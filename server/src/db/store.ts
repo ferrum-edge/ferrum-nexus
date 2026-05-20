@@ -203,7 +203,14 @@ export interface EmailOutboxRow {
   subject: string;
   template_id: string | null;
   payload: Record<string, unknown>;
-  status: 'pending' | 'sent' | 'failed';
+  /**
+   * `pending` rows are eligible to be claimed by the worker. The worker
+   * atomically transitions a row to `sending` before delivering it; on
+   * success it becomes `sent`, on failure it goes back to `pending` (with
+   * backoff) or terminates at `failed`. The transient `sending` state
+   * prevents concurrent workers from double-claiming the same row.
+   */
+  status: 'pending' | 'sending' | 'sent' | 'failed';
   attempts: number;
   last_error: string | null;
   scheduled_at: string;
@@ -276,6 +283,15 @@ export interface UsersRepo {
   recordFailedLogin(id: string): Promise<number>;
   resetFailedLogins(id: string): Promise<void>;
   list(opts: ListOptions): Promise<{ rows: UserRow[]; total: number }>;
+  /**
+   * Paginated lookup with optional role and status filters. Used by mass-
+   * email and admin filtering so large user tables don't need to be loaded
+   * into memory just to filter in JS.
+   */
+  listFiltered(opts: ListOptions & {
+    role?: UserRole;
+    status?: UserStatus;
+  }): Promise<{ rows: UserRow[]; total: number }>;
   count(): Promise<number>;
 }
 

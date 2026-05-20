@@ -107,6 +107,37 @@ function hydrateAsset(row: Record<string, unknown>): ApiAssetRow {
   };
 }
 
+function hydrateAccessRequest(row: Record<string, unknown>): AccessRequestRow {
+  return {
+    id: row.id as string,
+    api_asset_id: row.api_asset_id as string,
+    client_user_id: row.client_user_id as string,
+    client_consumer_id: (row.client_consumer_id as string | null) ?? null,
+    justification: row.justification as string,
+    status: row.status as AccessRequestRow['status'],
+    provider_reason: (row.provider_reason as string | null) ?? null,
+    reviewed_by: (row.reviewed_by as string | null) ?? null,
+    created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
+    reviewed_at: toIsoString(row.reviewed_at),
+  };
+}
+
+function hydrateAccessGrant(row: Record<string, unknown>): AccessGrantRow {
+  return {
+    id: row.id as string,
+    api_asset_id: row.api_asset_id as string,
+    client_user_id: row.client_user_id as string,
+    client_consumer_id: row.client_consumer_id as string,
+    acl_group: row.acl_group as string,
+    status: row.status as AccessGrantRow['status'],
+    approved_by: row.approved_by as string,
+    approved_at: toIsoString(row.approved_at) ?? new Date().toISOString(),
+    revoked_by: (row.revoked_by as string | null) ?? null,
+    revoked_at: toIsoString(row.revoked_at),
+    revoked_reason: (row.revoked_reason as string | null) ?? null,
+  };
+}
+
 function hydrateConsumer(row: Record<string, unknown>): FerrumConsumerRow {
   return {
     id: row.id as string,
@@ -246,6 +277,33 @@ export function buildSqlRepos(
           )
         )?.c;
         return { rows: rows.map(hydrateUser), total: Number(total ?? 0) };
+      },
+      async listFiltered(opts) {
+        const limit = opts.limit ?? 25;
+        const offset = opts.offset ?? 0;
+        const role = opts.role ?? null;
+        const status = opts.status ?? null;
+        // JOIN against user_roles inline; let the DB do filter + paginate.
+        const rows = await client.query<Record<string, unknown>>(
+          sql(`SELECT u.* FROM users u
+               WHERE ($1::text IS NULL OR u.status = $2)
+                 AND ($3::text IS NULL OR EXISTS (
+                   SELECT 1 FROM user_roles ur
+                   WHERE ur.user_id = u.id AND ur.role = $4
+                 ))
+               ORDER BY u.created_at DESC LIMIT $5 OFFSET $6`),
+          [status, status, role, role, limit, offset],
+        );
+        const totalRow = await client.one<{ c: string }>(
+          sql(`SELECT COUNT(*)::text as c FROM users u
+               WHERE ($1::text IS NULL OR u.status = $2)
+                 AND ($3::text IS NULL OR EXISTS (
+                   SELECT 1 FROM user_roles ur
+                   WHERE ur.user_id = u.id AND ur.role = $4
+                 ))`),
+          [status, status, role, role],
+        );
+        return { rows: rows.map(hydrateUser), total: Number(totalRow?.c ?? 0) };
       },
       async count() {
         const row = await client.one<{ c: string }>(
@@ -773,19 +831,7 @@ export function buildSqlRepos(
           sql('SELECT * FROM access_requests WHERE id = $1'),
           [id],
         );
-        if (!row) return null;
-        return {
-          id: row.id as string,
-          api_asset_id: row.api_asset_id as string,
-          client_user_id: row.client_user_id as string,
-          client_consumer_id: (row.client_consumer_id as string | null) ?? null,
-          justification: row.justification as string,
-          status: row.status as AccessRequestRow['status'],
-          provider_reason: (row.provider_reason as string | null) ?? null,
-          reviewed_by: (row.reviewed_by as string | null) ?? null,
-          created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-          reviewed_at: toIsoString(row.reviewed_at),
-        };
+        return row ? hydrateAccessRequest(row) : null;
       },
       async findOpenFor(clientUserId, apiAssetId) {
         const row = await client.one<Record<string, unknown>>(
@@ -793,32 +839,34 @@ export function buildSqlRepos(
                WHERE client_user_id = $1 AND api_asset_id = $2 AND status = 'pending'`),
           [clientUserId, apiAssetId],
         );
-        if (!row) return null;
-        return this.findById(row.id as string);
+        return row ? hydrateAccessRequest(row) : null;
       },
+      // listForClient/Provider/Asset SELECT full rows and hydrate inline. The
+      // previous implementation re-fetched each row by id (N+1), which made
+      // every dashboard render a quadratic load.
       async listForClient(clientUserId) {
         const rows = await client.query<Record<string, unknown>>(
           sql('SELECT * FROM access_requests WHERE client_user_id = $1 ORDER BY created_at DESC'),
           [clientUserId],
         );
-        return Promise.all(rows.map((r) => this.findById(r.id as string).then((v) => v!)));
+        return rows.map(hydrateAccessRequest);
       },
       async listForProvider(providerId, status?: AccessRequestStatus) {
         const rows = await client.query<Record<string, unknown>>(
-          sql(`SELECT ar.id FROM access_requests ar
+          sql(`SELECT ar.* FROM access_requests ar
                JOIN api_assets a ON a.id = ar.api_asset_id
                WHERE a.provider_id = $1 AND ($2::text IS NULL OR ar.status = $3)
                ORDER BY ar.created_at DESC`),
           [providerId, status ?? null, status ?? null],
         );
-        return Promise.all(rows.map((r) => this.findById(r.id as string).then((v) => v!)));
+        return rows.map(hydrateAccessRequest);
       },
       async listForAsset(apiAssetId) {
         const rows = await client.query<Record<string, unknown>>(
           sql('SELECT * FROM access_requests WHERE api_asset_id = $1 ORDER BY created_at DESC'),
           [apiAssetId],
         );
-        return Promise.all(rows.map((r) => this.findById(r.id as string).then((v) => v!)));
+        return rows.map(hydrateAccessRequest);
       },
     },
     grants: {
@@ -860,42 +908,30 @@ export function buildSqlRepos(
           sql('SELECT * FROM access_grants WHERE id = $1'),
           [id],
         );
-        if (!row) return null;
-        return {
-          id: row.id as string,
-          api_asset_id: row.api_asset_id as string,
-          client_user_id: row.client_user_id as string,
-          client_consumer_id: row.client_consumer_id as string,
-          acl_group: row.acl_group as string,
-          status: row.status as AccessGrantRow['status'],
-          approved_by: row.approved_by as string,
-          approved_at: toIsoString(row.approved_at) ?? new Date().toISOString(),
-          revoked_by: (row.revoked_by as string | null) ?? null,
-          revoked_at: toIsoString(row.revoked_at),
-          revoked_reason: (row.revoked_reason as string | null) ?? null,
-        };
+        return row ? hydrateAccessGrant(row) : null;
       },
       async findActiveFor(consumerId, apiAssetId) {
         const row = await client.one<Record<string, unknown>>(
-          sql(`SELECT id FROM access_grants
+          sql(`SELECT * FROM access_grants
                WHERE client_consumer_id = $1 AND api_asset_id = $2 AND status = 'active'`),
           [consumerId, apiAssetId],
         );
-        return row ? this.findById(row.id as string) : null;
+        return row ? hydrateAccessGrant(row) : null;
       },
+      // SELECT full rows + hydrate inline so list endpoints are a single query.
       async listForClient(clientUserId) {
-        const rows = await client.query<{ id: string }>(
-          sql('SELECT id FROM access_grants WHERE client_user_id = $1 ORDER BY approved_at DESC'),
+        const rows = await client.query<Record<string, unknown>>(
+          sql('SELECT * FROM access_grants WHERE client_user_id = $1 ORDER BY approved_at DESC'),
           [clientUserId],
         );
-        return Promise.all(rows.map((r) => this.findById(r.id).then((v) => v!)));
+        return rows.map(hydrateAccessGrant);
       },
       async listForAsset(apiAssetId) {
-        const rows = await client.query<{ id: string }>(
-          sql('SELECT id FROM access_grants WHERE api_asset_id = $1 ORDER BY approved_at DESC'),
+        const rows = await client.query<Record<string, unknown>>(
+          sql('SELECT * FROM access_grants WHERE api_asset_id = $1 ORDER BY approved_at DESC'),
           [apiAssetId],
         );
-        return Promise.all(rows.map((r) => this.findById(r.id).then((v) => v!)));
+        return rows.map(hydrateAccessGrant);
       },
     },
     conversations: {
@@ -1066,24 +1102,42 @@ export function buildSqlRepos(
         );
       },
       async claimBatch(now, batchSize) {
-        const rows = await client.query<Record<string, unknown>>(
-          sql(`SELECT * FROM email_outbox WHERE status = 'pending' AND scheduled_at <= $1
+        // Find candidate ids, then atomically transition each one to
+        // `sending`. A conditional UPDATE guarantees that only one worker
+        // claims a given row even when several poll concurrently.
+        const candidates = await client.query<{ id: string }>(
+          sql(`SELECT id FROM email_outbox WHERE status = 'pending' AND scheduled_at <= $1
                ORDER BY scheduled_at ASC LIMIT $2`),
           [now, batchSize],
         );
-        return rows.map((row) => ({
-          id: row.id as string,
-          to_address: row.to_address as string,
-          subject: row.subject as string,
-          template_id: (row.template_id as string | null) ?? null,
-          payload: asJson<Record<string, unknown>>(row.payload, {}),
-          status: row.status as EmailOutboxRow['status'],
-          attempts: Number(row.attempts ?? 0),
-          last_error: (row.last_error as string | null) ?? null,
-          scheduled_at: toIsoString(row.scheduled_at) ?? new Date().toISOString(),
-          sent_at: toIsoString(row.sent_at),
-          created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-        }));
+        const claimed: EmailOutboxRow[] = [];
+        for (const c of candidates) {
+          const affected = await client.exec(
+            sql(`UPDATE email_outbox SET status = 'sending'
+                 WHERE id = $1 AND status = 'pending'`),
+            [c.id],
+          );
+          if (affected === 0) continue;
+          const row = await client.one<Record<string, unknown>>(
+            sql('SELECT * FROM email_outbox WHERE id = $1'),
+            [c.id],
+          );
+          if (!row) continue;
+          claimed.push({
+            id: row.id as string,
+            to_address: row.to_address as string,
+            subject: row.subject as string,
+            template_id: (row.template_id as string | null) ?? null,
+            payload: asJson<Record<string, unknown>>(row.payload, {}),
+            status: row.status as EmailOutboxRow['status'],
+            attempts: Number(row.attempts ?? 0),
+            last_error: (row.last_error as string | null) ?? null,
+            scheduled_at: toIsoString(row.scheduled_at) ?? new Date().toISOString(),
+            sent_at: toIsoString(row.sent_at),
+            created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
+          });
+        }
+        return claimed;
       },
       async markSent(id, at) {
         await client.exec(

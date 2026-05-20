@@ -169,18 +169,28 @@ export function createMessagingService(
     if (recipients.length === 0) {
       throw badRequest('no_recipients', 'No active grants to broadcast to');
     }
-    const conv = await store.conversations.insert({
-      id: uuid(),
-      api_asset_id: apiAssetId,
-      request_id: null,
-      grant_id: null,
-      type: 'announcement',
-      subject,
-      participants: [actorId, ...recipients],
-      created_at: new Date().toISOString(),
-    });
-    await send({ actorId, conversationId: conv.id, body });
-    return { conversationId: conv.id, recipients };
+    // Each recipient gets their own 2-person announcement conversation so the
+    // recipient list isn't visible to other recipients. The provider sees N
+    // threads in their inbox; each client sees only their own.
+    const firstConversationId = await (async () => {
+      let first: string | null = null;
+      for (const recipientId of recipients) {
+        const conv = await store.conversations.insert({
+          id: uuid(),
+          api_asset_id: apiAssetId,
+          request_id: null,
+          grant_id: null,
+          type: 'announcement',
+          subject,
+          participants: [actorId, recipientId],
+          created_at: new Date().toISOString(),
+        });
+        await send({ actorId, conversationId: conv.id, body });
+        if (first === null) first = conv.id;
+      }
+      return first!;
+    })();
+    return { conversationId: firstConversationId, recipients };
   };
 
   return {

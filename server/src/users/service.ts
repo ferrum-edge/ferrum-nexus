@@ -214,8 +214,16 @@ export function createUsersService(
 
   const startPasswordReset: UsersService['startPasswordReset'] = async (email) => {
     const user = await store.users.findByEmail(normalizeEmail(email));
-    if (!user) return null;
+    // Generate the token unconditionally so the timing of this branch matches
+    // the existing-user branch up to the FS-bound randomBytes() call.
     const token = randomToken(24);
+    if (!user) {
+      // Burn roughly the same wall-clock as the create-token + enqueue path so
+      // an attacker can't enumerate accounts via response timing.
+      const dummy = await getDummyHash();
+      await argon2.verify(dummy, token).catch(() => false);
+      return null;
+    }
     await store.verifications.createPasswordReset({
       token,
       user_id: user.id,

@@ -175,6 +175,10 @@ export function createFerrumAdminClient(
     return (await res.text()) as unknown as T;
   }
 
+  // URL-encode each path segment so a malformed/hostile ID can never inject
+  // additional path components (`../`, `?`, etc.) into the Admin API URL.
+  const seg = (value: string | number): string => encodeURIComponent(String(value));
+
   return {
     async health() {
       try {
@@ -197,10 +201,10 @@ export function createFerrumAdminClient(
       return Array.isArray(res) ? res : res.items ?? [];
     },
     async getApiSpec(apiSpecId, namespace) {
-      return request<FerrumApiSpec | null>('GET', `/api-specs/${apiSpecId}`, { namespace });
+      return request<FerrumApiSpec | null>('GET', `/api-specs/${seg(apiSpecId)}`, { namespace });
     },
     async getApiSpecRaw(apiSpecId, namespace) {
-      return request<string | null>('GET', `/api-specs/${apiSpecId}/raw`, {
+      return request<string | null>('GET', `/api-specs/${seg(apiSpecId)}/raw`, {
         namespace,
         acceptText: true,
       });
@@ -213,17 +217,17 @@ export function createFerrumAdminClient(
       });
     },
     async replaceApiSpec(apiSpecId, rawSpec, contentType, namespace) {
-      return request<FerrumApiSpec>('PUT', `/api-specs/${apiSpecId}`, {
+      return request<FerrumApiSpec>('PUT', `/api-specs/${seg(apiSpecId)}`, {
         namespace,
         body: rawSpec,
         contentType,
       });
     },
     async deleteApiSpec(apiSpecId, namespace) {
-      await request<void>('DELETE', `/api-specs/${apiSpecId}`, { namespace });
+      await request<void>('DELETE', `/api-specs/${seg(apiSpecId)}`, { namespace });
     },
     async getConsumer(consumerId, namespace) {
-      return request<FerrumConsumer | null>('GET', `/consumers/${consumerId}`, { namespace });
+      return request<FerrumConsumer | null>('GET', `/consumers/${seg(consumerId)}`, { namespace });
     },
     async createConsumer(payload) {
       return request<FerrumConsumer>('POST', '/consumers', {
@@ -233,19 +237,19 @@ export function createFerrumAdminClient(
       });
     },
     async updateConsumer(consumerId, fields, namespace) {
-      return request<FerrumConsumer>('PATCH', `/consumers/${consumerId}`, {
+      return request<FerrumConsumer>('PATCH', `/consumers/${seg(consumerId)}`, {
         namespace,
         body: JSON.stringify(fields),
         contentType: 'application/json',
       });
     },
     async deleteConsumer(consumerId, namespace) {
-      await request<void>('DELETE', `/consumers/${consumerId}`, { namespace });
+      await request<void>('DELETE', `/consumers/${seg(consumerId)}`, { namespace });
     },
     async appendCredential(consumerId, payload, namespace) {
       return request<{ index: number; type: CredentialType }>(
         'POST',
-        `/consumers/${consumerId}/credentials/${payload.type}`,
+        `/consumers/${seg(consumerId)}/credentials/${seg(payload.type)}`,
         {
           namespace,
           body: JSON.stringify(payload.data),
@@ -256,12 +260,12 @@ export function createFerrumAdminClient(
     async deleteCredential(consumerId, type, index, namespace) {
       await request<void>(
         'DELETE',
-        `/consumers/${consumerId}/credentials/${type}/${index}`,
+        `/consumers/${seg(consumerId)}/credentials/${seg(type)}/${seg(index)}`,
         { namespace },
       );
     },
     async upsertPlugin(payload, namespace) {
-      const path = payload.plugin_id ? `/plugins/${payload.plugin_id}` : '/plugins';
+      const path = payload.plugin_id ? `/plugins/${seg(payload.plugin_id)}` : '/plugins';
       const method = payload.plugin_id ? 'PUT' : 'POST';
       return request<FerrumPlugin>(method, path, {
         namespace,
@@ -270,7 +274,7 @@ export function createFerrumAdminClient(
       });
     },
     async deletePlugin(pluginId, namespace) {
-      await request<void>('DELETE', `/plugins/${pluginId}`, { namespace });
+      await request<void>('DELETE', `/plugins/${seg(pluginId)}`, { namespace });
     },
   };
 }

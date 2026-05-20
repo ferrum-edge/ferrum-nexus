@@ -166,3 +166,80 @@ test('sqlite store: api asset round trip', async () => {
     await store.close();
   }
 });
+
+test('users.listFiltered filters by role and status', async () => {
+  const store = await createSqliteStore(config);
+  await store.migrate();
+  try {
+    const provider = uuid();
+    const client = uuid();
+    const pending = uuid();
+    for (const [id, status] of [
+      [provider, 'active'],
+      [client, 'active'],
+      [pending, 'pending'],
+    ] as const) {
+      await store.users.insert({
+        id,
+        email: `${id}@example.com`,
+        email_normalized: `${id}@example.com`,
+        name: null,
+        phone: null,
+        status,
+        email_verified_at: null,
+        password_hash: 'h',
+        last_login_at: null,
+        failed_login_count: 0,
+        organization_id: null,
+      });
+    }
+    await store.userRoles.add(provider, 'provider');
+    await store.userRoles.add(client, 'client');
+    await store.userRoles.add(pending, 'client');
+
+    const allClients = await store.users.listFiltered({ role: 'client', limit: 50 });
+    assert.equal(allClients.total, 2);
+    const activeClients = await store.users.listFiltered({
+      role: 'client',
+      status: 'active',
+      limit: 50,
+    });
+    assert.equal(activeClients.total, 1);
+    assert.equal(activeClients.rows[0]!.id, client);
+    const providers = await store.users.listFiltered({ role: 'provider', limit: 50 });
+    assert.equal(providers.total, 1);
+    assert.equal(providers.rows[0]!.id, provider);
+  } finally {
+    await store.close();
+  }
+});
+
+test('email outbox claim transitions pending → sending exactly once', async () => {
+  const store = await createSqliteStore(config);
+  await store.migrate();
+  try {
+    const id = uuid();
+    const now = new Date().toISOString();
+    await store.email.enqueue({
+      id,
+      to_address: 'x@example.com',
+      subject: 's',
+      template_id: null,
+      payload: {},
+      status: 'pending',
+      attempts: 0,
+      last_error: null,
+      scheduled_at: now,
+      sent_at: null,
+      created_at: now,
+    });
+    const first = await store.email.claimBatch(now, 10);
+    assert.equal(first.length, 1);
+    assert.equal(first[0]!.status, 'sending');
+    // A second worker polling the same instant must not re-claim it.
+    const second = await store.email.claimBatch(now, 10);
+    assert.equal(second.length, 0);
+  } finally {
+    await store.close();
+  }
+});

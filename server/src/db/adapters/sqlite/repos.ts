@@ -128,6 +128,24 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
     SELECT COUNT(*) as c FROM users
     WHERE (@search IS NULL OR email_normalized LIKE @search OR name LIKE @search)
   `);
+  // Filtered listing for mass-email & admin: JOIN against user_roles when a
+  // role filter is supplied so the database does the matching, not JS.
+  const usersListFiltered = db.prepare(`
+    SELECT u.* FROM users u
+    WHERE (@status IS NULL OR u.status = @status)
+      AND (@role IS NULL OR EXISTS (
+        SELECT 1 FROM user_roles ur WHERE ur.user_id = u.id AND ur.role = @role
+      ))
+    ORDER BY u.created_at DESC
+    LIMIT @limit OFFSET @offset
+  `);
+  const usersListFilteredCount = db.prepare(`
+    SELECT COUNT(*) as c FROM users u
+    WHERE (@status IS NULL OR u.status = @status)
+      AND (@role IS NULL OR EXISTS (
+        SELECT 1 FROM user_roles ur WHERE ur.user_id = u.id AND ur.role = @role
+      ))
+  `);
 
   // ---------- USER ROLES ----------
   const rolesAdd = db.prepare(
@@ -350,11 +368,16 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
     VALUES (@id, @to_address, @subject, @template_id, @payload, @status, @attempts,
             @last_error, @scheduled_at, @sent_at, @created_at)
   `);
-  const outboxClaim = db.prepare(`
-    SELECT * FROM email_outbox
+  const outboxFindCandidates = db.prepare(`
+    SELECT id FROM email_outbox
     WHERE status = 'pending' AND scheduled_at <= ?
     ORDER BY scheduled_at ASC LIMIT ?
   `);
+  const outboxClaim = db.prepare(`
+    UPDATE email_outbox SET status = 'sending'
+    WHERE id = ? AND status = 'pending'
+  `);
+  const outboxGet = db.prepare('SELECT * FROM email_outbox WHERE id = ?');
   const outboxMarkSent = db.prepare(
     "UPDATE email_outbox SET status = 'sent', sent_at = ? WHERE id = ?",
   );
@@ -470,6 +493,20 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
         const search = opts.search ? `%${opts.search}%` : null;
         const rows = usersList.all({ search, limit, offset }) as UserRow[];
         const { c } = usersListCount.get({ search }) as { c: number };
+        return { rows, total: c };
+      },
+      async listFiltered(opts) {
+        const limit = opts.limit ?? 25;
+        const offset = opts.offset ?? 0;
+        const role = opts.role ?? null;
+        const status = opts.status ?? null;
+        const rows = usersListFiltered.all({
+          role,
+          status,
+          limit,
+          offset,
+        }) as UserRow[];
+        const { c } = usersListFilteredCount.get({ role, status }) as { c: number };
         return { rows, total: c };
       },
       async count() {
@@ -780,7 +817,18 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
         outboxInsert.run({ ...row, payload: J(row.payload) });
       },
       async claimBatch(now, batchSize) {
-        return (outboxClaim.all(now, batchSize) as OutboxRowRaw[]).map(hydrateOutbox);
+        // Atomically transition each candidate from `pending` to `sending`.
+        // better-sqlite3 statements are serialized per-connection, so the
+        // conditional UPDATE+SELECT cannot interleave with another worker.
+        const candidates = outboxFindCandidates.all(now, batchSize) as { id: string }[];
+        const claimed: OutboxRowRaw[] = [];
+        for (const { id } of candidates) {
+          const result = outboxClaim.run(id);
+          if (Number(result.changes ?? 0) === 0) continue;
+          const row = outboxGet.get(id) as OutboxRowRaw | undefined;
+          if (row) claimed.push(row);
+        }
+        return claimed.map(hydrateOutbox);
       },
       async markSent(id, at) {
         outboxMarkSent.run(at, id);

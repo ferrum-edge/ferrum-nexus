@@ -232,6 +232,26 @@ export async function createMongoStore(config: ResolvedConfig): Promise<NexusSto
         ]);
         return { rows: rows.map((r) => stripId(r)!), total };
       },
+      async listFiltered(opts) {
+        const limit = opts.limit ?? 25;
+        const offset = opts.offset ?? 0;
+        const filter: Filter<WithId<Omit<UserRow, 'id'>>> = {};
+        if (opts.status) filter.status = opts.status;
+        if (opts.role) {
+          // Pre-fetch matching user ids from user_roles. The collection is
+          // expected to be small (one row per user-per-role), and we use the
+          // (user_id, role) compound index that the migration creates.
+          const roleRows = await c.userRoles
+            .find({ role: opts.role }, { projection: { user_id: 1 } })
+            .toArray();
+          filter._id = { $in: roleRows.map((r) => r.user_id) };
+        }
+        const [rows, total] = await Promise.all([
+          c.users.find(filter).sort({ created_at: -1 }).skip(offset).limit(limit).toArray(),
+          c.users.countDocuments(filter),
+        ]);
+        return { rows: rows.map((r) => stripId(r)!), total };
+      },
       async count() {
         return c.users.countDocuments({});
       },
@@ -590,12 +610,21 @@ export async function createMongoStore(config: ResolvedConfig): Promise<NexusSto
         await c.emailOutbox.insertOne(withId(row));
       },
       async claimBatch(now, batchSize) {
-        const rows = await c.emailOutbox
-          .find({ status: 'pending', scheduled_at: { $lte: now } })
-          .sort({ scheduled_at: 1 })
-          .limit(batchSize)
-          .toArray();
-        return rows.map((r) => stripId(r)!);
+        // findOneAndUpdate with `status: 'pending'` in the filter atomically
+        // claims a row — even across multiple workers — so no two of them
+        // can take ownership of the same email.
+        const claimed: EmailOutboxRow[] = [];
+        for (let i = 0; i < batchSize; i++) {
+          const updated = await c.emailOutbox.findOneAndUpdate(
+            { status: 'pending', scheduled_at: { $lte: now } },
+            { $set: { status: 'sending' } },
+            { sort: { scheduled_at: 1 }, returnDocument: 'after' },
+          );
+          if (!updated) break;
+          const row = stripId(updated);
+          if (row) claimed.push(row as EmailOutboxRow);
+        }
+        return claimed;
       },
       async markSent(id, at) {
         await c.emailOutbox.updateOne(
