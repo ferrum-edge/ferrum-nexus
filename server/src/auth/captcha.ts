@@ -32,7 +32,13 @@ export async function verifyCaptchaIfEnabled(
   if (!url) throw badRequest('captcha_misconfigured', 'Unknown CAPTCHA provider');
   const params = new URLSearchParams({ secret, response: token });
   if (ip) params.set('remoteip', ip);
-  const res = await fetch(url, { method: 'POST', body: params });
+  const res = await fetch(url, {
+    method: 'POST',
+    body: params,
+    signal: AbortSignal.timeout(10_000),
+  }).catch(() => {
+    throw badRequest('captcha_failed', 'CAPTCHA verification service is unreachable');
+  });
   if (!res.ok) throw badRequest('captcha_failed', `CAPTCHA verify HTTP ${res.status}`);
   const data = (await res.json()) as { success?: boolean };
   if (!data.success) throw badRequest('captcha_failed', 'CAPTCHA verification failed');

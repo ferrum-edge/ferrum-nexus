@@ -7,7 +7,7 @@ up a local development environment and the conventions used in the codebase.
 
 Requirements:
 
-- Node.js 20+
+- Node.js 20.19+ (or 22.12+)
 - npm 10+
 - A running Ferrum Edge instance (or its mock — see `server/src/ferrum-admin`)
 - One of: SQLite (default), PostgreSQL, MySQL, or MongoDB

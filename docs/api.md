@@ -77,13 +77,13 @@ session cookie).
 
 ## Admin
 
-All require role `admin` or `super_admin`.
+Admin endpoints require role `admin` or `super_admin` unless noted.
 
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/admin/users` | List/search users. |
 | PUT | `/admin/users/:id/status` | Set status (pending/active/disabled). |
-| PUT | `/admin/users/:id/roles` | Replace role assignments. |
+| PUT | `/admin/users/:id/roles` | Replace role assignments (`super_admin` only). |
 | GET | `/admin/organizations` | List organizations. |
 | POST | `/admin/organizations` | Create org. |
 | GET | `/admin/settings` | Full admin settings (encrypted secrets not exposed). |
@@ -98,6 +98,6 @@ All require role `admin` or `super_admin`.
 | POST | `/admin/drift/sync` | Pull metadata updates from Edge. |
 | POST | `/admin/imports/api-spec` | Import an existing Edge API into Nexus. |
 | GET | `/admin/apis` | All APIs in the catalog (admin view). |
-| DELETE | `/admin/god-mode/apis/:id` | Emergency delete with reason. |
-| POST | `/admin/god-mode/grants/:id/revoke` | Emergency revoke with reason. |
-| POST | `/admin/god-mode/users/:id/disable` | Emergency disable with reason. |
+| DELETE | `/admin/god-mode/apis/:id` | Emergency delete with reason (`super_admin` only). |
+| POST | `/admin/god-mode/grants/:id/revoke` | Emergency revoke with reason (`super_admin` only). |
+| POST | `/admin/god-mode/users/:id/disable` | Emergency disable with reason (`super_admin` only). |

@@ -22,7 +22,6 @@ export interface OasMetadata {
   operationCount: number;
   contentHash: string;
   rawContentType: 'application/json' | 'application/yaml';
-  parsed: Record<string, unknown>;
 }
 
 export function detectContentType(raw: string): 'application/json' | 'application/yaml' {
@@ -49,6 +48,9 @@ export function parseSpec(raw: string): Record<string, unknown> {
 export function extractMetadata(raw: string): OasMetadata {
   const contentType = detectContentType(raw);
   const parsed = parseSpec(raw);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw badRequest('invalid_spec', 'OpenAPI document must be an object');
+  }
   const openapi = parsed.openapi;
   if (typeof openapi !== 'string' || !openapi.startsWith('3.')) {
     throw badRequest('unsupported_oas_version', 'Only OpenAPI 3.x is supported');
@@ -88,7 +90,6 @@ export function extractMetadata(raw: string): OasMetadata {
     operationCount,
     contentHash,
     rawContentType: contentType,
-    parsed,
   };
 }
 

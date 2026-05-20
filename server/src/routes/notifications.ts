@@ -16,9 +16,9 @@ export async function registerNotificationRoutes(
   });
 
   app.post('/api/notifications/:id/read', async (req, reply) => {
-    requireAuth(req);
+    const user = requireAuth(req);
     const { id } = req.params as { id: string };
-    await notifications.markRead(id);
+    await notifications.markRead(user.id, id);
     reply.status(204).send();
   });
 }

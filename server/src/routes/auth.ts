@@ -9,6 +9,15 @@ import { requireAuth } from '../auth/session.js';
 import type { SettingsService } from '../admin/settings-service.js';
 import { verifyCaptchaIfEnabled } from '../auth/captcha.js';
 
+const AUTH_RATE_LIMIT = {
+  config: {
+    rateLimit: {
+      max: 20,
+      timeWindow: '1 minute',
+    },
+  },
+};
+
 export async function registerAuthRoutes(
   app: FastifyInstance,
   opts: {
@@ -20,7 +29,7 @@ export async function registerAuthRoutes(
 ): Promise<void> {
   const { config, users, sessions, settings } = opts;
 
-  app.post('/api/auth/register', async (req, reply) => {
+  app.post('/api/auth/register', AUTH_RATE_LIMIT, async (req, reply) => {
     const cfg = await settings.public();
     if (!cfg.registrationEnabled) {
       throw badRequest('registration_disabled', 'Registration is currently disabled');
@@ -40,7 +49,7 @@ export async function registerAuthRoutes(
     reply.status(201).send({ user, requiresVerification: !!verifyToken });
   });
 
-  app.post('/api/auth/login', async (req, reply) => {
+  app.post('/api/auth/login', AUTH_RATE_LIMIT, async (req, reply) => {
     const input = LoginInput.parse(req.body);
     const user = await users.login(input);
     const session = await sessions.createSession({
@@ -59,20 +68,20 @@ export async function registerAuthRoutes(
     reply.status(204).send();
   });
 
-  app.post('/api/auth/verify-email', async (req, reply) => {
+  app.post('/api/auth/verify-email', AUTH_RATE_LIMIT, async (req, reply) => {
     const { token } = z.object({ token: z.string() }).parse(req.body);
     const user = await users.verifyEmail(token);
     reply.send({ user });
   });
 
-  app.post('/api/auth/forgot-password', async (req, reply) => {
+  app.post('/api/auth/forgot-password', AUTH_RATE_LIMIT, async (req, reply) => {
     const { email } = z.object({ email: z.string().email() }).parse(req.body);
     await users.startPasswordReset(email);
     // Always return success to avoid disclosing whether the email exists.
     reply.status(202).send({ ok: true });
   });
 
-  app.post('/api/auth/reset-password', async (req, reply) => {
+  app.post('/api/auth/reset-password', AUTH_RATE_LIMIT, async (req, reply) => {
     const { token, password } = z
       .object({ token: z.string(), password: z.string().min(8) })
       .parse(req.body);

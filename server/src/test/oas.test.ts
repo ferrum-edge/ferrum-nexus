@@ -41,6 +41,10 @@ test('extractMetadata rejects missing x-ferrum-proxy', () => {
   assert.throws(() => extractMetadata(bad), /x-ferrum-proxy/);
 });
 
+test('extractMetadata rejects non-object documents', () => {
+  assert.throws(() => extractMetadata('[]'), /OpenAPI document must be an object/);
+});
+
 test('slugify produces URL-safe slugs', () => {
   assert.equal(slugify('Orders API v1.2'), 'orders-api-v1-2');
   assert.equal(slugify('  ' + 'hello   world '), 'hello-world');

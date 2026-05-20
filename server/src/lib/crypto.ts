@@ -11,7 +11,15 @@
  *   material for safe storage (no plaintext credentials ever land in Nexus).
  */
 
-import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes } from 'node:crypto';
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createHmac,
+  hkdfSync,
+  randomBytes,
+  timingSafeEqual,
+} from 'node:crypto';
 
 const KEY_LEN = 32;
 
@@ -61,14 +69,10 @@ export function decryptSetting(token: string, secret: string): string {
 /** Sign a value with an HMAC-SHA256 keyed off the server secret. */
 export function sign(value: string, secret: string, purpose: string): string {
   const key = deriveKey(secret, purpose);
-  return createHash('sha256').update(key).update(value).digest('hex');
+  return createHmac('sha256', key).update(value).digest('hex');
 }
 
 export function constantTimeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
-  let res = 0;
-  for (let i = 0; i < a.length; i++) {
-    res |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return res === 0;
+  return timingSafeEqual(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
 }

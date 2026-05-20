@@ -375,7 +375,7 @@ export interface MessagesRepo {
 export interface NotificationsRepo {
   insert(row: NotificationRow): Promise<NotificationRow>;
   listForUser(userId: string, limit: number): Promise<NotificationRow[]>;
-  markRead(id: string, at: string): Promise<void>;
+  markRead(id: string, userId: string, at: string): Promise<number>;
   unreadCount(userId: string): Promise<number>;
 }
 

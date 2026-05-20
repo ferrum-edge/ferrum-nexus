@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { requireRole } from '../auth/session.js';
+import { requireRole, type AuthenticatedUser } from '../auth/session.js';
 import type { PublishingService } from '../api-publishing/service.js';
 import { PublishInput, SettingsUpdate } from '../api-publishing/service.js';
 import type { AccessRequestsService } from '../access-requests/service.js';
@@ -111,8 +111,12 @@ export async function registerProviderRoutes(
   });
 
   app.get('/api/provider/apis/:id/consumers', async (req, reply) => {
-    requireRole(req, 'provider', 'admin', 'super_admin');
+    const user = requireRole(req, 'provider', 'admin', 'super_admin');
     const { id } = req.params as { id: string };
+    if (!(await canManageProviderAsset(user, id, store, true))) {
+      reply.status(404).send({ error: { code: 'not_found', message: 'Not found' } });
+      return;
+    }
     const items = await grants.listForAsset(id);
     reply.send({ grants: items.filter((g) => g.status === 'active') });
   });
@@ -135,6 +139,10 @@ export async function registerProviderRoutes(
   app.post('/api/provider/apis/:id/announce', async (req, reply) => {
     const user = requireRole(req, 'provider', 'admin', 'super_admin');
     const { id } = req.params as { id: string };
+    if (!(await canManageProviderAsset(user, id, store, false))) {
+      reply.status(404).send({ error: { code: 'not_found', message: 'Not found' } });
+      return;
+    }
     const { subject, body } = z
       .object({ subject: z.string().min(1).max(255), body: z.string().min(1).max(10_000) })
       .parse(req.body);
@@ -146,4 +154,18 @@ export async function registerProviderRoutes(
     });
     reply.status(201).send(out);
   });
+}
+
+async function canManageProviderAsset(
+  user: AuthenticatedUser,
+  assetId: string,
+  store: NexusStore,
+  allowAdmin: boolean,
+): Promise<boolean> {
+  const asset = await store.apiAssets.findById(assetId);
+  if (!asset) return false;
+  return (
+    asset.provider_id === user.id ||
+    (allowAdmin && (user.roles.includes('admin') || user.roles.includes('super_admin')))
+  );
 }

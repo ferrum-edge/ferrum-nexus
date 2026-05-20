@@ -18,6 +18,7 @@ const config: ResolvedConfig = {
   port: 0,
   publicUrl: 'http://127.0.0.1:8787',
   corsOrigins: '',
+  trustProxy: false,
   secretKey: 'a'.repeat(64),
   db: { driver: 'sqlite', url: ':memory:' },
   session: { cookieName: 'nexus_sid', ttlSeconds: 600, secure: false },
@@ -42,11 +43,25 @@ test('sqlite store: end-to-end user + notification lifecycle', async () => {
   await store.migrate();
   try {
     const userId = uuid();
+    const otherUserId = uuid();
     await store.users.insert({
       id: userId,
       email: 'alice@example.com',
       email_normalized: 'alice@example.com',
       name: 'Alice',
+      phone: null,
+      status: 'active',
+      email_verified_at: new Date().toISOString(),
+      password_hash: 'hash',
+      last_login_at: null,
+      failed_login_count: 0,
+      organization_id: null,
+    });
+    await store.users.insert({
+      id: otherUserId,
+      email: 'mallory@example.com',
+      email_normalized: 'mallory@example.com',
+      name: 'Mallory',
       phone: null,
       status: 'active',
       email_verified_at: new Date().toISOString(),
@@ -64,8 +79,9 @@ test('sqlite store: end-to-end user + notification lifecycle', async () => {
     const roles = await store.userRoles.forUser(userId);
     assert.deepEqual(roles, ['client']);
 
+    const notificationId = uuid();
     await store.notifications.insert({
-      id: uuid(),
+      id: notificationId,
       recipient_id: userId,
       type: 'registration_confirmed',
       payload: { test: true },
@@ -74,10 +90,19 @@ test('sqlite store: end-to-end user + notification lifecycle', async () => {
     });
     const unread = await store.notifications.unreadCount(userId);
     assert.equal(unread, 1);
+    assert.equal(
+      await store.notifications.markRead(notificationId, otherUserId, new Date().toISOString()),
+      0,
+    );
+    assert.equal(await store.notifications.unreadCount(userId), 1);
+    assert.equal(
+      await store.notifications.markRead(notificationId, userId, new Date().toISOString()),
+      1,
+    );
+    assert.equal(await store.notifications.unreadCount(userId), 0);
 
     const list = await store.users.list({ limit: 10 });
-    assert.equal(list.total, 1);
-    assert.equal(list.rows[0]?.id, userId);
+    assert.equal(list.total, 2);
   } finally {
     await store.close();
   }

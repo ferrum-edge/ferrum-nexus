@@ -8,7 +8,7 @@
 | CSRF | Server emits CSRF token in `nexus_csrf` cookie; required on state-changing requests via `X-Nexus-CSRF`. |
 | Password attacks | Argon2id hashing. Failed-login counter blocks after 10 attempts; resettable by password reset. Rate limiting on `/api/auth/*`. |
 | Spec injection | OpenAPI documents are parsed locally and rejected if missing `x-ferrum-proxy` or using unsupported versions. Edge enforces consumer + credential rejection from specs. |
-| Privilege escalation | Every provider and admin action goes through `requireRole`; no role implied by user input. First registered user is bootstrapped as `super_admin`; subsequent users only get the role they choose. |
+| Privilege escalation | Every provider and admin action goes through `requireRole`; no role implied by user input. First registered user is bootstrapped as `super_admin`; subsequent users only get the role they choose. Role assignment and god-mode actions require `super_admin`, and the last active `super_admin` cannot be removed or disabled. |
 | Stored secrets | Plaintext credentials are never stored. App settings (SMTP password, CAPTCHA secret) are encrypted with AES-256-GCM derived from `NEXUS_SECRET_KEY`. |
 | Audit gap | Every mutation writes an `audit_logs` row with actor, target, before/after, IP, and user agent. |
 | Brute force on access requests | Rate-limited at the global Fastify level; access requests further capped per user via the application logic (one pending per API). |

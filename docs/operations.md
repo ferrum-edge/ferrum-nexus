@@ -17,6 +17,10 @@ Rotate the key with care: encrypted settings stored before the rotation will
 no longer be decryptable. Re-enter SMTP and CAPTCHA secrets through the admin
 UI after rotation.
 
+Set `NEXUS_TRUST_PROXY=true` only when Nexus is behind a trusted reverse proxy
+that controls `X-Forwarded-*` headers. Leaving it disabled prevents direct
+clients from spoofing audit and rate-limit IP addresses.
+
 ## Database
 
 The driver is selected by `NEXUS_DB_DRIVER`. The default is SQLite, which
@@ -33,9 +37,10 @@ Ferrum Edge's own MongoDB support).
 
 ## Email
 
-If `NEXUS_SMTP_HOST` is unset the email service logs messages instead of
-delivering them — useful for local development. Configure SMTP through the
-admin UI to encrypt the password at rest.
+If `NEXUS_SMTP_HOST` is unset the email service simulates delivery only outside
+production, without logging body content. Production treats missing SMTP as a
+delivery failure. Configure SMTP through the admin UI to encrypt the password
+at rest.
 
 The outbox worker polls every five seconds and retries failed messages with
 exponential backoff up to five attempts.

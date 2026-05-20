@@ -83,7 +83,7 @@ async function main(): Promise<void> {
 
   const app = Fastify({
     logger: loggerConfig(config.nodeEnv),
-    trustProxy: true,
+    trustProxy: config.trustProxy,
     bodyLimit: 10 * 1024 * 1024, // 10 MiB — large OAS specs are common.
   });
 
@@ -100,7 +100,7 @@ async function main(): Promise<void> {
     credentials: true,
   });
   await app.register(fastifyRateLimit, {
-    global: false,
+    global: true,
     max: 600,
     timeWindow: '1 minute',
   });
@@ -133,16 +133,6 @@ async function main(): Promise<void> {
     accessRequests,
     catalog,
     store,
-  });
-
-  // Tighter rate limits on auth endpoints.
-  await app.register(async (instance) => {
-    await instance.register(fastifyRateLimit, {
-      global: false,
-      max: 20,
-      timeWindow: '1 minute',
-    });
-    instance.addHook('preHandler', async () => {});
   });
 
   app.get('/api/health', async () => {

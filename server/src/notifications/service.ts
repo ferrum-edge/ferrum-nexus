@@ -1,6 +1,7 @@
 import { v4 as uuid } from 'uuid';
 import type { NexusStore } from '../db/store.js';
 import type { NotificationItem, NotificationType } from '@ferrum-nexus/shared';
+import { notFound } from '../lib/errors.js';
 
 export interface NotificationService {
   push(opts: {
@@ -9,7 +10,7 @@ export interface NotificationService {
     payload: Record<string, unknown>;
   }): Promise<NotificationItem>;
   list(userId: string, limit?: number): Promise<NotificationItem[]>;
-  markRead(id: string): Promise<void>;
+  markRead(userId: string, id: string): Promise<void>;
   unreadCount(userId: string): Promise<number>;
 }
 
@@ -30,8 +31,9 @@ export function createNotificationService(store: NexusStore): NotificationServic
       const rows = await store.notifications.listForUser(userId, limit);
       return rows.map(toItem);
     },
-    async markRead(id) {
-      await store.notifications.markRead(id, new Date().toISOString());
+    async markRead(userId, id) {
+      const changed = await store.notifications.markRead(id, userId, new Date().toISOString());
+      if (changed === 0) throw notFound('Notification not found');
     },
     async unreadCount(userId) {
       return store.notifications.unreadCount(userId);

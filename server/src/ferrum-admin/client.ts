@@ -8,7 +8,7 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { Agent } from 'node:https';
+import { Agent as UndiciAgent, fetch, type Dispatcher } from 'undici';
 import type { Logger } from 'pino';
 import type { ResolvedConfig } from '../config/index.js';
 import { ApiError, upstreamError } from '../lib/errors.js';
@@ -119,9 +119,9 @@ export function createFerrumAdminClient(
   logger: Logger,
 ): FerrumAdminClient {
   const baseUrl = config.ferrum.adminUrl.replace(/\/$/, '');
-  const agent =
+  const dispatcher: Dispatcher | undefined =
     config.ferrum.caPath && baseUrl.startsWith('https://')
-      ? new Agent({ ca: readFileSync(config.ferrum.caPath) })
+      ? new UndiciAgent({ connect: { ca: readFileSync(config.ferrum.caPath, 'utf8') } })
       : undefined;
 
   async function request<T>(
@@ -147,9 +147,8 @@ export function createFerrumAdminClient(
       method,
       headers,
       body: init.body ?? null,
-      // node's fetch supports dispatcher via undici Agent; for the common https
-      // case we fall back to the global agent unless a custom CA was supplied.
-      ...(agent && { dispatcher: agent as unknown as undefined }),
+      signal: AbortSignal.timeout(30_000),
+      ...(dispatcher && { dispatcher }),
     }).catch((err) => {
       logger.error({ err, url, method }, 'ferrum admin request failed');
       throw upstreamError('Cannot reach Ferrum Edge Admin API', { url });

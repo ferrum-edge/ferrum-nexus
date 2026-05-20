@@ -10,6 +10,13 @@
 import { z } from 'zod';
 
 const DbDriver = z.enum(['sqlite', 'postgres', 'mysql', 'mongodb']);
+const EnvBoolean = z.preprocess((value) => {
+  if (typeof value !== 'string') return value;
+  const normalized = value.trim().toLowerCase();
+  if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'off', ''].includes(normalized)) return false;
+  return value;
+}, z.boolean());
 
 const Schema = z.object({
   nodeEnv: z.enum(['development', 'production', 'test']).default('development'),
@@ -17,6 +24,7 @@ const Schema = z.object({
   port: z.coerce.number().int().positive().default(8787),
   publicUrl: z.string().url().default('http://127.0.0.1:8787'),
   corsOrigins: z.string().default(''),
+  trustProxy: EnvBoolean.default(false),
   secretKey: z
     .string()
     .min(32, 'NEXUS_SECRET_KEY must be at least 32 characters (use `openssl rand -hex 32`).'),
@@ -29,7 +37,7 @@ const Schema = z.object({
   session: z.object({
     cookieName: z.string().default('nexus_sid'),
     ttlSeconds: z.coerce.number().int().positive().default(86_400),
-    secure: z.coerce.boolean().default(false),
+    secure: EnvBoolean.default(false),
   }),
 
   ferrum: z.object({
@@ -49,7 +57,7 @@ const Schema = z.object({
     smtpPort: z.coerce.number().int().positive().default(587),
     smtpUsername: z.string().optional(),
     smtpPassword: z.string().optional(),
-    smtpSecure: z.coerce.boolean().default(false),
+    smtpSecure: EnvBoolean.default(false),
   }),
 });
 
@@ -62,6 +70,7 @@ export function loadConfig(): ResolvedConfig {
     port: process.env.NEXUS_PORT,
     publicUrl: process.env.NEXUS_PUBLIC_URL,
     corsOrigins: process.env.NEXUS_CORS_ORIGINS,
+    trustProxy: process.env.NEXUS_TRUST_PROXY,
     secretKey: process.env.NEXUS_SECRET_KEY,
     db: {
       driver: process.env.NEXUS_DB_DRIVER,
@@ -96,5 +105,9 @@ export function loadConfig(): ResolvedConfig {
     const issues = parsed.error.issues.map((i) => `  - ${i.path.join('.')}: ${i.message}`).join('\n');
     throw new Error(`Invalid configuration:\n${issues}`);
   }
-  return parsed.data;
+  const data = parsed.data;
+  if (process.env.NEXUS_SESSION_SECURE === undefined) {
+    data.session.secure = data.nodeEnv === 'production';
+  }
+  return data;
 }

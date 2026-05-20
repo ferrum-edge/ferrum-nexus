@@ -2,8 +2,8 @@
  * Email helpers: template rendering and SMTP transport setup.
  *
  * Templates use a minimal `{{var}}` substitution. If no SMTP host is
- * configured the transport logs the message to the application logger and
- * marks it sent so local development is not blocked by missing SMTP.
+ * configured the transport simulates delivery in non-production without
+ * logging body content; production treats missing SMTP as a delivery error.
  */
 
 import nodemailer, { type Transporter } from 'nodemailer';
@@ -48,10 +48,13 @@ export function createMailer(
   logger: Logger,
 ): { send: (opts: { to: string; subject: string; body: string }) => Promise<void> } {
   if (!config.email.smtpHost) {
-    logger.warn('SMTP not configured — emails will be logged but not delivered');
+    logger.warn('SMTP not configured');
     return {
-      async send({ to, subject, body }) {
-        logger.info({ to, subject, body }, 'simulated email send');
+      async send({ to, subject }) {
+        if (config.nodeEnv === 'production') {
+          throw new Error('SMTP is not configured');
+        }
+        logger.info({ to, subject }, 'simulated email send');
       },
     };
   }

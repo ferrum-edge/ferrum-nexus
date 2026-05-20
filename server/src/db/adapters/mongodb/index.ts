@@ -574,8 +574,12 @@ export async function createMongoStore(config: ResolvedConfig): Promise<NexusSto
           .toArray();
         return rows.map((r) => stripId(r)!);
       },
-      async markRead(id, at) {
-        await c.notifications.updateOne({ _id: id }, { $set: { read_at: at } });
+      async markRead(id, userId, at) {
+        const result = await c.notifications.updateOne(
+          { _id: id, recipient_id: userId },
+          { $set: { read_at: at } },
+        );
+        return result.matchedCount;
       },
       async unreadCount(userId) {
         return c.notifications.countDocuments({ recipient_id: userId, read_at: null });

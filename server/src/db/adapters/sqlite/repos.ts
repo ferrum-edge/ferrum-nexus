@@ -336,7 +336,9 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
   const notifList = db.prepare(`
     SELECT * FROM notifications WHERE recipient_id = ? ORDER BY created_at DESC LIMIT ?
   `);
-  const notifMarkRead = db.prepare('UPDATE notifications SET read_at = ? WHERE id = ?');
+  const notifMarkRead = db.prepare(
+    'UPDATE notifications SET read_at = ? WHERE id = ? AND recipient_id = ?',
+  );
   const notifUnread = db.prepare(
     'SELECT COUNT(*) as c FROM notifications WHERE recipient_id = ? AND read_at IS NULL',
   );
@@ -767,8 +769,8 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
       async listForUser(userId, limit) {
         return (notifList.all(userId, limit) as NotificationRowRaw[]).map(hydrateNotification);
       },
-      async markRead(id, at) {
-        notifMarkRead.run(at, id);
+      async markRead(id, userId, at) {
+        return notifMarkRead.run(at, id, userId).changes;
       },
       async unreadCount(userId) {
         return (notifUnread.get(userId) as { c: number }).c;

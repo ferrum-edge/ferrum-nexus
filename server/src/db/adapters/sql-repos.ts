@@ -40,8 +40,27 @@ import { asBool, asJson, toIsoString, type SqlClient, type SqlDialect } from './
 
 const renderSql = (dialect: SqlDialect, sql: string): string => {
   if (dialect === 'postgres') return sql;
-  // Rewrite $1, $2, ... to ? for MySQL.
-  return sql.replace(/\$(\d+)/g, '?');
+  // Rewrite common PostgreSQL syntax used below to MySQL-compatible SQL.
+  return sql
+    .replace(/COUNT\(\*\)::text/g, 'COUNT(*)')
+    .replace(/\$(\d+)::text/g, '?')
+    .replace(/\$(\d+)/g, '?')
+    .replace(/\bILIKE\b/g, 'LIKE')
+    .replace(/INSERT INTO user_roles/g, 'INSERT IGNORE INTO user_roles')
+    .replace(/INSERT INTO organization_members/g, 'INSERT IGNORE INTO organization_members')
+    .replace(/\s+ON CONFLICT DO NOTHING/g, '')
+    .replace(/INSERT INTO email_templates \(key,/g, 'INSERT INTO email_templates (`key`,')
+    .replace(/INSERT INTO app_settings \(key,/g, 'INSERT INTO app_settings (`key`,')
+    .replace(/WHERE key =/g, 'WHERE `key` =')
+    .replace(/ORDER BY key ASC/g, 'ORDER BY `key` ASC')
+    .replace(
+      /ON CONFLICT \(key\) DO UPDATE SET subject_template = EXCLUDED\.subject_template,\s+body_template = EXCLUDED\.body_template, enabled = EXCLUDED\.enabled,\s+updated_at = EXCLUDED\.updated_at/g,
+      'ON DUPLICATE KEY UPDATE subject_template = VALUES(subject_template), body_template = VALUES(body_template), enabled = VALUES(enabled), updated_at = VALUES(updated_at)',
+    )
+    .replace(
+      /ON CONFLICT \(key\) DO UPDATE SET value = EXCLUDED\.value,\s+encrypted = EXCLUDED\.encrypted, updated_at = EXCLUDED\.updated_at/g,
+      'ON DUPLICATE KEY UPDATE value = VALUES(value), encrypted = VALUES(encrypted), updated_at = VALUES(updated_at)',
+    );
 };
 
 const J = (value: unknown): string => JSON.stringify(value ?? null);
@@ -911,12 +930,18 @@ export function buildSqlRepos(
         };
       },
       async listForUser(userId) {
-        // Cross-dialect JSON containment check: cast to text and use LIKE.
-        const rows = await client.query<{ id: string }>(
-          sql(`SELECT id FROM conversations
-               WHERE participants::text LIKE $1 ORDER BY created_at DESC`),
-          [`%${userId}%`],
-        );
+        const rows =
+          dialect === 'postgres'
+            ? await client.query<{ id: string }>(
+                `SELECT id FROM conversations
+                 WHERE participants ? $1 ORDER BY created_at DESC`,
+                [userId],
+              )
+            : await client.query<{ id: string }>(
+                `SELECT id FROM conversations
+                 WHERE JSON_CONTAINS(participants, JSON_QUOTE(?)) ORDER BY created_at DESC`,
+                [userId],
+              );
         return Promise.all(rows.map((r) => this.findById(r.id).then((v) => v!)));
       },
       async updateParticipants(id, participants) {
@@ -1000,8 +1025,11 @@ export function buildSqlRepos(
           created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
         }));
       },
-      async markRead(id, at) {
-        await client.exec(sql('UPDATE notifications SET read_at = $1 WHERE id = $2'), [at, id]);
+      async markRead(id, userId, at) {
+        return client.exec(
+          sql('UPDATE notifications SET read_at = $1 WHERE id = $2 AND recipient_id = $3'),
+          [at, id, userId],
+        );
       },
       async unreadCount(userId) {
         const row = await client.one<{ c: string }>(

@@ -12,17 +12,9 @@ export function registerAuthPlugin(app: FastifyInstance, sessions: SessionServic
     const auth = await sessions.resolveSession(req);
     if (auth) {
       req.auth = auth;
-      if (isStateChanging(req.method) && !isCsrfExempt(req.url)) {
+      if (isStateChanging(req.method)) {
         verifyCsrf(req);
       }
     }
   });
-}
-
-const CSRF_EXEMPT_PREFIXES = ['/api/auth/login', '/api/auth/register', '/api/auth/forgot-password'];
-
-function isCsrfExempt(url: string): boolean {
-  // Login/registration cannot present a CSRF token yet (no session); they are
-  // rate-limited instead.
-  return CSRF_EXEMPT_PREFIXES.some((p) => url.startsWith(p));
 }

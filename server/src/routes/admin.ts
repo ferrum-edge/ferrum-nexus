@@ -19,8 +19,10 @@ import {
 } from '../admin/settings-service.js';
 import { MassEmailInput } from '../admin/mass-email-service.js';
 import { USER_ROLES, type UserRole } from '@ferrum-nexus/shared';
+import { badRequest } from '../lib/errors.js';
 
 const requireAdmin = (req: FastifyRequest) => requireRole(req, 'admin', 'super_admin');
+const requireSuperAdmin = (req: FastifyRequest) => requireRole(req, 'super_admin');
 
 export async function registerAdminRoutes(
   app: FastifyInstance,
@@ -75,6 +77,7 @@ export async function registerAdminRoutes(
     const { status } = z
       .object({ status: z.enum(['pending', 'active', 'disabled']) })
       .parse(req.body);
+    if (status === 'disabled') await ensureNotLastActiveSuperAdmin(id, store);
     const user = await users.setStatus(id, status);
     await audit.record(req, {
       action: 'admin.user_status',
@@ -86,11 +89,12 @@ export async function registerAdminRoutes(
   });
 
   app.put('/api/admin/users/:id/roles', async (req, reply) => {
-    requireAdmin(req);
+    requireSuperAdmin(req);
     const { id } = req.params as { id: string };
     const { roles } = z
       .object({ roles: z.array(z.enum(USER_ROLES)).min(1) })
       .parse(req.body);
+    await ensureNotRemovingLastSuperAdmin(id, roles as UserRole[], store);
     const user = await users.setRoles(id, roles as UserRole[]);
     await audit.record(req, {
       action: 'admin.user_roles',
@@ -217,7 +221,7 @@ export async function registerAdminRoutes(
   });
 
   app.delete('/api/admin/god-mode/apis/:id', async (req, reply) => {
-    const user = requireAdmin(req);
+    const user = requireSuperAdmin(req);
     const { id } = req.params as { id: string };
     const { reason } = z.object({ reason: z.string().min(1) }).parse(req.body ?? {});
     await publishing.deleteAsset({ actorId: user.id, assetId: id });
@@ -231,7 +235,7 @@ export async function registerAdminRoutes(
   });
 
   app.post('/api/admin/god-mode/grants/:id/revoke', async (req, reply) => {
-    const user = requireAdmin(req);
+    const user = requireSuperAdmin(req);
     const { id } = req.params as { id: string };
     const { reason } = z.object({ reason: z.string().min(1) }).parse(req.body);
     await accessRequests.godRevoke({ actorId: user.id, grantId: id, reason });
@@ -239,9 +243,10 @@ export async function registerAdminRoutes(
   });
 
   app.post('/api/admin/god-mode/users/:id/disable', async (req, reply) => {
-    requireAdmin(req);
+    requireSuperAdmin(req);
     const { id } = req.params as { id: string };
     const { reason } = z.object({ reason: z.string().min(1) }).parse(req.body);
+    await ensureNotLastActiveSuperAdmin(id, store);
     const user = await users.setStatus(id, 'disabled');
     await audit.record(req, {
       action: 'admin.god_disable_user',
@@ -251,4 +256,43 @@ export async function registerAdminRoutes(
     });
     reply.send({ user });
   });
+}
+
+async function ensureNotRemovingLastSuperAdmin(
+  targetUserId: string,
+  nextRoles: UserRole[],
+  store: NexusStore,
+): Promise<void> {
+  if (nextRoles.includes('super_admin')) return;
+  const currentRoles = await store.userRoles.forUser(targetUserId);
+  if (!currentRoles.includes('super_admin')) return;
+  await ensureMoreThanOneActiveSuperAdmin(targetUserId, store);
+}
+
+async function ensureNotLastActiveSuperAdmin(
+  targetUserId: string,
+  store: NexusStore,
+): Promise<void> {
+  const currentRoles = await store.userRoles.forUser(targetUserId);
+  if (!currentRoles.includes('super_admin')) return;
+  await ensureMoreThanOneActiveSuperAdmin(targetUserId, store);
+}
+
+async function ensureMoreThanOneActiveSuperAdmin(
+  targetUserId: string,
+  store: NexusStore,
+): Promise<void> {
+  const { rows } = await store.users.list({ limit: 10_000 });
+  let activeSuperAdmins = 0;
+  for (const row of rows) {
+    if (row.status === 'disabled') continue;
+    const roles = await store.userRoles.forUser(row.id);
+    if (roles.includes('super_admin')) activeSuperAdmins++;
+  }
+  if (activeSuperAdmins <= 1) {
+    throw badRequest(
+      'last_super_admin',
+      `Cannot remove or disable the last active super_admin (${targetUserId})`,
+    );
+  }
 }

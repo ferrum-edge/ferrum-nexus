@@ -14,9 +14,14 @@ export function registerErrorHandler(app: FastifyInstance): void {
       });
       return;
     }
-    if (err.statusCode && err.statusCode >= 400 && err.statusCode < 500) {
-      reply.status(err.statusCode).send({
-        error: { code: err.code ?? 'bad_request', message: err.message },
+    const fastifyError = err as { statusCode?: number; code?: string; message?: string };
+    if (
+      fastifyError.statusCode &&
+      fastifyError.statusCode >= 400 &&
+      fastifyError.statusCode < 500
+    ) {
+      reply.status(fastifyError.statusCode).send({
+        error: { code: fastifyError.code ?? 'bad_request', message: fastifyError.message },
       });
       return;
     }
