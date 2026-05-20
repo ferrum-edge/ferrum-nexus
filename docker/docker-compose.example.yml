@@ -1,0 +1,44 @@
+version: '3.9'
+
+# Example end-to-end stack for Ferrum Nexus. Stand up a Postgres database, the
+# Nexus BFF + SPA in one container, and (optionally) a Ferrum Edge instance.
+# Copy this file to `docker-compose.yml` and edit before use.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nexus
+      POSTGRES_PASSWORD: nexus
+      POSTGRES_DB: nexus
+    volumes:
+      - nexus_pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  nexus:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: ferrum-nexus:latest
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    environment:
+      NEXUS_HOST: 0.0.0.0
+      NEXUS_PORT: 8787
+      NEXUS_PUBLIC_URL: http://localhost:8787
+      NEXUS_CORS_ORIGINS: http://localhost:8787
+      NEXUS_SECRET_KEY: change-me-to-32-bytes-of-hex
+      NEXUS_DB_DRIVER: postgres
+      NEXUS_DB_URL: postgres://nexus:nexus@postgres:5432/nexus
+      FERRUM_ADMIN_URL: http://ferrum-edge:8000
+      FERRUM_ADMIN_JWT_SECRET: change-me
+      FERRUM_DEFAULT_NAMESPACE: default
+      NEXUS_EMAIL_FROM: 'Ferrum Nexus <noreply@example.com>'
+    ports:
+      - "8787:8787"
+
+volumes:
+  nexus_pgdata: {}

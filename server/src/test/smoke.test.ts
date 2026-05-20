@@ -1,0 +1,143 @@
+/**
+ * Smoke test for the SQLite store. Runs against an in-memory SQLite database
+ * and exercises the core lifecycle: register a user, attach a role, create a
+ * notification, list users, and verify counts.
+ *
+ * Run with: `npm test --workspace server`
+ */
+
+import { test } from 'node:test';
+import { strict as assert } from 'node:assert';
+import { v4 as uuid } from 'uuid';
+import { createSqliteStore } from '../db/adapters/sqlite/index.js';
+import type { ResolvedConfig } from '../config/index.js';
+
+const config: ResolvedConfig = {
+  nodeEnv: 'test',
+  host: '127.0.0.1',
+  port: 0,
+  publicUrl: 'http://127.0.0.1:8787',
+  corsOrigins: '',
+  secretKey: 'a'.repeat(64),
+  db: { driver: 'sqlite', url: ':memory:' },
+  session: { cookieName: 'nexus_sid', ttlSeconds: 600, secure: false },
+  ferrum: {
+    adminUrl: 'http://127.0.0.1:8000',
+    jwtSecret: 'b'.repeat(32),
+    jwtIssuer: 'test',
+    jwtSubject: 'test',
+    jwtRole: 'admin',
+    jwtTtl: 60,
+    defaultNamespace: 'default',
+  },
+  email: {
+    from: 'noreply@example.com',
+    smtpPort: 587,
+    smtpSecure: false,
+  },
+};
+
+test('sqlite store: end-to-end user + notification lifecycle', async () => {
+  const store = await createSqliteStore(config);
+  await store.migrate();
+  try {
+    const userId = uuid();
+    await store.users.insert({
+      id: userId,
+      email: 'alice@example.com',
+      email_normalized: 'alice@example.com',
+      name: 'Alice',
+      phone: null,
+      status: 'active',
+      email_verified_at: new Date().toISOString(),
+      password_hash: 'hash',
+      last_login_at: null,
+      failed_login_count: 0,
+      organization_id: null,
+    });
+    await store.userRoles.add(userId, 'client');
+
+    const found = await store.users.findByEmail('alice@example.com');
+    assert.ok(found, 'user should exist');
+    assert.equal(found.email, 'alice@example.com');
+
+    const roles = await store.userRoles.forUser(userId);
+    assert.deepEqual(roles, ['client']);
+
+    await store.notifications.insert({
+      id: uuid(),
+      recipient_id: userId,
+      type: 'registration_confirmed',
+      payload: { test: true },
+      read_at: null,
+      created_at: new Date().toISOString(),
+    });
+    const unread = await store.notifications.unreadCount(userId);
+    assert.equal(unread, 1);
+
+    const list = await store.users.list({ limit: 10 });
+    assert.equal(list.total, 1);
+    assert.equal(list.rows[0]?.id, userId);
+  } finally {
+    await store.close();
+  }
+});
+
+test('sqlite store: api asset round trip', async () => {
+  const store = await createSqliteStore(config);
+  await store.migrate();
+  try {
+    const userId = uuid();
+    await store.users.insert({
+      id: userId,
+      email: 'provider@example.com',
+      email_normalized: 'provider@example.com',
+      name: 'Provider',
+      phone: null,
+      status: 'active',
+      email_verified_at: new Date().toISOString(),
+      password_hash: 'hash',
+      last_login_at: null,
+      failed_login_count: 0,
+      organization_id: null,
+    });
+
+    const assetId = uuid();
+    const now = new Date().toISOString();
+    await store.apiAssets.insert({
+      id: assetId,
+      api_spec_id: 'spec-1',
+      proxy_id: 'proxy-1',
+      namespace: 'default',
+      provider_id: userId,
+      title: 'Orders API',
+      description: 'Manages orders',
+      slug: 'orders-api-1-0',
+      version: '1.0.0',
+      visibility: 'public',
+      requestable: 1,
+      lifecycle: 'published',
+      tags: ['orders', 'commerce'],
+      contact_email: 'api@example.com',
+      support_notes: null,
+      operation_count: 12,
+      content_hash: 'abc',
+      created_at: now,
+      updated_at: now,
+    });
+    const fetched = await store.apiAssets.findById(assetId);
+    assert.ok(fetched);
+    assert.equal(fetched.title, 'Orders API');
+    assert.deepEqual(fetched.tags, ['orders', 'commerce']);
+    assert.equal(fetched.requestable, 1);
+
+    const updated = await store.apiAssets.update(assetId, {
+      title: 'Orders API v2',
+      requestable: 0,
+    });
+    assert.equal(updated.title, 'Orders API v2');
+    assert.equal(updated.requestable, 0);
+  } finally {
+    await store.close();
+  }
+});
