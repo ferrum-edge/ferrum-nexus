@@ -149,9 +149,7 @@ async function main(): Promise<void> {
         reply.status(404).send({ error: { code: 'not_found', message: 'Not found' } });
         return;
       }
-      const indexPath = resolve(spaDir, 'index.html');
       return reply.type('text/html').sendFile('index.html', spaDir);
-      void indexPath;
     });
   }
 

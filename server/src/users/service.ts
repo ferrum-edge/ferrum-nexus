@@ -45,6 +45,18 @@ export interface UsersService {
   setRoles(id: string, roles: UserRole[]): Promise<PortalUser>;
 }
 
+// Lazily computed argon2id hash used to equalize login timing when the
+// supplied email does not match any user. Verifying against a real hash takes
+// the same time as a wrong-password verify, preventing user enumeration via
+// response timing. The plaintext is a random value; no real account uses it.
+let dummyHashPromise: Promise<string> | null = null;
+function getDummyHash(): Promise<string> {
+  if (!dummyHashPromise) {
+    dummyHashPromise = argon2.hash(`nexus-dummy-${Math.random()}`, { type: argon2.argon2id });
+  }
+  return dummyHashPromise;
+}
+
 export function createUsersService(
   config: ResolvedConfig,
   store: NexusStore,
@@ -147,7 +159,13 @@ export function createUsersService(
   const login: UsersService['login'] = async (input) => {
     const emailNormalized = normalizeEmail(input.email);
     const user = await store.users.findByEmail(emailNormalized);
-    if (!user) throw unauthorized('Invalid email or password');
+    if (!user) {
+      // Verify against a dummy hash so a missing account takes the same time
+      // as one with a wrong password — prevents email enumeration.
+      const dummy = await getDummyHash();
+      await argon2.verify(dummy, input.password).catch(() => false);
+      throw unauthorized('Invalid email or password');
+    }
     if (user.status === 'disabled') throw unauthorized('Account disabled');
     if (user.failed_login_count >= 10) {
       throw unauthorized('Too many failed attempts. Reset your password to continue.');

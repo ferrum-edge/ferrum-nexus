@@ -43,6 +43,15 @@ export function renderEmail(
   };
 }
 
+// Reject anything that looks like multiple recipients or SMTP header
+// smuggling. nodemailer accepts CSV lists in `to` by default, so a stray
+// comma from a caller would silently broadcast.
+function assertSingleAddress(to: string): void {
+  if (!to || /[\r\n,;]/.test(to)) {
+    throw new Error(`Invalid email recipient: ${JSON.stringify(to)}`);
+  }
+}
+
 export function createMailer(
   config: ResolvedConfig,
   logger: Logger,
@@ -51,6 +60,7 @@ export function createMailer(
     logger.warn('SMTP not configured');
     return {
       async send({ to, subject }) {
+        assertSingleAddress(to);
         if (config.nodeEnv === 'production') {
           throw new Error('SMTP is not configured');
         }
@@ -71,6 +81,7 @@ export function createMailer(
 
   return {
     async send({ to, subject, body }) {
+      assertSingleAddress(to);
       await transport.sendMail({
         from: config.email.from,
         to,

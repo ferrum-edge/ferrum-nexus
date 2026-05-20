@@ -9,7 +9,7 @@
 
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { v4 as uuid } from 'uuid';
-import { randomToken } from '../lib/crypto.js';
+import { constantTimeEqual, randomToken } from '../lib/crypto.js';
 import type { ResolvedConfig } from '../config/index.js';
 import type { NexusStore } from '../db/store.js';
 import type { UserRole } from '@ferrum-nexus/shared';
@@ -141,7 +141,7 @@ export function verifyCsrf(req: FastifyRequest): void {
   if (!sessionCsrf) throw unauthorized('Missing session');
   const header = req.headers[CSRF_HEADER] || req.headers[CSRF_HEADER.toLowerCase()];
   const provided = Array.isArray(header) ? header[0] : header;
-  if (!provided || provided !== sessionCsrf) {
+  if (!provided || !constantTimeEqual(provided, sessionCsrf)) {
     throw forbidden('CSRF token mismatch');
   }
 }

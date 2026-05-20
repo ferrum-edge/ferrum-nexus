@@ -116,13 +116,10 @@ export function createSettingsService(
       const branding = await getBranding();
       const captcha = await getCaptcha();
       const flags = await getRegFlags();
-      return {
-        branding,
-        captcha: { ...captcha, // never expose secret
-          secret: undefined as unknown as never,
-        } as CaptchaSettings,
-        ...flags,
-      };
+      // captcha settings stored under KEYS.captcha never include the secret —
+      // it lives encrypted under KEYS.captchaSecretEnc — so there is nothing
+      // to strip here. Returning the stored shape directly.
+      return { branding, captcha, ...flags };
     },
     async full() {
       const branding = await getBranding();

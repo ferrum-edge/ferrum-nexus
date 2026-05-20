@@ -749,7 +749,7 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
       async listForConversation(conversationId) {
         return (msgList.all(conversationId) as MessageRowRaw[]).map(hydrateMessage);
       },
-      async markRead(conversationId, userId, at) {
+      async markRead(conversationId, userId, _at) {
         const rows = msgList.all(conversationId) as MessageRowRaw[];
         const upd = db.prepare('UPDATE messages SET read_by = ? WHERE id = ?');
         for (const r of rows) {
@@ -758,7 +758,6 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
             upd.run(J([...readBy, userId]), r.id);
           }
         }
-        void at;
       },
     },
     notifications: {

@@ -230,17 +230,19 @@ export function buildSqlRepos(
         const limit = opts.limit ?? 25;
         const offset = opts.offset ?? 0;
         const search = opts.search ? `%${opts.search}%` : null;
+        // Each placeholder is unique so MySQL (positional `?`) and Postgres
+        // (named `$N`) both bind correctly.
         const rows = await client.query<Record<string, unknown>>(
           sql(`SELECT * FROM users
-               WHERE ($1::text IS NULL OR email_normalized ILIKE $1 OR name ILIKE $1)
-               ORDER BY created_at DESC LIMIT $2 OFFSET $3`),
-          [search, limit, offset],
+               WHERE ($1::text IS NULL OR email_normalized ILIKE $2 OR name ILIKE $3)
+               ORDER BY created_at DESC LIMIT $4 OFFSET $5`),
+          [search, search, search, limit, offset],
         );
         const total = (
           await client.one<{ c: string }>(
             sql(`SELECT COUNT(*)::text as c FROM users
-                 WHERE ($1::text IS NULL OR email_normalized ILIKE $1 OR name ILIKE $1)`),
-            [search],
+                 WHERE ($1::text IS NULL OR email_normalized ILIKE $2 OR name ILIKE $3)`),
+            [search, search, search],
           )
         )?.c;
         return { rows: rows.map(hydrateUser), total: Number(total ?? 0) };
@@ -651,20 +653,22 @@ export function buildSqlRepos(
         const search = opts.search ? `%${opts.search}%` : null;
         const visibility = (opts.visibility as ApiVisibility | undefined) ?? null;
         const providerId = opts.providerId ?? null;
+        // Each placeholder is unique so MySQL (positional `?`) and Postgres
+        // (named `$N`) both bind correctly.
         const rows = await client.query<Record<string, unknown>>(
           sql(`SELECT * FROM api_assets
-               WHERE ($1::text IS NULL OR title ILIKE $1 OR description ILIKE $1 OR slug ILIKE $1)
-                 AND ($2::text IS NULL OR visibility = $2)
-                 AND ($3::text IS NULL OR provider_id = $3)
-               ORDER BY updated_at DESC LIMIT $4 OFFSET $5`),
-          [search, visibility, providerId, limit, offset],
+               WHERE ($1::text IS NULL OR title ILIKE $2 OR description ILIKE $3 OR slug ILIKE $4)
+                 AND ($5::text IS NULL OR visibility = $6)
+                 AND ($7::text IS NULL OR provider_id = $8)
+               ORDER BY updated_at DESC LIMIT $9 OFFSET $10`),
+          [search, search, search, search, visibility, visibility, providerId, providerId, limit, offset],
         );
         const totalRow = await client.one<{ c: string }>(
           sql(`SELECT COUNT(*)::text as c FROM api_assets
-               WHERE ($1::text IS NULL OR title ILIKE $1 OR description ILIKE $1 OR slug ILIKE $1)
-                 AND ($2::text IS NULL OR visibility = $2)
-                 AND ($3::text IS NULL OR provider_id = $3)`),
-          [search, visibility, providerId],
+               WHERE ($1::text IS NULL OR title ILIKE $2 OR description ILIKE $3 OR slug ILIKE $4)
+                 AND ($5::text IS NULL OR visibility = $6)
+                 AND ($7::text IS NULL OR provider_id = $8)`),
+          [search, search, search, search, visibility, visibility, providerId, providerId],
         );
         return { rows: rows.map(hydrateAsset), total: Number(totalRow?.c ?? 0) };
       },
@@ -803,9 +807,9 @@ export function buildSqlRepos(
         const rows = await client.query<Record<string, unknown>>(
           sql(`SELECT ar.id FROM access_requests ar
                JOIN api_assets a ON a.id = ar.api_asset_id
-               WHERE a.provider_id = $1 AND ($2::text IS NULL OR ar.status = $2)
+               WHERE a.provider_id = $1 AND ($2::text IS NULL OR ar.status = $3)
                ORDER BY ar.created_at DESC`),
-          [providerId, status ?? null],
+          [providerId, status ?? null, status ?? null],
         );
         return Promise.all(rows.map((r) => this.findById(r.id as string).then((v) => v!)));
       },
@@ -1090,11 +1094,11 @@ export function buildSqlRepos(
       async markFailed(id, attempts, error) {
         const backoffMs = Math.min(60_000 * attempts, 30 * 60_000);
         const scheduled = new Date(Date.now() + backoffMs).toISOString();
+        const status = attempts >= 5 ? 'failed' : 'pending';
         await client.exec(
           sql(`UPDATE email_outbox SET attempts = $1, last_error = $2,
-                 status = CASE WHEN $1 >= 5 THEN 'failed' ELSE 'pending' END,
-                 scheduled_at = $3 WHERE id = $4`),
-          [attempts, error, scheduled, id],
+                 status = $3, scheduled_at = $4 WHERE id = $5`),
+          [attempts, error, status, scheduled, id],
         );
       },
       async getTemplate(key) {
@@ -1206,16 +1210,16 @@ export function buildSqlRepos(
         const actorId = opts.actorId ?? null;
         const rows = await client.query<Record<string, unknown>>(
           sql(`SELECT * FROM audit_logs
-               WHERE ($1::text IS NULL OR action = $1)
-                 AND ($2::text IS NULL OR actor_id = $2)
-               ORDER BY created_at DESC LIMIT $3 OFFSET $4`),
-          [action, actorId, limit, offset],
+               WHERE ($1::text IS NULL OR action = $2)
+                 AND ($3::text IS NULL OR actor_id = $4)
+               ORDER BY created_at DESC LIMIT $5 OFFSET $6`),
+          [action, action, actorId, actorId, limit, offset],
         );
         const totalRow = await client.one<{ c: string }>(
           sql(`SELECT COUNT(*)::text as c FROM audit_logs
-               WHERE ($1::text IS NULL OR action = $1)
-                 AND ($2::text IS NULL OR actor_id = $2)`),
-          [action, actorId],
+               WHERE ($1::text IS NULL OR action = $2)
+                 AND ($3::text IS NULL OR actor_id = $4)`),
+          [action, action, actorId, actorId],
         );
         return {
           rows: rows.map((row) => ({
