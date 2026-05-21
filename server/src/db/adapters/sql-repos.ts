@@ -36,31 +36,34 @@ import type {
   ApiVisibility,
   UserRole,
 } from '@ferrum-nexus/shared';
-import { asBool, asJson, toIsoString, type SqlClient, type SqlDialect } from './sql-common.js';
+import {
+  asBool,
+  asJson,
+  buildInsertIgnore,
+  buildUpsert,
+  caseInsensitiveLike,
+  ident,
+  toIsoString,
+  type SqlClient,
+  type SqlDialect,
+} from './sql-common.js';
 
+/**
+ * Minimal placeholder/identifier rewriter. We deliberately do NOT rewrite
+ * dialect-specific operators (ILIKE, ON CONFLICT) any more — those are
+ * generated per-dialect by helpers in `sql-common.ts`. The only thing we
+ * still need is the $N → ? swap for MySQL and the COUNT(*)::text → COUNT(*)
+ * cast strip.
+ */
 const renderSql = (dialect: SqlDialect, sql: string): string => {
   if (dialect === 'postgres') return sql;
-  // Rewrite common PostgreSQL syntax used below to MySQL-compatible SQL.
-  return sql
-    .replace(/COUNT\(\*\)::text/g, 'COUNT(*)')
-    .replace(/\$(\d+)::text/g, '?')
-    .replace(/\$(\d+)/g, '?')
-    .replace(/\bILIKE\b/g, 'LIKE')
-    .replace(/INSERT INTO user_roles/g, 'INSERT IGNORE INTO user_roles')
-    .replace(/INSERT INTO organization_members/g, 'INSERT IGNORE INTO organization_members')
-    .replace(/\s+ON CONFLICT DO NOTHING/g, '')
-    .replace(/INSERT INTO email_templates \(key,/g, 'INSERT INTO email_templates (`key`,')
-    .replace(/INSERT INTO app_settings \(key,/g, 'INSERT INTO app_settings (`key`,')
-    .replace(/WHERE key =/g, 'WHERE `key` =')
-    .replace(/ORDER BY key ASC/g, 'ORDER BY `key` ASC')
-    .replace(
-      /ON CONFLICT \(key\) DO UPDATE SET subject_template = EXCLUDED\.subject_template,\s+body_template = EXCLUDED\.body_template, enabled = EXCLUDED\.enabled,\s+updated_at = EXCLUDED\.updated_at/g,
-      'ON DUPLICATE KEY UPDATE subject_template = VALUES(subject_template), body_template = VALUES(body_template), enabled = VALUES(enabled), updated_at = VALUES(updated_at)',
-    )
-    .replace(
-      /ON CONFLICT \(key\) DO UPDATE SET value = EXCLUDED\.value,\s+encrypted = EXCLUDED\.encrypted, updated_at = EXCLUDED\.updated_at/g,
-      'ON DUPLICATE KEY UPDATE value = VALUES(value), encrypted = VALUES(encrypted), updated_at = VALUES(updated_at)',
-    );
+  return sql.replace(/COUNT\(\*\)::text/g, 'COUNT(*)').replace(/\$(\d+)/g, '?');
+};
+
+/** Lower-case search parameter for use with `caseInsensitiveLike`. */
+const lowerSearch = (dialect: SqlDialect, value: string | null): string | null => {
+  if (value == null) return null;
+  return dialect === 'postgres' ? value : value.toLowerCase();
 };
 
 const J = (value: unknown): string => JSON.stringify(value ?? null);
@@ -260,19 +263,19 @@ export function buildSqlRepos(
       async list(opts: ListOptions) {
         const limit = opts.limit ?? 25;
         const offset = opts.offset ?? 0;
-        const search = opts.search ? `%${opts.search}%` : null;
-        // Each placeholder is unique so MySQL (positional `?`) and Postgres
-        // (named `$N`) both bind correctly.
+        const search = lowerSearch(dialect, opts.search ? `%${opts.search}%` : null);
+        const emailMatch = caseInsensitiveLike(dialect, 'email_normalized', '$2');
+        const nameMatch = caseInsensitiveLike(dialect, 'name', '$3');
         const rows = await client.query<Record<string, unknown>>(
           sql(`SELECT * FROM users
-               WHERE ($1::text IS NULL OR email_normalized ILIKE $2 OR name ILIKE $3)
+               WHERE ($1::text IS NULL OR ${emailMatch} OR ${nameMatch})
                ORDER BY created_at DESC LIMIT $4 OFFSET $5`),
           [search, search, search, limit, offset],
         );
         const total = (
           await client.one<{ c: string }>(
             sql(`SELECT COUNT(*)::text as c FROM users
-                 WHERE ($1::text IS NULL OR email_normalized ILIKE $2 OR name ILIKE $3)`),
+                 WHERE ($1::text IS NULL OR ${emailMatch} OR ${nameMatch})`),
             [search, search, search],
           )
         )?.c;
@@ -316,8 +319,7 @@ export function buildSqlRepos(
     userRoles: {
       async add(userId, role) {
         await client.exec(
-          sql(`INSERT INTO user_roles (user_id, role, created_at) VALUES ($1,$2,$3)
-               ON CONFLICT DO NOTHING`),
+          sql(buildInsertIgnore(dialect, 'user_roles', ['user_id', 'role', 'created_at'])),
           [userId, role, new Date().toISOString()],
         );
       },
@@ -337,12 +339,11 @@ export function buildSqlRepos(
       async setRoles(userId, roles) {
         await client.exec(sql('DELETE FROM user_roles WHERE user_id = $1'), [userId]);
         const now = new Date().toISOString();
+        const insertSql = sql(
+          buildInsertIgnore(dialect, 'user_roles', ['user_id', 'role', 'created_at']),
+        );
         for (const role of roles) {
-          await client.exec(
-            sql(`INSERT INTO user_roles (user_id, role, created_at) VALUES ($1,$2,$3)
-                 ON CONFLICT DO NOTHING`),
-            [userId, role, now],
-          );
+          await client.exec(insertSql, [userId, role, now]);
         }
       },
     },
@@ -434,6 +435,15 @@ export function buildSqlRepos(
           [at, token],
         );
       },
+      async countRecentPasswordResets(userId, since) {
+        // expires_at is reset_created_at + 1h, so this approximates "issued in
+        // the throttle window" without requiring a schema migration.
+        const row = await client.one<{ c: string }>(
+          sql('SELECT COUNT(*) as c FROM password_resets WHERE user_id = $1 AND expires_at >= $2'),
+          [userId, since],
+        );
+        return Number(row?.c ?? 0);
+      },
     },
     organizations: {
       async insert(row: OrganizationRow) {
@@ -473,8 +483,14 @@ export function buildSqlRepos(
       },
       async addMember(row: OrganizationMemberRow) {
         await client.exec(
-          sql(`INSERT INTO organization_members (organization_id, user_id, role, created_at)
-               VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`),
+          sql(
+            buildInsertIgnore(dialect, 'organization_members', [
+              'organization_id',
+              'user_id',
+              'role',
+              'created_at',
+            ]),
+          ),
           [row.organization_id, row.user_id, row.role, row.created_at],
         );
       },
@@ -708,14 +724,15 @@ export function buildSqlRepos(
       async list(opts) {
         const limit = opts.limit ?? 25;
         const offset = opts.offset ?? 0;
-        const search = opts.search ? `%${opts.search}%` : null;
+        const search = lowerSearch(dialect, opts.search ? `%${opts.search}%` : null);
         const visibility = (opts.visibility as ApiVisibility | undefined) ?? null;
         const providerId = opts.providerId ?? null;
-        // Each placeholder is unique so MySQL (positional `?`) and Postgres
-        // (named `$N`) both bind correctly.
+        const titleMatch = caseInsensitiveLike(dialect, 'title', '$2');
+        const descMatch = caseInsensitiveLike(dialect, 'description', '$3');
+        const slugMatch = caseInsensitiveLike(dialect, 'slug', '$4');
         const rows = await client.query<Record<string, unknown>>(
           sql(`SELECT * FROM api_assets
-               WHERE ($1::text IS NULL OR title ILIKE $2 OR description ILIKE $3 OR slug ILIKE $4)
+               WHERE ($1::text IS NULL OR ${titleMatch} OR ${descMatch} OR ${slugMatch})
                  AND ($5::text IS NULL OR visibility = $6)
                  AND ($7::text IS NULL OR provider_id = $8)
                ORDER BY updated_at DESC LIMIT $9 OFFSET $10`),
@@ -723,7 +740,7 @@ export function buildSqlRepos(
         );
         const totalRow = await client.one<{ c: string }>(
           sql(`SELECT COUNT(*)::text as c FROM api_assets
-               WHERE ($1::text IS NULL OR title ILIKE $2 OR description ILIKE $3 OR slug ILIKE $4)
+               WHERE ($1::text IS NULL OR ${titleMatch} OR ${descMatch} OR ${slugMatch})
                  AND ($5::text IS NULL OR visibility = $6)
                  AND ($7::text IS NULL OR provider_id = $8)`),
           [search, search, search, search, visibility, visibility, providerId, providerId],
@@ -1082,10 +1099,20 @@ export function buildSqlRepos(
     },
     email: {
       async enqueue(row: EmailOutboxRow) {
+        // The partial unique index on `idempotency_key` makes a duplicate
+        // enqueue with the same key violate the constraint — ON CONFLICT
+        // turns that into a no-op so the caller sees idempotent behavior.
+        const conflictClause =
+          dialect === 'postgres'
+            ? ' ON CONFLICT (idempotency_key) DO NOTHING'
+            : ' ON DUPLICATE KEY UPDATE idempotency_key = idempotency_key';
         await client.exec(
-          sql(`INSERT INTO email_outbox (id, to_address, subject, template_id, payload,
-                  status, attempts, last_error, scheduled_at, sent_at, created_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`),
+          sql(
+            `INSERT INTO email_outbox (id, to_address, subject, template_id, payload,
+                  status, attempts, last_error, scheduled_at, sent_at, created_at,
+                  idempotency_key, headers)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)` + conflictClause,
+          ),
           [
             row.id,
             row.to_address,
@@ -1098,6 +1125,12 @@ export function buildSqlRepos(
             row.scheduled_at,
             row.sent_at,
             row.created_at,
+            row.idempotency_key,
+            row.headers == null
+              ? null
+              : dialect === 'postgres'
+                ? row.headers
+                : J(row.headers),
           ],
         );
       },
@@ -1135,6 +1168,11 @@ export function buildSqlRepos(
             scheduled_at: toIsoString(row.scheduled_at) ?? new Date().toISOString(),
             sent_at: toIsoString(row.sent_at),
             created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
+            idempotency_key: (row.idempotency_key as string | null) ?? null,
+            headers:
+              row.headers == null
+                ? null
+                : asJson<Record<string, string>>(row.headers, {}),
           });
         }
         return claimed;
@@ -1155,9 +1193,56 @@ export function buildSqlRepos(
           [attempts, error, status, scheduled, id],
         );
       },
+      async listFailed(opts) {
+        const limit = opts.limit ?? 50;
+        const offset = opts.offset ?? 0;
+        const rows = await client.query<Record<string, unknown>>(
+          sql(
+            "SELECT * FROM email_outbox WHERE status = 'failed' ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+          ),
+          [limit, offset],
+        );
+        const total = (
+          await client.one<{ c: string }>(
+            sql("SELECT COUNT(*)::text as c FROM email_outbox WHERE status = 'failed'"),
+            [],
+          )
+        )?.c;
+        return {
+          rows: rows.map((row) => ({
+            id: row.id as string,
+            to_address: row.to_address as string,
+            subject: row.subject as string,
+            template_id: (row.template_id as string | null) ?? null,
+            payload: asJson<Record<string, unknown>>(row.payload, {}),
+            status: row.status as EmailOutboxRow['status'],
+            attempts: Number(row.attempts ?? 0),
+            last_error: (row.last_error as string | null) ?? null,
+            scheduled_at: toIsoString(row.scheduled_at) ?? new Date().toISOString(),
+            sent_at: toIsoString(row.sent_at),
+            created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
+            idempotency_key: (row.idempotency_key as string | null) ?? null,
+            headers:
+              row.headers == null
+                ? null
+                : asJson<Record<string, string>>(row.headers, {}),
+          })),
+          total: Number(total ?? 0),
+        };
+      },
+      async requeue(id) {
+        const changes = await client.exec(
+          sql(
+            "UPDATE email_outbox SET status = 'pending', attempts = 0, last_error = NULL, scheduled_at = $1 WHERE id = $2 AND status = 'failed'",
+          ),
+          [new Date().toISOString(), id],
+        );
+        return changes > 0;
+      },
       async getTemplate(key) {
+        const keyCol = ident(dialect, 'key');
         const row = await client.one<Record<string, unknown>>(
-          sql('SELECT * FROM email_templates WHERE key = $1'),
+          sql(`SELECT * FROM email_templates WHERE ${keyCol} = $1`),
           [key],
         );
         if (!row) return null;
@@ -1171,11 +1256,14 @@ export function buildSqlRepos(
       },
       async upsertTemplate(row: EmailTemplateRow) {
         await client.exec(
-          sql(`INSERT INTO email_templates (key, subject_template, body_template, enabled,
-                  updated_at) VALUES ($1,$2,$3,$4,$5)
-               ON CONFLICT (key) DO UPDATE SET subject_template = EXCLUDED.subject_template,
-                  body_template = EXCLUDED.body_template, enabled = EXCLUDED.enabled,
-                  updated_at = EXCLUDED.updated_at`),
+          sql(
+            buildUpsert(
+              dialect,
+              'email_templates',
+              ['key', 'subject_template', 'body_template', 'enabled', 'updated_at'],
+              ['key'],
+            ),
+          ),
           [
             row.key,
             row.subject_template,
@@ -1186,8 +1274,9 @@ export function buildSqlRepos(
         );
       },
       async listTemplates() {
+        const keyCol = ident(dialect, 'key');
         const rows = await client.query<Record<string, unknown>>(
-          sql('SELECT * FROM email_templates ORDER BY key ASC'),
+          sql(`SELECT * FROM email_templates ORDER BY ${keyCol} ASC`),
           [],
         );
         return rows.map((row) => ({
@@ -1201,8 +1290,9 @@ export function buildSqlRepos(
     },
     settings: {
       async get<T>(key: string): Promise<T | null> {
+        const keyCol = ident(dialect, 'key');
         const row = await client.one<Record<string, unknown>>(
-          sql('SELECT * FROM app_settings WHERE key = $1'),
+          sql(`SELECT * FROM app_settings WHERE ${keyCol} = $1`),
           [key],
         );
         if (!row) return null;
@@ -1210,10 +1300,14 @@ export function buildSqlRepos(
       },
       async set<T>(key: string, value: T, encrypted = false) {
         await client.exec(
-          sql(`INSERT INTO app_settings (key, value, encrypted, updated_at)
-               VALUES ($1,$2,$3,$4)
-               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value,
-                  encrypted = EXCLUDED.encrypted, updated_at = EXCLUDED.updated_at`),
+          sql(
+            buildUpsert(
+              dialect,
+              'app_settings',
+              ['key', 'value', 'encrypted', 'updated_at'],
+              ['key'],
+            ),
+          ),
           [
             key,
             dialect === 'postgres' ? value : JSON.stringify(value),
@@ -1223,8 +1317,9 @@ export function buildSqlRepos(
         );
       },
       async all() {
+        const keyCol = ident(dialect, 'key');
         const rows = await client.query<Record<string, unknown>>(
-          sql('SELECT * FROM app_settings ORDER BY key ASC'),
+          sql(`SELECT * FROM app_settings ORDER BY ${keyCol} ASC`),
           [],
         );
         return rows.map((row) => ({

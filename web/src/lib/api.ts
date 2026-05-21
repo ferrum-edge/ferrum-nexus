@@ -39,7 +39,17 @@ export async function api<T>(
   }
   const method = (init.method ?? 'GET').toUpperCase();
   if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-    const token = readCookie(CSRF_COOKIE);
+    // Before any anonymous mutation (login, register, password reset) we may
+    // not yet have a CSRF cookie. Bootstrap one transparently so the caller
+    // doesn't have to remember to do this on every page. Authenticated
+    // sessions already have the cookie set during /auth/login.
+    let token = readCookie(CSRF_COOKIE);
+    if (!token) {
+      await fetch(new URL(BASE + '/csrf-token', window.location.origin), {
+        credentials: 'include',
+      });
+      token = readCookie(CSRF_COOKIE);
+    }
     if (token) headers.set(CSRF_HEADER, token);
   }
   const res = await fetch(url, { ...init, headers, credentials: 'include' });

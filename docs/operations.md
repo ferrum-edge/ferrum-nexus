@@ -13,9 +13,32 @@ start without are `NEXUS_SECRET_KEY`, `FERRUM_ADMIN_URL`, and
 - AES-256-GCM encryption of sensitive `app_settings` rows (SMTP password,
   CAPTCHA secret).
 
-Rotate the key with care: encrypted settings stored before the rotation will
-no longer be decryptable. Re-enter SMTP and CAPTCHA secrets through the admin
-UI after rotation.
+### Rotating `NEXUS_SECRET_KEY`
+
+There is no automatic key derivation envelope yet, so rotation is a manual
+re-encrypt operation. Plan a maintenance window and follow this order:
+
+1. **Capture the current secrets.** Before changing the key, log in as an
+   admin and copy the plaintext values of every encrypted setting (SMTP
+   password, CAPTCHA secret) from your password manager / configuration source
+   of record. You will re-enter them after rotation.
+2. **Stop all Nexus instances.** Sessions are signed with HKDF-derived keys,
+   so a mid-flight key swap will invalidate every active session and trigger
+   re-logins anyway — easier to do it cleanly while no traffic is in flight.
+3. **Generate the new key:** `openssl rand -hex 32`. Update every deployment's
+   environment (`NEXUS_SECRET_KEY=<new>`) and the secret store you back up to.
+4. **Start one instance and confirm boot.** It will read encrypted
+   `app_settings` rows and fail to decrypt them; that is expected. The error
+   path falls back to empty (e.g. SMTP appears unconfigured) but the server
+   still starts.
+5. **Re-enter the secrets via the admin UI** (SMTP, CAPTCHA, anything else
+   that lives in `app_settings` with `encrypted=true`). The new writes are
+   encrypted under the new key.
+6. **Bring the rest of the fleet online.** All sessions are gone; users will
+   log in again. The CSRF cookie is regenerated on the next anonymous request.
+
+Back up both old and new keys until step 5 is complete in case you need to
+roll back and decrypt the pre-rotation rows.
 
 Set `NEXUS_TRUST_PROXY=true` only when Nexus is behind a trusted reverse proxy
 that controls `X-Forwarded-*` headers. Leaving it disabled prevents direct
@@ -30,10 +53,12 @@ For PostgreSQL / MySQL / MongoDB, set `NEXUS_DB_URL` to a standard connection
 string. Migrations live in `server/src/db/migrations/` and run automatically
 at startup.
 
-**MongoDB caveat:** multi-document transactions require a replica set. With a
-standalone MongoDB instance Nexus will log a warning at boot and execute
-multi-document workflows without atomicity (the same caveat that applies to
-Ferrum Edge's own MongoDB support).
+**MongoDB caveat:** multi-document transactions require a replica set. Nexus
+refuses to start against a standalone MongoDB by default — credential
+rotation and grant approval rely on transactional guarantees. If you
+explicitly accept the risk (development, single-node test deployments) set
+`NEXUS_DB_ALLOW_STANDALONE=true`; the server will boot and log a warning,
+but the workflows above will not be atomic.
 
 ## Email
 
@@ -43,7 +68,15 @@ delivery failure. Configure SMTP through the admin UI to encrypt the password
 at rest.
 
 The outbox worker polls every five seconds and retries failed messages with
-exponential backoff up to five attempts.
+exponential backoff up to five attempts. After the fifth failure the row
+transitions to `status='failed'` and an error-level log line is emitted so
+alerting picks it up. Failed messages can be inspected and re-queued through
+`GET /api/admin/email/failed` and `POST /api/admin/email/failed/:id/requeue`.
+
+Callers that need at-most-once semantics (mass-email broadcasts, verification
+emails) supply an `idempotencyKey` to `EmailService.enqueue`; a second enqueue
+with the same key is a no-op courtesy of the unique partial index on
+`email_outbox.idempotency_key`.
 
 ## Backups
 

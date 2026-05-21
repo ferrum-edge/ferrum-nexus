@@ -45,6 +45,14 @@ export interface SessionService {
   resolveSession(req: FastifyRequest): Promise<AuthenticatedUser | null>;
   setCookies(reply: FastifyReply, sessionId: string, csrfToken: string, expiresAt: string): void;
   clearCookies(reply: FastifyReply): void;
+  /**
+   * Issue a CSRF token for use on anonymous mutations (register/login/password
+   * reset). The token is bound to a random value placed in the `nexus_csrf`
+   * cookie; the SPA reads the cookie and echoes the value in the
+   * `X-Nexus-CSRF` header. The double-submit pattern prevents a cross-origin
+   * site from forging the request because it can't read the cookie.
+   */
+  setAnonymousCsrfCookie(reply: FastifyReply): string;
 }
 
 export function createSessionService(
@@ -116,6 +124,19 @@ export function createSessionService(
       reply.clearCookie(config.session.cookieName, { path: '/' });
       reply.clearCookie(CSRF_COOKIE, { path: '/' });
     },
+    setAnonymousCsrfCookie(reply) {
+      const token = randomToken(24);
+      reply.setCookie(CSRF_COOKIE, token, {
+        path: '/',
+        httpOnly: false,
+        secure: config.session.secure,
+        sameSite: 'lax',
+        // One hour is enough to complete a login or registration; if the user
+        // takes longer, the SPA simply re-fetches /api/csrf-token.
+        maxAge: 3600,
+      });
+      return token;
+    },
   };
 }
 
@@ -134,14 +155,26 @@ export function requireRole(req: FastifyRequest, ...roles: UserRole[]): Authenti
   return user;
 }
 
-/** Compare the request's CSRF header to the session token. */
+/**
+ * Compare the request's CSRF header to the value bound to the requester.
+ *
+ * For authenticated requests the bound value is the session's `csrf_token`.
+ * For anonymous mutations (register, login, password reset) we use a
+ * double-submit cookie: the SPA reads the `nexus_csrf` cookie (set by
+ * `setAnonymousCsrfCookie`) and echoes it in the header. A cross-origin
+ * attacker cannot read the cookie under our `SameSite=Lax` policy, so they
+ * cannot forge the header.
+ */
 export function verifyCsrf(req: FastifyRequest): void {
   if (!isStateChanging(req.method)) return;
-  const sessionCsrf = (req as FastifyRequest & { _sessionCsrf?: string })._sessionCsrf;
-  if (!sessionCsrf) throw unauthorized('Missing session');
   const header = req.headers[CSRF_HEADER] || req.headers[CSRF_HEADER.toLowerCase()];
   const provided = Array.isArray(header) ? header[0] : header;
-  if (!provided || !constantTimeEqual(provided, sessionCsrf)) {
+  if (!provided) throw forbidden('CSRF token missing');
+
+  const sessionCsrf = (req as FastifyRequest & { _sessionCsrf?: string })._sessionCsrf;
+  const expected = sessionCsrf ?? req.cookies[CSRF_COOKIE];
+  if (!expected) throw forbidden('CSRF token missing');
+  if (!constantTimeEqual(provided, expected)) {
     throw forbidden('CSRF token mismatch');
   }
 }

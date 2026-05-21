@@ -12,6 +12,27 @@ export interface AuditRecord {
   after?: unknown;
 }
 
+// Field names that look like secrets — these get redacted before insert so an
+// audit log inspector (or backup) cannot recover credentials, tokens, or
+// SMTP passwords from the historical record. Match is case-insensitive and
+// substring-based so `apiKey`, `api_key`, `SMTP_PASSWORD`, `client_secret`,
+// `bearerToken`, `data.secret`, etc. are all caught.
+const SECRET_FIELD_PATTERN = /(password|secret|token|api[_-]?key|client[_-]?id|private[_-]?key|certificate|cert)/i;
+const REDACTED = '[REDACTED]';
+
+function scrubValue(value: unknown, depth = 0): unknown {
+  if (depth > 8) return value; // bounded recursion for cyclic-ish payloads
+  if (Array.isArray(value)) return value.map((v) => scrubValue(v, depth + 1));
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = SECRET_FIELD_PATTERN.test(k) ? REDACTED : scrubValue(v, depth + 1);
+    }
+    return out;
+  }
+  return value;
+}
+
 export interface AuditService {
   record(req: FastifyRequest | null, record: AuditRecord): Promise<void>;
   list(opts: {
@@ -33,8 +54,8 @@ export function createAuditService(store: NexusStore): AuditService {
         target_type: record.targetType,
         target_id: record.targetId ?? null,
         reason: record.reason ?? null,
-        before: record.before ?? null,
-        after: record.after ?? null,
+        before: record.before == null ? null : scrubValue(record.before),
+        after: record.after == null ? null : scrubValue(record.after),
         ip: (req?.ip as string) ?? null,
         user_agent: (req?.headers['user-agent'] as string | undefined) ?? null,
         created_at: new Date().toISOString(),

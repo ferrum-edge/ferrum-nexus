@@ -82,6 +82,8 @@ CREATE TABLE IF NOT EXISTS ferrum_consumers (
   UNIQUE (user_id, namespace)
 );
 
+CREATE INDEX IF NOT EXISTS idx_consumers_user ON ferrum_consumers (user_id);
+
 CREATE TABLE IF NOT EXISTS credential_metadata (
   id TEXT PRIMARY KEY,
   consumer_id TEXT NOT NULL REFERENCES ferrum_consumers (id) ON DELETE CASCADE,
@@ -95,6 +97,8 @@ CREATE TABLE IF NOT EXISTS credential_metadata (
   rotated_at TIMESTAMPTZ,
   expires_at TIMESTAMPTZ
 );
+
+CREATE INDEX IF NOT EXISTS idx_credentials_consumer ON credential_metadata (consumer_id);
 
 CREATE TABLE IF NOT EXISTS api_assets (
   id TEXT PRIMARY KEY,
@@ -132,6 +136,8 @@ CREATE TABLE IF NOT EXISTS api_spec_versions (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE INDEX IF NOT EXISTS idx_spec_versions_asset ON api_spec_versions (api_asset_id);
+
 CREATE TABLE IF NOT EXISTS access_requests (
   id TEXT PRIMARY KEY,
   api_asset_id TEXT NOT NULL REFERENCES api_assets (id) ON DELETE CASCADE,
@@ -146,6 +152,8 @@ CREATE TABLE IF NOT EXISTS access_requests (
 );
 
 CREATE INDEX IF NOT EXISTS idx_access_requests_status ON access_requests (status);
+CREATE INDEX IF NOT EXISTS idx_access_requests_client ON access_requests (client_user_id);
+CREATE INDEX IF NOT EXISTS idx_access_requests_asset ON access_requests (api_asset_id);
 
 CREATE TABLE IF NOT EXISTS access_grants (
   id TEXT PRIMARY KEY,
@@ -161,6 +169,9 @@ CREATE TABLE IF NOT EXISTS access_grants (
   revoked_reason TEXT
 );
 
+CREATE INDEX IF NOT EXISTS idx_grants_consumer ON access_grants (client_consumer_id);
+CREATE INDEX IF NOT EXISTS idx_grants_asset ON access_grants (api_asset_id);
+
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,
   api_asset_id TEXT,
@@ -172,6 +183,11 @@ CREATE TABLE IF NOT EXISTS conversations (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE INDEX IF NOT EXISTS idx_conversations_asset ON conversations (api_asset_id);
+-- GIN index lets `WHERE participants ? $1` and `@>` containment queries hit
+-- an index rather than scanning every conversation document.
+CREATE INDEX IF NOT EXISTS idx_conversations_participants ON conversations USING GIN (participants);
+
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
@@ -181,6 +197,8 @@ CREATE TABLE IF NOT EXISTS messages (
   read_by JSONB NOT NULL DEFAULT '[]'::jsonb
 );
 
+CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages (conversation_id);
+
 CREATE TABLE IF NOT EXISTS notifications (
   id TEXT PRIMARY KEY,
   recipient_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
@@ -189,6 +207,9 @@ CREATE TABLE IF NOT EXISTS notifications (
   read_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS idx_notifications_recipient ON notifications (recipient_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications (recipient_id, read_at);
 
 CREATE TABLE IF NOT EXISTS email_outbox (
   id TEXT PRIMARY KEY,
@@ -201,10 +222,14 @@ CREATE TABLE IF NOT EXISTS email_outbox (
   last_error TEXT,
   scheduled_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   sent_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  idempotency_key TEXT,
+  headers JSONB
 );
 
 CREATE INDEX IF NOT EXISTS idx_outbox_status ON email_outbox (status, scheduled_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outbox_idempotency
+  ON email_outbox (idempotency_key) WHERE idempotency_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS email_templates (
   key TEXT PRIMARY KEY,
@@ -238,6 +263,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 
 CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_logs (actor_id);
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs (action);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs (created_at);
 
 CREATE TABLE IF NOT EXISTS mass_email_campaigns (
   id TEXT PRIMARY KEY,

@@ -26,20 +26,25 @@ export async function registerProviderRoutes(
 ): Promise<void> {
   const { publishing, catalog, accessRequests, grants, credentials, messaging, store } = opts;
 
+  // OAS specs are the only large payloads we routinely accept. Allow up to
+  // 10 MiB only on the publish + replace-spec endpoints; every other route
+  // inherits the smaller default body limit.
+  const SPEC_UPLOAD_LIMIT = { bodyLimit: 10 * 1024 * 1024 };
+
   app.get('/api/provider/apis', async (req, reply) => {
     const user = requireRole(req, 'provider', 'admin', 'super_admin');
     const { items, total } = await catalog.list({ providerId: user.id, limit: 200 });
     reply.send({ items, total });
   });
 
-  app.post('/api/provider/apis', async (req, reply) => {
+  app.post('/api/provider/apis', SPEC_UPLOAD_LIMIT, async (req, reply) => {
     const user = requireRole(req, 'provider', 'admin', 'super_admin');
     const input = PublishInput.parse(req.body);
     const asset = await publishing.publish({ providerId: user.id, input });
     reply.status(201).send({ asset });
   });
 
-  app.put('/api/provider/apis/:id/spec', async (req, reply) => {
+  app.put('/api/provider/apis/:id/spec', SPEC_UPLOAD_LIMIT, async (req, reply) => {
     const user = requireRole(req, 'provider', 'admin', 'super_admin');
     const { id } = req.params as { id: string };
     const { rawSpec } = z.object({ rawSpec: z.string().min(1) }).parse(req.body);

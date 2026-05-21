@@ -2,6 +2,14 @@ import { v4 as uuid } from 'uuid';
 import { z } from 'zod';
 import type { NexusStore } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
+import type { ResolvedConfig } from '../config/index.js';
+import { badRequest } from '../lib/errors.js';
+
+// Hard cap on a single campaign so a runaway broadcast can't flood the
+// outbox with millions of rows. 50k is well above any plausible production
+// audience for this product; admins who legitimately need more can split a
+// campaign into segments.
+const MAX_CAMPAIGN_RECIPIENTS = 50_000;
 
 export const MassEmailInput = z.object({
   subject: z.string().min(1).max(255),
@@ -32,10 +40,17 @@ export interface MassEmailService {
 export function createMassEmailService(
   store: NexusStore,
   email: EmailService,
+  config: ResolvedConfig,
 ): MassEmailService {
   return {
     async send({ actorId, input }) {
       const recipients = await resolveRecipients(store, input.filter);
+      if (recipients.length > MAX_CAMPAIGN_RECIPIENTS) {
+        throw badRequest(
+          'campaign_too_large',
+          `Recipient set exceeds the per-campaign cap of ${MAX_CAMPAIGN_RECIPIENTS}. Narrow the audience or split into multiple campaigns.`,
+        );
+      }
       const campaign = await store.massEmail.insert({
         id: uuid(),
         created_by: actorId,
@@ -48,11 +63,27 @@ export function createMassEmailService(
         created_at: new Date().toISOString(),
         completed_at: null,
       });
+      // RFC 8058 / RFC 2369 `List-Unsubscribe` header gives the recipient's
+      // mail client a one-click unsubscribe button. We point it at a portal
+      // route that lets the user manage their broadcast preferences.
+      const unsubscribeUrl = `${config.publicUrl}/notifications/unsubscribe`;
       for (const recipient of recipients) {
         await email.enqueue({
           to: recipient.email,
           templateKey: 'admin_broadcast',
-          vars: { subject: input.subject, body: input.body },
+          vars: {
+            subject: input.subject,
+            body: input.body,
+            unsubscribeUrl,
+            recipientId: recipient.id,
+          },
+          // Idempotency key prevents duplicate sends if the worker tick that
+          // runs this campaign retries (e.g. process crash mid-loop).
+          idempotencyKey: `mass_email:${campaign.id}:${recipient.id}`,
+          headers: {
+            'List-Unsubscribe': `<${unsubscribeUrl}?u=${encodeURIComponent(recipient.id)}>`,
+            'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+          },
         });
       }
       await store.massEmail.update(campaign.id, {

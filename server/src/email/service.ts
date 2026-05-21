@@ -16,6 +16,15 @@ export interface EmailService {
     body?: string;
     /** Schedule the message for a future delivery. */
     scheduledAt?: Date;
+    /**
+     * Optional dedup key. A second enqueue with the same key returns without
+     * inserting (or throwing). Use for retried request handlers, mass-email
+     * campaigns, and any other path that may be invoked more than once for
+     * the same logical message.
+     */
+    idempotencyKey?: string;
+    /** Extra SMTP headers to add to the outgoing message (e.g. List-Unsubscribe). */
+    headers?: Record<string, string>;
   }): Promise<void>;
   /** Process the outbox once. Returns count of attempted messages. */
   flushOnce(): Promise<number>;
@@ -58,6 +67,8 @@ export function createEmailService(
     subject,
     body,
     scheduledAt,
+    idempotencyKey,
+    headers,
   }) => {
     let renderedSubject = subject;
     let renderedBody = body;
@@ -97,6 +108,8 @@ export function createEmailService(
       scheduled_at: (scheduledAt ?? new Date()).toISOString(),
       sent_at: null,
       created_at: new Date().toISOString(),
+      idempotency_key: idempotencyKey ?? null,
+      headers: headers ?? null,
     });
   };
 
@@ -112,12 +125,21 @@ export function createEmailService(
           to: row.to_address,
           subject: row.subject,
           body: await rebuildBody(row.subject, row.payload, row.template_id),
+          headers: row.headers ?? undefined,
         });
         await store.email.markSent(row.id, new Date().toISOString());
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        await store.email.markFailed(row.id, row.attempts + 1, msg);
-        logger.warn({ err, id: row.id }, 'email send failed');
+        const nextAttempts = row.attempts + 1;
+        await store.email.markFailed(row.id, nextAttempts, msg);
+        // Once a message hits the max retry threshold it sits in the DLQ
+        // until an admin re-queues it. Surface that at `error` level so it
+        // shows up in alerting, not just routine warning noise.
+        if (nextAttempts >= 5) {
+          logger.error({ err, id: row.id, to: row.to_address }, 'email moved to DLQ');
+        } else {
+          logger.warn({ err, id: row.id, attempts: nextAttempts }, 'email send failed');
+        }
       }
       processed++;
     }

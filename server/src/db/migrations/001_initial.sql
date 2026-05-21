@@ -233,10 +233,14 @@ CREATE TABLE IF NOT EXISTS email_outbox (
   last_error TEXT,
   scheduled_at TEXT NOT NULL,
   sent_at TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  idempotency_key TEXT,
+  headers TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_outbox_status ON email_outbox (status, scheduled_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outbox_idempotency
+  ON email_outbox (idempotency_key) WHERE idempotency_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS email_templates (
   key TEXT PRIMARY KEY,

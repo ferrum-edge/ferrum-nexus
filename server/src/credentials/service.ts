@@ -83,6 +83,12 @@ export interface CredentialsService {
   rotate(opts: {
     userId: string;
     credentialId: string;
+    /**
+     * Replacement payload for credential types that cannot be auto-generated
+     * (currently JWT and mTLS). Ignored for keyauth/basicauth/hmac_auth
+     * because Nexus generates the new secret itself.
+     */
+    replacement?: CredentialCreateInput;
   }): Promise<CredentialIssueResult>;
   finalize(opts: { userId: string; credentialId: string }): Promise<void>;
   syncAclGroupsForGrant(opts: {
@@ -286,7 +292,7 @@ export function createCredentialsService(
     return issueInternal(consumerId, input, consumer!.namespace, user.email, user.name, false);
   };
 
-  const rotate: CredentialsService['rotate'] = async ({ userId, credentialId }) => {
+  const rotate: CredentialsService['rotate'] = async ({ userId, credentialId, replacement }) => {
     const cred = await store.credentials.findById(credentialId);
     if (!cred) throw notFound('Credential not found');
     const consumer = await store.consumers.findById(cred.consumer_id);
@@ -304,15 +310,26 @@ export function createCredentialsService(
         case 'hmac_auth':
           return { type: 'hmac_auth', label: cred.label } as const;
         case 'jwt':
-          throw badRequest(
-            'manual_rotation_required',
-            'JWT credentials must be rotated by providing a new payload (use the create endpoint and then finalize the old one).',
-          );
+          // JWT secrets can't be auto-generated — the caller must supply a
+          // replacement payload (new key material + claims). With the
+          // replacement the rotation runs the standard append-then-mark-old
+          // flow, giving JWT users a way to revoke a leaked signing key
+          // without a manual delete-and-recreate dance.
+          if (!replacement || replacement.type !== 'jwt') {
+            throw badRequest(
+              'replacement_required',
+              'Rotating a JWT credential requires providing a new JWT payload in `replacement`.',
+            );
+          }
+          return { ...replacement, label: replacement.label ?? cred.label };
         case 'mtls_auth':
-          throw badRequest(
-            'manual_rotation_required',
-            'mTLS credentials require uploading a new certificate before the old one is removed.',
-          );
+          if (!replacement || replacement.type !== 'mtls_auth') {
+            throw badRequest(
+              'replacement_required',
+              'Rotating an mTLS credential requires providing a new certificate in `replacement`.',
+            );
+          }
+          return { ...replacement, label: replacement.label ?? cred.label };
       }
     })();
     return issueInternal(consumer.id, rotationInput, consumer.namespace, user.email, user.name, true);
@@ -326,6 +343,11 @@ export function createCredentialsService(
     if (cred.status === 'active') {
       throw badRequest('still_active', 'Cannot delete an active credential. Rotate first.');
     }
+    // Delete on Edge first. If Edge already returned 404 (already gone), the
+    // wrapper resolves to null — we treat that as success so this endpoint is
+    // safely retryable after a partial failure. Only after Edge confirms
+    // removal do we drop the local row, so an Edge error leaves the local
+    // pointer intact and the user can retry.
     await ferrum.deleteCredential(
       consumer.ferrum_consumer_id,
       cred.type,
@@ -340,6 +362,12 @@ export function createCredentialsService(
     });
   };
 
+  // Reconcile a single ACL membership on Edge then mirror it locally. We call
+  // Edge first because Edge is the system of record for authorization; if the
+  // Edge call fails we throw and leave both sides unchanged. If Edge succeeds
+  // but the local mirror fails, we try to revert Edge to the previous state so
+  // we never leave Edge ahead of Nexus (which would silently grant access
+  // without a corresponding Nexus grant record).
   const syncAclGroupsForGrant: CredentialsService['syncAclGroupsForGrant'] = async ({
     consumerId,
     apiAssetId,
@@ -347,8 +375,9 @@ export function createCredentialsService(
   }) => {
     const consumer = await store.consumers.findById(consumerId);
     if (!consumer) throw notFound('Ferrum consumer not found');
+    const previous = [...consumer.acl_groups];
     const group = aclGroupForApi(apiAssetId);
-    const groups = new Set(consumer.acl_groups);
+    const groups = new Set(previous);
     if (add) groups.add(group);
     else groups.delete(group);
     const next = [...groups];
@@ -357,7 +386,16 @@ export function createCredentialsService(
       { acl_groups: next },
       consumer.namespace,
     );
-    await store.consumers.updateAclGroups(consumer.id, next);
+    try {
+      await store.consumers.updateAclGroups(consumer.id, next);
+    } catch (err) {
+      // Best-effort revert; if this also fails the drift sync job will catch
+      // the divergence on its next pass.
+      await ferrum
+        .updateConsumer(consumer.ferrum_consumer_id, { acl_groups: previous }, consumer.namespace)
+        .catch(() => undefined);
+      throw err;
+    }
   };
 
   return {

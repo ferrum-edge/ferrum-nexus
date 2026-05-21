@@ -80,7 +80,8 @@ CREATE TABLE IF NOT EXISTS ferrum_consumers (
   status VARCHAR(32) NOT NULL DEFAULT 'active',
   acl_groups JSON NOT NULL,
   created_at DATETIME NOT NULL,
-  UNIQUE KEY uniq_consumers_user_ns (user_id, namespace)
+  UNIQUE KEY uniq_consumers_user_ns (user_id, namespace),
+  INDEX idx_consumers_user (user_id)
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS credential_metadata (
@@ -95,6 +96,7 @@ CREATE TABLE IF NOT EXISTS credential_metadata (
   created_at DATETIME NOT NULL,
   rotated_at DATETIME,
   expires_at DATETIME,
+  INDEX idx_credentials_consumer (consumer_id),
   CONSTRAINT fk_credential_consumer FOREIGN KEY (consumer_id) REFERENCES ferrum_consumers (id) ON DELETE CASCADE
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4;
 
@@ -132,6 +134,7 @@ CREATE TABLE IF NOT EXISTS api_spec_versions (
   submitted_by VARCHAR(64) NOT NULL,
   raw_spec MEDIUMTEXT NOT NULL,
   created_at DATETIME NOT NULL,
+  INDEX idx_spec_versions_asset (api_asset_id),
   CONSTRAINT fk_spec_versions_asset FOREIGN KEY (api_asset_id) REFERENCES api_assets (id) ON DELETE CASCADE
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4;
 
@@ -147,6 +150,8 @@ CREATE TABLE IF NOT EXISTS access_requests (
   created_at DATETIME NOT NULL,
   reviewed_at DATETIME,
   INDEX idx_access_requests_status (status),
+  INDEX idx_access_requests_client (client_user_id),
+  INDEX idx_access_requests_asset (api_asset_id),
   CONSTRAINT fk_access_requests_asset FOREIGN KEY (api_asset_id) REFERENCES api_assets (id) ON DELETE CASCADE,
   CONSTRAINT fk_access_requests_client FOREIGN KEY (client_user_id) REFERENCES users (id) ON DELETE CASCADE
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4;
@@ -163,6 +168,8 @@ CREATE TABLE IF NOT EXISTS access_grants (
   revoked_by VARCHAR(64),
   revoked_at DATETIME,
   revoked_reason TEXT,
+  INDEX idx_grants_consumer (client_consumer_id),
+  INDEX idx_grants_asset (api_asset_id),
   CONSTRAINT fk_grants_asset FOREIGN KEY (api_asset_id) REFERENCES api_assets (id) ON DELETE CASCADE
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4;
 
@@ -174,7 +181,8 @@ CREATE TABLE IF NOT EXISTS conversations (
   type VARCHAR(32) NOT NULL,
   subject VARCHAR(255) NOT NULL,
   participants JSON NOT NULL,
-  created_at DATETIME NOT NULL
+  created_at DATETIME NOT NULL,
+  INDEX idx_conversations_asset (api_asset_id)
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -184,6 +192,7 @@ CREATE TABLE IF NOT EXISTS messages (
   body TEXT NOT NULL,
   created_at DATETIME NOT NULL,
   read_by JSON NOT NULL,
+  INDEX idx_messages_conversation (conversation_id),
   CONSTRAINT fk_messages_conversation FOREIGN KEY (conversation_id) REFERENCES conversations (id) ON DELETE CASCADE
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4;
 
@@ -194,6 +203,8 @@ CREATE TABLE IF NOT EXISTS notifications (
   payload JSON NOT NULL,
   read_at DATETIME,
   created_at DATETIME NOT NULL,
+  INDEX idx_notifications_recipient (recipient_id),
+  INDEX idx_notifications_unread (recipient_id, read_at),
   CONSTRAINT fk_notifications_recipient FOREIGN KEY (recipient_id) REFERENCES users (id) ON DELETE CASCADE
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4;
 
@@ -209,7 +220,10 @@ CREATE TABLE IF NOT EXISTS email_outbox (
   scheduled_at DATETIME NOT NULL,
   sent_at DATETIME,
   created_at DATETIME NOT NULL,
-  INDEX idx_outbox_status (status, scheduled_at)
+  idempotency_key VARCHAR(255),
+  headers JSON,
+  INDEX idx_outbox_status (status, scheduled_at),
+  UNIQUE KEY uniq_outbox_idempotency (idempotency_key)
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS email_templates (
@@ -241,7 +255,8 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   user_agent VARCHAR(512),
   created_at DATETIME NOT NULL,
   INDEX idx_audit_actor (actor_id),
-  INDEX idx_audit_action (action)
+  INDEX idx_audit_action (action),
+  INDEX idx_audit_created (created_at)
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS mass_email_campaigns (

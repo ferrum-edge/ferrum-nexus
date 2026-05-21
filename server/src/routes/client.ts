@@ -44,7 +44,17 @@ export async function registerClientRoutes(
   app.post('/api/client/credentials/:id/rotate', async (req, reply) => {
     const user = requireAuth(req);
     const { id } = req.params as { id: string };
-    const result = await credentials.rotate({ userId: user.id, credentialId: id });
+    // Body is optional. JWT/mTLS rotations include a `replacement` of the same
+    // type as the existing credential; auto-rotatable types ignore it.
+    const parsed = z
+      .object({ replacement: CredentialInputSchema.optional() })
+      .safeParse(req.body ?? {});
+    const replacement = parsed.success ? parsed.data.replacement : undefined;
+    const result = await credentials.rotate({
+      userId: user.id,
+      credentialId: id,
+      replacement,
+    });
     reply.send({ credential: result.metadata, secret: result.secret });
   });
 

@@ -73,10 +73,18 @@ export async function createMongoStore(config: ResolvedConfig): Promise<NexusSto
   }
 
   if (!supportsTransactions) {
+    if (config.db.requireReplicaSet) {
+      await mongo.close().catch(() => undefined);
+      throw new Error(
+        'Ferrum Nexus requires MongoDB to be running as a replica set so multi-document ' +
+          'workflows (credential rotation, grant approval) remain atomic. Either deploy a ' +
+          'replica set, or explicitly accept the risk by setting NEXUS_DB_ALLOW_STANDALONE=true.',
+      );
+    }
     // eslint-disable-next-line no-console
     console.warn(
-      '[ferrum-nexus] MongoDB is not running as a replica set — transactions are disabled. ' +
-        'Multi-document workflows will not be atomic.',
+      '[ferrum-nexus] NEXUS_DB_ALLOW_STANDALONE=true — running against a non-replica-set ' +
+        'MongoDB. Multi-document workflows will not be atomic.',
     );
   }
 
@@ -131,6 +139,9 @@ export async function createMongoStore(config: ResolvedConfig): Promise<NexusSto
       c.messages.createIndex({ conversation_id: 1, created_at: 1 }),
       c.notifications.createIndex({ recipient_id: 1, read_at: 1 }),
       c.emailOutbox.createIndex({ status: 1, scheduled_at: 1 }),
+      // Unique sparse index gives idempotency_key the same dedup behavior as
+      // the SQL partial unique index — null keys are ignored.
+      c.emailOutbox.createIndex({ idempotency_key: 1 }, { unique: true, sparse: true }),
       c.auditLogs.createIndex({ actor_id: 1 }),
       c.auditLogs.createIndex({ action: 1, created_at: -1 }),
     ]);
@@ -319,6 +330,12 @@ export async function createMongoStore(config: ResolvedConfig): Promise<NexusSto
       },
       async consumePasswordReset(token, at) {
         await c.passwordResets.updateOne({ _id: token }, { $set: { consumed_at: at } });
+      },
+      async countRecentPasswordResets(userId, since) {
+        return c.passwordResets.countDocuments({
+          user_id: userId,
+          expires_at: { $gte: since },
+        });
       },
     },
     organizations: {
@@ -607,7 +624,20 @@ export async function createMongoStore(config: ResolvedConfig): Promise<NexusSto
     },
     email: {
       async enqueue(row) {
-        await c.emailOutbox.insertOne(withId(row));
+        try {
+          await c.emailOutbox.insertOne(withId(row));
+        } catch (err) {
+          // Duplicate-key on idempotency_key — treat as success.
+          if (
+            row.idempotency_key &&
+            err &&
+            typeof err === 'object' &&
+            (err as { code?: number }).code === 11000
+          ) {
+            return;
+          }
+          throw err;
+        }
       },
       async claimBatch(now, batchSize) {
         // findOneAndUpdate with `status: 'pending'` in the filter atomically
@@ -640,6 +670,34 @@ export async function createMongoStore(config: ResolvedConfig): Promise<NexusSto
           { _id: id },
           { $set: { attempts, last_error: error, status, scheduled_at: scheduled } },
         );
+      },
+      async listFailed(opts) {
+        const limit = opts.limit ?? 50;
+        const offset = opts.offset ?? 0;
+        const [rows, total] = await Promise.all([
+          c.emailOutbox
+            .find({ status: 'failed' })
+            .sort({ created_at: -1 })
+            .skip(offset)
+            .limit(limit)
+            .toArray(),
+          c.emailOutbox.countDocuments({ status: 'failed' }),
+        ]);
+        return { rows: rows.map((r) => stripId(r)!) as EmailOutboxRow[], total };
+      },
+      async requeue(id) {
+        const result = await c.emailOutbox.updateOne(
+          { _id: id, status: 'failed' },
+          {
+            $set: {
+              status: 'pending',
+              attempts: 0,
+              last_error: null,
+              scheduled_at: new Date().toISOString(),
+            },
+          },
+        );
+        return result.modifiedCount > 0;
       },
       async getTemplate(key) {
         const row = await c.emailTemplates.findOne({ _id: key });

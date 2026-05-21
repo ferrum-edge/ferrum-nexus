@@ -38,6 +38,10 @@ COPY --from=build /app/shared/dist shared/dist
 COPY --from=build /app/server/dist server/dist
 COPY --from=build /app/web/dist web/dist
 COPY --from=build /app/server/src/db/migrations server/dist/db/migrations
+# Re-own application files so the unprivileged `node` user (UID 1000) can read
+# them. The base image already ships this user; we don't create a new one.
+RUN chown -R node:node /app
+USER node
 EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+process.env.NEXUS_PORT+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

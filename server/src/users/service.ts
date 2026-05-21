@@ -3,12 +3,28 @@ import { v4 as uuid } from 'uuid';
 import { z } from 'zod';
 import type { NexusStore, UserRow } from '../db/store.js';
 import type { ResolvedConfig } from '../config/index.js';
-import { badRequest, conflict, notFound, unauthorized } from '../lib/errors.js';
+import { badRequest, conflict, notFound, tooManyRequests, unauthorized } from '../lib/errors.js';
 import type { PortalUser, UserRole } from '@ferrum-nexus/shared';
 import { randomToken } from '../lib/crypto.js';
 import type { EmailService } from '../email/service.js';
 import type { AuditService } from '../audit/service.js';
 import type { NotificationService } from '../notifications/service.js';
+
+// OWASP 2024 guidance for argon2id: 19 MiB memory, 2 iterations, parallelism 1
+// (we use 64 MiB / 3 iterations to leave headroom for modern hardware).
+// Centralized so every hash call uses the same audited parameters.
+export const ARGON2_OPTIONS = {
+  type: argon2.argon2id,
+  memoryCost: 65536,
+  timeCost: 3,
+  parallelism: 1,
+} as const;
+
+// Per-email throttle for password-reset requests. Three within 24h is generous
+// enough for legitimate users while blocking outbound-mail spam aimed at a
+// single inbox.
+const PASSWORD_RESET_LIMIT = 3;
+const PASSWORD_RESET_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 export const RegistrationInput = z.object({
   email: z.string().email().max(320),
@@ -52,7 +68,7 @@ export interface UsersService {
 let dummyHashPromise: Promise<string> | null = null;
 function getDummyHash(): Promise<string> {
   if (!dummyHashPromise) {
-    dummyHashPromise = argon2.hash(`nexus-dummy-${Math.random()}`, { type: argon2.argon2id });
+    dummyHashPromise = argon2.hash(`nexus-dummy-${Math.random()}`, ARGON2_OPTIONS);
   }
   return dummyHashPromise;
 }
@@ -85,27 +101,33 @@ export function createUsersService(
     if (existing) throw conflict('email_taken', 'An account with that email already exists');
 
     const userId = uuid();
-    const passwordHash = await argon2.hash(input.password, { type: argon2.argon2id });
+    const passwordHash = await argon2.hash(input.password, ARGON2_OPTIONS);
 
-    // First user becomes super_admin automatically (bootstrap).
-    const totalUsers = await store.users.count();
-    const initialRoles: UserRole[] =
-      totalUsers === 0 ? ['admin', 'super_admin', input.desiredRole] : [input.desiredRole];
-
-    const row = await store.users.insert({
-      id: userId,
-      email: input.email,
-      email_normalized: emailNormalized,
-      name: input.name ?? null,
-      phone: input.phone ?? null,
-      status: 'pending',
-      email_verified_at: null,
-      password_hash: passwordHash,
-      last_login_at: null,
-      failed_login_count: 0,
-      organization_id: null,
+    // Insert the user and their initial roles in a single transaction so the
+    // first-user `super_admin` bootstrap is atomic — two concurrent
+    // registrations cannot both observe count=0 and race to grant themselves
+    // the super_admin role. If a second registration loses the race it sees
+    // count=1 inside its own transaction and gets the regular role set.
+    const { row, initialRoles } = await store.transaction(async (tx) => {
+      const totalUsers = await tx.users.count();
+      const roles: UserRole[] =
+        totalUsers === 0 ? ['admin', 'super_admin', input.desiredRole] : [input.desiredRole];
+      const inserted = await tx.users.insert({
+        id: userId,
+        email: input.email,
+        email_normalized: emailNormalized,
+        name: input.name ?? null,
+        phone: input.phone ?? null,
+        status: 'pending',
+        email_verified_at: null,
+        password_hash: passwordHash,
+        last_login_at: null,
+        failed_login_count: 0,
+        organization_id: null,
+      });
+      await tx.userRoles.setRoles(userId, roles);
+      return { row: inserted, initialRoles: roles };
     });
-    await store.userRoles.setRoles(userId, initialRoles);
     await audit.record(null, {
       action: 'user.register',
       targetType: 'user',
@@ -128,6 +150,10 @@ export function createUsersService(
         to: input.email,
         templateKey: 'registration_confirmed',
         vars: { name: input.name ?? input.email, verifyUrl },
+        // The verification token uniquely identifies the registration event,
+        // so re-submitting the same token (rare but possible on a retry) is
+        // a true no-op rather than a duplicate inbox delivery.
+        idempotencyKey: `verify:${token}`,
       });
       await notifications.push({
         recipientId: userId,
@@ -208,7 +234,7 @@ export function createUsersService(
     const ok = await argon2.verify(user.password_hash, currentPassword).catch(() => false);
     if (!ok) throw unauthorized('Current password is incorrect');
     if (newPassword.length < 8) throw badRequest('weak_password', 'Password must be 8+ characters');
-    const hash = await argon2.hash(newPassword, { type: argon2.argon2id });
+    const hash = await argon2.hash(newPassword, ARGON2_OPTIONS);
     await store.users.updatePassword(id, hash);
   };
 
@@ -224,6 +250,19 @@ export function createUsersService(
       await argon2.verify(dummy, token).catch(() => false);
       return null;
     }
+    // Per-email throttle: limit how many reset emails we send to a single
+    // address in a rolling window so a misbehaving caller can't flood an inbox.
+    // The global rate limiter on the route handles per-IP abuse; this guards
+    // outbound delivery to the targeted email regardless of source IP.
+    const recent = await store.verifications.countRecentPasswordResets(
+      user.id,
+      new Date(Date.now() - PASSWORD_RESET_WINDOW_MS).toISOString(),
+    );
+    if (recent >= PASSWORD_RESET_LIMIT) {
+      throw tooManyRequests(
+        'Too many password reset requests for this account. Try again later.',
+      );
+    }
     await store.verifications.createPasswordReset({
       token,
       user_id: user.id,
@@ -235,6 +274,7 @@ export function createUsersService(
       to: user.email,
       templateKey: 'password_reset',
       vars: { name: user.name ?? user.email, resetUrl },
+      idempotencyKey: `reset:${token}`,
     });
     return { token, userId: user.id };
   };
@@ -247,20 +287,25 @@ export function createUsersService(
       throw badRequest('token_expired', 'Reset link expired');
     }
     if (newPassword.length < 8) throw badRequest('weak_password', 'Password must be 8+ characters');
-    const hash = await argon2.hash(newPassword, { type: argon2.argon2id });
+    const hash = await argon2.hash(newPassword, ARGON2_OPTIONS);
     await store.users.updatePassword(reset.user_id, hash);
     await store.verifications.consumePasswordReset(token, new Date().toISOString());
     await store.sessions.deleteForUser(reset.user_id);
   };
 
+  // Any change to a user's authorization state — status (disable, restore) or
+  // role membership — must invalidate existing sessions. Otherwise a user
+  // promoted to super_admin (or demoted) keeps acting under the cached auth
+  // payload on their session until natural expiry, defeating the change.
   const setStatus: UsersService['setStatus'] = async (id, status) => {
     await store.users.updateStatus(id, status);
-    if (status === 'disabled') await store.sessions.deleteForUser(id);
+    await store.sessions.deleteForUser(id);
     return loadById(id);
   };
 
   const setRoles: UsersService['setRoles'] = async (id, roles) => {
     await store.userRoles.setRoles(id, roles);
+    await store.sessions.deleteForUser(id);
     return loadById(id);
   };
 

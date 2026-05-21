@@ -120,4 +120,14 @@ export async function registerAuthRoutes(
     const settingsPublic = await settings.public();
     reply.send(settingsPublic);
   });
+
+  // Anonymous CSRF bootstrap. The SPA calls this before submitting any
+  // anonymous mutation (register, login, forgot-password, reset-password) to
+  // pick up a `nexus_csrf` cookie + token value. The response body returns the
+  // token for convenience but the cookie is the source of truth — the
+  // double-submit check in `verifyCsrf` reads the cookie, not the body.
+  app.get('/api/csrf-token', async (_req, reply) => {
+    const token = sessions.setAnonymousCsrfCookie(reply);
+    reply.send({ token });
+  });
 }

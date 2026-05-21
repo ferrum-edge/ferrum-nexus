@@ -32,6 +32,13 @@ const Schema = z.object({
   db: z.object({
     driver: DbDriver.default('sqlite'),
     url: z.string().optional(),
+    /**
+     * When the driver is `mongodb`, refuse to start if the target deployment
+     * isn't a replica set. Set to false (NEXUS_DB_ALLOW_STANDALONE=true) only
+     * if you accept that multi-document workflows (credential rotation, grant
+     * approval) will not be atomic.
+     */
+    requireReplicaSet: EnvBoolean.default(true),
   }),
 
   session: z.object({
@@ -75,6 +82,12 @@ export function loadConfig(): ResolvedConfig {
     db: {
       driver: process.env.NEXUS_DB_DRIVER,
       url: process.env.NEXUS_DB_URL,
+      requireReplicaSet:
+        process.env.NEXUS_DB_ALLOW_STANDALONE === undefined
+          ? undefined
+          : process.env.NEXUS_DB_ALLOW_STANDALONE === 'true'
+            ? false
+            : true,
     },
     session: {
       cookieName: process.env.NEXUS_SESSION_COOKIE_NAME,

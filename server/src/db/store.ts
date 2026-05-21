@@ -216,6 +216,17 @@ export interface EmailOutboxRow {
   scheduled_at: string;
   sent_at: string | null;
   created_at: string;
+  /**
+   * Optional caller-supplied dedup key. If a row with the same key already
+   * exists the second enqueue is a no-op. Used by mass-email to make
+   * campaign sends idempotent across worker retries.
+   */
+  idempotency_key: string | null;
+  /**
+   * Extra SMTP headers to set on the outgoing message (e.g.
+   * `List-Unsubscribe`). Stored as a JSON object; null when no extras.
+   */
+  headers: Record<string, string> | null;
 }
 
 export interface EmailTemplateRow {
@@ -317,6 +328,8 @@ export interface VerificationsRepo {
   createPasswordReset(row: PasswordResetRow): Promise<void>;
   findPasswordReset(token: string): Promise<PasswordResetRow | null>;
   consumePasswordReset(token: string, at: string): Promise<void>;
+  /** Count password reset rows issued for `userId` since `since` (ISO timestamp). */
+  countRecentPasswordResets(userId: string, since: string): Promise<number>;
 }
 
 export interface ConsumersRepo {
@@ -400,6 +413,10 @@ export interface EmailRepo {
   claimBatch(now: string, batchSize: number): Promise<EmailOutboxRow[]>;
   markSent(id: string, at: string): Promise<void>;
   markFailed(id: string, attempts: number, error: string): Promise<void>;
+  /** Dead-letter view: messages that hit max attempts and won't be retried. */
+  listFailed(opts: ListOptions): Promise<{ rows: EmailOutboxRow[]; total: number }>;
+  /** Re-queue a failed message for delivery. Resets attempts to 0. */
+  requeue(id: string): Promise<boolean>;
   getTemplate(key: string): Promise<EmailTemplateRow | null>;
   upsertTemplate(row: EmailTemplateRow): Promise<void>;
   listTemplates(): Promise<EmailTemplateRow[]>;

@@ -48,7 +48,10 @@ type AssetRowRaw = Omit<ApiAssetRow, 'tags'> & { tags: string };
 type ConversationRowRaw = Omit<ConversationRow, 'participants'> & { participants: string };
 type MessageRowRaw = Omit<MessageRow, 'read_by'> & { read_by: string };
 type NotificationRowRaw = Omit<NotificationRow, 'payload'> & { payload: string };
-type OutboxRowRaw = Omit<EmailOutboxRow, 'payload'> & { payload: string };
+type OutboxRowRaw = Omit<EmailOutboxRow, 'payload' | 'headers'> & {
+  payload: string;
+  headers: string | null;
+};
 type AuditRowRaw = Omit<AuditLogRow, 'before' | 'after'> & { before: string; after: string };
 type SettingRowRaw = Omit<AppSettingRow, 'value' | 'encrypted'> & { value: string; encrypted: number };
 type CampaignRowRaw = Omit<MassEmailCampaignRow, 'recipient_filter'> & { recipient_filter: string };
@@ -69,7 +72,11 @@ function hydrateNotification(row: NotificationRowRaw): NotificationRow {
   return { ...row, payload: P<Record<string, unknown>>(row.payload, {}) };
 }
 function hydrateOutbox(row: OutboxRowRaw): EmailOutboxRow {
-  return { ...row, payload: P<Record<string, unknown>>(row.payload, {}) };
+  return {
+    ...row,
+    payload: P<Record<string, unknown>>(row.payload, {}),
+    headers: row.headers == null ? null : P<Record<string, string>>(row.headers, {}),
+  };
 }
 function hydrateAudit(row: AuditRowRaw): AuditLogRow {
   return {
@@ -180,6 +187,11 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
   `);
   const prFind = db.prepare('SELECT * FROM password_resets WHERE token = ?');
   const prConsume = db.prepare('UPDATE password_resets SET consumed_at = ? WHERE token = ?');
+  // The `consumed_at IS NULL` filter restricts the count to live reset tokens
+  // — a user who completed a reset shouldn't be billed against the throttle.
+  const prCountRecent = db.prepare(
+    "SELECT COUNT(*) as c FROM password_resets WHERE user_id = ? AND expires_at >= ?",
+  );
 
   // ---------- ORGS ----------
   const orgInsert = db.prepare(`
@@ -362,11 +374,15 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
   );
 
   // ---------- EMAIL ----------
+  // OR IGNORE makes idempotent inserts a no-op when `idempotency_key` collides
+  // with an existing row (the partial unique index enforces this only when
+  // the key is non-null, so plain enqueues are unaffected).
   const outboxInsert = db.prepare(`
-    INSERT INTO email_outbox (id, to_address, subject, template_id, payload, status,
-                              attempts, last_error, scheduled_at, sent_at, created_at)
+    INSERT OR IGNORE INTO email_outbox (id, to_address, subject, template_id, payload, status,
+                              attempts, last_error, scheduled_at, sent_at, created_at,
+                              idempotency_key, headers)
     VALUES (@id, @to_address, @subject, @template_id, @payload, @status, @attempts,
-            @last_error, @scheduled_at, @sent_at, @created_at)
+            @last_error, @scheduled_at, @sent_at, @created_at, @idempotency_key, @headers)
   `);
   const outboxFindCandidates = db.prepare(`
     SELECT id FROM email_outbox
@@ -565,6 +581,9 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
       },
       async consumePasswordReset(token, at) {
         prConsume.run(at, token);
+      },
+      async countRecentPasswordResets(userId, since) {
+        return (prCountRecent.get(userId, since) as { c: number }).c;
       },
     },
     organizations: {
@@ -814,7 +833,12 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
     },
     email: {
       async enqueue(row) {
-        outboxInsert.run({ ...row, payload: J(row.payload) });
+        outboxInsert.run({
+          ...row,
+          payload: J(row.payload),
+          headers: row.headers == null ? null : J(row.headers),
+          idempotency_key: row.idempotency_key,
+        });
       },
       async claimBatch(now, batchSize) {
         // Atomically transition each candidate from `pending` to `sending`.
@@ -841,6 +865,31 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
           last_error: error,
           scheduled_at: new Date(Date.now() + backoffMs).toISOString(),
         });
+      },
+      async listFailed(opts) {
+        const limit = opts.limit ?? 50;
+        const offset = opts.offset ?? 0;
+        const rows = db
+          .prepare(
+            "SELECT * FROM email_outbox WHERE status = 'failed' ORDER BY created_at DESC LIMIT ? OFFSET ?",
+          )
+          .all(limit, offset) as OutboxRowRaw[];
+        const total = (
+          db.prepare("SELECT COUNT(*) as c FROM email_outbox WHERE status = 'failed'").get() as {
+            c: number;
+          }
+        ).c;
+        return { rows: rows.map(hydrateOutbox), total };
+      },
+      async requeue(id) {
+        // Only `failed` rows are eligible — re-queueing an already-pending row
+        // would clobber its attempt counter.
+        const info = db
+          .prepare(
+            "UPDATE email_outbox SET status = 'pending', attempts = 0, last_error = NULL, scheduled_at = ? WHERE id = ? AND status = 'failed'",
+          )
+          .run(new Date().toISOString(), id);
+        return Number(info.changes ?? 0) > 0;
       },
       async getTemplate(key) {
         return (tmplGet.get(key) as EmailTemplateRow | undefined) ?? null;

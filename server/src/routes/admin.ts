@@ -185,6 +185,38 @@ export async function registerAdminRoutes(
     reply.send({ campaigns: await massEmail.list() });
   });
 
+  // Dead-letter view: messages that hit the max attempt count and stopped
+  // retrying. Admins can inspect the last error and either re-queue or leave
+  // the row in place pending a fix to the underlying delivery issue.
+  app.get('/api/admin/email/failed', async (req, reply) => {
+    requireAdmin(req);
+    const { limit, offset } = z
+      .object({
+        limit: z.coerce.number().int().positive().max(200).default(50),
+        offset: z.coerce.number().int().nonnegative().default(0),
+      })
+      .parse(req.query ?? {});
+    const result = await store.email.listFailed({ limit, offset });
+    reply.send(result);
+  });
+
+  app.post('/api/admin/email/failed/:id/requeue', async (req, reply) => {
+    const actor = requireAdmin(req);
+    const { id } = req.params as { id: string };
+    const requeued = await store.email.requeue(id);
+    if (!requeued) {
+      reply.status(404).send({ error: { code: 'not_found', message: 'Not found or not failed' } });
+      return;
+    }
+    await audit.record(req, {
+      action: 'admin.email_requeue',
+      targetType: 'email_outbox',
+      targetId: id,
+      after: { actorId: actor.id },
+    });
+    reply.status(202).send({ ok: true });
+  });
+
   app.get('/api/admin/drift', async (req, reply) => {
     requireAdmin(req);
     const { namespace } = (req.query ?? {}) as { namespace?: string };

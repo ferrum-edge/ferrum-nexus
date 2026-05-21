@@ -78,13 +78,16 @@ async function main(): Promise<void> {
   );
   const grants = createGrantsService(store);
   const messaging = createMessagingService(store, notifications, email);
-  const massEmail = createMassEmailService(store, email);
+  const massEmail = createMassEmailService(store, email, config);
   const drift = createDriftService(store, ferrum);
 
   const app = Fastify({
     logger: loggerConfig(config.nodeEnv),
     trustProxy: config.trustProxy,
-    bodyLimit: 10 * 1024 * 1024, // 10 MiB — large OAS specs are common.
+    // 256 KiB by default. OAS spec uploads override this on a per-route basis
+    // (see SPEC_UPLOAD_LIMIT in routes/provider.ts); the default protects the
+    // remaining JSON endpoints from oversized bodies.
+    bodyLimit: 256 * 1024,
   });
 
   await app.register(fastifySensible);

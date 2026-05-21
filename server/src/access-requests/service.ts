@@ -178,31 +178,38 @@ export function createAccessRequestsService(
     await ensureProviderOwnsAsset(providerId, request.api_asset_id);
     if (!request.client_consumer_id) throw badRequest('no_consumer', 'Client consumer missing');
 
+    // Edge-side mutation happens first and outside the DB transaction below —
+    // we treat Edge as the system of record for authorization. If Edge
+    // succeeds and the local writes fail, the next drift sync pass will
+    // either commit the missing grant locally or revoke the Edge ACL, so
+    // both sides converge.
     await credentials.syncAclGroupsForGrant({
       consumerId: request.client_consumer_id,
       apiAssetId: request.api_asset_id,
       add: true,
     });
 
-    const grant = await store.grants.insert({
-      id: uuid(),
-      api_asset_id: request.api_asset_id,
-      client_user_id: request.client_user_id,
-      client_consumer_id: request.client_consumer_id,
-      acl_group: aclGroupForApi(request.api_asset_id),
-      status: 'active',
-      approved_by: providerId,
-      approved_at: new Date().toISOString(),
-      revoked_by: null,
-      revoked_at: null,
-      revoked_reason: null,
-    });
-
-    const updated = await store.accessRequests.update(requestId, {
-      status: 'approved',
-      provider_reason: providerReason,
-      reviewed_by: providerId,
-      reviewed_at: new Date().toISOString(),
+    const { grant, updated } = await store.transaction(async (tx) => {
+      const insertedGrant = await tx.grants.insert({
+        id: uuid(),
+        api_asset_id: request.api_asset_id,
+        client_user_id: request.client_user_id,
+        client_consumer_id: request.client_consumer_id!,
+        acl_group: aclGroupForApi(request.api_asset_id),
+        status: 'active',
+        approved_by: providerId,
+        approved_at: new Date().toISOString(),
+        revoked_by: null,
+        revoked_at: null,
+        revoked_reason: null,
+      });
+      const updatedRequest = await tx.accessRequests.update(requestId, {
+        status: 'approved',
+        provider_reason: providerReason,
+        reviewed_by: providerId,
+        reviewed_at: new Date().toISOString(),
+      });
+      return { grant: insertedGrant, updated: updatedRequest };
     });
 
     const asset = await store.apiAssets.findById(request.api_asset_id);
@@ -281,6 +288,9 @@ export function createAccessRequestsService(
     if (!asGod && asset && asset.provider_id !== actorId) {
       throw forbidden('Not the API owner');
     }
+    // Edge-side ACL removal happens first so that even if the local update
+    // below fails, access is denied at the gateway. The drift sync job
+    // reconciles any leftover local `active` row in that case.
     await credentials.syncAclGroupsForGrant({
       consumerId: grant.client_consumer_id,
       apiAssetId: grant.api_asset_id,

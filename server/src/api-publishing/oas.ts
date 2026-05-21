@@ -10,7 +10,19 @@
 
 import { parse as parseYaml } from 'yaml';
 import { createHash } from 'node:crypto';
+import { z } from 'zod';
 import { badRequest } from '../lib/errors.js';
+
+// Minimum required shape of the `x-ferrum-proxy` extension. We don't try to
+// validate every Ferrum-specific field here — Edge owns full validation — but
+// we do reject specs whose proxy descriptor is missing the bits Nexus needs
+// to know about (the proxy id and at least one route target).
+const FerrumProxySchema = z.object({
+  proxy_id: z.string().min(1),
+  paths: z.array(z.string()).optional(),
+  hosts: z.array(z.string()).optional(),
+  upstream_url: z.string().url().optional(),
+});
 
 export interface OasMetadata {
   title: string;
@@ -79,6 +91,25 @@ export function extractMetadata(raw: string): OasMetadata {
       'Spec is missing required `x-ferrum-proxy` extension. Add a proxy descriptor before publishing.',
     );
   }
+  const proxyParse = FerrumProxySchema.safeParse(parsed['x-ferrum-proxy']);
+  if (!proxyParse.success) {
+    throw badRequest(
+      'invalid_ferrum_proxy',
+      'Invalid `x-ferrum-proxy` descriptor. It must include a `proxy_id` and at least one of `paths`, `hosts`, or `upstream_url`.',
+      proxyParse.error.issues,
+    );
+  }
+  if (
+    !proxyParse.data.paths?.length &&
+    !proxyParse.data.hosts?.length &&
+    !proxyParse.data.upstream_url
+  ) {
+    throw badRequest(
+      'invalid_ferrum_proxy',
+      'x-ferrum-proxy must define at least one of paths/hosts/upstream_url.',
+    );
+  }
+  rejectExternalRefs(parsed);
 
   return {
     title,
@@ -91,6 +122,41 @@ export function extractMetadata(raw: string): OasMetadata {
     contentHash,
     rawContentType: contentType,
   };
+}
+
+/**
+ * Walk the parsed spec and reject any `$ref` whose target is an external URL.
+ * Allowing external refs would let an uploaded spec coerce internal tooling
+ * into fetching attacker-chosen URLs — a textbook SSRF vector.
+ *
+ * We allow:
+ *   - fragment-only refs (`#/components/schemas/Foo`)
+ *   - relative file refs (`./common.yaml`) which a downstream consumer might
+ *     resolve locally; if you ship a spec validator that resolves these, swap
+ *     the predicate below.
+ *
+ * We reject anything whose scheme is `http`/`https`.
+ */
+function rejectExternalRefs(node: unknown, depth = 0): void {
+  if (depth > 100 || node == null) return;
+  if (Array.isArray(node)) {
+    for (const child of node) rejectExternalRefs(child, depth + 1);
+    return;
+  }
+  if (typeof node !== 'object') return;
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    if (key === '$ref' && typeof value === 'string') {
+      const lowered = value.trim().toLowerCase();
+      if (lowered.startsWith('http://') || lowered.startsWith('https://') || lowered.startsWith('//')) {
+        throw badRequest(
+          'external_ref_forbidden',
+          `Spec contains external $ref: ${value}. Inline the referenced content or use a fragment-only ($/components/...) reference.`,
+        );
+      }
+    } else {
+      rejectExternalRefs(value, depth + 1);
+    }
+  }
 }
 
 function countOperations(paths: unknown): number {

@@ -52,10 +52,18 @@ function assertSingleAddress(to: string): void {
   }
 }
 
+export interface MailerSendOpts {
+  to: string;
+  subject: string;
+  body: string;
+  /** Extra SMTP headers (e.g. List-Unsubscribe). */
+  headers?: Record<string, string>;
+}
+
 export function createMailer(
   config: ResolvedConfig,
   logger: Logger,
-): { send: (opts: { to: string; subject: string; body: string }) => Promise<void> } {
+): { send: (opts: MailerSendOpts) => Promise<void> } {
   if (!config.email.smtpHost) {
     logger.warn('SMTP not configured');
     return {
@@ -80,13 +88,14 @@ export function createMailer(
   });
 
   return {
-    async send({ to, subject, body }) {
+    async send({ to, subject, body, headers }) {
       assertSingleAddress(to);
       await transport.sendMail({
         from: config.email.from,
         to,
         subject,
         text: body,
+        headers,
       });
     },
   };

@@ -50,3 +50,71 @@ export function toIsoString(value: unknown): string | null {
   if (typeof value === 'string') return value;
   return String(value);
 }
+
+/**
+ * Per-dialect emitters for the small set of constructs that genuinely differ
+ * between Postgres and MySQL. Built as small, explicit helpers rather than a
+ * blanket regex rewriter so the differences are visible at the call site.
+ */
+
+/** Case-insensitive LIKE that works on every default collation. */
+export function caseInsensitiveLike(dialect: SqlDialect, column: string, paramRef: string): string {
+  // Postgres has the dedicated ILIKE operator. For MySQL/SQLite we lower-case
+  // both sides — the caller is expected to pre-lower the bound parameter so
+  // we don't double-evaluate LOWER() on it for every row.
+  return dialect === 'postgres' ? `${column} ILIKE ${paramRef}` : `LOWER(${column}) LIKE ${paramRef}`;
+}
+
+/** Quote an identifier that collides with a reserved word (`key`, etc). */
+export function ident(dialect: SqlDialect, name: string): string {
+  return dialect === 'postgres' ? name : `\`${name}\``;
+}
+
+/**
+ * Generate an `INSERT ... ON DUPLICATE KEY UPDATE` (MySQL) or
+ * `INSERT ... ON CONFLICT DO UPDATE` (Postgres) statement. The caller
+ * supplies the column list and the value-placeholder list; the UPDATE clause
+ * is generated from the same column list so the two stay in sync.
+ *
+ * `conflictKeys` are the column(s) used to detect the conflict (typically the
+ * primary key or a unique index).
+ */
+export function buildUpsert(
+  dialect: SqlDialect,
+  table: string,
+  columns: string[],
+  conflictKeys: string[],
+  startingPlaceholder = 1,
+): string {
+  const quotedTable = ident(dialect, table);
+  const quotedColumns = columns.map((c) => ident(dialect, c)).join(', ');
+  const placeholders = buildPlaceholders(dialect, columns.length, startingPlaceholder);
+  const updates = columns
+    .filter((c) => !conflictKeys.includes(c))
+    .map((c) => {
+      const col = ident(dialect, c);
+      return dialect === 'postgres' ? `${col} = EXCLUDED.${col}` : `${col} = VALUES(${col})`;
+    })
+    .join(', ');
+  if (dialect === 'postgres') {
+    const conflict = conflictKeys.map((c) => ident(dialect, c)).join(', ');
+    return `INSERT INTO ${quotedTable} (${quotedColumns}) VALUES (${placeholders}) ON CONFLICT (${conflict}) DO UPDATE SET ${updates}`;
+  }
+  return `INSERT INTO ${quotedTable} (${quotedColumns}) VALUES (${placeholders}) ON DUPLICATE KEY UPDATE ${updates}`;
+}
+
+/** `INSERT IGNORE` for MySQL / `ON CONFLICT DO NOTHING` for Postgres. */
+export function buildInsertIgnore(
+  dialect: SqlDialect,
+  table: string,
+  columns: string[],
+  startingPlaceholder = 1,
+): string {
+  const quotedTable = ident(dialect, table);
+  const quotedColumns = columns.map((c) => ident(dialect, c)).join(', ');
+  const placeholders = buildPlaceholders(dialect, columns.length, startingPlaceholder);
+  if (dialect === 'postgres') {
+    return `INSERT INTO ${quotedTable} (${quotedColumns}) VALUES (${placeholders}) ON CONFLICT DO NOTHING`;
+  }
+  return `INSERT IGNORE INTO ${quotedTable} (${quotedColumns}) VALUES (${placeholders})`;
+}

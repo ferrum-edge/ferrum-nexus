@@ -21,6 +21,7 @@ paths:
     post:
       summary: create
 x-ferrum-proxy:
+  proxy_id: orders-proxy
   paths:
     - /things
 `;
@@ -39,6 +40,31 @@ test('extractMetadata rejects missing x-ferrum-proxy', () => {
     "paths": {}
   }`;
   assert.throws(() => extractMetadata(bad), /x-ferrum-proxy/);
+});
+
+test('extractMetadata rejects x-ferrum-proxy missing proxy_id', () => {
+  const bad = `{
+    "openapi": "3.0.0",
+    "info": { "title": "x", "version": "1" },
+    "paths": {},
+    "x-ferrum-proxy": { "paths": ["/x"] }
+  }`;
+  assert.throws(() => extractMetadata(bad), /invalid_ferrum_proxy|proxy_id/i);
+});
+
+test('extractMetadata rejects external $ref URLs (SSRF guard)', () => {
+  const bad = `{
+    "openapi": "3.0.0",
+    "info": { "title": "x", "version": "1" },
+    "paths": {},
+    "x-ferrum-proxy": { "proxy_id": "p", "paths": ["/x"] },
+    "components": {
+      "schemas": {
+        "Bad": { "$ref": "https://attacker.example/schema.json" }
+      }
+    }
+  }`;
+  assert.throws(() => extractMetadata(bad), /external_ref_forbidden|external \$ref/i);
 });
 
 test('extractMetadata rejects non-object documents', () => {
