@@ -21,7 +21,7 @@ import { z } from 'zod';
 import type { NexusStore } from '../db/store.js';
 import type { ResolvedConfig } from '../config/index.js';
 import type { FerrumAdminClient } from '../ferrum-admin/client.js';
-import type { AuditService } from '../audit/service.js';
+import type { AuditActor, AuditService } from '../audit/service.js';
 import type { NotificationService } from '../notifications/service.js';
 import type { EmailService } from '../email/service.js';
 import { badRequest, notFound } from '../lib/errors.js';
@@ -64,6 +64,7 @@ export interface CredentialIssueResult {
     /** Field name to display (key, password, hmacSecret, etc). */
     field: string;
     value: string;
+    fields?: Array<{ field: string; value: string }>;
   };
 }
 
@@ -73,12 +74,14 @@ export interface CredentialsService {
     email: string;
     name: string | null;
     namespace?: string;
+    actor?: AuditActor | null;
   }): Promise<string>;
   listForUser(userId: string): Promise<CredentialMetadata[]>;
   issue(opts: {
     userId: string;
     input: CredentialCreateInput;
     namespace?: string;
+    actor?: AuditActor | null;
   }): Promise<CredentialIssueResult>;
   rotate(opts: {
     userId: string;
@@ -89,8 +92,9 @@ export interface CredentialsService {
      * because Nexus generates the new secret itself.
      */
     replacement?: CredentialCreateInput;
+    actor?: AuditActor | null;
   }): Promise<CredentialIssueResult>;
-  finalize(opts: { userId: string; credentialId: string }): Promise<void>;
+  finalize(opts: { userId: string; credentialId: string; actor?: AuditActor | null }): Promise<void>;
   syncAclGroupsForGrant(opts: {
     consumerId: string;
     apiAssetId: string;
@@ -137,6 +141,7 @@ export function createCredentialsService(
     email: userEmail,
     name,
     namespace,
+    actor,
   }) => {
     const ns = namespace ?? config.ferrum.defaultNamespace;
     const existing = await store.consumers.findByUserNamespace(userId, ns);
@@ -162,6 +167,7 @@ export function createCredentialsService(
       targetType: 'ferrum_consumer',
       targetId: row.id,
       after: { namespace: ns, username, ferrumId: created.consumer_id },
+      actor,
     });
     return row.id;
   };
@@ -183,6 +189,7 @@ export function createCredentialsService(
     forUserEmail: string,
     forUserName: string | null,
     isRotation: boolean,
+    actor?: AuditActor | null,
   ): Promise<CredentialIssueResult> => {
     const consumer = await store.consumers.findById(consumerId);
     if (!consumer) throw notFound('Ferrum consumer not found');
@@ -201,7 +208,15 @@ export function createCredentialsService(
         const username = input.username ?? `${consumer.username}-${randomBytes(3).toString('hex')}`;
         const password = randomBytes(18).toString('base64url');
         data = { username, password };
-        secret = { type: 'basicauth', field: 'password', value: password };
+        secret = {
+          type: 'basicauth',
+          field: 'password',
+          value: password,
+          fields: [
+            { field: 'username', value: username },
+            { field: 'password', value: password },
+          ],
+        };
         break;
       }
       case 'jwt': {
@@ -215,7 +230,15 @@ export function createCredentialsService(
         const username = `${consumer.username}-${randomBytes(3).toString('hex')}`;
         const sharedSecret = randomBytes(32).toString('base64url');
         data = { username, secret: sharedSecret };
-        secret = { type: 'hmac_auth', field: 'secret', value: sharedSecret };
+        secret = {
+          type: 'hmac_auth',
+          field: 'secret',
+          value: sharedSecret,
+          fields: [
+            { field: 'username', value: username },
+            { field: 'secret', value: sharedSecret },
+          ],
+        };
         break;
       }
       case 'mtls_auth': {
@@ -264,6 +287,7 @@ export function createCredentialsService(
       targetType: 'credential',
       targetId: row.id,
       after: { type: input.type, label: input.label, consumerId },
+      actor,
     });
     await notifications.push({
       recipientId: consumer.user_id!,
@@ -279,7 +303,7 @@ export function createCredentialsService(
     return { metadata: toMeta(row), secret };
   };
 
-  const issue: CredentialsService['issue'] = async ({ userId, input, namespace }) => {
+  const issue: CredentialsService['issue'] = async ({ userId, input, namespace, actor }) => {
     const user = await store.users.findById(userId);
     if (!user) throw notFound('User not found');
     const consumerId = await ensureConsumerForUser({
@@ -287,12 +311,18 @@ export function createCredentialsService(
       email: user.email,
       name: user.name,
       namespace,
+      actor,
     });
     const consumer = await store.consumers.findById(consumerId);
-    return issueInternal(consumerId, input, consumer!.namespace, user.email, user.name, false);
+    return issueInternal(consumerId, input, consumer!.namespace, user.email, user.name, false, actor);
   };
 
-  const rotate: CredentialsService['rotate'] = async ({ userId, credentialId, replacement }) => {
+  const rotate: CredentialsService['rotate'] = async ({
+    userId,
+    credentialId,
+    replacement,
+    actor,
+  }) => {
     const cred = await store.credentials.findById(credentialId);
     if (!cred) throw notFound('Credential not found');
     const consumer = await store.consumers.findById(cred.consumer_id);
@@ -332,10 +362,10 @@ export function createCredentialsService(
           return { ...replacement, label: replacement.label ?? cred.label };
       }
     })();
-    return issueInternal(consumer.id, rotationInput, consumer.namespace, user.email, user.name, true);
+    return issueInternal(consumer.id, rotationInput, consumer.namespace, user.email, user.name, true, actor);
   };
 
-  const finalize: CredentialsService['finalize'] = async ({ userId, credentialId }) => {
+  const finalize: CredentialsService['finalize'] = async ({ userId, credentialId, actor }) => {
     const cred = await store.credentials.findById(credentialId);
     if (!cred) throw notFound('Credential not found');
     const consumer = await store.consumers.findById(cred.consumer_id);
@@ -359,6 +389,7 @@ export function createCredentialsService(
       action: 'credential.finalize',
       targetType: 'credential',
       targetId: credentialId,
+      actor,
     });
   };
 

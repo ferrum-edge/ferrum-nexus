@@ -1308,13 +1308,21 @@ export function buildSqlRepos(
               ['key'],
             ),
           ),
-          [
-            key,
-            dialect === 'postgres' ? value : JSON.stringify(value),
-            boolValue(encrypted),
-            new Date().toISOString(),
-          ],
+          [key, JSON.stringify(value), boolValue(encrypted), new Date().toISOString()],
         );
+      },
+      async setIfAbsent<T>(key: string, value: T, encrypted = false) {
+        const changed = await client.exec(
+          sql(
+            buildInsertIgnore(
+              dialect,
+              'app_settings',
+              ['key', 'value', 'encrypted', 'updated_at'],
+            ),
+          ),
+          [key, JSON.stringify(value), boolValue(encrypted), new Date().toISOString()],
+        );
+        return changed > 0;
       },
       async all() {
         const keyCol = ident(dialect, 'key');

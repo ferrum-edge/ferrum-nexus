@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { requireRole } from '../auth/session.js';
 import type { UsersService } from '../users/service.js';
 import type { OrganizationsService } from '../organizations/service.js';
-import type { AuditService } from '../audit/service.js';
+import { auditActorFromRequest, type AuditService } from '../audit/service.js';
 import type { SettingsService } from '../admin/settings-service.js';
 import type { MassEmailService } from '../admin/mass-email-service.js';
 import type { DriftService } from '../drift/service.js';
@@ -236,7 +236,12 @@ export async function registerAdminRoutes(
     const { specId, namespace, ownerId } = z
       .object({ specId: z.string(), namespace: z.string().optional(), ownerId: z.string() })
       .parse(req.body);
-    const asset = await publishing.importFromEdge({ ownerId, specId, namespace });
+    const asset = await publishing.importFromEdge({
+      ownerId,
+      specId,
+      namespace,
+      actor: auditActorFromRequest(req),
+    });
     await audit.record(req, {
       action: 'admin.import_api',
       targetType: 'api_asset',
@@ -256,7 +261,7 @@ export async function registerAdminRoutes(
     const user = requireSuperAdmin(req);
     const { id } = req.params as { id: string };
     const { reason } = z.object({ reason: z.string().min(1) }).parse(req.body ?? {});
-    await publishing.deleteAsset({ actorId: user.id, assetId: id });
+    await publishing.deleteAsset({ actorId: user.id, assetId: id, actor: auditActorFromRequest(req) });
     await audit.record(req, {
       action: 'admin.god_delete_api',
       targetType: 'api_asset',
@@ -270,7 +275,12 @@ export async function registerAdminRoutes(
     const user = requireSuperAdmin(req);
     const { id } = req.params as { id: string };
     const { reason } = z.object({ reason: z.string().min(1) }).parse(req.body);
-    await accessRequests.godRevoke({ actorId: user.id, grantId: id, reason });
+    await accessRequests.godRevoke({
+      actorId: user.id,
+      grantId: id,
+      reason,
+      actor: auditActorFromRequest(req),
+    });
     reply.status(204).send();
   });
 

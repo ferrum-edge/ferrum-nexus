@@ -10,6 +10,14 @@ export interface AuditRecord {
   reason?: string | null;
   before?: unknown;
   after?: unknown;
+  actor?: AuditActor | null;
+}
+
+export interface AuditActor {
+  id: string | null;
+  email: string | null;
+  ip: string | null;
+  userAgent: string | null;
 }
 
 // Field names that look like secrets — these get redacted before insert so an
@@ -46,18 +54,19 @@ export interface AuditService {
 export function createAuditService(store: NexusStore): AuditService {
   return {
     async record(req, record) {
+      const actor = req ? auditActorFromRequest(req) : record.actor ?? null;
       await store.audit.insert({
         id: uuid(),
-        actor_id: req?.auth?.id ?? null,
-        actor_email: req?.auth?.email ?? null,
+        actor_id: actor?.id ?? null,
+        actor_email: actor?.email ?? null,
         action: record.action,
         target_type: record.targetType,
         target_id: record.targetId ?? null,
         reason: record.reason ?? null,
         before: record.before == null ? null : scrubValue(record.before),
         after: record.after == null ? null : scrubValue(record.after),
-        ip: (req?.ip as string) ?? null,
-        user_agent: (req?.headers['user-agent'] as string | undefined) ?? null,
+        ip: actor?.ip ?? null,
+        user_agent: actor?.userAgent ?? null,
         created_at: new Date().toISOString(),
       });
     },
@@ -81,5 +90,14 @@ export function createAuditService(store: NexusStore): AuditService {
         total,
       };
     },
+  };
+}
+
+export function auditActorFromRequest(req: FastifyRequest): AuditActor {
+  return {
+    id: req.auth?.id ?? null,
+    email: req.auth?.email ?? null,
+    ip: (req.ip as string) ?? null,
+    userAgent: (req.headers['user-agent'] as string | undefined) ?? null,
   };
 }

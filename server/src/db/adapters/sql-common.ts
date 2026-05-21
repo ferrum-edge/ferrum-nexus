@@ -38,10 +38,10 @@ export function asJson<T>(value: unknown, fallback: T): T {
     try {
       return JSON.parse(value) as T;
     } catch {
-      return fallback;
+      return value as T;
     }
   }
-  return fallback;
+  return value as T;
 }
 
 export function toIsoString(value: unknown): string | null {

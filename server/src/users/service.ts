@@ -7,7 +7,7 @@ import { badRequest, conflict, notFound, tooManyRequests, unauthorized } from '.
 import type { PortalUser, UserRole } from '@ferrum-nexus/shared';
 import { randomToken } from '../lib/crypto.js';
 import type { EmailService } from '../email/service.js';
-import type { AuditService } from '../audit/service.js';
+import type { AuditActor, AuditService } from '../audit/service.js';
 import type { NotificationService } from '../notifications/service.js';
 
 // OWASP 2024 guidance for argon2id: 19 MiB memory, 2 iterations, parallelism 1
@@ -48,7 +48,10 @@ export const ContactUpdate = z.object({
 });
 
 export interface UsersService {
-  register(input: RegistrationInput): Promise<{ user: PortalUser; verifyToken: string | null }>;
+  register(
+    input: RegistrationInput,
+    actor?: AuditActor | null,
+  ): Promise<{ user: PortalUser; verifyToken: string | null }>;
   verifyEmail(token: string): Promise<PortalUser>;
   login(input: LoginInput): Promise<PortalUser>;
   toPortalUser(row: UserRow, roles: UserRole[]): Promise<PortalUser>;
@@ -95,7 +98,7 @@ export function createUsersService(
     organizationId: row.organization_id,
   });
 
-  const register: UsersService['register'] = async (input) => {
+  const register: UsersService['register'] = async (input, actor) => {
     const emailNormalized = normalizeEmail(input.email);
     const existing = await store.users.findByEmail(emailNormalized);
     if (existing) throw conflict('email_taken', 'An account with that email already exists');
@@ -103,15 +106,18 @@ export function createUsersService(
     const userId = uuid();
     const passwordHash = await argon2.hash(input.password, ARGON2_OPTIONS);
 
-    // Insert the user and their initial roles in a single transaction so the
-    // first-user `super_admin` bootstrap is atomic — two concurrent
-    // registrations cannot both observe count=0 and race to grant themselves
-    // the super_admin role. If a second registration loses the race it sees
-    // count=1 inside its own transaction and gets the regular role set.
+    // Insert the user and their initial roles in a single transaction. The
+    // app_settings claim is a unique-key insert so only one concurrent
+    // registration can win the first-user super_admin bootstrap.
     const { row, initialRoles } = await store.transaction(async (tx) => {
       const totalUsers = await tx.users.count();
-      const roles: UserRole[] =
-        totalUsers === 0 ? ['admin', 'super_admin', input.desiredRole] : [input.desiredRole];
+      const claimedBootstrap =
+        totalUsers === 0
+          ? await tx.settings.setIfAbsent('bootstrapSuperAdminUserId', userId)
+          : false;
+      const roles: UserRole[] = claimedBootstrap
+        ? ['admin', 'super_admin', input.desiredRole]
+        : [input.desiredRole];
       const inserted = await tx.users.insert({
         id: userId,
         email: input.email,
@@ -133,6 +139,7 @@ export function createUsersService(
       targetType: 'user',
       targetId: userId,
       after: { email: input.email, roles: initialRoles },
+      actor,
     });
 
     const settings = await loadAppSettings(store);
@@ -289,6 +296,7 @@ export function createUsersService(
     if (newPassword.length < 8) throw badRequest('weak_password', 'Password must be 8+ characters');
     const hash = await argon2.hash(newPassword, ARGON2_OPTIONS);
     await store.users.updatePassword(reset.user_id, hash);
+    await store.users.resetFailedLogins(reset.user_id);
     await store.verifications.consumePasswordReset(token, new Date().toISOString());
     await store.sessions.deleteForUser(reset.user_id);
   };

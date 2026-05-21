@@ -425,6 +425,7 @@ export interface EmailRepo {
 export interface SettingsRepo {
   get<T = unknown>(key: string): Promise<T | null>;
   set<T = unknown>(key: string, value: T, encrypted?: boolean): Promise<void>;
+  setIfAbsent<T = unknown>(key: string, value: T, encrypted?: boolean): Promise<boolean>;
   all(): Promise<AppSettingRow[]>;
 }
 

@@ -425,6 +425,10 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
       encrypted = excluded.encrypted,
       updated_at = excluded.updated_at
   `);
+  const setInsertIfAbsent = db.prepare(`
+    INSERT OR IGNORE INTO app_settings (key, value, encrypted, updated_at)
+    VALUES (@key, @value, @encrypted, @updated_at)
+  `);
   const setAll = db.prepare('SELECT * FROM app_settings ORDER BY key ASC');
 
   // ---------- AUDIT ----------
@@ -914,6 +918,15 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
           encrypted: encrypted ? 1 : 0,
           updated_at: new Date().toISOString(),
         });
+      },
+      async setIfAbsent<T>(key: string, value: T, encrypted = false) {
+        const result = setInsertIfAbsent.run({
+          key,
+          value: JSON.stringify(value),
+          encrypted: encrypted ? 1 : 0,
+          updated_at: new Date().toISOString(),
+        });
+        return result.changes === 1;
       },
       async all() {
         return (setAll.all() as SettingRowRaw[]).map((row) => ({

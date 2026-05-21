@@ -9,7 +9,12 @@ interface ListResp {
 
 interface IssueResp {
   credential: CredentialMetadata;
-  secret?: { type: CredentialType; field: string; value: string };
+  secret?: {
+    type: CredentialType;
+    field: string;
+    value: string;
+    fields?: Array<{ field: string; value: string }>;
+  };
 }
 
 export function ClientCredentialsPage() {
@@ -60,7 +65,9 @@ export function ClientCredentialsPage() {
             This is the only time we'll show you this value. Copy it now.
           </p>
           <pre className="mt-2 overflow-x-auto rounded bg-slate-900 p-2 text-xs text-white">
-            {showSecret.field}={showSecret.value}
+            {(showSecret.fields ?? [{ field: showSecret.field, value: showSecret.value }])
+              .map((item) => `${item.field}=${item.value}`)
+              .join('\n')}
           </pre>
           <button type="button" className="btn-secondary mt-2" onClick={() => setShowSecret(null)}>
             I've copied it

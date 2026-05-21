@@ -11,6 +11,7 @@ import type { CredentialsService } from '../credentials/service.js';
 import { CredentialCreateInput as CredentialInputSchema } from '../credentials/service.js';
 import type { MessagingService } from '../messaging/service.js';
 import type { NexusStore } from '../db/store.js';
+import { auditActorFromRequest } from '../audit/service.js';
 
 export async function registerProviderRoutes(
   app: FastifyInstance,
@@ -40,7 +41,7 @@ export async function registerProviderRoutes(
   app.post('/api/provider/apis', SPEC_UPLOAD_LIMIT, async (req, reply) => {
     const user = requireRole(req, 'provider', 'admin', 'super_admin');
     const input = PublishInput.parse(req.body);
-    const asset = await publishing.publish({ providerId: user.id, input });
+    const asset = await publishing.publish({ providerId: user.id, input, actor: auditActorFromRequest(req) });
     reply.status(201).send({ asset });
   });
 
@@ -48,7 +49,12 @@ export async function registerProviderRoutes(
     const user = requireRole(req, 'provider', 'admin', 'super_admin');
     const { id } = req.params as { id: string };
     const { rawSpec } = z.object({ rawSpec: z.string().min(1) }).parse(req.body);
-    const asset = await publishing.replaceSpec({ providerId: user.id, assetId: id, rawSpec });
+    const asset = await publishing.replaceSpec({
+      providerId: user.id,
+      assetId: id,
+      rawSpec,
+      actor: auditActorFromRequest(req),
+    });
     reply.send({ asset });
   });
 
@@ -56,7 +62,12 @@ export async function registerProviderRoutes(
     const user = requireRole(req, 'provider', 'admin', 'super_admin');
     const { id } = req.params as { id: string };
     const patch = SettingsUpdate.parse(req.body);
-    const asset = await publishing.updateSettings({ providerId: user.id, assetId: id, patch });
+    const asset = await publishing.updateSettings({
+      providerId: user.id,
+      assetId: id,
+      patch,
+      actor: auditActorFromRequest(req),
+    });
     reply.send({ asset });
   });
 
@@ -69,7 +80,7 @@ export async function registerProviderRoutes(
       reply.status(404).send({ error: { code: 'not_found', message: 'Not found' } });
       return;
     }
-    await publishing.deleteAsset({ actorId: user.id, assetId: id });
+    await publishing.deleteAsset({ actorId: user.id, assetId: id, actor: auditActorFromRequest(req) });
     reply.status(204).send();
   });
 
@@ -99,6 +110,7 @@ export async function registerProviderRoutes(
       providerId: user.id,
       requestId: id,
       providerReason: providerReason ?? null,
+      actor: auditActorFromRequest(req),
     });
     reply.send(result);
   });
@@ -111,6 +123,7 @@ export async function registerProviderRoutes(
       providerId: user.id,
       requestId: id,
       providerReason,
+      actor: auditActorFromRequest(req),
     });
     reply.send({ request: updated });
   });
@@ -130,14 +143,19 @@ export async function registerProviderRoutes(
     const user = requireRole(req, 'provider', 'admin', 'super_admin');
     const { id } = req.params as { id: string };
     const { reason } = RevokeInput.parse(req.body);
-    await accessRequests.revoke({ providerId: user.id, grantId: id, reason });
+    await accessRequests.revoke({
+      providerId: user.id,
+      grantId: id,
+      reason,
+      actor: auditActorFromRequest(req),
+    });
     reply.status(204).send();
   });
 
   app.post('/api/provider/test-credentials', async (req, reply) => {
     const user = requireRole(req, 'provider', 'admin', 'super_admin');
     const input = CredentialInputSchema.parse(req.body);
-    const result = await credentials.issue({ userId: user.id, input });
+    const result = await credentials.issue({ userId: user.id, input, actor: auditActorFromRequest(req) });
     reply.status(201).send({ credential: result.metadata, secret: result.secret });
   });
 

@@ -183,6 +183,9 @@ CREATE TABLE IF NOT EXISTS access_grants (
 
 CREATE INDEX IF NOT EXISTS idx_grants_consumer ON access_grants (client_consumer_id);
 CREATE INDEX IF NOT EXISTS idx_grants_asset ON access_grants (api_asset_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_grants_active_unique
+  ON access_grants (client_consumer_id, api_asset_id)
+  WHERE status = 'active';
 
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,

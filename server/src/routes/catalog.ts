@@ -6,6 +6,7 @@ import type { ApiAssetRow, NexusStore } from '../db/store.js';
 import { requireAuth, requireRole, type AuthenticatedUser } from '../auth/session.js';
 import { RequestInput } from '../access-requests/service.js';
 import { notFound } from '../lib/errors.js';
+import { auditActorFromRequest } from '../audit/service.js';
 
 export async function registerCatalogRoutes(
   app: FastifyInstance,
@@ -62,6 +63,7 @@ export async function registerCatalogRoutes(
       clientName: userRow?.name ?? null,
       apiAssetId: id,
       justification: input.justification,
+      actor: auditActorFromRequest(req),
     });
     reply.status(201).send({ request });
   });

@@ -5,6 +5,7 @@ import type { AccessRequestsService } from '../access-requests/service.js';
 import type { GrantsService } from '../grants/service.js';
 import type { CredentialsService, CredentialCreateInput } from '../credentials/service.js';
 import { CredentialCreateInput as CredentialInputSchema } from '../credentials/service.js';
+import { auditActorFromRequest } from '../audit/service.js';
 
 export async function registerClientRoutes(
   app: FastifyInstance,
@@ -37,7 +38,7 @@ export async function registerClientRoutes(
   app.post('/api/client/credentials', async (req, reply) => {
     const user = requireAuth(req);
     const input = CredentialInputSchema.parse(req.body) as CredentialCreateInput;
-    const result = await credentials.issue({ userId: user.id, input });
+    const result = await credentials.issue({ userId: user.id, input, actor: auditActorFromRequest(req) });
     reply.status(201).send({ credential: result.metadata, secret: result.secret });
   });
 
@@ -54,6 +55,7 @@ export async function registerClientRoutes(
       userId: user.id,
       credentialId: id,
       replacement,
+      actor: auditActorFromRequest(req),
     });
     reply.send({ credential: result.metadata, secret: result.secret });
   });
@@ -61,7 +63,7 @@ export async function registerClientRoutes(
   app.post('/api/client/credentials/:id/finalize', async (req, reply) => {
     const user = requireAuth(req);
     const { id } = req.params as { id: string };
-    await credentials.finalize({ userId: user.id, credentialId: id });
+    await credentials.finalize({ userId: user.id, credentialId: id, actor: auditActorFromRequest(req) });
     reply.status(204).send();
   });
 }

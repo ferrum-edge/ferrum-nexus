@@ -8,6 +8,7 @@ import { badRequest, unauthorized } from '../lib/errors.js';
 import { requireAuth } from '../auth/session.js';
 import type { SettingsService } from '../admin/settings-service.js';
 import { verifyCaptchaIfEnabled } from '../auth/captcha.js';
+import { auditActorFromRequest } from '../audit/service.js';
 
 const AUTH_RATE_LIMIT = {
   config: {
@@ -36,7 +37,7 @@ export async function registerAuthRoutes(
     }
     const input = RegistrationInput.parse(req.body);
     await verifyCaptchaIfEnabled(settings, input.captchaToken, req.ip);
-    const { user, verifyToken } = await users.register(input);
+    const { user, verifyToken } = await users.register(input, auditActorFromRequest(req));
     // Don't auto-login on register when email verification is required.
     if (!verifyToken) {
       const session = await sessions.createSession({

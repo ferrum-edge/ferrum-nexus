@@ -168,8 +168,12 @@ CREATE TABLE IF NOT EXISTS access_grants (
   revoked_by VARCHAR(64),
   revoked_at DATETIME,
   revoked_reason TEXT,
+  active_client_consumer_id VARCHAR(64) GENERATED ALWAYS AS (
+    CASE WHEN status = 'active' THEN client_consumer_id ELSE NULL END
+  ) STORED,
   INDEX idx_grants_consumer (client_consumer_id),
   INDEX idx_grants_asset (api_asset_id),
+  UNIQUE KEY idx_grants_active_unique (active_client_consumer_id, api_asset_id),
   CONSTRAINT fk_grants_asset FOREIGN KEY (api_asset_id) REFERENCES api_assets (id) ON DELETE CASCADE
 ) ENGINE=InnoDB CHARACTER SET=utf8mb4;
 

@@ -135,6 +135,14 @@ export async function createMongoStore(config: ResolvedConfig): Promise<NexusSto
       c.apiSpecVersions.createIndex({ api_asset_id: 1, created_at: -1 }),
       c.accessRequests.createIndex({ client_user_id: 1, api_asset_id: 1, status: 1 }),
       c.accessGrants.createIndex({ client_consumer_id: 1, api_asset_id: 1 }),
+      c.accessGrants.createIndex(
+        { client_consumer_id: 1, api_asset_id: 1, status: 1 },
+        {
+          unique: true,
+          partialFilterExpression: { status: 'active' },
+          name: 'idx_grants_active_unique',
+        },
+      ),
       c.conversations.createIndex({ participants: 1 }),
       c.messages.createIndex({ conversation_id: 1, created_at: 1 }),
       c.notifications.createIndex({ recipient_id: 1, read_at: 1 }),
@@ -739,6 +747,21 @@ export async function createMongoStore(config: ResolvedConfig): Promise<NexusSto
           },
           { upsert: true },
         );
+      },
+      async setIfAbsent<T>(key: string, value: T, encrypted = false) {
+        const result = await c.appSettings.updateOne(
+          { _id: key },
+          {
+            $setOnInsert: {
+              _id: key,
+              value,
+              encrypted,
+              updated_at: new Date().toISOString(),
+            },
+          },
+          { upsert: true },
+        );
+        return result.upsertedCount === 1;
       },
       async all() {
         const rows = await c.appSettings.find().sort({ _id: 1 }).toArray();

@@ -259,6 +259,94 @@ for (const adapter of adapters) {
     }
   });
 
+  test(`[${adapter.name}] grants allow only one active grant per consumer and API`, async () => {
+    const store = await adapter.factory();
+    await store.migrate();
+    try {
+      const providerId = uuid();
+      const clientId = uuid();
+      for (const [id, email] of [
+        [providerId, 'provider-grants@example.com'],
+        [clientId, 'client-grants@example.com'],
+      ] as const) {
+        await store.users.insert({
+          id,
+          email,
+          email_normalized: email,
+          name: null,
+          phone: null,
+          status: 'active',
+          email_verified_at: null,
+          password_hash: 'h',
+          last_login_at: null,
+          failed_login_count: 0,
+          organization_id: null,
+        });
+      }
+
+      const assetId = uuid();
+      const now = new Date().toISOString();
+      await store.apiAssets.insert({
+        id: assetId,
+        api_spec_id: 'spec-grants',
+        proxy_id: 'proxy-grants',
+        namespace: 'default',
+        provider_id: providerId,
+        title: 'Grant API',
+        description: null,
+        slug: `grant-api-${assetId}`,
+        version: '1.0.0',
+        visibility: 'public',
+        requestable: 1,
+        lifecycle: 'published',
+        tags: [],
+        contact_email: null,
+        support_notes: null,
+        operation_count: 1,
+        content_hash: 'hash',
+        created_at: now,
+        updated_at: now,
+      });
+
+      const baseGrant = {
+        api_asset_id: assetId,
+        client_user_id: clientId,
+        client_consumer_id: 'consumer-grants',
+        acl_group: 'api:grant',
+        approved_by: providerId,
+        approved_at: now,
+      };
+      await store.grants.insert({
+        id: uuid(),
+        ...baseGrant,
+        status: 'active',
+        revoked_by: null,
+        revoked_at: null,
+        revoked_reason: null,
+      });
+      await assert.rejects(async () => {
+        await store.grants.insert({
+          id: uuid(),
+          ...baseGrant,
+          status: 'active',
+          revoked_by: null,
+          revoked_at: null,
+          revoked_reason: null,
+        });
+      });
+      await store.grants.insert({
+        id: uuid(),
+        ...baseGrant,
+        status: 'revoked',
+        revoked_by: providerId,
+        revoked_at: now,
+        revoked_reason: 'superseded',
+      });
+    } finally {
+      await store.close();
+    }
+  });
+
   test(`[${adapter.name}] email outbox claim transitions pending → sending exactly once`, async () => {
     const store = await adapter.factory();
     await store.migrate();
@@ -320,6 +408,25 @@ for (const adapter of adapters) {
       assert.equal(claim.length, 1);
       const second = await store.email.claimBatch(now, 10);
       assert.equal(second.length, 0);
+    } finally {
+      await store.close();
+    }
+  });
+
+  test(`[${adapter.name}] settings setIfAbsent preserves first value`, async () => {
+    const store = await adapter.factory();
+    await store.migrate();
+    try {
+      assert.equal(await store.settings.setIfAbsent('bootstrapSuperAdminUserId', 'first'), true);
+      assert.equal(await store.settings.setIfAbsent('bootstrapSuperAdminUserId', 'second'), false);
+      assert.equal(await store.settings.get<string>('bootstrapSuperAdminUserId'), 'first');
+
+      await store.settings.set('smtpHost', 'smtp.example.com');
+      await store.settings.set('smtpSecure', true);
+      await store.settings.set('smtpPort', 2525);
+      assert.equal(await store.settings.get<string>('smtpHost'), 'smtp.example.com');
+      assert.equal(await store.settings.get<boolean>('smtpSecure'), true);
+      assert.equal(await store.settings.get<number>('smtpPort'), 2525);
     } finally {
       await store.close();
     }

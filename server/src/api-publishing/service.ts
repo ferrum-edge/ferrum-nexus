@@ -7,7 +7,7 @@ import { badRequest, conflict, forbidden, notFound } from '../lib/errors.js';
 import type { FerrumAdminClient } from '../ferrum-admin/client.js';
 import type { ResolvedConfig } from '../config/index.js';
 import { extractMetadata, slugify } from './oas.js';
-import type { AuditService } from '../audit/service.js';
+import type { AuditActor, AuditService } from '../audit/service.js';
 
 export const PublishInput = z.object({
   rawSpec: z.string().min(1),
@@ -32,16 +32,31 @@ export const SettingsUpdate = z.object({
 export type SettingsUpdate = z.infer<typeof SettingsUpdate>;
 
 export interface PublishingService {
-  publish(opts: { providerId: string; input: PublishInput }): Promise<ApiAsset>;
-  replaceSpec(opts: { providerId: string; assetId: string; rawSpec: string }): Promise<ApiAsset>;
+  publish(opts: {
+    providerId: string;
+    input: PublishInput;
+    actor?: AuditActor | null;
+  }): Promise<ApiAsset>;
+  replaceSpec(opts: {
+    providerId: string;
+    assetId: string;
+    rawSpec: string;
+    actor?: AuditActor | null;
+  }): Promise<ApiAsset>;
   updateSettings(opts: {
     providerId: string;
     assetId: string;
     patch: SettingsUpdate;
+    actor?: AuditActor | null;
   }): Promise<ApiAsset>;
-  deleteAsset(opts: { actorId: string; assetId: string }): Promise<void>;
+  deleteAsset(opts: { actorId: string; assetId: string; actor?: AuditActor | null }): Promise<void>;
   ensureAccessControlPlugin(assetId: string): Promise<void>;
-  importFromEdge(opts: { ownerId: string; specId: string; namespace?: string }): Promise<ApiAsset>;
+  importFromEdge(opts: {
+    ownerId: string;
+    specId: string;
+    namespace?: string;
+    actor?: AuditActor | null;
+  }): Promise<ApiAsset>;
   syncFromEdge(opts: { namespace?: string }): Promise<{ imported: number; updated: number; drift: number }>;
 }
 
@@ -83,7 +98,7 @@ export function createPublishingService(
     return candidate;
   };
 
-  const publish: PublishingService['publish'] = async ({ providerId, input }) => {
+  const publish: PublishingService['publish'] = async ({ providerId, input, actor }) => {
     const meta = extractMetadata(input.rawSpec);
     const namespace = input.namespace ?? config.ferrum.defaultNamespace;
     const created = await ferrum.createApiSpec(input.rawSpec, meta.rawContentType, namespace);
@@ -128,11 +143,17 @@ export function createPublishingService(
       targetType: 'api_asset',
       targetId: id,
       after: { title: meta.title, version: meta.version, requestable: input.requestable },
+      actor,
     });
     return toApi(row);
   };
 
-  const replaceSpec: PublishingService['replaceSpec'] = async ({ providerId, assetId, rawSpec }) => {
+  const replaceSpec: PublishingService['replaceSpec'] = async ({
+    providerId,
+    assetId,
+    rawSpec,
+    actor,
+  }) => {
     const existing = await store.apiAssets.findById(assetId);
     if (!existing) throw notFound('API asset not found');
     if (existing.provider_id !== providerId) throw forbidden('Not the API owner');
@@ -172,11 +193,17 @@ export function createPublishingService(
       targetId: assetId,
       before: { version: existing.version, contentHash: existing.content_hash },
       after: { version: meta.version, contentHash: meta.contentHash },
+      actor,
     });
     return toApi(next);
   };
 
-  const updateSettings: PublishingService['updateSettings'] = async ({ providerId, assetId, patch }) => {
+  const updateSettings: PublishingService['updateSettings'] = async ({
+    providerId,
+    assetId,
+    patch,
+    actor,
+  }) => {
     const existing = await store.apiAssets.findById(assetId);
     if (!existing) throw notFound('API asset not found');
     if (existing.provider_id !== providerId) throw forbidden('Not the API owner');
@@ -199,11 +226,12 @@ export function createPublishingService(
       targetId: assetId,
       before: existing,
       after: next,
+      actor,
     });
     return toApi(next);
   };
 
-  const deleteAsset: PublishingService['deleteAsset'] = async ({ actorId, assetId }) => {
+  const deleteAsset: PublishingService['deleteAsset'] = async ({ actorId, assetId, actor }) => {
     const existing = await store.apiAssets.findById(assetId);
     if (!existing) throw notFound('API asset not found');
     try {
@@ -220,6 +248,7 @@ export function createPublishingService(
       targetId: assetId,
       before: existing,
       reason: `actor=${actorId}`,
+      actor,
     });
   };
 
@@ -244,6 +273,7 @@ export function createPublishingService(
     ownerId,
     specId,
     namespace,
+    actor,
   }) => {
     const spec = await ferrum.getApiSpec(specId, namespace);
     if (!spec) throw notFound('Ferrum API spec not found');
@@ -281,6 +311,7 @@ export function createPublishingService(
       targetType: 'api_asset',
       targetId: id,
       after: { title: spec.title, specId, namespace },
+      actor,
     });
     return toApi(row);
   };

@@ -5,7 +5,7 @@ import type { ResolvedConfig } from '../config/index.js';
 import type { AccessRequest, AccessRequestStatus } from '@ferrum-nexus/shared';
 import { badRequest, conflict, forbidden, notFound } from '../lib/errors.js';
 import type { CredentialsService } from '../credentials/service.js';
-import type { AuditService } from '../audit/service.js';
+import type { AuditActor, AuditService } from '../audit/service.js';
 import type { NotificationService } from '../notifications/service.js';
 import type { EmailService } from '../email/service.js';
 import { aclGroupForApi } from '@ferrum-nexus/shared';
@@ -33,17 +33,34 @@ export interface AccessRequestsService {
     clientName: string | null;
     apiAssetId: string;
     justification: string;
+    actor?: AuditActor | null;
   }): Promise<AccessRequest>;
   approve(opts: {
     providerId: string;
     requestId: string;
     providerReason: string | null;
+    actor?: AuditActor | null;
   }): Promise<{ request: AccessRequest; grantId: string }>;
-  deny(opts: { providerId: string; requestId: string; providerReason: string }): Promise<AccessRequest>;
-  revoke(opts: { providerId: string; grantId: string; reason: string }): Promise<void>;
+  deny(opts: {
+    providerId: string;
+    requestId: string;
+    providerReason: string;
+    actor?: AuditActor | null;
+  }): Promise<AccessRequest>;
+  revoke(opts: {
+    providerId: string;
+    grantId: string;
+    reason: string;
+    actor?: AuditActor | null;
+  }): Promise<void>;
   listForClient(userId: string): Promise<AccessRequest[]>;
   listForProvider(providerId: string, status?: AccessRequestStatus): Promise<AccessRequest[]>;
-  godRevoke(opts: { actorId: string; grantId: string; reason: string }): Promise<void>;
+  godRevoke(opts: {
+    actorId: string;
+    grantId: string;
+    reason: string;
+    actor?: AuditActor | null;
+  }): Promise<void>;
 }
 
 export function createAccessRequestsService(
@@ -84,6 +101,7 @@ export function createAccessRequestsService(
     clientName,
     apiAssetId,
     justification,
+    actor,
   }) => {
     const asset = await store.apiAssets.findById(apiAssetId);
     if (!asset) throw notFound('API asset not found');
@@ -98,7 +116,12 @@ export function createAccessRequestsService(
       email: clientEmail,
       name: clientName,
       namespace: asset.namespace,
+      actor,
     });
+    const activeGrant = await store.grants.findActiveFor(consumerId, apiAssetId);
+    if (activeGrant) {
+      throw conflict('access_already_granted', 'You already have active access to this API');
+    }
 
     const row = await store.accessRequests.insert({
       id: uuid(),
@@ -154,6 +177,7 @@ export function createAccessRequestsService(
       targetType: 'access_request',
       targetId: row.id,
       after: { apiAssetId, clientUserId },
+      actor,
     });
 
     return toApi(row);
@@ -169,6 +193,7 @@ export function createAccessRequestsService(
     providerId,
     requestId,
     providerReason,
+    actor,
   }) => {
     const request = await store.accessRequests.findById(requestId);
     if (!request) throw notFound('Request not found');
@@ -177,6 +202,13 @@ export function createAccessRequestsService(
     }
     await ensureProviderOwnsAsset(providerId, request.api_asset_id);
     if (!request.client_consumer_id) throw badRequest('no_consumer', 'Client consumer missing');
+    const existingGrant = await store.grants.findActiveFor(
+      request.client_consumer_id,
+      request.api_asset_id,
+    );
+    if (existingGrant) {
+      throw conflict('access_already_granted', 'Client already has active access to this API');
+    }
 
     // Edge-side mutation happens first and outside the DB transaction below —
     // we treat Edge as the system of record for authorization. If Edge
@@ -235,12 +267,18 @@ export function createAccessRequestsService(
       targetType: 'access_request',
       targetId: requestId,
       after: { grantId: grant.id, providerReason },
+      actor,
     });
 
     return { request: toApi(updated), grantId: grant.id };
   };
 
-  const deny: AccessRequestsService['deny'] = async ({ providerId, requestId, providerReason }) => {
+  const deny: AccessRequestsService['deny'] = async ({
+    providerId,
+    requestId,
+    providerReason,
+    actor,
+  }) => {
     const request = await store.accessRequests.findById(requestId);
     if (!request) throw notFound('Request not found');
     if (request.status !== 'pending') {
@@ -272,6 +310,7 @@ export function createAccessRequestsService(
       targetType: 'access_request',
       targetId: requestId,
       after: { providerReason },
+      actor,
     });
     return toApi(updated);
   };
@@ -281,6 +320,7 @@ export function createAccessRequestsService(
     actorId: string,
     reason: string,
     asGod: boolean,
+    actor?: AuditActor | null,
   ): Promise<void> => {
     const grant = await store.grants.findById(grantId);
     if (!grant || grant.status !== 'active') throw notFound('Active grant not found');
@@ -288,14 +328,23 @@ export function createAccessRequestsService(
     if (!asGod && asset && asset.provider_id !== actorId) {
       throw forbidden('Not the API owner');
     }
-    // Edge-side ACL removal happens first so that even if the local update
-    // below fails, access is denied at the gateway. The drift sync job
-    // reconciles any leftover local `active` row in that case.
-    await credentials.syncAclGroupsForGrant({
-      consumerId: grant.client_consumer_id,
-      apiAssetId: grant.api_asset_id,
-      add: false,
-    });
+    const activeGrantsForAsset = await store.grants.listForAsset(grant.api_asset_id);
+    const hasOtherActiveGrant = activeGrantsForAsset.some(
+      (row) =>
+        row.id !== grantId &&
+        row.client_consumer_id === grant.client_consumer_id &&
+        row.status === 'active',
+    );
+    // Edge-side ACL removal happens first when this is the last active grant so
+    // that even if the local update below fails, access is denied at the gateway.
+    // If another active grant still exists, the ACL group must remain present.
+    if (!hasOtherActiveGrant) {
+      await credentials.syncAclGroupsForGrant({
+        consumerId: grant.client_consumer_id,
+        apiAssetId: grant.api_asset_id,
+        add: false,
+      });
+    }
     await store.grants.update(grantId, {
       status: 'revoked',
       revoked_by: actorId,
@@ -320,6 +369,7 @@ export function createAccessRequestsService(
       targetType: 'access_grant',
       targetId: grantId,
       reason,
+      actor,
     });
   };
 
@@ -327,11 +377,11 @@ export function createAccessRequestsService(
     create,
     approve,
     deny,
-    async revoke({ providerId, grantId, reason }) {
-      await revokeInternal(grantId, providerId, reason, false);
+    async revoke({ providerId, grantId, reason, actor }) {
+      await revokeInternal(grantId, providerId, reason, false, actor);
     },
-    async godRevoke({ actorId, grantId, reason }) {
-      await revokeInternal(grantId, actorId, reason, true);
+    async godRevoke({ actorId, grantId, reason, actor }) {
+      await revokeInternal(grantId, actorId, reason, true, actor);
     },
     async listForClient(userId) {
       const rows = await store.accessRequests.listForClient(userId);
