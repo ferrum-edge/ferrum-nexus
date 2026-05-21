@@ -3,6 +3,7 @@ import type { Logger } from 'pino';
 import type { NexusStore } from '../db/store.js';
 import type { ResolvedConfig } from '../config/index.js';
 import { DEFAULT_TEMPLATES, createMailer, renderEmail } from '../lib/email.js';
+import { decryptSetting } from '../lib/crypto.js';
 
 export interface EmailService {
   enqueue(opts: {
@@ -27,7 +28,28 @@ export function createEmailService(
   store: NexusStore,
   logger: Logger,
 ): EmailService {
-  const mailer = createMailer(config, logger);
+  let mailer = createMailer(config, logger);
+
+  const resolveMailer = async () => {
+    const smtpHost = await store.settings.get<string>('smtpHost');
+    const host = smtpHost ?? config.email.smtpHost;
+    const from = (await store.settings.get<string>('emailFrom')) ?? config.email.from;
+    const port = (await store.settings.get<number>('smtpPort')) ?? config.email.smtpPort;
+    const username = (await store.settings.get<string>('smtpUsername')) ?? config.email.smtpUsername;
+    const secure =
+      ((await store.settings.get<boolean>('smtpSecure')) ?? config.email.smtpSecure) === true;
+    const encPassword = await store.settings.get<string>('smtpPasswordEnc');
+    const password = encPassword
+      ? decryptSetting(encPassword, config.secretKey)
+      : config.email.smtpPassword;
+
+    const resolved: ResolvedConfig = {
+      ...config,
+      email: { from, smtpHost: host, smtpPort: port, smtpUsername: username, smtpPassword: password, smtpSecure: secure },
+    };
+    mailer = createMailer(resolved, logger);
+    return { mailer, from };
+  };
 
   const enqueue: EmailService['enqueue'] = async ({
     to,
@@ -82,13 +104,14 @@ export function createEmailService(
     const now = new Date().toISOString();
     const batch = await store.email.claimBatch(now, 25);
     if (batch.length === 0) return 0;
+    const { mailer: currentMailer } = await resolveMailer();
     let processed = 0;
     for (const row of batch) {
       try {
-        await mailer.send({
+        await currentMailer.send({
           to: row.to_address,
           subject: row.subject,
-          body: rebuildBody(row.subject, row.payload, row.template_id),
+          body: await rebuildBody(row.subject, row.payload, row.template_id),
         });
         await store.email.markSent(row.id, new Date().toISOString());
       } catch (err) {
@@ -101,16 +124,19 @@ export function createEmailService(
     return processed;
   };
 
-  const rebuildBody = (
+  const rebuildBody = async (
     fallbackSubject: string,
     vars: Record<string, unknown>,
     templateKey: string | null,
-  ): string => {
-    // If the body wasn't pre-rendered (because the template existed at the time
-    // of enqueue) we already stored the rendered subject. Bodies are
-    // re-rendered at send time so admins can update templates without losing
-    // queued messages.
+  ): Promise<string> => {
     if (!templateKey) return fallbackSubject;
+    const dbTemplate = await store.email.getTemplate(templateKey);
+    if (dbTemplate) {
+      return renderEmail(
+        { subject_template: dbTemplate.subject_template, body_template: dbTemplate.body_template },
+        vars,
+      ).body;
+    }
     const tmpl = DEFAULT_TEMPLATES[templateKey];
     if (!tmpl) return fallbackSubject;
     return renderEmail({ subject_template: tmpl.subject, body_template: tmpl.body }, vars).body;
