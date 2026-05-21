@@ -1,2 +1,119 @@
-# ferrum-nexus
-A central connection point for consumers, providers, APIs, credentials, and analytics.
+# Ferrum Nexus
+
+Ferrum Nexus is the multi-user developer portal and workflow layer that sits in
+front of [Ferrum Edge](https://github.com/ferrum-edge/ferrum-edge). Ferrum Edge
+owns proxies, upstreams, plugins, consumers, credentials, and runtime gateway
+behavior. **Ferrum Nexus owns portal accounts, approvals, messaging,
+notifications, branding, audit history, request state, and the user-facing API
+catalog.**
+
+The browser never talks to the Ferrum Edge Admin API directly — every gateway
+mutation goes through the Nexus backend, which enforces RBAC, audit logging,
+and per-user authorization before forwarding to Edge.
+
+> Required Notice: Copyright Ferrum Nexus (https://github.com/ferrum-edge)
+
+## Features
+
+- **API clients** can register, manage contact info, create and rotate
+  gateway credentials, browse the API catalog with rendered OpenAPI docs,
+  request access with a justification, message providers, and receive email
+  + in-app notifications.
+- **API providers** can publish OpenAPI specs (which create Ferrum Edge
+  proxies), choose whether an API is externally requestable, review and
+  approve / deny / revoke access requests, edit safe runtime settings (rate
+  limits, auth plugin selection, access policy), message clients, and create
+  test consumers for their own APIs.
+- **Portal admins** can configure CAPTCHA, branding, email senders and
+  templates, send mass emails, manage users / providers / APIs / grants,
+  view a historical audit log, and use **god mode** for emergency revoke,
+  spec deletion, user disablement, and direct platform messaging.
+- **Ferrum integration** uses one Ferrum consumer per Nexus client account
+  per namespace. Approvals add an `acl_group` (`nexus:api:<api_id>:approved`)
+  to the consumer; revocations remove it. Each requestable API gets an
+  `access_control` plugin that allows only that group.
+
+## Architecture
+
+```
+Browser
+  |
+  | HTTPS (same-origin)
+  v
+Ferrum Nexus SPA (web/)
+  |
+  | Session cookie + CSRF
+  v
+Ferrum Nexus BFF (server/)  -->  SMTP / Email provider
+  |                          \-> Nexus DB (PG / MySQL / SQLite / Mongo)
+  |
+  +--> Ferrum Edge Admin API (server-side only, JWT-protected)
+```
+
+See [`docs/architecture.md`](docs/architecture.md) for the full design.
+
+## Quickstart
+
+```bash
+# Requires Node.js 20.19+ (or 22.12+)
+npm install
+
+cp .env.example .env
+# edit .env — at minimum set NEXUS_SECRET_KEY and FERRUM_ADMIN_URL
+
+npm run migrate --workspace server
+npm run dev
+```
+
+Open <http://127.0.0.1:5173>. Register the first user — they become the
+initial `super_admin`. The backend serves on `http://127.0.0.1:8787`.
+
+## Database
+
+Ferrum Nexus uses string UUIDs across all databases so PostgreSQL, MySQL,
+SQLite, and MongoDB share the same logical schema.
+
+```bash
+# choose with NEXUS_DB_DRIVER in .env
+NEXUS_DB_DRIVER=sqlite      # default; file at ./data/nexus.sqlite
+NEXUS_DB_DRIVER=postgres    # NEXUS_DB_URL=postgres://...
+NEXUS_DB_DRIVER=mysql       # NEXUS_DB_URL=mysql://...
+NEXUS_DB_DRIVER=mongodb     # NEXUS_DB_URL=mongodb+srv://...
+```
+
+> Note: with MongoDB, multi-document workflows require a replica set for
+> transactional atomicity. See [`docs/operations.md`](docs/operations.md).
+
+## Docker
+
+```bash
+docker build -t ferrum-nexus -f docker/Dockerfile .
+docker run --rm -p 8787:8787 \
+  -e NEXUS_SECRET_KEY=$(openssl rand -hex 32) \
+  -e FERRUM_ADMIN_URL=http://host.docker.internal:8000 \
+  -e FERRUM_ADMIN_JWT_SECRET=changeme \
+  ferrum-nexus
+```
+
+See [`docker/docker-compose.example.yml`](docker/docker-compose.example.yml)
+for a full stack alongside Postgres and a Ferrum Edge instance.
+
+## Documentation
+
+- [`docs/architecture.md`](docs/architecture.md) — design rationale, module
+  layout, and trust boundaries.
+- [`docs/api.md`](docs/api.md) — Nexus backend REST API reference.
+- [`docs/operations.md`](docs/operations.md) — running, scaling, backup,
+  drift sync, and observability.
+- [`docs/security.md`](docs/security.md) — threat model and hardening.
+- [`docs/contributing.md`](docs/contributing.md) → [`CONTRIBUTING.md`](CONTRIBUTING.md)
+
+## License
+
+Ferrum Nexus is dual-licensed:
+
+- [PolyForm Noncommercial 1.0.0](LICENSE) for personal, research,
+  educational, and nonprofit use.
+- [Commercial License](LICENSE-COMMERCIAL.md) for commercial use.
+
+See [`SECURITY.md`](SECURITY.md) to report security issues.
