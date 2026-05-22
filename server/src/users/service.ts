@@ -251,8 +251,8 @@ export function createUsersService(
     // the existing-user branch up to the FS-bound randomBytes() call.
     const token = randomToken(24);
     if (!user) {
-      // Burn roughly the same wall-clock as the create-token + enqueue path so
-      // an attacker can't enumerate accounts via response timing.
+      // Burn the same argon2 cost as the existing-user branch so a missing
+      // account does not return measurably faster/slower.
       const dummy = await getDummyHash();
       await argon2.verify(dummy, token).catch(() => false);
       return null;
@@ -283,6 +283,9 @@ export function createUsersService(
       vars: { name: user.name ?? user.email, resetUrl },
       idempotencyKey: `reset:${token}`,
     });
+    // Mirror the same expensive argon2 operation as the missing-user branch.
+    const dummy = await getDummyHash();
+    await argon2.verify(dummy, token).catch(() => false);
     return { token, userId: user.id };
   };
 
