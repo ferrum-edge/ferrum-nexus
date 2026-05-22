@@ -67,6 +67,35 @@ test('extractMetadata rejects external $ref URLs (SSRF guard)', () => {
   assert.throws(() => extractMetadata(bad), /external_ref_forbidden|external \$ref/i);
 });
 
+test('extractMetadata rejects protocol-relative external $ref URLs', () => {
+  const bad = `{
+    "openapi": "3.0.0",
+    "info": { "title": "x", "version": "1" },
+    "paths": {},
+    "x-ferrum-proxy": { "proxy_id": "p", "paths": ["/x"] },
+    "components": {
+      "schemas": {
+        "Bad": { "$ref": "//attacker.example/schema.json" }
+      }
+    }
+  }`;
+  assert.throws(() => extractMetadata(bad), /external_ref_forbidden|external \$ref/i);
+});
+
+test('extractMetadata rejects malformed OpenAPI documents', () => {
+  assert.throws(() => extractMetadata('{ "openapi": "3.0.0",'), /Failed to parse/);
+});
+
+test('extractMetadata rejects unsupported OpenAPI versions', () => {
+  const bad = `{
+    "swagger": "2.0",
+    "info": { "title": "x", "version": "1" },
+    "paths": {},
+    "x-ferrum-proxy": { "proxy_id": "p", "paths": ["/x"] }
+  }`;
+  assert.throws(() => extractMetadata(bad), /Only OpenAPI 3\.x is supported/);
+});
+
 test('extractMetadata rejects non-object documents', () => {
   assert.throws(() => extractMetadata('[]'), /OpenAPI document must be an object/);
 });
