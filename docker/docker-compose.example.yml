@@ -30,11 +30,11 @@ services:
       NEXUS_PORT: 8787
       NEXUS_PUBLIC_URL: http://localhost:8787
       NEXUS_CORS_ORIGINS: http://localhost:8787
-      NEXUS_SECRET_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      NEXUS_SECRET_KEY: ${NEXUS_SECRET_KEY:?set in .env (32+ chars)}
       NEXUS_DB_DRIVER: postgres
       NEXUS_DB_URL: postgres://nexus:nexus@postgres:5432/nexus
       FERRUM_ADMIN_URL: http://ferrum-edge:8000
-      FERRUM_ADMIN_JWT_SECRET: 0123456789abcdef0123456789abcdef
+      FERRUM_ADMIN_JWT_SECRET: ${FERRUM_ADMIN_JWT_SECRET:?set in .env (16+ chars)}
       FERRUM_DEFAULT_NAMESPACE: default
       NEXUS_EMAIL_FROM: 'Ferrum Nexus <noreply@example.com>'
     ports:
