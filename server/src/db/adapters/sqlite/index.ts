@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,18 +21,31 @@ export async function createSqliteStore(config: ResolvedConfig): Promise<NexusSt
   db.pragma('busy_timeout = 5000');
 
   const migrate = async (): Promise<void> => {
-    const sql = readFileSync(resolve(MIGRATIONS_DIR, '001_initial.sql'), 'utf8');
-    db.exec(sql);
     db.exec(`
       CREATE TABLE IF NOT EXISTS _migrations (
         id TEXT PRIMARY KEY,
         applied_at TEXT NOT NULL
       );
     `);
-    const stmt = db.prepare(
+    const applied = new Set(
+      (
+        db.prepare('SELECT id FROM _migrations').all() as Array<{
+          id: string;
+        }>
+      ).map((row) => row.id),
+    );
+    const insert = db.prepare(
       'INSERT OR IGNORE INTO _migrations (id, applied_at) VALUES (?, ?)',
     );
-    stmt.run('001_initial', new Date().toISOString());
+    const files = readdirSync(MIGRATIONS_DIR)
+      .filter((file) => /^\d+_.+\.sql$/.test(file) && !file.endsWith('.pg.sql') && !file.endsWith('.mysql.sql'))
+      .sort();
+    for (const file of files) {
+      const id = file.replace(/\.sql$/, '');
+      if (applied.has(id)) continue;
+      db.exec(readFileSync(resolve(MIGRATIONS_DIR, file), 'utf8'));
+      insert.run(id, new Date().toISOString());
+    }
   };
 
   // better-sqlite3 prepares statements eagerly, so the schema must exist

@@ -11,7 +11,12 @@ import { CSRF_COOKIE, CSRF_HEADER } from '@ferrum-nexus/shared';
 const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? '/api';
 
 export class ApiError extends Error {
-  constructor(public readonly status: number, public readonly code: string, message: string) {
+  constructor(
+    public readonly status: number,
+    public readonly code: string,
+    message: string,
+    public readonly details?: unknown,
+  ) {
     super(message);
   }
 }
@@ -58,12 +63,13 @@ export async function api<T>(
   const body = text ? (JSON.parse(text) as unknown) : undefined;
   if (!res.ok) {
     const errorBody = body as
-      | { error?: { code?: string; message?: string } }
+      | { error?: { code?: string; message?: string; details?: unknown } }
       | undefined;
     throw new ApiError(
       res.status,
       errorBody?.error?.code ?? 'error',
       errorBody?.error?.message ?? res.statusText,
+      errorBody?.error?.details,
     );
   }
   return body as T;

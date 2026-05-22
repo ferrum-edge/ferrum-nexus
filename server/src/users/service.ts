@@ -51,7 +51,7 @@ export interface UsersService {
   register(
     input: RegistrationInput,
     actor?: AuditActor | null,
-  ): Promise<{ user: PortalUser; verifyToken: string | null }>;
+  ): Promise<{ user: PortalUser; verifyToken: string | null; requiresAdminApproval: boolean }>;
   verifyEmail(token: string): Promise<PortalUser>;
   login(input: LoginInput): Promise<PortalUser>;
   toPortalUser(row: UserRow, roles: UserRole[]): Promise<PortalUser>;
@@ -62,6 +62,8 @@ export interface UsersService {
   completePasswordReset(token: string, newPassword: string): Promise<void>;
   setStatus(id: string, status: UserRow['status']): Promise<PortalUser>;
   setRoles(id: string, roles: UserRole[]): Promise<PortalUser>;
+  approveRegistration(id: string): Promise<{ user: PortalUser; verifyToken: string | null }>;
+  denyRegistration(id: string, reason: string): Promise<PortalUser>;
 }
 
 // Lazily computed argon2id hash used to equalize login timing when the
@@ -102,6 +104,8 @@ export function createUsersService(
     const emailNormalized = normalizeEmail(input.email);
     const existing = await store.users.findByEmail(emailNormalized);
     if (existing) throw conflict('email_taken', 'An account with that email already exists');
+    const settings = await loadAppSettings(store);
+    enforceAllowedDomain(emailNormalized, settings.registrationAllowedEmailDomains);
 
     const userId = uuid();
     const passwordHash = await argon2.hash(input.password, ARGON2_OPTIONS);
@@ -109,7 +113,7 @@ export function createUsersService(
     // Insert the user and their initial roles in a single transaction. The
     // app_settings claim is a unique-key insert so only one concurrent
     // registration can win the first-user super_admin bootstrap.
-    const { row, initialRoles } = await store.transaction(async (tx) => {
+    const { row, initialRoles, requiresAdminApproval } = await store.transaction(async (tx) => {
       const totalUsers = await tx.users.count();
       const claimedBootstrap =
         totalUsers === 0
@@ -118,13 +122,14 @@ export function createUsersService(
       const roles: UserRole[] = claimedBootstrap
         ? ['admin', 'super_admin', input.desiredRole]
         : [input.desiredRole];
+      const gated = !claimedBootstrap && settings.registrationRequiresAdminApproval;
       const inserted = await tx.users.insert({
         id: userId,
         email: input.email,
         email_normalized: emailNormalized,
         name: input.name ?? null,
         phone: input.phone ?? null,
-        status: 'pending',
+        status: gated ? 'pending_admin_approval' : 'pending',
         email_verified_at: null,
         password_hash: passwordHash,
         last_login_at: null,
@@ -132,7 +137,7 @@ export function createUsersService(
         organization_id: null,
       });
       await tx.userRoles.setRoles(userId, roles);
-      return { row: inserted, initialRoles: roles };
+      return { row: inserted, initialRoles: roles, requiresAdminApproval: gated };
     });
     await audit.record(null, {
       action: 'user.register',
@@ -142,7 +147,15 @@ export function createUsersService(
       actor,
     });
 
-    const settings = await loadAppSettings(store);
+    if (requiresAdminApproval) {
+      await sendPendingRegistrationEmails(input, userId);
+      return {
+        user: await toPortalUser(row, initialRoles),
+        verifyToken: null,
+        requiresAdminApproval: true,
+      };
+    }
+
     const requireVerification = settings.emailVerificationRequired;
     if (requireVerification) {
       const token = randomToken(24);
@@ -167,12 +180,20 @@ export function createUsersService(
         type: 'registration_confirmed',
         payload: { verifyUrl },
       });
-      return { user: await toPortalUser(row, initialRoles), verifyToken: token };
+      return {
+        user: await toPortalUser(row, initialRoles),
+        verifyToken: token,
+        requiresAdminApproval: false,
+      };
     }
 
     await store.users.markEmailVerified(userId, new Date().toISOString());
     const fresh = await store.users.findById(userId);
-    return { user: await toPortalUser(fresh!, initialRoles), verifyToken: null };
+    return {
+      user: await toPortalUser(fresh!, initialRoles),
+      verifyToken: null,
+      requiresAdminApproval: false,
+    };
   };
 
   const verifyEmail: UsersService['verifyEmail'] = async (token) => {
@@ -200,6 +221,9 @@ export function createUsersService(
       throw unauthorized('Invalid email or password');
     }
     if (user.status === 'disabled') throw unauthorized('Account disabled');
+    if (user.status === 'pending_admin_approval') {
+      throw unauthorized('Account is awaiting administrator approval');
+    }
     if (user.failed_login_count >= 10) {
       throw unauthorized('Too many failed attempts. Reset your password to continue.');
     }
@@ -317,6 +341,84 @@ export function createUsersService(
     return loadById(id);
   };
 
+  const approveRegistration: UsersService['approveRegistration'] = async (id) => {
+    const user = await store.users.findById(id);
+    if (!user) throw notFound('User not found');
+    if (user.status !== 'pending_admin_approval') {
+      throw badRequest('not_pending_admin_approval', 'User is not awaiting administrator approval');
+    }
+    const settings = await loadAppSettings(store);
+    if (settings.emailVerificationRequired) {
+      await store.users.updateStatus(id, 'pending');
+      await store.sessions.deleteForUser(id);
+      const token = randomToken(24);
+      await store.verifications.createEmailToken({
+        token,
+        user_id: id,
+        expires_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+        consumed_at: null,
+      });
+      const verifyUrl = `${config.publicUrl}/verify-email?token=${token}`;
+      await emailService.enqueue({
+        to: user.email,
+        templateKey: 'registration_confirmed',
+        vars: { name: user.name ?? user.email, verifyUrl },
+        idempotencyKey: `verify:${token}`,
+      });
+      const roles = await store.userRoles.forUser(id);
+      return { user: await toPortalUser((await store.users.findById(id))!, roles), verifyToken: token };
+    }
+    await store.users.markEmailVerified(id, new Date().toISOString());
+    await store.sessions.deleteForUser(id);
+    const roles = await store.userRoles.forUser(id);
+    return { user: await toPortalUser((await store.users.findById(id))!, roles), verifyToken: null };
+  };
+
+  const denyRegistration: UsersService['denyRegistration'] = async (id, reason) => {
+    const user = await store.users.findById(id);
+    if (!user) throw notFound('User not found');
+    if (user.status !== 'pending_admin_approval') {
+      throw badRequest('not_pending_admin_approval', 'User is not awaiting administrator approval');
+    }
+    await store.users.updateStatus(id, 'disabled');
+    await store.sessions.deleteForUser(id);
+    await emailService.enqueue({
+      to: user.email,
+      templateKey: 'registration_denied',
+      vars: { name: user.name ?? user.email, reason },
+      idempotencyKey: `reg-denied:${id}`,
+    });
+    const roles = await store.userRoles.forUser(id);
+    return toPortalUser((await store.users.findById(id))!, roles);
+  };
+
+  const sendPendingRegistrationEmails = async (
+    input: RegistrationInput,
+    userId: string,
+  ): Promise<void> => {
+    const { rows } = await store.users.listFiltered({ status: 'active', limit: 10_000 });
+    for (const admin of rows) {
+      const roles = await store.userRoles.forUser(admin.id);
+      if (!roles.includes('super_admin')) continue;
+      await emailService.enqueue({
+        to: admin.email,
+        templateKey: 'admin_registration_pending',
+        vars: {
+          userEmail: input.email,
+          userName: input.name ?? input.email,
+          reviewUrl: `${config.publicUrl}/admin/pending-registrations`,
+        },
+        idempotencyKey: `reg-pending:${userId}:${admin.id}`,
+      });
+    }
+    await emailService.enqueue({
+      to: input.email,
+      templateKey: 'registration_pending_admin_approval',
+      vars: { name: input.name ?? input.email, productName: 'Ferrum Nexus' },
+      idempotencyKey: `reg-pending:${userId}:registrant`,
+    });
+  };
+
   return {
     register,
     verifyEmail,
@@ -329,15 +431,34 @@ export function createUsersService(
     completePasswordReset,
     setStatus,
     setRoles,
+    approveRegistration,
+    denyRegistration,
   };
 }
 
 export async function loadAppSettings(store: NexusStore): Promise<{
   emailVerificationRequired: boolean;
   registrationEnabled: boolean;
+  registrationAllowedEmailDomains: string[];
+  registrationRequiresAdminApproval: boolean;
 }> {
   return {
     emailVerificationRequired: ((await store.settings.get<boolean>('emailVerificationRequired')) ?? true) === true,
     registrationEnabled: ((await store.settings.get<boolean>('registrationEnabled')) ?? true) === true,
+    registrationAllowedEmailDomains:
+      (await store.settings.get<string[]>('registrationAllowedEmailDomains')) ?? [],
+    registrationRequiresAdminApproval:
+      ((await store.settings.get<boolean>('registrationRequiresAdminApproval')) ?? false) === true,
   };
+}
+
+function enforceAllowedDomain(emailNormalized: string, allowedDomains: string[]): void {
+  const normalized = allowedDomains.map((domain) => domain.trim().toLowerCase().replace(/^@/, ''));
+  if (normalized.length === 0) return;
+  const domain = emailNormalized.split('@')[1] ?? '';
+  if (!normalized.includes(domain)) {
+    throw badRequest('EMAIL_DOMAIN_NOT_ALLOWED', 'Email domain is not allowed', {
+      allowedDomains: normalized,
+    });
+  }
 }

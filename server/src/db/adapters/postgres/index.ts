@@ -1,5 +1,5 @@
 import { Pool, type PoolClient } from 'pg';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ResolvedConfig } from '../../../config/index.js';
@@ -47,20 +47,26 @@ export async function createPostgresStore(config: ResolvedConfig): Promise<Nexus
   const repos = buildSqlRepos(poolClient, 'postgres');
 
   const migrate = async (): Promise<void> => {
-    const sql = readFileSync(resolve(MIGRATIONS_DIR, '001_initial.pg.sql'), 'utf8');
     const c = await pool.connect();
     try {
       await c.query('BEGIN');
-      await c.query(sql);
       await c.query(`
         CREATE TABLE IF NOT EXISTS _migrations (
           id TEXT PRIMARY KEY,
           applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
         )
       `);
-      await c.query('INSERT INTO _migrations (id) VALUES ($1) ON CONFLICT DO NOTHING', [
-        '001_initial',
-      ]);
+      const appliedRows = await c.query<{ id: string }>('SELECT id FROM _migrations');
+      const applied = new Set(appliedRows.rows.map((row) => row.id));
+      const files = readdirSync(MIGRATIONS_DIR)
+        .filter((file) => /^\d+_.+\.pg\.sql$/.test(file))
+        .sort();
+      for (const file of files) {
+        const id = file.replace(/\.pg\.sql$/, '');
+        if (applied.has(id)) continue;
+        await c.query(readFileSync(resolve(MIGRATIONS_DIR, file), 'utf8'));
+        await c.query('INSERT INTO _migrations (id) VALUES ($1) ON CONFLICT DO NOTHING', [id]);
+      }
       await c.query('COMMIT');
     } catch (err) {
       await c.query('ROLLBACK');

@@ -1,13 +1,14 @@
 import { v4 as uuid } from 'uuid';
 import { z } from 'zod';
-import type { NexusStore, ApiAssetRow } from '../db/store.js';
+import type { NexusStore, ApiAssetRow, PolicyExceptionRequestRow } from '../db/store.js';
 import type { ApiAsset, ApiLifecycleStatus, ApiVisibility } from '@ferrum-nexus/shared';
 import { aclGroupForApi } from '@ferrum-nexus/shared';
-import { badRequest, conflict, forbidden, notFound } from '../lib/errors.js';
+import { ApiError, badRequest, conflict, forbidden, notFound } from '../lib/errors.js';
 import type { FerrumAdminClient } from '../ferrum-admin/client.js';
 import type { ResolvedConfig } from '../config/index.js';
-import { extractMetadata, slugify } from './oas.js';
+import { extractMetadata, normalizeAndExtractMetadata, slugify, type OasMetadata } from './oas.js';
 import type { AuditActor, AuditService } from '../audit/service.js';
+import type { PolicyService } from '../governance/policy-service.js';
 
 export const PublishInput = z.object({
   rawSpec: z.string().min(1),
@@ -58,6 +59,11 @@ export interface PublishingService {
     actor?: AuditActor | null;
   }): Promise<ApiAsset>;
   syncFromEdge(opts: { namespace?: string }): Promise<{ imported: number; updated: number; drift: number }>;
+  publishStaged(opts: {
+    pendingPublishId: string;
+    exception: PolicyExceptionRequestRow;
+    actor?: AuditActor | null;
+  }): Promise<ApiAsset>;
 }
 
 export function createPublishingService(
@@ -65,6 +71,7 @@ export function createPublishingService(
   store: NexusStore,
   ferrum: FerrumAdminClient,
   audit: AuditService,
+  policy?: PolicyService,
 ): PublishingService {
   const toApi = (row: ApiAssetRow): ApiAsset => ({
     id: row.id,
@@ -80,12 +87,55 @@ export function createPublishingService(
     requestable: row.requestable === 1,
     lifecycle: row.lifecycle,
     tags: row.tags,
+    contactName: row.contact_name,
     contactEmail: row.contact_email,
+    contactUrl: row.contact_url,
     supportNotes: row.support_notes,
     operationCount: row.operation_count,
     contentHash: row.content_hash,
+    proxyHosts: row.proxy_hosts,
+    proxyPaths: row.proxy_paths,
+    proxyUpstreamUrl: row.proxy_upstream_url,
+    timeoutConnectMs: row.timeout_connect_ms,
+    timeoutReadMs: row.timeout_read_ms,
+    timeoutWriteMs: row.timeout_write_ms,
+    bodySizeLimitBytes: row.body_size_limit_bytes,
+    rateLimitPerMinute: row.rate_limit_per_minute,
+    operationPaths: row.operation_paths,
+    operationSummaries: row.operation_summaries,
+    sourceFormat: row.source_format,
+    policyExceptionId: row.policy_exception_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  });
+
+  const factColumns = (meta: OasMetadata): Pick<
+    ApiAssetRow,
+    | 'proxy_hosts'
+    | 'proxy_paths'
+    | 'proxy_upstream_url'
+    | 'timeout_connect_ms'
+    | 'timeout_read_ms'
+    | 'timeout_write_ms'
+    | 'body_size_limit_bytes'
+    | 'rate_limit_per_minute'
+    | 'operation_paths'
+    | 'operation_summaries'
+    | 'source_format'
+    | 'policy_exception_id'
+  > => ({
+    proxy_hosts: meta.keyFacts.proxyHosts,
+    proxy_paths: meta.keyFacts.proxyPaths,
+    proxy_upstream_url: meta.keyFacts.upstreamUrl,
+    timeout_connect_ms: meta.keyFacts.timeoutConnectMs,
+    timeout_read_ms: meta.keyFacts.timeoutReadMs,
+    timeout_write_ms: meta.keyFacts.timeoutWriteMs,
+    body_size_limit_bytes: meta.keyFacts.bodySizeLimitBytes,
+    rate_limit_per_minute: meta.keyFacts.rateLimitPerMinute,
+    operation_paths: meta.keyFacts.operationPaths,
+    operation_summaries: meta.keyFacts.operationSummaries,
+    source_format: meta.sourceFormat,
+    policy_exception_id: null,
   });
 
   const ensureUniqueSlug = async (base: string): Promise<string> => {
@@ -98,10 +148,39 @@ export function createPublishingService(
     return candidate;
   };
 
-  const publish: PublishingService['publish'] = async ({ providerId, input, actor }) => {
-    const meta = extractMetadata(input.rawSpec);
+  const enforcePolicyOrStage = async (opts: {
+    providerId: string;
+    rawSpec: string;
+    publishInput: Record<string, unknown>;
+  }): Promise<void> => {
+    if (!policy) return;
+    const evaluation = await policy.evaluate(opts.rawSpec);
+    if (evaluation.blocking.length === 0) return;
+    const pendingPublishId = uuid();
+    await store.pendingPublishes.insert({
+      id: pendingPublishId,
+      provider_id: opts.providerId,
+      raw_spec: opts.rawSpec,
+      publish_input: opts.publishInput,
+      exception_request_id: null,
+      created_at: new Date().toISOString(),
+    });
+    throw new ApiError(422, 'POLICY_VIOLATION', 'OpenAPI document violates governance policy', {
+      violations: evaluation.violations,
+      pendingPublishId,
+    });
+  };
+
+  const publishNormalized = async (opts: {
+    providerId: string;
+    input: PublishInput;
+    meta: Awaited<ReturnType<typeof normalizeAndExtractMetadata>>;
+    actor?: AuditActor | null;
+    policyExceptionId?: string | null;
+  }): Promise<ApiAsset> => {
+    const { providerId, input, meta, actor, policyExceptionId } = opts;
     const namespace = input.namespace ?? config.ferrum.defaultNamespace;
-    const created = await ferrum.createApiSpec(input.rawSpec, meta.rawContentType, namespace);
+    const created = await ferrum.createApiSpec(meta.rawSpec, meta.rawContentType, namespace);
     const id = uuid();
     const slug = await ensureUniqueSlug(slugify(`${meta.title}-${meta.version}`));
     const now = new Date().toISOString();
@@ -119,10 +198,14 @@ export function createPublishingService(
       requestable: input.requestable ? 1 : 0,
       lifecycle: input.lifecycle,
       tags: meta.tags,
+      contact_name: meta.contact?.name ?? null,
       contact_email: input.contactEmail ?? meta.contact?.email ?? null,
+      contact_url: meta.contact?.url ?? null,
       support_notes: input.supportNotes ?? null,
       operation_count: meta.operationCount,
       content_hash: meta.contentHash,
+      ...factColumns(meta),
+      policy_exception_id: policyExceptionId ?? null,
       created_at: now,
       updated_at: now,
     });
@@ -132,35 +215,52 @@ export function createPublishingService(
       version: meta.version,
       content_hash: meta.contentHash,
       submitted_by: providerId,
-      raw_spec: input.rawSpec,
+      raw_spec: meta.rawSpec,
       created_at: now,
     });
     if (input.requestable) {
       await ensureAccessControlPlugin(id);
     }
     await audit.record(null, {
-      action: 'api.publish',
+      action: policyExceptionId ? 'api.publish_with_exception' : 'api.publish',
       targetType: 'api_asset',
       targetId: id,
-      after: { title: meta.title, version: meta.version, requestable: input.requestable },
+      after: {
+        title: meta.title,
+        version: meta.version,
+        requestable: input.requestable,
+        policyExceptionId,
+      },
       actor,
     });
     return toApi(row);
   };
 
-  const replaceSpec: PublishingService['replaceSpec'] = async ({
-    providerId,
-    assetId,
-    rawSpec,
-    actor,
-  }) => {
+  const publish: PublishingService['publish'] = async ({ providerId, input, actor }) => {
+    const meta = await normalizeAndExtractMetadata(input.rawSpec);
+    const { rawSpec: _rawSpec, ...stageInput } = input;
+    await enforcePolicyOrStage({
+      providerId,
+      rawSpec: meta.rawSpec,
+      publishInput: { ...stageInput, mode: 'publish' },
+    });
+    return publishNormalized({ providerId, input, meta, actor });
+  };
+
+  const replaceNormalized = async (opts: {
+    providerId: string;
+    assetId: string;
+    meta: Awaited<ReturnType<typeof normalizeAndExtractMetadata>>;
+    actor?: AuditActor | null;
+    policyExceptionId?: string | null;
+  }): Promise<ApiAsset> => {
+    const { providerId, assetId, meta, actor, policyExceptionId } = opts;
     const existing = await store.apiAssets.findById(assetId);
     if (!existing) throw notFound('API asset not found');
     if (existing.provider_id !== providerId) throw forbidden('Not the API owner');
-    const meta = extractMetadata(rawSpec);
     const updatedEdge = await ferrum.replaceApiSpec(
       existing.api_spec_id,
-      rawSpec,
+      meta.rawSpec,
       meta.rawContentType,
       existing.namespace,
     );
@@ -173,7 +273,11 @@ export function createPublishingService(
       tags: meta.tags,
       operation_count: meta.operationCount,
       content_hash: meta.contentHash,
+      contact_name: meta.contact?.name ?? null,
       contact_email: existing.contact_email ?? meta.contact?.email ?? null,
+      contact_url: meta.contact?.url ?? null,
+      ...factColumns(meta),
+      policy_exception_id: policyExceptionId ?? existing.policy_exception_id,
     });
     await store.apiSpecVersions.insert({
       id: uuid(),
@@ -181,21 +285,39 @@ export function createPublishingService(
       version: meta.version,
       content_hash: meta.contentHash,
       submitted_by: providerId,
-      raw_spec: rawSpec,
+      raw_spec: meta.rawSpec,
       created_at: new Date().toISOString(),
     });
     if (next.requestable === 1) {
       await ensureAccessControlPlugin(assetId);
     }
     await audit.record(null, {
-      action: 'api.spec_replace',
+      action: policyExceptionId ? 'api.publish_with_exception' : 'api.spec_replace',
       targetType: 'api_asset',
       targetId: assetId,
       before: { version: existing.version, contentHash: existing.content_hash },
-      after: { version: meta.version, contentHash: meta.contentHash },
+      after: { version: meta.version, contentHash: meta.contentHash, policyExceptionId },
       actor,
     });
     return toApi(next);
+  };
+
+  const replaceSpec: PublishingService['replaceSpec'] = async ({
+    providerId,
+    assetId,
+    rawSpec,
+    actor,
+  }) => {
+    const existing = await store.apiAssets.findById(assetId);
+    if (!existing) throw notFound('API asset not found');
+    if (existing.provider_id !== providerId) throw forbidden('Not the API owner');
+    const meta = await normalizeAndExtractMetadata(rawSpec);
+    await enforcePolicyOrStage({
+      providerId,
+      rawSpec: meta.rawSpec,
+      publishInput: { mode: 'replace', assetId },
+    });
+    return replaceNormalized({ providerId, assetId, meta, actor });
   };
 
   const updateSettings: PublishingService['updateSettings'] = async ({
@@ -212,7 +334,9 @@ export function createPublishingService(
       requestable:
         patch.requestable == null ? existing.requestable : patch.requestable ? 1 : 0,
       lifecycle: (patch.lifecycle ?? existing.lifecycle) as ApiLifecycleStatus,
+      contact_name: existing.contact_name,
       contact_email: patch.contactEmail === undefined ? existing.contact_email : patch.contactEmail,
+      contact_url: existing.contact_url,
       support_notes: patch.supportNotes === undefined ? existing.support_notes : patch.supportNotes,
       title: patch.title ?? existing.title,
       description: patch.description === undefined ? existing.description : patch.description,
@@ -299,10 +423,28 @@ export function createPublishingService(
       requestable: 0,
       lifecycle: 'draft',
       tags: spec.tags ?? meta?.tags ?? [],
+      contact_name: spec.contact?.name ?? meta?.contact?.name ?? null,
       contact_email: spec.contact?.email ?? meta?.contact?.email ?? null,
+      contact_url: spec.contact?.url ?? meta?.contact?.url ?? null,
       support_notes: null,
       operation_count: spec.operation_count ?? meta?.operationCount ?? 0,
       content_hash: spec.content_hash ?? meta?.contentHash ?? null,
+      ...(meta
+        ? factColumns(meta)
+        : {
+            proxy_hosts: [],
+            proxy_paths: [],
+            proxy_upstream_url: null,
+            timeout_connect_ms: null,
+            timeout_read_ms: null,
+            timeout_write_ms: null,
+            body_size_limit_bytes: null,
+            rate_limit_per_minute: null,
+            operation_paths: [],
+            operation_summaries: [],
+            source_format: 'openapi3' as const,
+            policy_exception_id: null,
+          }),
       created_at: now,
       updated_at: now,
     });
@@ -343,6 +485,48 @@ export function createPublishingService(
     return { imported, updated, drift };
   };
 
+  const publishStaged: PublishingService['publishStaged'] = async ({
+    pendingPublishId,
+    exception,
+    actor,
+  }) => {
+    const pending = await store.pendingPublishes.findById(pendingPublishId);
+    if (!pending) throw notFound('Pending publish not found');
+    if (exception.pending_publish_id !== pendingPublishId) {
+      throw badRequest('exception_mismatch', 'Exception does not match pending publish');
+    }
+    if (policy) {
+      const evaluation = await policy.evaluateWithException(pending.raw_spec, exception);
+      if (evaluation.blocking.length > 0) {
+        throw new ApiError(422, 'POLICY_VIOLATION', 'OpenAPI document still violates policy', {
+          violations: evaluation.violations,
+          pendingPublishId,
+        });
+      }
+    }
+    const meta = await normalizeAndExtractMetadata(pending.raw_spec);
+    const mode = pending.publish_input.mode;
+    const asset =
+      mode === 'replace' && typeof pending.publish_input.assetId === 'string'
+        ? await replaceNormalized({
+            providerId: pending.provider_id,
+            assetId: pending.publish_input.assetId,
+            meta,
+            actor,
+            policyExceptionId: exception.id,
+          })
+        : await publishNormalized({
+            providerId: pending.provider_id,
+            input: PublishInput.parse({ ...pending.publish_input, rawSpec: pending.raw_spec }),
+            meta,
+            actor,
+            policyExceptionId: exception.id,
+          });
+    await store.policyExceptions.update(exception.id, { api_asset_id: asset.id });
+    await store.pendingPublishes.delete(pendingPublishId);
+    return asset;
+  };
+
   return {
     publish,
     replaceSpec,
@@ -351,6 +535,7 @@ export function createPublishingService(
     ensureAccessControlPlugin,
     importFromEdge,
     syncFromEdge,
+    publishStaged,
   };
 }
 

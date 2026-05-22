@@ -30,6 +30,8 @@ import type {
   OrganizationMemberRow,
   OrganizationRow,
   PasswordResetRow,
+  PendingPublishRow,
+  PolicyExceptionRequestRow,
   SessionRow,
   UserRoleRow,
   UserRow,
@@ -54,6 +56,29 @@ function stripId<T extends { _id: string }>(
 function withId<T extends { id: string }>(row: T): WithId<Omit<T, 'id'>> {
   const { id, ...rest } = row;
   return { _id: id, ...(rest as Omit<T, 'id'>) } as WithId<Omit<T, 'id'>>;
+}
+
+function hydrateAsset(row: WithId<Omit<ApiAssetRow, 'id'>> | null): ApiAssetRow | null {
+  const stripped = stripId(row);
+  if (!stripped) return null;
+  return {
+    ...stripped,
+    contact_name: stripped.contact_name ?? null,
+    contact_email: stripped.contact_email ?? null,
+    contact_url: stripped.contact_url ?? null,
+    proxy_hosts: stripped.proxy_hosts ?? [],
+    proxy_paths: stripped.proxy_paths ?? [],
+    proxy_upstream_url: stripped.proxy_upstream_url ?? null,
+    timeout_connect_ms: stripped.timeout_connect_ms ?? null,
+    timeout_read_ms: stripped.timeout_read_ms ?? null,
+    timeout_write_ms: stripped.timeout_write_ms ?? null,
+    body_size_limit_bytes: stripped.body_size_limit_bytes ?? null,
+    rate_limit_per_minute: stripped.rate_limit_per_minute ?? null,
+    operation_paths: stripped.operation_paths ?? [],
+    operation_summaries: stripped.operation_summaries ?? [],
+    source_format: stripped.source_format ?? 'openapi3',
+    policy_exception_id: stripped.policy_exception_id ?? null,
+  };
 }
 
 export async function createMongoStore(config: ResolvedConfig): Promise<NexusStore> {
@@ -102,6 +127,10 @@ export async function createMongoStore(config: ResolvedConfig): Promise<NexusSto
     credentials: db.collection<WithId<Omit<CredentialMetadataRow, 'id'>>>('credential_metadata'),
     apiAssets: db.collection<WithId<Omit<ApiAssetRow, 'id'>>>('api_assets'),
     apiSpecVersions: db.collection<WithId<Omit<ApiSpecVersionRow, 'id'>>>('api_spec_versions'),
+    policyExceptions: db.collection<WithId<Omit<PolicyExceptionRequestRow, 'id'>>>(
+      'policy_exception_requests',
+    ),
+    pendingPublishes: db.collection<WithId<Omit<PendingPublishRow, 'id'>>>('pending_publishes'),
     accessRequests: db.collection<WithId<Omit<AccessRequestRow, 'id'>>>('access_requests'),
     accessGrants: db.collection<WithId<Omit<AccessGrantRow, 'id'>>>('access_grants'),
     conversations: db.collection<WithId<Omit<ConversationRow, 'id'>>>('conversations'),
@@ -133,6 +162,10 @@ export async function createMongoStore(config: ResolvedConfig): Promise<NexusSto
       c.apiAssets.createIndex({ visibility: 1 }),
       c.apiAssets.createIndex({ lifecycle: 1 }),
       c.apiSpecVersions.createIndex({ api_asset_id: 1, created_at: -1 }),
+      c.policyExceptions.createIndex({ status: 1, created_at: 1 }),
+      c.policyExceptions.createIndex({ provider_id: 1, created_at: -1 }),
+      c.policyExceptions.createIndex({ api_asset_id: 1, created_at: -1 }),
+      c.pendingPublishes.createIndex({ provider_id: 1, created_at: -1 }),
       c.accessRequests.createIndex({ client_user_id: 1, api_asset_id: 1, status: 1 }),
       c.accessGrants.createIndex({ client_consumer_id: 1, api_asset_id: 1 }),
       c.accessGrants.createIndex(
@@ -422,16 +455,16 @@ export async function createMongoStore(config: ResolvedConfig): Promise<NexusSto
         const set = { ...fields, updated_at: new Date().toISOString() };
         delete (set as Record<string, unknown>).id;
         await c.apiAssets.updateOne({ _id: id }, { $set: set });
-        return stripId(await c.apiAssets.findOne({ _id: id }))!;
+        return hydrateAsset(await c.apiAssets.findOne({ _id: id }))!;
       },
       async findById(id) {
-        return stripId(await c.apiAssets.findOne({ _id: id }));
+        return hydrateAsset(await c.apiAssets.findOne({ _id: id }));
       },
       async findBySpecId(specId) {
-        return stripId(await c.apiAssets.findOne({ api_spec_id: specId }));
+        return hydrateAsset(await c.apiAssets.findOne({ api_spec_id: specId }));
       },
       async findBySlug(slug) {
-        return stripId(await c.apiAssets.findOne({ slug }));
+        return hydrateAsset(await c.apiAssets.findOne({ slug }));
       },
       async delete(id) {
         await c.apiAssets.deleteOne({ _id: id });
@@ -453,7 +486,7 @@ export async function createMongoStore(config: ResolvedConfig): Promise<NexusSto
           c.apiAssets.find(filter).sort({ updated_at: -1 }).skip(offset).limit(limit).toArray(),
           c.apiAssets.countDocuments(filter),
         ]);
-        return { rows: rows.map((r) => stripId(r)!), total };
+        return { rows: rows.map((r) => hydrateAsset(r)!), total };
       },
     },
     apiSpecVersions: {
@@ -478,6 +511,60 @@ export async function createMongoStore(config: ResolvedConfig): Promise<NexusSto
       },
       async get(id) {
         return stripId(await c.apiSpecVersions.findOne({ _id: id }));
+      },
+    },
+    policyExceptions: {
+      async insert(row) {
+        await c.policyExceptions.insertOne(withId(row));
+        return row;
+      },
+      async update(id, fields) {
+        const set: Record<string, unknown> = { ...fields };
+        delete set.id;
+        await c.policyExceptions.updateOne({ _id: id }, { $set: set });
+        return stripId(await c.policyExceptions.findOne({ _id: id }))!;
+      },
+      async findById(id) {
+        return stripId(await c.policyExceptions.findOne({ _id: id }));
+      },
+      async listPending() {
+        const rows = await c.policyExceptions
+          .find({ status: 'pending' })
+          .sort({ created_at: 1 })
+          .toArray();
+        return rows.map((r) => stripId(r)!);
+      },
+      async listForProvider(providerId) {
+        const rows = await c.policyExceptions
+          .find({ provider_id: providerId })
+          .sort({ created_at: -1 })
+          .toArray();
+        return rows.map((r) => stripId(r)!);
+      },
+      async listForAsset(apiAssetId) {
+        const rows = await c.policyExceptions
+          .find({ api_asset_id: apiAssetId })
+          .sort({ created_at: -1 })
+          .toArray();
+        return rows.map((r) => stripId(r)!);
+      },
+    },
+    pendingPublishes: {
+      async insert(row) {
+        await c.pendingPublishes.insertOne(withId(row));
+        return row;
+      },
+      async update(id, fields) {
+        const set: Record<string, unknown> = { ...fields };
+        delete set.id;
+        await c.pendingPublishes.updateOne({ _id: id }, { $set: set });
+        return stripId(await c.pendingPublishes.findOne({ _id: id }))!;
+      },
+      async findById(id) {
+        return stripId(await c.pendingPublishes.findOne({ _id: id }));
+      },
+      async delete(id) {
+        await c.pendingPublishes.deleteOne({ _id: id });
       },
     },
     accessRequests: {

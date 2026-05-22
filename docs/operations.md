@@ -53,6 +53,10 @@ For PostgreSQL / MySQL / MongoDB, set `NEXUS_DB_URL` to a standard connection
 string. Migrations live in `server/src/db/migrations/` and run automatically
 at startup.
 
+For a populated local SQLite instance that shows the portal with active users,
+catalog APIs, requests, grants, credentials, messages, and governance data, see
+[`demo-seed.md`](demo-seed.md).
+
 **MongoDB caveat:** multi-document transactions require a replica set. Nexus
 refuses to start against a standalone MongoDB by default — credential
 rotation and grant approval rely on transactional guarantees. If you
@@ -96,6 +100,25 @@ via `POST /api/admin/drift/sync`.
 For unmanaged APIs that exist on Edge but not in Nexus, use
 `POST /api/admin/imports/api-spec { specId, ownerId, namespace? }` to claim
 ownership in the catalog.
+
+## Ferrum Admin API cache
+
+Nexus wraps the Ferrum Edge Admin client in a single-node in-memory cache by
+default. Read TTLs are controlled by `NEXUS_FERRUM_CACHE_TTL_*` variables and
+mutating Admin API calls invalidate the affected API specs, consumers, and
+health entries. A periodic refresh runs every
+`NEXUS_FERRUM_CACHE_REFRESH_HOURS` hours.
+
+For multi-replica Nexus deployments, this cache is local to each process. To
+get cross-instance invalidation, replace the `FerrumCacheBackend` implementation
+with a Redis-backed backend and publish `delete` / `deletePrefix` events to the
+other replicas.
+
+## Governance policy
+
+If `NEXUS_POLICY_FILE` points at a YAML policy file, Nexus seeds
+`app_settings.governance_policy` on first boot only. After that, the database
+copy is authoritative and changes should be made through the admin policy UI.
 
 ## Observability
 

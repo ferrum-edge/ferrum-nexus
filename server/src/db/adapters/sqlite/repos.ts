@@ -20,6 +20,8 @@ import type {
   OrganizationMemberRow,
   OrganizationRow,
   PasswordResetRow,
+  PendingPublishRow,
+  PolicyExceptionRequestRow,
   SessionRow,
   UserRoleRow,
   UserRow,
@@ -44,7 +46,19 @@ const P = <T>(value: string | null | undefined, fallback: T): T => {
 };
 
 type ConsumerRowRaw = Omit<FerrumConsumerRow, 'acl_groups'> & { acl_groups: string };
-type AssetRowRaw = Omit<ApiAssetRow, 'tags'> & { tags: string };
+type AssetJsonField =
+  | 'tags'
+  | 'proxy_hosts'
+  | 'proxy_paths'
+  | 'operation_paths'
+  | 'operation_summaries';
+type AssetRowRaw = Omit<ApiAssetRow, AssetJsonField> & {
+  tags: string;
+  proxy_hosts: string | null;
+  proxy_paths: string | null;
+  operation_paths: string | null;
+  operation_summaries: string | null;
+};
 type ConversationRowRaw = Omit<ConversationRow, 'participants'> & { participants: string };
 type MessageRowRaw = Omit<MessageRow, 'read_by'> & { read_by: string };
 type NotificationRowRaw = Omit<NotificationRow, 'payload'> & { payload: string };
@@ -55,12 +69,29 @@ type OutboxRowRaw = Omit<EmailOutboxRow, 'payload' | 'headers'> & {
 type AuditRowRaw = Omit<AuditLogRow, 'before' | 'after'> & { before: string; after: string };
 type SettingRowRaw = Omit<AppSettingRow, 'value' | 'encrypted'> & { value: string; encrypted: number };
 type CampaignRowRaw = Omit<MassEmailCampaignRow, 'recipient_filter'> & { recipient_filter: string };
+type PolicyExceptionRaw = Omit<PolicyExceptionRequestRow, 'violations'> & { violations: string };
+type PendingPublishRaw = Omit<PendingPublishRow, 'publish_input'> & { publish_input: string };
 
 function hydrateConsumer(row: ConsumerRowRaw): FerrumConsumerRow {
   return { ...row, acl_groups: P<string[]>(row.acl_groups, []) };
 }
 function hydrateAsset(row: AssetRowRaw): ApiAssetRow {
-  return { ...row, tags: P<string[]>(row.tags, []) };
+  return {
+    ...row,
+    tags: P<string[]>(row.tags, []),
+    proxy_hosts: P<string[]>(row.proxy_hosts, []),
+    proxy_paths: P<string[]>(row.proxy_paths, []),
+    proxy_upstream_url: row.proxy_upstream_url ?? null,
+    timeout_connect_ms: row.timeout_connect_ms ?? null,
+    timeout_read_ms: row.timeout_read_ms ?? null,
+    timeout_write_ms: row.timeout_write_ms ?? null,
+    body_size_limit_bytes: row.body_size_limit_bytes ?? null,
+    rate_limit_per_minute: row.rate_limit_per_minute ?? null,
+    operation_paths: P<string[]>(row.operation_paths, []),
+    operation_summaries: P<string[]>(row.operation_summaries, []),
+    source_format: row.source_format ?? 'openapi3',
+    policy_exception_id: row.policy_exception_id ?? null,
+  };
 }
 function hydrateConversation(row: ConversationRowRaw): ConversationRow {
   return { ...row, participants: P<string[]>(row.participants, []) };
@@ -87,6 +118,15 @@ function hydrateAudit(row: AuditRowRaw): AuditLogRow {
 }
 function hydrateCampaign(row: CampaignRowRaw): MassEmailCampaignRow {
   return { ...row, recipient_filter: P<Record<string, unknown>>(row.recipient_filter, {}) };
+}
+function hydratePolicyException(row: PolicyExceptionRaw): PolicyExceptionRequestRow {
+  return { ...row, violations: P<PolicyExceptionRequestRow['violations']>(row.violations, []) };
+}
+function hydratePendingPublish(row: PendingPublishRaw): PendingPublishRow {
+  return {
+    ...row,
+    publish_input: P<Record<string, unknown>>(row.publish_input, {}),
+  };
 }
 
 export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'transaction' | 'migrate' | 'close'> {
@@ -248,11 +288,19 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
   const assetInsert = db.prepare(`
     INSERT INTO api_assets (id, api_spec_id, proxy_id, namespace, provider_id, title,
                             description, slug, version, visibility, requestable, lifecycle,
-                            tags, contact_email, support_notes, operation_count, content_hash,
-                            created_at, updated_at)
+                            tags, contact_name, contact_email, contact_url, support_notes,
+                            operation_count, content_hash,
+                            proxy_hosts, proxy_paths, proxy_upstream_url, timeout_connect_ms,
+                            timeout_read_ms, timeout_write_ms, body_size_limit_bytes,
+                            rate_limit_per_minute, operation_paths, operation_summaries,
+                            source_format, policy_exception_id, created_at, updated_at)
     VALUES (@id, @api_spec_id, @proxy_id, @namespace, @provider_id, @title, @description,
-            @slug, @version, @visibility, @requestable, @lifecycle, @tags, @contact_email,
-            @support_notes, @operation_count, @content_hash, @created_at, @updated_at)
+            @slug, @version, @visibility, @requestable, @lifecycle, @tags, @contact_name,
+            @contact_email, @contact_url, @support_notes, @operation_count, @content_hash,
+            @proxy_hosts, @proxy_paths, @proxy_upstream_url, @timeout_connect_ms,
+            @timeout_read_ms, @timeout_write_ms, @body_size_limit_bytes,
+            @rate_limit_per_minute, @operation_paths, @operation_summaries, @source_format,
+            @policy_exception_id, @created_at, @updated_at)
   `);
   const assetFindById = db.prepare('SELECT * FROM api_assets WHERE id = ?');
   const assetFindBySpec = db.prepare('SELECT * FROM api_assets WHERE api_spec_id = ?');
@@ -286,6 +334,33 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
     'SELECT * FROM api_spec_versions WHERE api_asset_id = ? ORDER BY created_at DESC LIMIT 1',
   );
   const specVerGet = db.prepare('SELECT * FROM api_spec_versions WHERE id = ?');
+
+  // ---------- GOVERNANCE ----------
+  const pendingPublishInsert = db.prepare(`
+    INSERT INTO pending_publishes (id, provider_id, raw_spec, publish_input,
+                                   exception_request_id, created_at)
+    VALUES (@id, @provider_id, @raw_spec, @publish_input, @exception_request_id, @created_at)
+  `);
+  const pendingPublishFind = db.prepare('SELECT * FROM pending_publishes WHERE id = ?');
+  const pendingPublishDelete = db.prepare('DELETE FROM pending_publishes WHERE id = ?');
+  const exceptionInsert = db.prepare(`
+    INSERT INTO policy_exception_requests (id, api_asset_id, provider_id, pending_publish_id,
+                                           violations, justification, status, reviewed_by,
+                                           reviewed_at, reviewer_notes, expires_at, created_at)
+    VALUES (@id, @api_asset_id, @provider_id, @pending_publish_id, @violations,
+            @justification, @status, @reviewed_by, @reviewed_at, @reviewer_notes,
+            @expires_at, @created_at)
+  `);
+  const exceptionFind = db.prepare('SELECT * FROM policy_exception_requests WHERE id = ?');
+  const exceptionListPending = db.prepare(
+    "SELECT * FROM policy_exception_requests WHERE status = 'pending' ORDER BY created_at ASC",
+  );
+  const exceptionListForProvider = db.prepare(
+    'SELECT * FROM policy_exception_requests WHERE provider_id = ? ORDER BY created_at DESC',
+  );
+  const exceptionListForAsset = db.prepare(
+    'SELECT * FROM policy_exception_requests WHERE api_asset_id = ? ORDER BY created_at DESC',
+  );
 
   // ---------- ACCESS REQUESTS ----------
   const reqInsert = db.prepare(`
@@ -651,7 +726,14 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
     },
     apiAssets: {
       async insert(row) {
-        assetInsert.run({ ...row, tags: J(row.tags) });
+        assetInsert.run({
+          ...row,
+          tags: J(row.tags),
+          proxy_hosts: J(row.proxy_hosts),
+          proxy_paths: J(row.proxy_paths),
+          operation_paths: J(row.operation_paths),
+          operation_summaries: J(row.operation_summaries),
+        });
         return row;
       },
       async update(id, fields) {
@@ -661,7 +743,9 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
           ...existing,
           ...Object.fromEntries(
             Object.entries(fields).map(([k, v]) =>
-              k === 'tags' ? [k, J(v)] : [k, v as unknown],
+              ['tags', 'proxy_hosts', 'proxy_paths', 'operation_paths', 'operation_summaries'].includes(k)
+                ? [k, J(v)]
+                : [k, v as unknown],
             ),
           ),
           updated_at: new Date().toISOString(),
@@ -670,9 +754,17 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
           UPDATE api_assets SET
             title = @title, description = @description, version = @version,
             visibility = @visibility, requestable = @requestable, lifecycle = @lifecycle,
-            tags = @tags, contact_email = @contact_email, support_notes = @support_notes,
+            tags = @tags, contact_name = @contact_name, contact_email = @contact_email,
+            contact_url = @contact_url, support_notes = @support_notes,
             operation_count = @operation_count, content_hash = @content_hash,
             api_spec_id = @api_spec_id, proxy_id = @proxy_id, namespace = @namespace,
+            proxy_hosts = @proxy_hosts, proxy_paths = @proxy_paths,
+            proxy_upstream_url = @proxy_upstream_url, timeout_connect_ms = @timeout_connect_ms,
+            timeout_read_ms = @timeout_read_ms, timeout_write_ms = @timeout_write_ms,
+            body_size_limit_bytes = @body_size_limit_bytes,
+            rate_limit_per_minute = @rate_limit_per_minute, operation_paths = @operation_paths,
+            operation_summaries = @operation_summaries, source_format = @source_format,
+            policy_exception_id = @policy_exception_id,
             updated_at = @updated_at
           WHERE id = @id
         `).run(next);
@@ -717,6 +809,82 @@ export function buildSqliteRepos(db: SqliteDB): Omit<NexusStore, 'driver' | 'tra
       },
       async get(id) {
         return (specVerGet.get(id) as ApiSpecVersionRow | undefined) ?? null;
+      },
+    },
+    policyExceptions: {
+      async insert(row) {
+        exceptionInsert.run({ ...row, violations: J(row.violations) });
+        return row;
+      },
+      async update(id, fields) {
+        const existing = exceptionFind.get(id) as PolicyExceptionRaw | undefined;
+        if (!existing) throw new Error(`Policy exception not found: ${id}`);
+        const next: PolicyExceptionRaw = {
+          ...existing,
+          ...Object.fromEntries(
+            Object.entries(fields).map(([key, value]) =>
+              key === 'violations' ? [key, J(value)] : [key, value as unknown],
+            ),
+          ),
+        } as PolicyExceptionRaw;
+        db.prepare(`
+          UPDATE policy_exception_requests SET
+            api_asset_id = @api_asset_id, provider_id = @provider_id,
+            pending_publish_id = @pending_publish_id, violations = @violations,
+            justification = @justification, status = @status, reviewed_by = @reviewed_by,
+            reviewed_at = @reviewed_at, reviewer_notes = @reviewer_notes,
+            expires_at = @expires_at
+          WHERE id = @id
+        `).run(next);
+        return hydratePolicyException(exceptionFind.get(id) as PolicyExceptionRaw);
+      },
+      async findById(id) {
+        const row = exceptionFind.get(id) as PolicyExceptionRaw | undefined;
+        return row ? hydratePolicyException(row) : null;
+      },
+      async listPending() {
+        return (exceptionListPending.all() as PolicyExceptionRaw[]).map(hydratePolicyException);
+      },
+      async listForProvider(providerId) {
+        return (exceptionListForProvider.all(providerId) as PolicyExceptionRaw[]).map(
+          hydratePolicyException,
+        );
+      },
+      async listForAsset(apiAssetId) {
+        return (exceptionListForAsset.all(apiAssetId) as PolicyExceptionRaw[]).map(
+          hydratePolicyException,
+        );
+      },
+    },
+    pendingPublishes: {
+      async insert(row) {
+        pendingPublishInsert.run({ ...row, publish_input: J(row.publish_input) });
+        return row;
+      },
+      async update(id, fields) {
+        const existing = pendingPublishFind.get(id) as PendingPublishRaw | undefined;
+        if (!existing) throw new Error(`Pending publish not found: ${id}`);
+        const next: PendingPublishRaw = {
+          ...existing,
+          ...Object.fromEntries(
+            Object.entries(fields).map(([key, value]) =>
+              key === 'publish_input' ? [key, J(value)] : [key, value as unknown],
+            ),
+          ),
+        } as PendingPublishRaw;
+        db.prepare(`
+          UPDATE pending_publishes SET provider_id = @provider_id, raw_spec = @raw_spec,
+            publish_input = @publish_input, exception_request_id = @exception_request_id
+          WHERE id = @id
+        `).run(next);
+        return hydratePendingPublish(pendingPublishFind.get(id) as PendingPublishRaw);
+      },
+      async findById(id) {
+        const row = pendingPublishFind.get(id) as PendingPublishRaw | undefined;
+        return row ? hydratePendingPublish(row) : null;
+      },
+      async delete(id) {
+        pendingPublishDelete.run(id);
       },
     },
     accessRequests: {

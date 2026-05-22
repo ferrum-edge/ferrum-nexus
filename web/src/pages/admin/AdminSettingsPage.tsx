@@ -8,6 +8,8 @@ interface FullSettings {
   captcha: CaptchaSettings;
   registrationEnabled: boolean;
   emailVerificationRequired: boolean;
+  registrationAllowedEmailDomains: string[];
+  registrationRequiresAdminApproval: boolean;
   sender: {
     from: string;
     smtpHost: string | null;
@@ -43,6 +45,8 @@ export function AdminSettingsPage() {
   const [registration, setRegistration] = useState({
     registrationEnabled: true,
     emailVerificationRequired: true,
+    registrationAllowedEmailDomains: '',
+    registrationRequiresAdminApproval: false,
   });
 
   useEffect(() => {
@@ -60,6 +64,8 @@ export function AdminSettingsPage() {
     setRegistration({
       registrationEnabled: data.registrationEnabled,
       emailVerificationRequired: data.emailVerificationRequired,
+      registrationAllowedEmailDomains: data.registrationAllowedEmailDomains.join('\n'),
+      registrationRequiresAdminApproval: data.registrationRequiresAdminApproval,
     });
   }, [data]);
 
@@ -88,7 +94,16 @@ export function AdminSettingsPage() {
   });
   const saveRegistration = useMutation({
     mutationFn: async () =>
-      api<void>('/admin/settings/registration', { method: 'PUT', json: registration }),
+      api<void>('/admin/settings/registration', {
+        method: 'PUT',
+        json: {
+          ...registration,
+          registrationAllowedEmailDomains: registration.registrationAllowedEmailDomains
+            .split(/\s+/)
+            .map((domain) => domain.trim())
+            .filter(Boolean),
+        },
+      }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['admin-settings'] }),
   });
 
@@ -194,6 +209,19 @@ export function AdminSettingsPage() {
           <input type="checkbox" checked={registration.emailVerificationRequired} onChange={(e) => setRegistration({ ...registration, emailVerificationRequired: e.target.checked })} />
           <span className="text-sm">Require email verification</span>
         </label>
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={registration.registrationRequiresAdminApproval} onChange={(e) => setRegistration({ ...registration, registrationRequiresAdminApproval: e.target.checked })} />
+          <span className="text-sm">Require administrator approval</span>
+        </label>
+        <div>
+          <label className="label">Allowed email domains</label>
+          <textarea
+            className="input min-h-[120px]"
+            value={registration.registrationAllowedEmailDomains}
+            onChange={(e) => setRegistration({ ...registration, registrationAllowedEmailDomains: e.target.value })}
+            placeholder="example.com"
+          />
+        </div>
         <button type="button" className="btn-primary" onClick={() => saveRegistration.mutate()}>Save registration</button>
       </div>
     </section>

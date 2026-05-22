@@ -108,6 +108,21 @@ export const DEFAULT_TEMPLATES: Record<string, { subject: string; body: string }
       'Hi {{name}},\n\nClick the link below to confirm your email and activate your account:\n\n' +
       '{{verifyUrl}}\n\nThis link expires in 24 hours.',
   },
+  admin_registration_pending: {
+    subject: 'New Ferrum Nexus registration pending approval',
+    body:
+      '{{userName}} ({{userEmail}}) registered for Ferrum Nexus and is awaiting administrator approval.\n\n' +
+      'Review at: {{reviewUrl}}',
+  },
+  registration_pending_admin_approval: {
+    subject: 'Your Ferrum Nexus registration is pending approval',
+    body:
+      'Hi {{name}},\n\nYour {{productName}} registration was received and is awaiting administrator approval.',
+  },
+  registration_denied: {
+    subject: 'Ferrum Nexus registration denied',
+    body: 'Hi {{name}},\n\nYour registration was denied.\n\nReason: {{reason}}',
+  },
   password_reset: {
     subject: 'Reset your Ferrum Nexus password',
     body:
@@ -152,5 +167,17 @@ export const DEFAULT_TEMPLATES: Record<string, { subject: string; body: string }
   admin_broadcast: {
     subject: '{{subject}}',
     body: '{{body}}',
+  },
+  policy_exception_created: {
+    subject: 'New API governance exception request',
+    body: '{{providerEmail}} requested an API governance exception.\n\nReview at: {{reviewUrl}}',
+  },
+  policy_exception_approved: {
+    subject: 'API governance exception approved',
+    body: 'Your API governance exception was approved.\n\nReviewer notes: {{reviewerNotes}}',
+  },
+  policy_exception_denied: {
+    subject: 'API governance exception denied',
+    body: 'Your API governance exception was denied.\n\nReviewer notes: {{reviewerNotes}}',
   },
 };

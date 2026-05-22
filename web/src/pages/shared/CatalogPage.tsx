@@ -1,21 +1,20 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../../lib/api.js';
-import type { ApiAssetWithProvider } from '@ferrum-nexus/shared';
 import { navigate } from '../../App.js';
+import { searchCatalog, type CatalogSearchItem } from '../../lib/catalog-search.js';
 
 interface CatalogResp {
-  items: ApiAssetWithProvider[];
-  total: number;
+  items: CatalogSearchItem[];
 }
 
 export function CatalogPage() {
   const [search, setSearch] = useState('');
   const { data, isLoading } = useQuery({
-    queryKey: ['catalog', search],
-    queryFn: async () =>
-      api<CatalogResp>('/catalog/apis', { query: { search: search || undefined, limit: 100 } }),
+    queryKey: ['catalog-search-index'],
+    queryFn: async () => api<CatalogResp>('/catalog/search-index'),
   });
+  const items = data ? searchCatalog(data.items, search) : [];
 
   return (
     <section>
@@ -30,11 +29,11 @@ export function CatalogPage() {
       </header>
       {isLoading ? (
         <p className="muted">Loading…</p>
-      ) : data?.items.length === 0 ? (
+      ) : items.length === 0 ? (
         <p className="muted">No APIs available yet.</p>
       ) : (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {data?.items.map((item) => (
+          {items.map((item) => (
             <button
               key={item.id}
               type="button"

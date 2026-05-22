@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../lib/auth.js';
 import { ThemeToggle } from './ThemeToggle.js';
 import { NotificationBell } from './NotificationBell.js';
@@ -18,6 +18,8 @@ import { AdminAuditPage } from '../pages/admin/AdminAuditPage.js';
 import { AdminSettingsPage } from '../pages/admin/AdminSettingsPage.js';
 import { AdminMassEmailPage } from '../pages/admin/AdminMassEmailPage.js';
 import { AdminDriftPage } from '../pages/admin/AdminDriftPage.js';
+import { AdminPendingRegistrationsPage } from '../pages/admin/AdminPendingRegistrationsPage.js';
+import { AdminPolicyPage } from '../pages/admin/AdminPolicyPage.js';
 import { MessagesPage } from '../pages/shared/MessagesPage.js';
 import { ProfilePage } from '../pages/shared/ProfilePage.js';
 
@@ -25,20 +27,122 @@ interface NavItem {
   to: string;
   label: string;
   match?: (path: string) => boolean;
-  roles?: ('client' | 'provider' | 'admin' | 'super_admin')[];
 }
 
-const NAV: NavItem[] = [
-  { to: '/', label: 'Dashboard', match: (p) => p === '/' },
-  { to: '/catalog', label: 'Catalog', match: (p) => p.startsWith('/catalog') || p.startsWith('/apis/') },
-  { to: '/client/access', label: 'My access', match: (p) => p.startsWith('/client/access'), roles: ['client'] },
-  { to: '/client/credentials', label: 'Credentials', match: (p) => p.startsWith('/client/credentials'), roles: ['client'] },
-  { to: '/provider/apis', label: 'My APIs', match: (p) => p.startsWith('/provider/apis'), roles: ['provider'] },
-  { to: '/provider/publish', label: 'Publish', match: (p) => p === '/provider/publish', roles: ['provider'] },
-  { to: '/provider/requests', label: 'Requests', match: (p) => p === '/provider/requests', roles: ['provider'] },
-  { to: '/messages', label: 'Messages', match: (p) => p.startsWith('/messages') },
-  { to: '/admin', label: 'Admin', match: (p) => p.startsWith('/admin'), roles: ['admin', 'super_admin'] },
+interface NavGroup {
+  label: string;
+  match: (path: string) => boolean;
+  roles: ('client' | 'provider' | 'admin' | 'super_admin')[];
+  children: NavItem[];
+}
+
+type NavEntry = (NavItem & { kind: 'link' }) | (NavGroup & { kind: 'group' });
+
+const NAV: NavEntry[] = [
+  { kind: 'link', to: '/', label: 'Dashboard', match: (p) => p === '/' },
+  { kind: 'link', to: '/catalog', label: 'Catalog', match: (p) => p.startsWith('/catalog') || p.startsWith('/apis/') },
+  { kind: 'link', to: '/messages', label: 'Messages', match: (p) => p.startsWith('/messages') },
+  {
+    kind: 'group',
+    label: 'Client',
+    match: (p) => p.startsWith('/client/'),
+    roles: ['client'],
+    children: [
+      { to: '/client/access', label: 'My access', match: (p) => p.startsWith('/client/access') },
+      { to: '/client/credentials', label: 'Credentials', match: (p) => p.startsWith('/client/credentials') },
+    ],
+  },
+  {
+    kind: 'group',
+    label: 'Provider',
+    match: (p) => p.startsWith('/provider/'),
+    roles: ['provider'],
+    children: [
+      { to: '/provider/apis', label: 'My APIs', match: (p) => p.startsWith('/provider/apis') },
+      { to: '/provider/publish', label: 'Publish', match: (p) => p === '/provider/publish' },
+      { to: '/provider/requests', label: 'Requests', match: (p) => p === '/provider/requests' },
+    ],
+  },
+  {
+    kind: 'group',
+    label: 'Admin',
+    match: (p) => p.startsWith('/admin'),
+    roles: ['admin', 'super_admin'],
+    children: [
+      { to: '/admin', label: 'Dashboard', match: (p) => p === '/admin' },
+      { to: '/admin/pending-registrations', label: 'Registrations', match: (p) => p === '/admin/pending-registrations' },
+      { to: '/admin/policy', label: 'Policy', match: (p) => p === '/admin/policy' },
+      { to: '/admin/users', label: 'Users', match: (p) => p === '/admin/users' },
+      { to: '/admin/settings', label: 'Settings', match: (p) => p === '/admin/settings' },
+      { to: '/admin/audit', label: 'Audit log', match: (p) => p === '/admin/audit' },
+    ],
+  },
 ];
+
+function NavDropdown({ group, pathname }: { group: NavGroup; pathname: string }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onClickOutside = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onClickOutside);
+    return () => document.removeEventListener('mousedown', onClickOutside);
+  }, [open]);
+
+  const active = group.match(pathname);
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={
+          'flex items-center gap-1 rounded px-3 py-1.5 text-sm ' +
+          (active
+            ? 'bg-slate-100 font-medium text-slate-900 dark:bg-slate-800 dark:text-slate-100'
+            : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800')
+        }
+      >
+        {group.label}
+        <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+          <path
+            fillRule="evenodd"
+            d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z"
+            clipRule="evenodd"
+          />
+        </svg>
+      </button>
+      {open ? (
+        <div className="absolute left-0 top-full z-50 mt-1 min-w-[10rem] rounded-md border border-slate-200 bg-white py-1 shadow-lg dark:border-slate-700 dark:bg-slate-800">
+          {group.children.map((item) => {
+            const childActive = item.match ? item.match(pathname) : pathname === item.to;
+            return (
+              <button
+                key={item.to}
+                type="button"
+                onClick={() => {
+                  navigate(item.to);
+                  setOpen(false);
+                }}
+                className={
+                  'block w-full px-4 py-2 text-left text-sm ' +
+                  (childActive
+                    ? 'bg-slate-100 font-medium text-slate-900 dark:bg-slate-700 dark:text-slate-100'
+                    : 'text-slate-600 hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-slate-700')
+                }
+              >
+                {item.label}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 export function AppShell() {
   const { user, logout, settings } = useAuth();
@@ -56,9 +160,9 @@ export function AppShell() {
 
   if (!user) return null;
 
-  const visibleNav = NAV.filter((item) => {
-    if (!item.roles) return true;
-    return item.roles.some((role) => user.roles.includes(role));
+  const visibleNav = NAV.filter((entry) => {
+    if (entry.kind === 'link') return true;
+    return entry.roles.some((role) => user.roles.includes(role));
   });
 
   return (
@@ -85,14 +189,17 @@ export function AppShell() {
               {settings?.branding.productName ?? 'Ferrum Nexus'}
             </span>
           </button>
-          <nav className="ml-6 flex flex-1 flex-wrap items-center gap-1">
-            {visibleNav.map((item) => {
-              const active = item.match ? item.match(pathname) : pathname === item.to;
+          <nav className="ml-6 flex flex-1 items-center gap-1">
+            {visibleNav.map((entry) => {
+              if (entry.kind === 'group') {
+                return <NavDropdown key={entry.label} group={entry} pathname={pathname} />;
+              }
+              const active = entry.match ? entry.match(pathname) : pathname === entry.to;
               return (
                 <button
-                  key={item.to}
+                  key={entry.to}
                   type="button"
-                  onClick={() => navigate(item.to)}
+                  onClick={() => navigate(entry.to)}
                   className={
                     'rounded px-3 py-1.5 text-sm ' +
                     (active
@@ -100,7 +207,7 @@ export function AppShell() {
                       : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800')
                   }
                 >
-                  {item.label}
+                  {entry.label}
                 </button>
               );
             })}
@@ -170,6 +277,8 @@ function renderRoute(
   if (pathname === '/admin/settings') return <AdminSettingsPage />;
   if (pathname === '/admin/mass-email') return <AdminMassEmailPage />;
   if (pathname === '/admin/drift') return <AdminDriftPage />;
+  if (pathname === '/admin/pending-registrations') return <AdminPendingRegistrationsPage />;
+  if (pathname === '/admin/policy') return <AdminPolicyPage />;
   return (
     <div className="card">
       <h2 className="text-lg font-semibold">Page not found</h2>

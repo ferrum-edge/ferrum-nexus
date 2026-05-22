@@ -19,6 +19,7 @@
     "test": "npm run build --workspace shared && npm run test --workspaces --if-present",
     "typecheck": "npm run build --workspace shared && npm run typecheck --workspace server && npm run typecheck --workspace web",
     "migrate": "npm run migrate --workspace server",
+    "seed:demo": "node scripts/seed-active-demo.mjs",
     "start": "npm run start --workspace server"
   },
   "devDependencies": {

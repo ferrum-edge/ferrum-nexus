@@ -68,6 +68,10 @@ npm run dev
 Open <http://127.0.0.1:5173>. Register the first user — they become the
 initial `super_admin`. The backend serves on `http://127.0.0.1:8787`.
 
+For a populated local portal, run `npm run seed:demo` after migrations and
+before starting dev. See [`docs/demo-seed.md`](docs/demo-seed.md) for the
+demo database setup and logins.
+
 ## Database
 
 Ferrum Nexus uses string UUIDs across all databases so PostgreSQL, MySQL,

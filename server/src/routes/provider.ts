@@ -10,6 +10,7 @@ import type { GrantsService } from '../grants/service.js';
 import type { CredentialsService } from '../credentials/service.js';
 import { CredentialCreateInput as CredentialInputSchema } from '../credentials/service.js';
 import type { MessagingService } from '../messaging/service.js';
+import type { PolicyExceptionService } from '../governance/exception-service.js';
 import type { NexusStore } from '../db/store.js';
 import { auditActorFromRequest } from '../audit/service.js';
 
@@ -22,10 +23,20 @@ export async function registerProviderRoutes(
     grants: GrantsService;
     credentials: CredentialsService;
     messaging: MessagingService;
+    policyExceptions: PolicyExceptionService;
     store: NexusStore;
   },
 ): Promise<void> {
-  const { publishing, catalog, accessRequests, grants, credentials, messaging, store } = opts;
+  const {
+    publishing,
+    catalog,
+    accessRequests,
+    grants,
+    credentials,
+    messaging,
+    policyExceptions,
+    store,
+  } = opts;
 
   // OAS specs are the only large payloads we routinely accept. Allow up to
   // 10 MiB only on the publish + replace-spec endpoints; every other route
@@ -43,6 +54,25 @@ export async function registerProviderRoutes(
     const input = PublishInput.parse(req.body);
     const asset = await publishing.publish({ providerId: user.id, input, actor: auditActorFromRequest(req) });
     reply.status(201).send({ asset });
+  });
+
+  app.post('/api/provider/governance/exceptions', async (req, reply) => {
+    const user = requireRole(req, 'provider', 'admin', 'super_admin');
+    const input = z
+      .object({ pendingPublishId: z.string(), justification: z.string().min(10).max(4000) })
+      .parse(req.body);
+    const exception = await policyExceptions.requestException({
+      providerId: user.id,
+      pendingPublishId: input.pendingPublishId,
+      justification: input.justification,
+      actor: auditActorFromRequest(req),
+    });
+    reply.status(201).send({ exception });
+  });
+
+  app.get('/api/provider/governance/exceptions', async (req, reply) => {
+    const user = requireRole(req, 'provider', 'admin', 'super_admin');
+    reply.send({ exceptions: await policyExceptions.listForProvider(user.id) });
   });
 
   app.put('/api/provider/apis/:id/spec', SPEC_UPLOAD_LIMIT, async (req, reply) => {

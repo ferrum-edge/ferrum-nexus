@@ -12,14 +12,14 @@ import { v4 as uuid } from 'uuid';
 import { constantTimeEqual, randomToken } from '../lib/crypto.js';
 import type { ResolvedConfig } from '../config/index.js';
 import type { NexusStore } from '../db/store.js';
-import type { UserRole } from '@ferrum-nexus/shared';
+import type { UserRole, UserStatus } from '@ferrum-nexus/shared';
 import { unauthorized, forbidden } from '../lib/errors.js';
 import { SESSION_COOKIE_NAME, CSRF_COOKIE, CSRF_HEADER } from '@ferrum-nexus/shared';
 
 export interface AuthenticatedUser {
   id: string;
   email: string;
-  status: 'pending' | 'active' | 'disabled';
+  status: UserStatus;
   roles: UserRole[];
 }
 

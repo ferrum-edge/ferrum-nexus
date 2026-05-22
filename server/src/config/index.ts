@@ -17,6 +17,8 @@ const EnvBoolean = z.preprocess((value) => {
   if (['false', '0', 'no', 'off', ''].includes(normalized)) return false;
   return value;
 }, z.boolean());
+const TtlSeconds = (seconds: number) =>
+  z.coerce.number().positive().default(seconds).transform((value) => value * 1000);
 
 const Schema = z.object({
   nodeEnv: z.enum(['development', 'production', 'test']).default('development'),
@@ -28,6 +30,7 @@ const Schema = z.object({
   secretKey: z
     .string()
     .min(32, 'NEXUS_SECRET_KEY must be at least 32 characters (use `openssl rand -hex 32`).'),
+  policyFile: z.string().optional(),
 
   db: z.object({
     driver: DbDriver.default('sqlite'),
@@ -56,6 +59,17 @@ const Schema = z.object({
     jwtTtl: z.coerce.number().int().positive().default(300),
     defaultNamespace: z.string().default('default'),
     caPath: z.string().optional(),
+    cacheEnabled: EnvBoolean.default(true),
+    cacheRefreshHours: z.coerce.number().positive().default(12),
+    cacheTtls: z.object({
+      apiSpec: TtlSeconds(300),
+      apiSpecList: TtlSeconds(60),
+      apiSpecRaw: TtlSeconds(300),
+      consumer: TtlSeconds(120),
+      namespaces: TtlSeconds(600),
+      health: TtlSeconds(10),
+      negative: TtlSeconds(15),
+    }),
   }),
 
   email: z.object({
@@ -79,6 +93,7 @@ export function loadConfig(): ResolvedConfig {
     corsOrigins: process.env.NEXUS_CORS_ORIGINS,
     trustProxy: process.env.NEXUS_TRUST_PROXY,
     secretKey: process.env.NEXUS_SECRET_KEY,
+    policyFile: process.env.NEXUS_POLICY_FILE,
     db: {
       driver: process.env.NEXUS_DB_DRIVER,
       url: process.env.NEXUS_DB_URL,
@@ -103,6 +118,17 @@ export function loadConfig(): ResolvedConfig {
       jwtTtl: process.env.FERRUM_ADMIN_JWT_TTL,
       defaultNamespace: process.env.FERRUM_DEFAULT_NAMESPACE,
       caPath: process.env.FERRUM_ADMIN_CA_PATH,
+      cacheEnabled: process.env.NEXUS_FERRUM_CACHE_ENABLED,
+      cacheRefreshHours: process.env.NEXUS_FERRUM_CACHE_REFRESH_HOURS,
+      cacheTtls: {
+        apiSpec: process.env.NEXUS_FERRUM_CACHE_TTL_API_SPEC,
+        apiSpecList: process.env.NEXUS_FERRUM_CACHE_TTL_API_SPEC_LIST,
+        apiSpecRaw: process.env.NEXUS_FERRUM_CACHE_TTL_API_SPEC_RAW,
+        consumer: process.env.NEXUS_FERRUM_CACHE_TTL_CONSUMER,
+        namespaces: process.env.NEXUS_FERRUM_CACHE_TTL_NAMESPACES,
+        health: process.env.NEXUS_FERRUM_CACHE_TTL_HEALTH,
+        negative: process.env.NEXUS_FERRUM_CACHE_TTL_NEGATIVE,
+      },
     },
     email: {
       from: process.env.NEXUS_EMAIL_FROM,

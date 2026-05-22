@@ -16,6 +16,8 @@ import type {
   CredentialType,
   GrantStatus,
   NotificationType,
+  PolicyExceptionStatus,
+  Violation,
   UserRole,
   UserStatus,
 } from '@ferrum-nexus/shared';
@@ -123,10 +125,24 @@ export interface ApiAssetRow {
   requestable: number;
   lifecycle: ApiLifecycleStatus;
   tags: string[];
+  contact_name: string | null;
   contact_email: string | null;
+  contact_url: string | null;
   support_notes: string | null;
   operation_count: number;
   content_hash: string | null;
+  proxy_hosts: string[];
+  proxy_paths: string[];
+  proxy_upstream_url: string | null;
+  timeout_connect_ms: number | null;
+  timeout_read_ms: number | null;
+  timeout_write_ms: number | null;
+  body_size_limit_bytes: number | null;
+  rate_limit_per_minute: number | null;
+  operation_paths: string[];
+  operation_summaries: string[];
+  source_format: 'openapi3' | 'swagger2';
+  policy_exception_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -272,6 +288,30 @@ export interface MassEmailCampaignRow {
   completed_at: string | null;
 }
 
+export interface PolicyExceptionRequestRow {
+  id: string;
+  api_asset_id: string | null;
+  provider_id: string;
+  pending_publish_id: string | null;
+  violations: Violation[];
+  justification: string;
+  status: PolicyExceptionStatus;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  reviewer_notes: string | null;
+  expires_at: string | null;
+  created_at: string;
+}
+
+export interface PendingPublishRow {
+  id: string;
+  provider_id: string;
+  raw_spec: string;
+  publish_input: Record<string, unknown>;
+  exception_request_id: string | null;
+  created_at: string;
+}
+
 // ---------- Query helpers ----------
 
 export interface ListOptions {
@@ -367,6 +407,25 @@ export interface ApiSpecVersionsRepo {
   listForAsset(assetId: string): Promise<ApiSpecVersionRow[]>;
   latestForAsset(assetId: string): Promise<ApiSpecVersionRow | null>;
   get(id: string): Promise<ApiSpecVersionRow | null>;
+}
+
+export interface PolicyExceptionsRepo {
+  insert(row: PolicyExceptionRequestRow): Promise<PolicyExceptionRequestRow>;
+  update(
+    id: string,
+    fields: Partial<PolicyExceptionRequestRow>,
+  ): Promise<PolicyExceptionRequestRow>;
+  findById(id: string): Promise<PolicyExceptionRequestRow | null>;
+  listPending(): Promise<PolicyExceptionRequestRow[]>;
+  listForProvider(providerId: string): Promise<PolicyExceptionRequestRow[]>;
+  listForAsset(apiAssetId: string): Promise<PolicyExceptionRequestRow[]>;
+}
+
+export interface PendingPublishesRepo {
+  insert(row: PendingPublishRow): Promise<PendingPublishRow>;
+  update(id: string, fields: Partial<PendingPublishRow>): Promise<PendingPublishRow>;
+  findById(id: string): Promise<PendingPublishRow | null>;
+  delete(id: string): Promise<void>;
 }
 
 export interface AccessRequestsRepo {
@@ -465,6 +524,8 @@ export interface NexusStore {
   credentials: CredentialsRepo;
   apiAssets: ApiAssetsRepo;
   apiSpecVersions: ApiSpecVersionsRepo;
+  policyExceptions: PolicyExceptionsRepo;
+  pendingPublishes: PendingPublishesRepo;
   accessRequests: AccessRequestsRepo;
   grants: GrantsRepo;
   conversations: ConversationsRepo;

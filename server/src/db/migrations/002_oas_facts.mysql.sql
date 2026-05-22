@@ -1,0 +1,15 @@
+ALTER TABLE api_assets ADD COLUMN proxy_hosts JSON;
+ALTER TABLE api_assets ADD COLUMN proxy_paths JSON;
+ALTER TABLE api_assets ADD COLUMN proxy_upstream_url TEXT;
+ALTER TABLE api_assets ADD COLUMN timeout_connect_ms INT;
+ALTER TABLE api_assets ADD COLUMN timeout_read_ms INT;
+ALTER TABLE api_assets ADD COLUMN timeout_write_ms INT;
+ALTER TABLE api_assets ADD COLUMN body_size_limit_bytes INT;
+ALTER TABLE api_assets ADD COLUMN rate_limit_per_minute INT;
+ALTER TABLE api_assets ADD COLUMN operation_paths JSON;
+ALTER TABLE api_assets ADD COLUMN operation_summaries JSON;
+ALTER TABLE api_assets ADD COLUMN source_format VARCHAR(32) NOT NULL DEFAULT 'openapi3';
+UPDATE api_assets SET proxy_hosts = JSON_ARRAY() WHERE proxy_hosts IS NULL;
+UPDATE api_assets SET proxy_paths = JSON_ARRAY() WHERE proxy_paths IS NULL;
+UPDATE api_assets SET operation_paths = JSON_ARRAY() WHERE operation_paths IS NULL;
+UPDATE api_assets SET operation_summaries = JSON_ARRAY() WHERE operation_summaries IS NULL;

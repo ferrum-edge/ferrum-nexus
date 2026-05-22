@@ -1,6 +1,6 @@
 import { v4 as uuid } from 'uuid';
 import type { NexusStore } from '../db/store.js';
-import type { Organization } from '@ferrum-nexus/shared';
+import type { Organization, UserStatus } from '@ferrum-nexus/shared';
 
 export interface OrganizationsService {
   create(input: { name: string; domain?: string }): Promise<Organization>;
@@ -14,7 +14,7 @@ export function createOrganizationsService(store: NexusStore): OrganizationsServ
     id: string;
     name: string;
     domain: string | null;
-    status: 'pending' | 'active' | 'disabled';
+    status: UserStatus;
     created_at: string;
   }): Organization => ({
     id: row.id,

@@ -10,6 +10,8 @@ import type { DriftService } from '../drift/service.js';
 import type { PublishingService } from '../api-publishing/service.js';
 import type { AccessRequestsService } from '../access-requests/service.js';
 import type { CatalogService } from '../api-catalog/service.js';
+import type { PolicyService } from '../governance/policy-service.js';
+import type { PolicyExceptionService } from '../governance/exception-service.js';
 import type { NexusStore } from '../db/store.js';
 import {
   BrandingInput,
@@ -36,6 +38,8 @@ export async function registerAdminRoutes(
     publishing: PublishingService;
     accessRequests: AccessRequestsService;
     catalog: CatalogService;
+    policy: PolicyService;
+    policyExceptions: PolicyExceptionService;
     store: NexusStore;
   },
 ): Promise<void> {
@@ -49,6 +53,8 @@ export async function registerAdminRoutes(
     publishing,
     accessRequests,
     catalog,
+    policy,
+    policyExceptions,
     store,
   } = opts;
 
@@ -71,11 +77,26 @@ export async function registerAdminRoutes(
     reply.send({ users: await Promise.all(enriched), total });
   });
 
+  app.get('/api/admin/users/pending', async (req, reply) => {
+    requireAdmin(req);
+    const { rows, total } = await store.users.listFiltered({
+      status: 'pending_admin_approval',
+      limit: 200,
+    });
+    const enriched = await Promise.all(
+      rows.map(async (row) => {
+        const roles = await store.userRoles.forUser(row.id);
+        return users.toPortalUser(row, roles);
+      }),
+    );
+    reply.send({ users: enriched, total });
+  });
+
   app.put('/api/admin/users/:id/status', async (req, reply) => {
     requireAdmin(req);
     const { id } = req.params as { id: string };
     const { status } = z
-      .object({ status: z.enum(['pending', 'active', 'disabled']) })
+      .object({ status: z.enum(['pending', 'pending_admin_approval', 'active', 'disabled']) })
       .parse(req.body);
     if (status === 'disabled') await ensureNotLastActiveSuperAdmin(id, store);
     const user = await users.setStatus(id, status);
@@ -84,6 +105,33 @@ export async function registerAdminRoutes(
       targetType: 'user',
       targetId: id,
       after: { status },
+    });
+    reply.send({ user });
+  });
+
+  app.post('/api/admin/users/:id/approve', async (req, reply) => {
+    requireAdmin(req);
+    const { id } = req.params as { id: string };
+    const result = await users.approveRegistration(id);
+    await audit.record(req, {
+      action: 'admin.user_approve_registration',
+      targetType: 'user',
+      targetId: id,
+      after: { requiresVerification: !!result.verifyToken },
+    });
+    reply.send({ user: result.user, requiresVerification: !!result.verifyToken });
+  });
+
+  app.post('/api/admin/users/:id/deny', async (req, reply) => {
+    requireAdmin(req);
+    const { id } = req.params as { id: string };
+    const { reason } = z.object({ reason: z.string().min(1).max(2000) }).parse(req.body);
+    const user = await users.denyRegistration(id, reason);
+    await audit.record(req, {
+      action: 'admin.user_deny_registration',
+      targetType: 'user',
+      targetId: id,
+      reason,
     });
     reply.send({ user });
   });
@@ -123,6 +171,57 @@ export async function registerAdminRoutes(
   app.get('/api/admin/settings', async (req, reply) => {
     requireAdmin(req);
     reply.send(await settings.full());
+  });
+
+  app.get('/api/admin/governance/policy', async (req, reply) => {
+    requireAdmin(req);
+    reply.send({ policy: await policy.get() });
+  });
+
+  app.put('/api/admin/governance/policy', async (req, reply) => {
+    requireSuperAdmin(req);
+    const input = z.object({ rules: z.array(z.record(z.unknown())) }).parse(req.body);
+    const saved = await policy.set({ rules: input.rules as unknown as Awaited<ReturnType<PolicyService['get']>>['rules'] }, auditActorFromRequest(req));
+    reply.send({ policy: saved });
+  });
+
+  app.get('/api/admin/governance/exceptions', async (req, reply) => {
+    requireAdmin(req);
+    const q = z.object({ status: z.enum(['pending']).optional() }).parse(req.query);
+    const exceptions = q.status === 'pending' ? await policyExceptions.listPending() : await policyExceptions.listPending();
+    reply.send({ exceptions });
+  });
+
+  app.post('/api/admin/governance/exceptions/:id/approve', async (req, reply) => {
+    const user = requireAdmin(req);
+    const { id } = req.params as { id: string };
+    const body = z
+      .object({
+        reviewerNotes: z.string().max(4000).nullable().optional(),
+        expiresAt: z.string().datetime().nullable().optional(),
+      })
+      .parse(req.body ?? {});
+    const result = await policyExceptions.approve({
+      id,
+      reviewerId: user.id,
+      reviewerNotes: body.reviewerNotes ?? null,
+      expiresAt: body.expiresAt ?? null,
+      actor: auditActorFromRequest(req),
+    });
+    reply.send(result);
+  });
+
+  app.post('/api/admin/governance/exceptions/:id/deny', async (req, reply) => {
+    const user = requireAdmin(req);
+    const { id } = req.params as { id: string };
+    const body = z.object({ reviewerNotes: z.string().max(4000).nullable().optional() }).parse(req.body ?? {});
+    const exception = await policyExceptions.deny({
+      id,
+      reviewerId: user.id,
+      reviewerNotes: body.reviewerNotes ?? null,
+      actor: auditActorFromRequest(req),
+    });
+    reply.send({ exception });
   });
 
   app.put('/api/admin/settings/branding', async (req, reply) => {

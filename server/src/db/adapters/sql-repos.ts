@@ -28,6 +28,8 @@ import type {
   OrganizationMemberRow,
   OrganizationRow,
   PasswordResetRow,
+  PendingPublishRow,
+  PolicyExceptionRequestRow,
   SessionRow,
   UserRow,
 } from '../store.js';
@@ -101,12 +103,63 @@ function hydrateAsset(row: Record<string, unknown>): ApiAssetRow {
     requestable: asBool(row.requestable) ? 1 : 0,
     lifecycle: row.lifecycle as ApiAssetRow['lifecycle'],
     tags: asJson<string[]>(row.tags, []),
+    contact_name: (row.contact_name as string | null) ?? null,
     contact_email: (row.contact_email as string | null) ?? null,
+    contact_url: (row.contact_url as string | null) ?? null,
     support_notes: (row.support_notes as string | null) ?? null,
     operation_count: Number(row.operation_count ?? 0),
     content_hash: (row.content_hash as string | null) ?? null,
+    proxy_hosts: asJson<string[]>(row.proxy_hosts, []),
+    proxy_paths: asJson<string[]>(row.proxy_paths, []),
+    proxy_upstream_url: (row.proxy_upstream_url as string | null) ?? null,
+    timeout_connect_ms: nullableNumber(row.timeout_connect_ms),
+    timeout_read_ms: nullableNumber(row.timeout_read_ms),
+    timeout_write_ms: nullableNumber(row.timeout_write_ms),
+    body_size_limit_bytes: nullableNumber(row.body_size_limit_bytes),
+    rate_limit_per_minute: nullableNumber(row.rate_limit_per_minute),
+    operation_paths: asJson<string[]>(row.operation_paths, []),
+    operation_summaries: asJson<string[]>(row.operation_summaries, []),
+    source_format:
+      row.source_format === 'swagger2' || row.source_format === 'openapi3'
+        ? row.source_format
+        : 'openapi3',
+    policy_exception_id: (row.policy_exception_id as string | null) ?? null,
     created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
     updated_at: toIsoString(row.updated_at) ?? new Date().toISOString(),
+  };
+}
+
+function nullableNumber(value: unknown): number | null {
+  if (value == null) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function hydratePolicyException(row: Record<string, unknown>): PolicyExceptionRequestRow {
+  return {
+    id: row.id as string,
+    api_asset_id: (row.api_asset_id as string | null) ?? null,
+    provider_id: row.provider_id as string,
+    pending_publish_id: (row.pending_publish_id as string | null) ?? null,
+    violations: asJson<PolicyExceptionRequestRow['violations']>(row.violations, []),
+    justification: row.justification as string,
+    status: row.status as PolicyExceptionRequestRow['status'],
+    reviewed_by: (row.reviewed_by as string | null) ?? null,
+    reviewed_at: toIsoString(row.reviewed_at),
+    reviewer_notes: (row.reviewer_notes as string | null) ?? null,
+    expires_at: toIsoString(row.expires_at),
+    created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
+  };
+}
+
+function hydratePendingPublish(row: Record<string, unknown>): PendingPublishRow {
+  return {
+    id: row.id as string,
+    provider_id: row.provider_id as string,
+    raw_spec: row.raw_spec as string,
+    publish_input: asJson<Record<string, unknown>>(row.publish_input, {}),
+    exception_request_id: (row.exception_request_id as string | null) ?? null,
+    created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
   };
 }
 
@@ -638,9 +691,14 @@ export function buildSqlRepos(
         await client.exec(
           sql(`INSERT INTO api_assets (id, api_spec_id, proxy_id, namespace, provider_id,
                   title, description, slug, version, visibility, requestable, lifecycle,
-                  tags, contact_email, support_notes, operation_count, content_hash,
-                  created_at, updated_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`),
+                  tags, contact_name, contact_email, contact_url, support_notes,
+                  operation_count, content_hash,
+                  proxy_hosts, proxy_paths, proxy_upstream_url, timeout_connect_ms,
+                  timeout_read_ms, timeout_write_ms, body_size_limit_bytes,
+                  rate_limit_per_minute, operation_paths, operation_summaries, source_format,
+                  policy_exception_id, created_at, updated_at)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
+                       $20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)`),
           [
             row.id,
             row.api_spec_id,
@@ -655,10 +713,24 @@ export function buildSqlRepos(
             boolValue(row.requestable === 1),
             row.lifecycle,
             dialect === 'postgres' ? row.tags : J(row.tags),
+            row.contact_name,
             row.contact_email,
+            row.contact_url,
             row.support_notes,
             row.operation_count,
             row.content_hash,
+            dialect === 'postgres' ? row.proxy_hosts : J(row.proxy_hosts),
+            dialect === 'postgres' ? row.proxy_paths : J(row.proxy_paths),
+            row.proxy_upstream_url,
+            row.timeout_connect_ms,
+            row.timeout_read_ms,
+            row.timeout_write_ms,
+            row.body_size_limit_bytes,
+            row.rate_limit_per_minute,
+            dialect === 'postgres' ? row.operation_paths : J(row.operation_paths),
+            dialect === 'postgres' ? row.operation_summaries : J(row.operation_summaries),
+            row.source_format,
+            row.policy_exception_id,
             row.created_at,
             row.updated_at,
           ],
@@ -672,10 +744,16 @@ export function buildSqlRepos(
         await client.exec(
           sql(`UPDATE api_assets SET
                  title = $1, description = $2, version = $3, visibility = $4,
-                 requestable = $5, lifecycle = $6, tags = $7, contact_email = $8,
-                 support_notes = $9, operation_count = $10, content_hash = $11,
-                 api_spec_id = $12, proxy_id = $13, namespace = $14, updated_at = $15
-               WHERE id = $16`),
+                 requestable = $5, lifecycle = $6, tags = $7, contact_name = $8,
+                 contact_email = $9, contact_url = $10, support_notes = $11,
+                 operation_count = $12, content_hash = $13, api_spec_id = $14,
+                 proxy_id = $15, namespace = $16, proxy_hosts = $17, proxy_paths = $18,
+                 proxy_upstream_url = $19, timeout_connect_ms = $20, timeout_read_ms = $21,
+                 timeout_write_ms = $22, body_size_limit_bytes = $23,
+                 rate_limit_per_minute = $24, operation_paths = $25,
+                 operation_summaries = $26, source_format = $27, policy_exception_id = $28,
+                 updated_at = $29
+               WHERE id = $30`),
           [
             next.title,
             next.description,
@@ -684,13 +762,27 @@ export function buildSqlRepos(
             boolValue(next.requestable === 1),
             next.lifecycle,
             dialect === 'postgres' ? next.tags : J(next.tags),
+            next.contact_name,
             next.contact_email,
+            next.contact_url,
             next.support_notes,
             next.operation_count,
             next.content_hash,
             next.api_spec_id,
             next.proxy_id,
             next.namespace,
+            dialect === 'postgres' ? next.proxy_hosts : J(next.proxy_hosts),
+            dialect === 'postgres' ? next.proxy_paths : J(next.proxy_paths),
+            next.proxy_upstream_url,
+            next.timeout_connect_ms,
+            next.timeout_read_ms,
+            next.timeout_write_ms,
+            next.body_size_limit_bytes,
+            next.rate_limit_per_minute,
+            dialect === 'postgres' ? next.operation_paths : J(next.operation_paths),
+            dialect === 'postgres' ? next.operation_summaries : J(next.operation_summaries),
+            next.source_format,
+            next.policy_exception_id,
             next.updated_at,
             id,
           ],
@@ -800,6 +892,133 @@ export function buildSqlRepos(
           raw_spec: row.raw_spec as string,
           created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
         };
+      },
+    },
+    policyExceptions: {
+      async insert(row: PolicyExceptionRequestRow) {
+        await client.exec(
+          sql(`INSERT INTO policy_exception_requests (id, api_asset_id, provider_id,
+                  pending_publish_id, violations, justification, status, reviewed_by,
+                  reviewed_at, reviewer_notes, expires_at, created_at)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`),
+          [
+            row.id,
+            row.api_asset_id,
+            row.provider_id,
+            row.pending_publish_id,
+            dialect === 'postgres' ? row.violations : J(row.violations),
+            row.justification,
+            row.status,
+            row.reviewed_by,
+            row.reviewed_at,
+            row.reviewer_notes,
+            row.expires_at,
+            row.created_at,
+          ],
+        );
+        return row;
+      },
+      async update(id, fields) {
+        const existing = await this.findById(id);
+        if (!existing) throw new Error(`Policy exception not found: ${id}`);
+        const next = { ...existing, ...fields };
+        await client.exec(
+          sql(`UPDATE policy_exception_requests SET
+                 api_asset_id = $1, provider_id = $2, pending_publish_id = $3,
+                 violations = $4, justification = $5, status = $6, reviewed_by = $7,
+                 reviewed_at = $8, reviewer_notes = $9, expires_at = $10
+               WHERE id = $11`),
+          [
+            next.api_asset_id,
+            next.provider_id,
+            next.pending_publish_id,
+            dialect === 'postgres' ? next.violations : J(next.violations),
+            next.justification,
+            next.status,
+            next.reviewed_by,
+            next.reviewed_at,
+            next.reviewer_notes,
+            next.expires_at,
+            id,
+          ],
+        );
+        return (await this.findById(id))!;
+      },
+      async findById(id) {
+        const row = await client.one<Record<string, unknown>>(
+          sql('SELECT * FROM policy_exception_requests WHERE id = $1'),
+          [id],
+        );
+        return row ? hydratePolicyException(row) : null;
+      },
+      async listPending() {
+        const rows = await client.query<Record<string, unknown>>(
+          sql(`SELECT * FROM policy_exception_requests
+               WHERE status = 'pending' ORDER BY created_at ASC`),
+          [],
+        );
+        return rows.map(hydratePolicyException);
+      },
+      async listForProvider(providerId) {
+        const rows = await client.query<Record<string, unknown>>(
+          sql(`SELECT * FROM policy_exception_requests
+               WHERE provider_id = $1 ORDER BY created_at DESC`),
+          [providerId],
+        );
+        return rows.map(hydratePolicyException);
+      },
+      async listForAsset(apiAssetId) {
+        const rows = await client.query<Record<string, unknown>>(
+          sql(`SELECT * FROM policy_exception_requests
+               WHERE api_asset_id = $1 ORDER BY created_at DESC`),
+          [apiAssetId],
+        );
+        return rows.map(hydratePolicyException);
+      },
+    },
+    pendingPublishes: {
+      async insert(row: PendingPublishRow) {
+        await client.exec(
+          sql(`INSERT INTO pending_publishes (id, provider_id, raw_spec, publish_input,
+                  exception_request_id, created_at)
+               VALUES ($1,$2,$3,$4,$5,$6)`),
+          [
+            row.id,
+            row.provider_id,
+            row.raw_spec,
+            dialect === 'postgres' ? row.publish_input : J(row.publish_input),
+            row.exception_request_id,
+            row.created_at,
+          ],
+        );
+        return row;
+      },
+      async update(id, fields) {
+        const existing = await this.findById(id);
+        if (!existing) throw new Error(`Pending publish not found: ${id}`);
+        const next = { ...existing, ...fields };
+        await client.exec(
+          sql(`UPDATE pending_publishes SET provider_id = $1, raw_spec = $2,
+                 publish_input = $3, exception_request_id = $4 WHERE id = $5`),
+          [
+            next.provider_id,
+            next.raw_spec,
+            dialect === 'postgres' ? next.publish_input : J(next.publish_input),
+            next.exception_request_id,
+            id,
+          ],
+        );
+        return (await this.findById(id))!;
+      },
+      async findById(id) {
+        const row = await client.one<Record<string, unknown>>(
+          sql('SELECT * FROM pending_publishes WHERE id = $1'),
+          [id],
+        );
+        return row ? hydratePendingPublish(row) : null;
+      },
+      async delete(id) {
+        await client.exec(sql('DELETE FROM pending_publishes WHERE id = $1'), [id]);
       },
     },
     accessRequests: {

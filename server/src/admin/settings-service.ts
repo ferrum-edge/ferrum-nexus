@@ -16,6 +16,8 @@ const KEYS = {
   captcha: 'captcha',
   registrationEnabled: 'registrationEnabled',
   emailVerificationRequired: 'emailVerificationRequired',
+  registrationAllowedEmailDomains: 'registrationAllowedEmailDomains',
+  registrationRequiresAdminApproval: 'registrationRequiresAdminApproval',
   emailFrom: 'emailFrom',
   smtpHost: 'smtpHost',
   smtpPort: 'smtpPort',
@@ -53,6 +55,8 @@ export const SenderInput = z.object({
 export const RegistrationInput = z.object({
   registrationEnabled: z.boolean(),
   emailVerificationRequired: z.boolean(),
+  registrationAllowedEmailDomains: z.array(z.string().min(1)).default([]),
+  registrationRequiresAdminApproval: z.boolean().default(false),
 });
 
 const DEFAULT_BRANDING: BrandingSettings = {
@@ -77,6 +81,8 @@ export interface SettingsService {
     captcha: CaptchaSettings;
     registrationEnabled: boolean;
     emailVerificationRequired: boolean;
+    registrationAllowedEmailDomains: string[];
+    registrationRequiresAdminApproval: boolean;
     sender: {
       from: string;
       smtpHost: string | null;
@@ -109,6 +115,10 @@ export function createSettingsService(
       ((await store.settings.get<boolean>(KEYS.registrationEnabled)) ?? true) === true,
     emailVerificationRequired:
       ((await store.settings.get<boolean>(KEYS.emailVerificationRequired)) ?? true) === true,
+    registrationAllowedEmailDomains:
+      (await store.settings.get<string[]>(KEYS.registrationAllowedEmailDomains)) ?? [],
+    registrationRequiresAdminApproval:
+      ((await store.settings.get<boolean>(KEYS.registrationRequiresAdminApproval)) ?? false) === true,
   });
 
   return {
@@ -182,10 +192,28 @@ export function createSettingsService(
     async setRegistration(input) {
       await store.settings.set(KEYS.registrationEnabled, input.registrationEnabled);
       await store.settings.set(KEYS.emailVerificationRequired, input.emailVerificationRequired);
+      await store.settings.set(
+        KEYS.registrationAllowedEmailDomains,
+        normalizeDomains(input.registrationAllowedEmailDomains),
+      );
+      await store.settings.set(
+        KEYS.registrationRequiresAdminApproval,
+        input.registrationRequiresAdminApproval,
+      );
     },
     async captchaSecret() {
       const enc = await store.settings.get<string>(KEYS.captchaSecretEnc);
       return enc ? decryptSetting(enc, config.secretKey) : null;
     },
   };
+}
+
+function normalizeDomains(domains: string[]): string[] {
+  return Array.from(
+    new Set(
+      domains
+        .map((domain) => domain.trim().toLowerCase().replace(/^@/, ''))
+        .filter(Boolean),
+    ),
+  ).sort();
 }

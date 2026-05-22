@@ -11,6 +11,9 @@ import { loadConfig } from './config/index.js';
 import { createLogger, loggerConfig } from './lib/logger.js';
 import { createStore } from './db/index.js';
 import { createFerrumAdminClient } from './ferrum-admin/client.js';
+import { createCachingFerrumAdminClient } from './ferrum-admin/cache/caching-client.js';
+import { createLruBackend } from './ferrum-admin/cache/lru-backend.js';
+import { startCacheRefreshWorker } from './ferrum-admin/cache/refresh-worker.js';
 import { createSessionService } from './auth/session.js';
 import { createUsersService } from './users/service.js';
 import { createOrganizationsService } from './organizations/service.js';
@@ -26,6 +29,9 @@ import { createAuditService } from './audit/service.js';
 import { createSettingsService } from './admin/settings-service.js';
 import { createMassEmailService } from './admin/mass-email-service.js';
 import { createDriftService } from './drift/service.js';
+import { createPolicyService } from './governance/policy-service.js';
+import { createPolicyExceptionService } from './governance/exception-service.js';
+import { seedPolicyFromFile } from './governance/policy-loader.js';
 import { registerAuthPlugin } from './middleware/auth-plugin.js';
 import { registerErrorHandler } from './middleware/error-handler.js';
 import { registerAuthRoutes } from './routes/auth.js';
@@ -47,19 +53,32 @@ async function main(): Promise<void> {
   // Migrate at startup so the operator doesn't need to remember to run it.
   await store.migrate();
 
-  const ferrum = createFerrumAdminClient(config, logger);
+  const rawFerrum = createFerrumAdminClient(config, logger);
+  const cachedFerrum = config.ferrum.cacheEnabled
+    ? createCachingFerrumAdminClient(rawFerrum, {
+        backend: createLruBackend({ max: 5000 }),
+        ttls: config.ferrum.cacheTtls,
+        logger,
+      })
+    : null;
+  const ferrum = cachedFerrum ?? rawFerrum;
   const sessions = createSessionService(config, store);
   const audit = createAuditService(store);
+  await seedPolicyFromFile(store, config.policyFile, logger);
   const notifications = createNotificationService(store);
   const email = createEmailService(config, store, logger);
   await email.seedTemplates();
-  email.startWorker();
+  const emailWorker = email.startWorker();
+  const cacheWorker = cachedFerrum
+    ? startCacheRefreshWorker(cachedFerrum, config.ferrum.cacheRefreshHours, logger)
+    : null;
 
   const users = createUsersService(config, store, email, audit, notifications);
   const organizations = createOrganizationsService(store);
   const settings = createSettingsService(config, store);
   const catalog = createCatalogService(store);
-  const publishing = createPublishingService(config, store, ferrum, audit);
+  const policy = createPolicyService(store, audit);
+  const publishing = createPublishingService(config, store, ferrum, audit, policy);
   const credentials = createCredentialsService(
     config,
     store,
@@ -80,6 +99,7 @@ async function main(): Promise<void> {
   const messaging = createMessagingService(store, notifications, email);
   const massEmail = createMassEmailService(store, email, config);
   const drift = createDriftService(store, ferrum);
+  const policyExceptions = createPolicyExceptionService(store, audit, email, policy, publishing);
 
   const app = Fastify({
     logger: loggerConfig(config.nodeEnv),
@@ -121,6 +141,7 @@ async function main(): Promise<void> {
     grants,
     credentials,
     messaging,
+    policyExceptions,
     store,
   });
   await registerMessageRoutes(app, { messaging });
@@ -135,6 +156,8 @@ async function main(): Promise<void> {
     publishing,
     accessRequests,
     catalog,
+    policy,
+    policyExceptions,
     store,
   });
 
@@ -167,6 +190,8 @@ async function main(): Promise<void> {
 
   const shutdown = async (signal: string): Promise<void> => {
     logger.info({ signal }, 'shutting down');
+    emailWorker.stop();
+    cacheWorker?.stop();
     await app.close();
     await store.close();
     process.exit(0);

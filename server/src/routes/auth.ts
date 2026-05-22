@@ -37,9 +37,12 @@ export async function registerAuthRoutes(
     }
     const input = RegistrationInput.parse(req.body);
     await verifyCaptchaIfEnabled(settings, input.captchaToken, req.ip);
-    const { user, verifyToken } = await users.register(input, auditActorFromRequest(req));
+    const { user, verifyToken, requiresAdminApproval } = await users.register(
+      input,
+      auditActorFromRequest(req),
+    );
     // Don't auto-login on register when email verification is required.
-    if (!verifyToken) {
+    if (!verifyToken && !requiresAdminApproval) {
       const session = await sessions.createSession({
         userId: user.id,
         userAgent: req.headers['user-agent'] ?? null,
@@ -47,7 +50,7 @@ export async function registerAuthRoutes(
       });
       sessions.setCookies(reply, session.sessionId, session.csrfToken, session.expiresAt);
     }
-    reply.status(201).send({ user, requiresVerification: !!verifyToken });
+    reply.status(201).send({ user, requiresVerification: !!verifyToken, requiresAdminApproval });
   });
 
   app.post('/api/auth/login', AUTH_RATE_LIMIT, async (req, reply) => {

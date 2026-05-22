@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
-import { api } from '../../lib/api.js';
-import type { ApiAsset } from '@ferrum-nexus/shared';
+import { ApiError, api } from '../../lib/api.js';
+import type { ApiAsset, Violation } from '@ferrum-nexus/shared';
 import { navigate } from '../../App.js';
 
 export function ProviderPublishPage() {
@@ -12,6 +12,11 @@ export function ProviderPublishPage() {
   const [contactEmail, setContactEmail] = useState('');
   const [supportNotes, setSupportNotes] = useState('');
   const [namespace, setNamespace] = useState('');
+  const [policyViolation, setPolicyViolation] = useState<{
+    pendingPublishId: string;
+    violations: Violation[];
+  } | null>(null);
+  const [justification, setJustification] = useState('');
 
   const publish = useMutation({
     mutationFn: async () =>
@@ -29,6 +34,33 @@ export function ProviderPublishPage() {
       }),
     onSuccess: (data) => {
       navigate(`/apis/${data.asset.id}`);
+    },
+    onError: (err) => {
+      if (err instanceof ApiError && err.code === 'POLICY_VIOLATION') {
+        const details = err.details as { pendingPublishId?: string; violations?: Violation[] } | undefined;
+        if (details?.pendingPublishId && details.violations) {
+          setPolicyViolation({
+            pendingPublishId: details.pendingPublishId,
+            violations: details.violations,
+          });
+        }
+      }
+    },
+  });
+
+  const requestException = useMutation({
+    mutationFn: async () =>
+      policyViolation
+        ? api('/provider/governance/exceptions', {
+            method: 'POST',
+            json: {
+              pendingPublishId: policyViolation.pendingPublishId,
+              justification,
+            },
+          })
+        : Promise.resolve(),
+    onSuccess: () => {
+      setJustification('');
     },
   });
 
@@ -104,6 +136,37 @@ export function ProviderPublishPage() {
           </p>
         ) : null}
       </div>
+      {policyViolation ? (
+        <div className="card space-y-3">
+          <h2 className="font-semibold">Policy violations</h2>
+          <ul className="space-y-2 text-sm">
+            {policyViolation.violations.map((violation) => (
+              <li key={violation.ruleId} className="rounded bg-slate-50 p-2 dark:bg-slate-950">
+                <div><code>{violation.ruleId}</code> · {violation.severity}</div>
+                <div>{violation.message}</div>
+                <code className="muted">{violation.pointer}</code>
+              </li>
+            ))}
+          </ul>
+          <textarea
+            className="input min-h-[120px]"
+            value={justification}
+            onChange={(e) => setJustification(e.target.value)}
+            placeholder="Explain why this API needs an exception."
+          />
+          <div className="flex justify-end">
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={justification.length < 10 || requestException.isPending}
+              onClick={() => requestException.mutate()}
+            >
+              {requestException.isPending ? 'Requesting…' : 'Request exception'}
+            </button>
+          </div>
+          {requestException.isSuccess ? <p className="text-sm text-green-700">Exception request submitted.</p> : null}
+        </div>
+      ) : null}
     </section>
   );
 }

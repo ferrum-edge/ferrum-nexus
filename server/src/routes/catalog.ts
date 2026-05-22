@@ -35,6 +35,43 @@ export async function registerCatalogRoutes(
     reply.send({ items, total });
   });
 
+  app.get('/api/catalog/search-index', async (req, reply) => {
+    const auth = requireAuth(req);
+    const isAdmin = hasAdminRole(auth);
+    const { items } = await catalog.list({
+      limit: 10_000,
+      visibility: isAdmin ? undefined : 'public',
+    });
+    reply.send({
+      items: items.map((item) => ({
+        id: item.id,
+        title: item.title,
+        slug: item.slug,
+        version: item.version,
+        tags: item.tags,
+        description: item.description,
+        providerName: item.providerName,
+        contactName: item.contactName,
+        contactEmail: item.contactEmail,
+        contactUrl: item.contactUrl,
+        operationPaths: item.operationPaths,
+        operationSummaries: item.operationSummaries,
+        operationCount: item.operationCount,
+        requestable: item.requestable,
+        lifecycle: item.lifecycle,
+        keyFactsSummary: [
+          item.proxyUpstreamUrl,
+          item.contactName,
+          item.contactEmail,
+          item.contactUrl,
+          ...item.proxyHosts,
+          ...item.proxyPaths,
+          item.rateLimitPerMinute ? `${item.rateLimitPerMinute}/min` : null,
+        ].filter(Boolean),
+      })),
+    });
+  });
+
   app.get('/api/catalog/apis/:id', async (req, reply) => {
     const user = requireAuth(req);
     const { id } = req.params as { id: string };

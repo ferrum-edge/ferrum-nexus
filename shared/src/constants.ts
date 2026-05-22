@@ -6,7 +6,7 @@ export const FERRUM_NAMESPACE_HEADER = 'X-Ferrum-Namespace';
 export const USER_ROLES = ['client', 'provider', 'admin', 'super_admin'] as const;
 export type UserRole = (typeof USER_ROLES)[number];
 
-export const USER_STATUSES = ['pending', 'active', 'disabled'] as const;
+export const USER_STATUSES = ['pending', 'pending_admin_approval', 'active', 'disabled'] as const;
 export type UserStatus = (typeof USER_STATUSES)[number];
 
 export const API_LIFECYCLE_STATUSES = ['draft', 'published', 'deprecated', 'retired'] as const;

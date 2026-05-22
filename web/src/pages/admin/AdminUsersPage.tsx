@@ -58,6 +58,7 @@ export function AdminUsersPage() {
                     onChange={(e) => setStatus.mutate({ id: u.id, status: e.target.value as UserStatus })}
                   >
                     <option value="pending">pending</option>
+                    <option value="pending_admin_approval">pending_admin_approval</option>
                     <option value="active">active</option>
                     <option value="disabled">disabled</option>
                   </select>

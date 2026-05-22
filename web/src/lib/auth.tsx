@@ -14,7 +14,7 @@ interface AuthContext {
     name?: string;
     desiredRole: 'client' | 'provider';
     captchaToken?: string;
-  }) => Promise<{ requiresVerification: boolean }>;
+  }) => Promise<{ requiresVerification: boolean; requiresAdminApproval: boolean }>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
 }
@@ -57,14 +57,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       desiredRole: 'client' | 'provider';
       captchaToken?: string;
     }) => {
-      const data = await api<{ user: PortalUser; requiresVerification: boolean }>(
+      const data = await api<{
+        user: PortalUser;
+        requiresVerification: boolean;
+        requiresAdminApproval: boolean;
+      }>(
         '/auth/register',
         { method: 'POST', json: input },
       );
       return data;
     },
     onSuccess: (data) => {
-      if (!data.requiresVerification) setUser(data.user);
+      if (!data.requiresVerification && !data.requiresAdminApproval) setUser(data.user);
     },
   });
 
@@ -86,7 +90,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       },
       register: async (input) => {
         const result = await registerMut.mutateAsync(input);
-        return { requiresVerification: result.requiresVerification };
+        return {
+          requiresVerification: result.requiresVerification,
+          requiresAdminApproval: result.requiresAdminApproval,
+        };
       },
       logout: async () => {
         await logoutMut.mutateAsync();

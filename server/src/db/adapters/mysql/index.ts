@@ -1,5 +1,5 @@
 import { createPool, type PoolConnection, type ResultSetHeader, type RowDataPacket } from 'mysql2/promise';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ResolvedConfig } from '../../../config/index.js';
@@ -44,24 +44,31 @@ export async function createMysqlStore(config: ResolvedConfig): Promise<NexusSto
       .filter((s) => s.length > 0);
 
   const migrate = async (): Promise<void> => {
-    const sql = readFileSync(resolve(MIGRATIONS_DIR, '001_initial.mysql.sql'), 'utf8');
-    const stmts = splitStatements(sql);
     const c = await pool.getConnection();
     try {
       await c.query('START TRANSACTION');
-      for (const stmt of stmts) {
-        await c.query(stmt);
-      }
       await c.query(`
         CREATE TABLE IF NOT EXISTS _migrations (
           id VARCHAR(64) PRIMARY KEY,
           applied_at DATETIME NOT NULL
         )
       `);
-      await c.query('INSERT IGNORE INTO _migrations (id, applied_at) VALUES (?, ?)', [
-        '001_initial',
-        new Date(),
-      ]);
+      const [appliedRows] = await c.query<RowDataPacket[]>('SELECT id FROM _migrations');
+      const applied = new Set(appliedRows.map((row) => row.id as string));
+      const files = readdirSync(MIGRATIONS_DIR)
+        .filter((file) => /^\d+_.+\.mysql\.sql$/.test(file))
+        .sort();
+      for (const file of files) {
+        const id = file.replace(/\.mysql\.sql$/, '');
+        if (applied.has(id)) continue;
+        for (const stmt of splitStatements(readFileSync(resolve(MIGRATIONS_DIR, file), 'utf8'))) {
+          await c.query(stmt);
+        }
+        await c.query('INSERT IGNORE INTO _migrations (id, applied_at) VALUES (?, ?)', [
+          id,
+          new Date(),
+        ]);
+      }
       await c.query('COMMIT');
     } catch (err) {
       await c.query('ROLLBACK');

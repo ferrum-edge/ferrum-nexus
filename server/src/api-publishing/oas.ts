@@ -11,6 +11,8 @@
 import { parse as parseYaml } from 'yaml';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import swagger2openapi from 'swagger2openapi';
+import { extractKeyFacts, type KeyFacts } from '@ferrum-nexus/shared';
 import { badRequest } from '../lib/errors.js';
 
 // Minimum required shape of the `x-ferrum-proxy` extension. We don't try to
@@ -34,6 +36,12 @@ export interface OasMetadata {
   operationCount: number;
   contentHash: string;
   rawContentType: 'application/json' | 'application/yaml';
+  keyFacts: KeyFacts;
+  sourceFormat: 'openapi3' | 'swagger2';
+}
+
+export interface NormalizedOasMetadata extends OasMetadata {
+  rawSpec: string;
 }
 
 export function detectContentType(raw: string): 'application/json' | 'application/yaml' {
@@ -60,6 +68,29 @@ export function parseSpec(raw: string): Record<string, unknown> {
 export function extractMetadata(raw: string): OasMetadata {
   const contentType = detectContentType(raw);
   const parsed = parseSpec(raw);
+  return extractMetadataFromParsed(parsed, raw, contentType, 'openapi3');
+}
+
+export async function normalizeAndExtractMetadata(raw: string): Promise<NormalizedOasMetadata> {
+  const contentType = detectContentType(raw);
+  const parsed = parseSpec(raw);
+  if (typeof parsed.swagger === 'string' && parsed.swagger.startsWith('2.')) {
+    const converted = await convertSwagger2(parsed);
+    const rawSpec = JSON.stringify(converted, null, 2);
+    return {
+      ...extractMetadataFromParsed(converted, rawSpec, 'application/json', 'swagger2'),
+      rawSpec,
+    };
+  }
+  return { ...extractMetadataFromParsed(parsed, raw, contentType, 'openapi3'), rawSpec: raw };
+}
+
+function extractMetadataFromParsed(
+  parsed: Record<string, unknown>,
+  raw: string,
+  contentType: 'application/json' | 'application/yaml',
+  sourceFormat: 'openapi3' | 'swagger2',
+): OasMetadata {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw badRequest('invalid_spec', 'OpenAPI document must be an object');
   }
@@ -84,6 +115,8 @@ export function extractMetadata(raw: string): OasMetadata {
     : [];
   const operationCount = countOperations(parsed.paths);
   const contentHash = createHash('sha256').update(raw).digest('hex');
+  const keyFacts = extractKeyFacts(parsed);
+  keyFacts.sourceFormat = sourceFormat;
 
   if (!('x-ferrum-proxy' in parsed)) {
     throw badRequest(
@@ -121,7 +154,32 @@ export function extractMetadata(raw: string): OasMetadata {
     operationCount,
     contentHash,
     rawContentType: contentType,
+    keyFacts,
+    sourceFormat,
   };
+}
+
+async function convertSwagger2(swagger: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const converted = await new Promise<Record<string, unknown>>((resolve, reject) => {
+    swagger2openapi.convertObj(
+      swagger,
+      { patch: true, warnOnly: true },
+      (err: unknown, options: { openapi?: Record<string, unknown> }) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve(options.openapi ?? {});
+      },
+    );
+  }).catch((err) => {
+    throw badRequest(
+      'swagger2_conversion_failed',
+      'Failed to convert Swagger 2.0 document to OpenAPI 3.x',
+      err instanceof Error ? err.message : err,
+    );
+  });
+  return converted;
 }
 
 /**

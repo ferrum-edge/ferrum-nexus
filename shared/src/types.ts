@@ -71,10 +71,24 @@ export interface ApiAsset {
   requestable: boolean;
   lifecycle: ApiLifecycleStatus;
   tags: string[];
+  contactName: string | null;
   contactEmail: string | null;
+  contactUrl: string | null;
   supportNotes: string | null;
   operationCount: number;
   contentHash: string | null;
+  proxyHosts: string[];
+  proxyPaths: string[];
+  proxyUpstreamUrl: string | null;
+  timeoutConnectMs: number | null;
+  timeoutReadMs: number | null;
+  timeoutWriteMs: number | null;
+  bodySizeLimitBytes: number | null;
+  rateLimitPerMinute: number | null;
+  operationPaths: string[];
+  operationSummaries: string[];
+  sourceFormat: 'openapi3' | 'swagger2';
+  policyExceptionId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -158,6 +172,8 @@ export interface AppPublicSettings {
   captcha: CaptchaSettings;
   registrationEnabled: boolean;
   emailVerificationRequired: boolean;
+  registrationAllowedEmailDomains: string[];
+  registrationRequiresAdminApproval: boolean;
 }
 
 export interface AuditLogEntry {

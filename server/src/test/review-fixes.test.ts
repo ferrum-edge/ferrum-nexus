@@ -30,6 +30,17 @@ function makeConfig(): ResolvedConfig {
       jwtRole: 'admin',
       jwtTtl: 60,
       defaultNamespace: 'default',
+      cacheEnabled: true,
+      cacheRefreshHours: 12,
+      cacheTtls: {
+        apiSpec: 300_000,
+        apiSpecList: 60_000,
+        apiSpecRaw: 300_000,
+        consumer: 120_000,
+        namespaces: 600_000,
+        health: 10_000,
+        negative: 15_000,
+      },
     },
     email: {
       from: 'noreply@example.com',

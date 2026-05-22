@@ -11,15 +11,19 @@ export function RegisterPage() {
   const [captchaToken, setCaptchaToken] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState(false);
+  const [done, setDone] = useState<'verify' | 'approval' | null>(null);
 
   if (done) {
     return (
       <div className="flex h-full min-h-screen items-center justify-center px-4">
         <div className="card max-w-md text-center">
-          <h2 className="text-lg font-semibold">Check your email</h2>
+          <h2 className="text-lg font-semibold">
+            {done === 'approval' ? 'Pending administrator approval' : 'Check your email'}
+          </h2>
           <p className="muted mt-2">
-            Please confirm your email address to activate your account.
+            {done === 'approval'
+              ? 'Your account was created and will be available after an administrator approves it.'
+              : 'Please confirm your email address to activate your account.'}
           </p>
           <button type="button" className="btn-secondary mt-4" onClick={() => navigate('/')}>
             Back to sign in
@@ -49,7 +53,8 @@ export function RegisterPage() {
                 desiredRole,
                 captchaToken: settings?.captcha.enabled ? captchaToken : undefined,
               });
-              if (out.requiresVerification) setDone(true);
+              if (out.requiresAdminApproval) setDone('approval');
+              else if (out.requiresVerification) setDone('verify');
               else navigate('/');
             } catch (err) {
               setError(err instanceof Error ? err.message : 'Registration failed');
