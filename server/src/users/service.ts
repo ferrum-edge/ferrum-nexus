@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid';
 import { z } from 'zod';
 import type { NexusStore, UserRow } from '../db/store.js';
 import type { ResolvedConfig } from '../config/index.js';
-import { badRequest, conflict, notFound, tooManyRequests, unauthorized } from '../lib/errors.js';
+import { badRequest, conflict, notFound, unauthorized } from '../lib/errors.js';
 import type { PortalUser, UserRole } from '@ferrum-nexus/shared';
 import { randomToken } from '../lib/crypto.js';
 import type { EmailService } from '../email/service.js';
@@ -266,9 +266,9 @@ export function createUsersService(
       new Date(Date.now() - PASSWORD_RESET_WINDOW_MS).toISOString(),
     );
     if (recent >= PASSWORD_RESET_LIMIT) {
-      throw tooManyRequests(
-        'Too many password reset requests for this account. Try again later.',
-      );
+      // Keep forgot-password responses indistinguishable for existing vs
+      // non-existing emails; silently suppress extra sends in this window.
+      return null;
     }
     await store.verifications.createPasswordReset({
       token,
