@@ -140,7 +140,7 @@ export async function registerAdminRoutes(
   });
 
   app.put('/api/admin/settings/sender', async (req, reply) => {
-    requireAdmin(req);
+    requireSuperAdmin(req);
     await settings.setSender(SenderInput.parse(req.body));
     await audit.record(req, { action: 'admin.sender_update', targetType: 'settings' });
     reply.status(204).send();
