@@ -45,7 +45,10 @@
  * against the live array length before any destructive call; a mismatch (an
  * operator edited the consumer by hand) degrades to deleting the whole
  * credential type when only one row is live, and otherwise refuses rather than
- * deleting somebody else's key.
+ * deleting somebody else's key. **That degradation is valid for `revoke`
+ * only** — deleting everything is what a revoke asked for. `rotate` refuses
+ * the drift instead, because "delete the whole type" would take the entry it
+ * had just appended with it.
  */
 
 import {
@@ -74,7 +77,7 @@ import type { EmailService } from '../email/service.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import type { EdgeCredentialEntry, EdgeCredentialMap } from '../ferrum-admin/types.js';
 import type { NexusCrypto } from '../lib/crypto.js';
-import { randomSecret, randomToken } from '../lib/crypto.js';
+import { last4, randomSecret, randomToken } from '../lib/crypto.js';
 import { conflict, edgeError, forbidden, notFound, validationFailed } from '../lib/errors.js';
 import type { NotificationsService } from '../notifications/service.js';
 import type { ConsumerProvisioner } from './consumers.js';
@@ -89,12 +92,26 @@ export const CREDENTIAL_TYPES = [
 /** Statuses that still occupy a slot in the Edge credentials array. */
 const LIVE_STATUSES = new Set(['active', 'retiring']);
 
+/** Raised whenever the Nexus mirror and the live Edge array disagree. */
+const RECONCILE_MESSAGE =
+  'The gateway credential list does not match the portal; ask an administrator to reconcile this consumer before rotating or revoking';
+
 /** Generated plaintext plus the Edge entry that carries it. */
 interface GeneratedCredential {
   /** The value fingerprinted and reduced to `last4`. */
   material: string;
   entry: EdgeCredentialEntry;
   secret: ShowOnceSecret;
+}
+
+/** What {@link CredentialsService.disableGatewayAccess} tore down. */
+export interface GatewayTeardown {
+  /** The Edge consumer that was stripped, or `null` when the user had none. */
+  consumer_id: string | null;
+  /** `credential_metadata` rows moved to `revoked`. */
+  revoked_credentials: number;
+  /** ACL groups the consumer held before the teardown. */
+  removed_groups: string[];
 }
 
 /** Input for {@link CredentialsService.issueForConsumer}. */
@@ -137,6 +154,17 @@ export interface CredentialsService {
   ): Promise<RotateCredentialResponse>;
   /** Delete the entry from Edge and mark the row revoked. */
   revoke(user: UserRecord, credentialId: Uuid, ip?: string | null): Promise<void>;
+  /**
+   * Take a user's gateway identity away entirely: every ACL group off the
+   * consumer, every credential of every type deleted, every mirrored row
+   * `revoked`.
+   *
+   * Called when an account is disabled. Killing the portal session is not
+   * enough on its own — an issued API key keeps working without one, and an
+   * API published with `requestable: false` carries no `access_control`
+   * plugin, so an empty group list does not stop it either.
+   */
+  disableGatewayAccess(userId: Uuid, subject: string): Promise<GatewayTeardown>;
   /** Append a credential to an arbitrary consumer — the test-consumer path. */
   issueForConsumer(
     input: IssueForConsumerInput,
@@ -199,9 +227,38 @@ export function generateCredential(
   }
 }
 
-/** Last four characters of a secret, for identifying it in the UI. */
-function last4(secret: string): string {
-  return secret.length <= 4 ? secret : secret.slice(-4);
+/**
+ * Audit `details` describing one gateway teardown, successful or not.
+ *
+ * Disabling an account must not depend on the gateway being reachable: a
+ * portal account left enabled because Edge timed out is strictly worse than a
+ * disabled account whose consumer still needs cleaning up. So the failure is
+ * logged and recorded in the audit row the caller is already writing, and the
+ * disable proceeds.
+ */
+export async function tearDownGatewayAccess(
+  credentials: Pick<CredentialsService, 'disableGatewayAccess'>,
+  userId: Uuid,
+  subject: string,
+  log?: (obj: Record<string, unknown>, message: string) => void,
+): Promise<Record<string, unknown>> {
+  try {
+    const result = await credentials.disableGatewayAccess(userId, subject);
+    if (result.consumer_id === null) return { gateway_teardown: 'no_consumer' };
+    return {
+      gateway_teardown: 'ok',
+      gateway_consumer_id: result.consumer_id,
+      revoked_credentials: result.revoked_credentials,
+      removed_acl_groups: result.removed_groups,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log?.(
+      { user_id: userId, error: message },
+      'Could not strip the gateway identity of a disabled account',
+    );
+    return { gateway_teardown: 'failed', gateway_error: message };
+  }
 }
 
 /* ── Service ────────────────────────────────────────────────────────────── */
@@ -237,10 +294,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     // The mirror drifted (a hand-edited consumer). Removing the entire type is
     // safe only when this is the last credential Nexus knows about.
     if (rows.length === 1) return 'whole-type';
-    throw edgeError(
-      'The gateway credential list does not match the portal; ask an administrator to reconcile this consumer before rotating or revoking',
-      { expected: rows.length, actual: edgeLength },
-    );
+    throw edgeError(RECONCILE_MESSAGE, { expected: rows.length, actual: edgeLength });
   }
 
   /** Length of the Edge credentials array for one type (basicauth is never emitted). */
@@ -329,6 +383,59 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     provisioner,
     issueForConsumer,
 
+    async disableGatewayAccess(userId, subject): Promise<GatewayTeardown> {
+      const consumer = await provisioner.findConsumer(userId);
+      if (!consumer) return { consumer_id: null, revoked_credentials: 0, removed_groups: [] };
+      const consumerId = consumer.ferrum_consumer_id;
+
+      // One serialised block, like every other consumer mutation — and *only*
+      // one, because `serializePerKey` is a queue rather than a re-entrant
+      // lock: calling `provisioner.mutateAclGroups` from in here would wait on
+      // the block it is already inside.
+      return edge.serializePerKey(consumerId, async () => {
+        const live = await edge.consumers.get(consumerId);
+        const removedGroups = [...(live?.acl_groups ?? [])];
+
+        if (live) {
+          // Groups first, rebuilt from the GET so redacted credential
+          // placeholders round-trip (§4.4) and nothing is dropped early…
+          await edge.consumers.replace(
+            consumerId,
+            {
+              id: live.id,
+              username: live.username,
+              custom_id: live.custom_id ?? null,
+              credentials: live.credentials,
+              acl_groups: [],
+            },
+            subject,
+          );
+          // …then every credential type, whether or not the read projection
+          // could show it — `basicauth` never appears in a GET. The whole-type
+          // delete is idempotent, so an absent type costs one 204.
+          for (const type of CREDENTIAL_TYPES) {
+            await edge.consumers.deleteCredentialType(consumerId, type, subject);
+          }
+        }
+
+        // The mirror follows the gateway, including when the consumer was
+        // already gone: those rows describe credentials that cannot work.
+        const rows = await store.credentials.listByConsumer(consumerId);
+        let revoked = 0;
+        for (const row of rows) {
+          if (row.status === 'revoked') continue;
+          await store.credentials.update(row.id, { status: 'revoked' });
+          revoked += 1;
+        }
+
+        return {
+          consumer_id: consumerId,
+          revoked_credentials: revoked,
+          removed_groups: removedGroups,
+        };
+      });
+    },
+
     async list(actor, targetUserId, filter = {}, options): Promise<Paginated<CredentialRecord>> {
       const userId = targetUserId ?? actor.id;
       if (userId !== actor.id && !roleAtLeast(actor.role, 'admin')) {
@@ -384,6 +491,13 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         const rows = await liveRows(consumerId, type);
         const length = edgeArrayLength(consumer.credentials, type, rows.length);
         const position = resolveCredentialIndex(rows, target, length);
+        if (position === 'whole-type') {
+          // Degrading to `DELETE /credentials/{type}` is only ever right for a
+          // revoke, where removing everything is the point. In a rotation it
+          // would delete the entry appended moments earlier and hand the user
+          // a show-once secret that authenticates nothing.
+          throw edgeError(RECONCILE_MESSAGE, { expected: rows.length, actual: length });
+        }
 
         // Append-then-delete keeps both secrets live across the hand-off. When
         // the array is already at the gateway cap there is no room to append,

@@ -1875,6 +1875,15 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     ['value_json', 'encrypted', 'updated_at'],
   );
 
+  // "Insert unless the key is taken", spelled for each server. Both report 0
+  // affected rows when the row already existed, which is the return value.
+  const SETTINGS_INSERT_IF_ABSENT =
+    dialect === 'pg'
+      ? `INSERT INTO app_settings ("key", value_json, encrypted, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?) ON CONFLICT ("key") DO NOTHING`
+      : `INSERT IGNORE INTO app_settings ("key", value_json, encrypted, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)`;
+
   const settings: SettingRepo = {
     get: async (key) => {
       const row = await queryOne(exec, 'SELECT * FROM app_settings WHERE "key" = ?', [key]);
@@ -1903,6 +1912,18 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       const stored = await settings.get(key);
       if (!stored) throw new Error('settings.set: row vanished immediately after upsert');
       return stored;
+    },
+
+    insertIfAbsent: async (key, value, encrypted = false) => {
+      const at = nowIso();
+      const affected = await execute(exec, SETTINGS_INSERT_IF_ABSENT, [
+        key,
+        JSON.stringify(value ?? null),
+        encodeBool(encrypted),
+        at,
+        at,
+      ]);
+      return affected > 0;
     },
 
     setMany: async (entries) => {

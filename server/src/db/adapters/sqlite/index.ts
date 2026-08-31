@@ -1879,6 +1879,21 @@ class SqliteStore implements NexusStore {
       return created;
     },
 
+    insertIfAbsent: async (key, value, encrypted = false) => {
+      const at = nowIso();
+      // `ON CONFLICT DO NOTHING` reports 0 changed rows when the key is taken,
+      // which is the whole answer — no read, no transaction.
+      return (
+        execute(
+          this.db,
+          `INSERT INTO app_settings (key, value_json, encrypted, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT (key) DO NOTHING`,
+          [key, JSON.stringify(value ?? null), encodeBool(encrypted), at, at],
+        ) > 0
+      );
+    },
+
     setMany: async (entries) => {
       if (entries.length === 0) return;
       const apply = this.db.transaction(() => {

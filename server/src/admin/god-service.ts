@@ -35,13 +35,14 @@ import {
 
 import type { AccessService } from '../access/service.js';
 import { AuditAction, type AuditService } from '../audit/service.js';
+import { tearDownGatewayAccess, type CredentialsService } from '../credentials/service.js';
 import type { NexusStore, UserRecord } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
 import { conflict, lastSuperAdmin, notFound, validationFailed } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
 import type { PublishingService } from '../publishing/service.js';
-import { MASS_RAW_HTML_VARS } from '../email/templates.js';
+import { escapeHtml, MASS_RAW_HTML_VARS } from '../email/templates.js';
 import type { MassEmailService } from './mass-email-service.js';
 
 /** Public projection of a stored user (no password hash). */
@@ -87,12 +88,14 @@ export interface GodServiceDeps {
   massEmail: MassEmailService;
   access: AccessService;
   publishing: PublishingService;
+  /** Strips the gateway identity of an account being disabled. */
+  credentials: Pick<CredentialsService, 'disableGatewayAccess'>;
   log?: (obj: Record<string, unknown>, message: string) => void;
 }
 
 /** Build the god-mode service. */
 export function createGodService(deps: GodServiceDeps): GodService {
-  const { store, audit, notifications, email, massEmail, access, publishing } = deps;
+  const { store, audit, notifications, email, massEmail, access, publishing, credentials } = deps;
 
   function requireReason(reason: string): string {
     const trimmed = reason.trim();
@@ -182,8 +185,10 @@ export function createGodService(deps: GodServiceDeps): GodService {
         target.status === 'disabled'
           ? target
           : ((await store.users.update(target.id, { status: 'disabled' })) ?? target);
-      // A disabled account keeps no usable browser session.
+      // A disabled account keeps no usable browser session — and no working
+      // gateway identity, which a session cookie has nothing to do with.
       const terminated = await store.sessions.deleteForUser(target.id);
+      const teardown = await tearDownGatewayAccess(credentials, target.id, actor.id, deps.log);
 
       await audit.record(
         { id: actor.id, role: actor.role },
@@ -194,6 +199,7 @@ export function createGodService(deps: GodServiceDeps): GodService {
           revoked_grants: revoked,
           terminated_sessions: terminated,
           previous_status: target.status,
+          ...teardown,
         },
         ip,
       );
@@ -295,14 +301,4 @@ export function createGodService(deps: GodServiceDeps): GodService {
       return { notified, emails_enqueued: emails, threads_created: threads };
     },
   };
-}
-
-/** Escape a plain-text broadcast body for the HTML half of the mass template. */
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }

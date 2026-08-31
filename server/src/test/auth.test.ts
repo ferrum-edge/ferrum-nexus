@@ -4,7 +4,7 @@ import { after, before, describe, it } from 'node:test';
 import { CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE, type ApiErrorBody } from '@ferrum-nexus/shared';
 
 import { AuditAction } from '../audit/service.js';
-import { REGISTRATION_SETTINGS_KEY } from '../auth/service.js';
+import { REGISTRATION_SETTINGS_KEY, SUPER_ADMIN_CLAIM_KEY } from '../auth/service.js';
 import { isoInSeconds } from '../lib/ids.js';
 import { buildTestApp, cookieValue, TEST_PASSWORD, type TestApp } from './helpers.js';
 
@@ -466,5 +466,66 @@ describe('registration policy', () => {
       },
     });
     assert.equal(allowed.statusCode, 201);
+  });
+});
+
+describe('bootstrap super_admin election', () => {
+  let harness: TestApp;
+
+  before(async () => {
+    harness = await buildTestApp();
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  it('promotes exactly one of six concurrent registrations against an empty portal', async () => {
+    // Every one of these reads an empty `users` table and then awaits ~100 ms
+    // of scrypt before inserting, so all six are inside the old
+    // count()-then-create window at the same time.
+    const responses = await Promise.all(
+      Array.from({ length: 6 }, (_unused, index) =>
+        harness.app.inject({
+          method: 'POST',
+          url: '/api/auth/register',
+          payload: {
+            email: `racer${index}@example.test`,
+            password: TEST_PASSWORD,
+            display_name: `Racer ${index}`,
+            role: 'client',
+          },
+        }),
+      ),
+    );
+
+    for (const response of responses) assert.equal(response.statusCode, 201, response.body);
+    const users = responses.map(
+      (response) =>
+        response.json<{ user: { id: string; role: string; email_verified: boolean } }>().user,
+    );
+
+    const founders = users.filter((user) => user.role === 'super_admin');
+    assert.equal(
+      founders.length,
+      1,
+      `exactly one racer may be promoted, got ${founders.length}: ${users.map((user) => user.role).join(', ')}`,
+    );
+    for (const loser of users.filter((user) => user.role !== 'super_admin')) {
+      assert.equal(loser.role, 'client', 'losers keep the role they asked for');
+    }
+
+    // The election is visible in storage, not just in the responses.
+    const stored = await harness.store.users.list({ role: 'super_admin' });
+    assert.equal(stored.total, 1);
+    assert.equal(stored.items[0]?.id, founders[0]?.id);
+
+    const claim = await harness.store.settings.get(SUPER_ADMIN_CLAIM_KEY);
+    assert.deepEqual((claim?.value as { user_id: string }).user_id, founders[0]?.id);
+    assert.equal(founders[0]?.email_verified, true, 'the founder is auto-verified');
+
+    // A later registration finds the key taken and stays a client.
+    const late = await harness.registerUser({ email: 'late-racer@example.test' });
+    assert.equal(late.user.role, 'client');
   });
 });

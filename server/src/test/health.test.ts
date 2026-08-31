@@ -3,6 +3,7 @@ import { after, before, describe, it } from 'node:test';
 
 import type { AppHealth, EdgeHealth } from '@ferrum-nexus/shared';
 
+import { OPAQUE_ERROR } from '../routes/health.js';
 import { buildTestApp, type TestApp } from './helpers.js';
 
 describe('health endpoints', () => {
@@ -59,13 +60,67 @@ describe('health endpoints', () => {
       assert.equal(body.status, 'degraded');
       assert.equal(body.database.status, 'ok');
       assert.equal(body.edge.status, 'down');
-      assert.ok(body.edge.error, 'the failure detail is reported for operators');
+      assert.equal(
+        body.edge.error,
+        OPAQUE_ERROR,
+        'an anonymous caller is told the gateway is down, not where it lives',
+      );
 
       const edgeOnly = await harness.app.inject({ method: 'GET', url: '/api/health/edge' });
       assert.equal(edgeOnly.statusCode, 200);
       assert.equal(edgeOnly.json<EdgeHealth>().status, 'down');
     } finally {
       await harness.edge.start();
+    }
+  });
+
+  it('gives an admin the real gateway diagnostic', async () => {
+    // The first account registered on an empty portal is the super_admin.
+    const admin = await harness.registerUser();
+    await harness.edge.stop();
+    try {
+      const response = await harness.app.inject({
+        method: 'GET',
+        url: '/api/health',
+        headers: { cookie: admin.cookieHeader },
+      });
+      const body = response.json<AppHealth>();
+      assert.equal(body.edge.status, 'down');
+      assert.notEqual(
+        body.edge.error,
+        OPAQUE_ERROR,
+        'an operator still needs the underlying probe failure',
+      );
+      assert.ok(body.edge.error);
+    } finally {
+      await harness.edge.start();
+    }
+  });
+
+  it('never echoes the driver’s message to an anonymous caller', async () => {
+    const original = harness.store.healthCheck.bind(harness.store);
+    // What a real driver hands back, host and role name included.
+    const leaky =
+      'connect ECONNREFUSED 10.0.3.14:5432 — password authentication failed for user "nexus_app"';
+    harness.store.healthCheck = async () => ({ ok: false, latencyMs: 4, error: leaky });
+
+    try {
+      const response = await harness.app.inject({ method: 'GET', url: '/api/health' });
+      assert.equal(response.statusCode, 200);
+
+      const body = response.json<AppHealth>();
+      assert.equal(body.status, 'down');
+      assert.equal(body.database.status, 'down');
+      assert.equal(body.database.error, 'unreachable');
+
+      for (const secret of ['10.0.3.14', '5432', 'nexus_app', 'ECONNREFUSED', 'password']) {
+        assert.ok(
+          !response.body.includes(secret),
+          `the public probe leaked ${secret}: ${response.body}`,
+        );
+      }
+    } finally {
+      harness.store.healthCheck = original;
     }
   });
 

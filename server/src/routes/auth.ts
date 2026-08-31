@@ -5,7 +5,7 @@
  * registration options. Cookie policy lives here and nowhere else.
  */
 
-import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import { z } from 'zod';
 
 import {
@@ -21,10 +21,10 @@ import {
   type VerifyEmailResponse,
 } from '@ferrum-nexus/shared';
 
-import type { AuthService, IssuedSession, RequestContext } from '../auth/service.js';
+import type { AuthService, IssuedSession } from '../auth/service.js';
 import type { CaptchaService } from '../auth/captcha.js';
 import type { NexusConfig } from '../config/index.js';
-import { clientIp, requireAuth } from '../middleware/auth-plugin.js';
+import { requestContext, requireAuth } from '../middleware/auth-plugin.js';
 import { parseOrThrow } from '../middleware/error-handler.js';
 
 /** Services this route plugin needs. */
@@ -54,22 +54,13 @@ const verifyEmailBody = z.object({
   token: z.string().trim().min(8).max(512),
 });
 
-/** Context recorded on the session row and every audit entry. */
-function contextOf(request: FastifyRequest): RequestContext {
-  const userAgent = request.headers['user-agent'];
-  return {
-    ip: clientIp(request),
-    userAgent: typeof userAgent === 'string' ? userAgent.slice(0, 512) : null,
-  };
-}
-
 /**
  * Write the session pair.
  *
  * `nexus_session` is HttpOnly (bearer-equivalent); `nexus_csrf` deliberately is
  * not, because the double-submit check needs the browser to read it. Both are
- * `SameSite=Lax`, path `/`, and `Secure` whenever the deployment terminates
- * TLS in front of Nexus (`NEXUS_TRUST_PROXY=true`).
+ * `SameSite=Lax`, path `/`, and `Secure` unless `NEXUS_COOKIE_SECURE=false`
+ * (the default outside `NEXUS_ENV=development`).
  */
 export function setSessionCookies(
   reply: FastifyReply,
@@ -79,7 +70,7 @@ export function setSessionCookies(
   const base = {
     path: '/',
     sameSite: 'lax' as const,
-    secure: config.trustProxy,
+    secure: config.cookieSecure,
     maxAge: config.sessionTtlSeconds,
   };
   reply.setCookie(SESSION_COOKIE, issued.token, { ...base, httpOnly: true });
@@ -88,7 +79,7 @@ export function setSessionCookies(
 
 /** Clear the session pair on sign-out. */
 export function clearSessionCookies(reply: FastifyReply, config: NexusConfig): void {
-  const base = { path: '/', sameSite: 'lax' as const, secure: config.trustProxy };
+  const base = { path: '/', sameSite: 'lax' as const, secure: config.cookieSecure };
   reply.clearCookie(SESSION_COOKIE, { ...base, httpOnly: true });
   reply.clearCookie(CSRF_COOKIE, { ...base, httpOnly: false });
 }
@@ -109,7 +100,7 @@ export const authRoutes: FastifyPluginAsync<AuthRoutesOptions> = async (app, opt
         phone: input.phone ?? null,
         captcha_token: input.captcha_token,
       },
-      contextOf(request),
+      requestContext(request),
     );
     if (result.issued) setSessionCookies(reply, config, result.issued);
     reply.status(201);
@@ -118,7 +109,7 @@ export const authRoutes: FastifyPluginAsync<AuthRoutesOptions> = async (app, opt
 
   app.post('/login', async (request, reply): Promise<LoginResponse> => {
     const input = parseOrThrow(loginBody, request.body);
-    const result = await auth.login(input, contextOf(request));
+    const result = await auth.login(input, requestContext(request));
     setSessionCookies(reply, config, result.issued);
     return {
       user: result.user,
@@ -131,7 +122,7 @@ export const authRoutes: FastifyPluginAsync<AuthRoutesOptions> = async (app, opt
     // CSRF is enforced for this route by the auth plugin — signing someone out
     // is a state change like any other.
     const { user, session } = requireAuth(request);
-    await auth.logout(session, user, contextOf(request));
+    await auth.logout(session, user, requestContext(request));
     clearSessionCookies(reply, config);
     return { ok: true };
   });
@@ -143,7 +134,7 @@ export const authRoutes: FastifyPluginAsync<AuthRoutesOptions> = async (app, opt
 
   app.post('/verify-email', async (request): Promise<VerifyEmailResponse> => {
     const input = parseOrThrow(verifyEmailBody, request.body);
-    return auth.verifyEmail(input.token, contextOf(request));
+    return auth.verifyEmail(input.token, requestContext(request));
   });
 
   app.get('/captcha', async (): Promise<CaptchaConfigResponse> => captcha.getPublicConfig());

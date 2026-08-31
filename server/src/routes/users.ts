@@ -20,14 +20,18 @@ import {
   type UpdateUserResponse,
 } from '@ferrum-nexus/shared';
 
-import { clientIp, requireAuth, requireRole } from '../middleware/auth-plugin.js';
+import type { NexusConfig } from '../config/index.js';
+import { clientIp, requestContext, requireAuth, requireRole } from '../middleware/auth-plugin.js';
 import { parseOrThrow } from '../middleware/error-handler.js';
 import type { UsersService } from '../users/service.js';
+import { setSessionCookies } from './auth.js';
 import { idParamSchema, listOptions, listQuerySchema } from './common.js';
 
 /** Services this route plugin needs. */
 export interface UsersRoutesOptions {
   users: UsersService;
+  /** Cookie policy for the session a password change re-issues. */
+  config: NexusConfig;
 }
 
 const updateMeBody = z.object({
@@ -64,17 +68,21 @@ const updateOrganizationBody = z.object({
 
 /** `/api/users` route plugin. */
 export const usersRoutes: FastifyPluginAsync<UsersRoutesOptions> = async (app, options) => {
-  const { users } = options;
+  const { users, config } = options;
 
   app.get('/me', async (request): Promise<GetMeUserResponse> => {
     const { user } = requireAuth(request);
     return { user: users.getMe(user) };
   });
 
-  app.patch('/me', async (request): Promise<UpdateMeResponse> => {
+  app.patch('/me', async (request, reply): Promise<UpdateMeResponse> => {
     const { user } = requireAuth(request);
     const input = parseOrThrow(updateMeBody, request.body);
-    return { user: await users.updateMe(user, input, clientIp(request)) };
+    const result = await users.updateMe(user, input, requestContext(request));
+    // A password change killed every session, including this request's own;
+    // the replacement has to reach the browser or the caller is signed out.
+    if (result.reissued) setSessionCookies(reply, config, result.reissued);
+    return { user: result.user };
   });
 
   app.get('/', { onRequest: requireRole('admin') }, async (request): Promise<ListUsersResponse> => {

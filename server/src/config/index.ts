@@ -30,6 +30,25 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
 /** Runtime environment; `test` disables rate limiting and quietens the logger. */
 export type NodeEnv = 'development' | 'test' | 'production';
 
+/**
+ * Value handed to Fastify's `trustProxy`.
+ *
+ * `false` — the default — means `X-Forwarded-For` is ignored entirely and
+ * `request.ip` is always the socket address. A number is a hop count counted
+ * from the *right* of the header; a list is a CIDR/IP allowlist. Both forms are
+ * passed to `proxy-addr` unchanged.
+ */
+export type TrustedProxies = false | number | string[];
+
+/** Aliases `proxy-addr` understands in place of a literal CIDR. */
+const PROXY_KEYWORDS = ['loopback', 'linklocal', 'uniquelocal'] as const;
+
+/** An IPv4/IPv6 address, a CIDR block, or one of the `proxy-addr` keywords. */
+function isTrustedProxyEntry(entry: string): boolean {
+  if ((PROXY_KEYWORDS as readonly string[]).includes(entry.toLowerCase())) return true;
+  return /^[0-9a-fA-F:.]+(\/\d{1,3})?$/.test(entry);
+}
+
 /** Persistence configuration. */
 export interface DbConfig {
   /** Which adapter `createStore` instantiates. */
@@ -86,8 +105,22 @@ export interface NexusConfig {
   port: number;
   /** Public origin of the portal, used in emails and verification links. */
   publicUrl: string;
-  /** True behind a TLS-terminating proxy: enables `Secure` cookies and `X-Forwarded-For`. */
-  trustProxy: boolean;
+  /**
+   * Which proxies may set `X-Forwarded-For` (`NEXUS_TRUSTED_PROXIES`).
+   *
+   * Defaults to `false`: a client-supplied header never reaches `request.ip`,
+   * so the rate limiter and the audit trail key on the socket address.
+   */
+  trustedProxies: TrustedProxies;
+  /**
+   * Mark the session/CSRF cookies `Secure` and enable HSTS
+   * (`NEXUS_COOKIE_SECURE`). Defaults to `true` outside development.
+   *
+   * Deliberately independent of {@link NexusConfig.trustedProxies}: TLS in
+   * front of the portal and "this proxy may rewrite the client address" are
+   * different claims, and coupling them made one of them wrong.
+   */
+  cookieSecure: boolean;
   logLevel: LogLevel;
   /** Master secret; every other key is HKDF-derived from it. */
   secretKey: string;
@@ -178,7 +211,10 @@ const envSchema = z.object({
   NEXUS_HOST: stringish('127.0.0.1'),
   NEXUS_PORT: intish(8787, 0, 65_535),
   NEXUS_PUBLIC_URL: stringish('http://127.0.0.1:5173'),
+  NEXUS_TRUSTED_PROXIES: optionalString(),
+  /** @deprecated alias for `NEXUS_TRUSTED_PROXIES=1`. */
   NEXUS_TRUST_PROXY: boolish(false),
+  NEXUS_COOKIE_SECURE: optionalString(),
   NEXUS_LOG_LEVEL: z
     .string()
     .optional()
@@ -294,6 +330,21 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     );
   }
 
+  // ── Proxy trust and cookie policy ────────────────────────────────────────
+  // Two independent decisions. `NEXUS_TRUST_PROXY=true` survives only as an
+  // alias for "one hop", so an existing deployment keeps working.
+  const trustedProxies = parseTrustedProxies(
+    raw.NEXUS_TRUSTED_PROXIES,
+    raw.NEXUS_TRUST_PROXY,
+    problems,
+  );
+  const cookieSecure = parseBoolish(
+    raw.NEXUS_COOKIE_SECURE,
+    'NEXUS_COOKIE_SECURE',
+    nodeEnv !== 'development',
+    problems,
+  );
+
   // ── Non-sqlite drivers need a connection URL ─────────────────────────────
   if (raw.NEXUS_DB_DRIVER !== 'sqlite' && raw.NEXUS_DB_URL === '') {
     problems.push(`NEXUS_DB_URL is required when NEXUS_DB_DRIVER=${raw.NEXUS_DB_DRIVER}`);
@@ -306,7 +357,8 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     host: raw.NEXUS_HOST,
     port: raw.NEXUS_PORT,
     publicUrl,
-    trustProxy: raw.NEXUS_TRUST_PROXY,
+    trustedProxies,
+    cookieSecure,
     logLevel: raw.NEXUS_LOG_LEVEL,
     secretKey: raw.NEXUS_SECRET_KEY,
     sessionTtlSeconds: raw.NEXUS_SESSION_TTL,
@@ -339,6 +391,68 @@ export function loadConfig(env: EnvRecord): NexusConfig {
       from: raw.NEXUS_EMAIL_FROM,
     },
   };
+}
+
+/**
+ * Parse a boolean whose default depends on something the schema cannot see
+ * (here: `NEXUS_ENV`). Unparsable values are collected, not thrown.
+ */
+function parseBoolish(
+  raw: string | undefined,
+  name: string,
+  defaultValue: boolean,
+  problems: string[],
+): boolean {
+  if (raw === undefined || raw.trim() === '') return defaultValue;
+  const value = raw.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(value)) return true;
+  if (['0', 'false', 'no', 'off'].includes(value)) return false;
+  problems.push(`${name} must be true or false`);
+  return defaultValue;
+}
+
+/**
+ * Parse `NEXUS_TRUSTED_PROXIES` — an integer hop count or a comma-separated
+ * CIDR/IP allowlist — falling back to the deprecated `NEXUS_TRUST_PROXY=true`
+ * alias, which means "trust exactly one hop".
+ *
+ * Trusting *every* proxy is deliberately not expressible: `trustProxy: true`
+ * makes `proxy-addr` take the left-most `X-Forwarded-For` entry, which any
+ * client can write, and that value then keys the rate limiter and the audit
+ * trail.
+ */
+function parseTrustedProxies(
+  raw: string | undefined,
+  legacyTrustProxy: boolean,
+  problems: string[],
+): TrustedProxies {
+  const value = raw?.trim() ?? '';
+  if (value === '') return legacyTrustProxy ? 1 : false;
+
+  if (/^\d+$/.test(value)) {
+    const hops = Number(value);
+    if (!Number.isSafeInteger(hops) || hops < 1 || hops > 32) {
+      problems.push('NEXUS_TRUSTED_PROXIES hop count must be an integer between 1 and 32');
+      return false;
+    }
+    return hops;
+  }
+
+  const entries = value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '');
+  const invalid = entries.filter((entry) => !isTrustedProxyEntry(entry));
+  if (entries.length === 0 || invalid.length > 0) {
+    problems.push(
+      'NEXUS_TRUSTED_PROXIES must be an integer hop count or a comma-separated list of ' +
+        `IP addresses, CIDR blocks or ${PROXY_KEYWORDS.join('/')}${
+          invalid.length > 0 ? ` (rejected: ${invalid.join(', ')})` : ''
+        }`,
+    );
+    return false;
+  }
+  return entries;
 }
 
 function configError(problems: string[]): NexusError {

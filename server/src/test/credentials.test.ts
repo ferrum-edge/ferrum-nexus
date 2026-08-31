@@ -212,6 +212,51 @@ describe('gateway credentials', () => {
     assert.ok(!keys.includes(second.secret.key), 'the rotated credential is gone');
   });
 
+  it('refuses to rotate when the gateway array has drifted from the portal', async () => {
+    const drifted = await harness.registerUser({
+      email: 'cred-drift@example.test',
+      role: 'client',
+    });
+    const original = await issue(drifted, 'keyauth', 'Production');
+
+    // An operator emptied the type by hand: one live Nexus row, zero live
+    // entries. The index no longer resolves, and the whole-type fallback would
+    // delete the entry the rotation had just appended — handing back a
+    // show-once secret that authenticates nothing.
+    const consumer = consumerOf(drifted.user.id);
+    assert.ok(consumer);
+    delete consumer.credentials.keyauth;
+
+    const response = await harness.authed(drifted, {
+      method: 'POST',
+      url: `/api/credentials/${original.credential.id}/rotate`,
+      payload: {},
+    });
+    assert.equal(response.statusCode, 502, response.body);
+    assert.equal(errorCode(response.body), 'EDGE_ERROR');
+    assert.match(JSON.parse(response.body).error.message, /reconcile this consumer/);
+
+    // Nothing was created: no second row, no appended entry, no secret.
+    assert.equal(consumerOf(drifted.user.id)?.credentials.keyauth, undefined);
+    const rows = await harness.store.credentials.list({ user_id: drifted.user.id });
+    assert.equal(rows.total, 1, 'the refused rotation left no extra row behind');
+    assert.equal(rows.items[0]?.id, original.credential.id);
+    assert.equal(rows.items[0]?.status, 'active', 'and did not revoke the original either');
+    assert.ok(!('secret' in JSON.parse(response.body)));
+
+    // Revoking the same drifted credential still works: deleting the whole
+    // type is exactly what a revoke asked for.
+    const revoked = await harness.authed(drifted, {
+      method: 'DELETE',
+      url: `/api/credentials/${original.credential.id}`,
+    });
+    assert.equal(revoked.statusCode, 200, revoked.body);
+    assert.equal(
+      (await harness.store.credentials.findById(original.credential.id))?.status,
+      'revoked',
+    );
+  });
+
   it('revokes a credential from the gateway and the portal together', async () => {
     const holder = await harness.registerUser({
       email: 'cred-revoke@example.test',

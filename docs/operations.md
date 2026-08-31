@@ -25,18 +25,20 @@ the process prints every offending variable and exits non-zero. The repo-root
 
 ### Server
 
-| Variable                   | Default                                      | Notes                                                                                                                                                                                                                                  |
-| -------------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NEXUS_ENV`                | inferred from `NODE_ENV`, else `development` | `development` \| `test` \| `production`. `test` forces rate limiting off and quietens the logger.                                                                                                                                      |
-| `NODE_ENV`                 | —                                            | Only consulted when `NEXUS_ENV` is unset, and only `production`/`test` are honoured.                                                                                                                                                   |
-| `NEXUS_HOST`               | `127.0.0.1`                                  | Bind address. Use `0.0.0.0` in a container.                                                                                                                                                                                            |
-| `NEXUS_PORT`               | `8787`                                       | 0–65535.                                                                                                                                                                                                                               |
-| `NEXUS_PUBLIC_URL`         | `http://127.0.0.1:5173`                      | Public origin of the portal. Used to build verification links, catalog/credential/thread URLs in email. Must be an absolute URL; a trailing slash is stripped.                                                                         |
-| `NEXUS_TRUST_PROXY`        | `false`                                      | Set `true` behind a TLS-terminating proxy. Enables Fastify's `trustProxy` (so `request.ip` honours `X-Forwarded-For`), marks both cookies `Secure`, and turns on HSTS.                                                                 |
-| `NEXUS_LOG_LEVEL`          | `info`                                       | One of `fatal`, `error`, `warn`, `info`, `debug`, `trace`, `silent`.                                                                                                                                                                   |
-| `NEXUS_SESSION_TTL`        | `43200` (12 h)                               | Session idle lifetime in seconds; 60 – 2 592 000. Sliding.                                                                                                                                                                             |
-| `NEXUS_RATE_LIMIT_ENABLED` | `true`                                       | Installs the 20 req/min limiter on `/api/auth/*`. Forced off when `NEXUS_ENV=test`.                                                                                                                                                    |
-| `NEXUS_WEB_DIST`           | _(unset)_                                    | Directory of the built SPA to serve. When unset, the server looks for `../../web/dist` relative to itself and then `./web/dist` under the CWD; if neither has an `index.html`, static serving is disabled and only the API is exposed. |
+| Variable                   | Default                                      | Notes                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| -------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NEXUS_ENV`                | inferred from `NODE_ENV`, else `development` | `development` \| `test` \| `production`. `test` forces rate limiting off and quietens the logger.                                                                                                                                                                                                                                                                                                                               |
+| `NODE_ENV`                 | —                                            | Only consulted when `NEXUS_ENV` is unset, and only `production`/`test` are honoured.                                                                                                                                                                                                                                                                                                                                            |
+| `NEXUS_HOST`               | `127.0.0.1`                                  | Bind address. Use `0.0.0.0` in a container.                                                                                                                                                                                                                                                                                                                                                                                     |
+| `NEXUS_PORT`               | `8787`                                       | 0–65535.                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `NEXUS_PUBLIC_URL`         | `http://127.0.0.1:5173`                      | Public origin of the portal. Used to build verification links, catalog/credential/thread URLs in email. Must be an absolute URL; a trailing slash is stripped.                                                                                                                                                                                                                                                                  |
+| `NEXUS_TRUSTED_PROXIES`    | _(unset)_                                    | Which proxies may set `X-Forwarded-For`. Unset trusts none: `request.ip` is the socket address, which is what the auth rate limiter and every audit row key on. Accepts an integer hop count counted from the right of the header (`1`), or a comma-separated allowlist of IPs/CIDR blocks (`10.0.0.0/8,192.168.1.7`; `loopback`, `linklocal` and `uniquelocal` are also accepted). Passed to Fastify's `trustProxy` unchanged. |
+| `NEXUS_TRUST_PROXY`        | `false`                                      | **Deprecated.** `true` is an alias for `NEXUS_TRUSTED_PROXIES=1`. It no longer affects cookies or HSTS — see `NEXUS_COOKIE_SECURE`.                                                                                                                                                                                                                                                                                             |
+| `NEXUS_COOKIE_SECURE`      | `true` unless `NEXUS_ENV=development`        | Marks `nexus_session` and `nexus_csrf` `Secure` and turns on HSTS. Set `false` only to serve the portal over plaintext `http://`.                                                                                                                                                                                                                                                                                               |
+| `NEXUS_LOG_LEVEL`          | `info`                                       | One of `fatal`, `error`, `warn`, `info`, `debug`, `trace`, `silent`.                                                                                                                                                                                                                                                                                                                                                            |
+| `NEXUS_SESSION_TTL`        | `43200` (12 h)                               | Session idle lifetime in seconds; 60 – 2 592 000. Sliding.                                                                                                                                                                                                                                                                                                                                                                      |
+| `NEXUS_RATE_LIMIT_ENABLED` | `true`                                       | Installs the 20 req/min limiter on `/api/auth/*`. Forced off when `NEXUS_ENV=test`.                                                                                                                                                                                                                                                                                                                                             |
+| `NEXUS_WEB_DIST`           | _(unset)_                                    | Directory of the built SPA to serve. When unset, the server looks for `../../web/dist` relative to itself and then `./web/dist` under the CWD; if neither has an `index.html`, static serving is disabled and only the API is exposed.                                                                                                                                                                                          |
 
 ### Database
 
@@ -252,20 +254,28 @@ Portal on `http://127.0.0.1:8787`, gateway proxy listener on
 Nexus does not terminate TLS. Put it behind nginx / Caddy / an ALB and set:
 
 ```bash
-NEXUS_TRUST_PROXY=true
+NEXUS_TRUSTED_PROXIES=10.0.0.0/8   # or: 1, meaning "one hop"
+NEXUS_COOKIE_SECURE=true           # the default outside development
 NEXUS_PUBLIC_URL=https://portal.example.com
 ```
 
-`NEXUS_TRUST_PROXY=true` changes three things at once:
+These are two independent decisions, and conflating them is a security bug:
 
-1. `Secure` is added to both `nexus_session` and `nexus_csrf`.
-2. Fastify honours `X-Forwarded-For`, so `request.ip` — which is what lands in
-   session rows and audit rows — is the real client address.
-3. HSTS is sent (`max-age=31536000; includeSubDomains`).
+1. `NEXUS_COOKIE_SECURE` adds `Secure` to both `nexus_session` and `nexus_csrf`
+   and sends HSTS (`max-age=31536000; includeSubDomains`). It is on by default;
+   turn it off only for a plaintext `http://` deployment.
+2. `NEXUS_TRUSTED_PROXIES` decides whether `X-Forwarded-For` may set
+   `request.ip` — the value that lands in session rows, audit rows, and the
+   `/api/auth/*` rate-limit key.
 
-Because of (2), **only enable it when a proxy you control actually sets
-`X-Forwarded-For`.** Enabling it on a directly-exposed instance lets any client
-forge the IP recorded in your audit log.
+**Name the proxy, or count the hops — never "trust everything".** Proxies
+_append_ to `X-Forwarded-For`, so the left-most entry is whatever the client
+sent. A configuration that trusts every proxy takes that left-most value, which
+lets any client forge the IP in your audit log and rotate past the login rate
+limit one header at a time. An allowlist (`10.0.0.0/8`) or a hop count (`1`, if
+exactly one proxy sits in front of Nexus) reads the address the proxy itself
+recorded. `NEXUS_TRUST_PROXY=true` still works and means `1`, but it is
+deprecated.
 
 Serve the SPA and the API on **one origin**. Cookies are `SameSite=Lax` and
 there is no CORS configuration; a split-origin deployment will not authenticate.

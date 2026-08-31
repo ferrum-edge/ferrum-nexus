@@ -359,7 +359,9 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           'access_request_created',
           `Access requested: ${api.name}`,
           `${user.display_name} requested access to ${api.name}.`,
-          '/provider/requests',
+          // The provider's review inbox is a tab on the API's own page; there
+          // is no `/provider/*` route in the SPA and the old link 404'd.
+          `/apis/${api.id}`,
         )
         .catch(() => undefined);
 

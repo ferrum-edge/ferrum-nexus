@@ -35,6 +35,7 @@ import {
   type Role,
 } from '@ferrum-nexus/shared';
 
+import type { RequestContext } from '../auth/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type { NexusStore, SessionRecord, UserRecord } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
@@ -233,7 +234,16 @@ export function assertRole(request: FastifyRequest, role: Role): AuthContext {
   return context;
 }
 
-/** Client IP, honouring `X-Forwarded-For` only when `NEXUS_TRUST_PROXY` is set. */
+/** Client IP: the socket address unless `NEXUS_TRUSTED_PROXIES` names a proxy. */
 export function clientIp(request: FastifyRequest): string | null {
   return request.ip ?? null;
+}
+
+/** The per-request context stamped onto session rows and audit rows. */
+export function requestContext(request: FastifyRequest): RequestContext {
+  const userAgent = request.headers['user-agent'];
+  return {
+    ip: clientIp(request),
+    userAgent: typeof userAgent === 'string' ? userAgent.slice(0, 512) : null,
+  };
 }

@@ -1022,6 +1022,45 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(await store.settings.get(plainKey), null);
     });
 
+    it('settings: exactly one concurrent insertIfAbsent wins the key', async () => {
+      const key = `bootstrap-claim-${newId().slice(0, 8)}`;
+
+      // Six callers race for the same key with nothing serialising them. The
+      // unique constraint on `app_settings.key` is the only arbiter, which is
+      // the property the super_admin election depends on — a transaction is
+      // not enough, because two of them can both observe "absent".
+      const results = await Promise.all(
+        Array.from({ length: 6 }, (_unused, index) =>
+          store.settings.insertIfAbsent(key, { winner: index }),
+        ),
+      );
+      assert.equal(
+        results.filter(Boolean).length,
+        1,
+        `expected exactly one winner, got ${results.filter(Boolean).join(', ')}`,
+      );
+
+      const stored = await store.settings.get(key);
+      const winner = results.indexOf(true);
+      assert.deepEqual(stored?.value, { winner }, 'the winner’s value is the one stored');
+      assert.equal(stored?.encrypted, false);
+
+      // A later call never overwrites, and never throws.
+      assert.equal(await store.settings.insertIfAbsent(key, { winner: 99 }), false);
+      assert.deepEqual((await store.settings.get(key))?.value, { winner });
+
+      // The encrypted flag is honoured on the insert that wins.
+      const secretKey = `claim-secret-${newId().slice(0, 8)}`;
+      assert.equal(await store.settings.insertIfAbsent(secretKey, 'v1:aa:bb:cc', true), true);
+      assert.equal((await store.settings.get(secretKey))?.encrypted, true);
+
+      // …and a key `set` created first is respected, too.
+      const takenKey = `claim-taken-${newId().slice(0, 8)}`;
+      await store.settings.set(takenKey, { from: 'set' });
+      assert.equal(await store.settings.insertIfAbsent(takenKey, { from: 'claim' }), false);
+      assert.deepEqual((await store.settings.get(takenKey))?.value, { from: 'set' });
+    });
+
     /* ── email templates ──────────────────────────────────────────────── */
 
     it('emailTemplates: upsert by key replaces the body and keeps the row', async () => {

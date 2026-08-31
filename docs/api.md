@@ -26,10 +26,10 @@ Endpoints are grouped in the order their plugins are registered in
 
 Sign in with `POST /api/auth/login`. The response sets two cookies:
 
-| Cookie          | Flags                                                                                                     | Contents             |
-| --------------- | --------------------------------------------------------------------------------------------------------- | -------------------- |
-| `nexus_session` | `HttpOnly`, `SameSite=Lax`, `Path=/`, `Secure` when `NEXUS_TRUST_PROXY=true`, `Max-Age=NEXUS_SESSION_TTL` | opaque session token |
-| `nexus_csrf`    | same, but **not** `HttpOnly`                                                                              | the CSRF token       |
+| Cookie          | Flags                                                                                                          | Contents             |
+| --------------- | -------------------------------------------------------------------------------------------------------------- | -------------------- |
+| `nexus_session` | `HttpOnly`, `SameSite=Lax`, `Path=/`, `Secure` unless `NEXUS_COOKIE_SECURE=false`, `Max-Age=NEXUS_SESSION_TTL` | opaque session token |
+| `nexus_csrf`    | same, but **not** `HttpOnly`                                                                                   | the CSRF token       |
 
 Send cookies on every request (`credentials: 'include'` in the browser).
 Sessions slide: any request extends the expiry.
@@ -169,6 +169,11 @@ overall status `down`.
 `status` is `ok` | `degraded` | `down`. `edge_version` is `null` when the
 gateway has no `/version` endpoint — take the real version from your deployment
 metadata.
+
+Because this endpoint is unauthenticated, `database.error` is never the
+driver's own message — a failing database reports the constant `"unreachable"`
+and the real text (`connect ECONNREFUSED 10.0.3.14:5432`, authentication
+failures, and so on) is written to the server log at `error` level instead.
 
 ### `GET /api/health/edge`
 

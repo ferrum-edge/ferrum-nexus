@@ -130,6 +130,27 @@ export interface BuildServerDeps {
 /** Rate limit applied to `/api/auth/*` when `config.rateLimitEnabled` is true. */
 export const AUTH_RATE_LIMIT = { max: 20, timeWindow: '1 minute' } as const;
 
+/**
+ * Translate `config.trustedProxies` into a value Fastify accepts.
+ *
+ * A hop count becomes a `TrustProxyFunction` rather than being passed through:
+ * this Fastify version maps a numeric `trustProxy` to "trust nothing"
+ * (`lib/request.js`), which would silently stop honouring `X-Forwarded-For`
+ * for anyone who set it. `(_, hop) => hop < hops` is the semantics
+ * `proxy-addr` — and Express's numeric `trust proxy` — implement: walk that
+ * many entries in from the right and stop.
+ *
+ * `true` is deliberately unreachable, because it makes `request.ip` the
+ * left-most `X-Forwarded-For` entry, which the client writes.
+ */
+export function fastifyTrustProxy(
+  trusted: NexusConfig['trustedProxies'],
+): boolean | string[] | ((address: string, hop: number) => boolean) {
+  if (trusted === false) return false;
+  if (typeof trusted === 'number') return (_address, hop) => hop < trusted;
+  return trusted;
+}
+
 /** Directory of the built SPA, when there is one. */
 function resolveWebDist(config: NexusConfig): string | null {
   const candidates = [
@@ -151,7 +172,7 @@ export async function buildServer(
   const crypto = deps.crypto ?? createCrypto(config.secretKey);
   const app = Fastify({
     logger: deps.logger ?? buildLoggerOptions(config),
-    trustProxy: config.trustProxy,
+    trustProxy: fastifyTrustProxy(config.trustedProxies),
     bodyLimit: 4 * 1024 * 1024,
   });
 
@@ -185,7 +206,6 @@ export async function buildServer(
     onRegistered: deps.onRegistered ?? defaultOnRegistered(config, email, notifications, warn),
   });
   const settings = createSettingsService({ config, store: deps.store, crypto, audit, auth });
-  const users = createUsersService({ store: deps.store, crypto, audit, notifications });
   const messaging = createMessagingService({
     config,
     store: deps.store,
@@ -215,6 +235,17 @@ export async function buildServer(
     email,
     provisioner,
   });
+  // Users is composed after credentials: disabling an account has to strip the
+  // gateway identity, not merely the browser session.
+  const users = createUsersService({
+    store: deps.store,
+    crypto,
+    audit,
+    notifications,
+    auth,
+    credentials,
+    log: warn,
+  });
   const publishing = createPublishingService({
     config,
     store: deps.store,
@@ -240,6 +271,7 @@ export async function buildServer(
     massEmail,
     access,
     publishing,
+    credentials,
     log: warn,
   });
 
@@ -326,7 +358,7 @@ export async function buildServer(
     },
     crossOriginEmbedderPolicy: false,
     frameguard: { action: 'deny' },
-    hsts: config.trustProxy ? { maxAge: 31_536_000, includeSubDomains: true } : false,
+    hsts: config.cookieSecure ? { maxAge: 31_536_000, includeSubDomains: true } : false,
     referrerPolicy: { policy: 'no-referrer' },
   });
 
@@ -366,11 +398,11 @@ export async function buildServer(
     prefix: '/api/branding',
   });
 
-  await app.register(async (scope) => scope.register(usersRoutes, { users }), {
+  await app.register(async (scope) => scope.register(usersRoutes, { users, config }), {
     prefix: '/api/users',
   });
 
-  await app.register(async (scope) => scope.register(organizationRoutes, { users }), {
+  await app.register(async (scope) => scope.register(organizationRoutes, { users, config }), {
     prefix: '/api/organizations',
   });
 

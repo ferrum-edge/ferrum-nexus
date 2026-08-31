@@ -561,6 +561,19 @@ export interface SettingRepo {
   getMany(keys: string[]): Promise<SettingRecord[]>;
   /** Upsert. `encrypted` records how `value` was stored, not what it means. */
   set(key: string, value: unknown, encrypted?: boolean): Promise<SettingRecord>;
+  /**
+   * Insert `key` **only if it does not exist yet**, returning whether this
+   * caller was the one that created it. An existing row is left untouched and
+   * reported as `false`; this never throws `CONFLICT`.
+   *
+   * This is the store's one atomic compare-and-set, and it is atomic because
+   * `app_settings.key` is unique — not because of any transaction. Concurrent
+   * callers on any adapter (including PostgreSQL at READ COMMITTED and
+   * MongoDB, where two transactions can both observe "absent") see exactly one
+   * `true`. Used to elect the bootstrap `super_admin`; use it for any other
+   * "exactly one winner" decision rather than read-then-write.
+   */
+  insertIfAbsent(key: string, value: unknown, encrypted?: boolean): Promise<boolean>;
   /** Upsert several keys; adapters apply them in one statement batch. */
   setMany(entries: { key: string; value: unknown; encrypted?: boolean }[]): Promise<void>;
   delete(key: string): Promise<boolean>;

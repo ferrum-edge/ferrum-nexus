@@ -15,7 +15,8 @@
  *    the target so the count is about *the others*.
  *
  * Disabling an account also deletes its sessions, so the next request from an
- * open browser tab is a 401 rather than a working page.
+ * open browser tab is a 401 rather than a working page — **and** strips its
+ * Ferrum consumer, because an issued API key needs no portal session at all.
  */
 
 import {
@@ -30,11 +31,28 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { AuditAction, type AuditService } from '../audit/service.js';
-import { toPublicUser } from '../auth/service.js';
+import {
+  toPublicUser,
+  type AuthService,
+  type IssuedSession,
+  type RequestContext,
+} from '../auth/service.js';
+import { tearDownGatewayAccess, type CredentialsService } from '../credentials/service.js';
 import type { ListOptions, NexusStore, UpdateInput, UserFilter, UserRecord } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
 import { conflict, forbidden, lastSuperAdmin, notFound, validationFailed } from '../lib/errors.js';
 import type { NotificationsService } from '../notifications/service.js';
+
+/** Result of {@link UsersService.updateMe}. */
+export interface UpdateMeResult {
+  user: User;
+  /**
+   * Present only when the password changed: every session of the account was
+   * deleted, and this one was issued to keep the caller signed in. The route
+   * must write it to the reply's cookies.
+   */
+  reissued: IssuedSession | null;
+}
 
 /** Patch accepted by {@link UsersService.updateMe}. */
 export interface UpdateMeInput {
@@ -66,8 +84,17 @@ export interface UserListFilter {
 export interface UsersService {
   /** The caller's own account. */
   getMe(user: UserRecord): User;
-  /** Self-service profile update. Never touches role, status or email. */
-  updateMe(user: UserRecord, patch: UpdateMeInput, ip?: string | null): Promise<User>;
+  /**
+   * Self-service profile update. Never touches role, status or email.
+   *
+   * A password change also ends every session of the account and hands back a
+   * replacement for the caller — see {@link UpdateMeResult.reissued}.
+   */
+  updateMe(
+    user: UserRecord,
+    patch: UpdateMeInput,
+    context?: RequestContext,
+  ): Promise<UpdateMeResult>;
   listUsers(filter?: UserListFilter, options?: ListOptions): Promise<Paginated<User>>;
   /** Admin update of another account, with the role and last-super-admin guards. */
   updateUser(
@@ -97,6 +124,12 @@ export interface UsersServiceDeps {
   audit: AuditService;
   /** Used to tell a user their role or account status changed. */
   notifications: NotificationsService;
+  /** Issues the replacement session a password change needs. */
+  auth: AuthService;
+  /** Strips the gateway identity of an account being disabled. */
+  credentials: Pick<CredentialsService, 'disableGatewayAccess'>;
+  /** Records a gateway teardown that failed; the disable still goes through. */
+  log?: (obj: Record<string, unknown>, message: string) => void;
 }
 
 /** Roles that only a `super_admin` may confer or remove. */
@@ -106,12 +139,13 @@ function isElevated(role: Role): boolean {
 
 /** Build the users service. */
 export function createUsersService(deps: UsersServiceDeps): UsersService {
-  const { store, crypto, audit, notifications } = deps;
+  const { store, crypto, audit, notifications, auth, credentials } = deps;
 
   return {
     getMe: (user) => toPublicUser(user),
 
-    async updateMe(user, patch, ip = null): Promise<User> {
+    async updateMe(user, patch, context = { ip: null, userAgent: null }): Promise<UpdateMeResult> {
+      const ip = context.ip;
       const update: UpdateInput<UserRecord> = {};
       const changed: string[] = [];
 
@@ -142,19 +176,34 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
         changed.push('password');
       }
 
-      if (changed.length === 0) return toPublicUser(user);
+      if (changed.length === 0) return { user: toPublicUser(user), reissued: null };
 
       const updated = await store.users.update(user.id, update);
       if (!updated) throw notFound('User', user.id);
+
+      // A password change ends every session of the account — the point of
+      // changing it is usually that somebody else might hold one. The caller
+      // gets a replacement so they are not signed out of the tab they did it
+      // in; every other session is gone, sliding expiry and all.
+      let reissued: IssuedSession | null = null;
+      let terminatedSessions = 0;
+      if (update.password_hash !== undefined) {
+        terminatedSessions = await store.sessions.deleteForUser(user.id);
+        reissued = await auth.issueSession(updated, context);
+      }
 
       await audit.record(
         { id: user.id, role: user.role },
         AuditAction.USER_UPDATE,
         { type: 'user', id: user.id },
-        { self: true, changed_fields: changed },
+        {
+          self: true,
+          changed_fields: changed,
+          ...(terminatedSessions > 0 ? { terminated_sessions: terminatedSessions } : {}),
+        },
         ip,
       );
-      return toPublicUser(updated);
+      return { user: toPublicUser(updated), reissued };
     },
 
     async listUsers(filter = {}, options): Promise<Paginated<User>> {
@@ -230,10 +279,13 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
       const updated = await store.users.update(target.id, update);
       if (!updated) throw notFound('User', targetId);
 
-      // A disabled account must not keep a usable browser session.
+      // A disabled account must not keep a usable browser session — nor a
+      // working gateway identity, which outlives the session entirely.
       let terminatedSessions = 0;
+      let teardown: Record<string, unknown> = {};
       if (update.status === 'disabled') {
         terminatedSessions = await store.sessions.deleteForUser(target.id);
+        teardown = await tearDownGatewayAccess(credentials, target.id, actor.id, deps.log);
       }
 
       const action = statusChanged
@@ -253,6 +305,7 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
           ...(roleChanged ? { from_role: target.role, to_role: update.role } : {}),
           ...(statusChanged ? { from_status: target.status, to_status: update.status } : {}),
           ...(terminatedSessions > 0 ? { terminated_sessions: terminatedSessions } : {}),
+          ...teardown,
         },
         ip,
       );

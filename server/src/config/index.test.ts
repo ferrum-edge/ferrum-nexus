@@ -33,7 +33,7 @@ describe('loadConfig', () => {
     assert.equal(config.host, '127.0.0.1');
     assert.equal(config.port, 8787);
     assert.equal(config.publicUrl, 'http://127.0.0.1:5173');
-    assert.equal(config.trustProxy, false);
+    assert.equal(config.trustedProxies, false);
     assert.equal(config.logLevel, 'info');
     assert.equal(config.sessionTtlSeconds, 43_200);
     assert.equal(config.db.driver, 'sqlite');
@@ -116,8 +116,64 @@ describe('loadConfig', () => {
   });
 
   it('parses booleans in every documented spelling', () => {
-    assert.equal(loadConfig(baseEnv({ NEXUS_TRUST_PROXY: 'TRUE' })).trustProxy, true);
-    assert.equal(loadConfig(baseEnv({ NEXUS_TRUST_PROXY: 'no' })).trustProxy, false);
-    expectConfigError(baseEnv({ NEXUS_TRUST_PROXY: 'maybe' }), 'true or false');
+    assert.equal(
+      loadConfig(baseEnv({ NEXUS_DB_ALLOW_STANDALONE: 'TRUE' })).db.allowStandalone,
+      true,
+    );
+    assert.equal(
+      loadConfig(baseEnv({ NEXUS_DB_ALLOW_STANDALONE: 'no' })).db.allowStandalone,
+      false,
+    );
+    expectConfigError(baseEnv({ NEXUS_DB_ALLOW_STANDALONE: 'maybe' }), 'true or false');
+  });
+
+  it('trusts no proxy unless one is named', () => {
+    assert.equal(loadConfig(baseEnv()).trustedProxies, false);
+    assert.equal(loadConfig(baseEnv({ NEXUS_TRUSTED_PROXIES: '  ' })).trustedProxies, false);
+    assert.equal(loadConfig(baseEnv({ NEXUS_TRUSTED_PROXIES: '2' })).trustedProxies, 2);
+    assert.deepEqual(
+      loadConfig(baseEnv({ NEXUS_TRUSTED_PROXIES: '10.0.0.0/8, 192.168.1.7 ,loopback' }))
+        .trustedProxies,
+      ['10.0.0.0/8', '192.168.1.7', 'loopback'],
+    );
+  });
+
+  it('keeps NEXUS_TRUST_PROXY=true as a deprecated one-hop alias', () => {
+    assert.equal(loadConfig(baseEnv({ NEXUS_TRUST_PROXY: 'true' })).trustedProxies, 1);
+    assert.equal(loadConfig(baseEnv({ NEXUS_TRUST_PROXY: 'false' })).trustedProxies, false);
+    // The explicit variable wins when both are set.
+    assert.equal(
+      loadConfig(baseEnv({ NEXUS_TRUST_PROXY: 'true', NEXUS_TRUSTED_PROXIES: '3' })).trustedProxies,
+      3,
+    );
+    // …and the alias no longer decides the cookie flag.
+    assert.equal(
+      loadConfig(baseEnv({ NEXUS_TRUST_PROXY: 'true', NEXUS_ENV: 'development' })).cookieSecure,
+      false,
+    );
+  });
+
+  it('rejects a trusted-proxy list that is neither a hop count nor addresses', () => {
+    expectConfigError(baseEnv({ NEXUS_TRUSTED_PROXIES: 'true' }), 'NEXUS_TRUSTED_PROXIES');
+    expectConfigError(baseEnv({ NEXUS_TRUSTED_PROXIES: '0' }), 'between 1 and 32');
+    expectConfigError(
+      baseEnv({ NEXUS_TRUSTED_PROXIES: '10.0.0.1,proxy.example.com' }),
+      'proxy.example.com',
+    );
+  });
+
+  it('defaults cookies to Secure everywhere but development', () => {
+    assert.equal(loadConfig(baseEnv({ NEXUS_ENV: 'production' })).cookieSecure, true);
+    assert.equal(loadConfig(baseEnv({ NEXUS_ENV: 'test' })).cookieSecure, true);
+    assert.equal(loadConfig(baseEnv({ NEXUS_ENV: 'development' })).cookieSecure, false);
+    assert.equal(
+      loadConfig(baseEnv({ NEXUS_ENV: 'development', NEXUS_COOKIE_SECURE: 'true' })).cookieSecure,
+      true,
+    );
+    assert.equal(
+      loadConfig(baseEnv({ NEXUS_ENV: 'production', NEXUS_COOKIE_SECURE: 'off' })).cookieSecure,
+      false,
+    );
+    expectConfigError(baseEnv({ NEXUS_COOKIE_SECURE: 'maybe' }), 'NEXUS_COOKIE_SECURE');
   });
 });

@@ -68,8 +68,9 @@ session cookie, and that cookie is only useful against Nexus.
   tokens, and — because the key is _separate_ from the settings-encryption key
   (info `nexus-settings-v1`) — a leak of one subkey cannot forge the other.
 - **Cookie flags.** `nexus_session` is `HttpOnly`, `SameSite=Lax`, `Path=/`,
-  `Max-Age=NEXUS_SESSION_TTL`, and `Secure` whenever `NEXUS_TRUST_PROXY=true`.
-  Set that in any deployment that terminates TLS.
+  `Max-Age=NEXUS_SESSION_TTL`, and `Secure` unless `NEXUS_COOKIE_SECURE=false`
+  (the default outside `NEXUS_ENV=development`). Clear it only for a plaintext
+  `http://` deployment.
 - **Sliding expiry.** Default idle lifetime 12 hours (`NEXUS_SESSION_TTL`).
   Any request extends it, but the row is only written when less than half the
   TTL remains, so an active SPA does not issue one `UPDATE` per request.
@@ -78,7 +79,13 @@ session cookie, and that cookie is only useful against Nexus.
   destroyed on the spot — along with **every** session for that user — so the
   next request from an open tab is a `401`, not a working page. Disabling an
   account (ordinary or god mode) deletes its sessions explicitly and reports
-  how many.
+  how many — **and strips its gateway identity**, because an issued API key
+  authenticates without any portal session at all. See
+  [Disabling an account](#disabling-an-account).
+- **Changing your password ends every other session.** `PATCH /api/users/me`
+  with a `new_password` deletes every session of the account and issues one
+  replacement for the request that made the change, so the tab you typed it in
+  stays signed in and nothing else does.
 - **Sign-in does not leak which addresses exist.** A missing account still
   costs one real scrypt derivation against a decoy hash, and "no such account"
   and "wrong password" return the identical `401 UNAUTHORIZED`.
@@ -185,6 +192,17 @@ platform has to be bootstrappable. Every later registration gets only the
 registrable role it asked for, subject to `open_registration` and
 `allowed_roles`.
 
+"First" is decided by an **atomic claim**, not by counting rows. Registration
+creates the account with the role that was requested and then inserts the
+`bootstrap.super_admin_claimed` key with `settings.insertIfAbsent`; only the
+insert that wins the unique constraint is promoted. Counting users and then
+awaiting a ~100 ms scrypt hash before the insert is a race every concurrent
+registration against an empty database wins — and a transaction does not close
+it, because under PostgreSQL's READ COMMITTED and under MongoDB two concurrent
+transactions can both observe zero users. Registrations that saw an
+already-populated portal never stand for the election, so an upgraded
+deployment cannot mint a second founder.
+
 The mirror-image protection: **the last active `super_admin` cannot be demoted,
 disabled or removed** → `409 LAST_SUPER_ADMIN`. The check counts active super
 admins _excluding the target_, so it is genuinely asking "is anyone else left?".
@@ -192,6 +210,27 @@ It is implemented twice on purpose — in `users/service.ts` for
 `PATCH /api/users/:id`, and again in `admin/god-service.ts`, because god mode
 does not route through the ordinary path. Disabling your own account is refused
 separately with `409 CONFLICT`.
+
+### Disabling an account
+
+Both paths — `PATCH /api/users/:id` with `status: "disabled"` and
+`POST /api/admin/god/disable-user` — do three things, not one:
+
+1. delete every session, so an open tab gets a `401`;
+2. strip every ACL group from the account's Ferrum consumer;
+3. delete **every credential of every type** on that consumer and mark the
+   matching `credential_metadata` rows `revoked`.
+
+(2) alone is not enough. An API published with `requestable: false` carries no
+`access_control` plugin, so an empty group list stops nothing; the credential
+is what the gateway authenticates, and it has no idea a portal session ever
+existed. `basicauth` is deleted explicitly because it never appears in a read
+projection, so a group rewrite cannot see it.
+
+The teardown is best-effort by design: if Edge is unreachable the account is
+still disabled and the failure is logged and recorded in the audit row
+(`gateway_teardown: "failed"`) for an operator to finish by hand. An account
+left enabled because the gateway was down would be strictly worse.
 
 ---
 
@@ -224,6 +263,12 @@ Because Edge gives credential entries no id, Nexus locates one by _position_
 hand-edited the consumer — the operation is **refused** with `EDGE_ERROR`
 rather than guessing, unless exactly one credential is live, in which case
 removing the whole type is unambiguous.
+
+That last fallback applies to **`revoke` only**. In a rotation, "delete the
+whole type" would take the entry appended moments earlier with it, leaving the
+user holding a show-once secret that authenticates nothing and a row that says
+`active`; a drifted `rotate` is therefore refused outright and the consumer has
+to be reconciled first.
 
 ---
 
@@ -266,9 +311,10 @@ Controlled by `NEXUS_RATE_LIMIT_ENABLED` (default `true`); forced off under
 `NEXUS_ENV=test`. The store is in-memory and therefore **per process** — with
 N instances the effective limit is N × 20/min, so enforce the real limit at the
 proxy if you run more than one. The limiter keys on `request.ip`, which honours
-`X-Forwarded-For` only when `NEXUS_TRUST_PROXY=true`; enabling that on a
-directly-exposed instance would let a client trivially evade the limit _and_
-forge the IP recorded in the audit log.
+`X-Forwarded-For` only for the proxies named by `NEXUS_TRUSTED_PROXIES`
+(unset — trust nothing — by default). Trusting an unfiltered header would let a
+client rotate the limiter's key once per request _and_ forge the IP recorded in
+the audit log, so the allowlist/hop-count form is the only one accepted.
 
 ### CAPTCHA
 
@@ -299,7 +345,7 @@ helmet is configured in the composition root:
 | `connect-src`               | `'self'`, `hcaptcha.com`, `*.hcaptcha.com`                                                                                                                                                        |
 | `X-Frame-Options`           | `DENY`                                                                                                                                                                                            |
 | `Referrer-Policy`           | `no-referrer`                                                                                                                                                                                     |
-| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` — **only when `NEXUS_TRUST_PROXY=true`**                                                                                                                    |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` — **only when `NEXUS_COOKIE_SECURE` is on (the default outside development)**                                                                               |
 | `Cache-Control`             | `no-store` on every `/api` response                                                                                                                                                               |
 
 Notes on the deliberate loosenings:
@@ -313,6 +359,12 @@ Notes on the deliberate loosenings:
 - `img-src ... data:` is required because the portal logo is stored and served
   as a `data:` URL.
 - `crossOriginEmbedderPolicy` is off so the CAPTCHA iframes work.
+
+**`GET /api/health` says nothing an anonymous caller can use.** The database
+probe reports `error: "unreachable"` and never the driver's own message, which
+would otherwise hand out internal hostnames, ports and database account names
+(`connect ECONNREFUSED 10.0.3.14:5432`, `password authentication failed for
+user "nexus_app"`). The real text goes to the log at `error` level.
 
 **Admin-authored HTML is a trusted-but-real input.** Email template bodies and
 the mass-email composer accept HTML, and only variables explicitly listed in
@@ -400,13 +452,13 @@ ordinary reporting.
 
 ### Users and organizations
 
-| Action             | Target type    | Description                                                                                                                                                                                                           |
-| ------------------ | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `user.update`      | `user`         | A profile or account field changed without a role/status change. `details.self` distinguishes self-service from an admin edit; `changed_fields` lists what moved (`password` appears as a field name, never a value). |
-| `user.role_change` | `user`         | An admin changed an account's role. `details`: `from_role`, `to_role`.                                                                                                                                                |
-| `user.disable`     | `user`         | An admin disabled (or re-enabled) an account via the ordinary route. `details`: `from_status`, `to_status`, `terminated_sessions`.                                                                                    |
-| `org.create`       | `organization` | An organization was created. `details`: name.                                                                                                                                                                         |
-| `org.update`       | `organization` | An organization was edited. `details`: `changed_fields`.                                                                                                                                                              |
+| Action             | Target type    | Description                                                                                                                                                                                                                                                                                                           |
+| ------------------ | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `user.update`      | `user`         | A profile or account field changed without a role/status change. `details.self` distinguishes self-service from an admin edit; `changed_fields` lists what moved (`password` appears as a field name, never a value). A self-service password change also ends every other session, counted in `terminated_sessions`. |
+| `user.role_change` | `user`         | An admin changed an account's role. `details`: `from_role`, `to_role`.                                                                                                                                                                                                                                                |
+| `user.disable`     | `user`         | An admin disabled (or re-enabled) an account via the ordinary route. `details`: `from_status`, `to_status`, `terminated_sessions`, plus the gateway teardown: `gateway_teardown` (`ok` / `no_consumer` / `failed`), `gateway_consumer_id`, `revoked_credentials`, `removed_acl_groups`, `gateway_error`.              |
+| `org.create`       | `organization` | An organization was created. `details`: name.                                                                                                                                                                                                                                                                         |
+| `org.update`       | `organization` | An organization was edited. `details`: `changed_fields`.                                                                                                                                                                                                                                                              |
 
 ### Publishing
 
@@ -461,12 +513,12 @@ underlying operation produces, so an emergency action leaves a two-row trail:
 what was done, and the fact that it was done under god mode and why. `reason`
 is required and non-empty on all four.
 
-| Action             | Target type | Description                                                                                                                                                                                        |
-| ------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `god.revoke_grant` | `grant`     | A grant was revoked without ownership. Pairs with `access.revoke`. `details`: `reason`, api id, user id.                                                                                           |
-| `god.delete_api`   | `api`       | An API was destroyed without ownership. Pairs with `api.delete` (and one `access.revoke` per grant when `revoke_grants` was set). `details`: `reason`, slug, `owner_user_id`, `revoked_grants`.    |
-| `god.disable_user` | `user`      | An account was disabled and its sessions destroyed. `details`: `reason`, `revoked_grants`, `terminated_sessions`, `previous_status`.                                                               |
-| `god.broadcast`    | `broadcast` | A platform message was sent to many users. `target_id` is `null`. `details`: `reason` (the subject), audience scope, `recipients`, `notified`, `threads_created`, `emails_enqueued`, `send_email`. |
+| Action             | Target type | Description                                                                                                                                                                                                          |
+| ------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `god.revoke_grant` | `grant`     | A grant was revoked without ownership. Pairs with `access.revoke`. `details`: `reason`, api id, user id.                                                                                                             |
+| `god.delete_api`   | `api`       | An API was destroyed without ownership. Pairs with `api.delete` (and one `access.revoke` per grant when `revoke_grants` was set). `details`: `reason`, slug, `owner_user_id`, `revoked_grants`.                      |
+| `god.disable_user` | `user`      | An account was disabled, its sessions destroyed and its gateway identity stripped. `details`: `reason`, `revoked_grants`, `terminated_sessions`, `previous_status`, and the same `gateway_*` keys as `user.disable`. |
+| `god.broadcast`    | `broadcast` | A platform message was sent to many users. `target_id` is `null`. `details`: `reason` (the subject), audience scope, `recipients`, `notified`, `threads_created`, `emails_enqueued`, `send_email`.                   |
 
 ### What is deliberately not audited
 
@@ -490,8 +542,10 @@ Before going live:
       and is not in version control.
 - [ ] `FERRUM_ADMIN_URL` is `https://`, or the Admin API is on a private
       network unreachable from the internet.
-- [ ] `NEXUS_TRUST_PROXY=true`, and a proxy you control actually sets
-      `X-Forwarded-For`.
+- [ ] `NEXUS_COOKIE_SECURE` is on (the default), and TLS is terminated in
+      front of Nexus.
+- [ ] `NEXUS_TRUSTED_PROXIES` names the proxies you control (or the hop count),
+      and is left unset on a directly-exposed instance.
 - [ ] `NEXUS_PUBLIC_URL` is the real public origin, and the SPA and API are on
       the same origin.
 - [ ] `NEXUS_RATE_LIMIT_ENABLED=true`; a proxy-level limit exists if you run

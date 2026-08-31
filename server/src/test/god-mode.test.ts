@@ -11,6 +11,7 @@ import {
   type GodDeleteApiResponse,
   type GodDisableUserResponse,
   type GodRevokeGrantResponse,
+  type IssueCredentialResponse,
   type ListNotificationsResponse,
   type ListThreadsResponse,
   type PublishApiResponse,
@@ -284,6 +285,42 @@ describe('API deletion and god mode', () => {
       );
       assert.equal(godRow?.details.reason, 'Account compromised.');
       assert.equal(godRow?.details.revoked_grants, 1);
+    });
+
+    it('deletes the gateway credentials of the account it disables', async () => {
+      const victim = await harness.registerUser({
+        email: 'god-credential-victim@example.test',
+        role: 'client',
+      });
+      const issued = await harness.authed(victim, {
+        method: 'POST',
+        url: '/api/credentials',
+        payload: { credential_type: 'keyauth' },
+      });
+      assert.equal(issued.statusCode, 201, issued.body);
+      const credentialId = issued.json<IssueCredentialResponse>().credential.id;
+
+      const username = consumerUsernameForUser(victim.user.id);
+      assert.equal(harness.edge.consumerByUsername(username)?.credentials.keyauth?.length, 1);
+
+      const response = await harness.authed(superAdmin, {
+        method: 'POST',
+        url: '/api/admin/god/disable-user',
+        payload: { user_id: victim.user.id, reason: 'Key posted to a public repo.' },
+      });
+      assert.equal(response.statusCode, 200, response.body);
+
+      // Sessions were never what kept the API key working.
+      const consumer = harness.edge.consumerByUsername(username);
+      assert.deepEqual(consumer?.credentials, {});
+      assert.deepEqual(consumer?.acl_groups, []);
+      assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'revoked');
+
+      const godRow = (await harness.auditRows('god.disable_user')).find(
+        (row) => row.target_id === victim.user.id,
+      );
+      assert.equal(godRow?.details.gateway_teardown, 'ok');
+      assert.equal(godRow?.details.revoked_credentials, 1);
     });
 
     it('refuses to disable the last active super_admin', async () => {

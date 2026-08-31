@@ -104,6 +104,11 @@ describe('access workflow', () => {
     const notified = providerBell.json<ListNotificationsResponse>();
     assert.equal(notified.total, 1);
     assert.match(notified.items[0]?.title ?? '', /Access requested/);
+    assert.equal(
+      notified.items[0]?.link,
+      `/apis/${apiId}`,
+      'the bell links at the provider’s review inbox, which lives on the API page',
+    );
 
     assert.ok(
       (await harness.auditRows('access.request')).some((row) => row.target_id === requestId),

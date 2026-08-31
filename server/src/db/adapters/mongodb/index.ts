@@ -2223,6 +2223,29 @@ class MongoStore implements NexusStore {
       return stored;
     },
 
+    insertIfAbsent: async (key, value, encrypted = false) => {
+      const at = nowIso();
+      try {
+        // The setting key *is* `_id`, so a plain insert is the atomic claim:
+        // the server rejects the second one with a duplicate-key error even
+        // when both callers looked and saw nothing.
+        await this.col(COLLECTIONS.settings).insertOne(
+          {
+            _id: key,
+            value: normalizeJson(value ?? null),
+            encrypted,
+            created_at: at,
+            updated_at: at,
+          } as NexusDoc,
+          this.opts,
+        );
+        return true;
+      } catch (error) {
+        if ((error as { code?: unknown }).code === 11000) return false;
+        throw error;
+      }
+    },
+
     setMany: async (entries) => {
       if (entries.length === 0) return;
       for (const entry of entries) {

@@ -570,7 +570,7 @@ escaping.
   `nexus-session-hmac-v1` — separate from the settings-encryption key, so a
   leak of one cannot forge the other.
 - The cookie `nexus_session` is `HttpOnly`, `SameSite=Lax`, `Path=/`, and
-  `Secure` when `NEXUS_TRUST_PROXY=true`.
+  `Secure` unless `NEXUS_COOKIE_SECURE=false`.
 - **Sliding expiry.** Every request extends the session, but the row is only
   written when less than half the TTL remains, so a busy SPA does not issue one
   `UPDATE` per request.

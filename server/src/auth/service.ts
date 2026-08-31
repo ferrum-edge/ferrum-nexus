@@ -6,7 +6,9 @@
  * - Email addresses are unique case-insensitively and stored lowercased.
  * - **The first account ever created becomes `super_admin` and is
  *   automatically email-verified**; later accounts get the registrable role
- *   they asked for (`client` or `provider`) and nothing more.
+ *   they asked for (`client` or `provider`) and nothing more. "First" is
+ *   decided by an atomic claim on {@link SUPER_ADMIN_CLAIM_KEY}, not by
+ *   counting users — see {@link AuthService.register}.
  * - Passwords are scrypt-hashed; verification is constant-time and a missing
  *   account still costs one hash so sign-in does not leak which emails exist.
  * - Every successful register/login/logout/verify writes an audit row.
@@ -40,6 +42,16 @@ import type { CaptchaService } from './captcha.js';
 
 /** `app_settings` key holding the registration policy. */
 export const REGISTRATION_SETTINGS_KEY = 'registration';
+
+/**
+ * `app_settings` key that records the bootstrap election.
+ *
+ * Its value is `{ user_id, claimed_at }` — the account that won the race to be
+ * the platform's first `super_admin`. The row exists to be *unique*: it is
+ * written with `settings.insertIfAbsent`, so the database's unique constraint,
+ * not a read-then-write in application code, decides the winner.
+ */
+export const SUPER_ADMIN_CLAIM_KEY = 'bootstrap.super_admin_claimed';
 
 /** Stored registration policy, with the defaults applied when unset. */
 export interface RegistrationPolicy {
@@ -228,8 +240,12 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
 
       await captcha.verify(input.captcha_token, context.ip);
 
-      const isFirstUser = (await store.users.count()) === 0;
-      if (!isFirstUser) {
+      // Advisory only: it decides whether the registration policy applies, and
+      // whether this registration stands for the bootstrap election below. It
+      // is *not* what makes anyone a super_admin. An empty user table also
+      // implies the default policy, since editing it needs an admin account.
+      const emptyPortal = (await store.users.count()) === 0;
+      if (!emptyPortal) {
         if (!policy.open_registration) {
           throw forbidden('Self-service registration is currently closed');
         }
@@ -242,20 +258,43 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         throw conflict('An account with that email address already exists');
       }
 
-      // The very first account bootstraps the platform: super_admin, verified.
-      const role: Role = isFirstUser ? 'super_admin' : input.role;
-      const requiresVerification = !isFirstUser && policy.require_email_verification;
-
-      const record = await store.users.create({
+      // Create with the role that was actually requested. Hashing the password
+      // takes ~100 ms, so any number of registrations can be in flight here at
+      // once; deciding the founder before that await is how every one of them
+      // used to come back a super_admin.
+      let record = await store.users.create({
         email,
         password_hash: await crypto.hashPassword(password),
         display_name: input.display_name.trim(),
-        role,
+        role: input.role,
         company: input.company ?? null,
         phone: input.phone ?? null,
         status: 'active',
-        email_verified: !requiresVerification,
+        email_verified: !policy.require_email_verification,
       });
+
+      // The bootstrap election: one insert against a unique key, so exactly one
+      // concurrent registration is told `true`. Registrations that saw an
+      // already-populated portal never stand, which keeps an upgraded
+      // deployment (whose founder predates this row) from minting a second one.
+      const promoted =
+        emptyPortal &&
+        (await store.settings.insertIfAbsent(SUPER_ADMIN_CLAIM_KEY, {
+          user_id: record.id,
+          claimed_at: nowIso(),
+        }));
+      if (promoted) {
+        // The founder bootstraps the platform: super_admin, and verified so
+        // there is nobody to configure SMTP for them.
+        record =
+          (await store.users.update(record.id, {
+            role: 'super_admin',
+            email_verified: true,
+          })) ?? record;
+      }
+
+      const role: Role = record.role;
+      const requiresVerification = !promoted && policy.require_email_verification;
       const user = toPublicUser(record);
 
       let verificationToken: string | null = null;
@@ -272,7 +311,7 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         { id: record.id, role },
         AuditAction.AUTH_REGISTER,
         { type: 'user', id: record.id },
-        { email, role, first_user: isFirstUser, verification_required: requiresVerification },
+        { email, role, first_user: promoted, verification_required: requiresVerification },
         context.ip,
       );
 
