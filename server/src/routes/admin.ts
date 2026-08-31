@@ -15,6 +15,10 @@ import {
   ROLE_ORDER,
   type AdminSettingsResponse,
   type GetEmailTemplateResponse,
+  type GodBroadcastResponse,
+  type GodDeleteApiResponse,
+  type GodDisableUserResponse,
+  type GodRevokeGrantResponse,
   type ListAuditLogsResponse,
   type ListEmailTemplatesResponse,
   type MassEmailResponse,
@@ -23,12 +27,13 @@ import {
   type UpdateSettingsResponse,
 } from '@ferrum-nexus/shared';
 
+import type { GodService } from '../admin/god-service.js';
 import type { MassEmailService } from '../admin/mass-email-service.js';
 import type { SettingsService } from '../admin/settings-service.js';
 import { AuditAction, type AuditService } from '../audit/service.js';
 import type { AuditLogFilter } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
-import { clientIp, requireAuth, requireRole } from '../middleware/auth-plugin.js';
+import { assertRole, clientIp, requireAuth, requireRole } from '../middleware/auth-plugin.js';
 import { parseOrThrow } from '../middleware/error-handler.js';
 import { listOptions, listQuerySchema } from './common.js';
 
@@ -38,6 +43,7 @@ export interface AdminRoutesOptions {
   massEmail: MassEmailService;
   email: EmailService;
   audit: AuditService;
+  god: GodService;
 }
 
 /** Largest accepted logo, as a data URL. Roughly 384 KiB of binary. */
@@ -125,9 +131,47 @@ const auditLogsQuery = listQuerySchema.extend({
   to: z.string().trim().datetime().optional(),
 });
 
+/* ── God-mode bodies ──────────────────────────────────────────────────────
+ * `reason` is required and non-empty on all four: an emergency action without
+ * a recorded justification is exactly the kind of thing the audit log exists to
+ * make impossible.
+ */
+
+const godReason = z.string().trim().min(1).max(2_000);
+
+const godRevokeGrantBody = z.object({
+  grant_id: z.string().trim().min(1).max(64),
+  reason: godReason,
+});
+
+const godDeleteApiBody = z.object({
+  api_id: z.string().trim().min(1).max(64),
+  reason: godReason,
+  revoke_grants: z.boolean().optional(),
+});
+
+const godDisableUserBody = z.object({
+  user_id: z.string().trim().min(1).max(64),
+  reason: godReason,
+  revoke_grants: z.boolean().optional(),
+});
+
+const godBroadcastBody = z.object({
+  subject: z.string().trim().min(1).max(300),
+  body: z.string().trim().min(1).max(20_000),
+  audience: z.object({
+    scope: z.enum(['all', 'filtered', 'explicit']),
+    roles: z.array(z.enum(ROLE_ORDER)).max(4).optional(),
+    status: z.enum(['active', 'disabled']).optional(),
+    org_id: z.string().trim().min(1).max(64).optional(),
+    user_ids: z.array(z.string().trim().min(1).max(64)).max(5_000).optional(),
+  }),
+  send_email: z.boolean().optional(),
+});
+
 /** `/api/admin` route plugin. */
 export const adminRoutes: FastifyPluginAsync<AdminRoutesOptions> = async (app, options) => {
-  const { settings, massEmail, email, audit } = options;
+  const { settings, massEmail, email, audit, god } = options;
   app.addHook('onRequest', requireRole('admin'));
 
   /* ── Settings ─────────────────────────────────────────────────────────── */
@@ -211,11 +255,54 @@ export const adminRoutes: FastifyPluginAsync<AdminRoutesOptions> = async (app, o
   });
 
   /* ── God mode (super_admin only) ───────────────────────────────────────
-   * NOTE(gateway agent): register `POST /god/revoke-grant`, `/god/delete-api`,
-   * `/god/disable-user` and `/god/broadcast` here. They live behind this
-   * plugin's `admin` hook, so each handler must additionally call
-   * `assertRole(request, 'super_admin')` (from `middleware/auth-plugin.js`),
-   * take its services through {@link AdminRoutesOptions}, and audit with the
-   * `AuditAction.GOD_*` actions.
+   * These four sit behind the plugin's `admin` hook and then raise the bar to
+   * `super_admin` per handler. Every one of them demands a non-empty `reason`,
+   * which the god service writes into the `god.*` audit row alongside the
+   * ordinary audit row the underlying operation produces.
    */
+
+  app.post('/god/revoke-grant', async (request): Promise<GodRevokeGrantResponse> => {
+    const { user } = assertRole(request, 'super_admin');
+    const body = parseOrThrow(godRevokeGrantBody, request.body);
+    return { grant: await god.revokeGrant(user, body.grant_id, body.reason, clientIp(request)) };
+  });
+
+  app.post('/god/delete-api', async (request): Promise<GodDeleteApiResponse> => {
+    const { user } = assertRole(request, 'super_admin');
+    const body = parseOrThrow(godDeleteApiBody, request.body);
+    return god.deleteApi(
+      user,
+      body.api_id,
+      body.reason,
+      body.revoke_grants ?? false,
+      clientIp(request),
+    );
+  });
+
+  app.post('/god/disable-user', async (request): Promise<GodDisableUserResponse> => {
+    const { user } = assertRole(request, 'super_admin');
+    const body = parseOrThrow(godDisableUserBody, request.body);
+    return god.disableUser(
+      user,
+      body.user_id,
+      body.reason,
+      body.revoke_grants ?? false,
+      clientIp(request),
+    );
+  });
+
+  app.post('/god/broadcast', async (request): Promise<GodBroadcastResponse> => {
+    const { user } = assertRole(request, 'super_admin');
+    const body = parseOrThrow(godBroadcastBody, request.body);
+    return god.broadcast(
+      user,
+      {
+        subject: body.subject,
+        body: body.body,
+        audience: body.audience,
+        ...(body.send_email !== undefined ? { send_email: body.send_email } : {}),
+      },
+      clientIp(request),
+    );
+  });
 };

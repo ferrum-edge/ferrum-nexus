@@ -14,6 +14,7 @@ import {
   CSRF_HEADER,
   MAX_PAGE_SIZE,
   SESSION_COOKIE,
+  type AuditLog,
   type User,
 } from '@ferrum-nexus/shared';
 
@@ -33,6 +34,55 @@ export const TEST_EDGE_JWT_SECRET = 'test-ferrum-admin-jwt-secret-0123456789';
 
 /** Default password used by {@link TestApp.registerUser}. */
 export const TEST_PASSWORD = 'correct-horse-battery-staple';
+
+/* ── OpenAPI fixtures ───────────────────────────────────────────────────── */
+
+/** A minimal but valid OpenAPI 3.1 document with an absolute `servers[0].url`. */
+export const SAMPLE_SPEC_YAML = [
+  'openapi: 3.1.0',
+  'info:',
+  '  title: Billing API',
+  '  version: 2.4.0',
+  '  description: Invoices and payments.',
+  'servers:',
+  '  - url: https://billing.internal:8443/v2',
+  'paths:',
+  '  /invoices:',
+  '    get:',
+  '      summary: List invoices',
+  '      responses:',
+  "        '200':",
+  '          description: OK',
+  '  /invoices/{id}:',
+  '    get:',
+  '      summary: Get one invoice',
+  '      responses:',
+  "        '200':",
+  '          description: OK',
+  '',
+].join('\n');
+
+/** The same document as JSON, for the "either format parses" tests. */
+export const SAMPLE_SPEC_JSON = JSON.stringify(
+  {
+    openapi: '3.0.3',
+    info: { title: 'Shipping API', version: '1.0.0' },
+    servers: [{ url: 'https://shipping.internal/api' }],
+    paths: { '/shipments': { get: { responses: { '200': { description: 'OK' } } } } },
+  },
+  null,
+  2,
+);
+
+/** Build a spec whose `servers[0].url` is `url` — used by the spec-update tests. */
+export function specWithServer(url: string, version = '1.0.0'): string {
+  return JSON.stringify({
+    openapi: '3.1.0',
+    info: { title: 'Billing API', version },
+    servers: [{ url }],
+    paths: { '/invoices': { get: { responses: { '200': { description: 'OK' } } } } },
+  });
+}
 
 /** Options for {@link buildTestApp}. */
 export interface BuildTestAppOptions {
@@ -107,6 +157,8 @@ export interface TestApp {
   tick(): Promise<OutboxTickResult>;
   /** Current `email_outbox` rows, oldest first. */
   outbox(): Promise<EmailOutboxRecord[]>;
+  /** Audit rows, optionally filtered to one action, newest first. */
+  auditRows(action?: string): Promise<AuditLog[]>;
   /** Register a new account and return its session. */
   registerUser(overrides?: Partial<RegisterPayload>): Promise<TestSession>;
   /** Sign in an existing account. */
@@ -198,6 +250,13 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
     async outbox(): Promise<EmailOutboxRecord[]> {
       const page = await store.emailOutbox.list({}, { limit: MAX_PAGE_SIZE });
       return [...page.items].sort((a, b) => a.created_at.localeCompare(b.created_at));
+    },
+
+    async auditRows(action?: string): Promise<AuditLog[]> {
+      const page = await store.auditLogs.list(action === undefined ? {} : { action }, {
+        limit: MAX_PAGE_SIZE,
+      });
+      return page.items;
     },
 
     async registerUser(overrides = {}): Promise<TestSession> {

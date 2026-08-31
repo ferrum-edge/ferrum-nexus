@@ -97,6 +97,26 @@ export interface MockFerrumEdge {
   seedConsumer(
     consumer: Partial<StoredConsumer> & { username: string; namespace?: string },
   ): StoredConsumer;
+
+  /* ── Assertion helpers ──────────────────────────────────────────────────
+   * These read the mock's *unredacted* state, which is what a test needs to
+   * check that the right thing landed on the gateway.
+   */
+
+  /** The stored consumer with this username, or `undefined`. */
+  consumerByUsername(username: string, namespace?: string): StoredConsumer | undefined;
+  /** The stored proxy with this `name` (`nexus-<slug>`), or `undefined`. */
+  proxyByName(name: string, namespace?: string): Record<string, unknown> | undefined;
+  /** Every plugin config attached to a proxy, in creation order. */
+  pluginsForProxy(proxyId: string, namespace?: string): Record<string, unknown>[];
+  /** The single plugin config of `pluginName` on a proxy, or `undefined`. */
+  pluginForProxy(
+    proxyId: string,
+    pluginName: string,
+    namespace?: string,
+  ): Record<string, unknown> | undefined;
+  /** Recorded calls filtered by method and a path substring. */
+  callsTo(method: string, pathContains: string): RecordedRequest[];
 }
 
 const DEFAULT_NAMESPACE = 'ferrum';
@@ -118,6 +138,55 @@ const PROXY_KEYS = new Set([
   'plugins',
 ]);
 
+/**
+ * Plugin configs the mock validates strictly, mirroring Edge's closed key
+ * allowlists (`ref-edge-admin.md` §8.7–8.8). Anything not listed here is stored
+ * without inspection, exactly as an unknown-to-Nexus plugin would be.
+ */
+const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = {
+  key_auth: ['key_location', 'hide_credentials'],
+  // `basic_auth` accepts *no* fields at all — an empty list is the point.
+  basic_auth: [],
+  jwt_auth: [
+    'token_lookup',
+    'consumer_claim_field',
+    'require_exp',
+    'require_nbf',
+    'expected_issuer',
+    'expected_issuers',
+    'audiences',
+    'leeway_secs',
+  ],
+  access_control: [
+    'allowed_consumers',
+    'disallowed_consumers',
+    'allowed_groups',
+    'disallowed_groups',
+    'allow_authenticated_identity',
+  ],
+  rate_limiting: [
+    'limit_by',
+    'expose_headers',
+    'limits',
+    'sync_mode',
+    'redis_url',
+    'redis_tls',
+    'redis_key_prefix',
+    'redis_pool_size',
+    'redis_failure_policy',
+  ],
+};
+
+const RATE_LIMIT_RULE_KEYS = new Set([
+  'scope',
+  'consumers',
+  'requests_per_second',
+  'requests_per_minute',
+  'requests_per_hour',
+  'window_seconds',
+  'max_requests',
+]);
+
 const PLUGIN_CONFIG_KEYS = new Set([
   'id',
   'plugin_name',
@@ -132,6 +201,92 @@ const CONSUMER_KEYS = new Set(['id', 'username', 'custom_id', 'credentials', 'ac
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+/**
+ * Validate a plugin `config` against the plugin's closed key allowlist, the way
+ * Edge's hand-written `Plugin::new(config)` constructors do. Returns an error
+ * message, or `null` when the config is acceptable.
+ *
+ * Only the rules Nexus can actually trip are modelled; the point is that a
+ * typo'd or over-specified config fails here exactly as it would on a real
+ * gateway, rather than being silently accepted by a permissive fake.
+ */
+function validatePluginConfig(pluginName: string, config: unknown): string | null {
+  const allowed = PLUGIN_CONFIG_ALLOWED_KEYS[pluginName];
+  if (allowed === undefined) return null;
+  if (config === null || config === undefined) return null;
+  if (!isRecord(config)) return `${pluginName}: config must be a JSON object`;
+
+  const keys = Object.keys(config);
+  if (pluginName === 'basic_auth' && keys.length > 0) {
+    return 'basic_auth: no configuration fields are supported';
+  }
+  for (const field of keys) {
+    if (!allowed.includes(field)) {
+      return `${pluginName}: unknown configuration field(s): ${field}`;
+    }
+  }
+
+  if (pluginName === 'access_control') {
+    const nonEmpty = keys.some((field) => {
+      const value = config[field];
+      return Array.isArray(value) ? value.length > 0 : value === true;
+    });
+    if (!nonEmpty) {
+      return "access_control: at least one of 'allowed_consumers', 'disallowed_consumers', 'allowed_groups', 'disallowed_groups', or 'allow_authenticated_identity=true' is required";
+    }
+    if (config.allow_authenticated_identity === true) {
+      const hasAllowList =
+        (Array.isArray(config.allowed_consumers) && config.allowed_consumers.length > 0) ||
+        (Array.isArray(config.allowed_groups) && config.allowed_groups.length > 0);
+      if (hasAllowList) {
+        return 'access_control: allow_authenticated_identity is mutually exclusive with an allow-list';
+      }
+    }
+  }
+
+  if (pluginName === 'rate_limiting') {
+    if (
+      config.limit_by !== undefined &&
+      !['ip', 'consumer', 'spiffe', 'spiffe_identity'].includes(String(config.limit_by))
+    ) {
+      return `rate_limiting: unsupported limit_by '${String(config.limit_by)}'`;
+    }
+    const limits = config.limits;
+    if (!Array.isArray(limits) || limits.length === 0) {
+      return "rate_limiting: 'limits' is required and must be non-empty";
+    }
+    const defaults = limits.filter((rule) => isRecord(rule) && rule.scope === 'default');
+    if (defaults.length !== 1) {
+      return "rate_limiting: 'limits' must contain exactly one entry with scope 'default'";
+    }
+    for (const rule of limits) {
+      if (!isRecord(rule)) return 'rate_limiting: each limits entry must be an object';
+      for (const field of Object.keys(rule)) {
+        if (!RATE_LIMIT_RULE_KEYS.has(field)) {
+          return `rate_limiting: unknown limits field '${field}'`;
+        }
+      }
+      if (rule.scope === 'default' && rule.consumers !== undefined) {
+        return "rate_limiting: 'consumers' is forbidden when scope is 'default'";
+      }
+      const preset =
+        rule.requests_per_second !== undefined ||
+        rule.requests_per_minute !== undefined ||
+        rule.requests_per_hour !== undefined;
+      const custom = rule.window_seconds !== undefined || rule.max_requests !== undefined;
+      if (preset && custom) {
+        return 'rate_limiting: preset and custom windows must not be mixed in one rule';
+      }
+      if (!preset && !custom) return 'rate_limiting: each limits rule needs a window';
+      if (custom && (rule.window_seconds === undefined || rule.max_requests === undefined)) {
+        return "rate_limiting: 'window_seconds' and 'max_requests' are required together";
+      }
+    }
+  }
+
+  return null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -576,6 +731,12 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
             `PluginConfig references non-existent proxy_id '${String(body.proxy_id)}'`,
           );
         }
+        // Edge constructs an `enabled: true` plugin strictly and rejects a bad
+        // config with a 400 *before* storing it.
+        if (body.enabled !== false) {
+          const problem = validatePluginConfig(body.plugin_name, body.config);
+          if (problem) return fail(res, 400, problem);
+        }
         const config = {
           ...body,
           id: typeof body.id === 'string' && body.id !== '' ? body.id : randomUUID(),
@@ -598,6 +759,13 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     if (method === 'PUT') {
       if (!existing) return fail(res, 404, 'Plugin config not found');
       if (!isRecord(body)) return fail(res, 400, 'Request body must be a JSON object');
+      if (body.enabled !== false) {
+        const problem = validatePluginConfig(
+          String(body.plugin_name ?? existing.plugin_name),
+          body.config,
+        );
+        if (problem) return fail(res, 400, problem);
+      }
       const updated = {
         ...body,
         id,
@@ -800,6 +968,39 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       };
       consumers.set(key(namespace, stored.id), stored);
       return stored;
+    },
+
+    consumerByUsername(username, namespace = 'nexus'): StoredConsumer | undefined {
+      return [...consumers.values()].find(
+        (consumer) => consumer.namespace === namespace && consumer.username === username,
+      );
+    },
+
+    proxyByName(name, namespace = 'nexus'): Record<string, unknown> | undefined {
+      return [...proxies.values()].find(
+        (proxy) => proxy.namespace === namespace && proxy.name === name,
+      );
+    },
+
+    pluginsForProxy(proxyId, namespace = 'nexus'): Record<string, unknown>[] {
+      return [...pluginConfigs.values()].filter(
+        (config) => config.namespace === namespace && config.proxy_id === proxyId,
+      );
+    },
+
+    pluginForProxy(proxyId, pluginName, namespace = 'nexus'): Record<string, unknown> | undefined {
+      return [...pluginConfigs.values()].find(
+        (config) =>
+          config.namespace === namespace &&
+          config.proxy_id === proxyId &&
+          config.plugin_name === pluginName,
+      );
+    },
+
+    callsTo(method, pathContains): RecordedRequest[] {
+      return requests.filter(
+        (entry) => entry.method === method && entry.path.includes(pathContains),
+      );
     },
   };
 }

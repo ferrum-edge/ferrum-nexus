@@ -22,6 +22,8 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyInstance } from 'fastify';
 
+import { createAccessService, type AccessService } from './access/service.js';
+import { createGodService, type GodService } from './admin/god-service.js';
 import { createMassEmailService, type MassEmailService } from './admin/mass-email-service.js';
 import { createSettingsService, type SettingsService } from './admin/settings-service.js';
 import { createAuditService, type AuditService } from './audit/service.js';
@@ -31,7 +33,10 @@ import {
   type CaptchaTransport,
 } from './auth/captcha.js';
 import { createAuthService, type AuthService, type OnRegistered } from './auth/service.js';
+import { createCatalogService, type CatalogService } from './catalog/service.js';
 import { loadConfig, type NexusConfig } from './config/index.js';
+import { createConsumerProvisioner } from './credentials/consumers.js';
+import { createCredentialsService, type CredentialsService } from './credentials/service.js';
 import { createStore } from './db/index.js';
 import type { NexusStore } from './db/store.js';
 import {
@@ -49,12 +54,17 @@ import { createMessagingService, type MessagingService } from './messaging/servi
 import { registerAuthPlugin } from './middleware/auth-plugin.js';
 import { registerErrorHandler } from './middleware/error-handler.js';
 import { createNotificationsService, type NotificationsService } from './notifications/service.js';
+import { createPublishingService, type PublishingService } from './publishing/service.js';
+import { accessRequestRoutes, grantRoutes } from './routes/access.js';
 import { adminRoutes } from './routes/admin.js';
 import { authRoutes } from './routes/auth.js';
 import { brandingRoutes } from './routes/branding.js';
+import { catalogRoutes } from './routes/catalog.js';
+import { credentialsRoutes } from './routes/credentials.js';
 import { healthRoutes } from './routes/health.js';
 import { messagingRoutes } from './routes/messaging.js';
 import { notificationsRoutes } from './routes/notifications.js';
+import { publishingRoutes } from './routes/publishing.js';
 import { organizationRoutes, usersRoutes } from './routes/users.js';
 import { createUsersService, type UsersService } from './users/service.js';
 
@@ -71,8 +81,11 @@ export interface NexusServices {
   users: UsersService;
   messaging: MessagingService;
   massEmail: MassEmailService;
-  // NOTE(gateway agent): add catalog, publishing, access and credentials
-  // services here, constructed in the COMPOSITION section below.
+  catalog: CatalogService;
+  credentials: CredentialsService;
+  publishing: PublishingService;
+  access: AccessService;
+  god: GodService;
 }
 
 /** Everything `buildServer` hangs off the Fastify instance. */
@@ -183,6 +196,53 @@ export async function buildServer(
   });
   const massEmail = createMassEmailService({ store: deps.store, email, audit });
 
+  // ── Gateway workflow ────────────────────────────────────────────────────
+  // One consumer provisioner is shared by credentials and access so both
+  // mutate the same Edge consumer through the same per-consumer queue.
+  const provisioner = createConsumerProvisioner({
+    config,
+    store: deps.store,
+    edge: deps.edge,
+  });
+  const catalog = createCatalogService({ store: deps.store });
+  const credentials = createCredentialsService({
+    config,
+    store: deps.store,
+    edge: deps.edge,
+    crypto,
+    audit,
+    notifications,
+    email,
+    provisioner,
+  });
+  const publishing = createPublishingService({
+    config,
+    store: deps.store,
+    edge: deps.edge,
+    audit,
+    notifications,
+    credentials,
+  });
+  const access = createAccessService({
+    config,
+    store: deps.store,
+    audit,
+    notifications,
+    email,
+    provisioner,
+    log: warn,
+  });
+  const god = createGodService({
+    store: deps.store,
+    audit,
+    notifications,
+    email,
+    massEmail,
+    access,
+    publishing,
+    log: warn,
+  });
+
   // The worker owns no SMTP knowledge of its own: it asks the email service for
   // the current settings on every tick, so an admin editing them takes effect
   // on the next poll without a restart.
@@ -208,6 +268,11 @@ export async function buildServer(
     users,
     messaging,
     massEmail,
+    catalog,
+    credentials,
+    publishing,
+    access,
+    god,
   };
   const webDist = (deps.serveStatic ?? true) ? resolveWebDist(config) : null;
 
@@ -314,12 +379,29 @@ export async function buildServer(
   );
 
   await app.register(
-    async (scope) => scope.register(adminRoutes, { settings, massEmail, email, audit }),
+    async (scope) => scope.register(adminRoutes, { settings, massEmail, email, audit, god }),
     { prefix: '/api/admin' },
   );
 
-  // NOTE(gateway agent): register /api/catalog, /api/apis, /api/access-requests,
-  // /api/grants and /api/credentials here, in the same shape.
+  await app.register(async (scope) => scope.register(catalogRoutes, { catalog }), {
+    prefix: '/api/catalog',
+  });
+
+  await app.register(async (scope) => scope.register(publishingRoutes, { publishing }), {
+    prefix: '/api/apis',
+  });
+
+  await app.register(async (scope) => scope.register(accessRequestRoutes, { access }), {
+    prefix: '/api/access-requests',
+  });
+
+  await app.register(async (scope) => scope.register(grantRoutes, { access }), {
+    prefix: '/api/grants',
+  });
+
+  await app.register(async (scope) => scope.register(credentialsRoutes, { credentials }), {
+    prefix: '/api/credentials',
+  });
 
   /* ── COMPOSITION — static SPA (production) ──────────────────────────── */
   if (webDist) {
