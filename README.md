@@ -59,7 +59,8 @@ See [`docs/architecture.md`](docs/architecture.md) for the full design.
 npm install
 
 cp .env.example .env
-# edit .env — at minimum set NEXUS_SECRET_KEY and FERRUM_ADMIN_URL
+# edit .env — at minimum set NEXUS_SECRET_KEY and FERRUM_ADMIN_JWT_SECRET
+# (both at least 32 characters; FERRUM_ADMIN_URL defaults to http://127.0.0.1:9000)
 
 npm run migrate --workspace server
 npm run dev
@@ -88,10 +89,12 @@ NEXUS_DB_DRIVER=mongodb     # NEXUS_DB_URL=mongodb+srv://...
 
 ```bash
 docker build -t ferrum-nexus -f docker/Dockerfile .
+# FERRUM_ADMIN_JWT_SECRET must match the gateway's own value, and both
+# secrets must be at least 32 characters or the server refuses to start.
 docker run --rm -p 8787:8787 \
   -e NEXUS_SECRET_KEY=$(openssl rand -hex 32) \
-  -e FERRUM_ADMIN_URL=http://host.docker.internal:8000 \
-  -e FERRUM_ADMIN_JWT_SECRET=changeme \
+  -e FERRUM_ADMIN_URL=http://host.docker.internal:9000 \
+  -e FERRUM_ADMIN_JWT_SECRET="$FERRUM_ADMIN_JWT_SECRET" \
   ferrum-nexus
 ```
 
@@ -100,11 +103,27 @@ for a full stack alongside Postgres and a Ferrum Edge instance.
 
 ## Documentation
 
+Start here:
+
+- [`docs/getting-started.md`](docs/getting-started.md) — end-to-end walkthrough:
+  stand up a gateway, publish an API, approve access, and call it with an
+  issued credential.
+
+Guides by role:
+
+- [`docs/guides/client-guide.md`](docs/guides/client-guide.md) — consuming APIs.
+- [`docs/guides/provider-guide.md`](docs/guides/provider-guide.md) — publishing
+  APIs and reviewing access requests.
+- [`docs/guides/admin-guide.md`](docs/guides/admin-guide.md) — running the
+  portal.
+
+Reference:
+
 - [`docs/architecture.md`](docs/architecture.md) — design rationale, module
   layout, and trust boundaries.
 - [`docs/api.md`](docs/api.md) — Nexus backend REST API reference.
 - [`docs/operations.md`](docs/operations.md) — running, scaling, backup,
-  drift sync, and observability.
+  key rotation, and observability.
 - [`docs/security.md`](docs/security.md) — threat model and hardening.
 - [`docs/contributing.md`](docs/contributing.md) → [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
