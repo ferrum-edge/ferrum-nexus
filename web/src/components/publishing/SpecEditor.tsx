@@ -1,5 +1,5 @@
 import { useMemo, useRef, type ChangeEvent, type ReactElement } from 'react';
-import { MAX_SPEC_BYTES } from '@ferrum-nexus/shared';
+import { MAX_SPEC_BYTES, MAX_SPEC_OPERATIONS } from '@ferrum-nexus/shared';
 import { formatBytes } from '../../lib/format';
 import { parseSpecText } from '../openapi/parse';
 import { Badge } from '../ui/Badge';
@@ -28,6 +28,9 @@ export function SpecEditor({
   const byteLength = useMemo(() => new TextEncoder().encode(value).length, [value]);
   const result = useMemo(() => (value.trim() ? parseSpecText(value) : null), [value]);
   const tooLarge = byteLength > MAX_SPEC_BYTES;
+  // The server enforces this too; saying it here avoids a round trip and tells
+  // the provider the number before they hit it.
+  const tooManyOperations = result?.ok === true && result.spec.operationCount > MAX_SPEC_OPERATIONS;
 
   const onFile = (event: ChangeEvent<HTMLInputElement>): void => {
     const file = event.target.files?.[0];
@@ -75,7 +78,9 @@ export function SpecEditor({
         ) : null}
         {result?.ok ? (
           <>
-            <Badge tone="success">Valid</Badge>
+            <Badge tone={tooManyOperations ? 'danger' : 'success'}>
+              {tooManyOperations ? 'Too many operations' : 'Valid'}
+            </Badge>
             <span className="text-xs text-fg-muted">
               {result.spec.title}
               {result.spec.version ? ` v${result.spec.version}` : ''} · {result.spec.operationCount}{' '}
@@ -90,11 +95,23 @@ export function SpecEditor({
           {result.error}
         </p>
       ) : null}
+      {tooManyOperations ? (
+        <p className="text-xs text-danger" role="alert">
+          This document declares more than {MAX_SPEC_OPERATIONS.toLocaleString()} operations, which
+          the portal will not publish. Split it into several APIs.
+        </p>
+      ) : null}
     </div>
   );
 }
 
-/** True when `text` parses as a usable OpenAPI document. */
+/**
+ * True when `text` parses as an OpenAPI document the portal will accept.
+ *
+ * Mirrors the server's checks so the provider is stopped before the request,
+ * not after it; the server remains the authority.
+ */
 export function isSpecValid(text: string): boolean {
-  return parseSpecText(text).ok;
+  const result = parseSpecText(text);
+  return result.ok && result.spec.operationCount <= MAX_SPEC_OPERATIONS;
 }
