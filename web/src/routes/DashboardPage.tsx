@@ -55,10 +55,10 @@ export function DashboardPage(): ReactElement {
   const myCredentials = useCredentials({ status: 'active', limit: 5 });
 
   const providerRequests = useAccessRequests({ status: 'pending', limit: 5 }, canProvider);
-  const providerApis = useMyApis({ limit: 5 });
+  const providerApis = useMyApis({ limit: 5 }, canProvider);
 
   const allUsers = useUsers({ limit: 1 }, canAdmin);
-  const allApis = useApis({ mine: false, limit: 1 });
+  const allApis = useApis({ mine: false, limit: 1 }, canAdmin);
   const recentAudit = useAuditLogs({ limit: 6 }, canAdmin);
 
   return (

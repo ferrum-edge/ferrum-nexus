@@ -23,18 +23,23 @@ import { apisApi } from '../lib/api';
 import { queryKeys } from './keys';
 
 /** List APIs; providers default to `mine`, admins pass `mine: false`. */
-export function useApis(query: ListApisQuery = {}): UseQueryResult<ListApisResponse> {
+export function useApis(
+  query: ListApisQuery = {},
+  enabled = true,
+): UseQueryResult<ListApisResponse> {
   return useQuery({
     queryKey: queryKeys.apis.list(query),
     queryFn: () => apisApi.list(query),
+    enabled,
   });
 }
 
 /** The caller's own published APIs. */
 export function useMyApis(
   query: Omit<ListApisQuery, 'mine'> = {},
+  enabled = true,
 ): UseQueryResult<ListApisResponse> {
-  return useApis({ ...query, mine: true });
+  return useApis({ ...query, mine: true }, enabled);
 }
 
 /** A single API with its current spec metadata and counters. */
