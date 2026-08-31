@@ -1,6 +1,7 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SchemaView } from './SchemaView';
+import { OpenApiView } from './OpenApiView';
 import type { SpecNode } from './parse';
 
 afterEach(cleanup);
@@ -78,5 +79,49 @@ describe('SchemaView', () => {
     const doc = { components: { schemas } } as SpecNode;
     render(<SchemaView doc={doc} schema={{ $ref: '#/components/schemas/A0' }} />);
     expect(screen.getByText('…nested further')).toBeInTheDocument();
+  });
+});
+
+describe('OpenApiView operation paging', () => {
+  /** A spec declaring `count` trivial GET operations. */
+  function manyOperationsSpec(count: number): string {
+    const paths: Record<string, unknown> = {};
+    for (let index = 0; index < count; index += 1) {
+      paths[`/resource-${index}`] = {
+        get: { summary: `Operation ${index}`, responses: { '200': { description: 'ok' } } },
+      };
+    }
+    return JSON.stringify({
+      openapi: '3.0.3',
+      info: { title: 'Huge API', version: '1.0.0' },
+      paths,
+    });
+  }
+
+  it('mounts only a page of operations for a huge document', () => {
+    const started = Date.now();
+    render(<OpenApiView text={manyOperationsSpec(5_000)} />);
+    expect(Date.now() - started).toBeLessThan(10_000);
+
+    // The header still reports the true total.
+    expect(screen.getByText('5000 operations')).toBeInTheDocument();
+    // …but nowhere near that many cards are mounted.
+    expect(screen.getByText(/Showing 200 of 5000 operations/)).toBeInTheDocument();
+    expect(screen.queryByText('Operation 4999')).not.toBeInTheDocument();
+  });
+
+  it('reveals another page on demand', () => {
+    render(<OpenApiView text={manyOperationsSpec(500)} />);
+    expect(screen.queryByText('Operation 250')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Show 200 more/ }));
+    expect(screen.getByText('Operation 250')).toBeInTheDocument();
+    expect(screen.getByText(/Showing 400 of 500 operations/)).toBeInTheDocument();
+  });
+
+  it('shows no paging control for an ordinary spec', () => {
+    render(<OpenApiView text={manyOperationsSpec(3)} />);
+    expect(screen.queryByText(/Showing/)).not.toBeInTheDocument();
+    expect(screen.getByText('Operation 2')).toBeInTheDocument();
   });
 });

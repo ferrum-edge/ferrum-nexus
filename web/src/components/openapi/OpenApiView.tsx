@@ -8,8 +8,10 @@ import {
   asString,
   parseSpecText,
   type HttpMethod,
+  type ParsedSpec,
   type SpecNode,
   type SpecOperation,
+  type SpecTagGroup,
 } from './parse';
 
 const METHOD_TONES: Readonly<Record<HttpMethod, BadgeTone>> = {
@@ -249,7 +251,36 @@ export function OpenApiView({ text }: OpenApiViewProps): ReactElement {
     );
   }
 
-  const { spec } = result;
+  return <ParsedSpecView spec={result.spec} />;
+}
+
+/**
+ * How many operations to mount at once.
+ *
+ * A spec is provider-authored and may declare tens of thousands of operations
+ * within the server's size limit; mounting a card for each one synchronously
+ * freezes the viewer's tab. The rest are one click away.
+ */
+const OPERATIONS_PAGE = 200;
+
+function ParsedSpecView({ spec }: { spec: ParsedSpec }): ReactElement {
+  const [visibleCount, setVisibleCount] = useState(OPERATIONS_PAGE);
+
+  // Walk groups in order, taking operations until the budget runs out.
+  const visibleGroups = useMemo(() => {
+    let remaining = visibleCount;
+    const groups: { group: SpecTagGroup; operations: SpecOperation[] }[] = [];
+    for (const group of spec.groups) {
+      if (remaining <= 0) break;
+      const operations = group.operations.slice(0, remaining);
+      remaining -= operations.length;
+      groups.push({ group, operations });
+    }
+    return groups;
+  }, [spec.groups, visibleCount]);
+
+  const shownCount = visibleGroups.reduce((total, entry) => total + entry.operations.length, 0);
+  const hiddenCount = spec.operationCount - shownCount;
 
   return (
     <div className="flex flex-col gap-6">
@@ -289,7 +320,7 @@ export function OpenApiView({ text }: OpenApiViewProps): ReactElement {
       {spec.groups.length === 0 ? (
         <p className="text-sm text-fg-muted">This specification declares no operations.</p>
       ) : (
-        spec.groups.map((group) => (
+        visibleGroups.map(({ group, operations }) => (
           <section key={group.name} className="fx-card overflow-hidden">
             <div className="border-b border-border px-4 py-3">
               <h3 className="text-sm font-semibold text-fg">{group.name}</h3>
@@ -297,12 +328,27 @@ export function OpenApiView({ text }: OpenApiViewProps): ReactElement {
                 <p className="mt-0.5 text-sm text-fg-muted">{group.description}</p>
               ) : null}
             </div>
-            {group.operations.map((operation) => (
+            {operations.map((operation) => (
               <OperationCard key={operation.id} operation={operation} doc={spec.doc} />
             ))}
           </section>
         ))
       )}
+
+      {hiddenCount > 0 ? (
+        <div className="fx-card flex flex-wrap items-center justify-between gap-3 p-4">
+          <p className="text-sm text-fg-muted">
+            Showing {shownCount} of {spec.operationCount} operations.
+          </p>
+          <button
+            type="button"
+            className="fx-btn fx-btn-secondary"
+            onClick={() => setVisibleCount((count) => count + OPERATIONS_PAGE)}
+          >
+            Show {Math.min(OPERATIONS_PAGE, hiddenCount)} more
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
