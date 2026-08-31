@@ -9,13 +9,21 @@
 
 import type { FastifyInstance, InjectOptions, LightMyRequestResponse } from 'fastify';
 
-import { CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE, type User } from '@ferrum-nexus/shared';
+import {
+  CSRF_COOKIE,
+  CSRF_HEADER,
+  MAX_PAGE_SIZE,
+  SESSION_COOKIE,
+  type User,
+} from '@ferrum-nexus/shared';
 
 import { loadConfig, type EnvRecord, type NexusConfig } from '../config/index.js';
 import { createStore } from '../db/index.js';
-import type { NexusStore } from '../db/store.js';
+import type { EmailOutboxRecord, NexusStore } from '../db/store.js';
+import type { MailTransport, MailTransportFactory, OutboundMail } from '../email/service.js';
+import type { OutboxTickResult } from '../email/outbox-worker.js';
 import { createFerrumAdminClient, type FerrumAdminClient } from '../ferrum-admin/index.js';
-import { buildServer, type BuildServerDeps } from '../index.js';
+import { buildServer, type BuildServerDeps, type NexusServices } from '../index.js';
 import { createMockFerrumEdge, type MockFerrumEdge } from './mock-ferrum-edge.js';
 
 /** 32+ character secrets so config validation passes. */
@@ -45,6 +53,45 @@ export interface TestSession {
   cookieHeader: string;
 }
 
+/**
+ * Recording mail sink installed in place of SMTP.
+ *
+ * The outbox worker never starts on its own under `NEXUS_ENV=test`, so nothing
+ * is delivered until a test calls {@link TestApp.tick}.
+ */
+export interface TestMailbox {
+  /** Every message the worker (or an SMTP test) handed to the transport. */
+  sent: OutboundMail[];
+  /** When set, each `send` rejects with this error — drives the retry tests. */
+  failure: Error | null;
+  /** When true the factory returns `null`, i.e. "SMTP is not configured". */
+  unconfigured: boolean;
+  clear(): void;
+}
+
+/** Build a recording mailbox and the transport factory that feeds it. */
+export function createTestMailbox(): { mailbox: TestMailbox; factory: MailTransportFactory } {
+  const mailbox: TestMailbox = {
+    sent: [],
+    failure: null,
+    unconfigured: false,
+    clear() {
+      mailbox.sent = [];
+      mailbox.failure = null;
+    },
+  };
+  const transport: MailTransport = {
+    async send(mail) {
+      if (mailbox.failure) throw mailbox.failure;
+      mailbox.sent.push(mail);
+    },
+  };
+  return {
+    mailbox,
+    factory: async () => (mailbox.unconfigured ? null : transport),
+  };
+}
+
 /** Everything a test needs, plus a single `close()`. */
 export interface TestApp {
   app: FastifyInstance;
@@ -52,6 +99,14 @@ export interface TestApp {
   edge: MockFerrumEdge;
   edgeClient: FerrumAdminClient;
   config: NexusConfig;
+  /** Every composed service, for tests that go below the HTTP layer. */
+  services: NexusServices;
+  /** Messages the fake SMTP transport received. */
+  mailbox: TestMailbox;
+  /** Run exactly one outbox poll cycle. */
+  tick(): Promise<OutboxTickResult>;
+  /** Current `email_outbox` rows, oldest first. */
+  outbox(): Promise<EmailOutboxRecord[]>;
   /** Register a new account and return its session. */
   registerUser(overrides?: Partial<RegisterPayload>): Promise<TestSession>;
   /** Sign in an existing account. */
@@ -118,10 +173,12 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
   await store.migrate();
 
   const edgeClient = createFerrumAdminClient(config.edge);
+  const { mailbox, factory } = createTestMailbox();
   const app = await buildServer(config, {
     store,
     edge: edgeClient,
     serveStatic: false,
+    mailTransportFactory: factory,
     ...options.deps,
   });
 
@@ -131,6 +188,17 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
     edge,
     edgeClient,
     config,
+    services: app.nexus.services,
+    mailbox,
+
+    async tick(): Promise<OutboxTickResult> {
+      return app.nexus.services.outbox.tick();
+    },
+
+    async outbox(): Promise<EmailOutboxRecord[]> {
+      const page = await store.emailOutbox.list({}, { limit: MAX_PAGE_SIZE });
+      return [...page.items].sort((a, b) => a.created_at.localeCompare(b.created_at));
+    },
 
     async registerUser(overrides = {}): Promise<TestSession> {
       userCounter += 1;

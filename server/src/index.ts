@@ -22,6 +22,8 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyInstance } from 'fastify';
 
+import { createMassEmailService, type MassEmailService } from './admin/mass-email-service.js';
+import { createSettingsService, type SettingsService } from './admin/settings-service.js';
 import { createAuditService, type AuditService } from './audit/service.js';
 import {
   createCaptchaService,
@@ -32,22 +34,45 @@ import { createAuthService, type AuthService, type OnRegistered } from './auth/s
 import { loadConfig, type NexusConfig } from './config/index.js';
 import { createStore } from './db/index.js';
 import type { NexusStore } from './db/store.js';
+import {
+  createEmailService,
+  createSmtpTransport,
+  type EmailService,
+  type MailTransportFactory,
+} from './email/service.js';
+import { createOutboxWorker, type OutboxWorker } from './email/outbox-worker.js';
 import { createFerrumAdmin, type FerrumAdminClient } from './ferrum-admin/index.js';
 import { createCrypto, type NexusCrypto } from './lib/crypto.js';
 import { isNexusError } from './lib/errors.js';
 import { buildLoggerOptions, type LoggerOptions } from './lib/logger.js';
+import { createMessagingService, type MessagingService } from './messaging/service.js';
 import { registerAuthPlugin } from './middleware/auth-plugin.js';
 import { registerErrorHandler } from './middleware/error-handler.js';
+import { createNotificationsService, type NotificationsService } from './notifications/service.js';
+import { adminRoutes } from './routes/admin.js';
 import { authRoutes } from './routes/auth.js';
+import { brandingRoutes } from './routes/branding.js';
 import { healthRoutes } from './routes/health.js';
+import { messagingRoutes } from './routes/messaging.js';
+import { notificationsRoutes } from './routes/notifications.js';
+import { organizationRoutes, usersRoutes } from './routes/users.js';
+import { createUsersService, type UsersService } from './users/service.js';
 
 /** Services composed by {@link buildServer} and exposed for tests. */
 export interface NexusServices {
   audit: AuditService;
   captcha: CaptchaService;
   auth: AuthService;
-  // NOTE(services agent): add users, catalog, publishing, access, credentials,
-  // messaging, notifications, email and admin services here.
+  email: EmailService;
+  /** Background sender; `tick()` runs one cycle deterministically in tests. */
+  outbox: OutboxWorker;
+  notifications: NotificationsService;
+  settings: SettingsService;
+  users: UsersService;
+  messaging: MessagingService;
+  massEmail: MassEmailService;
+  // NOTE(gateway agent): add catalog, publishing, access and credentials
+  // services here, constructed in the COMPOSITION section below.
 }
 
 /** Everything `buildServer` hangs off the Fastify instance. */
@@ -74,10 +99,17 @@ export interface BuildServerDeps {
   crypto?: NexusCrypto;
   /** Defaults to `buildLoggerOptions(config)`. */
   logger?: LoggerOptions;
-  /** Hook the email service will supply once it exists. */
+  /** Replace the post-registration hook (which enqueues the verification email). */
   onRegistered?: OnRegistered;
   /** Override the CAPTCHA vendor call in tests. */
   captchaTransport?: CaptchaTransport;
+  /** Replace the SMTP transport used by the outbox worker and the SMTP test. */
+  mailTransportFactory?: MailTransportFactory;
+  /**
+   * Start the outbox poller. Defaults to `false` under `NEXUS_ENV=test`, where
+   * tests drive `services.outbox.tick()` themselves, and `true` elsewhere.
+   */
+  startOutboxWorker?: boolean;
   /** Serve the built SPA. Defaults to "yes when the dist directory exists". */
   serveStatic?: boolean;
 }
@@ -114,23 +146,69 @@ export async function buildServer(
    * Construct every service exactly once, in dependency order. Services take
    * an explicit dependency object; none of them reads process.env.
    */
+  const warn = (obj: Record<string, unknown>, message: string): void => app.log.warn(obj, message);
+
   const audit = createAuditService(deps.store);
   const captcha = createCaptchaService({
     store: deps.store,
     crypto,
     ...(deps.captchaTransport ? { transport: deps.captchaTransport } : {}),
-    log: (obj, message) => app.log.warn(obj, message),
+    log: warn,
   });
+  const email = createEmailService({
+    config,
+    store: deps.store,
+    crypto,
+    log: warn,
+    ...(deps.mailTransportFactory ? { transportFactory: deps.mailTransportFactory } : {}),
+  });
+  const notifications = createNotificationsService({ store: deps.store });
   const auth = createAuthService({
     config,
     store: deps.store,
     crypto,
     audit,
     captcha,
-    ...(deps.onRegistered ? { onRegistered: deps.onRegistered } : {}),
+    onRegistered: deps.onRegistered ?? defaultOnRegistered(config, email, notifications, warn),
+  });
+  const settings = createSettingsService({ config, store: deps.store, crypto, audit, auth });
+  const users = createUsersService({ store: deps.store, crypto, audit, notifications });
+  const messaging = createMessagingService({
+    config,
+    store: deps.store,
+    notifications,
+    email,
+    audit,
+    log: warn,
+  });
+  const massEmail = createMassEmailService({ store: deps.store, email, audit });
+
+  // The worker owns no SMTP knowledge of its own: it asks the email service for
+  // the current settings on every tick, so an admin editing them takes effect
+  // on the next poll without a restart.
+  const outbox = createOutboxWorker({
+    store: deps.store,
+    log: warn,
+    transportFactory:
+      deps.mailTransportFactory ??
+      (async () => {
+        const smtp = await email.resolveSettings();
+        return smtp.host ? createSmtpTransport(smtp) : null;
+      }),
   });
 
-  const services: NexusServices = { audit, captcha, auth };
+  const services: NexusServices = {
+    audit,
+    captcha,
+    auth,
+    email,
+    outbox,
+    notifications,
+    settings,
+    users,
+    messaging,
+    massEmail,
+  };
   const webDist = (deps.serveStatic ?? true) ? resolveWebDist(config) : null;
 
   app.decorate('nexus', { config, store: deps.store, edge: deps.edge, crypto, services });
@@ -214,9 +292,34 @@ export async function buildServer(
     { prefix: '/api/auth' },
   );
 
-  // NOTE(services agent): register /api/users, /api/catalog, /api/apis,
-  // /api/access-requests, /api/grants, /api/credentials, /api/threads,
-  // /api/notifications, /api/admin, /api/branding here, in the same shape.
+  await app.register(async (scope) => scope.register(brandingRoutes, { settings, captcha }), {
+    prefix: '/api/branding',
+  });
+
+  await app.register(async (scope) => scope.register(usersRoutes, { users }), {
+    prefix: '/api/users',
+  });
+
+  await app.register(async (scope) => scope.register(organizationRoutes, { users }), {
+    prefix: '/api/organizations',
+  });
+
+  await app.register(async (scope) => scope.register(messagingRoutes, { messaging }), {
+    prefix: '/api/threads',
+  });
+
+  await app.register(
+    async (scope) => scope.register(notificationsRoutes, { notifications, audit }),
+    { prefix: '/api/notifications' },
+  );
+
+  await app.register(
+    async (scope) => scope.register(adminRoutes, { settings, massEmail, email, audit }),
+    { prefix: '/api/admin' },
+  );
+
+  // NOTE(gateway agent): register /api/catalog, /api/apis, /api/access-requests,
+  // /api/grants and /api/credentials here, in the same shape.
 
   /* ── COMPOSITION — static SPA (production) ──────────────────────────── */
   if (webDist) {
@@ -225,11 +328,62 @@ export async function buildServer(
   }
 
   app.addHook('onClose', async () => {
+    await outbox.stop();
     await deps.edge.close();
   });
 
   await app.ready();
+
+  // Tests drive `services.outbox.tick()` by hand so no timer ever fires mid-assert.
+  if (deps.startOutboxWorker ?? config.env !== 'test') outbox.start();
+
   return app;
+}
+
+/**
+ * Default post-registration hook: queue the verification email (when one is
+ * required) and drop a welcome notification in the new account's bell.
+ *
+ * Neither is allowed to fail the registration — the account already exists by
+ * the time this runs, and a queue problem must not leave the visitor unable to
+ * retry with the same address.
+ */
+function defaultOnRegistered(
+  config: NexusConfig,
+  email: EmailService,
+  notifications: NotificationsService,
+  log: (obj: Record<string, unknown>, message: string) => void,
+): OnRegistered {
+  return async ({ user, verificationToken }) => {
+    try {
+      if (verificationToken) {
+        const url = `${config.publicUrl}/verify-email?token=${encodeURIComponent(verificationToken)}`;
+        await email.enqueue({
+          to: user.email,
+          templateKey: 'verification',
+          idempotencyKey: `verify:${user.id}`,
+          vars: {
+            recipient_name: user.display_name,
+            recipient_email: user.email,
+            verification_url: url,
+            verification_token: verificationToken,
+          },
+        });
+      }
+      await notifications.notify(
+        user.id,
+        'system',
+        'Welcome to the portal',
+        'Your account is ready. Browse the catalog to request access to an API.',
+        '/catalog',
+      );
+    } catch (error) {
+      log(
+        { user_id: user.id, error: error instanceof Error ? error.message : String(error) },
+        'Post-registration hook failed',
+      );
+    }
+  };
 }
 
 /* ── Entry point ────────────────────────────────────────────────────────── */
