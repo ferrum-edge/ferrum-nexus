@@ -439,11 +439,11 @@ export interface RevokeGrantResponse {
  */
 export interface ShowOnceSecret {
   type: CredentialType;
-  /** API key value — present for `key-auth`. */
+  /** API key value — present for `keyauth`. */
   key?: string;
-  /** Basic-auth username — present for `basic-auth`. */
+  /** Basic-auth username — present for `basicauth`. */
   username?: string;
-  /** Basic-auth password — present for `basic-auth`. */
+  /** Basic-auth password — present for `basicauth`. */
   password?: string;
   /** JWT signing secret — present for `jwt`. */
   jwt_secret?: string;

@@ -183,8 +183,13 @@ export interface Grant {
 /** Lifecycle of a gateway credential. */
 export type CredentialStatus = 'active' | 'retiring' | 'revoked';
 
-/** Credential flavour, matching the API's auth plugin. */
-export type CredentialType = AuthPluginType;
+/**
+ * Credential flavour, using Ferrum Edge's credential-type keys (the keys of
+ * `Consumer.credentials` on the Admin API): `keyauth` satisfies the
+ * `key_auth` plugin, `basicauth` satisfies `basic_auth`, `jwt` satisfies
+ * `jwt_auth`.
+ */
+export type CredentialType = 'keyauth' | 'basicauth' | 'jwt';
 
 /**
  * Everything Nexus retains about a gateway credential. Plaintext material is

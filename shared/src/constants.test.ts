@@ -72,7 +72,7 @@ describe('auth plugins', () => {
   });
 
   it('guards plugin types at runtime', () => {
-    assert.equal(isAuthPluginType('key-auth'), true);
+    assert.equal(isAuthPluginType('key_auth'), true);
     assert.equal(isAuthPluginType('oauth2'), false);
     assert.equal(isAuthPluginType(undefined), false);
   });

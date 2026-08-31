@@ -72,22 +72,39 @@ export function listenPathFor(namespace: string, slug: string): string {
 
 /* ── Auth plugins ───────────────────────────────────────────────────────── */
 
-/** Ferrum Edge authentication plugin an API may be protected with. */
-export type AuthPluginType = 'key-auth' | 'basic-auth' | 'jwt';
+/**
+ * Ferrum Edge authentication plugin an API may be protected with.
+ * These are the exact Edge plugin names (`GET /plugins`).
+ */
+export type AuthPluginType = 'key_auth' | 'basic_auth' | 'jwt_auth';
 
 /** Every selectable auth plugin, in UI display order. */
 export const AUTH_PLUGIN_TYPES = [
-  'key-auth',
-  'basic-auth',
-  'jwt',
+  'key_auth',
+  'basic_auth',
+  'jwt_auth',
 ] as const satisfies readonly AuthPluginType[];
 
 /** Human-readable labels for {@link AuthPluginType}. */
 export const AUTH_PLUGIN_LABELS: Readonly<Record<AuthPluginType, string>> = {
-  'key-auth': 'API Key',
-  'basic-auth': 'HTTP Basic',
-  jwt: 'JWT',
+  key_auth: 'API Key',
+  basic_auth: 'HTTP Basic',
+  jwt_auth: 'JWT',
 };
+
+/**
+ * Ferrum Edge consumer credential type (the key inside `Consumer.credentials`)
+ * satisfied by each auth plugin. Note the names intentionally differ from the
+ * plugin names on the Edge API.
+ */
+export const CREDENTIAL_TYPE_FOR_PLUGIN = {
+  key_auth: 'keyauth',
+  basic_auth: 'basicauth',
+  jwt_auth: 'jwt',
+} as const satisfies Readonly<Record<AuthPluginType, string>>;
+
+/** Ferrum Edge credential type keys Nexus manages. */
+export type EdgeCredentialType = (typeof CREDENTIAL_TYPE_FOR_PLUGIN)[AuthPluginType];
 
 /** Runtime type guard for {@link AuthPluginType}. */
 export function isAuthPluginType(value: unknown): value is AuthPluginType {
@@ -98,7 +115,7 @@ export function isAuthPluginType(value: unknown): value is AuthPluginType {
 export const ACCESS_CONTROL_PLUGIN = 'access_control';
 
 /** Name of the Edge plugin used to enforce a per-API rate limit. */
-export const RATE_LIMIT_PLUGIN = 'rate_limit';
+export const RATE_LIMIT_PLUGIN = 'rate_limiting';
 
 /* ── Cookies, headers, storage keys ─────────────────────────────────────── */
 
