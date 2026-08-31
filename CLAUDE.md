@@ -76,3 +76,30 @@ Backend tests boot the full Fastify app against in-memory SQLite plus a mock Fer
 - **Adding a DB column / table**: add a migration under `server/src/db/migrations/` (`.sql` = SQLite, `.pg.sql`, `.mysql.sql`; Mongo indexes are created in its adapter), update `NexusStore`, implement in sqlite + sql-repos + mongodb, extend the smoke suite.
 - **Touching the Ferrum Edge integration**: only through `server/src/ferrum-admin/`; extend the mock in `server/src/test/mock-ferrum-edge.ts` to match.
 - **Adding an audit event**: extend the `AuditAction` catalog in [server/src/audit/service.ts](server/src/audit/service.ts) and the table in [docs/security.md](docs/security.md).
+
+## Agent-dispatch skills
+
+`.claude/skills/` holds orchestration skills that dispatch **external** CLI coding agents as
+implementation workers on isolated git worktrees. `.agents/skills` is a symlink to the same tree, so
+both paths work; the shared binary resolver lives at `.claude/lib/resolve-agent-bin.sh`.
+
+| Skill                                           | Worker                  | CLI            | Effort/model selection                                             |
+| ----------------------------------------------- | ----------------------- | -------------- | ------------------------------------------------------------------ |
+| `sol-agents`                                    | GPT-5.6 Sol             | `codex`        | `--effort medium\|high\|xhigh` (`--fast` only on explicit request) |
+| `opus-agents`                                   | Claude Opus 5 1M        | `claude`       | `--effort`                                                         |
+| `fable-agents`                                  | Claude Fable 5          | `claude`       | `--effort`                                                         |
+| `grok-agents`                                   | Cursor Grok 4.6         | `cursor-agent` | effort maps to a `cursor-grok-4.6-*` sku                           |
+| `composer-agents`                               | Cursor Composer 2.5     | `cursor-agent` | pinned model                                                       |
+| `opencode-laguna-agents`                        | opencode laguna-s-2.1   | `opencode`     | `--model`                                                          |
+| `deepseek-pro-agents` / `deepseek-flash-agents` | DeepSeek V4 Pro / Flash | `opencode`     | pinned model                                                       |
+| `qwen-agents`                                   | Qwen3.8 Max             | `opencode`     | pinned model                                                       |
+
+**Trigger shorthand.** "sol xhigh sub agent" (and the same shape for the other skills — "opus high",
+"grok medium") means: use that skill as the orchestrator, dispatch a worker at that reasoning
+effort, and follow the skill's worktree isolation, verification, and reporting rules. Never
+substitute a different model, effort, or service tier than the one named.
+
+Each skill is self-contained: `SKILL.md` is the orchestrator contract,
+`references/agent-brief.md` and `references/continuation-brief.md` are the worker briefs, and
+`scripts/dispatch-agent.sh` is the launcher that pins the model and sandbox. Workers are forbidden
+from dispatching nested workers.
