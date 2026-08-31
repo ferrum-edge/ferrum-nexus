@@ -1,0 +1,470 @@
+import assert from 'node:assert/strict';
+import { after, before, describe, it } from 'node:test';
+
+import { CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE, type ApiErrorBody } from '@ferrum-nexus/shared';
+
+import { AuditAction } from '../audit/service.js';
+import { REGISTRATION_SETTINGS_KEY } from '../auth/service.js';
+import { isoInSeconds } from '../lib/ids.js';
+import { buildTestApp, cookieValue, TEST_PASSWORD, type TestApp } from './helpers.js';
+
+function errorCode(body: string): string {
+  return (JSON.parse(body) as ApiErrorBody).error.code;
+}
+
+describe('auth flow', () => {
+  let harness: TestApp;
+
+  before(async () => {
+    harness = await buildTestApp();
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  it('makes the first registered account a verified super_admin', async () => {
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      payload: {
+        email: 'Founder@Example.Test',
+        password: TEST_PASSWORD,
+        display_name: 'Founder',
+        // A client role is requested; the bootstrap rule overrides it.
+        role: 'client',
+      },
+    });
+
+    assert.equal(response.statusCode, 201);
+    const body = response.json<{
+      user: { role: string; email: string; email_verified: boolean };
+    }>();
+    assert.equal(body.user.role, 'super_admin');
+    assert.equal(body.user.email, 'founder@example.test', 'email is normalised to lowercase');
+    assert.equal(body.user.email_verified, true);
+    assert.ok(cookieValue(response, SESSION_COOKIE), 'the founder lands signed in');
+    assert.ok(cookieValue(response, CSRF_COOKIE));
+  });
+
+  it('gives later registrations the role they asked for', async () => {
+    const session = await harness.registerUser({ email: 'second@example.test', role: 'client' });
+    assert.equal(session.user.role, 'client');
+
+    const provider = await harness.registerUser({ email: 'third@example.test', role: 'provider' });
+    assert.equal(provider.user.role, 'provider');
+  });
+
+  it('rejects a duplicate email with 409 CONFLICT, case-insensitively', async () => {
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      payload: {
+        email: 'SECOND@example.test',
+        password: TEST_PASSWORD,
+        display_name: 'Impostor',
+        role: 'client',
+      },
+    });
+    assert.equal(response.statusCode, 409);
+    assert.equal(errorCode(response.body), 'CONFLICT');
+  });
+
+  it('rejects a weak password and an elevated role with 400', async () => {
+    const weak = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      payload: {
+        email: 'weak@example.test',
+        password: 'short',
+        display_name: 'Weak',
+        role: 'client',
+      },
+    });
+    assert.equal(weak.statusCode, 400);
+    assert.equal(errorCode(weak.body), 'VALIDATION_FAILED');
+
+    const elevated = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      payload: {
+        email: 'sneaky@example.test',
+        password: TEST_PASSWORD,
+        display_name: 'Sneaky',
+        role: 'super_admin',
+      },
+    });
+    assert.equal(elevated.statusCode, 400);
+    assert.equal(errorCode(elevated.body), 'VALIDATION_FAILED');
+  });
+
+  it('signs in with the right password and refuses the wrong one', async () => {
+    const ok = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { email: 'second@example.test', password: TEST_PASSWORD },
+    });
+    assert.equal(ok.statusCode, 200);
+    const body = ok.json<{ csrf_token: string; expires_at: string }>();
+    assert.equal(body.csrf_token, cookieValue(ok, CSRF_COOKIE));
+    assert.ok(Date.parse(body.expires_at) > Date.now());
+
+    const wrong = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { email: 'second@example.test', password: 'not-the-password' },
+    });
+    assert.equal(wrong.statusCode, 401);
+    assert.equal(errorCode(wrong.body), 'UNAUTHORIZED');
+
+    const missing = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { email: 'nobody@example.test', password: TEST_PASSWORD },
+    });
+    assert.equal(
+      missing.statusCode,
+      401,
+      'an unknown account is indistinguishable from a bad password',
+    );
+    assert.equal(errorCode(missing.body), 'UNAUTHORIZED');
+  });
+
+  it('returns the principal and capabilities from /me', async () => {
+    const session = await harness.loginUser('second@example.test');
+    const response = await harness.app.inject({
+      method: 'GET',
+      url: '/api/auth/me',
+      headers: { cookie: session.cookieHeader },
+    });
+    assert.equal(response.statusCode, 200);
+    const body = response.json<{
+      user: { email: string };
+      csrf_token: string;
+      capabilities: Record<string, boolean>;
+    }>();
+    assert.equal(body.user.email, 'second@example.test');
+    assert.equal(body.csrf_token, session.csrfToken);
+    assert.deepEqual(body.capabilities, {
+      can_publish_apis: false,
+      can_review_access_requests: false,
+      can_manage_users: false,
+      can_manage_settings: false,
+      can_view_audit_log: false,
+      can_use_god_mode: false,
+    });
+
+    const anonymous = await harness.app.inject({ method: 'GET', url: '/api/auth/me' });
+    assert.equal(anonymous.statusCode, 401);
+    assert.equal(errorCode(anonymous.body), 'UNAUTHORIZED');
+  });
+
+  it('reports super_admin capabilities including god mode', async () => {
+    const founder = await harness.loginUser('founder@example.test');
+    const response = await harness.app.inject({
+      method: 'GET',
+      url: '/api/auth/me',
+      headers: { cookie: founder.cookieHeader },
+    });
+    const body = response.json<{ capabilities: Record<string, boolean> }>();
+    assert.equal(body.capabilities.can_use_god_mode, true);
+    assert.equal(body.capabilities.can_manage_settings, true);
+  });
+
+  describe('CSRF', () => {
+    it('rejects a mutation without the X-Nexus-CSRF header', async () => {
+      const session = await harness.loginUser('second@example.test');
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: '/api/auth/logout',
+        headers: { cookie: session.cookieHeader },
+      });
+      assert.equal(response.statusCode, 403);
+      assert.equal(errorCode(response.body), 'CSRF_MISMATCH');
+    });
+
+    it('rejects a header that does not match the session token', async () => {
+      const session = await harness.loginUser('second@example.test');
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: '/api/auth/logout',
+        headers: { cookie: session.cookieHeader, [CSRF_HEADER]: 'not-the-token' },
+      });
+      assert.equal(response.statusCode, 403);
+      assert.equal(errorCode(response.body), 'CSRF_MISMATCH');
+    });
+
+    it('rejects a matching cookie/header pair that is not bound to the session', async () => {
+      const session = await harness.loginUser('second@example.test');
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: '/api/auth/logout',
+        headers: {
+          cookie: `${SESSION_COOKIE}=${session.sessionToken}; ${CSRF_COOKIE}=forged-token`,
+          [CSRF_HEADER]: 'forged-token',
+        },
+      });
+      assert.equal(response.statusCode, 403);
+      assert.equal(errorCode(response.body), 'CSRF_MISMATCH');
+    });
+
+    it('accepts a mutation with the matching header, and clears the session', async () => {
+      const session = await harness.loginUser('second@example.test');
+      const response = await harness.authed(session, { method: 'POST', url: '/api/auth/logout' });
+      assert.equal(response.statusCode, 200);
+      assert.deepEqual(response.json(), { ok: true });
+      assert.equal(cookieValue(response, SESSION_COOKIE), '');
+
+      const afterLogout = await harness.app.inject({
+        method: 'GET',
+        url: '/api/auth/me',
+        headers: { cookie: session.cookieHeader },
+      });
+      assert.equal(afterLogout.statusCode, 401, 'the session row is gone');
+    });
+
+    it('does not require CSRF on the pre-authentication endpoints', async () => {
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: '/api/auth/login',
+        payload: { email: 'second@example.test', password: TEST_PASSWORD },
+      });
+      assert.equal(response.statusCode, 200);
+    });
+  });
+
+  it('refuses a disabled account with 403 USER_DISABLED', async () => {
+    const session = await harness.registerUser({ email: 'disabled@example.test' });
+    await harness.store.users.update(session.user.id, { status: 'disabled' });
+
+    const login = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { email: 'disabled@example.test', password: TEST_PASSWORD },
+    });
+    assert.equal(login.statusCode, 403);
+    assert.equal(errorCode(login.body), 'USER_DISABLED');
+
+    const existingSession = await harness.app.inject({
+      method: 'GET',
+      url: '/api/auth/me',
+      headers: { cookie: session.cookieHeader },
+    });
+    assert.equal(
+      existingSession.statusCode,
+      401,
+      'live sessions are dropped for a disabled account',
+    );
+  });
+
+  it('exposes the public captcha configuration without auth', async () => {
+    const response = await harness.app.inject({ method: 'GET', url: '/api/auth/captcha' });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json(), { enabled: false, provider: 'none', site_key: null });
+  });
+
+  it('writes an audit row for register, login and logout', async () => {
+    const session = await harness.registerUser({ email: 'audited@example.test' });
+
+    const registered = await harness.store.auditLogs.list({
+      actor_user_id: session.user.id,
+      action: AuditAction.AUTH_REGISTER,
+    });
+    assert.equal(registered.total, 1);
+    assert.equal(registered.items[0]?.target_type, 'user');
+    assert.equal(registered.items[0]?.actor_role, 'client');
+    assert.equal(registered.items[0]?.details.email, 'audited@example.test');
+
+    const loggedIn = await harness.loginUser('audited@example.test');
+    const loginRows = await harness.store.auditLogs.list({
+      actor_user_id: session.user.id,
+      action: AuditAction.AUTH_LOGIN,
+    });
+    assert.equal(loginRows.total, 1);
+
+    await harness.authed(loggedIn, { method: 'POST', url: '/api/auth/logout' });
+    const logoutRows = await harness.store.auditLogs.list({
+      actor_user_id: session.user.id,
+      action: AuditAction.AUTH_LOGOUT,
+    });
+    assert.equal(logoutRows.total, 1);
+  });
+
+  it('answers unknown API routes with the shared error body', async () => {
+    const response = await harness.app.inject({ method: 'GET', url: '/api/nope' });
+    assert.equal(response.statusCode, 404);
+    assert.equal(errorCode(response.body), 'NOT_FOUND');
+    assert.equal(response.headers['cache-control'], 'no-store');
+  });
+});
+
+describe('email verification', () => {
+  let harness: TestApp;
+  const issued: { userId: string; token: string | null }[] = [];
+
+  before(async () => {
+    harness = await buildTestApp({
+      deps: {
+        onRegistered: async ({ user, verificationToken }) => {
+          issued.push({ userId: user.id, token: verificationToken });
+        },
+      },
+    });
+    // The founder bootstraps the platform before the policy is tightened.
+    await harness.registerUser({ email: 'boss@example.test', role: 'provider' });
+    await harness.store.settings.set(REGISTRATION_SETTINGS_KEY, {
+      open_registration: true,
+      require_email_verification: true,
+      allowed_roles: ['client', 'provider'],
+    });
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  it('blocks sign-in until the emailed token is redeemed', async () => {
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      payload: {
+        email: 'unverified@example.test',
+        password: TEST_PASSWORD,
+        display_name: 'Unverified',
+        role: 'client',
+      },
+    });
+    assert.equal(response.statusCode, 201);
+    assert.equal(
+      response.json<{ email_verification_required: boolean }>().email_verification_required,
+      true,
+    );
+    assert.equal(cookieValue(response, SESSION_COOKIE), undefined, 'no session until verified');
+
+    const blocked = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { email: 'unverified@example.test', password: TEST_PASSWORD },
+    });
+    assert.equal(blocked.statusCode, 403);
+    assert.equal(errorCode(blocked.body), 'EMAIL_NOT_VERIFIED');
+
+    const token = issued.at(-1)?.token;
+    assert.ok(token, 'the onRegistered hook receives the plaintext token exactly once');
+
+    const verified = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/verify-email',
+      payload: { token },
+    });
+    assert.equal(verified.statusCode, 200);
+    assert.equal(verified.json<{ verified: boolean }>().verified, true);
+
+    const nowAllowed = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { email: 'unverified@example.test', password: TEST_PASSWORD },
+    });
+    assert.equal(nowAllowed.statusCode, 200);
+  });
+
+  it('refuses to redeem the same token twice', async () => {
+    const token = issued.at(-1)?.token;
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/verify-email',
+      payload: { token },
+    });
+    assert.equal(response.statusCode, 409);
+    assert.equal(errorCode(response.body), 'CONFLICT');
+  });
+
+  it('refuses an unknown or expired token', async () => {
+    const unknown = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/verify-email',
+      payload: { token: 'this-token-was-never-issued' },
+    });
+    assert.equal(unknown.statusCode, 400);
+    assert.equal(errorCode(unknown.body), 'VALIDATION_FAILED');
+
+    const user = await harness.store.users.findByEmail('boss@example.test');
+    assert.ok(user);
+    const expiredToken = 'an-expired-verification-token-value';
+    await harness.store.verificationTokens.create({
+      user_id: user.id,
+      token_hash: harness.app.nexus.crypto.hashToken(expiredToken),
+      expires_at: isoInSeconds(-60),
+    });
+
+    const expired = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/verify-email',
+      payload: { token: expiredToken },
+    });
+    assert.equal(expired.statusCode, 400);
+    assert.match(expired.body, /expired/);
+  });
+});
+
+describe('registration policy', () => {
+  let harness: TestApp;
+
+  before(async () => {
+    harness = await buildTestApp();
+    await harness.registerUser({ email: 'owner@example.test' });
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  it('honours closed registration and restricted roles', async () => {
+    await harness.store.settings.set(REGISTRATION_SETTINGS_KEY, {
+      open_registration: false,
+      require_email_verification: false,
+      allowed_roles: ['client'],
+    });
+    const closed = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      payload: {
+        email: 'late@example.test',
+        password: TEST_PASSWORD,
+        display_name: 'Late',
+        role: 'client',
+      },
+    });
+    assert.equal(closed.statusCode, 403);
+    assert.equal(errorCode(closed.body), 'FORBIDDEN');
+
+    await harness.store.settings.set(REGISTRATION_SETTINGS_KEY, {
+      open_registration: true,
+      require_email_verification: false,
+      allowed_roles: ['client'],
+    });
+    const wrongRole = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      payload: {
+        email: 'provider@example.test',
+        password: TEST_PASSWORD,
+        display_name: 'Provider',
+        role: 'provider',
+      },
+    });
+    assert.equal(wrongRole.statusCode, 403);
+
+    const allowed = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      payload: {
+        email: 'client@example.test',
+        password: TEST_PASSWORD,
+        display_name: 'Client',
+        role: 'client',
+      },
+    });
+    assert.equal(allowed.statusCode, 201);
+  });
+});

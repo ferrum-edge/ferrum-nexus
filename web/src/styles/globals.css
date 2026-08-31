@@ -1,0 +1,214 @@
+@import 'tailwindcss';
+
+/*
+ * Ferrum Nexus design tokens.
+ *
+ * Ferrum = iron: cool slate/zinc neutrals with a heated ember accent. Dark is
+ * the default theme (declared on bare `:root`); the light palette overrides the
+ * same variables under `:root[data-theme='light']`. Every colour used anywhere
+ * in the SPA resolves through one of these variables, so adding or restyling a
+ * colour only ever means editing this file.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces, from furthest back to furthest forward. */
+  --base: #0b0d10;
+  --surface: #12151a;
+  --elevated: #171b21;
+  --inset: #0e1116;
+  --overlay: rgb(3 5 8 / 0.72);
+
+  /* Lines. */
+  --border: #262b33;
+  --border-strong: #39414d;
+
+  /* Text. */
+  --fg: #e8ecf2;
+  --fg-muted: #a3adbb;
+  --fg-subtle: #6c7787;
+
+  /* Ember accent (branding may override --accent at runtime). */
+  --accent: #f97316;
+  --accent-hover: #fb8b3c;
+  --accent-active: #ea640c;
+  --accent-fg: #1a0d02;
+  --accent-soft: rgb(249 115 22 / 0.14);
+  --accent-ring: rgb(249 115 22 / 0.45);
+
+  /* Semantic states. */
+  --success: #34d399;
+  --success-soft: rgb(52 211 153 / 0.14);
+  --warning: #fbbf24;
+  --warning-soft: rgb(251 191 36 / 0.14);
+  --danger: #f87171;
+  --danger-hover: #fb8f8f;
+  --danger-soft: rgb(248 113 113 / 0.14);
+  --info: #60a5fa;
+  --info-soft: rgb(96 165 250 / 0.14);
+  --neutral-soft: rgb(163 173 187 / 0.12);
+
+  /* Elevation. */
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-pop: 0 12px 32px -8px rgb(0 0 0 / 0.6);
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --base: #f6f7f9;
+  --surface: #ffffff;
+  --elevated: #ffffff;
+  --inset: #f1f3f6;
+  --overlay: rgb(15 23 42 / 0.35);
+
+  --border: #dfe3e9;
+  --border-strong: #c3cad4;
+
+  --fg: #101419;
+  --fg-muted: #4d5866;
+  --fg-subtle: #77828f;
+
+  --accent: #ea580c;
+  --accent-hover: #c2410c;
+  --accent-active: #9a3412;
+  --accent-fg: #ffffff;
+  --accent-soft: rgb(234 88 12 / 0.1);
+  --accent-ring: rgb(234 88 12 / 0.35);
+
+  --success: #059669;
+  --success-soft: rgb(5 150 105 / 0.1);
+  --warning: #b45309;
+  --warning-soft: rgb(180 83 9 / 0.1);
+  --danger: #dc2626;
+  --danger-hover: #b91c1c;
+  --danger-soft: rgb(220 38 38 / 0.1);
+  --info: #2563eb;
+  --info-soft: rgb(37 99 235 / 0.1);
+  --neutral-soft: rgb(77 88 102 / 0.09);
+
+  --shadow-card: 0 1px 2px rgb(15 23 42 / 0.06);
+  --shadow-pop: 0 12px 32px -8px rgb(15 23 42 / 0.18);
+}
+
+/* Re-export the tokens as Tailwind theme values so utilities exist for them. */
+@theme inline {
+  --color-base: var(--base);
+  --color-surface: var(--surface);
+  --color-elevated: var(--elevated);
+  --color-inset: var(--inset);
+  --color-overlay: var(--overlay);
+
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-active: var(--accent-active);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-ring: var(--accent-ring);
+
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-hover: var(--danger-hover);
+  --color-danger-soft: var(--danger-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-neutral-soft: var(--neutral-soft);
+
+  --radius-xs: 0.25rem;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+
+  --shadow-card: var(--shadow-card);
+  --shadow-pop: var(--shadow-pop);
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background-color: var(--base);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: var(--radius-xs);
+  }
+
+  ::selection {
+    background: var(--accent-soft);
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+}
+
+@layer components {
+  /* Shared surface treatment for cards, panels and popovers. */
+  .fx-card {
+    background-color: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-card);
+  }
+
+  .fx-pop {
+    background-color: var(--elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-pop);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
