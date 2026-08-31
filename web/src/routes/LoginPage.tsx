@@ -1,5 +1,5 @@
-import { Link, Navigate, useNavigate } from '@tanstack/react-router';
-import { useCallback, useState, type FormEvent, type ReactElement } from 'react';
+import { Link, useNavigate } from '@tanstack/react-router';
+import { useCallback, useEffect, useState, type FormEvent, type ReactElement } from 'react';
 import { ERROR_CODES } from '@ferrum-nexus/shared';
 import { AuthShell, FormNotice } from '../components/auth/AuthShell';
 import { CaptchaWidget } from '../components/auth/CaptchaWidget';
@@ -23,7 +23,10 @@ export function LoginPage(): ReactElement {
 
   const onToken = useCallback((token: string | null) => setCaptchaToken(token), []);
 
-  if (status === 'authenticated') return <Navigate to="/" replace />;
+  // An already-signed-in visitor who lands here is bounced to the dashboard.
+  useEffect(() => {
+    if (status === 'authenticated') void navigate({ to: '/', replace: true });
+  }, [status, navigate]);
 
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();

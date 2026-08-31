@@ -59,8 +59,9 @@ describe('App', () => {
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeInTheDocument();
-    expect(await screen.findByLabelText('Email')).toBeInTheDocument();
-    expect(screen.getByLabelText('Password')).toBeInTheDocument();
+    // Required fields render an asterisk inside the label, hence the pattern.
+    expect(await screen.findByLabelText(/^Email/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Password/)).toBeInTheDocument();
     // Branding is applied to the public shell.
     expect(await screen.findByText('Acme Developer Portal')).toBeInTheDocument();
     // Nothing from the authenticated shell leaks into the public page.

@@ -1,5 +1,5 @@
-import { Link, Navigate } from '@tanstack/react-router';
-import { useCallback, useState, type FormEvent, type ReactElement } from 'react';
+import { Link, useNavigate } from '@tanstack/react-router';
+import { useCallback, useEffect, useState, type FormEvent, type ReactElement } from 'react';
 import {
   MIN_PASSWORD_LENGTH,
   REGISTRABLE_ROLES,
@@ -24,6 +24,7 @@ const ROLE_DESCRIPTIONS: Readonly<Record<RegistrableRole, string>> = {
 export function RegisterPage(): ReactElement {
   const { status, register } = useAuth();
   const { data: captcha } = useCaptchaConfig();
+  const navigate = useNavigate();
 
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
@@ -38,7 +39,10 @@ export function RegisterPage(): ReactElement {
 
   const onToken = useCallback((token: string | null) => setCaptchaToken(token), []);
 
-  if (status === 'authenticated') return <Navigate to="/" replace />;
+  // An already-signed-in visitor who lands here is bounced to the dashboard.
+  useEffect(() => {
+    if (status === 'authenticated') void navigate({ to: '/', replace: true });
+  }, [status, navigate]);
 
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();

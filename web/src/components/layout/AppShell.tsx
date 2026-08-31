@@ -1,4 +1,4 @@
-import { Navigate, Outlet, useLocation } from '@tanstack/react-router';
+import { Outlet, useLocation, useNavigate } from '@tanstack/react-router';
 import { useEffect, useState, type ReactElement } from 'react';
 import { useBranding } from '../../hooks/useBranding';
 import { useAuth } from '../../stores/auth';
@@ -34,21 +34,25 @@ export function AppShell(): ReactElement {
   const { data: branding } = useBranding();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const location = useLocation();
+  const navigate = useNavigate();
 
   useEffect(() => {
     setSidebarOpen(false);
   }, [location.pathname]);
 
-  if (status === 'loading') {
+  // Redirect imperatively rather than rendering <Navigate>: this component
+  // stays mounted while the lazy /login chunk loads, and <Navigate> re-fires on
+  // every render because it compares its props by identity.
+  useEffect(() => {
+    if (status === 'unauthenticated') void navigate({ to: '/login', replace: true });
+  }, [status, navigate]);
+
+  if (status !== 'authenticated' || user === null) {
     return (
       <div className="flex h-full items-center justify-center">
-        <Spinner label="Loading portal" />
+        <Spinner label={status === 'loading' ? 'Loading portal' : 'Redirecting to sign in'} />
       </div>
     );
-  }
-
-  if (status === 'unauthenticated' || user === null) {
-    return <Navigate to="/login" replace />;
   }
 
   const portalName = branding?.portal_name ?? 'Ferrum Nexus';
