@@ -1,10 +1,45 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { MAX_SPEC_BYTES } from '@ferrum-nexus/shared';
+import {
+  MAX_SPEC_BYTES,
+  MAX_SPEC_OPERATIONS,
+  MAX_SPEC_PATHS,
+  OPENAPI_OPERATION_METHODS,
+} from '@ferrum-nexus/shared';
 
 import { isNexusError } from '../lib/errors.js';
 import { parseOpenApiSpec, parseUpstreamUrl, resolveUpstream, slugify } from './oas.js';
+
+/** A minimal, structurally valid operation object. */
+const OPERATION = { responses: { '200': { description: 'OK' } } };
+
+/** A document declaring exactly `count` paths, one `get` operation each. */
+function specWithPaths(count: number): string {
+  const paths: Record<string, unknown> = {};
+  for (let index = 0; index < count; index += 1) paths[`/p${index}`] = { get: OPERATION };
+  return JSON.stringify({
+    openapi: '3.1.0',
+    info: { title: 'Generated', version: '1.0.0' },
+    paths,
+  });
+}
+
+/** A document declaring exactly `count` operations, packed 8 to a path item. */
+function specWithOperations(count: number): string {
+  const paths: Record<string, Record<string, unknown>> = {};
+  for (let index = 0; index < count; index += 1) {
+    const key = `/p${Math.floor(index / OPENAPI_OPERATION_METHODS.length)}`;
+    const item = paths[key] ?? {};
+    item[OPENAPI_OPERATION_METHODS[index % OPENAPI_OPERATION_METHODS.length] as string] = OPERATION;
+    paths[key] = item;
+  }
+  return JSON.stringify({
+    openapi: '3.1.0',
+    info: { title: 'Generated', version: '1.0.0' },
+    paths,
+  });
+}
 
 /** Assert that `fn` throws `SPEC_INVALID`, returning the error for inspection. */
 function expectSpecInvalid(fn: () => unknown): { message: string; details: unknown } {
@@ -168,6 +203,63 @@ describe('OpenAPI parsing', () => {
     const failure = expectSpecInvalid(() => parseOpenApiSpec(oversized));
     assert.match(failure.message, /larger than/);
     assert.equal((failure.details as { limit: number }).limit, MAX_SPEC_BYTES);
+  });
+
+  it('counts operations rather than paths, ignoring path-item metadata', () => {
+    const spec = parseOpenApiSpec(
+      JSON.stringify({
+        openapi: '3.1.0',
+        info: { title: 'Multi', version: '1.0.0' },
+        paths: {
+          '/a': {
+            summary: 'not an operation',
+            parameters: [],
+            'x-internal': true,
+            get: { responses: { '200': { description: 'OK' } } },
+            post: { responses: { '201': { description: 'Created' } } },
+          },
+          '/b': { delete: { responses: { '204': { description: 'No content' } } } },
+        },
+      }),
+    );
+    assert.equal(spec.pathCount, 2);
+    assert.equal(spec.operationCount, 3);
+  });
+
+  it('accepts a document at the operation limit and rejects one just over it', () => {
+    assert.equal(parseOpenApiSpec(specWithOperations(MAX_SPEC_OPERATIONS)).operationCount, 3_000);
+
+    const failure = expectSpecInvalid(() =>
+      parseOpenApiSpec(specWithOperations(MAX_SPEC_OPERATIONS + 1)),
+    );
+    assert.match(failure.message, /3001 operations, more than the 3000 operation limit/);
+    assert.deepEqual(failure.details, {
+      field: 'paths',
+      operations: MAX_SPEC_OPERATIONS + 1,
+      limit: MAX_SPEC_OPERATIONS,
+    });
+  });
+
+  it('accepts a document at the path limit and rejects one just over it', () => {
+    // One operation per path, so only the path ceiling can be the one that trips.
+    assert.equal(parseOpenApiSpec(specWithPaths(MAX_SPEC_PATHS)).pathCount, 2_000);
+
+    const failure = expectSpecInvalid(() => parseOpenApiSpec(specWithPaths(MAX_SPEC_PATHS + 1)));
+    assert.match(failure.message, /2001 paths, more than the 2000 path limit/);
+    assert.deepEqual(failure.details, {
+      field: 'paths',
+      paths: MAX_SPEC_PATHS + 1,
+      limit: MAX_SPEC_PATHS,
+    });
+  });
+
+  it('rejects an operation flood that is well inside MAX_SPEC_BYTES', () => {
+    // The shape the size cap alone does not stop: a server-valid document with
+    // tens of thousands of minimal operations, which the SPA renders one card
+    // at a time.
+    const flood = specWithOperations(30_000);
+    assert.ok(Buffer.byteLength(flood, 'utf8') < MAX_SPEC_BYTES);
+    assert.match(expectSpecInvalid(() => parseOpenApiSpec(flood)).message, /more than the/);
   });
 });
 

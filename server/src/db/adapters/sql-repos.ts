@@ -80,6 +80,7 @@ import type {
   StoreHealth,
   ThreadRecord,
   ThreadRepo,
+  UpdateInput,
   UserFilter,
   UserRecord,
   UserRepo,
@@ -129,6 +130,36 @@ function mapUser(row: Row): UserRecord {
     last_login_at: textOrNull(row.last_login_at),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
+  };
+}
+
+/** Encoded `SET` columns of a user patch, shared by `update` and `updateIfMatches`. */
+function userUpdateColumns(patch: UpdateInput<UserRecord>): Record<string, SqlParam | undefined> {
+  return {
+    email: patch.email === undefined ? undefined : patch.email.trim().toLowerCase(),
+    password_hash: patch.password_hash,
+    display_name: patch.display_name,
+    role: patch.role,
+    org_id: patch.org_id === undefined ? undefined : patch.org_id,
+    company: patch.company === undefined ? undefined : patch.company,
+    phone: patch.phone === undefined ? undefined : patch.phone,
+    status: patch.status,
+    email_verified:
+      patch.email_verified === undefined ? undefined : encodeBool(patch.email_verified),
+    last_login_at: patch.last_login_at === undefined ? undefined : patch.last_login_at,
+  };
+}
+
+/** Encoded `SET` columns of an access-request patch, shared by both updates. */
+function accessRequestUpdateColumns(
+  patch: UpdateInput<AccessRequestRecord>,
+): Record<string, SqlParam | undefined> {
+  return {
+    justification: patch.justification,
+    status: patch.status,
+    decided_by: patch.decided_by,
+    decided_at: patch.decided_at,
+    decision_note: patch.decision_note,
   };
 }
 
@@ -566,19 +597,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     },
 
     update: async (id, patch) => {
-      const set = setParts({
-        email: patch.email === undefined ? undefined : patch.email.trim().toLowerCase(),
-        password_hash: patch.password_hash,
-        display_name: patch.display_name,
-        role: patch.role,
-        org_id: patch.org_id === undefined ? undefined : patch.org_id,
-        company: patch.company === undefined ? undefined : patch.company,
-        phone: patch.phone === undefined ? undefined : patch.phone,
-        status: patch.status,
-        email_verified:
-          patch.email_verified === undefined ? undefined : encodeBool(patch.email_verified),
-        last_login_at: patch.last_login_at === undefined ? undefined : patch.last_login_at,
-      });
+      const set = setParts(userUpdateColumns(patch));
       if (set) {
         await mapSqlConflict('An account with that email address already exists', () =>
           execute(exec, `UPDATE users SET ${set.sql}, updated_at = ? WHERE id = ?`, [
@@ -589,6 +608,41 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         );
       }
       return users.findById(id);
+    },
+
+    updateIfMatches: async (id, expected, patch) => {
+      const guard = new SqlWhereBuilder()
+        .always('id = ?', id)
+        .add(expected.role, 'role = ?', expected.role ?? null)
+        .add(expected.status, 'status = ?', expected.status ?? null)
+        .build();
+      /**
+       * Did the row survive the predicate?
+       *
+       * Reached when the `UPDATE` reported no change, which is not the same as
+       * "somebody else got here first": MySQL counts *changed* rows, not
+       * matched ones, so a patch that wrote identical values inside the same
+       * millisecond looks like a loss. Re-reading the predicate separates the
+       * two — a genuine loser no longer satisfies it.
+       */
+      const stillMatches = async (): Promise<UserRecord | null> => {
+        const row = await queryOne(exec, `SELECT id FROM users${guard.sql}`, guard.params);
+        return row ? users.findById(id) : null;
+      };
+
+      const set = setParts(userUpdateColumns(patch));
+      if (!set) return stillMatches();
+
+      const changed = await mapSqlConflict(
+        'An account with that email address already exists',
+        () =>
+          execute(exec, `UPDATE users SET ${set.sql}, updated_at = ?${guard.sql}`, [
+            ...set.params,
+            nowIso(),
+            ...guard.params,
+          ]),
+      );
+      return changed > 0 ? users.findById(id) : stillMatches();
     },
 
     touchLastLogin: async (id, at) => {
@@ -1012,13 +1066,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     },
 
     update: async (id, patch) => {
-      const set = setParts({
-        justification: patch.justification,
-        status: patch.status,
-        decided_by: patch.decided_by,
-        decided_at: patch.decided_at,
-        decision_note: patch.decision_note,
-      });
+      const set = setParts(accessRequestUpdateColumns(patch));
       if (set) {
         await mapSqlConflict('You already have a pending request for this API', () =>
           execute(exec, `UPDATE access_requests SET ${set.sql}, updated_at = ? WHERE id = ?`, [
@@ -1029,6 +1077,31 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         );
       }
       return accessRequests.findById(id);
+    },
+
+    updateIfStatus: async (id, expected, patch) => {
+      // See `users.updateIfMatches` for why "no rows changed" is re-read
+      // rather than reported as a lost race outright.
+      const stillMatches = async (): Promise<AccessRequestRecord | null> => {
+        const row = await queryOne(
+          exec,
+          'SELECT id FROM access_requests WHERE id = ? AND status = ?',
+          [id, expected],
+        );
+        return row ? accessRequests.findById(id) : null;
+      };
+
+      const set = setParts(accessRequestUpdateColumns(patch));
+      if (!set) return stillMatches();
+
+      const changed = await mapSqlConflict('You already have a pending request for this API', () =>
+        execute(
+          exec,
+          `UPDATE access_requests SET ${set.sql}, updated_at = ? WHERE id = ? AND status = ?`,
+          [...set.params, nowIso(), id, expected],
+        ),
+      );
+      return changed > 0 ? accessRequests.findById(id) : stillMatches();
     },
 
     list: async (filter, options) => {
@@ -1458,9 +1531,10 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     list: async (filter, options) => {
       const builder = new SqlWhereBuilder();
       if (filter.participant_user_id !== undefined) {
+        // Seats only — `created_by` is provenance, not membership. See
+        // `ThreadFilter.participant_user_id`.
         builder.always(
-          '(participant_a = ? OR participant_b = ? OR created_by = ?)',
-          filter.participant_user_id,
+          '(participant_a = ? OR participant_b = ?)',
           filter.participant_user_id,
           filter.participant_user_id,
         );

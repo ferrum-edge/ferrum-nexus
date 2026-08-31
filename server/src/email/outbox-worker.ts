@@ -9,6 +9,25 @@
  * - failure with retries left → `reschedule` at `30s · 2^attempts` plus jitter;
  * - failure on attempt {@link OUTBOX_MAX_ATTEMPTS} → `markFailed`.
  *
+ * ## SMTP delivery is at-least-once, and the seam is the acknowledgement
+ *
+ * `transport.send` resolving and `markSent` committing are two writes to two
+ * systems with no transaction between them, so they are handled as two distinct
+ * failures:
+ *
+ * - **the transport rejected** — nothing was delivered, retry on the backoff;
+ * - **the transport accepted but the acknowledgement failed** — the relay
+ *   already has the message, and a retry would deliver a second copy. The row
+ *   is taken out of the retry loop and parked as `failed` with
+ *   {@link OUTBOX_DELIVERED_UNACKNOWLEDGED} at the front of `last_error`, so an
+ *   operator can tell it apart from mail that never left.
+ *
+ * Only the second write failing *and* the parking write failing too leaves the
+ * row `sending`, where `releaseStale` will eventually return it to `pending` and
+ * a duplicate goes out. That residual duplicate is the reason delivery is
+ * documented as at-least-once rather than exactly-once: exact deduplication
+ * needs the relay to honour a `Message-ID`, which Nexus cannot assume.
+ *
  * Two operational rules:
  *
  * 1. **It never crashes the process.** Every tick is wrapped; a transport or
@@ -39,6 +58,17 @@ export const OUTBOX_MAX_BACKOFF_MS = 60 * 60_000;
 /** A `sending` row untouched for this long is assumed to be a crashed worker's. */
 export const OUTBOX_STALE_AFTER_MS = 5 * 60_000;
 
+/**
+ * Prefix written to `last_error` when SMTP accepted a message but the
+ * acknowledgement could not be persisted.
+ *
+ * The row is `failed` only in the sense that Nexus lost track of it — the mail
+ * *was* handed to the relay. Parking it there is what stops the retry loop from
+ * delivering a second copy. Recognising the prefix is how an operator (and the
+ * admin outbox view) tells the two apart without a schema change.
+ */
+export const OUTBOX_DELIVERED_UNACKNOWLEDGED = 'delivered-unacknowledged';
+
 /** What one {@link OutboxWorker.tick} did. */
 export interface OutboxTickResult {
   /** Rows claimed from the queue. */
@@ -46,6 +76,8 @@ export interface OutboxTickResult {
   sent: number;
   rescheduled: number;
   failed: number;
+  /** Delivered by SMTP, but the `markSent` write did not land. */
+  unacknowledged: number;
   /** True when the tick did nothing because SMTP is not configured. */
   skipped: boolean;
 }
@@ -55,6 +87,7 @@ const EMPTY_TICK: OutboxTickResult = {
   sent: 0,
   rescheduled: 0,
   failed: 0,
+  unacknowledged: 0,
   skipped: true,
 };
 
@@ -121,9 +154,8 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
         html: entry.body_html,
         text: entry.body_text,
       });
-      await store.emailOutbox.markSent(entry.id, now().toISOString());
-      result.sent += 1;
     } catch (error) {
+      // Nothing was delivered: the retry loop is safe.
       const message = error instanceof Error ? error.message : String(error);
       if (entry.attempts >= OUTBOX_MAX_ATTEMPTS) {
         await store.emailOutbox.markFailed(entry.id, message);
@@ -141,6 +173,54 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
         { id: entry.id, attempts: entry.attempts, next_attempt_at: nextAt.toISOString() },
         'Outbox message delivery failed, retrying later',
       );
+      return;
+    }
+
+    // Past this point the relay has the message. Anything that fails now is an
+    // acknowledgement problem, and rescheduling would deliver a second copy.
+    try {
+      await store.emailOutbox.markSent(entry.id, now().toISOString());
+      result.sent += 1;
+    } catch (error) {
+      await parkUnacknowledged(result, entry, error);
+    }
+  }
+
+  /**
+   * Take a delivered-but-unacknowledged row out of the retry loop.
+   *
+   * `markFailed` is the only terminal status the schema offers, so the row is
+   * parked there with {@link OUTBOX_DELIVERED_UNACKNOWLEDGED} leading
+   * `last_error`. If even that write fails the row stays `sending` and
+   * `releaseStale` will eventually re-queue it — the one path on which a
+   * duplicate is delivered.
+   */
+  async function parkUnacknowledged(
+    result: OutboxTickResult,
+    entry: EmailOutboxRecord,
+    cause: unknown,
+  ): Promise<void> {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    result.unacknowledged += 1;
+    try {
+      await store.emailOutbox.markFailed(
+        entry.id,
+        `${OUTBOX_DELIVERED_UNACKNOWLEDGED}: ${message}`,
+      );
+      log(
+        { id: entry.id, to: entry.to_email, error: message },
+        'Outbox message was delivered but could not be marked sent; parked to avoid a duplicate',
+      );
+    } catch (parkError) {
+      log(
+        {
+          id: entry.id,
+          to: entry.to_email,
+          error: message,
+          park_error: parkError instanceof Error ? parkError.message : String(parkError),
+        },
+        'Outbox message was delivered but its row could not be updated at all; a retry may duplicate it',
+      );
     }
   }
 
@@ -150,6 +230,7 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
       sent: 0,
       rescheduled: 0,
       failed: 0,
+      unacknowledged: 0,
       skipped: false,
     };
     let transport: MailTransport | null = null;

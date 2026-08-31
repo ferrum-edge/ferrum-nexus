@@ -4,6 +4,7 @@ import { after, before, describe, it } from 'node:test';
 import { SESSION_COOKIE, type ApiErrorBody, type RegisterResponse } from '@ferrum-nexus/shared';
 
 import { REGISTRATION_SETTINGS_KEY } from '../auth/service.js';
+import type { UserRepo } from '../db/store.js';
 import { buildTestApp, cookieValue, TEST_PASSWORD, type TestApp } from './helpers.js';
 
 function errorCode(body: string): string {
@@ -105,6 +106,78 @@ describe('register to verified, end to end through the outbox', () => {
       payload: { token },
     });
     assert.equal(replay.statusCode, 409);
+  });
+
+  it('does not spend the verification token when the account update fails', async () => {
+    const email = 'flaky-verify@example.test';
+    const registered = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      payload: { email, password: TEST_PASSWORD, display_name: 'Flaky', role: 'client' },
+    });
+    assert.equal(registered.statusCode, 201, registered.body);
+
+    await harness.tick();
+    const delivered = harness.mailbox.sent.find((mail) => mail.to === email);
+    assert.ok(delivered, 'the verification mail was delivered');
+    const token = /\/verify-email\?token=([A-Za-z0-9_-]+)/.exec(delivered.text)?.[1] ?? '';
+    assert.ok(token);
+
+    // Fail the account update exactly once, after the token has been burned.
+    // There is no resend endpoint, so a burn that outlives its own purpose
+    // locks the account out of the portal permanently.
+    const users: UserRepo = harness.store.users;
+    const realUpdate = users.update.bind(users);
+    let attempts = 0;
+    users.update = async (id, patch) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('the users table went away mid-verification');
+      return realUpdate(id, patch);
+    };
+
+    try {
+      const failed = await harness.app.inject({
+        method: 'POST',
+        url: '/api/auth/verify-email',
+        payload: { token },
+      });
+      assert.equal(failed.statusCode, 500, failed.body);
+    } finally {
+      users.update = realUpdate;
+    }
+
+    assert.equal(
+      (await harness.store.users.findByEmail(email))?.email_verified,
+      false,
+      'the account is still unverified, as the failure implies',
+    );
+    const row = await harness.store.verificationTokens.findByTokenHash(
+      harness.app.nexus.crypto.hashToken(token),
+    );
+    assert.equal(row?.used_at, null, 'the burn rolled back with the update it was protecting');
+    assert.equal(
+      (await harness.auditRows('auth.verify_email')).some(
+        (entry) => entry.target_id === registered.json<RegisterResponse>().user.id,
+      ),
+      false,
+      'and no audit row claims a verification that did not happen',
+    );
+
+    // The retry is the whole point: the same link still works.
+    const retried = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/verify-email',
+      payload: { token },
+    });
+    assert.equal(retried.statusCode, 200, retried.body);
+    assert.equal((await harness.store.users.findByEmail(email))?.email_verified, true);
+
+    const signedIn = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { email, password: TEST_PASSWORD },
+    });
+    assert.equal(signedIn.statusCode, 200, signedIn.body);
   });
 
   it('greets the new account with a welcome notification', async () => {

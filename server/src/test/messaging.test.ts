@@ -195,3 +195,136 @@ describe('messaging', () => {
     assert.equal(self.statusCode, 400);
   });
 });
+
+/**
+ * A platform thread seats only its recipient. Whoever opened it — a god-mode
+ * broadcaster — holds no seat, so their access has to come from their *current*
+ * admin role and has to disappear when that role does.
+ */
+describe('messaging access follows the current role, not the thread’s creator', () => {
+  let harness: TestApp;
+  let founder: TestSession;
+  let broadcaster: TestSession;
+  let recipient: TestSession;
+  let provider: TestSession;
+  let platformThreadId: string;
+
+  before(async () => {
+    harness = await buildTestApp();
+    founder = await harness.registerUser({ email: 'seat-founder@example.test' });
+    recipient = await harness.registerUser({ email: 'seat-recipient@example.test' });
+    provider = await harness.registerUser({
+      email: 'seat-provider@example.test',
+      role: 'provider',
+    });
+    broadcaster = await harness.registerUser({ email: 'seat-broadcaster@example.test' });
+    const promoted = await harness.authed(founder, {
+      method: 'PATCH',
+      url: `/api/users/${broadcaster.user.id}`,
+      payload: { role: 'super_admin' },
+    });
+    assert.equal(promoted.statusCode, 200, promoted.body);
+
+    const broadcast = await harness.authed(broadcaster, {
+      method: 'POST',
+      url: '/api/admin/god/broadcast',
+      payload: {
+        subject: 'Maintenance window',
+        body: 'The gateway is unavailable on Sunday.',
+        audience: { scope: 'all' },
+        reason: 'Maintenance window',
+      },
+    });
+    assert.equal(broadcast.statusCode, 200, broadcast.body);
+
+    const thread = await harness.store.threads.findExisting(recipient.user.id, null, null);
+    assert.ok(thread, 'the broadcast opened a platform thread for the recipient');
+    assert.equal(thread.created_by, broadcaster.user.id);
+    assert.equal(thread.participant_a, recipient.user.id);
+    assert.equal(thread.participant_b, null);
+    platformThreadId = thread.id;
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  it('lets the broadcaster into the thread while they are still an admin', async () => {
+    const read = await harness.authed(broadcaster, {
+      method: 'GET',
+      url: `/api/threads/${platformThreadId}`,
+    });
+    assert.equal(read.statusCode, 200, read.body);
+  });
+
+  it('shuts the broadcaster out of every recipient’s thread once they are demoted', async () => {
+    const demoted = await harness.authed(founder, {
+      method: 'PATCH',
+      url: `/api/users/${broadcaster.user.id}`,
+      payload: { role: 'client' },
+    });
+    assert.equal(demoted.statusCode, 200, demoted.body);
+
+    const read = await harness.authed(broadcaster, {
+      method: 'GET',
+      url: `/api/threads/${platformThreadId}`,
+    });
+    assert.equal(read.statusCode, 403, read.body);
+    assert.equal(errorCode(read.body), 'FORBIDDEN');
+
+    const posted = await harness.authed(broadcaster, {
+      method: 'POST',
+      url: `/api/threads/${platformThreadId}/messages`,
+      payload: { body: 'Still here.' },
+    });
+    assert.equal(posted.statusCode, 403, posted.body);
+
+    const listed = await harness.authed(broadcaster, { method: 'GET', url: '/api/threads' });
+    assert.equal(
+      listed.json<ListThreadsResponse>().items.some((thread) => thread.id === platformThreadId),
+      false,
+      'nor does it show up in their own thread list',
+    );
+
+    // The seat holder is unaffected — this is the recipient's conversation.
+    const owner = await harness.authed(recipient, {
+      method: 'GET',
+      url: `/api/threads/${platformThreadId}`,
+    });
+    assert.equal(owner.statusCode, 200, owner.body);
+  });
+
+  it('leaves a 1:1 thread its creator genuinely sits in alone', async () => {
+    const opened = await harness.authed(broadcaster, {
+      method: 'POST',
+      url: '/api/threads',
+      payload: {
+        subject: 'About your API',
+        recipient_user_id: provider.user.id,
+        body: 'Do you support webhooks?',
+      },
+    });
+    assert.equal(opened.statusCode, 201, opened.body);
+    const thread = opened.json<CreateThreadResponse>().thread;
+    assert.equal(thread.created_by, broadcaster.user.id);
+
+    const read = await harness.authed(broadcaster, {
+      method: 'GET',
+      url: `/api/threads/${thread.id}`,
+    });
+    assert.equal(read.statusCode, 200, read.body);
+
+    const replied = await harness.authed(broadcaster, {
+      method: 'POST',
+      url: `/api/threads/${thread.id}/messages`,
+      payload: { body: 'Any update?' },
+    });
+    assert.equal(replied.statusCode, 201, replied.body);
+
+    const listed = await harness.authed(broadcaster, { method: 'GET', url: '/api/threads' });
+    assert.ok(
+      listed.json<ListThreadsResponse>().items.some((entry) => entry.id === thread.id),
+      'a thread they actually sit in is still theirs',
+    );
+  });
+});

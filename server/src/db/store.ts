@@ -273,7 +273,16 @@ export interface ConsumerFilter {
 
 /** Filters for `threads.list`. */
 export interface ThreadFilter {
-  /** Threads where this user is `created_by`, `participant_a` or `participant_b`. */
+  /**
+   * Threads where this user occupies a seat — `participant_a` or
+   * `participant_b`.
+   *
+   * `created_by` is deliberately **not** a seat. It is immutable provenance,
+   * not membership: a god-mode broadcast seats only the recipient, so counting
+   * the creator would hand whoever sent it a permanent key to every
+   * recipient's platform thread, surviving their own demotion. Admin oversight
+   * comes from the caller's *current* role, never from this column.
+   */
   participant_user_id?: Uuid;
   api_id?: Uuid;
   /** Case-insensitive substring match on the subject. */
@@ -322,6 +331,26 @@ export interface UserRepo {
   findManyByIds(ids: Uuid[]): Promise<UserRecord[]>;
   /** Patch mutable columns. Returns `null` when the user does not exist. */
   update(id: Uuid, patch: UpdateInput<UserRecord>): Promise<UserRecord | null>;
+  /**
+   * Compare-and-set update: apply `patch` **only while the row still matches
+   * every field of `expected`**, in one statement.
+   *
+   * Returns the updated row, or `null` when the user is gone or has already
+   * moved on — the caller lost the race and must not treat its earlier read as
+   * still true.
+   *
+   * This exists for the last-super-admin invariant, which is a check on *other*
+   * rows followed by a write to this one. `countActiveSuperAdmins` and this
+   * call belong inside the same {@link NexusStore.transaction} body: the
+   * transaction makes the check-then-write atomic against another demotion, and
+   * the predicate here makes the write refuse a target that changed underneath
+   * it anyway.
+   */
+  updateIfMatches(
+    id: Uuid,
+    expected: { role?: Role; status?: UserStatus },
+    patch: UpdateInput<UserRecord>,
+  ): Promise<UserRecord | null>;
   /** Record a successful sign-in without rewriting the rest of the row. */
   touchLastLogin(id: Uuid, at: IsoTimestamp): Promise<void>;
   list(filter: UserFilter, options?: ListOptions): Promise<Paginated<UserRecord>>;
@@ -403,6 +432,26 @@ export interface AccessRequestRepo {
   create(input: CreateInput<AccessRequestRecord>): Promise<AccessRequestRecord>;
   findById(id: Uuid): Promise<AccessRequestRecord | null>;
   update(id: Uuid, patch: UpdateInput<AccessRequestRecord>): Promise<AccessRequestRecord | null>;
+  /**
+   * Atomically move a request out of one status: apply `patch` **only while the
+   * row still has `expected`**, in one statement
+   * (`… WHERE id = ? AND status = ?`).
+   *
+   * Returns the updated row when this caller won the transition, `null` when it
+   * lost — the request was absent, or somebody else already decided it.
+   *
+   * **Every transition out of `pending` must go through here**, never through
+   * {@link AccessRequestRepo.update}. Approve, deny and cancel each read a
+   * pending row and write it back later; a blind write lets a cancellation
+   * racing an approval succeed too, so the history says `cancelled` while the
+   * approval's grant and ACL group stay live. Only the winner of this call may
+   * create a grant or touch the gateway; the loser raises `CONFLICT`.
+   */
+  updateIfStatus(
+    id: Uuid,
+    expected: AccessRequestStatus,
+    patch: UpdateInput<AccessRequestRecord>,
+  ): Promise<AccessRequestRecord | null>;
   list(filter: AccessRequestFilter, options?: ListOptions): Promise<Paginated<AccessRequestRecord>>;
   /** Duplicate guard: an open request by this user for this API. */
   findPendingByApiAndUser(apiId: Uuid, userId: Uuid): Promise<AccessRequestRecord | null>;

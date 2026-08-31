@@ -23,10 +23,25 @@
  * goes through the Edge client's per-consumer promise queue (via
  * {@link ConsumerProvisioner.mutateAclGroups}).
  *
- * The gateway write happens **before** the grant row is committed. If Edge
- * fails, no grant exists and the request stays pending, which is recoverable by
- * retrying. The reverse order would leave Nexus claiming an access that the
- * gateway would reject.
+ * Three steps, in this order, and the order is the whole design:
+ *
+ * 1. **Claim the decision.** Every transition out of `pending` is an atomic
+ *    compare-and-set (`accessRequests.updateIfStatus`). Approve, deny and
+ *    cancel all read a pending row and write it back later, so a blind update
+ *    let a cancellation racing an approval succeed *too* — the history read
+ *    `cancelled` while the approval's grant and ACL group stayed live. The
+ *    loser of the claim raises `CONFLICT` and, crucially, stops **before**
+ *    anything reaches the gateway.
+ * 2. **Write the gateway.** A grant row the gateway would not honour is worse
+ *    than a decided request an operator can see: the reverse order would leave
+ *    Nexus claiming an access the gateway rejects.
+ * 3. **Commit the grant row.**
+ *
+ * Step 2 preceding step 3 means a failure in step 3 would strand the ACL group
+ * with no grant to find it by — access the portal cannot see and nobody can
+ * revoke. `unwindApproval` closes that window: it takes the group back off
+ * (re-checking first that no concurrent approval legitimately won it), hands
+ * the request back to `pending`, and audits what it undid.
  */
 
 import {
@@ -56,7 +71,7 @@ import type {
   UserRecord,
 } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
-import { conflict, forbidden, notFound, validationFailed } from '../lib/errors.js';
+import { conflict, forbidden, notFound, validationFailed, type NexusError } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
 import { withGroup, withoutGroup, type ConsumerProvisioner } from '../credentials/consumers.js';
@@ -261,6 +276,117 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     return group;
   }
 
+  /**
+   * The error a lost status transition raises.
+   *
+   * Re-reads the row so the message names the decision that actually won,
+   * rather than the status this caller happened to read a moment ago.
+   */
+  async function decisionConflict(requestId: Uuid): Promise<NexusError> {
+    const current = await store.accessRequests.findById(requestId);
+    if (!current) return notFound('Access request', requestId);
+    return conflict(`This request is already ${current.status}`);
+  }
+
+  /**
+   * Undo a half-finished approval.
+   *
+   * Reached when the gateway write succeeded (or may have) but the grant row
+   * did not land. Without this the consumer keeps `nexus:api:<api_id>:approved`
+   * while Nexus holds no grant for anyone to find or revoke — working access
+   * with no portal record of it.
+   *
+   * It starts by **re-reading whether an active grant for this API/user pair
+   * exists**. If one does, a concurrent approval legitimately owns the group
+   * and nothing is undone — stripping it would revoke *their* access. Only when
+   * nothing needs it do both halves go back:
+   *
+   * - the ACL group comes off through the same per-consumer queue every other
+   *   mutation uses; and
+   * - the request returns to `pending`, again with a compare-and-set, so the
+   *   provider can simply approve again. If somebody has already reused the
+   *   slot, the release loses and is recorded as such rather than forced.
+   *
+   * Every step is best-effort: the caller re-throws the original failure, and
+   * an operator needs the trail whichever way the compensation went.
+   */
+  async function unwindApproval(input: {
+    actor: UserRecord;
+    api: ApiRecord;
+    requester: UserRecord;
+    requestId: Uuid;
+    /** The group put on the consumer, or `null` when the gateway write itself failed. */
+    groupAdded: string | null;
+    cause: unknown;
+    ip: string | null;
+  }): Promise<void> {
+    const { actor, api, requester, requestId, groupAdded, cause, ip } = input;
+    const details: Record<string, unknown> = {
+      api_id: api.id,
+      api_slug: api.slug,
+      user_id: requester.id,
+      cause: cause instanceof Error ? cause.message : String(cause),
+    };
+
+    const live = await store.grants.findActiveByApiAndUser(api.id, requester.id).catch(() => null);
+    if (live) {
+      // Somebody's approval owns this group after all. Undoing anything here
+      // would revoke *their* access, so leave both the group and the decision
+      // exactly as they are and let the audit row say so.
+      details.acl_group_kept = groupAdded;
+      details.kept_for_grant_id = live.id;
+    } else {
+      if (groupAdded !== null) {
+        try {
+          await setGroupMembership(requester, api.id, false);
+          details.acl_group_removed = groupAdded;
+        } catch (error) {
+          details.acl_group_orphaned = groupAdded;
+          deps.log?.(
+            {
+              api_id: api.id,
+              user_id: requester.id,
+              acl_group: groupAdded,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            'Could not take back the ACL group of a failed approval — the consumer still has it',
+          );
+        }
+      }
+
+      try {
+        const released = await store.accessRequests.updateIfStatus(requestId, 'approved', {
+          status: 'pending',
+          decided_by: null,
+          decided_at: null,
+          decision_note: null,
+        });
+        details.request_released = released !== null;
+      } catch (error) {
+        details.request_released = false;
+        deps.log?.(
+          {
+            request_id: requestId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'Could not return a failed approval to pending',
+        );
+      }
+    }
+
+    await audit
+      .record(
+        { id: actor.id, role: actor.role },
+        AuditAction.ACCESS_APPROVE_ROLLBACK,
+        { type: 'access_request', id: requestId },
+        details,
+        ip,
+      )
+      .catch(() => undefined);
+
+    deps.log?.(details, 'Rolled back an approval that could not be committed');
+  }
+
   /** Best-effort notify + email; never allowed to undo a committed decision. */
   async function announce(
     recipient: UserRecord,
@@ -378,12 +504,15 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         throw conflict(`This request is already ${request.status}`);
       }
 
-      const updated = await store.accessRequests.update(request.id, {
+      // Compare-and-set: an approval may have decided this request between the
+      // read above and here, and it will already have provisioned the gateway.
+      // The loser records nothing.
+      const updated = await store.accessRequests.updateIfStatus(request.id, 'pending', {
         status: 'cancelled',
         decided_by: user.id,
         decided_at: nowIso(),
       });
-      if (!updated) throw notFound('Access request', requestId);
+      if (!updated) throw await decisionConflict(request.id);
 
       await audit.record(
         { id: user.id, role: user.role },
@@ -407,29 +536,49 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         throw conflict('This user already has an active grant for this API');
       }
 
-      // Gateway first: a grant row that the gateway would not honour is worse
-      // than a pending request the provider can approve again.
-      const group = await setGroupMembership(requester, api.id, true);
-
+      // Step 1 — claim the decision before anything reaches the gateway. A
+      // cancellation or a denial racing this approval either loses here, or
+      // wins and leaves this call with a CONFLICT and no gateway side effect
+      // to explain away.
       const decidedAt = nowIso();
-      const { grant, updated } = await store.transaction(async (tx) => {
-        const createdGrant = await tx.grants.create({
-          api_id: api.id,
-          user_id: requester.id,
-          access_request_id: request.id,
-          acl_group: group,
-          status: 'active',
-          granted_by: actor.id,
-        });
-        const updatedRequest = await tx.accessRequests.update(request.id, {
-          status: 'approved',
-          decided_by: actor.id,
-          decided_at: decidedAt,
-          decision_note: note ?? null,
-        });
-        return { grant: createdGrant, updated: updatedRequest };
+      const updated = await store.accessRequests.updateIfStatus(request.id, 'pending', {
+        status: 'approved',
+        decided_by: actor.id,
+        decided_at: decidedAt,
+        decision_note: note ?? null,
       });
-      if (!updated) throw notFound('Access request', requestId);
+      if (!updated) throw await decisionConflict(request.id);
+
+      // Steps 2 and 3 — see the module docblock for why the gateway goes
+      // first, and `unwindApproval` for what happens when the grant does not
+      // follow it.
+      let addedGroup: string | null = null;
+      let grant: GrantRecord;
+      try {
+        addedGroup = await setGroupMembership(requester, api.id, true);
+        const group = addedGroup;
+        grant = await store.transaction(async (tx) =>
+          tx.grants.create({
+            api_id: api.id,
+            user_id: requester.id,
+            access_request_id: request.id,
+            acl_group: group,
+            status: 'active',
+            granted_by: actor.id,
+          }),
+        );
+      } catch (error) {
+        await unwindApproval({
+          actor,
+          api,
+          requester,
+          requestId: request.id,
+          groupAdded: addedGroup,
+          cause: error,
+          ip,
+        });
+        throw error;
+      }
 
       await audit.record(
         { id: actor.id, role: actor.role },
@@ -440,7 +589,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           api_slug: api.slug,
           user_id: requester.id,
           grant_id: grant.id,
-          acl_group: group,
+          acl_group: grant.acl_group,
         },
         ip,
       );
@@ -480,13 +629,15 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         throw conflict(`This request is already ${request.status}`);
       }
 
-      const updated = await store.accessRequests.update(request.id, {
+      // Compare-and-set, for the same reason `cancel` uses one: the requester
+      // may have withdrawn the request since it was read.
+      const updated = await store.accessRequests.updateIfStatus(request.id, 'pending', {
         status: 'denied',
         decided_by: actor.id,
         decided_at: nowIso(),
         decision_note: note ?? null,
       });
-      if (!updated) throw notFound('Access request', requestId);
+      if (!updated) throw await decisionConflict(request.id);
 
       await audit.record(
         { id: actor.id, role: actor.role },

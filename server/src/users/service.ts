@@ -12,7 +12,11 @@
  *    neither promoting someone to `admin` nor demoting an existing one.
  * 3. **The last active `super_admin` is untouchable.** Demoting or disabling it
  *    raises `LAST_SUPER_ADMIN`, checked with `countActiveSuperAdmins` excluding
- *    the target so the count is about *the others*.
+ *    the target so the count is about *the others*. The check that decides is
+ *    the one **inside the transaction that performs the update** — a count made
+ *    outside one is advisory, because two administrators demoting each other
+ *    simultaneously each pass it and the portal is left with no super admin at
+ *    all.
  *
  * Disabling an account also deletes its sessions, so the next request from an
  * open browser tab is a 401 rather than a working page — **and** strips its
@@ -276,8 +280,34 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
 
       if (changed.length === 0) return toPublicUser(target);
 
-      const updated = await store.users.update(target.id, update);
-      if (!updated) throw notFound('User', targetId);
+      // The last-super-admin rule is a count of *other* rows followed by a
+      // write to this one, and the checks above ran long before the write. Two
+      // administrators demoting each other's account at the same moment both
+      // passed them and the portal ended with zero active super admins.
+      //
+      // Both halves now happen inside one transaction body. Bodies are
+      // serialised (see `db/store.ts`), so the losing demotion re-counts after
+      // the winner committed and sees the invariant it would break; the
+      // conditional update is the second line of defence, refusing a target
+      // whose role or status moved underneath this call at all.
+      const guardsLastSuperAdmin =
+        target.role === 'super_admin' &&
+        ((roleChanged && target.status === 'active') || update.status === 'disabled');
+
+      const updated = await store.transaction(async (tx) => {
+        if (guardsLastSuperAdmin && (await tx.users.countActiveSuperAdmins(target.id)) === 0) {
+          throw lastSuperAdmin();
+        }
+        return tx.users.updateIfMatches(
+          target.id,
+          { role: target.role, status: target.status },
+          update,
+        );
+      });
+      if (!updated) {
+        if (!(await store.users.findById(target.id))) throw notFound('User', targetId);
+        throw conflict('That account changed while you were editing it — reload and try again');
+      }
 
       // A disabled account must not keep a usable browser session — nor a
       // working gateway identity, which outlives the session entirely.

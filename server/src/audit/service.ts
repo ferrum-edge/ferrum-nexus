@@ -42,6 +42,8 @@ export const AuditAction = {
   ACCESS_REQUEST: 'access.request',
   ACCESS_CANCEL: 'access.cancel',
   ACCESS_APPROVE: 'access.approve',
+  /** An approval that failed after the gateway write; records what was undone. */
+  ACCESS_APPROVE_ROLLBACK: 'access.approve_rollback',
   ACCESS_DENY: 'access.deny',
   ACCESS_REVOKE: 'access.revoke',
 
@@ -103,6 +105,16 @@ export interface AuditService {
   list(filter: AuditLogFilter, options?: ListOptions): Promise<Paginated<AuditLog>>;
   /** Count matching rows without fetching a page. */
   count(filter: AuditLogFilter): Promise<number>;
+  /**
+   * The same service bound to another store — in practice the
+   * transaction-scoped one handed to a `store.transaction` body.
+   *
+   * Use it whenever the audit row must commit or roll back with the mutation it
+   * describes, so a half-applied change cannot leave a trail claiming it
+   * happened (or, worse, leave no trail at all). Outside a transaction body
+   * there is no reason to call this.
+   */
+  forStore(store: NexusStore): AuditService;
 }
 
 /** Anonymous actor, for events that happen before a session exists. */
@@ -110,7 +122,7 @@ export const ANONYMOUS_ACTOR: AuditActor = { id: null, role: null };
 
 /** Build the audit service. */
 export function createAuditService(store: NexusStore): AuditService {
-  return {
+  const service: AuditService = {
     async record(actor, action, target, details = {}, ip = null) {
       return store.auditLogs.create({
         actor_user_id: actor.id,
@@ -130,5 +142,10 @@ export function createAuditService(store: NexusStore): AuditService {
     async count(filter) {
       return store.auditLogs.count(filter);
     },
+
+    forStore(scoped) {
+      return scoped === store ? service : createAuditService(scoped);
+    },
   };
+  return service;
 }

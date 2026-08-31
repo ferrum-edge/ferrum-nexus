@@ -26,6 +26,30 @@ function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
 }
 
+/**
+ * Make the next `store.transaction(...)` reject, then put the real one back.
+ *
+ * Stands in for a database outage at the one seam that matters: by the time
+ * publishing persists its rows the Edge objects are already live, so this is
+ * what the compensation has to cover.
+ */
+function failNextTransaction(harness: TestApp, message: string): void {
+  const real = harness.store.transaction.bind(harness.store);
+  harness.store.transaction = async <T>(): Promise<T> => {
+    harness.store.transaction = real;
+    throw new Error(message);
+  };
+}
+
+/** Make the next `store.apis.update(...)` reject, then put the real one back. */
+function failNextApiUpdate(harness: TestApp, message: string): void {
+  const real = harness.store.apis.update.bind(harness.store.apis);
+  harness.store.apis.update = async () => {
+    harness.store.apis.update = real;
+    throw new Error(message);
+  };
+}
+
 /** Body of `POST /api/apis` with sensible defaults. */
 function publishPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -226,6 +250,38 @@ describe('publishing', () => {
       assert.equal(retry.statusCode, 201);
     });
 
+    it('deletes the Edge objects when the Nexus rows cannot be written', async () => {
+      // The rollback used to end before persistence began, so a store failure
+      // here left a live proxy nothing in the portal knew about.
+      failNextTransaction(harness, 'database is gone');
+
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'orphan-guard',
+          rate_limit: { limit: 5, window_seconds: 60 },
+        }),
+      });
+      assert.notEqual(response.statusCode, 201);
+
+      assert.equal(
+        harness.edge.proxyByName('nexus-orphan-guard'),
+        undefined,
+        'no live, untracked proxy may survive a failed publish',
+      );
+      assert.equal(harness.edge.pluginConfigs.size, 0, 'its plugin configs go with it');
+      assert.equal(await harness.store.apis.findBySlug('orphan-guard'), null);
+
+      // Both sides are clean, so republishing the same slug just works.
+      const retry = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'orphan-guard' }),
+      });
+      assert.equal(retry.statusCode, 201);
+    });
+
     it('rejects a slug that is already taken', async () => {
       await harness.authed(provider, {
         method: 'POST',
@@ -362,6 +418,69 @@ describe('publishing', () => {
       assert.equal(row.details.previous_auth_plugin, 'key_auth');
       assert.equal(row.details.previous_credential_type, 'keyauth');
       assert.equal(row.details.existing_credentials_invalidated, true);
+    });
+
+    it('never leaves the proxy without an auth plugin when the swap fails', async () => {
+      // 1. The replacement cannot be attached. The incumbent must not have been
+      //    removed in anticipation — that is the window in which the proxy
+      //    fronts the upstream with no authentication at all.
+      harness.edge.queueFailure(
+        500,
+        { error: 'edge rejected the plugin' },
+        '/plugins/config',
+        'POST',
+      );
+      const attachFails = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { auth_plugin: 'jwt_auth' },
+      });
+      assert.notEqual(attachFails.statusCode, 200);
+      assert.ok(harness.edge.pluginForProxy(proxyId, 'key_auth'), 'the original is still live');
+      assert.equal(harness.edge.pluginForProxy(proxyId, 'jwt_auth'), undefined);
+
+      // 2. The replacement attaches but the incumbent cannot be removed. The
+      //    new plugin is rolled back, leaving exactly the original.
+      harness.edge.queueFailure(500, { error: 'edge is busy' }, '/plugins/config/', 'DELETE');
+      const deleteFails = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { auth_plugin: 'jwt_auth' },
+      });
+      assert.notEqual(deleteFails.statusCode, 200);
+      assert.ok(harness.edge.pluginForProxy(proxyId, 'key_auth'), 'the original is still live');
+      assert.equal(
+        harness.edge.pluginForProxy(proxyId, 'jwt_auth'),
+        undefined,
+        'the half-attached replacement is compensated away',
+      );
+
+      const api = await harness.store.apis.findById(apiId);
+      assert.equal(api?.auth_plugin, 'key_auth', 'the portal still describes what Edge enforces');
+    });
+
+    it('restores the previous auth plugin when the Nexus row update fails', async () => {
+      failNextApiUpdate(harness, 'database is gone');
+
+      const response = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { auth_plugin: 'jwt_auth' },
+      });
+      assert.notEqual(response.statusCode, 200);
+
+      assert.ok(
+        harness.edge.pluginForProxy(proxyId, 'key_auth'),
+        'the plugin deleted mid-swap is put back',
+      );
+      assert.equal(harness.edge.pluginForProxy(proxyId, 'jwt_auth'), undefined);
+      const authPlugins = harness.edge
+        .pluginsForProxy(proxyId)
+        .filter((plugin) => plugin.plugin_name === 'key_auth' || plugin.plugin_name === 'jwt_auth');
+      assert.equal(authPlugins.length, 1, 'exactly one auth plugin, the original');
+
+      const api = await harness.store.apis.findById(apiId);
+      assert.equal(api?.auth_plugin, 'key_auth');
     });
 
     it('repoints the proxy backend when a new upstream_url is supplied', async () => {
@@ -504,6 +623,71 @@ describe('publishing', () => {
       const current = await harness.store.apiSpecs.findCurrentByApi(apiId);
       assert.equal(current?.parsed_version, '2.4.0');
     });
+
+    it('keeps the previous revision current when the Edge backend move fails', async () => {
+      harness.edge.reset();
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'spec-edge-fails',
+          spec: specWithServer('https://v1.internal:8443'),
+        }),
+      });
+      const api = published.json<PublishApiResponse>().api;
+      const proxyId = String(api.ferrum_proxy_id);
+
+      // The revision used to become current *before* the proxy was repointed,
+      // so this left version 2 in the catalog and version 1 on the gateway.
+      harness.edge.queueFailure(500, { error: 'config_rejected' }, '/proxies/', 'PUT');
+      const response = await harness.authed(provider, {
+        method: 'PUT',
+        url: `/api/apis/${api.id}/spec`,
+        payload: { spec: specWithServer('https://v2.internal:8443', '3.0.0') },
+      });
+      assert.notEqual(response.statusCode, 200);
+
+      assert.equal(
+        harness.edge.proxies.get(`nexus/${proxyId}`)?.backend_host,
+        'v1.internal',
+        'the gateway never moved',
+      );
+      const specs = await harness.store.apiSpecs.list({ api_id: api.id });
+      assert.equal(specs.total, 1, 'no revision was stored');
+      assert.equal(specs.items[0]?.is_current, true);
+      assert.equal((await harness.store.apis.findById(api.id))?.version, '2.4.0');
+    });
+
+    it('restores the previous backend when the new revision cannot be persisted', async () => {
+      harness.edge.reset();
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'spec-store-fails',
+          spec: specWithServer('https://v1.internal:8443'),
+        }),
+      });
+      const api = published.json<PublishApiResponse>().api;
+      const proxyId = String(api.ferrum_proxy_id);
+
+      failNextTransaction(harness, 'database is gone');
+      const response = await harness.authed(provider, {
+        method: 'PUT',
+        url: `/api/apis/${api.id}/spec`,
+        payload: { spec: specWithServer('https://v2.internal:8443', '3.0.0') },
+      });
+      assert.notEqual(response.statusCode, 200);
+
+      assert.equal(
+        harness.edge.proxies.get(`nexus/${proxyId}`)?.backend_host,
+        'v1.internal',
+        'the backend that was moved for the failed revision is put back',
+      );
+      const specs = await harness.store.apiSpecs.list({ api_id: api.id });
+      assert.equal(specs.total, 1);
+      assert.equal(specs.items[0]?.parsed_version, '1.0.0');
+    });
   });
 
   describe('test consumers', () => {
@@ -578,6 +762,54 @@ describe('publishing', () => {
         (entry) => entry.target_id === apiId && entry.details.replaced === true,
       );
       assert.ok(row, 'the replacement is recorded as such');
+    });
+
+    it('revokes the credential rows of the consumer it replaced', async () => {
+      harness.edge.reset();
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'testcon-rows' }),
+      });
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const username = `nexus-test-${apiId}`;
+
+      await harness.authed(provider, {
+        method: 'POST',
+        url: `/api/apis/${apiId}/test-consumer`,
+        payload: {},
+      });
+      const firstConsumerId = harness.edge.consumerByUsername(username)?.id;
+      assert.ok(firstConsumerId);
+
+      const second = await harness.authed(provider, {
+        method: 'POST',
+        url: `/api/apis/${apiId}/test-consumer`,
+        payload: {},
+      });
+      assert.equal(second.statusCode, 201);
+      const secondBody = second.json<CreateTestConsumerResponse>();
+      const secondConsumerId = harness.edge.consumerByUsername(username)?.id;
+      assert.ok(secondConsumerId);
+      assert.notEqual(secondConsumerId, firstConsumerId, 'the consumer really was replaced');
+
+      // The deleted consumer's credential can never authenticate again, so its
+      // row must not still read `active` on the provider's credentials page.
+      const orphaned = await harness.store.credentials.listByConsumer(firstConsumerId);
+      assert.equal(orphaned.length, 1);
+      assert.equal(orphaned[0]?.status, 'revoked');
+
+      const live = await harness.store.credentials.list({ status: 'active' }, { limit: 200 });
+      const forThisApi = live.items.filter((row) =>
+        [firstConsumerId, secondConsumerId].includes(row.ferrum_consumer_id),
+      );
+      assert.equal(forThisApi.length, 1, 'exactly one usable test credential exists');
+      assert.equal(forThisApi[0]?.id, secondBody.credential.id);
+
+      const row = (await harness.auditRows('test_consumer.create')).find(
+        (entry) => entry.target_id === apiId && entry.details.replaced === true,
+      );
+      assert.equal(row?.details.revoked_credentials, 1);
     });
 
     it('refuses a test consumer on somebody else’s API', async () => {

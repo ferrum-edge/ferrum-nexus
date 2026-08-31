@@ -20,7 +20,8 @@
  *
  * The last active `super_admin` cannot be disabled — the same guard the
  * ordinary user-management route enforces, repeated here because god mode does
- * not go through it.
+ * not go through it, and enforced the same way: the count that decides runs
+ * inside the transaction that writes the row.
  */
 
 import {
@@ -181,10 +182,31 @@ export function createGodService(deps: GodServiceDeps): GodService {
 
       const revoked = revokeGrants ? await access.revokeAllForUser(actor, target.id, why, ip) : 0;
 
-      const updated =
-        target.status === 'disabled'
-          ? target
-          : ((await store.users.update(target.id, { status: 'disabled' })) ?? target);
+      // The count and the write share one transaction body, exactly as
+      // `users.updateUser` does: the pre-check above is advisory, because two
+      // concurrent disables both pass it and leave the portal with no active
+      // super admin. Bodies are serialised, so the loser re-counts after the
+      // winner committed; the conditional update also refuses a target whose
+      // role or status changed since it was read.
+      const updated = await store.transaction(async (tx) => {
+        if (target.status === 'disabled') return target;
+        if (
+          target.role === 'super_admin' &&
+          target.status === 'active' &&
+          (await tx.users.countActiveSuperAdmins(target.id)) === 0
+        ) {
+          throw lastSuperAdmin();
+        }
+        return tx.users.updateIfMatches(
+          target.id,
+          { role: target.role, status: target.status },
+          { status: 'disabled' },
+        );
+      });
+      if (!updated) {
+        if (!(await store.users.findById(target.id))) throw notFound('User', userId);
+        throw conflict('That account changed while you were disabling it — reload and try again');
+      }
       // A disabled account keeps no usable browser session — and no working
       // gateway identity, which a session cookie has nothing to do with.
       const terminated = await store.sessions.deleteForUser(target.id);

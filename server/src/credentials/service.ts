@@ -48,7 +48,25 @@
  * deleting somebody else's key. **That degradation is valid for `revoke`
  * only** — deleting everything is what a revoke asked for. `rotate` refuses
  * the drift instead, because "delete the whole type" would take the entry it
- * had just appended with it.
+ * had just appended with it. A target that is no longer live at all resolves
+ * to `not-live` and never to `whole-type`.
+ *
+ * ## The target is loaded twice, and the second read is the one that counts
+ *
+ * `rotate` and `revoke` resolve the credential once outside the per-consumer
+ * queue — that read is only for the ownership check and to learn which consumer
+ * to serialise on — and then **re-read it inside the queue**. The first read
+ * happens before the operation is ordered against everything else touching that
+ * consumer, so by the time the block runs another rotate may already have
+ * retired the row. Acting on the first copy is what let two raced rotations
+ * both delete an entry and both hand out a show-once secret. Only a row that is
+ * still live on the second read may be moved out of `active`; anything else is
+ * a `CONFLICT` (rotate) or an already-done no-op (revoke).
+ *
+ * **Multi-instance caveat:** `serializePerKey` orders operations within one
+ * Node process. Across processes the check-and-set needs a conditional
+ * `UPDATE … WHERE status = 'active'` in the store; until that exists, run one
+ * writer (the same constraint the Edge client's serializer already carries).
  */
 
 import {
@@ -287,9 +305,13 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     rows: CredentialRecord[],
     target: CredentialRecord,
     edgeLength: number,
-  ): number | 'whole-type' {
+  ): number | 'whole-type' | 'not-live' {
     const index = rows.findIndex((row) => row.id === target.id);
-    if (index === -1) return 'whole-type';
+    // The target no longer occupies a slot — a concurrent rotate or revoke of
+    // the same row won the queue. That is *never* permission to delete the
+    // whole credential type: everything still live belongs to someone else's
+    // successful operation.
+    if (index === -1) return 'not-live';
     if (rows.length === edgeLength) return index;
     // The mirror drifted (a hand-edited consumer). Removing the entire type is
     // safe only when this is the last credential Nexus knows about.
@@ -486,11 +508,25 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       const consumerId = target.ferrum_consumer_id;
 
       const result = await edge.serializePerKey(consumerId, async () => {
+        // Re-read the row *inside* the queue. The copy loaded for the ownership
+        // check was taken before this operation was serialised, and an earlier
+        // queued rotate or revoke of the same credential may have retired it
+        // since; acting on that stale copy is how two racing rotations both
+        // deleted an entry and both handed out a live-looking secret.
+        const current = await store.credentials.findById(target.id);
+        if (!current) throw notFound('Credential', credentialId);
+        if (!LIVE_STATUSES.has(current.status)) {
+          throw conflict('This credential has already been revoked');
+        }
+
         const consumer = await edge.consumers.get(consumerId);
         if (!consumer) throw edgeError('The gateway consumer for this credential no longer exists');
         const rows = await liveRows(consumerId, type);
         const length = edgeArrayLength(consumer.credentials, type, rows.length);
-        const position = resolveCredentialIndex(rows, target, length);
+        const position = resolveCredentialIndex(rows, current, length);
+        if (position === 'not-live') {
+          throw conflict('This credential has already been revoked');
+        }
         if (position === 'whole-type') {
           // Degrading to `DELETE /credentials/{type}` is only ever right for a
           // revoke, where removing everything is the point. In a rotation it
@@ -513,8 +549,8 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           consumerId,
           consumerUsername: consumer.username,
           type,
-          label: label ?? target.label,
-          rotatedFromId: target.id,
+          label: label ?? current.label,
+          rotatedFromId: current.id,
         });
         if (appendFirst) {
           // `POST` appends, so the old entry's index is unchanged by the append.
@@ -522,7 +558,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         }
 
         const previous =
-          (await store.credentials.update(target.id, { status: 'revoked' })) ?? target;
+          (await store.credentials.update(current.id, { status: 'revoked' })) ?? current;
         return { created, previous };
       });
 
@@ -579,17 +615,33 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       const type = target.credential_type;
       const consumerId = target.ferrum_consumer_id;
 
-      await edge.serializePerKey(consumerId, async () => {
+      const removed = await edge.serializePerKey(consumerId, async () => {
+        // Re-read inside the queue: an earlier queued operation on the same row
+        // may already have retired it, and deleting by the index that copy
+        // carried would take somebody else's live credential with it.
+        const current = await store.credentials.findById(target.id);
+        if (!current || !LIVE_STATUSES.has(current.status)) return false;
+
         const consumer = await edge.consumers.get(consumerId);
         // A consumer deleted out from under us means the entry is already gone;
         // the row still has to be marked so the UI stops offering it.
         if (consumer) {
           const rows = await liveRows(consumerId, type);
           const length = edgeArrayLength(consumer.credentials, type, rows.length);
-          await removeAt(consumerId, type, resolveCredentialIndex(rows, target, length), user.id);
+          const position = resolveCredentialIndex(rows, current, length);
+          // `not-live` cannot follow the status check above, but treat it as a
+          // completed revoke rather than a whole-type delete if it ever does.
+          if (position !== 'not-live') {
+            await removeAt(consumerId, type, position, user.id);
+          }
         }
-        await store.credentials.update(target.id, { status: 'revoked' });
+        await store.credentials.update(current.id, { status: 'revoked' });
+        return true;
       });
+
+      // A no-op revoke of an already-retired credential stays silent: it wrote
+      // nothing, so there is nothing to audit.
+      if (!removed) return;
 
       await audit.record(
         { id: user.id, role: user.role },

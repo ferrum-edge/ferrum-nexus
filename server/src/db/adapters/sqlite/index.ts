@@ -138,6 +138,36 @@ function mapUser(row: Row): UserRecord {
   };
 }
 
+/** Encoded `SET` columns of a user patch, shared by `update` and `updateIfMatches`. */
+function userUpdateColumns(patch: UpdateInput<UserRecord>): Record<string, Param | undefined> {
+  return {
+    email: patch.email === undefined ? undefined : patch.email.trim().toLowerCase(),
+    password_hash: patch.password_hash,
+    display_name: patch.display_name,
+    role: patch.role,
+    org_id: patch.org_id === undefined ? undefined : patch.org_id,
+    company: patch.company === undefined ? undefined : patch.company,
+    phone: patch.phone === undefined ? undefined : patch.phone,
+    status: patch.status,
+    email_verified:
+      patch.email_verified === undefined ? undefined : encodeBool(patch.email_verified),
+    last_login_at: patch.last_login_at === undefined ? undefined : patch.last_login_at,
+  };
+}
+
+/** Encoded `SET` columns of an access-request patch, shared by both updates. */
+function accessRequestUpdateColumns(
+  patch: UpdateInput<AccessRequestRecord>,
+): Record<string, Param | undefined> {
+  return {
+    justification: patch.justification,
+    status: patch.status,
+    decided_by: patch.decided_by,
+    decided_at: patch.decided_at,
+    decision_note: patch.decision_note,
+  };
+}
+
 function mapOrganization(row: Row): OrganizationRecord {
   return {
     id: text(row.id),
@@ -564,20 +594,7 @@ class SqliteStore implements NexusStore {
     },
 
     update: async (id, patch: UpdateInput<UserRecord>) => {
-      const columns: Record<string, Param | undefined> = {
-        email: patch.email === undefined ? undefined : patch.email.trim().toLowerCase(),
-        password_hash: patch.password_hash,
-        display_name: patch.display_name,
-        role: patch.role,
-        org_id: patch.org_id === undefined ? undefined : patch.org_id,
-        company: patch.company === undefined ? undefined : patch.company,
-        phone: patch.phone === undefined ? undefined : patch.phone,
-        status: patch.status,
-        email_verified:
-          patch.email_verified === undefined ? undefined : encodeBool(patch.email_verified),
-        last_login_at: patch.last_login_at === undefined ? undefined : patch.last_login_at,
-      };
-      const set = setParts(columns);
+      const set = setParts(userUpdateColumns(patch));
       if (set) {
         mapConflict('An account with that email address already exists', () =>
           execute(this.db, `UPDATE users SET ${set.sql}, updated_at = ? WHERE id = ?`, [
@@ -588,6 +605,30 @@ class SqliteStore implements NexusStore {
         );
       }
       return this.users.findById(id);
+    },
+
+    updateIfMatches: async (id, expected, patch) => {
+      const guard = new WhereBuilder()
+        .always('id = ?', id)
+        .add(expected.role, 'role = ?', expected.role ?? null)
+        .add(expected.status, 'status = ?', expected.status ?? null)
+        .build();
+      const set = setParts(userUpdateColumns(patch));
+      if (!set) {
+        // Nothing to write: report whether the row still matches, so an empty
+        // patch cannot look like a lost race.
+        return queryOne(this.db, `SELECT * FROM users${guard.sql}`, guard.params)
+          ? this.users.findById(id)
+          : null;
+      }
+      const changed = mapConflict('An account with that email address already exists', () =>
+        execute(this.db, `UPDATE users SET ${set.sql}, updated_at = ?${guard.sql}`, [
+          ...set.params,
+          nowIso(),
+          ...guard.params,
+        ]),
+      );
+      return changed > 0 ? this.users.findById(id) : null;
     },
 
     touchLastLogin: async (id, at) => {
@@ -1010,13 +1051,7 @@ class SqliteStore implements NexusStore {
     },
 
     update: async (id, patch) => {
-      const set = setParts({
-        justification: patch.justification,
-        status: patch.status,
-        decided_by: patch.decided_by,
-        decided_at: patch.decided_at,
-        decision_note: patch.decision_note,
-      });
+      const set = setParts(accessRequestUpdateColumns(patch));
       if (set) {
         mapConflict('You already have a pending request for this API', () =>
           execute(this.db, `UPDATE access_requests SET ${set.sql}, updated_at = ? WHERE id = ?`, [
@@ -1027,6 +1062,26 @@ class SqliteStore implements NexusStore {
         );
       }
       return this.accessRequests.findById(id);
+    },
+
+    updateIfStatus: async (id, expected, patch) => {
+      const set = setParts(accessRequestUpdateColumns(patch));
+      if (!set) {
+        return queryOne(this.db, 'SELECT * FROM access_requests WHERE id = ? AND status = ?', [
+          id,
+          expected,
+        ])
+          ? this.accessRequests.findById(id)
+          : null;
+      }
+      const changed = mapConflict('You already have a pending request for this API', () =>
+        execute(
+          this.db,
+          `UPDATE access_requests SET ${set.sql}, updated_at = ? WHERE id = ? AND status = ?`,
+          [...set.params, nowIso(), id, expected],
+        ),
+      );
+      return changed > 0 ? this.accessRequests.findById(id) : null;
     },
 
     list: async (filter, options) => {
@@ -1446,9 +1501,10 @@ class SqliteStore implements NexusStore {
     list: async (filter, options) => {
       const builder = new WhereBuilder();
       if (filter.participant_user_id !== undefined) {
+        // Seats only — `created_by` is provenance, not membership. See
+        // `ThreadFilter.participant_user_id`.
         builder.always(
-          '(participant_a = ? OR participant_b = ? OR created_by = ?)',
-          filter.participant_user_id,
+          '(participant_a = ? OR participant_b = ?)',
           filter.participant_user_id,
           filter.participant_user_id,
         );

@@ -17,6 +17,35 @@ function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
 }
 
+/**
+ * Hold the first `count` `credentials.findById` calls until every one of them
+ * has arrived, then release them together and restore the real method.
+ *
+ * This is what makes a rotate/rotate race a real interleaving rather than two
+ * sequential calls: both requests resolve the target *before* either enters the
+ * per-consumer queue, which is precisely the window in which the second one
+ * used to carry on with a credential the first had already retired.
+ */
+function barrierOnCredentialLoad(harness: TestApp, count: number): void {
+  const real = harness.store.credentials.findById.bind(harness.store.credentials);
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let arrived = 0;
+
+  harness.store.credentials.findById = async (id) => {
+    arrived += 1;
+    if (arrived >= count) {
+      harness.store.credentials.findById = real;
+      release();
+    } else {
+      await gate;
+    }
+    return real(id);
+  };
+}
+
 describe('gateway credentials', () => {
   let harness: TestApp;
   let founder: TestSession;
@@ -251,6 +280,45 @@ describe('gateway credentials', () => {
       url: `/api/credentials/${original.credential.id}`,
     });
     assert.equal(revoked.statusCode, 200, revoked.body);
+    assert.equal(
+      (await harness.store.credentials.findById(original.credential.id))?.status,
+      'revoked',
+    );
+  });
+
+  it('lets exactly one of two raced rotations of the same credential win', async () => {
+    const racer = await harness.registerUser({ email: 'cred-race@example.test', role: 'client' });
+    const original = await issue(racer, 'keyauth', 'Production');
+    const rotate = (): Promise<{ statusCode: number; body: string }> =>
+      harness.authed(racer, {
+        method: 'POST',
+        url: `/api/credentials/${original.credential.id}/rotate`,
+        payload: {},
+      });
+
+    // Both requests load the target, then both are let go at once.
+    barrierOnCredentialLoad(harness, 2);
+    const [first, second] = await Promise.all([rotate(), rotate()]);
+
+    const codes = [first.statusCode, second.statusCode].sort((a, b) => a - b);
+    assert.deepEqual(codes, [200, 409], `got ${first.body} / ${second.body}`);
+    const winner = (first.statusCode === 200 ? first : second).json<RotateCredentialResponse>();
+    const loser = first.statusCode === 200 ? second : first;
+    assert.equal(errorCode(loser.body), 'CONFLICT');
+    assert.ok(!('secret' in JSON.parse(loser.body)), 'the loser hands out no show-once secret');
+
+    // The gateway keeps exactly one working key — the winner's. The bug this
+    // covers ended with no `keyauth` array on the consumer at all.
+    const entries = consumerOf(racer.user.id)?.credentials.keyauth;
+    assert.equal(entries?.length, 1);
+    assert.equal(entries?.[0]?.key, winner.secret.key);
+
+    // …and the portal mirrors it: one active row, the rotated one revoked.
+    const rows = await harness.store.credentials.list({ user_id: racer.user.id });
+    assert.equal(rows.total, 2, 'only one replacement row was created');
+    const active = rows.items.filter((row) => row.status === 'active');
+    assert.equal(active.length, 1);
+    assert.equal(active[0]?.id, winner.credential.id);
     assert.equal(
       (await harness.store.credentials.findById(original.credential.id))?.status,
       'revoked',

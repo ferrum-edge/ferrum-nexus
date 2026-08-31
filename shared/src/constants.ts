@@ -203,6 +203,41 @@ export const MAX_JUSTIFICATION_LENGTH = 2_000;
 export const MAX_SPEC_BYTES = 2 * 1024 * 1024;
 
 /**
+ * Maximum number of path items an uploaded OpenAPI document may declare.
+ *
+ * {@link MAX_SPEC_BYTES} alone is not a bound on *structure*: a server-valid
+ * 2 MiB JSON document fits tens of thousands of minimal operations, and the SPA
+ * renders one card per operation, so a single publish could freeze every
+ * catalog viewer. The largest real-world public APIs sit far below this —
+ * Stripe and GitHub are in the hundreds of paths, the biggest Azure surfaces in
+ * the low thousands — so this is generous for anything a portal legitimately
+ * fronts while still being a hard ceiling on render cost.
+ */
+export const MAX_SPEC_PATHS = 2_000;
+
+/**
+ * Maximum number of operations (path item × HTTP method) an uploaded OpenAPI
+ * document may declare. Sized against the same real-world APIs as
+ * {@link MAX_SPEC_PATHS}, allowing a healthy average of methods per path.
+ */
+export const MAX_SPEC_OPERATIONS = 3_000;
+
+/**
+ * HTTP methods that make a key of an OpenAPI path item an *operation*. Every
+ * other key (`parameters`, `summary`, `servers`, `$ref`, extensions) is not.
+ */
+export const OPENAPI_OPERATION_METHODS = [
+  'get',
+  'put',
+  'post',
+  'delete',
+  'options',
+  'head',
+  'patch',
+  'trace',
+] as const satisfies readonly string[];
+
+/**
  * Clamp a caller-supplied page size into `[1, MAX_PAGE_SIZE]`, falling back to
  * {@link DEFAULT_PAGE_SIZE} when it is absent or not a finite number.
  */

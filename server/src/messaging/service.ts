@@ -111,13 +111,20 @@ export function toUserSummary(record: UserRecord): UserSummary {
   };
 }
 
-/** True when `user` occupies one of the thread's seats. */
+/**
+ * True when `user` occupies one of the thread's two seats.
+ *
+ * **`created_by` is not a seat.** It records who opened the conversation and is
+ * never rewritten, so counting it as membership makes access permanent: a
+ * god-mode broadcast seats only the recipient, and treating its sender as a
+ * participant left them able to read and post in every recipient's platform
+ * thread for good — including after being demoted out of admin entirely.
+ * Oversight comes from the caller's *current* role in the read and post
+ * guards, which a demotion actually takes away. Every 1:1 thread seats its
+ * creator (see `createThread`), so the honest cases are unaffected.
+ */
 export function isThreadParticipant(user: UserRecord, thread: ThreadRecord): boolean {
-  return (
-    thread.participant_a === user.id ||
-    thread.participant_b === user.id ||
-    thread.created_by === user.id
-  );
+  return thread.participant_a === user.id || thread.participant_b === user.id;
 }
 
 /** A thread with an empty second seat is the platform inbox. */
@@ -259,14 +266,18 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
     return thread;
   }
 
-  /** Read access: participants always; admins for oversight and support. */
+  /**
+   * Read access: the two seats, plus the caller's *current* admin role for
+   * oversight and support. Nothing here is derived from who created the
+   * thread — see {@link isThreadParticipant}.
+   */
   function assertCanRead(user: UserRecord, thread: ThreadRecord): void {
     if (isThreadParticipant(user, thread)) return;
     if (roleAtLeast(user.role, 'admin')) return;
     throw forbidden('You are not a participant in this conversation');
   }
 
-  /** Write access: participants, plus any admin answering the platform inbox. */
+  /** Write access: the two seats, plus any current admin answering the platform inbox. */
   function assertCanPost(user: UserRecord, thread: ThreadRecord): void {
     if (isThreadParticipant(user, thread)) return;
     if (isPlatformThread(thread) && roleAtLeast(user.role, 'admin')) return;

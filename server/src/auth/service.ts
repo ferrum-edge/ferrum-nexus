@@ -391,19 +391,30 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         throw validationFailed('That verification link has expired');
       }
 
-      const burned = await store.verificationTokens.markUsed(row.id, nowIso());
-      if (!burned) throw conflict('That verification link has already been used');
+      // Burn, verify and audit in one transaction. The token is single-use and
+      // there is no resend endpoint, so spending it and *then* failing to mark
+      // the account verified locked that account out permanently: the retry saw
+      // a spent token and the user could never sign in. The `used_at IS NULL`
+      // predicate on the burn still does the work of making it single-use —
+      // the transaction only makes sure the burn does not outlive its purpose.
+      const updated = await store.transaction(async (tx) => {
+        const burned = await tx.verificationTokens.markUsed(row.id, nowIso());
+        if (!burned) throw conflict('That verification link has already been used');
 
-      const updated = await store.users.update(row.user_id, { email_verified: true });
-      if (!updated) throw validationFailed('That verification link is not valid');
+        const user = await tx.users.update(row.user_id, { email_verified: true });
+        if (!user) throw validationFailed('That verification link is not valid');
 
-      await audit.record(
-        { id: updated.id, role: updated.role },
-        AuditAction.AUTH_VERIFY_EMAIL,
-        { type: 'user', id: updated.id },
-        {},
-        context.ip,
-      );
+        await audit
+          .forStore(tx)
+          .record(
+            { id: user.id, role: user.role },
+            AuditAction.AUTH_VERIFY_EMAIL,
+            { type: 'user', id: user.id },
+            {},
+            context.ip,
+          );
+        return user;
+      });
 
       return { verified: true, user: toPublicUser(updated) };
     },

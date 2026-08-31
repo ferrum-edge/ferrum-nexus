@@ -123,6 +123,7 @@ import type {
   StoreHealth,
   ThreadRecord,
   ThreadRepo,
+  UpdateInput,
   UserFilter,
   UserRecord,
   UserRepo,
@@ -287,6 +288,35 @@ function mapUser(row: Row): UserRecord {
     last_login_at: strOrNull(row.last_login_at),
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
+  };
+}
+
+/** Settable fields of a user patch, shared by `update` and `updateIfMatches`. */
+function userUpdateFields(patch: UpdateInput<UserRecord>): Record<string, unknown> {
+  return {
+    email: patch.email === undefined ? undefined : patch.email.trim().toLowerCase(),
+    password_hash: patch.password_hash,
+    display_name: patch.display_name,
+    role: patch.role,
+    org_id: patch.org_id,
+    company: patch.company,
+    phone: patch.phone,
+    status: patch.status,
+    email_verified: patch.email_verified,
+    last_login_at: patch.last_login_at,
+  };
+}
+
+/** Settable fields of an access-request patch, shared by both updates. */
+function accessRequestUpdateFields(
+  patch: UpdateInput<AccessRequestRecord>,
+): Record<string, unknown> {
+  return {
+    justification: patch.justification,
+    status: patch.status,
+    decided_by: patch.decided_by,
+    decided_at: patch.decided_at,
+    decision_note: patch.decision_note,
   };
 }
 
@@ -936,6 +966,20 @@ class MongoStore implements NexusStore {
   }
 
   transaction<T>(fn: (tx: NexusStore) => Promise<T>): Promise<T> {
+    return this.inTransaction(fn);
+  }
+
+  /**
+   * {@link transaction}, typed as the concrete store.
+   *
+   * The repository methods that must be atomic even when the caller opened no
+   * transaction of their own use this to reach the session-scoped collections,
+   * mirroring the `inTransaction` runner the SQL adapters are built on. All the
+   * documented behaviour is unchanged: bodies are serialised, a nested call
+   * joins the open transaction, and a standalone deployment that opted in with
+   * `NEXUS_DB_ALLOW_STANDALONE` degrades to sequential execution.
+   */
+  private inTransaction<T>(fn: (tx: MongoStore) => Promise<T>): Promise<T> {
     // Already inside a transaction body — join it rather than nesting.
     if (this.session) return fn(this);
 
@@ -1021,18 +1065,7 @@ class MongoStore implements NexusStore {
     },
 
     update: async (id, patch) => {
-      const set = setDoc({
-        email: patch.email === undefined ? undefined : patch.email.trim().toLowerCase(),
-        password_hash: patch.password_hash,
-        display_name: patch.display_name,
-        role: patch.role,
-        org_id: patch.org_id,
-        company: patch.company,
-        phone: patch.phone,
-        status: patch.status,
-        email_verified: patch.email_verified,
-        last_login_at: patch.last_login_at,
-      });
+      const set = setDoc(userUpdateFields(patch));
       if (set) {
         await mapConflict('An account with that email address already exists', () =>
           this.col(COLLECTIONS.users).updateOne(
@@ -1043,6 +1076,29 @@ class MongoStore implements NexusStore {
         );
       }
       return this.users.findById(id);
+    },
+
+    updateIfMatches: async (id, expected, patch) => {
+      const guard: Record<string, unknown> = { _id: id };
+      if (expected.role !== undefined) guard.role = expected.role;
+      if (expected.status !== undefined) guard.status = expected.status;
+      const query = guard as Filter<NexusDoc>;
+
+      const set = setDoc(userUpdateFields(patch));
+      if (!set) {
+        // Nothing to write: report whether the row still matches, so an empty
+        // patch cannot look like a lost race.
+        const still = await this.col(COLLECTIONS.users).findOne(query, this.opts);
+        return still ? this.users.findById(id) : null;
+      }
+      const result = await mapConflict('An account with that email address already exists', () =>
+        this.col(COLLECTIONS.users).updateOne(
+          query,
+          { $set: { ...set, updated_at: nowIso() } },
+          this.opts,
+        ),
+      );
+      return result.matchedCount > 0 ? this.users.findById(id) : null;
     },
 
     touchLastLogin: async (id, at) => {
@@ -1319,31 +1375,37 @@ class MongoStore implements NexusStore {
   readonly apiSpecs: ApiSpecRepo = {
     create: async (input) => {
       const meta = stamps(input);
-      await mapConflict('That spec revision already exists', async () => {
+      await mapConflict('That spec revision already exists', () =>
         // Clear the previous current revision first so the partial unique index
-        // never sees two, exactly as the SQL adapters do.
-        if (input.is_current) {
-          await this.col(COLLECTIONS.apiSpecs).updateMany(
-            { api_id: input.api_id, is_current: true },
-            { $set: { is_current: false, updated_at: meta.updated_at } },
-            this.opts,
+        // never sees two, exactly as the SQL adapters do — and, like them, do
+        // both halves in **one** transaction. Two loose writes leave the API
+        // with no current spec at all when the process dies between them.
+        this.inTransaction(async (tx) => {
+          if (input.is_current) {
+            await tx
+              .col(COLLECTIONS.apiSpecs)
+              .updateMany(
+                { api_id: input.api_id, is_current: true },
+                { $set: { is_current: false, updated_at: meta.updated_at } },
+                tx.opts,
+              );
+          }
+          await tx.col(COLLECTIONS.apiSpecs).insertOne(
+            {
+              _id: meta.id,
+              api_id: input.api_id,
+              version: input.version,
+              raw_spec: input.raw_spec,
+              parsed_title: input.parsed_title ?? null,
+              parsed_version: input.parsed_version ?? null,
+              is_current: input.is_current,
+              created_at: meta.created_at,
+              updated_at: meta.updated_at,
+            } as NexusDoc,
+            tx.opts,
           );
-        }
-        await this.col(COLLECTIONS.apiSpecs).insertOne(
-          {
-            _id: meta.id,
-            api_id: input.api_id,
-            version: input.version,
-            raw_spec: input.raw_spec,
-            parsed_title: input.parsed_title ?? null,
-            parsed_version: input.parsed_version ?? null,
-            is_current: input.is_current,
-            created_at: meta.created_at,
-            updated_at: meta.updated_at,
-          } as NexusDoc,
-          this.opts,
-        );
-      });
+        }),
+      );
       const created = await this.apiSpecs.findById(meta.id);
       if (!created) throw new Error('apiSpecs.create: row vanished immediately after insert');
       return created;
@@ -1366,16 +1428,23 @@ class MongoStore implements NexusStore {
 
     setCurrent: async (apiId, specId) => {
       const at = nowIso();
-      await this.col(COLLECTIONS.apiSpecs).updateMany(
-        { api_id: apiId, _id: { $ne: specId } } as Filter<NexusDoc>,
-        { $set: { is_current: false, updated_at: at } },
-        this.opts,
-      );
-      await this.col(COLLECTIONS.apiSpecs).updateOne(
-        { api_id: apiId, _id: specId } as Filter<NexusDoc>,
-        { $set: { is_current: true, updated_at: at } },
-        this.opts,
-      );
+      // One transaction around the whole swap; see `create` above.
+      await this.inTransaction(async (tx) => {
+        await tx
+          .col(COLLECTIONS.apiSpecs)
+          .updateMany(
+            { api_id: apiId, _id: { $ne: specId } } as Filter<NexusDoc>,
+            { $set: { is_current: false, updated_at: at } },
+            tx.opts,
+          );
+        await tx
+          .col(COLLECTIONS.apiSpecs)
+          .updateOne(
+            { api_id: apiId, _id: specId } as Filter<NexusDoc>,
+            { $set: { is_current: true, updated_at: at } },
+            tx.opts,
+          );
+      });
     },
 
     list: async (filter, options) => {
@@ -1431,13 +1500,7 @@ class MongoStore implements NexusStore {
     },
 
     update: async (id, patch) => {
-      const set = setDoc({
-        justification: patch.justification,
-        status: patch.status,
-        decided_by: patch.decided_by,
-        decided_at: patch.decided_at,
-        decision_note: patch.decision_note,
-      });
+      const set = setDoc(accessRequestUpdateFields(patch));
       if (set) {
         await mapConflict('You already have a pending request for this API', () =>
           this.col(COLLECTIONS.accessRequests).updateOne(
@@ -1448,6 +1511,26 @@ class MongoStore implements NexusStore {
         );
       }
       return this.accessRequests.findById(id);
+    },
+
+    updateIfStatus: async (id, expected, patch) => {
+      // A single-document `updateOne` is atomic in MongoDB, so the status in
+      // the filter is the compare half of the compare-and-set exactly as the
+      // SQL adapters' `AND status = ?` is.
+      const query = { _id: id, status: expected } as Filter<NexusDoc>;
+      const set = setDoc(accessRequestUpdateFields(patch));
+      if (!set) {
+        const still = await this.col(COLLECTIONS.accessRequests).findOne(query, this.opts);
+        return still ? this.accessRequests.findById(id) : null;
+      }
+      const result = await mapConflict('You already have a pending request for this API', () =>
+        this.col(COLLECTIONS.accessRequests).updateOne(
+          query,
+          { $set: { ...set, updated_at: nowIso() } },
+          this.opts,
+        ),
+      );
+      return result.matchedCount > 0 ? this.accessRequests.findById(id) : null;
     },
 
     list: async (filter, options) =>
@@ -1814,11 +1897,12 @@ class MongoStore implements NexusStore {
     list: async (filter, options) => {
       const conditions: Record<string, unknown>[] = [];
       if (filter.participant_user_id !== undefined) {
+        // Seats only — `created_by` is provenance, not membership. See
+        // `ThreadFilter.participant_user_id`.
         conditions.push({
           $or: [
             { participant_a: filter.participant_user_id },
             { participant_b: filter.participant_user_id },
-            { created_by: filter.participant_user_id },
           ],
         });
       }

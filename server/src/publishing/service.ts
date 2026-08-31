@@ -22,7 +22,14 @@
  * Edge has no cross-resource transaction, so `publish` creates the proxy, then
  * each plugin config, and **rolls back what it created** if any step fails
  * (delete the plugin configs, then the proxy) before rethrowing. The Nexus rows
- * are written last, so a failed publish leaves nothing behind on either side.
+ * are written last but *inside* that same compensated block, in one store
+ * transaction, so a store failure cannot leave a live proxy the portal has no
+ * row for. `update` uses the same technique with an explicit undo stack, and
+ * `updateSpec` moves the gateway before the revision becomes current.
+ *
+ * Where a step genuinely cannot be made atomic, the failure is arranged to land
+ * in the safe direction and is documented at the call site: an API stays
+ * reachable and authenticated rather than becoming open or orphaned.
  *
  * ## Retirement versus deletion
  *
@@ -74,6 +81,7 @@ import type {
   EdgePluginConfig,
   EdgePluginConfigWrite,
   EdgePluginSettings,
+  EdgeProxy,
 } from '../ferrum-admin/types.js';
 import { conflict, forbidden, notFound, specInvalid, validationFailed } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
@@ -344,6 +352,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const version = input.version?.trim() || parsed.version;
 
       const created: { proxyId?: string; pluginIds: string[] } = { pluginIds: [] };
+      let persisted: { api: ApiRecord; spec: ApiSpecRecord };
       try {
         const proxy = await edge.proxies.create(
           {
@@ -385,11 +394,44 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           );
           created.pluginIds.push(limiter.id);
         }
+
+        // The Nexus rows are written *inside* the compensated block: a store
+        // failure here would otherwise leave a live, untracked proxy on the
+        // gateway that nothing in the portal knows how to reach or delete. One
+        // transaction so the API and its first spec revision commit together.
+        persisted = await store.transaction(async (tx) => {
+          const row = await tx.apis.create({
+            id: apiId,
+            name,
+            slug,
+            description: input.description ?? parsed.description,
+            owner_user_id: owner.id,
+            ferrum_proxy_id: created.proxyId ?? null,
+            namespace,
+            version,
+            spec_format: 'openapi',
+            requestable: input.requestable,
+            auth_plugin: input.auth_plugin,
+            rate_limit: input.rate_limit ?? null,
+            status: 'published',
+            visibility: input.visibility,
+          });
+          const revision = await tx.apiSpecs.create({
+            api_id: row.id,
+            version,
+            raw_spec: parsed.raw,
+            parsed_title: parsed.title,
+            parsed_version: parsed.version,
+            is_current: true,
+          });
+          return { api: row, spec: revision };
+        });
       } catch (error) {
-        // Nothing has been written to the Nexus store yet, so undoing the Edge
-        // side leaves the whole publish as if it never happened. Deleting the
-        // proxy cascades its proxy-scoped plugin configs, but the explicit
-        // deletes make the intent obvious and survive a partial cascade.
+        // Undo the Edge side so the whole publish reads as if it never
+        // happened. Deleting the proxy cascades its proxy-scoped plugin
+        // configs, but the explicit deletes make the intent obvious and survive
+        // a partial cascade. The store transaction has already rolled itself
+        // back, so nothing is left on the Nexus side either.
         for (const pluginId of created.pluginIds) {
           await edge.pluginConfigs.delete(pluginId, owner.id).catch(() => undefined);
         }
@@ -399,32 +441,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         throw error;
       }
 
-      const api = await store.apis.create({
-        id: apiId,
-        name,
-        slug,
-        description: input.description ?? parsed.description,
-        owner_user_id: owner.id,
-        ferrum_proxy_id: created.proxyId ?? null,
-        namespace,
-        version,
-        spec_format: 'openapi',
-        requestable: input.requestable,
-        auth_plugin: input.auth_plugin,
-        rate_limit: input.rate_limit ?? null,
-        status: 'published',
-        visibility: input.visibility,
-      });
+      const { api, spec } = persisted;
 
-      const spec = await store.apiSpecs.create({
-        api_id: api.id,
-        version,
-        raw_spec: parsed.raw,
-        parsed_title: parsed.title,
-        parsed_version: parsed.version,
-        is_current: true,
-      });
-
+      // The audit row is deliberately outside the compensated block: both sides
+      // now agree, and tearing a live API back down because the log write
+      // failed would trade a missing audit row for an outage.
       await audit.record(
         { id: owner.id, role: owner.role },
         AuditAction.API_PUBLISH,
@@ -439,6 +460,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           rate_limit: input.rate_limit ?? null,
           upstream: `${upstream.scheme}://${upstream.host}:${upstream.port}`,
           spec_paths: parsed.pathCount,
+          spec_operations: parsed.operationCount,
         },
         ip,
       );
@@ -483,72 +505,140 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const plugins = await pluginsOf(api);
       const proxyId = api.ferrum_proxy_id;
 
-      if (patch.upstream_url !== undefined && patch.upstream_url.trim() !== '' && proxyId) {
-        const upstream = parseUpstreamUrl(patch.upstream_url);
-        if (!upstream) {
-          throw specInvalid('The upstream URL must be an absolute http:// or https:// URL', {
-            field: 'upstream_url',
-            value: patch.upstream_url,
-          });
+      // Edge has no cross-resource transaction, so every gateway mutation below
+      // records the call that undoes it. Any later failure — the next plugin
+      // call, or the Nexus row update itself — unwinds them in reverse, so a
+      // half-applied PATCH never leaves the gateway in a shape the portal does
+      // not describe.
+      const undo: (() => Promise<void>)[] = [];
+      let updated: ApiRecord;
+
+      try {
+        if (patch.upstream_url !== undefined && patch.upstream_url.trim() !== '' && proxyId) {
+          const upstream = parseUpstreamUrl(patch.upstream_url);
+          if (!upstream) {
+            throw specInvalid('The upstream URL must be an absolute http:// or https:// URL', {
+              field: 'upstream_url',
+              value: patch.upstream_url,
+            });
+          }
+          const before = await edge.proxies.get(proxyId);
+          await replaceProxyBackend(proxyId, api.slug, upstream, actor.id);
+          if (before) undo.push(() => restoreProxy(before, api.slug, actor.id));
+          changed.push('upstream_url');
+          details.upstream = `${upstream.scheme}://${upstream.host}:${upstream.port}`;
         }
-        await replaceProxyBackend(proxyId, api.slug, upstream, actor.id);
-        changed.push('upstream_url');
-        details.upstream = `${upstream.scheme}://${upstream.host}:${upstream.port}`;
-      }
 
-      if (patch.auth_plugin !== undefined && patch.auth_plugin !== api.auth_plugin && proxyId) {
-        const previous = findPlugin(plugins, api.auth_plugin);
-        if (previous) await edge.pluginConfigs.delete(previous.id, actor.id);
-        await attach(proxyId, patch.auth_plugin, authPluginConfig(patch.auth_plugin), actor.id);
-        update.auth_plugin = patch.auth_plugin;
-        changed.push('auth_plugin');
-        // Credentials of the previous flavour are kept on the consumer (they may
-        // still authenticate other APIs) but they no longer satisfy *this* API.
-        details.previous_auth_plugin = api.auth_plugin;
-        details.previous_credential_type = CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin];
-        details.existing_credentials_invalidated = true;
-      }
-
-      if (patch.requestable !== undefined && patch.requestable !== api.requestable && proxyId) {
-        const acl = findPlugin(plugins, ACCESS_CONTROL_PLUGIN);
-        if (patch.requestable && !acl) {
-          await attach(proxyId, ACCESS_CONTROL_PLUGIN, accessControlConfig(api.id), actor.id);
-        } else if (!patch.requestable && acl) {
-          // Dropping the gate opens the API to every authenticated consumer;
-          // existing grants stay on the consumers and become inert.
-          await edge.pluginConfigs.delete(acl.id, actor.id);
-        }
-        update.requestable = patch.requestable;
-        changed.push('requestable');
-      }
-
-      if (patch.rate_limit !== undefined && proxyId) {
-        const limiter = findPlugin(plugins, RATE_LIMIT_PLUGIN);
-        if (patch.rate_limit === null) {
-          if (limiter) await edge.pluginConfigs.delete(limiter.id, actor.id);
-        } else if (limiter) {
-          await edge.pluginConfigs.replace(
-            limiter.id,
-            {
-              plugin_name: RATE_LIMIT_PLUGIN,
-              scope: 'proxy',
-              proxy_id: proxyId,
-              enabled: true,
-              config: rateLimitConfig(patch.rate_limit),
-            },
+        if (patch.auth_plugin !== undefined && patch.auth_plugin !== api.auth_plugin && proxyId) {
+          const previous = findPlugin(plugins, api.auth_plugin);
+          // Attach the replacement **before** removing the incumbent. For the
+          // moment both are live the proxy accepts either credential (auth
+          // plugins run in priority order until one succeeds, §3.4), which is a
+          // vastly safer window than the one the other order opens: a live
+          // proxy fronting the provider's upstream with no authentication
+          // plugin at all.
+          const attached = await attach(
+            proxyId,
+            patch.auth_plugin,
+            authPluginConfig(patch.auth_plugin),
             actor.id,
           );
-        } else {
-          await attach(proxyId, RATE_LIMIT_PLUGIN, rateLimitConfig(patch.rate_limit), actor.id);
+          undo.push(() => edge.pluginConfigs.delete(attached.id, actor.id));
+          if (previous) {
+            await edge.pluginConfigs.delete(previous.id, actor.id);
+            undo.push(async () => {
+              await attach(proxyId, previous.plugin_name, previous.config, actor.id);
+            });
+          }
+          update.auth_plugin = patch.auth_plugin;
+          changed.push('auth_plugin');
+          // Credentials of the previous flavour are kept on the consumer (they may
+          // still authenticate other APIs) but they no longer satisfy *this* API.
+          details.previous_auth_plugin = api.auth_plugin;
+          details.previous_credential_type = CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin];
+          details.existing_credentials_invalidated = true;
         }
-        update.rate_limit = patch.rate_limit;
-        changed.push('rate_limit');
+
+        if (patch.requestable !== undefined && patch.requestable !== api.requestable && proxyId) {
+          const acl = findPlugin(plugins, ACCESS_CONTROL_PLUGIN);
+          if (patch.requestable && !acl) {
+            const attached = await attach(
+              proxyId,
+              ACCESS_CONTROL_PLUGIN,
+              accessControlConfig(api.id),
+              actor.id,
+            );
+            undo.push(() => edge.pluginConfigs.delete(attached.id, actor.id));
+          } else if (!patch.requestable && acl) {
+            // Dropping the gate opens the API to every authenticated consumer;
+            // existing grants stay on the consumers and become inert.
+            await edge.pluginConfigs.delete(acl.id, actor.id);
+            undo.push(async () => {
+              await attach(proxyId, ACCESS_CONTROL_PLUGIN, acl.config, actor.id);
+            });
+          }
+          update.requestable = patch.requestable;
+          changed.push('requestable');
+        }
+
+        if (patch.rate_limit !== undefined && proxyId) {
+          const limiter = findPlugin(plugins, RATE_LIMIT_PLUGIN);
+          if (patch.rate_limit === null) {
+            if (limiter) {
+              await edge.pluginConfigs.delete(limiter.id, actor.id);
+              undo.push(async () => {
+                await attach(proxyId, RATE_LIMIT_PLUGIN, limiter.config, actor.id);
+              });
+            }
+          } else if (limiter) {
+            await edge.pluginConfigs.replace(
+              limiter.id,
+              {
+                plugin_name: RATE_LIMIT_PLUGIN,
+                scope: 'proxy',
+                proxy_id: proxyId,
+                enabled: true,
+                config: rateLimitConfig(patch.rate_limit),
+              },
+              actor.id,
+            );
+            undo.push(async () => {
+              await edge.pluginConfigs.replace(
+                limiter.id,
+                {
+                  plugin_name: RATE_LIMIT_PLUGIN,
+                  scope: 'proxy',
+                  proxy_id: proxyId,
+                  enabled: limiter.enabled,
+                  config: limiter.config,
+                },
+                actor.id,
+              );
+            });
+          } else {
+            const attached = await attach(
+              proxyId,
+              RATE_LIMIT_PLUGIN,
+              rateLimitConfig(patch.rate_limit),
+              actor.id,
+            );
+            undo.push(() => edge.pluginConfigs.delete(attached.id, actor.id));
+          }
+          update.rate_limit = patch.rate_limit;
+          changed.push('rate_limit');
+        }
+
+        if (changed.length === 0) return api;
+
+        const persisted = await store.apis.update(api.id, update);
+        if (!persisted) throw notFound('API', apiId);
+        updated = persisted;
+      } catch (error) {
+        for (const step of undo.reverse()) {
+          await step().catch(() => undefined);
+        }
+        throw error;
       }
-
-      if (changed.length === 0) return api;
-
-      const updated = await store.apis.update(api.id, update);
-      if (!updated) throw notFound('API', apiId);
 
       await audit.record(
         { id: actor.id, role: actor.role },
@@ -579,20 +669,18 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const previous = await store.apiSpecs.findCurrentByApi(api.id);
       const nextVersion = version?.trim() || parsed.version;
 
-      const spec = await store.apiSpecs.create({
-        api_id: api.id,
-        version: nextVersion,
-        raw_spec: parsed.raw,
-        parsed_title: parsed.title,
-        parsed_version: parsed.version,
-        is_current: true,
-      });
-      await store.apiSpecs.setCurrent(api.id, spec.id);
-
+      // The gateway moves **first**, and the revision only becomes current once
+      // it has. The other order publishes a document describing a backend Edge
+      // is not serving yet; this order's failure mode is compensated below, and
+      // if the compensation itself fails the gateway wins — traffic keeps
+      // flowing to the new upstream while the catalog still shows the previous
+      // revision, which is the direction that does not break integrations.
+      //
       // Follow the spec's `servers[0]` only while the proxy is still pointing
       // where the *previous* revision said it should. Once a provider supplies
       // an explicit upstream, the document stops being authoritative for it.
       let backendUpdated = false;
+      let restoreBackend: (() => Promise<void>) | null = null;
       const nextUpstream = parsed.defaultUpstream;
       if (nextUpstream && api.ferrum_proxy_id) {
         const previousUpstream = previous ? safeDefaultUpstream(previous.raw_spec) : null;
@@ -607,16 +695,38 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           previousUpstream.host !== nextUpstream.host ||
           previousUpstream.port !== nextUpstream.port ||
           previousUpstream.scheme !== nextUpstream.scheme;
-        if (followsSpec && moved) {
+        if (proxy && followsSpec && moved) {
           await replaceProxyBackend(api.ferrum_proxy_id, api.slug, nextUpstream, actor.id);
           backendUpdated = true;
+          restoreBackend = () => restoreProxy(proxy, api.slug, actor.id);
         }
       }
 
-      const updated =
-        nextVersion === api.version
-          ? api
-          : ((await store.apis.update(api.id, { version: nextVersion })) ?? api);
+      let spec: ApiSpecRecord;
+      let updated: ApiRecord;
+      try {
+        const persisted = await store.transaction(async (tx) => {
+          const revision = await tx.apiSpecs.create({
+            api_id: api.id,
+            version: nextVersion,
+            raw_spec: parsed.raw,
+            parsed_title: parsed.title,
+            parsed_version: parsed.version,
+            is_current: true,
+          });
+          await tx.apiSpecs.setCurrent(api.id, revision.id);
+          const row =
+            nextVersion === api.version
+              ? api
+              : ((await tx.apis.update(api.id, { version: nextVersion })) ?? api);
+          return { spec: revision, api: row };
+        });
+        spec = persisted.spec;
+        updated = persisted.api;
+      } catch (error) {
+        if (restoreBackend) await restoreBackend().catch(() => undefined);
+        throw error;
+      }
 
       await audit.record(
         { id: actor.id, role: actor.role },
@@ -626,6 +736,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           spec_id: spec.id,
           version: nextVersion,
           spec_paths: parsed.pathCount,
+          spec_operations: parsed.operationCount,
           backend_updated: backendUpdated,
         },
         ip,
@@ -697,22 +808,42 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const username = testConsumerUsername(api.id);
       const group = aclGroupForApi(api.id);
 
-      // Recreating replaces: a test consumer is disposable by definition, and
-      // deleting it is the only way to reset its credentials show-once state.
-      const existing = await edge.consumers.getByUsername(username);
-      if (existing) await edge.consumers.delete(existing.id, actor.id);
+      // Serialise on the username rather than a consumer id: the id changes on
+      // every replacement, so it is not a stable key, and two concurrent
+      // requests would otherwise both delete and both create. The key is
+      // prefixed so it can never collide with a consumer-id key used by the
+      // credentials service.
+      const replaced = await edge.serializePerKey(`test-consumer:${username}`, async () => {
+        // Recreating replaces: a test consumer is disposable by definition, and
+        // deleting it is the only way to reset its credentials show-once state.
+        const existing = await edge.consumers.getByUsername(username);
+        let revokedCredentials = 0;
+        if (existing) {
+          await edge.consumers.delete(existing.id, actor.id);
+          // The credentials of the deleted consumer no longer exist on the
+          // gateway; leaving their rows `active` would show the provider keys
+          // that cannot authenticate anything. The mirror follows the gateway.
+          for (const row of await store.credentials.listByConsumer(existing.id)) {
+            if (row.status === 'revoked') continue;
+            await store.credentials.update(row.id, { status: 'revoked' });
+            revokedCredentials += 1;
+          }
+        }
 
-      const consumer = await edge.consumers.create(
-        { username, custom_id: `nexus-test:${api.id}`, acl_groups: [group] },
-        actor.id,
-      );
+        const consumer = await edge.consumers.create(
+          { username, custom_id: `nexus-test:${api.id}`, acl_groups: [group] },
+          actor.id,
+        );
 
-      const issued = await credentials.issueForConsumer({
-        user: actor,
-        consumerId: consumer.id,
-        consumerUsername: consumer.username,
-        credentialType: CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin],
-        label: label ?? `Test consumer for ${api.slug}`,
+        const issued = await credentials.issueForConsumer({
+          user: actor,
+          consumerId: consumer.id,
+          consumerUsername: consumer.username,
+          credentialType: CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin],
+          label: label ?? `Test consumer for ${api.slug}`,
+        });
+
+        return { consumer, issued, replacedExisting: existing !== null, revokedCredentials };
       });
 
       await audit.record(
@@ -721,17 +852,18 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         { type: 'api', id: api.id },
         {
           consumer_username: username,
-          consumer_id: consumer.id,
-          credential_type: issued.credential.credential_type,
-          replaced: existing !== null,
+          consumer_id: replaced.consumer.id,
+          credential_type: replaced.issued.credential.credential_type,
+          replaced: replaced.replacedExisting,
+          revoked_credentials: replaced.revokedCredentials,
         },
         ip,
       );
 
       return {
-        credential: issued.credential,
-        consumer_username: consumer.username,
-        secret: issued.secret,
+        credential: replaced.issued.credential,
+        consumer_username: replaced.consumer.username,
+        secret: replaced.issued.secret,
       };
     },
   };
@@ -754,6 +886,31 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         backend_port: upstream.port,
         ...(upstream.basePath ? { backend_path: upstream.basePath } : {}),
         strip_listen_path: true,
+      },
+      subject,
+    );
+  }
+
+  /**
+   * Put a proxy back the way a `GET /proxies/{id}` found it.
+   *
+   * Used to compensate a backend replacement whose follow-up step failed. Only
+   * the fields Nexus ever writes are restored; `listen_path` falls back to the
+   * canonical path for the slug because `EdgeProxyWrite` requires one and an
+   * operator-blanked value would not be routable anyway.
+   */
+  async function restoreProxy(proxy: EdgeProxy, slug: string, subject: string): Promise<void> {
+    await edge.proxies.replace(
+      proxy.id,
+      {
+        id: proxy.id,
+        name: proxy.name ?? proxyNameForSlug(slug),
+        listen_path: proxy.listen_path ?? listenPathFor(namespace, slug),
+        backend_scheme: proxy.backend_scheme === 'http' ? 'http' : 'https',
+        backend_host: proxy.backend_host ?? '',
+        backend_port: proxy.backend_port ?? 443,
+        ...(proxy.backend_path ? { backend_path: proxy.backend_path } : {}),
+        strip_listen_path: proxy.strip_listen_path ?? true,
       },
       subject,
     );

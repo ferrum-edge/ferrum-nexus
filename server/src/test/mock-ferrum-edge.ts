@@ -71,6 +71,12 @@ interface QueuedFailure {
   body: unknown;
   /** Only fail requests whose path contains this substring. */
   pathContains?: string;
+  /**
+   * Only fail requests using this method. Needed whenever one code path reads
+   * and writes the same collection — `/plugins/config` is listed with a `GET`
+   * immediately before the `POST`/`DELETE` under test.
+   */
+  method?: string;
 }
 
 /** The running mock. */
@@ -85,8 +91,13 @@ export interface MockFerrumEdge {
   reset(): void;
   /** Replace the payload returned by the authenticated `GET /health`. */
   setHealth(payload: Record<string, unknown>): void;
-  /** Make the next matching request fail with `status` and `body`. */
-  queueFailure(status: number, body?: unknown, pathContains?: string): void;
+  /**
+   * Make the next matching request fail with `status` and `body`.
+   *
+   * Narrow with `pathContains` and, when a path is both read and written in one
+   * operation, `method`.
+   */
+  queueFailure(status: number, body?: unknown, pathContains?: string, method?: string): void;
   /** Direct access to stored consumers, keyed `<namespace>/<id>`. */
   readonly consumers: Map<string, StoredConsumer>;
   /** Direct access to stored proxies, keyed `<namespace>/<id>`. */
@@ -861,7 +872,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     }
 
     const failure = failures.find(
-      (entry) => entry.pathContains === undefined || url.pathname.includes(entry.pathContains),
+      (entry) =>
+        (entry.pathContains === undefined || url.pathname.includes(entry.pathContains)) &&
+        (entry.method === undefined || entry.method === method),
     );
     if (failure) {
       failures.splice(failures.indexOf(failure), 1);
@@ -946,11 +959,12 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       health = payload;
     },
 
-    queueFailure(status: number, body?: unknown, pathContains?: string): void {
+    queueFailure(status: number, body?: unknown, pathContains?: string, method?: string): void {
       failures.push({
         status,
         body: body ?? { error: 'Injected failure' },
         ...(pathContains === undefined ? {} : { pathContains }),
+        ...(method === undefined ? {} : { method }),
       });
     },
 

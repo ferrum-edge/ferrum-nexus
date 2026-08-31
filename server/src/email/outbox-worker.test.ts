@@ -4,11 +4,24 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import { OUTBOX_MAX_ATTEMPTS } from '@ferrum-nexus/shared';
 
 import { buildTestApp, type TestApp } from '../test/helpers.js';
-import { backoffDelayMs, OUTBOX_BASE_BACKOFF_MS } from './outbox-worker.js';
+import {
+  backoffDelayMs,
+  OUTBOX_BASE_BACKOFF_MS,
+  OUTBOX_DELIVERED_UNACKNOWLEDGED,
+} from './outbox-worker.js';
 
 /** Push a row's next attempt into the past so the next tick claims it again. */
 async function makeDue(harness: TestApp, id: string): Promise<void> {
   await harness.store.emailOutbox.reschedule(id, new Date(Date.now() - 1000).toISOString(), 'due');
+}
+
+/** Make the next `emailOutbox.markSent(...)` reject, then restore the real one. */
+function failNextMarkSent(harness: TestApp, message: string): void {
+  const real = harness.store.emailOutbox.markSent.bind(harness.store.emailOutbox);
+  harness.store.emailOutbox.markSent = async () => {
+    harness.store.emailOutbox.markSent = real;
+    throw new Error(message);
+  };
 }
 
 describe('outbox backoff', () => {
@@ -148,6 +161,42 @@ describe('outbox worker', () => {
     harness.mailbox.failure = null;
     const quiet = await harness.tick();
     assert.equal(quiet.claimed, 0);
+  });
+
+  it('does not re-send a message whose acknowledgement failed after delivery', async () => {
+    const { entry } = await harness.services.email.enqueue({
+      to: 'acked@example.test',
+      templateKey: 'mass',
+      vars: { subject: 'Once', body_html: '<p>x</p>', body_text: 'x' },
+      idempotencyKey: 'worker:unacked',
+    });
+
+    // The relay accepts the mail; only the write recording that fact fails.
+    // Treating this as a delivery failure is what used to send it twice.
+    failNextMarkSent(harness, 'database connection reset');
+
+    const result = await harness.tick();
+    assert.equal(result.claimed, 1);
+    assert.equal(result.sent, 0);
+    assert.equal(result.rescheduled, 0, 'a delivered message is never rescheduled');
+    assert.equal(result.unacknowledged, 1);
+    assert.equal(harness.mailbox.sent.length, 1);
+
+    const stored = await harness.store.emailOutbox.findById(entry.id);
+    assert.equal(stored?.status, 'failed', 'parked in the one terminal status the schema has');
+    assert.equal(stored?.next_attempt_at, null);
+    assert.ok(
+      stored?.last_error?.startsWith(OUTBOX_DELIVERED_UNACKNOWLEDGED),
+      `an operator can tell it apart from mail that never left: ${String(stored?.last_error)}`,
+    );
+    assert.match(stored?.last_error ?? '', /database connection reset/);
+
+    // The decisive difference: the row is out of the retry loop for good, so
+    // no later tick can hand the relay a second copy. Before the fix it went
+    // back to `pending` with a backoff and was delivered again.
+    const quiet = await harness.tick();
+    assert.equal(quiet.claimed, 0);
+    assert.equal(harness.mailbox.sent.length, 1, 'exactly one message reached the relay');
   });
 
   it('claims nothing while SMTP is unconfigured', async () => {

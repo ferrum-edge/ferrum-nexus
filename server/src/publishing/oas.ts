@@ -17,7 +17,13 @@
  * - `info.title` and `info.version` are present, because they become the
  *   catalog's display title and the spec revision label;
  * - `paths` is an object, because a document with no operations cannot be
- *   rendered or usefully proxied.
+ *   rendered or usefully proxied;
+ * - the document declares no more than {@link MAX_SPEC_PATHS} paths and
+ *   {@link MAX_SPEC_OPERATIONS} operations. That is a *client* protection
+ *   rather than a gateway one: `MAX_SPEC_BYTES` bounds the transfer but not the
+ *   structure, and a server-valid 2 MiB document holding tens of thousands of
+ *   minimal operations would freeze every catalog viewer that renders one card
+ *   per operation.
  *
  * Everything else (schema correctness, `$ref` resolution, operation shape) is
  * left alone: an over-strict portal would reject specs the gateway is perfectly
@@ -32,7 +38,12 @@
 
 import { parse as parseYaml } from 'yaml';
 
-import { MAX_SPEC_BYTES } from '@ferrum-nexus/shared';
+import {
+  MAX_SPEC_BYTES,
+  MAX_SPEC_OPERATIONS,
+  MAX_SPEC_PATHS,
+  OPENAPI_OPERATION_METHODS,
+} from '@ferrum-nexus/shared';
 
 import { specInvalid } from '../lib/errors.js';
 
@@ -63,6 +74,8 @@ export interface ParsedSpec {
   defaultUpstream: SpecUpstream | null;
   /** Number of path items — surfaced in audit details and the provider UI. */
   pathCount: number;
+  /** Number of operations (path item × HTTP method) across the whole document. */
+  operationCount: number;
   /** Content type matching {@link ParsedSpec.raw}. */
   contentType: 'application/json' | 'application/yaml';
   /** The document as uploaded, with only surrounding whitespace trimmed. */
@@ -197,16 +210,51 @@ export function parseOpenApiSpec(text: string): ParsedSpec {
     throw specInvalid("The document is missing a 'paths' object", { field: 'paths' });
   }
 
+  const pathCount = Object.keys(paths).length;
+  if (pathCount > MAX_SPEC_PATHS) {
+    throw specInvalid(
+      `The document declares ${pathCount} paths, more than the ${MAX_SPEC_PATHS} path limit`,
+      { field: 'paths', paths: pathCount, limit: MAX_SPEC_PATHS },
+    );
+  }
+  const operationCount = countOperations(paths);
+  if (operationCount > MAX_SPEC_OPERATIONS) {
+    throw specInvalid(
+      `The document declares ${operationCount} operations, more than the ${MAX_SPEC_OPERATIONS} operation limit`,
+      { field: 'paths', operations: operationCount, limit: MAX_SPEC_OPERATIONS },
+    );
+  }
+
   return {
     title,
     version,
     description,
     openapiVersion: openapiVersion.trim(),
     defaultUpstream: readDefaultUpstream(value.servers),
-    pathCount: Object.keys(paths).length,
+    pathCount,
+    operationCount,
     contentType,
     raw,
   };
+}
+
+/**
+ * Operations across every path item.
+ *
+ * Only the eight OpenAPI HTTP-method keys count; `parameters`, `summary`,
+ * `servers`, `$ref` and `x-` extensions are path-item metadata, not operations.
+ * A non-object path item contributes nothing rather than failing the document —
+ * Nexus is not a spec linter (see the module docblock).
+ */
+function countOperations(paths: Record<string, unknown>): number {
+  let count = 0;
+  for (const item of Object.values(paths)) {
+    if (!isRecord(item)) continue;
+    for (const method of OPENAPI_OPERATION_METHODS) {
+      if (item[method] !== undefined) count += 1;
+    }
+  }
+  return count;
 }
 
 /** `servers[0].url` as an upstream, when it is absolute http(s). */

@@ -266,6 +266,78 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(await store.users.countActiveSuperAdmins(), baseline);
     });
 
+    it('users: updateIfMatches applies only while the row still matches', async () => {
+      const user = await makeUser({ role: 'super_admin' });
+
+      assert.equal(
+        await store.users.updateIfMatches(user.id, { role: 'admin' }, { role: 'client' }),
+        null,
+        'a stale expectation loses',
+      );
+      assert.equal(
+        (await store.users.findById(user.id))?.role,
+        'super_admin',
+        'and writes nothing at all',
+      );
+      assert.equal(
+        await store.users.updateIfMatches(newId(), {}, { role: 'client' }),
+        null,
+        'a missing row is a loss, not a throw',
+      );
+
+      const won = await store.users.updateIfMatches(
+        user.id,
+        { role: 'super_admin', status: 'active' },
+        { role: 'client', display_name: 'Demoted' },
+      );
+      assert.equal(won?.role, 'client');
+      assert.equal(won?.display_name, 'Demoted');
+      assert.deepEqual(await store.users.findById(user.id), won, 'the winner gets the stored row');
+    });
+
+    it('users: the last-super-admin rule survives two demotions at once', async () => {
+      // The invariant here is "never fewer active super admins than the suite
+      // started with, plus one", which keeps the test independent of whatever
+      // else the suite has created.
+      const baseline = await store.users.countActiveSuperAdmins();
+
+      /**
+       * The shape `users.updateUser` and god mode's `disable-user` both use:
+       * count and conditional write inside one transaction body. Counting
+       * outside one is what let two administrators demote each other and leave
+       * the portal with none.
+       */
+      async function demote(target: UserRecord): Promise<'demoted' | 'refused'> {
+        return store.transaction(async (tx) => {
+          if ((await tx.users.countActiveSuperAdmins(target.id)) <= baseline) return 'refused';
+          const updated = await tx.users.updateIfMatches(
+            target.id,
+            { role: target.role, status: target.status },
+            { role: 'client' },
+          );
+          return updated ? 'demoted' : 'refused';
+        });
+      }
+
+      const first = await makeUser({ role: 'super_admin' });
+      const second = await makeUser({ role: 'super_admin' });
+      assert.deepEqual(
+        (await Promise.all([demote(first), demote(second)])).sort(),
+        ['demoted', 'refused'],
+        'serialised transaction bodies let exactly one demotion through',
+      );
+      assert.equal(
+        await store.users.countActiveSuperAdmins(),
+        baseline + 1,
+        'and the survivor is still there',
+      );
+
+      // Leave the count as this test found it.
+      await store.users.update(first.id, { role: 'client' });
+      await store.users.update(second.id, { role: 'client' });
+      assert.equal(await store.users.countActiveSuperAdmins(), baseline);
+    });
+
     it('users: filters, paginates and reports the unpaginated total', async () => {
       const marker = `filter-${newId().slice(0, 8)}`;
       for (let i = 0; i < 5; i += 1) {
@@ -475,6 +547,38 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(await store.apiSpecs.deleteByApi(api.id), 1);
     });
 
+    it('apiSpecs: a revision that fails to insert leaves the previous one current', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const api = await makeApi(owner.id);
+
+      const current = await store.apiSpecs.create({
+        api_id: api.id,
+        version: '1',
+        raw_spec: 'openapi: 3.0.0',
+        is_current: true,
+      });
+
+      // Demoting the old revision and inserting the new one is one swap, so it
+      // has to be one transaction. Pinning an id that already exists makes the
+      // insert half fail; without a transaction the demotion has already
+      // landed and the API is left with no current spec at all.
+      await assert.rejects(
+        () =>
+          store.apiSpecs.create({
+            id: current.id,
+            api_id: api.id,
+            version: '2',
+            raw_spec: 'openapi: 3.1.0',
+            is_current: true,
+          }),
+        (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
+      );
+
+      const still = await store.apiSpecs.findCurrentByApi(api.id);
+      assert.equal(still?.id, current.id, 'the failed swap rolled back in full');
+      assert.equal((await store.apiSpecs.list({ api_id: api.id })).total, 1);
+    });
+
     /* ── access requests ──────────────────────────────────────────────── */
 
     it('accessRequests: one pending request per api/user pair', async () => {
@@ -530,10 +634,58 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(perApi[0]?.id, reopened.id);
       assert.deepEqual(await store.accessRequests.listLatestForUser(client.id, []), []);
 
+      assert.equal(await store.accessRequests.updateIfStatus(reopened.id, 'approved', {}), null);
       assert.equal(await store.accessRequests.count({ api_id: api.id }), 2);
       assert.equal(await store.accessRequests.count({ api_ids: [api.id], status: 'denied' }), 1);
       assert.equal((await store.accessRequests.list({ user_id: client.id })).total, 2);
       assert.equal(await store.accessRequests.deleteByApi(api.id), 2);
+    });
+
+    it('accessRequests: exactly one concurrent decision wins the pending status', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const client = await makeUser();
+      const api = await makeApi(owner.id);
+      const request = await store.accessRequests.create({
+        api_id: api.id,
+        user_id: client.id,
+        justification: 'please',
+        status: 'pending',
+      });
+
+      // Approve and cancel arrive together, each holding the same `pending`
+      // read. Nothing serialises them — the predicate on the update is the only
+      // arbiter, exactly as it has to be when the two decisions come from two
+      // different sessions.
+      const outcomes = await Promise.all([
+        store.accessRequests.updateIfStatus(request.id, 'pending', {
+          status: 'approved',
+          decided_by: owner.id,
+          decided_at: nowIso(),
+        }),
+        store.accessRequests.updateIfStatus(request.id, 'pending', {
+          status: 'cancelled',
+          decided_by: client.id,
+          decided_at: nowIso(),
+        }),
+      ]);
+      const winners = outcomes.filter((outcome) => outcome !== null);
+      assert.equal(winners.length, 1, 'exactly one decision may move a pending request');
+
+      const stored = await store.accessRequests.findById(request.id);
+      assert.equal(stored?.status, winners[0]?.status, 'and the winner is what was stored');
+      assert.notEqual(stored?.status, 'pending');
+
+      // A later attempt against the status it no longer has changes nothing.
+      assert.equal(
+        await store.accessRequests.updateIfStatus(request.id, 'pending', { status: 'denied' }),
+        null,
+      );
+      assert.deepEqual(await store.accessRequests.findById(request.id), stored);
+      assert.equal(
+        await store.accessRequests.updateIfStatus(newId(), 'pending', { status: 'denied' }),
+        null,
+        'a missing row is a loss, not a throw',
+      );
     });
 
     /* ── grants ───────────────────────────────────────────────────────── */
@@ -764,6 +916,29 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
 
       assert.equal(await store.messages.deleteByThread(thread.id), 2);
       assert.equal(await store.threads.delete(thread.id), true);
+    });
+
+    it('threads: participant_user_id matches the seats, never the creator', async () => {
+      const admin = await makeUser({ role: 'super_admin' });
+      const recipient = await makeUser();
+
+      // The shape a god-mode broadcast produces: the recipient holds the only
+      // seat and the sender is recorded only as `created_by`.
+      const broadcast = await store.threads.create({
+        subject: `Broadcast ${newId().slice(0, 6)}`,
+        created_by: admin.id,
+        participant_a: recipient.id,
+      });
+
+      const seated = await store.threads.list({ participant_user_id: recipient.id });
+      assert.equal(seated.total, 1);
+      assert.equal(seated.items[0]?.id, broadcast.id);
+
+      assert.equal(
+        (await store.threads.list({ participant_user_id: admin.id })).total,
+        0,
+        'creating a thread is not a seat in it — access has to come from the current role',
+      );
     });
 
     /* ── notifications ────────────────────────────────────────────────── */
@@ -1327,7 +1502,40 @@ describe('mongodb standalone rule', () => {
           email_verified: false,
         });
       });
-      assert.ok(await store.users.findByEmail(email));
+      const owner = await store.users.findByEmail(email);
+      assert.ok(owner);
+
+      // `apiSpecs.create` and `setCurrent` open a transaction of their own to
+      // make the current-revision swap atomic. On a standalone deployment that
+      // has to degrade to plain sequential writes, not fail with "Transaction
+      // numbers are only allowed on a replica set member or mongos".
+      const api = await store.apis.create({
+        name: 'Standalone API',
+        slug: `standalone-${newId().slice(0, 8)}`,
+        owner_user_id: owner.id,
+        namespace: 'nexus',
+        version: '1.0.0',
+        spec_format: 'openapi',
+        requestable: true,
+        auth_plugin: 'key_auth',
+        status: 'published',
+        visibility: 'public',
+      });
+      const v1 = await store.apiSpecs.create({
+        api_id: api.id,
+        version: '1',
+        raw_spec: 'openapi: 3.0.0',
+        is_current: true,
+      });
+      const v2 = await store.apiSpecs.create({
+        api_id: api.id,
+        version: '2',
+        raw_spec: 'openapi: 3.1.0',
+        is_current: true,
+      });
+      assert.equal((await store.apiSpecs.findCurrentByApi(api.id))?.id, v2.id);
+      await store.apiSpecs.setCurrent(api.id, v1.id);
+      assert.equal((await store.apiSpecs.findCurrentByApi(api.id))?.id, v1.id);
     } finally {
       const cleaner = new MongoClient(withDatabase(standaloneUrl, database));
       try {
