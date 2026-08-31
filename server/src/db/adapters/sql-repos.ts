@@ -163,6 +163,17 @@ function accessRequestUpdateColumns(
   };
 }
 
+/** Encoded `SET` columns of a grant patch, shared by both updates. */
+function grantUpdateColumns(patch: UpdateInput<GrantRecord>): Record<string, SqlParam | undefined> {
+  return {
+    status: patch.status,
+    acl_group: patch.acl_group,
+    access_request_id: patch.access_request_id,
+    revoked_by: patch.revoked_by,
+    revoked_at: patch.revoked_at,
+  };
+}
+
 function mapOrganization(row: Row): OrganizationRecord {
   return {
     id: text(row.id),
@@ -1213,13 +1224,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     },
 
     update: async (id, patch) => {
-      const set = setParts({
-        status: patch.status,
-        acl_group: patch.acl_group,
-        access_request_id: patch.access_request_id,
-        revoked_by: patch.revoked_by,
-        revoked_at: patch.revoked_at,
-      });
+      const set = setParts(grantUpdateColumns(patch));
       if (set) {
         await mapSqlConflict('An active grant already exists for this API and user', () =>
           execute(exec, `UPDATE grants SET ${set.sql}, updated_at = ? WHERE id = ?`, [
@@ -1230,6 +1235,32 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         );
       }
       return grants.findById(id);
+    },
+
+    updateIfStatus: async (id, expected, patch) => {
+      // See `users.updateIfMatches` for why "no rows changed" is re-read
+      // rather than reported as a lost race outright.
+      const stillMatches = async (): Promise<GrantRecord | null> => {
+        const row = await queryOne(exec, 'SELECT id FROM grants WHERE id = ? AND status = ?', [
+          id,
+          expected,
+        ]);
+        return row ? grants.findById(id) : null;
+      };
+
+      const set = setParts(grantUpdateColumns(patch));
+      if (!set) return stillMatches();
+
+      const changed = await mapSqlConflict(
+        'An active grant already exists for this API and user',
+        () =>
+          execute(
+            exec,
+            `UPDATE grants SET ${set.sql}, updated_at = ? WHERE id = ? AND status = ?`,
+            [...set.params, nowIso(), id, expected],
+          ),
+      );
+      return changed > 0 ? grants.findById(id) : stillMatches();
     },
 
     list: async (filter, options) => {

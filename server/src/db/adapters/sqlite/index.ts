@@ -168,6 +168,17 @@ function accessRequestUpdateColumns(
   };
 }
 
+/** Encoded `SET` columns of a grant patch, shared by both updates. */
+function grantUpdateColumns(patch: UpdateInput<GrantRecord>): Record<string, Param | undefined> {
+  return {
+    status: patch.status,
+    acl_group: patch.acl_group,
+    access_request_id: patch.access_request_id,
+    revoked_by: patch.revoked_by,
+    revoked_at: patch.revoked_at,
+  };
+}
+
 function mapOrganization(row: Row): OrganizationRecord {
   return {
     id: text(row.id),
@@ -1187,13 +1198,7 @@ class SqliteStore implements NexusStore {
     },
 
     update: async (id, patch) => {
-      const set = setParts({
-        status: patch.status,
-        acl_group: patch.acl_group,
-        access_request_id: patch.access_request_id,
-        revoked_by: patch.revoked_by,
-        revoked_at: patch.revoked_at,
-      });
+      const set = setParts(grantUpdateColumns(patch));
       if (set) {
         mapConflict('An active grant already exists for this API and user', () =>
           execute(this.db, `UPDATE grants SET ${set.sql}, updated_at = ? WHERE id = ?`, [
@@ -1204,6 +1209,23 @@ class SqliteStore implements NexusStore {
         );
       }
       return this.grants.findById(id);
+    },
+
+    updateIfStatus: async (id, expected, patch) => {
+      const set = setParts(grantUpdateColumns(patch));
+      if (!set) {
+        return queryOne(this.db, 'SELECT * FROM grants WHERE id = ? AND status = ?', [id, expected])
+          ? this.grants.findById(id)
+          : null;
+      }
+      const changed = mapConflict('An active grant already exists for this API and user', () =>
+        execute(
+          this.db,
+          `UPDATE grants SET ${set.sql}, updated_at = ? WHERE id = ? AND status = ?`,
+          [...set.params, nowIso(), id, expected],
+        ),
+      );
+      return changed > 0 ? this.grants.findById(id) : null;
     },
 
     list: async (filter, options) => {

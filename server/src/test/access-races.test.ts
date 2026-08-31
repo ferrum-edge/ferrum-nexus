@@ -21,6 +21,7 @@ import {
   type ApiErrorBody,
   type ApproveAccessRequestResponse,
   type CreateAccessRequestResponse,
+  type GodDisableUserResponse,
   type PublishApiResponse,
 } from '@ferrum-nexus/shared';
 
@@ -42,6 +43,7 @@ function latch(): { wait: Promise<void>; open: () => void } {
 
 describe('access workflow under concurrency', () => {
   let harness: TestApp;
+  let superAdmin: TestSession;
   let provider: TestSession;
   let clientCounter = 0;
 
@@ -84,6 +86,130 @@ describe('access workflow under concurrency', () => {
   }
 
   /**
+   * How many writes to this user's consumer actually took `group` off it,
+   * replayed from the recorded `PUT` bodies. Consumers are created with no
+   * groups, so a held→absent transition is a real removal; a `PUT` that omits
+   * a group the consumer no longer had is not.
+   */
+  function groupRemovals(userId: string, group: string): number {
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(userId));
+    if (!consumer) return 0;
+    let held = false;
+    let removals = 0;
+    for (const call of harness.edge.callsTo('PUT', `/consumers/${consumer.id}`)) {
+      const body = call.body as { acl_groups?: unknown } | null;
+      if (!Array.isArray(body?.acl_groups)) continue;
+      const has = body.acl_groups.includes(group);
+      if (held && !has) removals += 1;
+      held = has;
+    }
+    return removals;
+  }
+
+  /**
+   * Writes to this user's consumer that sent an `acl_groups` array without
+   * `group`, whether or not the consumer still had it.
+   *
+   * `mutateAclGroups` issues its `PUT` unconditionally, so a revocation that
+   * slipped past the status guard shows up here even though stripping an
+   * already-absent group leaves the stored consumer looking identical.
+   */
+  function groupStripAttempts(userId: string, group: string): number {
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(userId));
+    if (!consumer) return 0;
+    return harness.edge.callsTo('PUT', `/consumers/${consumer.id}`).filter((call) => {
+      const body = call.body as { acl_groups?: unknown } | null;
+      return Array.isArray(body?.acl_groups) && !body.acl_groups.includes(group);
+    }).length;
+  }
+
+  /** Every `access.revoke` row naming this grant. */
+  async function revokeAudits(grantId: string): Promise<number> {
+    return (await harness.auditRows('access.revoke')).filter((row) => row.target_id === grantId)
+      .length;
+  }
+
+  /** Request access as `client`, approve it as `provider`; returns the grant id. */
+  async function grantAccess(actor: TestSession, apiId: string): Promise<string> {
+    const requestId = await request(actor, apiId);
+    const approved = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/access-requests/${requestId}/approve`,
+      payload: {},
+    });
+    assert.equal(approved.statusCode, 200, approved.body);
+    return approved.json<ApproveAccessRequestResponse>().grant.id;
+  }
+
+  /**
+   * Hold the **first** `grants.findById` at the moment it has read the row, so
+   * the revocation that made it is parked with a stale `active` in hand.
+   */
+  function holdFirstGrantRead(): {
+    parked: Promise<void>;
+    release: () => void;
+    restore: () => void;
+  } {
+    const repo: GrantRepo = harness.store.grants;
+    const real = repo.findById.bind(repo);
+    const arrived = latch();
+    const proceed = latch();
+    let seen = 0;
+
+    repo.findById = async (id) => {
+      const row = await real(id);
+      seen += 1;
+      if (seen === 1) {
+        arrived.open();
+        await proceed.wait;
+      }
+      return row;
+    };
+
+    return {
+      parked: arrived.wait,
+      release: proceed.open,
+      restore: () => {
+        repo.findById = real;
+      },
+    };
+  }
+
+  /**
+   * Hold the **first** `grants.listActiveByUser` — the snapshot a bulk
+   * revocation sweeps — at the moment it has read the rows.
+   */
+  function holdFirstActiveList(): {
+    parked: Promise<void>;
+    release: () => void;
+    restore: () => void;
+  } {
+    const repo: GrantRepo = harness.store.grants;
+    const real = repo.listActiveByUser.bind(repo);
+    const arrived = latch();
+    const proceed = latch();
+    let seen = 0;
+
+    repo.listActiveByUser = async (userId) => {
+      const rows = await real(userId);
+      seen += 1;
+      if (seen === 1) {
+        arrived.open();
+        await proceed.wait;
+      }
+      return rows;
+    };
+
+    return {
+      parked: arrived.wait,
+      release: proceed.open,
+      restore: () => {
+        repo.listActiveByUser = real;
+      },
+    };
+  }
+
+  /**
    * Hold the **first** `accessRequests.findById` at the moment it has read the
    * row, so the caller that made it is parked with a stale `pending` in hand.
    *
@@ -121,7 +247,8 @@ describe('access workflow under concurrency', () => {
 
   before(async () => {
     harness = await buildTestApp();
-    await harness.registerUser({ email: 'race-founder@example.test' });
+    superAdmin = await harness.registerUser({ email: 'race-founder@example.test' });
+    assert.equal(superAdmin.user.role, 'super_admin');
     provider = await harness.registerUser({
       email: 'race-provider@example.test',
       role: 'provider',
@@ -353,5 +480,121 @@ describe('access workflow under concurrency', () => {
     );
     assert.equal(rollback?.details.acl_group_kept, group);
     assert.ok(rollback?.details.kept_for_grant_id, 'the audit row names the grant it deferred to');
+  });
+
+  /* ── Revocations are compare-and-set too ──────────────────────────────── */
+
+  it('a second revocation of one grant loses instead of withdrawing it twice', async () => {
+    const apiId = await publish('race-double-revoke');
+    const client = await freshClient();
+    const grantId = await grantAccess(client, apiId);
+    const group = aclGroupForApi(apiId);
+    assert.deepEqual(groupsOf(client.user.id), [group]);
+    const stripsBefore = groupStripAttempts(client.user.id, group);
+
+    const hold = holdFirstGrantRead();
+    try {
+      // The first revocation reads an active grant and stops there, before it
+      // has claimed anything or reached the gateway.
+      const first = harness.authed(provider, {
+        method: 'POST',
+        url: `/api/grants/${grantId}/revoke`,
+        payload: { reason: 'First.' },
+      });
+      await hold.parked;
+
+      // The second runs all the way through in the meantime.
+      const second = await harness.authed(superAdmin, {
+        method: 'POST',
+        url: `/api/grants/${grantId}/revoke`,
+        payload: { reason: 'Second.' },
+      });
+      assert.equal(second.statusCode, 200, second.body);
+
+      // Only now does the first one get to write.
+      hold.release();
+      const late = await first;
+      assert.equal(late.statusCode, 409, late.body);
+      assert.equal(errorCode(late.body), 'CONFLICT');
+    } finally {
+      hold.restore();
+    }
+
+    const stored = await harness.store.grants.findById(grantId);
+    assert.equal(stored?.status, 'revoked');
+    assert.equal(stored?.revoked_by, superAdmin.user.id, 'the winner owns the revocation');
+    assert.deepEqual(groupsOf(client.user.id), [], 'the ACL group is gone, once');
+    assert.equal(
+      groupStripAttempts(client.user.id, group) - stripsBefore,
+      1,
+      'the loser never reached the gateway',
+    );
+    assert.equal(groupRemovals(client.user.id, group), 1, 'and the group came off exactly once');
+    assert.equal(await revokeAudits(grantId), 1, 'one withdrawal, one audit row');
+
+    const revokeMail = (await harness.outbox()).filter(
+      (row) => row.to_email === client.user.email && row.subject.includes('Access revoked'),
+    );
+    assert.equal(revokeMail.length, 1, 'the grantee is told once');
+  });
+
+  it('a bulk revocation skips the grants it loses and still sweeps the rest', async () => {
+    const keptApiId = await publish('race-sweep-loses');
+    const sweptApiId = await publish('race-sweep-wins');
+    const client = await freshClient();
+    const contestedGrantId = await grantAccess(client, keptApiId);
+    const sweptGrantId = await grantAccess(client, sweptApiId);
+    const contestedGroup = aclGroupForApi(keptApiId);
+
+    const hold = holdFirstActiveList();
+    let disabled: Awaited<ReturnType<typeof harness.authed>>;
+    try {
+      // The sweep snapshots both active grants and stops there.
+      const disabling = harness.authed(superAdmin, {
+        method: 'POST',
+        url: '/api/admin/god/disable-user',
+        payload: {
+          user_id: client.user.id,
+          reason: 'Account compromised.',
+          revoke_grants: true,
+        },
+      });
+      await hold.parked;
+
+      // The API owner revokes one of them out from under the sweep.
+      const targeted = await harness.authed(provider, {
+        method: 'POST',
+        url: `/api/grants/${contestedGrantId}/revoke`,
+        payload: { reason: 'Contract ended.' },
+      });
+      assert.equal(targeted.statusCode, 200, targeted.body);
+
+      hold.release();
+      disabled = await disabling;
+    } finally {
+      hold.restore();
+    }
+
+    assert.equal(disabled.statusCode, 200, disabled.body);
+    const body = disabled.json<GodDisableUserResponse>();
+    assert.equal(body.revoked_grants, 1, 'the sweep counts only the grant it actually took');
+
+    // The grant it lost is revoked exactly once, by the caller that won it…
+    const contested = await harness.store.grants.findById(contestedGrantId);
+    assert.equal(contested?.status, 'revoked');
+    assert.equal(contested?.revoked_by, provider.user.id);
+    assert.equal(await revokeAudits(contestedGrantId), 1, 'the sweep recorded nothing for it');
+    assert.equal(
+      groupRemovals(client.user.id, contestedGroup),
+      1,
+      'the contested group came off once, on the revocation that won it',
+    );
+
+    // …and losing it did not stop the sweep finishing the account.
+    const swept = await harness.store.grants.findById(sweptGrantId);
+    assert.equal(swept?.status, 'revoked');
+    assert.equal(swept?.revoked_by, superAdmin.user.id);
+    assert.equal(await revokeAudits(sweptGrantId), 1);
+    assert.deepEqual(groupsOf(client.user.id), [], 'no access survived the sweep');
   });
 });

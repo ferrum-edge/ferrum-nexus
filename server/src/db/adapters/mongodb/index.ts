@@ -320,6 +320,17 @@ function accessRequestUpdateFields(
   };
 }
 
+/** Settable fields of a grant patch, shared by both updates. */
+function grantUpdateFields(patch: UpdateInput<GrantRecord>): Record<string, unknown> {
+  return {
+    status: patch.status,
+    acl_group: patch.acl_group,
+    access_request_id: patch.access_request_id,
+    revoked_by: patch.revoked_by,
+    revoked_at: patch.revoked_at,
+  };
+}
+
 function mapOrganization(row: Row): OrganizationRecord {
   return {
     id: str(row._id),
@@ -1620,13 +1631,7 @@ class MongoStore implements NexusStore {
     },
 
     update: async (id, patch) => {
-      const set = setDoc({
-        status: patch.status,
-        acl_group: patch.acl_group,
-        access_request_id: patch.access_request_id,
-        revoked_by: patch.revoked_by,
-        revoked_at: patch.revoked_at,
-      });
+      const set = setDoc(grantUpdateFields(patch));
       if (set) {
         await mapConflict('An active grant already exists for this API and user', () =>
           this.col(COLLECTIONS.grants).updateOne(
@@ -1637,6 +1642,26 @@ class MongoStore implements NexusStore {
         );
       }
       return this.grants.findById(id);
+    },
+
+    updateIfStatus: async (id, expected, patch) => {
+      // A single-document `updateOne` is atomic in MongoDB, so the status in
+      // the filter is the compare half of the compare-and-set exactly as the
+      // SQL adapters' `AND status = ?` is.
+      const query = { _id: id, status: expected } as Filter<NexusDoc>;
+      const set = setDoc(grantUpdateFields(patch));
+      if (!set) {
+        const still = await this.col(COLLECTIONS.grants).findOne(query, this.opts);
+        return still ? this.grants.findById(id) : null;
+      }
+      const result = await mapConflict('An active grant already exists for this API and user', () =>
+        this.col(COLLECTIONS.grants).updateOne(
+          query,
+          { $set: { ...set, updated_at: nowIso() } },
+          this.opts,
+        ),
+      );
+      return result.matchedCount > 0 ? this.grants.findById(id) : null;
     },
 
     list: async (filter, options) =>

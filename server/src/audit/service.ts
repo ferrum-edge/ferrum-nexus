@@ -46,6 +46,8 @@ export const AuditAction = {
   ACCESS_APPROVE_ROLLBACK: 'access.approve_rollback',
   ACCESS_DENY: 'access.deny',
   ACCESS_REVOKE: 'access.revoke',
+  /** A revocation the gateway refused; records whether the grant went back. */
+  ACCESS_REVOKE_ROLLBACK: 'access.revoke_rollback',
 
   /* credentials */
   CREDENTIAL_ISSUE: 'credential.issue',

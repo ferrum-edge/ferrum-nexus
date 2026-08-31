@@ -469,6 +469,28 @@ export interface GrantRepo {
   create(input: CreateInput<GrantRecord>): Promise<GrantRecord>;
   findById(id: Uuid): Promise<GrantRecord | null>;
   update(id: Uuid, patch: UpdateInput<GrantRecord>): Promise<GrantRecord | null>;
+  /**
+   * Atomically move a grant out of one status: apply `patch` **only while the
+   * row still has `expected`**, in one statement
+   * (`… WHERE id = ? AND status = ?`).
+   *
+   * Returns the updated row when this caller won the transition, `null` when it
+   * lost — the grant was absent, or somebody else already moved it.
+   *
+   * **Every transition out of `active` must go through here**, never through
+   * {@link GrantRepo.update}. Revocation reads an active grant and writes it
+   * back after a round trip to the gateway, so a blind write let two
+   * concurrent revocations — a second click, god mode racing the API owner, an
+   * account teardown racing either — both pass the `status === 'active'` guard
+   * and both commit. The ACL group came off twice and the audit trail claimed
+   * the same access had been withdrawn twice. Only the winner of this call may
+   * touch the gateway, record the revocation or tell the grantee.
+   */
+  updateIfStatus(
+    id: Uuid,
+    expected: GrantStatus,
+    patch: UpdateInput<GrantRecord>,
+  ): Promise<GrantRecord | null>;
   list(filter: GrantFilter, options?: ListOptions): Promise<Paginated<GrantRecord>>;
   /**
    * The single `status = 'active'` grant for an API/user pair, if any. The

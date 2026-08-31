@@ -739,6 +739,91 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(await store.grants.deleteByApi(api.id), 2);
     });
 
+    it('grants: updateIfStatus lets exactly one revocation withdraw a grant', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const admin = await makeUser({ role: 'admin' });
+      const client = await makeUser();
+      const api = await makeApi(owner.id);
+
+      const grant = await store.grants.create({
+        api_id: api.id,
+        user_id: client.id,
+        acl_group: `nexus:api:${api.id}:approved`,
+        status: 'active',
+        granted_by: owner.id,
+      });
+
+      // The owner and an administrator revoke at the same instant, each holding
+      // the same `active` read. Nothing serialises them — the predicate on the
+      // update is the only arbiter, and only its winner may strip the ACL group
+      // and audit the withdrawal.
+      const outcomes = await Promise.all([
+        store.grants.updateIfStatus(grant.id, 'active', {
+          status: 'revoked',
+          revoked_by: owner.id,
+          revoked_at: nowIso(),
+        }),
+        store.grants.updateIfStatus(grant.id, 'active', {
+          status: 'revoked',
+          revoked_by: admin.id,
+          revoked_at: nowIso(),
+        }),
+      ]);
+      const winners = outcomes.filter((outcome) => outcome !== null);
+      assert.equal(winners.length, 1, 'exactly one revocation may move an active grant');
+
+      const stored = await store.grants.findById(grant.id);
+      assert.equal(stored?.status, 'revoked');
+      assert.equal(stored?.revoked_by, winners[0]?.revoked_by, 'the winner is what was stored');
+      assert.equal(await store.grants.findActiveByApiAndUser(api.id, client.id), null);
+
+      // A later attempt against the status it no longer has changes nothing.
+      assert.equal(
+        await store.grants.updateIfStatus(grant.id, 'active', { revoked_by: admin.id }),
+        null,
+      );
+      assert.deepEqual(await store.grants.findById(grant.id), stored);
+
+      // An empty patch is still a predicate test, not an unconditional hit.
+      assert.equal(await store.grants.updateIfStatus(grant.id, 'active', {}), null);
+      assert.deepEqual(await store.grants.updateIfStatus(grant.id, 'revoked', {}), stored);
+
+      // A patch that writes the values the row already holds is a *win*, not a
+      // miss — MySQL reports zero *changed* rows for it, so the adapter has to
+      // re-read the predicate rather than trust the affected-row count. The
+      // statement still ran, so `updated_at` may have moved; everything the
+      // caller decides on must not have.
+      const rewritten = await store.grants.updateIfStatus(grant.id, 'revoked', {
+        status: 'revoked',
+      });
+      assert.ok(rewritten, 'a patch of identical values still matches the predicate');
+      assert.deepEqual({ ...rewritten, updated_at: '' }, { ...stored, updated_at: '' });
+
+      assert.equal(
+        await store.grants.updateIfStatus(newId(), 'active', { status: 'revoked' }),
+        null,
+        'a missing row is a loss, not a throw',
+      );
+
+      // The unique index still applies through the conditional path: putting
+      // this grant back would collide with the replacement that took its slot.
+      const regrant = await store.grants.create({
+        api_id: api.id,
+        user_id: client.id,
+        acl_group: `nexus:api:${api.id}:approved`,
+        status: 'active',
+        granted_by: owner.id,
+      });
+      await assert.rejects(
+        () => store.grants.updateIfStatus(grant.id, 'revoked', { status: 'active' }),
+        (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
+      );
+      assert.equal((await store.grants.listActiveByUser(client.id)).length, 1);
+      assert.equal((await store.grants.findActiveByApiAndUser(api.id, client.id))?.id, regrant.id);
+
+      assert.equal(await store.grants.deleteByApi(api.id), 2);
+    });
+
     /* ── consumers and credentials ────────────────────────────────────── */
 
     it('consumers: one mapping per user per namespace', async () => {

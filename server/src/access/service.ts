@@ -42,6 +42,27 @@
  * revoke. `unwindApproval` closes that window: it takes the group back off
  * (re-checking first that no concurrent approval legitimately won it), hands
  * the request back to `pending`, and audits what it undid.
+ *
+ * ## Revocation is the same shape, mirrored
+ *
+ * `revoke` and `revokeAllForUser` read a grant, check it is `active`, and write
+ * it back around a round trip to the gateway — so they had the same race, and
+ * they get the same claim-first fix (`grants.updateIfStatus`). Two revocations
+ * of one grant, or a revocation racing the disable-account sweep, used to both
+ * pass the guard: the group came off twice and two `access.revoke` rows claimed
+ * the same withdrawal.
+ *
+ * The order flips, because the danger flips with it. An approval writes the
+ * gateway first so Nexus never claims access the gateway would reject; a
+ * revocation must never claim the *reverse* — access withdrawn in the portal
+ * while the group still opens the door — so it claims the row first and
+ * `unwindRevocation` puts it back when the gateway will not follow.
+ *
+ * `revoke` answers one caller about one grant, so its loser raises `CONFLICT`
+ * like any other lost decision. `revokeAllForUser` is a sweep, so its loser
+ * skips that grant and carries on: the grant ends up revoked either way, and
+ * aborting over somebody else's success would leave the rest of the account's
+ * access standing.
  */
 
 import {
@@ -286,6 +307,92 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     const current = await store.accessRequests.findById(requestId);
     if (!current) return notFound('Access request', requestId);
     return conflict(`This request is already ${current.status}`);
+  }
+
+  /**
+   * The error a lost grant transition raises.
+   *
+   * A grant that vanished under the caller — `publishing.remove` deletes the
+   * rows of an API it takes off the gateway — is a 404, not a conflict.
+   */
+  async function revocationConflict(grantId: Uuid): Promise<NexusError> {
+    const current = await store.grants.findById(grantId);
+    if (!current) return notFound('Grant', grantId);
+    return conflict(`This grant is already ${current.status}`);
+  }
+
+  /**
+   * Undo a revocation the gateway would not accept.
+   *
+   * The mirror of {@link unwindApproval}, and it exists for the mirror reason.
+   * A revocation claims the grant row **before** it touches the gateway, so
+   * that only one of several concurrent revocations gets that far; if the
+   * group removal then fails, the portal would be reporting access as
+   * withdrawn while the group still opens the door — the one direction of
+   * inconsistency that is a security problem rather than a reporting one.
+   *
+   * Both halves go back under compare-and-set, so a revocation that lost a
+   * later race — somebody re-approved the API in the meantime, and a new
+   * active grant now owns the partial unique index — is recorded as unrestored
+   * rather than forced. Every step is best-effort: the caller re-throws the
+   * original gateway failure and an operator needs the trail either way.
+   */
+  async function unwindRevocation(input: {
+    actor: UserRecord;
+    grant: GrantRecord;
+    /** The originating request this revocation moved, or `null` if it moved none. */
+    request: AccessRequestRecord | null;
+    cause: unknown;
+    ip: string | null;
+  }): Promise<void> {
+    const { actor, grant, request, cause, ip } = input;
+    const details: Record<string, unknown> = {
+      api_id: grant.api_id,
+      user_id: grant.user_id,
+      acl_group: grant.acl_group,
+      cause: cause instanceof Error ? cause.message : String(cause),
+    };
+
+    try {
+      const restored = await store.transaction(async (tx) => {
+        const back = await tx.grants.updateIfStatus(grant.id, 'revoked', {
+          status: 'active',
+          revoked_by: null,
+          revoked_at: null,
+        });
+        if (back && request) {
+          await tx.accessRequests.updateIfStatus(request.id, 'revoked', {
+            status: request.status,
+            decided_by: request.decided_by,
+            decided_at: request.decided_at,
+            decision_note: request.decision_note,
+          });
+        }
+        return back;
+      });
+      details.grant_restored = restored !== null;
+    } catch (error) {
+      details.grant_restored = false;
+      deps.log?.(
+        {
+          grant_id: grant.id,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Could not return a failed revocation to active',
+      );
+    }
+
+    await audit
+      .record(
+        { id: actor.id, role: actor.role },
+        AuditAction.ACCESS_REVOKE_ROLLBACK,
+        { type: 'grant', id: grant.id },
+        details,
+        ip,
+      )
+      .catch(() => undefined);
+
+    deps.log?.(details, 'Rolled back a revocation the gateway would not accept');
   }
 
   /**
@@ -679,31 +786,51 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       if (grant.status !== 'active') throw conflict('This grant is already revoked');
 
       const grantee = await store.users.findById(grant.user_id);
-      if (grantee) await setGroupMembership(grantee, api.id, false);
 
+      // Step 1 — claim the transition before anything reaches the gateway, for
+      // the same reason an approval claims its decision first. The read above
+      // is stale the instant it returns: a second click, god mode racing the
+      // API owner, or the disable-account sweep can all be revoking this same
+      // grant, and a blind write by id let every one of them past the
+      // `status !== 'active'` guard. They each stripped the ACL group and each
+      // wrote an `access.revoke` row, so the trail claimed one access had been
+      // withdrawn several times over. The loser stops here with a CONFLICT.
       const revokedAt = nowIso();
+      let movedRequest: AccessRequestRecord | null = null;
       const updated = await store.transaction(async (tx) => {
-        const result = await tx.grants.update(grant.id, {
+        const result = await tx.grants.updateIfStatus(grant.id, 'active', {
           status: 'revoked',
           revoked_by: actor.id,
           revoked_at: revokedAt,
         });
+        if (!result) return null;
         // Keep the originating request's status honest so the requester's
         // history reads "approved, then revoked" rather than staying approved.
         if (grant.access_request_id) {
           const request = await tx.accessRequests.findById(grant.access_request_id);
           if (request && request.status === 'approved') {
-            await tx.accessRequests.update(request.id, {
+            const moved = await tx.accessRequests.updateIfStatus(request.id, 'approved', {
               status: 'revoked',
               decided_by: actor.id,
               decided_at: revokedAt,
               decision_note: reason ?? request.decision_note,
             });
+            if (moved) movedRequest = request;
           }
         }
         return result;
       });
-      if (!updated) throw notFound('Grant', grantId);
+      if (!updated) throw await revocationConflict(grant.id);
+
+      // Step 2 — the gateway, now that exactly one caller is entitled to touch
+      // it. `unwindRevocation` puts the rows back if the group will not come
+      // off: a revocation the gateway did not accept must not stand as one.
+      try {
+        if (grantee) await setGroupMembership(grantee, api.id, false);
+      } catch (error) {
+        await unwindRevocation({ actor, grant, request: movedRequest, cause: error, ip });
+        throw error;
+      }
 
       await audit.record(
         { id: actor.id, role: actor.role },
@@ -751,14 +878,32 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         // Bypasses the ownership check on purpose: this is only reachable from
         // god mode, which has already proven super_admin.
         try {
-          const api = await store.apis.findById(grant.api_id);
-          const grantee = await store.users.findById(userId);
-          if (api && grantee) await setGroupMembership(grantee, api.id, false);
-          await store.grants.update(grant.id, {
+          // Claim each grant before touching the gateway, exactly as `revoke`
+          // does — `listActiveByUser` above is a snapshot, and a targeted
+          // revocation or a second disable may have taken any row in it since.
+          //
+          // A loser here *skips* rather than raising: unlike `revoke`, which
+          // answers one caller about one grant, this is a sweep, and the grant
+          // it lost is revoked either way. Aborting the loop over somebody
+          // else's success would leave the rest of the account's access up.
+          // It is not counted, because this call did not revoke it.
+          const claimed = await store.grants.updateIfStatus(grant.id, 'active', {
             status: 'revoked',
             revoked_by: actor.id,
             revoked_at: nowIso(),
           });
+          if (!claimed) continue;
+
+          const api = await store.apis.findById(grant.api_id);
+          const grantee = await store.users.findById(userId);
+          if (api && grantee) {
+            try {
+              await setGroupMembership(grantee, api.id, false);
+            } catch (error) {
+              await unwindRevocation({ actor, grant, request: null, cause: error, ip });
+              throw error;
+            }
+          }
           await audit.record(
             { id: actor.id, role: actor.role },
             AuditAction.ACCESS_REVOKE,
