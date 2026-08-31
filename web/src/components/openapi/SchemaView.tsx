@@ -14,6 +14,22 @@ import {
 /** Hard stop for pathological documents that nest without a `$ref` cycle. */
 const MAX_DEPTH = 12;
 
+/**
+ * Hard stop on total rendered nodes.
+ *
+ * Depth alone does not bound the tree: every level fans out across
+ * `properties`, `items` and `oneOf`/`anyOf`/`allOf`, so a document that is
+ * merely 14 levels deep with a handful of `$ref`ing properties each expands to
+ * billions of nodes and hangs the tab. Specs are attacker-authored (any
+ * provider can publish one), so the budget is a safety limit, not a nicety.
+ */
+const MAX_NODES = 4000;
+
+/** Mutable node allowance shared by one top-level render pass. */
+interface Budget {
+  remaining: number;
+}
+
 export interface SchemaViewProps {
   schema: unknown;
   /** Document root, used to resolve local `$ref`s. */
@@ -24,6 +40,15 @@ export interface SchemaViewProps {
   depth?: number;
   /** `$ref` pointers already expanded on this branch — the cycle guard. */
   seen?: readonly string[];
+}
+
+interface RenderArgs {
+  schema: unknown;
+  doc: SpecNode;
+  name?: string | undefined;
+  required?: boolean | undefined;
+  depth: number;
+  seen: readonly string[];
 }
 
 function TypeLine({ schema }: { schema: SpecNode }): ReactElement | null {
@@ -76,11 +101,31 @@ export function SchemaView({
   depth = 0,
   seen = [],
 }: SchemaViewProps): ReactElement {
+  // A fresh allowance per top-level render. The whole subtree is produced
+  // synchronously inside this one call, so the counter is consumed in a single
+  // deterministic pass rather than across separate component renders.
+  const budget: Budget = { remaining: MAX_NODES };
+  return renderNode({ schema, doc, name, required, depth, seen }, budget);
+}
+
+function renderNode(
+  { schema, doc, name, required = false, depth, seen }: RenderArgs,
+  budget: Budget,
+): ReactElement {
   const node = asRecord(schema);
 
   if (!node) {
     return <p className="text-xs text-fg-subtle">No schema.</p>;
   }
+
+  if (budget.remaining <= 0) {
+    return (
+      <SchemaRow name={name} required={required} depth={depth}>
+        <span className="text-xs text-fg-subtle">…truncated</span>
+      </SchemaRow>
+    );
+  }
+  budget.remaining -= 1;
 
   const ref = asString(node.$ref);
   if (ref) {
@@ -88,6 +133,13 @@ export function SchemaView({
       return (
         <SchemaRow name={name} required={required} depth={depth}>
           <Badge tone="warning">circular → {refName(ref)}</Badge>
+        </SchemaRow>
+      );
+    }
+    if (depth > MAX_DEPTH) {
+      return (
+        <SchemaRow name={name} required={required} depth={depth}>
+          <span className="text-xs text-fg-subtle">…nested further</span>
         </SchemaRow>
       );
     }
@@ -104,7 +156,9 @@ export function SchemaView({
         <SchemaRow name={name} required={required} depth={depth}>
           <Badge tone="accent">{refName(ref)}</Badge>
         </SchemaRow>
-        <SchemaView schema={resolved} doc={doc} depth={depth} seen={[...seen, ref]} />
+        {/* depth + 1: indirection must cost depth, or a chain of `$ref`s
+            nests without limit. */}
+        {renderNode({ schema: resolved, doc, depth: depth + 1, seen: [...seen, ref] }, budget)}
       </div>
     );
   }
@@ -142,7 +196,9 @@ export function SchemaView({
         <div className="mt-1 border-l border-border pl-3">
           <p className="text-xs font-medium text-fg-subtle">{composition.key}</p>
           {composition.entries.map((entry, index) => (
-            <SchemaView key={index} schema={entry} doc={doc} depth={depth + 1} seen={seen} />
+            <div key={index}>
+              {renderNode({ schema: entry, doc, depth: depth + 1, seen }, budget)}
+            </div>
           ))}
         </div>
       ) : null}
@@ -150,22 +206,26 @@ export function SchemaView({
       {items !== undefined ? (
         <div className="mt-1 border-l border-border pl-3">
           <p className="text-xs font-medium text-fg-subtle">items</p>
-          <SchemaView schema={items} doc={doc} depth={depth + 1} seen={seen} />
+          {renderNode({ schema: items, doc, depth: depth + 1, seen }, budget)}
         </div>
       ) : null}
 
       {properties ? (
         <div className="mt-1 flex flex-col gap-2 border-l border-border pl-3">
           {Object.entries(properties).map(([propertyName, propertySchema]) => (
-            <SchemaView
-              key={propertyName}
-              schema={propertySchema}
-              doc={doc}
-              name={propertyName}
-              required={requiredNames.has(propertyName)}
-              depth={depth + 1}
-              seen={seen}
-            />
+            <div key={propertyName}>
+              {renderNode(
+                {
+                  schema: propertySchema,
+                  doc,
+                  name: propertyName,
+                  required: requiredNames.has(propertyName),
+                  depth: depth + 1,
+                  seen,
+                },
+                budget,
+              )}
+            </div>
           ))}
         </div>
       ) : null}
