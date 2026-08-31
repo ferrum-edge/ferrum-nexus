@@ -26,5 +26,10 @@
   "devDependencies": {
     "concurrently": "^10.0.3",
     "prettier": "^3.6.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@11.10.0": true,
+    "esbuild@0.28.2": true,
+    "esbuild@0.25.12": true
   }
 }
