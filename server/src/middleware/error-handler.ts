@@ -117,7 +117,18 @@ export function registerErrorHandler(
   });
 
   app.setNotFoundHandler((request: FastifyRequest, reply: FastifyReply) => {
-    if (options.spaFallback && !request.url.startsWith('/api')) {
+    // The SPA fallback only applies to navigations (GET, no file extension in
+    // the last path segment); a missing hashed asset must 404 so a stale
+    // index.html fails fast instead of executing HTML as a module script.
+    const path = request.url.split('?')[0] ?? '';
+    const lastSegment = path.slice(path.lastIndexOf('/') + 1);
+    const looksLikeAsset = lastSegment.includes('.');
+    if (
+      options.spaFallback &&
+      request.method === 'GET' &&
+      !path.startsWith('/api') &&
+      !looksLikeAsset
+    ) {
       return options.spaFallback(request, reply);
     }
     return reply
