@@ -1,0 +1,6 @@
+node_modules
+dist
+dist-server
+coverage
+data
+package-lock.json

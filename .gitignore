@@ -1,0 +1,16 @@
+node_modules/
+dist/
+dist-server/
+coverage/
+data/
+*.sqlite
+*.sqlite-journal
+*.log
+.env
+.env.local
+.env.*.local
+.DS_Store
+*.tsbuildinfo
+web/dist/
+server/dist/
+shared/dist/
