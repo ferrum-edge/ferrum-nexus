@@ -17,8 +17,8 @@ and per-user authorization before forwarding to Edge.
 
 - **API clients** can register, manage contact info, create and rotate
   gateway credentials, browse the API catalog with rendered OpenAPI docs,
-  request access with a justification, message providers, and receive email
-  + in-app notifications.
+  request access with a justification, message providers, and receive
+  email + in-app notifications.
 - **API providers** can publish OpenAPI specs (which create Ferrum Edge
   proxies), choose whether an API is externally requestable, review and
   approve / deny / revoke access requests, edit safe runtime settings (rate
