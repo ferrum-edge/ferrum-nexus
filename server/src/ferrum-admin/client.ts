@@ -1,280 +1,593 @@
 /**
- * Typed wrapper around the Ferrum Edge Admin API.
+ * The only module in Nexus that speaks the Ferrum Edge Admin API's HTTP shape.
  *
- * Each method takes an optional `namespace` (falling back to the configured
- * default) which is passed as the `X-Ferrum-Namespace` header. Errors raised
- * by Edge are wrapped in `ApiError(502)` with the upstream body included as
- * details so callers can surface gateway-side validation errors verbatim.
+ * Everything above it deals in domain objects and `NexusError`s. Failures are
+ * classified into exactly two codes:
+ *
+ * - `EDGE_UNAVAILABLE` — DNS, connect, TLS, socket or timeout. Nothing reached
+ *   the gateway.
+ * - `EDGE_ERROR` — the gateway answered with a non-2xx status. Edge's flat
+ *   `{"error": "..."}` text is **logged, never echoed to the browser**, because
+ *   it can contain operator-facing configuration detail.
+ *
+ * A `503` carrying `applied: false` is a special case worth knowing about: the
+ * write **is durable**, it just is not live yet. It surfaces as `EDGE_ERROR`
+ * with an explicit message and is never retried automatically — a blind retry
+ * of a create would `409`.
  */
 
 import { readFileSync } from 'node:fs';
-import { Agent as UndiciAgent, fetch, type Dispatcher } from 'undici';
-import type { Logger } from 'pino';
-import type { ResolvedConfig } from '../config/index.js';
-import { ApiError, upstreamError } from '../lib/errors.js';
-import { getAdminToken, invalidateAdminToken } from './jwt.js';
-import { FERRUM_NAMESPACE_HEADER, type CredentialType } from '@ferrum-nexus/shared';
 
-export interface FerrumProxy {
-  proxy_id: string;
-  name?: string;
-  paths?: string[];
-  hosts?: string[];
-  upstream_id?: string;
-  api_spec_id?: string | null;
-  [key: string]: unknown;
+import { Agent, request, type Dispatcher } from 'undici';
+
+import type { EdgeCredentialType } from '@ferrum-nexus/shared';
+
+import type { EdgeConfig } from '../config/index.js';
+import { edgeError, edgeUnavailable, internal } from '../lib/errors.js';
+import { createAdminTokenMinter, DEFAULT_ADMIN_SUBJECT, type AdminTokenMinter } from './jwt.js';
+import type {
+  EdgeConsumer,
+  EdgeConsumerWrite,
+  EdgeCredentialEntry,
+  EdgeHealth,
+  EdgeListQuery,
+  EdgePage,
+  EdgePluginConfig,
+  EdgePluginConfigWrite,
+  EdgeProbe,
+  EdgeProxy,
+  EdgeProxyWrite,
+} from './types.js';
+
+/** Minimal logger surface, so this module does not depend on Fastify. */
+export interface EdgeLogger {
+  debug(obj: Record<string, unknown>, message?: string): void;
+  warn(obj: Record<string, unknown>, message?: string): void;
+  error(obj: Record<string, unknown>, message?: string): void;
 }
 
-export interface FerrumConsumer {
-  consumer_id: string;
-  username: string;
-  acl_groups?: string[];
-  status?: string;
-  [key: string]: unknown;
+/** A logger that drops everything — the default when none is supplied. */
+export const silentEdgeLogger: EdgeLogger = {
+  debug: () => undefined,
+  warn: () => undefined,
+  error: () => undefined,
+};
+
+/* ── Per-key serialization ──────────────────────────────────────────────── */
+
+/** Runs work serially per key; independent keys still run concurrently. */
+export type KeyedSerializer = <T>(key: string, fn: () => Promise<T>) => Promise<T>;
+
+/**
+ * Build a per-key promise queue.
+ *
+ * Consumer mutations **must** go through this: `PUT /consumers/{id}` is a
+ * whole-resource replace with no concurrency token, so two concurrent
+ * GET→edit→PUT round trips would silently lose one ACL group change
+ * (`ref-edge-admin.md` §7.2).
+ *
+ * **Multi-instance caveat:** this serialises within one Node process only. A
+ * horizontally scaled Nexus needs either sticky routing per consumer or an
+ * external lock; until then, run one writer.
+ */
+export function createKeyedSerializer(): KeyedSerializer {
+  const queues = new Map<string, Promise<unknown>>();
+
+  return function serializePerKey<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const previous = queues.get(key) ?? Promise.resolve();
+    const result = previous.then(fn, fn);
+    const guard: Promise<void> = result
+      .then(
+        () => undefined,
+        () => undefined,
+      )
+      .then(() => {
+        if (queues.get(key) === guard) queues.delete(key);
+      });
+    queues.set(key, guard);
+    return result;
+  };
 }
 
-export interface FerrumCredential {
-  type: CredentialType;
-  data: Record<string, unknown>;
-  [key: string]: unknown;
+/* ── Client ─────────────────────────────────────────────────────────────── */
+
+/** Options for one Admin API call. */
+interface CallOptions {
+  /** JSON request body. */
+  body?: unknown;
+  /** Query string parameters; `undefined` values are dropped. */
+  query?: Record<string, string | number | boolean | undefined>;
+  /** Return `null` instead of throwing when Edge answers `404`. */
+  allow404?: boolean;
+  /** Additional statuses to treat as success (e.g. `409` for "already exists"). */
+  tolerate?: number[];
+  /** Override the JWT `sub` claim so Edge's audit log names the acting user. */
+  subject?: string;
 }
 
-export interface FerrumPlugin {
-  plugin_id?: string;
-  name: string;
-  config: Record<string, unknown>;
-  proxy_id?: string | null;
-  consumer_id?: string | null;
-  api_spec_id?: string | null;
-  enabled?: boolean;
-  [key: string]: unknown;
-}
-
-export interface FerrumApiSpec {
-  api_spec_id: string;
-  proxy_id: string;
-  title: string;
-  version: string;
-  description?: string | null;
-  contact?: { name?: string; email?: string; url?: string } | null;
-  tags?: string[];
-  servers?: { url: string }[];
-  operation_count?: number;
-  content_hash?: string;
-  namespace?: string;
-  [key: string]: unknown;
-}
-
+/** Typed client for the subset of the Ferrum Edge Admin API that Nexus uses. */
 export interface FerrumAdminClient {
-  health(): Promise<{ ok: boolean; details?: unknown }>;
+  /** Namespace sent in `X-Ferrum-Namespace` on every namespace-scoped call. */
+  readonly namespace: string;
+
+  /** Authenticated `GET /health` — reports `mode`, `ready`, `admin_writes_enabled`. */
+  health(): Promise<EdgeHealth>;
+  /** Unauthenticated `GET /live`. `true` when the gateway answered `200`. */
+  live(): Promise<boolean>;
+  /**
+   * Best-effort version probe. Edge has **no `/version` endpoint**
+   * (`ref-edge-admin.md` §10.5), so this returns `null` on a 404 rather than
+   * failing; take the real version from your deployment metadata.
+   */
+  version(): Promise<string | null>;
+  /** Combined reachability probe for `GET /api/health`; never throws. */
+  probe(): Promise<EdgeProbe>;
+
+  /** `GET /namespaces` — a list of name strings. */
   listNamespaces(): Promise<string[]>;
+  /**
+   * Make sure the configured namespace exists. Writing any resource with a new
+   * `X-Ferrum-Namespace` already isolates data, so a failure here is logged and
+   * swallowed rather than blocking startup.
+   */
+  ensureNamespace(description?: string): Promise<void>;
 
-  listApiSpecs(namespace?: string): Promise<FerrumApiSpec[]>;
-  getApiSpec(apiSpecId: string, namespace?: string): Promise<FerrumApiSpec | null>;
-  getApiSpecRaw(apiSpecId: string, namespace?: string): Promise<string | null>;
-  createApiSpec(
-    rawSpec: string,
-    contentType: 'application/json' | 'application/yaml',
-    namespace?: string,
-  ): Promise<FerrumApiSpec>;
-  replaceApiSpec(
-    apiSpecId: string,
-    rawSpec: string,
-    contentType: 'application/json' | 'application/yaml',
-    namespace?: string,
-  ): Promise<FerrumApiSpec>;
-  deleteApiSpec(apiSpecId: string, namespace?: string): Promise<void>;
+  readonly consumers: {
+    list(query?: EdgeListQuery): Promise<EdgePage<EdgeConsumer>>;
+    get(id: string): Promise<EdgeConsumer | null>;
+    /**
+     * Find a consumer by `username` by scanning `GET /consumers` pages — Edge
+     * has no username filter. Nexus normally reads the mapping from its own
+     * `consumers` table; this is the reconciliation path.
+     */
+    getByUsername(username: string): Promise<EdgeConsumer | null>;
+    create(body: EdgeConsumerWrite, subject?: string): Promise<EdgeConsumer>;
+    /**
+     * Whole-resource replace. **Always build the body from a `get()` response** —
+     * omitting `keyauth`/`jwt` deletes those credentials.
+     */
+    replace(id: string, body: EdgeConsumerWrite, subject?: string): Promise<EdgeConsumer>;
+    delete(id: string, subject?: string): Promise<void>;
+    /** Append one credential entry (rotation step 1). */
+    addCredential(
+      id: string,
+      type: EdgeCredentialType,
+      entry: EdgeCredentialEntry,
+      subject?: string,
+    ): Promise<EdgeConsumer>;
+    /** Replace every entry of a credential type. */
+    replaceCredentials(
+      id: string,
+      type: EdgeCredentialType,
+      entries: EdgeCredentialEntry[],
+      subject?: string,
+    ): Promise<EdgeConsumer>;
+    /** Remove one entry by 0-based index (rotation step 3); the array re-indexes. */
+    deleteCredentialAt(
+      id: string,
+      type: EdgeCredentialType,
+      index: number,
+      subject?: string,
+    ): Promise<EdgeConsumer>;
+    /** Remove a whole credential type. Idempotent for the built-in types. */
+    deleteCredentialType(id: string, type: EdgeCredentialType, subject?: string): Promise<void>;
+  };
 
-  getConsumer(consumerId: string, namespace?: string): Promise<FerrumConsumer | null>;
-  createConsumer(payload: {
-    username: string;
-    acl_groups?: string[];
-    namespace?: string;
-  }): Promise<FerrumConsumer>;
-  updateConsumer(
-    consumerId: string,
-    fields: Partial<FerrumConsumer>,
-    namespace?: string,
-  ): Promise<FerrumConsumer>;
-  deleteConsumer(consumerId: string, namespace?: string): Promise<void>;
+  readonly proxies: {
+    list(query?: EdgeListQuery): Promise<EdgePage<EdgeProxy>>;
+    get(id: string): Promise<EdgeProxy | null>;
+    create(body: EdgeProxyWrite, subject?: string): Promise<EdgeProxy>;
+    replace(id: string, body: EdgeProxyWrite, subject?: string): Promise<EdgeProxy>;
+    delete(id: string, subject?: string): Promise<void>;
+  };
 
-  appendCredential(
-    consumerId: string,
-    payload: FerrumCredential,
-    namespace?: string,
-  ): Promise<{ index: number; type: CredentialType }>;
-  deleteCredential(
-    consumerId: string,
-    type: CredentialType,
-    index: number,
-    namespace?: string,
-  ): Promise<void>;
+  readonly pluginConfigs: {
+    list(query?: EdgeListQuery): Promise<EdgePage<EdgePluginConfig>>;
+    /** Every plugin config attached to one proxy (client-side filtered). */
+    listByProxy(proxyId: string): Promise<EdgePluginConfig[]>;
+    get(id: string): Promise<EdgePluginConfig | null>;
+    create(body: EdgePluginConfigWrite, subject?: string): Promise<EdgePluginConfig>;
+    replace(id: string, body: EdgePluginConfigWrite, subject?: string): Promise<EdgePluginConfig>;
+    delete(id: string, subject?: string): Promise<void>;
+  };
 
-  upsertPlugin(payload: FerrumPlugin, namespace?: string): Promise<FerrumPlugin>;
-  deletePlugin(pluginId: string, namespace?: string): Promise<void>;
+  /** Serialise work per consumer id — see {@link createKeyedSerializer}. */
+  serializePerKey: KeyedSerializer;
+
+  /** Release the undici dispatcher. */
+  close(): Promise<void>;
 }
 
-export function createFerrumAdminClient(
-  config: ResolvedConfig,
-  logger: Logger,
-): FerrumAdminClient {
-  const baseUrl = config.ferrum.adminUrl.replace(/\/$/, '');
-  const dispatcher: Dispatcher | undefined =
-    config.ferrum.caPath && baseUrl.startsWith('https://')
-      ? new UndiciAgent({ connect: { ca: readFileSync(config.ferrum.caPath, 'utf8') } })
-      : undefined;
+const MAX_CONSUMER_SCAN_PAGES = 20;
+const CONSUMER_SCAN_PAGE_SIZE = 500;
 
-  async function request<T>(
-    method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
-    path: string,
-    init: {
-      namespace?: string;
-      body?: string | null;
-      contentType?: string;
-      acceptText?: boolean;
-    } = {},
-  ): Promise<T> {
-    const token = await getAdminToken(config.ferrum);
-    const headers: Record<string, string> = {
-      authorization: `Bearer ${token}`,
-      accept: init.acceptText ? 'text/plain' : 'application/json',
-      [FERRUM_NAMESPACE_HEADER]: init.namespace ?? config.ferrum.defaultNamespace,
-    };
-    if (init.contentType) headers['content-type'] = init.contentType;
-    const url = `${baseUrl}${path}`;
-    const start = Date.now();
-    const res = await fetch(url, {
-      method,
-      headers,
-      body: init.body ?? null,
-      signal: AbortSignal.timeout(30_000),
-      ...(dispatcher && { dispatcher }),
-    }).catch((err) => {
-      logger.error({ err, url, method }, 'ferrum admin request failed');
-      throw upstreamError('Cannot reach Ferrum Edge Admin API', { url });
-    });
-    const ms = Date.now() - start;
-    logger.debug({ url, method, status: res.status, ms }, 'ferrum admin request');
-    if (res.status === 401 || res.status === 403) {
-      invalidateAdminToken();
-      const body = await res.text().catch(() => '');
-      throw upstreamError(`Ferrum Admin API rejected token: ${res.status}`, body);
+function buildDispatcher(config: EdgeConfig): Dispatcher {
+  const isHttps = config.adminUrl.startsWith('https://');
+  let ca: string | undefined;
+  if (config.caFile) {
+    try {
+      ca = readFileSync(config.caFile, 'utf8');
+    } catch (cause) {
+      throw internal('FERRUM_ADMIN_CA_FILE could not be read', cause);
     }
-    if (res.status === 404) {
-      return null as unknown as T;
+  }
+  return new Agent({
+    connect: {
+      timeout: config.timeoutMs,
+      ...(isHttps && ca ? { ca } : {}),
+    },
+    headersTimeout: Math.max(config.timeoutMs, 30_000),
+    bodyTimeout: Math.max(config.timeoutMs, 30_000),
+    keepAliveTimeout: 10_000,
+    keepAliveMaxTimeout: 60_000,
+  });
+}
+
+function isUnavailable(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === 'AbortError' || error.name === 'TimeoutError') return true;
+  const code = (error as NodeJS.ErrnoException).code;
+  if (typeof code === 'string') {
+    return (
+      code.startsWith('E') ||
+      code === 'UND_ERR_CONNECT_TIMEOUT' ||
+      code === 'UND_ERR_HEADERS_TIMEOUT' ||
+      code === 'UND_ERR_BODY_TIMEOUT' ||
+      code === 'UND_ERR_SOCKET'
+    );
+  }
+  return error.message.includes('fetch failed');
+}
+
+/** Build the Ferrum Edge Admin API client. */
+export function createFerrumAdminClient(
+  config: EdgeConfig,
+  logger: EdgeLogger = silentEdgeLogger,
+  deps: { minter?: AdminTokenMinter; dispatcher?: Dispatcher } = {},
+): FerrumAdminClient {
+  const minter = deps.minter ?? createAdminTokenMinter(config);
+  const dispatcher = deps.dispatcher ?? buildDispatcher(config);
+  const serializePerKey = createKeyedSerializer();
+  const namespace = config.namespace;
+
+  function urlFor(path: string, query?: CallOptions['query']): string {
+    const url = new URL(config.adminUrl + path);
+    for (const [key, value] of Object.entries(query ?? {})) {
+      if (value !== undefined) url.searchParams.set(key, String(value));
     }
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new ApiError(502, 'ferrum_error', `Ferrum Edge returned ${res.status}`, body);
-    }
-    if (res.status === 204) return undefined as unknown as T;
-    if (init.acceptText) return (await res.text()) as unknown as T;
-    if (res.headers.get('content-type')?.includes('application/json')) {
-      return (await res.json()) as T;
-    }
-    return (await res.text()) as unknown as T;
+    return url.toString();
   }
 
-  // URL-encode each path segment so a malformed/hostile ID can never inject
-  // additional path components (`../`, `?`, etc.) into the Admin API URL.
-  const seg = (value: string | number): string => encodeURIComponent(String(value));
+  async function call<T>(
+    method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+    path: string,
+    options: CallOptions = {},
+  ): Promise<T | null> {
+    const token = await minter.getToken(options.subject ?? DEFAULT_ADMIN_SUBJECT);
+    const url = urlFor(path, options.query);
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${token}`,
+      'x-ferrum-namespace': namespace,
+      accept: 'application/json',
+    };
+    const hasBody = options.body !== undefined;
+    if (hasBody) headers['content-type'] = 'application/json';
+
+    let statusCode: number;
+    let raw: string;
+    try {
+      const response = await request(url, {
+        method,
+        headers,
+        dispatcher,
+        ...(hasBody ? { body: JSON.stringify(options.body) } : {}),
+        signal: AbortSignal.timeout(config.timeoutMs),
+      });
+      statusCode = response.statusCode;
+      raw = await response.body.text();
+    } catch (cause) {
+      logger.error(
+        { method, path, code: (cause as NodeJS.ErrnoException).code ?? null },
+        'Ferrum Edge Admin API is unreachable',
+      );
+      if (isUnavailable(cause)) throw edgeUnavailable(undefined, cause);
+      throw edgeUnavailable('The Ferrum Edge Admin API request failed', cause);
+    }
+
+    if (statusCode === 404 && options.allow404) return null;
+    if (statusCode === 204 || raw.trim() === '') {
+      if (statusCode >= 400 && !(options.tolerate ?? []).includes(statusCode)) {
+        throw classify(statusCode, null, method, path);
+      }
+      return null;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = null;
+    }
+
+    if (statusCode >= 400 && !(options.tolerate ?? []).includes(statusCode)) {
+      throw classify(statusCode, parsed, method, path);
+    }
+    return parsed as T;
+  }
+
+  function classify(status: number, parsed: unknown, method: string, path: string): Error {
+    const body = (parsed ?? {}) as { error?: unknown; applied?: unknown; reason?: unknown };
+    const upstream = typeof body.error === 'string' ? body.error : `HTTP ${status}`;
+    logger.error(
+      { method, path, status, upstream, reason: body.reason ?? null },
+      'Ferrum Edge Admin API returned an error',
+    );
+
+    if (status === 503 && body.applied === false) {
+      return edgeError(
+        'The gateway accepted the change but has not applied it yet; do not retry — verify the gateway configuration and try again once it recovers',
+        { status, reason: typeof body.reason === 'string' ? body.reason : null },
+      );
+    }
+    if (status === 401 || status === 403) {
+      return edgeError('The gateway rejected the Nexus admin credentials', { status });
+    }
+    return edgeError('The gateway rejected the request', { status });
+  }
+
+  /** Same as `call`, for endpoints that must return a body. */
+  async function callRequired<T>(
+    method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+    path: string,
+    options: CallOptions = {},
+  ): Promise<T> {
+    const result = await call<T>(method, path, options);
+    if (result === null || result === undefined) {
+      throw edgeError('The gateway returned an empty response where one was expected');
+    }
+    return result;
+  }
 
   return {
-    async health() {
+    namespace,
+
+    async health(): Promise<EdgeHealth> {
+      return callRequired<EdgeHealth>('GET', '/health');
+    },
+
+    async live(): Promise<boolean> {
+      const result = await call<{ status?: string }>('GET', '/live', { allow404: true });
+      return result !== null;
+    },
+
+    async version(): Promise<string | null> {
+      const result = await call<{ version?: unknown }>('GET', '/version', {
+        allow404: true,
+        tolerate: [404, 405],
+      });
+      const version = (result ?? {}).version;
+      return typeof version === 'string' ? version : null;
+    },
+
+    async probe(): Promise<EdgeProbe> {
+      const started = Date.now();
       try {
-        const data = await request<unknown>('GET', '/health');
-        return { ok: true, details: data };
-      } catch (err) {
-        return { ok: false, details: err instanceof Error ? err.message : err };
+        const health = await this.health();
+        let version: string | null = null;
+        try {
+          version = await this.version();
+        } catch {
+          version = null;
+        }
+        return {
+          reachable: true,
+          latencyMs: Date.now() - started,
+          mode: typeof health.mode === 'string' ? health.mode : null,
+          adminWritesEnabled:
+            typeof health.admin_writes_enabled === 'boolean' ? health.admin_writes_enabled : null,
+          version,
+          error: null,
+        };
+      } catch (error) {
+        return {
+          reachable: false,
+          latencyMs: Date.now() - started,
+          mode: null,
+          adminWritesEnabled: null,
+          version: null,
+          error: error instanceof Error ? error.message : 'unknown error',
+        };
       }
     },
-    async listNamespaces() {
-      const res = await request<{ namespaces: string[] } | string[]>('GET', '/namespaces');
-      return Array.isArray(res) ? res : res.namespaces ?? [];
-    },
-    async listApiSpecs(namespace) {
-      const res = await request<{ items: FerrumApiSpec[] } | FerrumApiSpec[]>(
-        'GET',
-        '/api-specs',
-        { namespace },
-      );
-      return Array.isArray(res) ? res : res.items ?? [];
-    },
-    async getApiSpec(apiSpecId, namespace) {
-      return request<FerrumApiSpec | null>('GET', `/api-specs/${seg(apiSpecId)}`, { namespace });
-    },
-    async getApiSpecRaw(apiSpecId, namespace) {
-      return request<string | null>('GET', `/api-specs/${seg(apiSpecId)}/raw`, {
-        namespace,
-        acceptText: true,
+
+    async listNamespaces(): Promise<string[]> {
+      const page = await callRequired<EdgePage<string>>('GET', '/namespaces', {
+        query: { limit: 1000 },
       });
+      return Array.isArray(page.data) ? page.data : [];
     },
-    async createApiSpec(rawSpec, contentType, namespace) {
-      return request<FerrumApiSpec>('POST', '/api-specs', {
-        namespace,
-        body: rawSpec,
-        contentType,
-      });
+
+    async ensureNamespace(description?: string): Promise<void> {
+      try {
+        const existing = await call<unknown>(
+          'GET',
+          `/namespaces/${encodeURIComponent(namespace)}`,
+          {
+            allow404: true,
+          },
+        );
+        if (existing !== null) return;
+        await call('POST', '/namespaces', {
+          body: { name: namespace, ...(description ? { description } : {}) },
+          // 409: created concurrently. 501: MongoDB standalone refuses namespace writes.
+          tolerate: [409, 501],
+        });
+      } catch (error) {
+        // Namespaces are created implicitly by the first resource write, so a
+        // failure here must not block startup.
+        logger.warn(
+          { namespace, error: error instanceof Error ? error.message : String(error) },
+          'Could not pre-create the Ferrum namespace; it will be created implicitly',
+        );
+      }
     },
-    async replaceApiSpec(apiSpecId, rawSpec, contentType, namespace) {
-      return request<FerrumApiSpec>('PUT', `/api-specs/${seg(apiSpecId)}`, {
-        namespace,
-        body: rawSpec,
-        contentType,
-      });
+
+    consumers: {
+      async list(query?: EdgeListQuery): Promise<EdgePage<EdgeConsumer>> {
+        return callRequired<EdgePage<EdgeConsumer>>('GET', '/consumers', { query: { ...query } });
+      },
+
+      async get(id: string): Promise<EdgeConsumer | null> {
+        return call<EdgeConsumer>('GET', `/consumers/${encodeURIComponent(id)}`, {
+          allow404: true,
+        });
+      },
+
+      async getByUsername(username: string): Promise<EdgeConsumer | null> {
+        for (let pageIndex = 0; pageIndex < MAX_CONSUMER_SCAN_PAGES; pageIndex += 1) {
+          const page = await callRequired<EdgePage<EdgeConsumer>>('GET', '/consumers', {
+            query: { limit: CONSUMER_SCAN_PAGE_SIZE, offset: pageIndex * CONSUMER_SCAN_PAGE_SIZE },
+          });
+          const items = Array.isArray(page.data) ? page.data : [];
+          // access_control matches usernames byte-for-byte, so this does too.
+          const match = items.find((consumer) => consumer.username === username);
+          if (match) return match;
+          const total = page.pagination?.total ?? items.length;
+          if ((pageIndex + 1) * CONSUMER_SCAN_PAGE_SIZE >= total || items.length === 0) return null;
+        }
+        return null;
+      },
+
+      async create(body: EdgeConsumerWrite, subject?: string): Promise<EdgeConsumer> {
+        return callRequired<EdgeConsumer>('POST', '/consumers', { body, subject });
+      },
+
+      async replace(id: string, body: EdgeConsumerWrite, subject?: string): Promise<EdgeConsumer> {
+        return callRequired<EdgeConsumer>('PUT', `/consumers/${encodeURIComponent(id)}`, {
+          body,
+          subject,
+        });
+      },
+
+      async delete(id: string, subject?: string): Promise<void> {
+        await call('DELETE', `/consumers/${encodeURIComponent(id)}`, { subject });
+      },
+
+      async addCredential(
+        id: string,
+        type: EdgeCredentialType,
+        entry: EdgeCredentialEntry,
+        subject?: string,
+      ): Promise<EdgeConsumer> {
+        return callRequired<EdgeConsumer>(
+          'POST',
+          `/consumers/${encodeURIComponent(id)}/credentials/${type}`,
+          { body: entry, subject },
+        );
+      },
+
+      async replaceCredentials(
+        id: string,
+        type: EdgeCredentialType,
+        entries: EdgeCredentialEntry[],
+        subject?: string,
+      ): Promise<EdgeConsumer> {
+        return callRequired<EdgeConsumer>(
+          'PUT',
+          `/consumers/${encodeURIComponent(id)}/credentials/${type}`,
+          { body: entries, subject },
+        );
+      },
+
+      async deleteCredentialAt(
+        id: string,
+        type: EdgeCredentialType,
+        index: number,
+        subject?: string,
+      ): Promise<EdgeConsumer> {
+        return callRequired<EdgeConsumer>(
+          'DELETE',
+          `/consumers/${encodeURIComponent(id)}/credentials/${type}/${index}`,
+          { subject },
+        );
+      },
+
+      async deleteCredentialType(
+        id: string,
+        type: EdgeCredentialType,
+        subject?: string,
+      ): Promise<void> {
+        await call('DELETE', `/consumers/${encodeURIComponent(id)}/credentials/${type}`, {
+          subject,
+        });
+      },
     },
-    async deleteApiSpec(apiSpecId, namespace) {
-      await request<void>('DELETE', `/api-specs/${seg(apiSpecId)}`, { namespace });
+
+    proxies: {
+      async list(query?: EdgeListQuery): Promise<EdgePage<EdgeProxy>> {
+        return callRequired<EdgePage<EdgeProxy>>('GET', '/proxies', { query: { ...query } });
+      },
+      async get(id: string): Promise<EdgeProxy | null> {
+        return call<EdgeProxy>('GET', `/proxies/${encodeURIComponent(id)}`, { allow404: true });
+      },
+      async create(body: EdgeProxyWrite, subject?: string): Promise<EdgeProxy> {
+        return callRequired<EdgeProxy>('POST', '/proxies', { body, subject });
+      },
+      async replace(id: string, body: EdgeProxyWrite, subject?: string): Promise<EdgeProxy> {
+        return callRequired<EdgeProxy>('PUT', `/proxies/${encodeURIComponent(id)}`, {
+          body,
+          subject,
+        });
+      },
+      async delete(id: string, subject?: string): Promise<void> {
+        await call('DELETE', `/proxies/${encodeURIComponent(id)}`, { subject, allow404: true });
+      },
     },
-    async getConsumer(consumerId, namespace) {
-      return request<FerrumConsumer | null>('GET', `/consumers/${seg(consumerId)}`, { namespace });
+
+    pluginConfigs: {
+      async list(query?: EdgeListQuery): Promise<EdgePage<EdgePluginConfig>> {
+        return callRequired<EdgePage<EdgePluginConfig>>('GET', '/plugins/config', {
+          query: { ...query },
+        });
+      },
+      async listByProxy(proxyId: string): Promise<EdgePluginConfig[]> {
+        const page = await callRequired<EdgePage<EdgePluginConfig>>('GET', '/plugins/config', {
+          query: { limit: 1000 },
+        });
+        const items = Array.isArray(page.data) ? page.data : [];
+        return items.filter((config) => config.proxy_id === proxyId);
+      },
+      async get(id: string): Promise<EdgePluginConfig | null> {
+        return call<EdgePluginConfig>('GET', `/plugins/config/${encodeURIComponent(id)}`, {
+          allow404: true,
+        });
+      },
+      async create(body: EdgePluginConfigWrite, subject?: string): Promise<EdgePluginConfig> {
+        return callRequired<EdgePluginConfig>('POST', '/plugins/config', { body, subject });
+      },
+      async replace(
+        id: string,
+        body: EdgePluginConfigWrite,
+        subject?: string,
+      ): Promise<EdgePluginConfig> {
+        return callRequired<EdgePluginConfig>('PUT', `/plugins/config/${encodeURIComponent(id)}`, {
+          body,
+          subject,
+        });
+      },
+      async delete(id: string, subject?: string): Promise<void> {
+        await call('DELETE', `/plugins/config/${encodeURIComponent(id)}`, {
+          subject,
+          allow404: true,
+        });
+      },
     },
-    async createConsumer(payload) {
-      return request<FerrumConsumer>('POST', '/consumers', {
-        namespace: payload.namespace,
-        body: JSON.stringify({ username: payload.username, acl_groups: payload.acl_groups ?? [] }),
-        contentType: 'application/json',
-      });
-    },
-    async updateConsumer(consumerId, fields, namespace) {
-      return request<FerrumConsumer>('PATCH', `/consumers/${seg(consumerId)}`, {
-        namespace,
-        body: JSON.stringify(fields),
-        contentType: 'application/json',
-      });
-    },
-    async deleteConsumer(consumerId, namespace) {
-      await request<void>('DELETE', `/consumers/${seg(consumerId)}`, { namespace });
-    },
-    async appendCredential(consumerId, payload, namespace) {
-      return request<{ index: number; type: CredentialType }>(
-        'POST',
-        `/consumers/${seg(consumerId)}/credentials/${seg(payload.type)}`,
-        {
-          namespace,
-          body: JSON.stringify(payload.data),
-          contentType: 'application/json',
-        },
-      );
-    },
-    async deleteCredential(consumerId, type, index, namespace) {
-      await request<void>(
-        'DELETE',
-        `/consumers/${seg(consumerId)}/credentials/${seg(type)}/${seg(index)}`,
-        { namespace },
-      );
-    },
-    async upsertPlugin(payload, namespace) {
-      const path = payload.plugin_id ? `/plugins/${seg(payload.plugin_id)}` : '/plugins';
-      const method = payload.plugin_id ? 'PUT' : 'POST';
-      return request<FerrumPlugin>(method, path, {
-        namespace,
-        body: JSON.stringify(payload),
-        contentType: 'application/json',
-      });
-    },
-    async deletePlugin(pluginId, namespace) {
-      await request<void>('DELETE', `/plugins/${seg(pluginId)}`, { namespace });
+
+    serializePerKey,
+
+    async close(): Promise<void> {
+      if (deps.dispatcher) return;
+      await dispatcher.close();
     },
   };
 }

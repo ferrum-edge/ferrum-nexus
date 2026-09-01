@@ -1,182 +1,553 @@
-import 'dotenv/config';
+/**
+ * Composition root.
+ *
+ * `buildServer(config, deps)` wires the whole BFF and returns the Fastify
+ * instance; `main()` runs it. Nothing here contains business logic — services
+ * are constructed in the COMPOSITION section below and handed to route plugins
+ * through their registration options, so adding a feature is:
+ *
+ *   1. write `<domain>/service.ts` exporting `create<Domain>Service(deps)`;
+ *   2. construct it in "COMPOSITION — services";
+ *   3. register its route plugin in "COMPOSITION — routes".
+ *
+ * No route file ever imports a service module directly.
+ */
+
+import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import Fastify from 'fastify';
-import fastifyCookie from '@fastify/cookie';
-import fastifyCors from '@fastify/cors';
-import fastifyHelmet from '@fastify/helmet';
-import fastifyRateLimit from '@fastify/rate-limit';
-import fastifySensible from '@fastify/sensible';
-import fastifyStatic from '@fastify/static';
-import { loadConfig } from './config/index.js';
-import { createLogger, loggerConfig } from './lib/logger.js';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+import cookie from '@fastify/cookie';
+import helmet from '@fastify/helmet';
+import rateLimit from '@fastify/rate-limit';
+import Fastify, { type FastifyInstance } from 'fastify';
+
+import { createAccessService, type AccessService } from './access/service.js';
+import { createGodService, type GodService } from './admin/god-service.js';
+import { createMassEmailService, type MassEmailService } from './admin/mass-email-service.js';
+import { createSettingsService, type SettingsService } from './admin/settings-service.js';
+import { createAuditService, type AuditService } from './audit/service.js';
+import {
+  createCaptchaService,
+  type CaptchaService,
+  type CaptchaTransport,
+} from './auth/captcha.js';
+import { createAuthService, type AuthService, type OnRegistered } from './auth/service.js';
+import { createCatalogService, type CatalogService } from './catalog/service.js';
+import { loadConfig, type NexusConfig } from './config/index.js';
+import { createConsumerProvisioner } from './credentials/consumers.js';
+import { createCredentialsService, type CredentialsService } from './credentials/service.js';
 import { createStore } from './db/index.js';
-import { createFerrumAdminClient } from './ferrum-admin/client.js';
-import { createSessionService } from './auth/session.js';
-import { createUsersService } from './users/service.js';
-import { createOrganizationsService } from './organizations/service.js';
-import { createCatalogService } from './api-catalog/service.js';
-import { createPublishingService } from './api-publishing/service.js';
-import { createCredentialsService } from './credentials/service.js';
-import { createAccessRequestsService } from './access-requests/service.js';
-import { createGrantsService } from './grants/service.js';
-import { createMessagingService } from './messaging/service.js';
-import { createNotificationService } from './notifications/service.js';
-import { createEmailService } from './email/service.js';
-import { createAuditService } from './audit/service.js';
-import { createSettingsService } from './admin/settings-service.js';
-import { createMassEmailService } from './admin/mass-email-service.js';
-import { createDriftService } from './drift/service.js';
+import type { NexusStore } from './db/store.js';
+import {
+  createEmailService,
+  createSmtpTransport,
+  type EmailService,
+  type MailTransportFactory,
+} from './email/service.js';
+import { createOutboxWorker, type OutboxWorker } from './email/outbox-worker.js';
+import { createFerrumAdmin, type FerrumAdminClient } from './ferrum-admin/index.js';
+import { createCrypto, type NexusCrypto } from './lib/crypto.js';
+import { isNexusError } from './lib/errors.js';
+import { buildLoggerOptions, type LoggerOptions } from './lib/logger.js';
+import { createMessagingService, type MessagingService } from './messaging/service.js';
 import { registerAuthPlugin } from './middleware/auth-plugin.js';
 import { registerErrorHandler } from './middleware/error-handler.js';
-import { registerAuthRoutes } from './routes/auth.js';
-import { registerCatalogRoutes } from './routes/catalog.js';
-import { registerClientRoutes } from './routes/client.js';
-import { registerProviderRoutes } from './routes/provider.js';
-import { registerMessageRoutes } from './routes/messages.js';
-import { registerNotificationRoutes } from './routes/notifications.js';
-import { registerAdminRoutes } from './routes/admin.js';
-import { existsSync } from 'node:fs';
+import { createNotificationsService, type NotificationsService } from './notifications/service.js';
+import { createPublishingService, type PublishingService } from './publishing/service.js';
+import { accessRequestRoutes, grantRoutes } from './routes/access.js';
+import { adminRoutes } from './routes/admin.js';
+import { authRoutes } from './routes/auth.js';
+import { brandingRoutes } from './routes/branding.js';
+import { catalogRoutes } from './routes/catalog.js';
+import { credentialsRoutes } from './routes/credentials.js';
+import { healthRoutes } from './routes/health.js';
+import { messagingRoutes } from './routes/messaging.js';
+import { notificationsRoutes } from './routes/notifications.js';
+import { publishingRoutes } from './routes/publishing.js';
+import { organizationRoutes, usersRoutes } from './routes/users.js';
+import { createUsersService, type UsersService } from './users/service.js';
 
-async function main(): Promise<void> {
-  const config = loadConfig();
-  const logger = createLogger(config.nodeEnv);
-
-  logger.info({ driver: config.db.driver }, 'starting Ferrum Nexus');
-
-  const store = await createStore(config);
-  // Migrate at startup so the operator doesn't need to remember to run it.
-  await store.migrate();
-
-  const ferrum = createFerrumAdminClient(config, logger);
-  const sessions = createSessionService(config, store);
-  const audit = createAuditService(store);
-  const notifications = createNotificationService(store);
-  const email = createEmailService(config, store, logger);
-  await email.seedTemplates();
-  email.startWorker();
-
-  const users = createUsersService(config, store, email, audit, notifications);
-  const organizations = createOrganizationsService(store);
-  const settings = createSettingsService(config, store);
-  const catalog = createCatalogService(store);
-  const publishing = createPublishingService(config, store, ferrum, audit);
-  const credentials = createCredentialsService(
-    config,
-    store,
-    ferrum,
-    audit,
-    notifications,
-    email,
-  );
-  const accessRequests = createAccessRequestsService(
-    config,
-    store,
-    credentials,
-    audit,
-    notifications,
-    email,
-  );
-  const grants = createGrantsService(store);
-  const messaging = createMessagingService(store, notifications, email);
-  const massEmail = createMassEmailService(store, email, config);
-  const drift = createDriftService(store, ferrum);
-
-  const app = Fastify({
-    logger: loggerConfig(config.nodeEnv),
-    trustProxy: config.trustProxy,
-    // 256 KiB by default. OAS spec uploads override this on a per-route basis
-    // (see SPEC_UPLOAD_LIMIT in routes/provider.ts); the default protects the
-    // remaining JSON endpoints from oversized bodies.
-    bodyLimit: 256 * 1024,
-  });
-
-  await app.register(fastifySensible);
-  await app.register(fastifyCookie);
-  await app.register(fastifyHelmet, {
-    contentSecurityPolicy: false, // CSP is configured at the SPA layer if served externally.
-    crossOriginEmbedderPolicy: false,
-  });
-  await app.register(fastifyCors, {
-    origin: config.corsOrigins
-      ? config.corsOrigins.split(',').map((s) => s.trim()).filter(Boolean)
-      : [config.publicUrl],
-    credentials: true,
-  });
-  await app.register(fastifyRateLimit, {
-    global: true,
-    max: 600,
-    timeWindow: '1 minute',
-  });
-
-  registerErrorHandler(app);
-  registerAuthPlugin(app, sessions);
-
-  await registerAuthRoutes(app, { config, users, sessions, settings });
-  await registerCatalogRoutes(app, { catalog, accessRequests, store });
-  await registerClientRoutes(app, { accessRequests, grants, credentials });
-  await registerProviderRoutes(app, {
-    publishing,
-    catalog,
-    accessRequests,
-    grants,
-    credentials,
-    messaging,
-    store,
-  });
-  await registerMessageRoutes(app, { messaging });
-  await registerNotificationRoutes(app, { notifications });
-  await registerAdminRoutes(app, {
-    users,
-    organizations,
-    audit,
-    settings,
-    massEmail,
-    drift,
-    publishing,
-    accessRequests,
-    catalog,
-    store,
-  });
-
-  app.get('/api/health', async () => {
-    const edge = await ferrum.health().catch(() => ({ ok: false, details: 'unreachable' }));
-    return { ok: true, edge, time: new Date().toISOString() };
-  });
-
-  // Serve the SPA in production. In dev the Vite server proxies /api here.
-  const spaDir = resolve(process.cwd(), 'web/dist');
-  if (existsSync(spaDir)) {
-    await app.register(fastifyStatic, { root: spaDir, prefix: '/' });
-    app.setNotFoundHandler(async (req, reply) => {
-      if (req.raw.url?.startsWith('/api/')) {
-        reply.status(404).send({ error: { code: 'not_found', message: 'Not found' } });
-        return;
-      }
-      return reply.type('text/html').sendFile('index.html', spaDir);
-    });
-  }
-
-  const cleanupExpiredSessions = (): void => {
-    store.sessions
-      .cleanupExpired(new Date().toISOString())
-      .catch((err) => logger.warn({ err }, 'session cleanup failed'));
-  };
-  setInterval(cleanupExpiredSessions, 60_000).unref();
-
-  await app.listen({ host: config.host, port: config.port });
-
-  const shutdown = async (signal: string): Promise<void> => {
-    logger.info({ signal }, 'shutting down');
-    await app.close();
-    await store.close();
-    process.exit(0);
-  };
-  process.on('SIGTERM', () => void shutdown('SIGTERM'));
-  process.on('SIGINT', () => void shutdown('SIGINT'));
+/** Services composed by {@link buildServer} and exposed for tests. */
+export interface NexusServices {
+  audit: AuditService;
+  captcha: CaptchaService;
+  auth: AuthService;
+  email: EmailService;
+  /** Background sender; `tick()` runs one cycle deterministically in tests. */
+  outbox: OutboxWorker;
+  notifications: NotificationsService;
+  settings: SettingsService;
+  users: UsersService;
+  messaging: MessagingService;
+  massEmail: MassEmailService;
+  catalog: CatalogService;
+  credentials: CredentialsService;
+  publishing: PublishingService;
+  access: AccessService;
+  god: GodService;
 }
 
-main().catch((err) => {
-  // eslint-disable-next-line no-console
-  console.error(err);
-  process.exit(1);
-});
+/** Everything `buildServer` hangs off the Fastify instance. */
+export interface NexusContext {
+  config: NexusConfig;
+  store: NexusStore;
+  edge: FerrumAdminClient;
+  crypto: NexusCrypto;
+  services: NexusServices;
+}
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    /** Config, store, Edge client, crypto helper and every composed service. */
+    nexus: NexusContext;
+  }
+}
+
+/** Injectable dependencies; tests substitute the store, Edge client and logger. */
+export interface BuildServerDeps {
+  store: NexusStore;
+  edge: FerrumAdminClient;
+  /** Defaults to one derived from `config.secretKey`. */
+  crypto?: NexusCrypto;
+  /** Defaults to `buildLoggerOptions(config)`. */
+  logger?: LoggerOptions;
+  /** Replace the post-registration hook (which enqueues the verification email). */
+  onRegistered?: OnRegistered;
+  /** Override the CAPTCHA vendor call in tests. */
+  captchaTransport?: CaptchaTransport;
+  /** Replace the SMTP transport used by the outbox worker and the SMTP test. */
+  mailTransportFactory?: MailTransportFactory;
+  /**
+   * Start the outbox poller. Defaults to `false` under `NEXUS_ENV=test`, where
+   * tests drive `services.outbox.tick()` themselves, and `true` elsewhere.
+   */
+  startOutboxWorker?: boolean;
+  /** Serve the built SPA. Defaults to "yes when the dist directory exists". */
+  serveStatic?: boolean;
+}
+
+/** Rate limit applied to `/api/auth/*` when `config.rateLimitEnabled` is true. */
+export const AUTH_RATE_LIMIT = { max: 20, timeWindow: '1 minute' } as const;
+
+/**
+ * Translate `config.trustedProxies` into a value Fastify accepts.
+ *
+ * A hop count becomes a `TrustProxyFunction` rather than being passed through:
+ * this Fastify version maps a numeric `trustProxy` to "trust nothing"
+ * (`lib/request.js`), which would silently stop honouring `X-Forwarded-For`
+ * for anyone who set it. `(_, hop) => hop < hops` is the semantics
+ * `proxy-addr` — and Express's numeric `trust proxy` — implement: walk that
+ * many entries in from the right and stop.
+ *
+ * `true` is deliberately unreachable, because it makes `request.ip` the
+ * left-most `X-Forwarded-For` entry, which the client writes.
+ */
+export function fastifyTrustProxy(
+  trusted: NexusConfig['trustedProxies'],
+): boolean | string[] | ((address: string, hop: number) => boolean) {
+  if (trusted === false) return false;
+  if (typeof trusted === 'number') return (_address, hop) => hop < trusted;
+  return trusted;
+}
+
+/** Directory of the built SPA, when there is one. */
+function resolveWebDist(config: NexusConfig): string | null {
+  const candidates = [
+    config.webDistPath,
+    resolve(fileURLToPath(new URL('.', import.meta.url)), '..', '..', 'web', 'dist'),
+    resolve(process.cwd(), 'web', 'dist'),
+  ].filter((candidate): candidate is string => typeof candidate === 'string');
+  for (const candidate of candidates) {
+    if (existsSync(resolve(candidate, 'index.html'))) return resolve(candidate);
+  }
+  return null;
+}
+
+/** Build the Fastify server. The caller owns `store.init()`/`store.migrate()`. */
+export async function buildServer(
+  config: NexusConfig,
+  deps: BuildServerDeps,
+): Promise<FastifyInstance> {
+  const crypto = deps.crypto ?? createCrypto(config.secretKey);
+  const app = Fastify({
+    logger: deps.logger ?? buildLoggerOptions(config),
+    trustProxy: fastifyTrustProxy(config.trustedProxies),
+    bodyLimit: 4 * 1024 * 1024,
+  });
+
+  /* ── COMPOSITION — services ─────────────────────────────────────────────
+   * Construct every service exactly once, in dependency order. Services take
+   * an explicit dependency object; none of them reads process.env.
+   */
+  const warn = (obj: Record<string, unknown>, message: string): void => app.log.warn(obj, message);
+
+  const audit = createAuditService(deps.store);
+  const captcha = createCaptchaService({
+    store: deps.store,
+    crypto,
+    ...(deps.captchaTransport ? { transport: deps.captchaTransport } : {}),
+    log: warn,
+  });
+  const email = createEmailService({
+    config,
+    store: deps.store,
+    crypto,
+    log: warn,
+    ...(deps.mailTransportFactory ? { transportFactory: deps.mailTransportFactory } : {}),
+  });
+  const notifications = createNotificationsService({ store: deps.store });
+  const auth = createAuthService({
+    config,
+    store: deps.store,
+    crypto,
+    audit,
+    captcha,
+    onRegistered: deps.onRegistered ?? defaultOnRegistered(config, email, notifications, warn),
+  });
+  const settings = createSettingsService({ config, store: deps.store, crypto, audit, auth });
+  const messaging = createMessagingService({
+    config,
+    store: deps.store,
+    notifications,
+    email,
+    audit,
+    log: warn,
+  });
+  const massEmail = createMassEmailService({ store: deps.store, email, audit });
+
+  // ── Gateway workflow ────────────────────────────────────────────────────
+  // One consumer provisioner is shared by credentials and access so both
+  // mutate the same Edge consumer through the same per-consumer queue.
+  const provisioner = createConsumerProvisioner({
+    config,
+    store: deps.store,
+    edge: deps.edge,
+  });
+  const catalog = createCatalogService({ store: deps.store });
+  const credentials = createCredentialsService({
+    config,
+    store: deps.store,
+    edge: deps.edge,
+    crypto,
+    audit,
+    notifications,
+    email,
+    provisioner,
+  });
+  // Users is composed after credentials: disabling an account has to strip the
+  // gateway identity, not merely the browser session.
+  const users = createUsersService({
+    store: deps.store,
+    crypto,
+    audit,
+    notifications,
+    auth,
+    credentials,
+    log: warn,
+  });
+  const publishing = createPublishingService({
+    config,
+    store: deps.store,
+    edge: deps.edge,
+    audit,
+    notifications,
+    credentials,
+  });
+  const access = createAccessService({
+    config,
+    store: deps.store,
+    audit,
+    notifications,
+    email,
+    provisioner,
+    log: warn,
+  });
+  const god = createGodService({
+    store: deps.store,
+    audit,
+    notifications,
+    email,
+    massEmail,
+    access,
+    publishing,
+    credentials,
+    log: warn,
+  });
+
+  // The worker owns no SMTP knowledge of its own: it asks the email service for
+  // the current settings on every tick, so an admin editing them takes effect
+  // on the next poll without a restart.
+  const outbox = createOutboxWorker({
+    store: deps.store,
+    log: warn,
+    transportFactory:
+      deps.mailTransportFactory ??
+      (async () => {
+        const smtp = await email.resolveSettings();
+        return smtp.host ? createSmtpTransport(smtp) : null;
+      }),
+  });
+
+  const services: NexusServices = {
+    audit,
+    captcha,
+    auth,
+    email,
+    outbox,
+    notifications,
+    settings,
+    users,
+    messaging,
+    massEmail,
+    catalog,
+    credentials,
+    publishing,
+    access,
+    god,
+  };
+  const webDist = (deps.serveStatic ?? true) ? resolveWebDist(config) : null;
+
+  app.decorate('nexus', { config, store: deps.store, edge: deps.edge, crypto, services });
+
+  /* ── COMPOSITION — platform plugins ─────────────────────────────────── */
+  registerErrorHandler(app, {
+    ...(webDist
+      ? {
+          spaFallback: (_request, reply) =>
+            // no-cache: browsers must revalidate the shell so a fresh deploy's
+            // hashed asset references are picked up immediately.
+            reply.type('text/html').header('cache-control', 'no-cache').sendFile('index.html'),
+        }
+      : {}),
+  });
+
+  await app.register(cookie, { parseOptions: { path: '/' } });
+
+  await app.register(helmet, {
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        baseUri: ["'self'"],
+        // CAPTCHA widgets load a vendor script and iframe; the hosts are fixed
+        // and inert unless an admin enables the corresponding provider.
+        scriptSrc: [
+          "'self'",
+          'https://challenges.cloudflare.com',
+          'https://hcaptcha.com',
+          'https://*.hcaptcha.com',
+          'https://www.google.com',
+          'https://www.gstatic.com',
+        ],
+        frameSrc: [
+          "'self'",
+          'https://challenges.cloudflare.com',
+          'https://hcaptcha.com',
+          'https://*.hcaptcha.com',
+          'https://www.google.com',
+        ],
+        connectSrc: ["'self'", 'https://hcaptcha.com', 'https://*.hcaptcha.com'],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:'],
+        fontSrc: ["'self'", 'data:'],
+        objectSrc: ["'none'"],
+        formAction: ["'self'"],
+        frameAncestors: ["'none'"],
+        upgradeInsecureRequests: null,
+      },
+    },
+    crossOriginEmbedderPolicy: false,
+    frameguard: { action: 'deny' },
+    hsts: config.cookieSecure ? { maxAge: 31_536_000, includeSubDomains: true } : false,
+    referrerPolicy: { policy: 'no-referrer' },
+  });
+
+  app.addHook('onSend', async (request, reply, payload) => {
+    if (request.url.startsWith('/api') && !reply.hasHeader('cache-control')) {
+      reply.header('cache-control', 'no-store');
+    }
+    return payload;
+  });
+
+  await registerAuthPlugin(app, { config, store: deps.store, crypto });
+
+  /* ── COMPOSITION — routes ───────────────────────────────────────────────
+   * One `register` per domain, all under /api. Add new route plugins here and
+   * pass them their services explicitly.
+   */
+  await app.register(
+    async (scope) => {
+      await scope.register(healthRoutes, { config, store: deps.store, edge: deps.edge });
+    },
+    { prefix: '/api/health' },
+  );
+
+  await app.register(
+    async (scope) => {
+      // Rate limiting is scoped to this child instance, so it protects the
+      // credential-guessing surface without throttling the rest of the API.
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { ...AUTH_RATE_LIMIT });
+      }
+      await scope.register(authRoutes, { config, auth, captcha });
+    },
+    { prefix: '/api/auth' },
+  );
+
+  await app.register(async (scope) => scope.register(brandingRoutes, { settings, captcha }), {
+    prefix: '/api/branding',
+  });
+
+  await app.register(async (scope) => scope.register(usersRoutes, { users, config }), {
+    prefix: '/api/users',
+  });
+
+  await app.register(async (scope) => scope.register(organizationRoutes, { users, config }), {
+    prefix: '/api/organizations',
+  });
+
+  await app.register(async (scope) => scope.register(messagingRoutes, { messaging }), {
+    prefix: '/api/threads',
+  });
+
+  await app.register(
+    async (scope) => scope.register(notificationsRoutes, { notifications, audit }),
+    { prefix: '/api/notifications' },
+  );
+
+  await app.register(
+    async (scope) => scope.register(adminRoutes, { settings, massEmail, email, audit, god }),
+    { prefix: '/api/admin' },
+  );
+
+  await app.register(async (scope) => scope.register(catalogRoutes, { catalog }), {
+    prefix: '/api/catalog',
+  });
+
+  await app.register(async (scope) => scope.register(publishingRoutes, { publishing }), {
+    prefix: '/api/apis',
+  });
+
+  await app.register(async (scope) => scope.register(accessRequestRoutes, { access }), {
+    prefix: '/api/access-requests',
+  });
+
+  await app.register(async (scope) => scope.register(grantRoutes, { access }), {
+    prefix: '/api/grants',
+  });
+
+  await app.register(async (scope) => scope.register(credentialsRoutes, { credentials }), {
+    prefix: '/api/credentials',
+  });
+
+  /* ── COMPOSITION — static SPA (production) ──────────────────────────── */
+  if (webDist) {
+    const fastifyStatic = (await import('@fastify/static')).default;
+    await app.register(fastifyStatic, { root: webDist, wildcard: false, index: false });
+  }
+
+  app.addHook('onClose', async () => {
+    await outbox.stop();
+    await deps.edge.close();
+  });
+
+  await app.ready();
+
+  // Tests drive `services.outbox.tick()` by hand so no timer ever fires mid-assert.
+  if (deps.startOutboxWorker ?? config.env !== 'test') outbox.start();
+
+  return app;
+}
+
+/**
+ * Default post-registration hook: queue the verification email (when one is
+ * required) and drop a welcome notification in the new account's bell.
+ *
+ * Neither is allowed to fail the registration — the account already exists by
+ * the time this runs, and a queue problem must not leave the visitor unable to
+ * retry with the same address.
+ */
+function defaultOnRegistered(
+  config: NexusConfig,
+  email: EmailService,
+  notifications: NotificationsService,
+  log: (obj: Record<string, unknown>, message: string) => void,
+): OnRegistered {
+  return async ({ user, verificationToken }) => {
+    try {
+      if (verificationToken) {
+        const url = `${config.publicUrl}/verify-email?token=${encodeURIComponent(verificationToken)}`;
+        await email.enqueue({
+          to: user.email,
+          templateKey: 'verification',
+          idempotencyKey: `verify:${user.id}`,
+          vars: {
+            recipient_name: user.display_name,
+            recipient_email: user.email,
+            verification_url: url,
+            verification_token: verificationToken,
+          },
+        });
+      }
+      await notifications.notify(
+        user.id,
+        'system',
+        'Welcome to the portal',
+        'Your account is ready. Browse the catalog to request access to an API.',
+        '/catalog',
+      );
+    } catch (error) {
+      log(
+        { user_id: user.id, error: error instanceof Error ? error.message : String(error) },
+        'Post-registration hook failed',
+      );
+    }
+  };
+}
+
+/* ── Entry point ────────────────────────────────────────────────────────── */
+
+/** Boot the server from `process.env` and listen. */
+export async function main(): Promise<void> {
+  const config = loadConfig(process.env);
+  const store = createStore(config);
+  await store.init();
+  await store.migrate();
+
+  const app = await buildServer(config, { store, edge: createFerrumAdmin(config) });
+  // Best-effort: the namespace is also created implicitly by the first write.
+  void app.nexus.edge.ensureNamespace('Managed by Ferrum Nexus');
+
+  let shuttingDown = false;
+  const shutdown = async (signal: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    app.log.info({ signal }, 'Shutting down');
+    try {
+      await app.close();
+    } finally {
+      await store.close();
+    }
+    process.exit(0);
+  };
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+
+  await app.listen({ host: config.host, port: config.port });
+}
+
+const invokedDirectly =
+  process.argv[1] !== undefined && pathToFileURL(process.argv[1]).href === import.meta.url;
+
+if (invokedDirectly) {
+  main().catch((error: unknown) => {
+    if (isNexusError(error)) {
+      process.stderr.write(`${error.message}\n`);
+    } else {
+      process.stderr.write(
+        `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
+      );
+    }
+    process.exit(1);
+  });
+}

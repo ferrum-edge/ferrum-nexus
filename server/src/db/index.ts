@@ -1,11 +1,23 @@
-import type { NexusStore } from './store.js';
-import type { ResolvedConfig } from '../config/index.js';
-import { createSqliteStore } from './adapters/sqlite/index.js';
-import { createPostgresStore } from './adapters/postgres/index.js';
-import { createMysqlStore } from './adapters/mysql/index.js';
-import { createMongoStore } from './adapters/mongodb/index.js';
+/**
+ * Store factory — the one place that knows which adapter backs which driver.
+ */
 
-export async function createStore(config: ResolvedConfig): Promise<NexusStore> {
+import type { NexusConfig } from '../config/index.js';
+import { NexusError } from '../lib/errors.js';
+import { createMongoStore } from './adapters/mongodb/index.js';
+import { createMysqlStore } from './adapters/mysql/index.js';
+import { createPostgresStore } from './adapters/postgres/index.js';
+import { createSqliteStore } from './adapters/sqlite/index.js';
+import type { NexusStore } from './store.js';
+
+/**
+ * Build the {@link NexusStore} for a configuration.
+ *
+ * The caller is responsible for `await store.init()` and `await store.migrate()`
+ * before handing the store to services. `init()` is also where a driver
+ * validates its deployment — notably the MongoDB replica-set check.
+ */
+export function createStore(config: NexusConfig): NexusStore {
   switch (config.db.driver) {
     case 'sqlite':
       return createSqliteStore(config);
@@ -17,7 +29,7 @@ export async function createStore(config: ResolvedConfig): Promise<NexusStore> {
       return createMongoStore(config);
     default: {
       const exhaustive: never = config.db.driver;
-      throw new Error(`Unsupported NEXUS_DB_DRIVER: ${String(exhaustive)}`);
+      throw new NexusError('INTERNAL', `Unknown database driver: ${String(exhaustive)}`);
     }
   }
 }

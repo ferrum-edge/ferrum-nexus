@@ -1,440 +1,669 @@
 /**
- * Credentials lifecycle.
+ * Gateway credentials — issue, rotate, revoke. Show-once, by construction.
  *
- * Each Nexus user has at most one Ferrum consumer per namespace. Credentials
- * live on the consumer (multiple per type for rotation). Nexus stores only
- * fingerprints + display metadata — never plaintext keys, HMAC secrets, basic
- * auth passwords, or private keys.
+ * ## Show-once is enforced twice
  *
- * Rotation flow:
- *   1. Generate (or accept) new credential material.
- *   2. Append it to the Edge consumer.
- *   3. Return the new secret to the user (show once).
- *   4. Mark previous credentials of the same type as `pending_removal`.
- *   5. After the configured grace period, the user can finalize and delete
- *      the older credential entries.
+ * Nexus generates the secret, returns it in exactly one HTTP response, and
+ * stores only a SHA-256 fingerprint and the last four characters. Even if that
+ * discipline slipped, Edge would still hold the line: every ordinary Admin API
+ * response redacts `keyauth.key` and `jwt.secret` to the literal `[REDACTED]`
+ * and omits `basicauth` entirely (`ref-edge-admin.md` §4.5). There is no read
+ * path back to the plaintext on either side.
+ *
+ * ## Credential shapes, and why they are not what a portal would guess
+ *
+ * | Nexus type  | Edge entry            | What the client actually sends |
+ * |-------------|-----------------------|--------------------------------|
+ * | `keyauth`   | `{ key }`             | `X-API-Key: <key>`             |
+ * | `basicauth` | `{ password }`        | Basic `<consumer username>:<password>` |
+ * | `jwt`       | `{ secret }`          | HS256 JWT with `sub` = consumer username |
+ *
+ * Two consequences fall out of Edge's schemas and are worth stating plainly:
+ *
+ * - **`basicauth` has no username field.** The entry accepts exactly one of
+ *   `password` / `password_hash` and nothing else; the lookup key is the
+ *   *consumer's* `username` (§5.2). So the username Nexus shows the user is
+ *   `nexus-user-<id>`, not a per-credential name — inventing one would produce
+ *   a credential that cannot authenticate.
+ * - **`jwt` has no key/kid field.** The entry is exactly `{ secret }`, 32–4096
+ *   chars, and `additionalProperties: false` rejects `algorithm`, `kid`, and
+ *   friends. The consumer is located from the `jwt_auth` plugin's
+ *   `consumer_claim_field` (default `sub`), matched against the consumer's
+ *   `username`/`id`/`custom_id`. `ShowOnceSecret.jwt_key` therefore carries the
+ *   consumer username — the value the client must put in `sub`.
+ *
+ * ## Locating an entry to delete: Nexus row order *is* the array index
+ *
+ * Edge gives credential entries **no id**, and reads redact the material, so
+ * there is nothing on the wire to match a specific entry against. What is
+ * stable is the ordering: `POST` appends, `DELETE /{type}/{index}` removes by
+ * 0-based index, and Nexus writes one `credential_metadata` row per append. The
+ * non-revoked rows for a `(consumer, type)` pair, oldest first, are therefore a
+ * mirror of the Edge array, and a row's position in that list is its index.
+ *
+ * {@link resolveCredentialIndex} computes that position and cross-checks it
+ * against the live array length before any destructive call; a mismatch (an
+ * operator edited the consumer by hand) degrades to deleting the whole
+ * credential type when only one row is live, and otherwise refuses rather than
+ * deleting somebody else's key. **That degradation is valid for `revoke`
+ * only** — deleting everything is what a revoke asked for. `rotate` refuses
+ * the drift instead, because "delete the whole type" would take the entry it
+ * had just appended with it. A target that is no longer live at all resolves
+ * to `not-live` and never to `whole-type`.
+ *
+ * ## The target is loaded twice, and the second read is the one that counts
+ *
+ * `rotate` and `revoke` resolve the credential once outside the per-consumer
+ * queue — that read is only for the ownership check and to learn which consumer
+ * to serialise on — and then **re-read it inside the queue**. The first read
+ * happens before the operation is ordered against everything else touching that
+ * consumer, so by the time the block runs another rotate may already have
+ * retired the row. Acting on the first copy is what let two raced rotations
+ * both delete an entry and both hand out a show-once secret. Only a row that is
+ * still live on the second read may be moved out of `active`; anything else is
+ * a `CONFLICT` (rotate) or an already-done no-op (revoke).
+ *
+ * **Multi-instance caveat:** `serializePerKey` orders operations within one
+ * Node process. Across processes the check-and-set needs a conditional
+ * `UPDATE … WHERE status = 'active'` in the store; until that exists, run one
+ * writer (the same constraint the Edge client's serializer already carries).
  */
 
-import { randomBytes } from 'node:crypto';
-import { v4 as uuid } from 'uuid';
-import { z } from 'zod';
-import type { NexusStore } from '../db/store.js';
-import type { ResolvedConfig } from '../config/index.js';
-import type { FerrumAdminClient } from '../ferrum-admin/client.js';
-import type { AuditActor, AuditService } from '../audit/service.js';
-import type { NotificationService } from '../notifications/service.js';
+import {
+  CREDENTIAL_TYPE_FOR_PLUGIN,
+  consumerUsernameForUser,
+  roleAtLeast,
+  type CredentialMetadata,
+  type CredentialType,
+  type IssueCredentialResponse,
+  type Paginated,
+  type RotateCredentialResponse,
+  type ShowOnceSecret,
+  type Uuid,
+} from '@ferrum-nexus/shared';
+
+import { AuditAction, type AuditService } from '../audit/service.js';
+import type { NexusConfig } from '../config/index.js';
+import type {
+  CredentialFilter,
+  CredentialRecord,
+  ListOptions,
+  NexusStore,
+  UserRecord,
+} from '../db/store.js';
 import type { EmailService } from '../email/service.js';
-import { badRequest, notFound } from '../lib/errors.js';
-import { fingerprint, last4 } from '../lib/crypto.js';
-import { aclGroupForApi, type CredentialType } from '@ferrum-nexus/shared';
-import type { CredentialMetadata } from '@ferrum-nexus/shared';
+import type { FerrumAdminClient } from '../ferrum-admin/index.js';
+import type { EdgeCredentialEntry, EdgeCredentialMap } from '../ferrum-admin/types.js';
+import type { NexusCrypto } from '../lib/crypto.js';
+import { last4, randomSecret, randomToken } from '../lib/crypto.js';
+import { conflict, edgeError, forbidden, notFound, validationFailed } from '../lib/errors.js';
+import type { NotificationsService } from '../notifications/service.js';
+import type { ConsumerProvisioner } from './consumers.js';
 
-export const CredentialCreateInput = z.discriminatedUnion('type', [
-  z.object({
-    type: z.literal('keyauth'),
-    label: z.string().min(1).max(64).default('Default'),
-  }),
-  z.object({
-    type: z.literal('basicauth'),
-    label: z.string().min(1).max(64).default('Default'),
-    username: z.string().min(3).max(64).optional(),
-  }),
-  z.object({
-    type: z.literal('jwt'),
-    label: z.string().min(1).max(64).default('Default'),
-    data: z.record(z.unknown()),
-  }),
-  z.object({
-    type: z.literal('hmac_auth'),
-    label: z.string().min(1).max(64).default('Default'),
-  }),
-  z.object({
-    type: z.literal('mtls_auth'),
-    label: z.string().min(1).max(64).default('Default'),
-    cert: z.string().min(1),
-  }),
-]);
-export type CredentialCreateInput = z.infer<typeof CredentialCreateInput>;
+/** Every credential type a Nexus user may hold, in UI order. */
+export const CREDENTIAL_TYPES = [
+  'keyauth',
+  'basicauth',
+  'jwt',
+] as const satisfies readonly CredentialType[];
 
-export interface CredentialIssueResult {
-  metadata: CredentialMetadata;
-  /** The credential value to show to the user exactly once. */
-  secret?: {
-    type: CredentialType;
-    /** Field name to display (key, password, hmacSecret, etc). */
-    field: string;
-    value: string;
-    fields?: Array<{ field: string; value: string }>;
-  };
+/** Statuses that still occupy a slot in the Edge credentials array. */
+const LIVE_STATUSES = new Set(['active', 'retiring']);
+
+/** Raised whenever the Nexus mirror and the live Edge array disagree. */
+const RECONCILE_MESSAGE =
+  'The gateway credential list does not match the portal; ask an administrator to reconcile this consumer before rotating or revoking';
+
+/** Generated plaintext plus the Edge entry that carries it. */
+interface GeneratedCredential {
+  /** The value fingerprinted and reduced to `last4`. */
+  material: string;
+  entry: EdgeCredentialEntry;
+  secret: ShowOnceSecret;
 }
 
+/** What {@link CredentialsService.disableGatewayAccess} tore down. */
+export interface GatewayTeardown {
+  /** The Edge consumer that was stripped, or `null` when the user had none. */
+  consumer_id: string | null;
+  /** `credential_metadata` rows moved to `revoked`. */
+  revoked_credentials: number;
+  /** ACL groups the consumer held before the teardown. */
+  removed_groups: string[];
+}
+
+/** Input for {@link CredentialsService.issueForConsumer}. */
+export interface IssueForConsumerInput {
+  /** The account the credential row is attributed to. */
+  user: UserRecord;
+  /** Edge consumer the entry is appended to. */
+  consumerId: string;
+  /** That consumer's username — what a `basicauth` or `jwt` client must send. */
+  consumerUsername: string;
+  credentialType: CredentialType;
+  label?: string | null;
+  /** Skip the per-type cap (test consumers start from an empty consumer). */
+  skipCap?: boolean;
+}
+
+/** Credential operations. */
 export interface CredentialsService {
-  ensureConsumerForUser(opts: {
-    userId: string;
-    email: string;
-    name: string | null;
-    namespace?: string;
-    actor?: AuditActor | null;
-  }): Promise<string>;
-  listForUser(userId: string): Promise<CredentialMetadata[]>;
-  issue(opts: {
-    userId: string;
-    input: CredentialCreateInput;
-    namespace?: string;
-    actor?: AuditActor | null;
-  }): Promise<CredentialIssueResult>;
-  rotate(opts: {
-    userId: string;
-    credentialId: string;
-    /**
-     * Replacement payload for credential types that cannot be auto-generated
-     * (currently JWT and mTLS). Ignored for keyauth/basicauth/hmac_auth
-     * because Nexus generates the new secret itself.
-     */
-    replacement?: CredentialCreateInput;
-    actor?: AuditActor | null;
-  }): Promise<CredentialIssueResult>;
-  finalize(opts: { userId: string; credentialId: string; actor?: AuditActor | null }): Promise<void>;
-  syncAclGroupsForGrant(opts: {
-    consumerId: string;
-    apiAssetId: string;
-    add: boolean;
-  }): Promise<void>;
+  /** Consumer provisioning, shared with the access service. */
+  readonly provisioner: ConsumerProvisioner;
+  /** The caller's credentials, or another user's when an admin asks. */
+  list(
+    actor: UserRecord,
+    targetUserId?: Uuid,
+    filter?: { status?: CredentialMetadata['status'] },
+    options?: ListOptions,
+  ): Promise<Paginated<CredentialRecord>>;
+  /** Mint a credential on the caller's own consumer. Show-once. */
+  issue(
+    user: UserRecord,
+    input: { credential_type: CredentialType; label?: string | null },
+    ip?: string | null,
+  ): Promise<IssueCredentialResponse>;
+  /** Append-then-delete rotation of one credential. Show-once. */
+  rotate(
+    user: UserRecord,
+    credentialId: Uuid,
+    label?: string | null,
+    ip?: string | null,
+  ): Promise<RotateCredentialResponse>;
+  /** Delete the entry from Edge and mark the row revoked. */
+  revoke(user: UserRecord, credentialId: Uuid, ip?: string | null): Promise<void>;
+  /**
+   * Take a user's gateway identity away entirely: every ACL group off the
+   * consumer, every credential of every type deleted, every mirrored row
+   * `revoked`.
+   *
+   * Called when an account is disabled. Killing the portal session is not
+   * enough on its own — an issued API key keeps working without one, and an
+   * API published with `requestable: false` carries no `access_control`
+   * plugin, so an empty group list does not stop it either.
+   */
+  disableGatewayAccess(userId: Uuid, subject: string): Promise<GatewayTeardown>;
+  /** Append a credential to an arbitrary consumer — the test-consumer path. */
+  issueForConsumer(
+    input: IssueForConsumerInput,
+  ): Promise<{ credential: CredentialRecord; secret: ShowOnceSecret }>;
 }
 
-export function createCredentialsService(
-  config: ResolvedConfig,
-  store: NexusStore,
-  ferrum: FerrumAdminClient,
-  audit: AuditService,
-  notifications: NotificationService,
-  email: EmailService,
-): CredentialsService {
-  const toMeta = (row: {
-    id: string;
-    consumer_id: string;
+/** Dependencies of {@link createCredentialsService}. */
+export interface CredentialsServiceDeps {
+  config: NexusConfig;
+  store: NexusStore;
+  edge: FerrumAdminClient;
+  crypto: NexusCrypto;
+  audit: AuditService;
+  notifications: NotificationsService;
+  email: EmailService;
+  provisioner: ConsumerProvisioner;
+}
+
+/* ── Material generation ────────────────────────────────────────────────── */
+
+/**
+ * Generate the plaintext for one credential type.
+ *
+ * All three secrets are 32 bytes of `crypto.randomBytes` rendered base64url,
+ * which clears Edge's 32-character minimum for `jwt` secrets with room to
+ * spare and stays far below the 4096-character ceiling.
+ */
+export function generateCredential(
+  type: CredentialType,
+  consumerUsername: string,
+): GeneratedCredential {
+  switch (type) {
+    case 'keyauth': {
+      const key = randomSecret('nxs', 32);
+      return { material: key, entry: { key }, secret: { type, key } };
+    }
+    case 'basicauth': {
+      // The consumer's username *is* the basic-auth username (§5.2); the entry
+      // itself accepts nothing but the password.
+      const password = randomToken(32);
+      return {
+        material: password,
+        entry: { password },
+        secret: { type, username: consumerUsername, password },
+      };
+    }
+    case 'jwt': {
+      const secret = randomToken(32);
+      return {
+        material: secret,
+        entry: { secret },
+        // `jwt_key` is the value the client puts in the token's `sub` claim.
+        secret: { type, jwt_secret: secret, jwt_key: consumerUsername },
+      };
+    }
+    default: {
+      // Exhaustive: `CredentialType` has exactly three members.
+      throw validationFailed(`Unsupported credential type '${String(type)}'`);
+    }
+  }
+}
+
+/**
+ * Audit `details` describing one gateway teardown, successful or not.
+ *
+ * Disabling an account must not depend on the gateway being reachable: a
+ * portal account left enabled because Edge timed out is strictly worse than a
+ * disabled account whose consumer still needs cleaning up. So the failure is
+ * logged and recorded in the audit row the caller is already writing, and the
+ * disable proceeds.
+ */
+export async function tearDownGatewayAccess(
+  credentials: Pick<CredentialsService, 'disableGatewayAccess'>,
+  userId: Uuid,
+  subject: string,
+  log?: (obj: Record<string, unknown>, message: string) => void,
+): Promise<Record<string, unknown>> {
+  try {
+    const result = await credentials.disableGatewayAccess(userId, subject);
+    if (result.consumer_id === null) return { gateway_teardown: 'no_consumer' };
+    return {
+      gateway_teardown: 'ok',
+      gateway_consumer_id: result.consumer_id,
+      revoked_credentials: result.revoked_credentials,
+      removed_acl_groups: result.removed_groups,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log?.(
+      { user_id: userId, error: message },
+      'Could not strip the gateway identity of a disabled account',
+    );
+    return { gateway_teardown: 'failed', gateway_error: message };
+  }
+}
+
+/* ── Service ────────────────────────────────────────────────────────────── */
+
+/** Build the credentials service. */
+export function createCredentialsService(deps: CredentialsServiceDeps): CredentialsService {
+  const { config, store, edge, crypto, audit, notifications, email, provisioner } = deps;
+  const cap = config.edge.maxCredentialsPerType;
+
+  /** Rows still occupying an Edge array slot, oldest first. */
+  async function liveRows(consumerId: string, type: CredentialType): Promise<CredentialRecord[]> {
+    const rows = await store.credentials.listByConsumer(consumerId, type);
+    return rows
+      .filter((row) => LIVE_STATUSES.has(row.status))
+      .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+  }
+
+  /**
+   * 0-based index of `target` inside the Edge credentials array.
+   *
+   * `edgeLength` is the array length read from a *fresh* `GET /consumers/{id}`
+   * inside the same serialised block, so the two views cannot drift between the
+   * check and the delete.
+   */
+  function resolveCredentialIndex(
+    rows: CredentialRecord[],
+    target: CredentialRecord,
+    edgeLength: number,
+  ): number | 'whole-type' | 'not-live' {
+    const index = rows.findIndex((row) => row.id === target.id);
+    // The target no longer occupies a slot — a concurrent rotate or revoke of
+    // the same row won the queue. That is *never* permission to delete the
+    // whole credential type: everything still live belongs to someone else's
+    // successful operation.
+    if (index === -1) return 'not-live';
+    if (rows.length === edgeLength) return index;
+    // The mirror drifted (a hand-edited consumer). Removing the entire type is
+    // safe only when this is the last credential Nexus knows about.
+    if (rows.length === 1) return 'whole-type';
+    throw edgeError(RECONCILE_MESSAGE, { expected: rows.length, actual: edgeLength });
+  }
+
+  /** Length of the Edge credentials array for one type (basicauth is never emitted). */
+  function edgeArrayLength(
+    credentials: EdgeCredentialMap | undefined,
+    type: CredentialType,
+    fallback: number,
+  ): number {
+    const entries = credentials?.[type];
+    // `basicauth` is omitted from every read projection, so its length is
+    // unknowable from a GET — trust the Nexus mirror for it.
+    if (type === 'basicauth') return fallback;
+    return Array.isArray(entries) ? entries.length : 0;
+  }
+
+  async function loadOwned(user: UserRecord, credentialId: Uuid): Promise<CredentialRecord> {
+    const credential = await store.credentials.findById(credentialId);
+    if (!credential) throw notFound('Credential', credentialId);
+    if (credential.user_id !== user.id && !roleAtLeast(user.role, 'admin')) {
+      // Not a 404: the caller is authenticated and the id is theirs to guess or
+      // not, and a 403 is what the SPA needs to render a useful message.
+      throw forbidden('This credential belongs to another account');
+    }
+    return credential;
+  }
+
+  async function appendCredential(input: {
+    user: UserRecord;
+    consumerId: string;
+    consumerUsername: string;
     type: CredentialType;
-    label: string;
-    fingerprint: string;
-    last4: string | null;
-    ferrum_credential_index: number;
-    status: 'active' | 'pending_removal' | 'expired';
-    created_at: string;
-    rotated_at: string | null;
-    expires_at: string | null;
-  }): CredentialMetadata => ({
-    id: row.id,
-    consumerId: row.consumer_id,
-    type: row.type,
-    label: row.label,
-    fingerprint: row.fingerprint,
-    last4: row.last4,
-    ferrumCredentialIndex: row.ferrum_credential_index,
-    status: row.status,
-    createdAt: row.created_at,
-    rotatedAt: row.rotated_at,
-    expiresAt: row.expires_at,
-  });
-
-  const ensureConsumerForUser: CredentialsService['ensureConsumerForUser'] = async ({
-    userId,
-    email: userEmail,
-    name,
-    namespace,
-    actor,
-  }) => {
-    const ns = namespace ?? config.ferrum.defaultNamespace;
-    const existing = await store.consumers.findByUserNamespace(userId, ns);
-    if (existing) return existing.id;
-    const username = `${(name ?? userEmail)
-      .toLowerCase()
-      .replace(/[^a-z0-9._-]+/g, '-')
-      .slice(0, 40)}-${userId.slice(0, 8)}`;
-    const created = await ferrum.createConsumer({ username, acl_groups: [], namespace: ns });
-    const row = await store.consumers.insert({
-      id: uuid(),
-      user_id: userId,
-      organization_id: null,
-      namespace: ns,
-      ferrum_consumer_id: created.consumer_id,
-      username: created.username,
-      status: 'active',
-      acl_groups: [],
-      created_at: new Date().toISOString(),
-    });
-    await audit.record(null, {
-      action: 'consumer.create',
-      targetType: 'ferrum_consumer',
-      targetId: row.id,
-      after: { namespace: ns, username, ferrumId: created.consumer_id },
-      actor,
-    });
-    return row.id;
-  };
-
-  const listForUser: CredentialsService['listForUser'] = async (userId) => {
-    const consumers = await store.consumers.listForUser(userId);
-    const all: CredentialMetadata[] = [];
-    for (const consumer of consumers) {
-      const rows = await store.credentials.listForConsumer(consumer.id);
-      all.push(...rows.map(toMeta));
-    }
-    return all;
-  };
-
-  const issueInternal = async (
-    consumerId: string,
-    input: CredentialCreateInput,
-    namespace: string,
-    forUserEmail: string,
-    forUserName: string | null,
-    isRotation: boolean,
-    actor?: AuditActor | null,
-  ): Promise<CredentialIssueResult> => {
-    const consumer = await store.consumers.findById(consumerId);
-    if (!consumer) throw notFound('Ferrum consumer not found');
-
-    let data: Record<string, unknown>;
-    let secret: CredentialIssueResult['secret'];
-
-    switch (input.type) {
-      case 'keyauth': {
-        const key = randomBytes(24).toString('base64url');
-        data = { key };
-        secret = { type: 'keyauth', field: 'key', value: key };
-        break;
-      }
-      case 'basicauth': {
-        const username = input.username ?? `${consumer.username}-${randomBytes(3).toString('hex')}`;
-        const password = randomBytes(18).toString('base64url');
-        data = { username, password };
-        secret = {
-          type: 'basicauth',
-          field: 'password',
-          value: password,
-          fields: [
-            { field: 'username', value: username },
-            { field: 'password', value: password },
-          ],
-        };
-        break;
-      }
-      case 'jwt': {
-        data = input.data;
-        if (typeof data.secret === 'string') {
-          secret = { type: 'jwt', field: 'secret', value: data.secret as string };
-        }
-        break;
-      }
-      case 'hmac_auth': {
-        const username = `${consumer.username}-${randomBytes(3).toString('hex')}`;
-        const sharedSecret = randomBytes(32).toString('base64url');
-        data = { username, secret: sharedSecret };
-        secret = {
-          type: 'hmac_auth',
-          field: 'secret',
-          value: sharedSecret,
-          fields: [
-            { field: 'username', value: username },
-            { field: 'secret', value: sharedSecret },
-          ],
-        };
-        break;
-      }
-      case 'mtls_auth': {
-        data = { cert: input.cert };
-        break;
-      }
-    }
-
-    const appended = await ferrum.appendCredential(
-      consumer.ferrum_consumer_id,
-      { type: input.type, data },
-      namespace,
+    label: string | null;
+    rotatedFromId?: Uuid | null;
+  }): Promise<{ credential: CredentialRecord; secret: ShowOnceSecret }> {
+    const generated = generateCredential(input.type, input.consumerUsername);
+    await edge.consumers.addCredential(
+      input.consumerId,
+      input.type,
+      generated.entry,
+      input.user.id,
     );
-
-    const fp = fingerprint(
-      input.type === 'mtls_auth' ? (data.cert as string) : JSON.stringify(data),
-    );
-    const visible = secret?.value ?? null;
-    const row = await store.credentials.insert({
-      id: uuid(),
-      consumer_id: consumerId,
-      type: input.type,
+    const credential = await store.credentials.create({
+      user_id: input.user.id,
+      ferrum_consumer_id: input.consumerId,
+      credential_type: input.type,
+      // Edge assigns credential entries no id of their own; the addressable
+      // resource is the per-type collection, and position is tracked by row
+      // order (see the module docblock).
+      ferrum_credential_id: `${input.consumerId}/credentials/${input.type}`,
+      fingerprint: crypto.fingerprint(generated.material),
+      last4: last4(generated.material),
       label: input.label,
-      fingerprint: fp,
-      last4: visible ? last4(visible) : null,
-      ferrum_credential_index: appended.index,
       status: 'active',
-      created_at: new Date().toISOString(),
-      rotated_at: null,
-      expires_at: null,
+      rotated_from_id: input.rotatedFromId ?? null,
     });
+    return { credential, secret: generated.secret };
+  }
 
-    if (isRotation) {
-      const existing = await store.credentials.listForConsumer(consumerId);
-      for (const cred of existing) {
-        if (cred.id === row.id) continue;
-        if (cred.type !== input.type) continue;
-        if (cred.status === 'active') {
-          await store.credentials.updateStatus(cred.id, 'pending_removal');
+  async function issueForConsumer(
+    input: IssueForConsumerInput,
+  ): Promise<{ credential: CredentialRecord; secret: ShowOnceSecret }> {
+    if (!(CREDENTIAL_TYPES as readonly string[]).includes(input.credentialType)) {
+      throw validationFailed(`Unsupported credential type '${input.credentialType}'`);
+    }
+    return edge.serializePerKey(input.consumerId, async () => {
+      if (input.skipCap !== true) {
+        const rows = await liveRows(input.consumerId, input.credentialType);
+        if (rows.length >= cap) {
+          throw conflict(
+            `You already hold ${rows.length} live ${input.credentialType} credentials (the gateway allows ${cap}); revoke or rotate one first`,
+            { credential_type: input.credentialType, limit: cap },
+          );
         }
       }
-    }
-
-    await audit.record(null, {
-      action: isRotation ? 'credential.rotate' : 'credential.create',
-      targetType: 'credential',
-      targetId: row.id,
-      after: { type: input.type, label: input.label, consumerId },
-      actor,
+      return appendCredential({
+        user: input.user,
+        consumerId: input.consumerId,
+        consumerUsername: input.consumerUsername,
+        type: input.credentialType,
+        label: input.label ?? null,
+      });
     });
-    await notifications.push({
-      recipientId: consumer.user_id!,
-      type: isRotation ? 'credential_rotation_completed' : 'credential_created',
-      payload: { credentialId: row.id, type: input.type, label: input.label },
-    });
-    await email.enqueue({
-      to: forUserEmail,
-      templateKey: isRotation ? 'credential_rotation_completed' : 'credential_created',
-      vars: { name: forUserName ?? forUserEmail, credentialType: input.type, label: input.label },
-    });
-
-    return { metadata: toMeta(row), secret };
-  };
-
-  const issue: CredentialsService['issue'] = async ({ userId, input, namespace, actor }) => {
-    const user = await store.users.findById(userId);
-    if (!user) throw notFound('User not found');
-    const consumerId = await ensureConsumerForUser({
-      userId,
-      email: user.email,
-      name: user.name,
-      namespace,
-      actor,
-    });
-    const consumer = await store.consumers.findById(consumerId);
-    return issueInternal(consumerId, input, consumer!.namespace, user.email, user.name, false, actor);
-  };
-
-  const rotate: CredentialsService['rotate'] = async ({
-    userId,
-    credentialId,
-    replacement,
-    actor,
-  }) => {
-    const cred = await store.credentials.findById(credentialId);
-    if (!cred) throw notFound('Credential not found');
-    const consumer = await store.consumers.findById(cred.consumer_id);
-    if (!consumer || consumer.user_id !== userId) {
-      throw notFound('Credential not found');
-    }
-    const user = await store.users.findById(userId);
-    if (!user) throw notFound('User not found');
-    const rotationInput: CredentialCreateInput = (() => {
-      switch (cred.type) {
-        case 'keyauth':
-          return { type: 'keyauth', label: cred.label } as const;
-        case 'basicauth':
-          return { type: 'basicauth', label: cred.label } as const;
-        case 'hmac_auth':
-          return { type: 'hmac_auth', label: cred.label } as const;
-        case 'jwt':
-          // JWT secrets can't be auto-generated — the caller must supply a
-          // replacement payload (new key material + claims). With the
-          // replacement the rotation runs the standard append-then-mark-old
-          // flow, giving JWT users a way to revoke a leaked signing key
-          // without a manual delete-and-recreate dance.
-          if (!replacement || replacement.type !== 'jwt') {
-            throw badRequest(
-              'replacement_required',
-              'Rotating a JWT credential requires providing a new JWT payload in `replacement`.',
-            );
-          }
-          return { ...replacement, label: replacement.label ?? cred.label };
-        case 'mtls_auth':
-          if (!replacement || replacement.type !== 'mtls_auth') {
-            throw badRequest(
-              'replacement_required',
-              'Rotating an mTLS credential requires providing a new certificate in `replacement`.',
-            );
-          }
-          return { ...replacement, label: replacement.label ?? cred.label };
-      }
-    })();
-    return issueInternal(consumer.id, rotationInput, consumer.namespace, user.email, user.name, true, actor);
-  };
-
-  const finalize: CredentialsService['finalize'] = async ({ userId, credentialId, actor }) => {
-    const cred = await store.credentials.findById(credentialId);
-    if (!cred) throw notFound('Credential not found');
-    const consumer = await store.consumers.findById(cred.consumer_id);
-    if (!consumer || consumer.user_id !== userId) throw notFound('Credential not found');
-    if (cred.status === 'active') {
-      throw badRequest('still_active', 'Cannot delete an active credential. Rotate first.');
-    }
-    // Delete on Edge first. If Edge already returned 404 (already gone), the
-    // wrapper resolves to null — we treat that as success so this endpoint is
-    // safely retryable after a partial failure. Only after Edge confirms
-    // removal do we drop the local row, so an Edge error leaves the local
-    // pointer intact and the user can retry.
-    await ferrum.deleteCredential(
-      consumer.ferrum_consumer_id,
-      cred.type,
-      cred.ferrum_credential_index,
-      consumer.namespace,
-    );
-    await store.credentials.delete(cred.id);
-    await audit.record(null, {
-      action: 'credential.finalize',
-      targetType: 'credential',
-      targetId: credentialId,
-      actor,
-    });
-  };
-
-  // Reconcile a single ACL membership on Edge then mirror it locally. We call
-  // Edge first because Edge is the system of record for authorization; if the
-  // Edge call fails we throw and leave both sides unchanged. If Edge succeeds
-  // but the local mirror fails, we try to revert Edge to the previous state so
-  // we never leave Edge ahead of Nexus (which would silently grant access
-  // without a corresponding Nexus grant record).
-  const syncAclGroupsForGrant: CredentialsService['syncAclGroupsForGrant'] = async ({
-    consumerId,
-    apiAssetId,
-    add,
-  }) => {
-    const consumer = await store.consumers.findById(consumerId);
-    if (!consumer) throw notFound('Ferrum consumer not found');
-    const previous = [...consumer.acl_groups];
-    const group = aclGroupForApi(apiAssetId);
-    const groups = new Set(previous);
-    if (add) groups.add(group);
-    else groups.delete(group);
-    const next = [...groups];
-    await ferrum.updateConsumer(
-      consumer.ferrum_consumer_id,
-      { acl_groups: next },
-      consumer.namespace,
-    );
-    try {
-      await store.consumers.updateAclGroups(consumer.id, next);
-    } catch (err) {
-      // Best-effort revert; if this also fails the drift sync job will catch
-      // the divergence on its next pass.
-      await ferrum
-        .updateConsumer(consumer.ferrum_consumer_id, { acl_groups: previous }, consumer.namespace)
-        .catch(() => undefined);
-      throw err;
-    }
-  };
+  }
 
   return {
-    ensureConsumerForUser,
-    listForUser,
-    issue,
-    rotate,
-    finalize,
-    syncAclGroupsForGrant,
+    provisioner,
+    issueForConsumer,
+
+    async disableGatewayAccess(userId, subject): Promise<GatewayTeardown> {
+      const consumer = await provisioner.findConsumer(userId);
+      if (!consumer) return { consumer_id: null, revoked_credentials: 0, removed_groups: [] };
+      const consumerId = consumer.ferrum_consumer_id;
+
+      // One serialised block, like every other consumer mutation — and *only*
+      // one, because `serializePerKey` is a queue rather than a re-entrant
+      // lock: calling `provisioner.mutateAclGroups` from in here would wait on
+      // the block it is already inside.
+      return edge.serializePerKey(consumerId, async () => {
+        const live = await edge.consumers.get(consumerId);
+        const removedGroups = [...(live?.acl_groups ?? [])];
+
+        if (live) {
+          // Groups first, rebuilt from the GET so redacted credential
+          // placeholders round-trip (§4.4) and nothing is dropped early…
+          await edge.consumers.replace(
+            consumerId,
+            {
+              id: live.id,
+              username: live.username,
+              custom_id: live.custom_id ?? null,
+              credentials: live.credentials,
+              acl_groups: [],
+            },
+            subject,
+          );
+          // …then every credential type, whether or not the read projection
+          // could show it — `basicauth` never appears in a GET. The whole-type
+          // delete is idempotent, so an absent type costs one 204.
+          for (const type of CREDENTIAL_TYPES) {
+            await edge.consumers.deleteCredentialType(consumerId, type, subject);
+          }
+        }
+
+        // The mirror follows the gateway, including when the consumer was
+        // already gone: those rows describe credentials that cannot work.
+        const rows = await store.credentials.listByConsumer(consumerId);
+        let revoked = 0;
+        for (const row of rows) {
+          if (row.status === 'revoked') continue;
+          await store.credentials.update(row.id, { status: 'revoked' });
+          revoked += 1;
+        }
+
+        return {
+          consumer_id: consumerId,
+          revoked_credentials: revoked,
+          removed_groups: removedGroups,
+        };
+      });
+    },
+
+    async list(actor, targetUserId, filter = {}, options): Promise<Paginated<CredentialRecord>> {
+      const userId = targetUserId ?? actor.id;
+      if (userId !== actor.id && !roleAtLeast(actor.role, 'admin')) {
+        throw forbidden('Only an administrator can list another account’s credentials');
+      }
+      const storeFilter: CredentialFilter = {
+        user_id: userId,
+        ...(filter.status !== undefined ? { status: filter.status } : {}),
+      };
+      return store.credentials.list(storeFilter, options);
+    },
+
+    async issue(user, input, ip = null): Promise<IssueCredentialResponse> {
+      if (!(CREDENTIAL_TYPES as readonly string[]).includes(input.credential_type)) {
+        throw validationFailed(`Unsupported credential type '${input.credential_type}'`);
+      }
+      const consumer = await provisioner.ensureConsumer(user);
+
+      const { credential, secret } = await issueForConsumer({
+        user,
+        consumerId: consumer.ferrum_consumer_id,
+        consumerUsername: consumer.ferrum_username,
+        credentialType: input.credential_type,
+        label: input.label ?? null,
+      });
+
+      await audit.record(
+        { id: user.id, role: user.role },
+        AuditAction.CREDENTIAL_ISSUE,
+        { type: 'credential', id: credential.id },
+        {
+          credential_type: credential.credential_type,
+          consumer_id: consumer.ferrum_consumer_id,
+          last4: credential.last4,
+        },
+        ip,
+      );
+
+      return { credential, consumer_username: consumer.ferrum_username, secret };
+    },
+
+    async rotate(user, credentialId, label, ip = null): Promise<RotateCredentialResponse> {
+      const target = await loadOwned(user, credentialId);
+      if (target.status === 'revoked') {
+        throw conflict('This credential has already been revoked');
+      }
+      const type = target.credential_type;
+      const consumerId = target.ferrum_consumer_id;
+
+      const result = await edge.serializePerKey(consumerId, async () => {
+        // Re-read the row *inside* the queue. The copy loaded for the ownership
+        // check was taken before this operation was serialised, and an earlier
+        // queued rotate or revoke of the same credential may have retired it
+        // since; acting on that stale copy is how two racing rotations both
+        // deleted an entry and both handed out a live-looking secret.
+        const current = await store.credentials.findById(target.id);
+        if (!current) throw notFound('Credential', credentialId);
+        if (!LIVE_STATUSES.has(current.status)) {
+          throw conflict('This credential has already been revoked');
+        }
+
+        const consumer = await edge.consumers.get(consumerId);
+        if (!consumer) throw edgeError('The gateway consumer for this credential no longer exists');
+        const rows = await liveRows(consumerId, type);
+        const length = edgeArrayLength(consumer.credentials, type, rows.length);
+        const position = resolveCredentialIndex(rows, current, length);
+        if (position === 'not-live') {
+          throw conflict('This credential has already been revoked');
+        }
+        if (position === 'whole-type') {
+          // Degrading to `DELETE /credentials/{type}` is only ever right for a
+          // revoke, where removing everything is the point. In a rotation it
+          // would delete the entry appended moments earlier and hand the user
+          // a show-once secret that authenticates nothing.
+          throw edgeError(RECONCILE_MESSAGE, { expected: rows.length, actual: length });
+        }
+
+        // Append-then-delete keeps both secrets live across the hand-off. When
+        // the array is already at the gateway cap there is no room to append,
+        // so the old entry has to go first — briefly leaving the account with
+        // no working credential of this type, which is unavoidable at the cap.
+        const appendFirst = length < cap;
+
+        if (!appendFirst) {
+          await removeAt(consumerId, type, position, user.id);
+        }
+        const created = await appendCredential({
+          user,
+          consumerId,
+          consumerUsername: consumer.username,
+          type,
+          label: label ?? current.label,
+          rotatedFromId: current.id,
+        });
+        if (appendFirst) {
+          // `POST` appends, so the old entry's index is unchanged by the append.
+          await removeAt(consumerId, type, position, user.id);
+        }
+
+        const previous =
+          (await store.credentials.update(current.id, { status: 'revoked' })) ?? current;
+        return { created, previous };
+      });
+
+      await audit.record(
+        { id: user.id, role: user.role },
+        AuditAction.CREDENTIAL_ROTATE,
+        { type: 'credential', id: result.created.credential.id },
+        {
+          credential_type: type,
+          consumer_id: consumerId,
+          rotated_from: target.id,
+          previous_last4: target.last4,
+        },
+        ip,
+      );
+
+      const owner = target.user_id === user.id ? user : await store.users.findById(target.user_id);
+      if (owner) {
+        await notifications
+          .notify(
+            owner.id,
+            'credential_rotated',
+            'A gateway credential was rotated',
+            `Your ${type} credential ending …${target.last4} was replaced.`,
+            '/credentials',
+          )
+          .catch(() => undefined);
+        await email
+          .enqueue({
+            to: owner.email,
+            templateKey: 'credential_rotated',
+            vars: {
+              recipient_name: owner.display_name,
+              recipient_email: owner.email,
+              credential_label: result.created.credential.label ?? type,
+              credential_last4: result.created.credential.last4,
+              credentials_url: `${config.publicUrl}/credentials`,
+            },
+          })
+          .catch(() => undefined);
+      }
+
+      return {
+        credential: result.created.credential,
+        previous: result.previous,
+        consumer_username: consumerUsernameForUser(target.user_id),
+        secret: result.created.secret,
+      };
+    },
+
+    async revoke(user, credentialId, ip = null): Promise<void> {
+      const target = await loadOwned(user, credentialId);
+      if (target.status === 'revoked') return;
+      const type = target.credential_type;
+      const consumerId = target.ferrum_consumer_id;
+
+      const removed = await edge.serializePerKey(consumerId, async () => {
+        // Re-read inside the queue: an earlier queued operation on the same row
+        // may already have retired it, and deleting by the index that copy
+        // carried would take somebody else's live credential with it.
+        const current = await store.credentials.findById(target.id);
+        if (!current || !LIVE_STATUSES.has(current.status)) return false;
+
+        const consumer = await edge.consumers.get(consumerId);
+        // A consumer deleted out from under us means the entry is already gone;
+        // the row still has to be marked so the UI stops offering it.
+        if (consumer) {
+          const rows = await liveRows(consumerId, type);
+          const length = edgeArrayLength(consumer.credentials, type, rows.length);
+          const position = resolveCredentialIndex(rows, current, length);
+          // `not-live` cannot follow the status check above, but treat it as a
+          // completed revoke rather than a whole-type delete if it ever does.
+          if (position !== 'not-live') {
+            await removeAt(consumerId, type, position, user.id);
+          }
+        }
+        await store.credentials.update(current.id, { status: 'revoked' });
+        return true;
+      });
+
+      // A no-op revoke of an already-retired credential stays silent: it wrote
+      // nothing, so there is nothing to audit.
+      if (!removed) return;
+
+      await audit.record(
+        { id: user.id, role: user.role },
+        AuditAction.CREDENTIAL_REVOKE,
+        { type: 'credential', id: target.id },
+        { credential_type: type, consumer_id: consumerId, last4: target.last4 },
+        ip,
+      );
+    },
   };
+
+  /** Delete one entry by index, or the whole type when the index is unusable. */
+  async function removeAt(
+    consumerId: string,
+    type: CredentialType,
+    position: number | 'whole-type',
+    subject: string,
+  ): Promise<void> {
+    if (position === 'whole-type') {
+      await edge.consumers.deleteCredentialType(consumerId, type, subject);
+      return;
+    }
+    await edge.consumers.deleteCredentialAt(consumerId, type, position, subject);
+  }
 }

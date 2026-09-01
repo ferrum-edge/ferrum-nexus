@@ -1,53 +1,16 @@
-# Node
 node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-.npmrc.local
-
-# Build outputs
 dist/
-build/
-out/
-.next/
-.cache/
-.parcel-cache/
-.turbo/
-.vite/
-*.tsbuildinfo
-
-# Test / coverage
+dist-server/
 coverage/
-.nyc_output/
-*.lcov
-
-# Editors
-.vscode/*
-!.vscode/extensions.json
-!.vscode/settings.json.example
-.idea/
-*.swp
-*.swo
-.DS_Store
-
-# Env files
-.env
-.env.local
-.env.*.local
-!.env.example
-
-# Local data
 data/
 *.sqlite
 *.sqlite-journal
-*.sqlite-wal
-*.sqlite-shm
-*.db
-
-# Logs
-logs/
 *.log
-
-# Conductor workspace artifacts
-.context/
+.env
+.env.local
+.env.*.local
+.DS_Store
+*.tsbuildinfo
+web/dist/
+server/dist/
+shared/dist/

@@ -1,161 +1,116 @@
-import { v4 as uuid } from 'uuid';
-import { z } from 'zod';
-import type { NexusStore } from '../db/store.js';
+/**
+ * Mass email — one queued message per recipient, never a single BCC blast.
+ *
+ * Fanning out at enqueue time means each recipient gets their own outbox row,
+ * so a bad address retries (and eventually fails) on its own instead of taking
+ * the whole send with it, and the admin can see per-recipient state.
+ *
+ * **Idempotency.** Every row is keyed `mass:<batch>:<user_id>`. The batch id is
+ * the caller's `idempotency_key` when supplied, otherwise a fresh UUID per
+ * call. Re-posting the same request with the same key therefore enqueues
+ * nothing new — the unique index on `email_outbox.idempotency_key` does the
+ * work — which makes the composer safe to retry after a timeout.
+ */
+
+import type { MassEmailAudience, MassEmailRequest, MassEmailResponse } from '@ferrum-nexus/shared';
+
+import { AuditAction, type AuditActor, type AuditService } from '../audit/service.js';
+import type { NexusStore, UserFilter, UserRecord } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
-import type { ResolvedConfig } from '../config/index.js';
-import { badRequest } from '../lib/errors.js';
+import { MASS_RAW_HTML_VARS } from '../email/templates.js';
+import { validationFailed } from '../lib/errors.js';
+import { newId } from '../lib/ids.js';
 
-// Hard cap on a single campaign so a runaway broadcast can't flood the
-// outbox with millions of rows. 50k is well above any plausible production
-// audience for this product; admins who legitimately need more can split a
-// campaign into segments.
-const MAX_CAMPAIGN_RECIPIENTS = 50_000;
-
-export const MassEmailInput = z.object({
-  subject: z.string().min(1).max(255),
-  body: z.string().min(1).max(20_000),
-  filter: z.object({
-    audience: z.enum([
-      'all_users',
-      'clients',
-      'providers',
-      'pending_clients',
-      'api_clients',
-    ]),
-    apiAssetId: z.string().optional(),
-    userIds: z.array(z.string()).optional(),
-  }),
-});
-
+/** Mass-email operations. */
 export interface MassEmailService {
-  send(opts: {
-    actorId: string;
-    input: z.infer<typeof MassEmailInput>;
-  }): Promise<{ campaignId: string; queued: number }>;
-  list(): Promise<
-    Awaited<ReturnType<NexusStore['massEmail']['list']>>
-  >;
+  /** Resolve the audience and enqueue one message per recipient. */
+  send(
+    actor: AuditActor,
+    request: MassEmailRequest,
+    ip?: string | null,
+  ): Promise<MassEmailResponse>;
+  /** Resolve an audience selector to its recipients, without sending. */
+  resolveAudience(audience: MassEmailAudience): Promise<UserRecord[]>;
 }
 
-export function createMassEmailService(
-  store: NexusStore,
-  email: EmailService,
-  config: ResolvedConfig,
-): MassEmailService {
-  return {
-    async send({ actorId, input }) {
-      const recipients = await resolveRecipients(store, input.filter);
-      if (recipients.length > MAX_CAMPAIGN_RECIPIENTS) {
-        throw badRequest(
-          'campaign_too_large',
-          `Recipient set exceeds the per-campaign cap of ${MAX_CAMPAIGN_RECIPIENTS}. Narrow the audience or split into multiple campaigns.`,
-        );
+/** Dependencies of {@link createMassEmailService}. */
+export interface MassEmailServiceDeps {
+  store: NexusStore;
+  email: EmailService;
+  audit: AuditService;
+}
+
+/** Build the mass-email service. */
+export function createMassEmailService(deps: MassEmailServiceDeps): MassEmailService {
+  const { store, email, audit } = deps;
+
+  async function resolveAudience(audience: MassEmailAudience): Promise<UserRecord[]> {
+    switch (audience.scope) {
+      case 'all':
+        // "all" ignores the other filters, but never mails disabled accounts.
+        return store.users.listRecipients({ status: 'active' });
+      case 'explicit': {
+        const ids = audience.user_ids ?? [];
+        if (ids.length === 0) throw validationFailed('Select at least one recipient');
+        return store.users.listRecipients({ ids, status: 'active' });
       }
-      const campaign = await store.massEmail.insert({
-        id: uuid(),
-        created_by: actorId,
-        recipient_filter: input.filter,
-        subject: input.subject,
-        body: input.body,
-        status: 'running',
-        sent_count: 0,
-        failed_count: 0,
-        created_at: new Date().toISOString(),
-        completed_at: null,
-      });
-      // RFC 8058 / RFC 2369 `List-Unsubscribe` header gives the recipient's
-      // mail client a one-click unsubscribe button. We point it at a portal
-      // route that lets the user manage their broadcast preferences.
-      const unsubscribeUrl = `${config.publicUrl}/notifications/unsubscribe`;
+      case 'filtered':
+      default: {
+        const filter: UserFilter = {
+          status: audience.status ?? 'active',
+          ...(audience.roles && audience.roles.length > 0 ? { roles: audience.roles } : {}),
+          ...(audience.org_id !== undefined ? { org_id: audience.org_id } : {}),
+        };
+        return store.users.listRecipients(filter);
+      }
+    }
+  }
+
+  return {
+    resolveAudience,
+
+    async send(actor, request, ip = null): Promise<MassEmailResponse> {
+      const subject = request.subject.trim();
+      if (subject === '') throw validationFailed('A subject is required');
+      if (request.body_html.trim() === '' && request.body_text.trim() === '') {
+        throw validationFailed('A message body is required');
+      }
+
+      const recipients = await resolveAudience(request.audience);
+      const batch = request.idempotency_key ?? newId();
+
+      let enqueued = 0;
       for (const recipient of recipients) {
-        await email.enqueue({
+        const result = await email.enqueue({
           to: recipient.email,
-          templateKey: 'admin_broadcast',
+          templateKey: 'mass',
+          idempotencyKey: `mass:${batch}:${recipient.id}`,
+          rawHtmlVars: MASS_RAW_HTML_VARS,
           vars: {
-            subject: input.subject,
-            body: input.body,
-            unsubscribeUrl,
-            recipientId: recipient.id,
-          },
-          // Idempotency key prevents duplicate sends if the worker tick that
-          // runs this campaign retries (e.g. process crash mid-loop).
-          idempotencyKey: `mass_email:${campaign.id}:${recipient.id}`,
-          headers: {
-            'List-Unsubscribe': `<${unsubscribeUrl}?u=${encodeURIComponent(recipient.id)}>`,
-            'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+            recipient_name: recipient.display_name,
+            recipient_email: recipient.email,
+            subject,
+            body_html: request.body_html,
+            body_text: request.body_text,
           },
         });
+        if (result.created) enqueued += 1;
       }
-      await store.massEmail.update(campaign.id, {
-        status: 'completed',
-        sent_count: recipients.length,
-        completed_at: new Date().toISOString(),
-      });
-      return { campaignId: campaign.id, queued: recipients.length };
-    },
-    async list() {
-      return store.massEmail.list();
+
+      await audit.record(
+        actor,
+        AuditAction.ADMIN_MASS_EMAIL,
+        { type: 'mass_email', id: batch },
+        {
+          subject,
+          audience_scope: request.audience.scope,
+          recipients: recipients.length,
+          enqueued,
+        },
+        ip,
+      );
+
+      return { enqueued, recipients: recipients.length };
     },
   };
-}
-
-const RECIPIENT_PAGE_SIZE = 500;
-
-/**
- * Stream all rows matching a filtered users query in fixed-size pages. Avoids
- * loading the entire user table into memory (the previous implementation
- * pulled up to 100k rows in one shot, then did one role lookup per row).
- */
-async function* paginateUsers(
-  store: NexusStore,
-  filter: { role?: 'client' | 'provider'; status?: 'pending' | 'active' | 'disabled' },
-): AsyncGenerator<{ id: string; email: string }, void, void> {
-  let offset = 0;
-  while (true) {
-    const { rows } = await store.users.listFiltered({
-      role: filter.role,
-      status: filter.status,
-      limit: RECIPIENT_PAGE_SIZE,
-      offset,
-    });
-    if (rows.length === 0) return;
-    for (const row of rows) yield { id: row.id, email: row.email };
-    if (rows.length < RECIPIENT_PAGE_SIZE) return;
-    offset += rows.length;
-  }
-}
-
-async function resolveRecipients(
-  store: NexusStore,
-  filter: z.infer<typeof MassEmailInput>['filter'],
-): Promise<{ id: string; email: string }[]> {
-  const recipients: { id: string; email: string }[] = [];
-  switch (filter.audience) {
-    case 'all_users':
-      for await (const u of paginateUsers(store, {})) recipients.push(u);
-      return recipients;
-    case 'clients':
-      for await (const u of paginateUsers(store, { role: 'client' })) recipients.push(u);
-      return recipients;
-    case 'providers':
-      for await (const u of paginateUsers(store, { role: 'provider' })) recipients.push(u);
-      return recipients;
-    case 'pending_clients':
-      for await (const u of paginateUsers(store, { status: 'pending', role: 'client' })) {
-        recipients.push(u);
-      }
-      return recipients;
-    case 'api_clients': {
-      if (!filter.apiAssetId) return [];
-      const grants = await store.grants.listForAsset(filter.apiAssetId);
-      for (const grant of grants) {
-        if (grant.status !== 'active') continue;
-        const user = await store.users.findById(grant.client_user_id);
-        if (user) recipients.push({ id: user.id, email: user.email });
-      }
-      return recipients;
-    }
-    default:
-      return [];
-  }
 }

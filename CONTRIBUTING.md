@@ -1,77 +1,74 @@
-# Contributing
+# Contributing to Ferrum Nexus
 
-Thanks for your interest in Ferrum Nexus. This document outlines how to set
-up a local development environment and the conventions used in the codebase.
+Thanks for helping improve Ferrum Nexus!
 
-## Local Setup
+## Prerequisites
 
-Requirements:
+- Node.js 20.19+ (or 22.12+) — see `.nvmrc`.
+- A Ferrum Edge gateway for end-to-end work (unit and integration tests run
+  against a built-in mock Admin API and need no gateway).
 
-- Node.js 20.19+ (or 22.12+)
-- npm 10+
-- A running Ferrum Edge instance (or its mock — see `server/src/ferrum-admin`)
-- One of: SQLite (default), PostgreSQL, MySQL, or MongoDB
+## Getting started
 
 ```bash
-# Install workspace deps
 npm install
-
-# Copy env template and edit
-cp .env.example .env
-
-# Run database migrations (SQLite by default)
+cp .env.example .env   # set NEXUS_SECRET_KEY, FERRUM_ADMIN_URL, FERRUM_ADMIN_JWT_SECRET
 npm run migrate --workspace server
-
-# Start backend and frontend together
-npm run dev
+npm run dev            # backend on :8787, web on :5173
 ```
 
-The backend listens on `http://127.0.0.1:8787` and the Vite dev server runs on
-`http://127.0.0.1:5173` with `/api` proxied to the backend.
+## Project layout
 
-## Project Layout
+npm workspaces, in build-dependency order:
 
-```
-server/   Fastify backend (BFF + Admin API integration)
-web/      React + TypeScript SPA
-shared/   Shared TypeScript types
-docker/   Production container assets
-docs/     Architecture and operational docs
-```
+- `shared/` — types/constants used by both server and web. **Build it first**
+  (`npm run build --workspace shared`); every top-level script does this
+  automatically.
+- `server/` — Fastify BFF. All Ferrum Edge Admin API traffic originates here.
+- `web/` — React SPA (Vite).
 
-See `docs/architecture.md` for the design rationale.
-
-## Coding Conventions
-
-- TypeScript everywhere. No `any` unless escape-hatched with a comment.
-- Functions and modules have explicit return types at the public boundary.
-- Server modules export a single `register(opts)` plugin where possible so they
-  can be composed by `server/src/index.ts`.
-- Database access goes through `server/src/db/store.ts` — never reach into the
-  driver directly from a service module.
-- All state-changing endpoints require a session and write an audit log entry.
-- Public-facing strings live in the UI; backend errors return a stable code +
-  human-readable message.
-
-## Tests
+## Checks to run before a PR
 
 ```bash
-npm test                     # all
-npm test --workspace server  # backend only
-npm test --workspace web     # frontend only
+npm run typecheck   # tsc --noEmit across workspaces
+npm test            # server: node --test via tsx; web: vitest
+npm run format:check
 ```
 
-The backend test harness boots Fastify against an in-memory SQLite database and
-a mock Ferrum Edge Admin API.
+Run a single backend test file:
 
-## Commit / PR Conventions
+```bash
+cd server && npx tsx --test src/path/to/file.test.ts
+```
 
-- Branches: `<user>/<short-topic>`.
-- Commits: short imperative subject (~70 chars), optional body with rationale.
-- PRs: include a Summary and Test plan section.
+Cross-adapter smoke tests default to SQLite; export
+`NEXUS_TEST_POSTGRES_URL`, `NEXUS_TEST_MYSQL_URL`, or `NEXUS_TEST_MONGO_URL`
+to also exercise those adapters — always do this when touching
+`server/src/db/adapters/`.
 
-## License Acknowledgement
+## Ground rules
 
-By contributing you agree your contributions are made under the project's
-[PolyForm Noncommercial 1.0.0](LICENSE) license and the optional
-[Commercial License](LICENSE-COMMERCIAL.md) terms.
+1. Persistence only through the `NexusStore` interface — never import a DB
+   driver in a service module. New queries are added to the interface and
+   implemented in **all four** adapters.
+2. Every state-changing endpoint requires a session and writes an audit row.
+3. Plaintext credential material is returned exactly once and never stored.
+4. All Ferrum Edge knowledge lives in `server/src/ferrum-admin/`.
+5. Service modules export a `createXService(...)` factory and are composed
+   in `server/src/index.ts`; routes receive services via registration
+   options.
+6. TypeScript strict mode; no `any` without an escape-hatch comment;
+   explicit return types at public boundaries; Prettier formatting
+   (`npm run format`).
+
+## Commit / PR conventions
+
+- Small, focused PRs with a clear description of behavior changes.
+- Add or update tests for anything you change.
+- Update `CHANGELOG.md` under `[Unreleased]` for user-visible changes.
+- New audit events must be added to the catalog in `docs/security.md`.
+
+## License
+
+By contributing you agree that your contributions are licensed under the
+project's dual license (see `LICENSE` and `LICENSE-COMMERCIAL.md`).

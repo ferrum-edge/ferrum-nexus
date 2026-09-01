@@ -1,14 +1,15 @@
 {
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "jsx": "react-jsx",
-    "moduleResolution": "Bundler",
     "module": "ESNext",
-    "allowImportingTsExtensions": false,
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
     "noEmit": true,
-    "types": ["vite/client"]
+    "declaration": false,
+    "sourceMap": false,
+    "allowImportingTsExtensions": false
   },
-  "include": ["src/**/*"]
+  "include": ["src", "vite.config.ts", "vitest.setup.ts"]
 }

@@ -1,1471 +1,2306 @@
 /**
- * Shared SQL repository implementation used by both the PostgreSQL and MySQL
- * adapters. Dialect-specific differences (placeholder syntax, JSON encoding,
- * boolean handling) are normalized by helpers in `./sql-common.ts`.
+ * The seventeen {@link NexusStore} repositories, implemented once for both
+ * asynchronous SQL adapters.
  *
- * For brevity this implementation reuses the same parameterized statements
- * across drivers and rewrites `$N` to `?` for MySQL via a small helper.
+ * PostgreSQL and MySQL differ in placeholder syntax, identifier quoting and a
+ * handful of constructs; all of that is absorbed by
+ * {@link ./sql-common.js sql-common.ts}, so everything below is written against
+ * a single {@link SqlExecutor} and a single SQL text. `postgres/index.ts` and
+ * `mysql/index.ts` supply the executor (a pool, or a checked-out transaction
+ * connection) and the lifecycle; they add no query logic of their own.
+ *
+ * Semantics are matched method for method against `adapters/sqlite/index.ts`,
+ * which is the reference implementation: same ordering, same
+ * `{ items, total }` envelopes, same `null`-on-miss, same `CONFLICT` mapping,
+ * same adapter-managed `updated_at`.
+ *
+ * Note the deliberate deviation from the original "one repo file for all three
+ * SQL adapters" sketch: the sqlite adapter is synchronous under the hood
+ * (better-sqlite3), so it cannot share these `Promise`-returning bodies without
+ * either wrapping every statement or making the reference adapter async. It
+ * stays as it is; this file serves the two async drivers.
  */
 
-import type {
-  AccessGrantRow,
-  AccessRequestRow,
-  ApiAssetRow,
-  ApiSpecVersionRow,
-  AppSettingRow,
-  AuditLogRow,
-  ConversationRow,
-  CredentialMetadataRow,
-  EmailOutboxRow,
-  EmailTemplateRow,
-  EmailVerificationRow,
-  FerrumConsumerRow,
-  ListOptions,
-  MassEmailCampaignRow,
-  MessageRow,
-  NexusStore,
-  NotificationRow,
-  OrganizationMemberRow,
-  OrganizationRow,
-  PasswordResetRow,
-  SessionRow,
-  UserRow,
-} from '../store.js';
 import type {
   AccessRequestStatus,
+  ApiStatus,
   ApiVisibility,
-  UserRole,
+  AuthPluginType,
+  CredentialStatus,
+  CredentialType,
+  DbDriver,
+  EmailOutboxStatus,
+  EmailTemplateKey,
+  GrantStatus,
+  IsoTimestamp,
+  NotificationType,
+  RateLimitConfig,
+  Role,
+  UserStatus,
+  Uuid,
 } from '@ferrum-nexus/shared';
+
+import { newId, nowIso } from '../../lib/ids.js';
+import type {
+  AccessRequestFilter,
+  AccessRequestRecord,
+  AccessRequestRepo,
+  ApiFilter,
+  ApiRecord,
+  ApiRepo,
+  ApiSpecRecord,
+  ApiSpecRepo,
+  AuditLogFilter,
+  AuditLogRecord,
+  AuditLogRepo,
+  ConsumerRecord,
+  ConsumerRepo,
+  CreateInput,
+  CredentialFilter,
+  CredentialRecord,
+  CredentialRepo,
+  EmailOutboxRecord,
+  EmailOutboxRepo,
+  EmailTemplateRecord,
+  EmailTemplateRepo,
+  GrantFilter,
+  GrantRecord,
+  GrantRepo,
+  MessageRecord,
+  MessageRepo,
+  NexusStore,
+  NotificationRecord,
+  NotificationRepo,
+  OrganizationRecord,
+  OrganizationRepo,
+  SessionRecord,
+  SessionRepo,
+  SettingRecord,
+  SettingRepo,
+  StoreHealth,
+  ThreadRecord,
+  ThreadRepo,
+  UpdateInput,
+  UserFilter,
+  UserRecord,
+  UserRepo,
+  VerificationTokenRecord,
+  VerificationTokenRepo,
+} from '../store.js';
 import {
-  asBool,
-  asJson,
-  buildInsertIgnore,
-  buildUpsert,
-  caseInsensitiveLike,
-  ident,
-  toIsoString,
-  type SqlClient,
+  bool,
+  encodeBool,
+  encodeJson,
+  execute,
+  FOR_UPDATE_SKIP_LOCKED,
+  insertParts,
+  int,
+  json,
+  mapSqlConflict,
+  page,
+  queryAll,
+  queryCount,
+  queryOne,
+  setParts,
+  SqlWhereBuilder,
+  text,
+  textOrNull,
+  upsertSql,
+  type Row,
   type SqlDialect,
+  type SqlExecutor,
+  type SqlParam,
+  type SqlTransactionRunner,
 } from './sql-common.js';
 
+/* ── Row mappers ────────────────────────────────────────────────────────── */
+
+function mapUser(row: Row): UserRecord {
+  return {
+    id: text(row.id),
+    email: text(row.email),
+    password_hash: text(row.password_hash),
+    display_name: text(row.display_name),
+    role: text(row.role) as Role,
+    org_id: textOrNull(row.org_id),
+    company: textOrNull(row.company),
+    phone: textOrNull(row.phone),
+    status: text(row.status) as UserStatus,
+    email_verified: bool(row.email_verified),
+    last_login_at: textOrNull(row.last_login_at),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+/** Encoded `SET` columns of a user patch, shared by `update` and `updateIfMatches`. */
+function userUpdateColumns(patch: UpdateInput<UserRecord>): Record<string, SqlParam | undefined> {
+  return {
+    email: patch.email === undefined ? undefined : patch.email.trim().toLowerCase(),
+    password_hash: patch.password_hash,
+    display_name: patch.display_name,
+    role: patch.role,
+    org_id: patch.org_id === undefined ? undefined : patch.org_id,
+    company: patch.company === undefined ? undefined : patch.company,
+    phone: patch.phone === undefined ? undefined : patch.phone,
+    status: patch.status,
+    email_verified:
+      patch.email_verified === undefined ? undefined : encodeBool(patch.email_verified),
+    last_login_at: patch.last_login_at === undefined ? undefined : patch.last_login_at,
+  };
+}
+
+/** Encoded `SET` columns of an access-request patch, shared by both updates. */
+function accessRequestUpdateColumns(
+  patch: UpdateInput<AccessRequestRecord>,
+): Record<string, SqlParam | undefined> {
+  return {
+    justification: patch.justification,
+    status: patch.status,
+    decided_by: patch.decided_by,
+    decided_at: patch.decided_at,
+    decision_note: patch.decision_note,
+  };
+}
+
+/** Encoded `SET` columns of a grant patch, shared by both updates. */
+function grantUpdateColumns(patch: UpdateInput<GrantRecord>): Record<string, SqlParam | undefined> {
+  return {
+    status: patch.status,
+    acl_group: patch.acl_group,
+    access_request_id: patch.access_request_id,
+    revoked_by: patch.revoked_by,
+    revoked_at: patch.revoked_at,
+  };
+}
+
+function mapOrganization(row: Row): OrganizationRecord {
+  return {
+    id: text(row.id),
+    name: text(row.name),
+    description: textOrNull(row.description),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapSession(row: Row): SessionRecord {
+  return {
+    id: text(row.id),
+    token_hash: text(row.token_hash),
+    user_id: text(row.user_id),
+    csrf_token: text(row.csrf_token),
+    expires_at: text(row.expires_at),
+    ip: textOrNull(row.ip),
+    user_agent: textOrNull(row.user_agent),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapApi(row: Row): ApiRecord {
+  return {
+    id: text(row.id),
+    name: text(row.name),
+    slug: text(row.slug),
+    description: textOrNull(row.description),
+    owner_user_id: text(row.owner_user_id),
+    ferrum_proxy_id: textOrNull(row.ferrum_proxy_id),
+    namespace: text(row.namespace),
+    version: text(row.version),
+    spec_format: 'openapi',
+    requestable: bool(row.requestable),
+    auth_plugin: text(row.auth_plugin) as AuthPluginType,
+    rate_limit: json<RateLimitConfig | null>(row.rate_limit_json, null),
+    status: text(row.status) as ApiStatus,
+    visibility: text(row.visibility) as ApiVisibility,
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapApiSpec(row: Row): ApiSpecRecord {
+  return {
+    id: text(row.id),
+    api_id: text(row.api_id),
+    version: text(row.version),
+    raw_spec: text(row.raw_spec),
+    parsed_title: textOrNull(row.parsed_title),
+    parsed_version: textOrNull(row.parsed_version),
+    is_current: bool(row.is_current),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapAccessRequest(row: Row): AccessRequestRecord {
+  return {
+    id: text(row.id),
+    api_id: text(row.api_id),
+    user_id: text(row.user_id),
+    justification: text(row.justification),
+    status: text(row.status) as AccessRequestStatus,
+    decided_by: textOrNull(row.decided_by),
+    decided_at: textOrNull(row.decided_at),
+    decision_note: textOrNull(row.decision_note),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapGrant(row: Row): GrantRecord {
+  return {
+    id: text(row.id),
+    api_id: text(row.api_id),
+    user_id: text(row.user_id),
+    access_request_id: textOrNull(row.access_request_id),
+    acl_group: text(row.acl_group),
+    status: text(row.status) as GrantStatus,
+    granted_by: text(row.granted_by),
+    revoked_by: textOrNull(row.revoked_by),
+    revoked_at: textOrNull(row.revoked_at),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapCredential(row: Row): CredentialRecord {
+  return {
+    id: text(row.id),
+    user_id: text(row.user_id),
+    ferrum_consumer_id: text(row.ferrum_consumer_id),
+    credential_type: text(row.credential_type) as CredentialType,
+    ferrum_credential_id: text(row.ferrum_credential_id),
+    fingerprint: text(row.fingerprint),
+    last4: text(row.last4),
+    label: textOrNull(row.label),
+    status: text(row.status) as CredentialStatus,
+    rotated_from_id: textOrNull(row.rotated_from_id),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapConsumer(row: Row): ConsumerRecord {
+  return {
+    id: text(row.id),
+    user_id: text(row.user_id),
+    namespace: text(row.namespace),
+    ferrum_consumer_id: text(row.ferrum_consumer_id),
+    ferrum_username: text(row.ferrum_username),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapThread(row: Row): ThreadRecord {
+  return {
+    id: text(row.id),
+    subject: text(row.subject),
+    api_id: textOrNull(row.api_id),
+    created_by: text(row.created_by),
+    participant_a: text(row.participant_a),
+    participant_b: textOrNull(row.participant_b),
+    last_message_at: textOrNull(row.last_message_at),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapMessage(row: Row): MessageRecord {
+  return {
+    id: text(row.id),
+    thread_id: text(row.thread_id),
+    sender_user_id: text(row.sender_user_id),
+    body: text(row.body),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapNotification(row: Row): NotificationRecord {
+  return {
+    id: text(row.id),
+    user_id: text(row.user_id),
+    type: text(row.type) as NotificationType,
+    title: text(row.title),
+    body: text(row.body),
+    link: textOrNull(row.link),
+    read_at: textOrNull(row.read_at),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapOutbox(row: Row): EmailOutboxRecord {
+  return {
+    id: text(row.id),
+    to_email: text(row.to_email),
+    subject: text(row.subject),
+    body_html: text(row.body_html),
+    body_text: text(row.body_text),
+    status: text(row.status) as EmailOutboxStatus,
+    attempts: int(row.attempts),
+    next_attempt_at: textOrNull(row.next_attempt_at),
+    last_error: textOrNull(row.last_error),
+    idempotency_key: textOrNull(row.idempotency_key),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapAuditLog(row: Row): AuditLogRecord {
+  return {
+    id: text(row.id),
+    actor_user_id: textOrNull(row.actor_user_id),
+    actor_role: textOrNull(row.actor_role) as Role | null,
+    action: text(row.action),
+    target_type: text(row.target_type),
+    target_id: textOrNull(row.target_id),
+    details: json<Record<string, unknown>>(row.details_json, {}),
+    ip: textOrNull(row.ip),
+    created_at: text(row.created_at),
+  };
+}
+
+function mapSetting(row: Row): SettingRecord {
+  return {
+    key: text(row.key),
+    value: json<unknown>(row.value_json, null),
+    encrypted: bool(row.encrypted),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapEmailTemplate(row: Row): EmailTemplateRecord {
+  return {
+    id: text(row.id),
+    key: text(row.key) as EmailTemplateKey,
+    subject: text(row.subject),
+    body_html: text(row.body_html),
+    body_text: text(row.body_text),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapVerificationToken(row: Row): VerificationTokenRecord {
+  return {
+    id: text(row.id),
+    user_id: text(row.user_id),
+    token_hash: text(row.token_hash),
+    expires_at: text(row.expires_at),
+    used_at: textOrNull(row.used_at),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+/* ── Filter builders (shared by list/count) ─────────────────────────────── */
+
+function userWhere(filter: UserFilter): SqlWhereBuilder {
+  const builder = new SqlWhereBuilder()
+    .add(filter.role, 'role = ?', filter.role ?? null)
+    .add(filter.status, 'status = ?', filter.status ?? null)
+    .addSearch(filter.q, ['email', 'display_name']);
+  if (filter.roles !== undefined) builder.addIn('role', filter.roles);
+  if (filter.ids !== undefined) builder.addIn('id', filter.ids);
+  if (filter.org_id !== undefined) {
+    if (filter.org_id === null) builder.always('org_id IS NULL');
+    else builder.always('org_id = ?', filter.org_id);
+  }
+  if (filter.email_verified !== undefined) {
+    builder.always('email_verified = ?', encodeBool(filter.email_verified));
+  }
+  return builder;
+}
+
+function apiWhere(filter: ApiFilter): SqlWhereBuilder {
+  const builder = new SqlWhereBuilder()
+    .add(filter.owner_user_id, 'owner_user_id = ?', filter.owner_user_id ?? null)
+    .add(filter.status, 'status = ?', filter.status ?? null)
+    .add(filter.visibility, 'visibility = ?', filter.visibility ?? null)
+    .addSearch(filter.q, ['name', 'slug', 'description']);
+  if (filter.requestable !== undefined) {
+    builder.always('requestable = ?', encodeBool(filter.requestable));
+  }
+  if (filter.ids !== undefined) builder.addIn('id', filter.ids);
+  return builder;
+}
+
+function accessRequestWhere(filter: AccessRequestFilter): SqlWhereBuilder {
+  const builder = new SqlWhereBuilder()
+    .add(filter.user_id, 'user_id = ?', filter.user_id ?? null)
+    .add(filter.api_id, 'api_id = ?', filter.api_id ?? null)
+    .add(filter.status, 'status = ?', filter.status ?? null);
+  if (filter.api_ids !== undefined) builder.addIn('api_id', filter.api_ids);
+  return builder;
+}
+
+function grantWhere(filter: GrantFilter): SqlWhereBuilder {
+  const builder = new SqlWhereBuilder()
+    .add(filter.user_id, 'user_id = ?', filter.user_id ?? null)
+    .add(filter.api_id, 'api_id = ?', filter.api_id ?? null)
+    .add(filter.status, 'status = ?', filter.status ?? null);
+  if (filter.api_ids !== undefined) builder.addIn('api_id', filter.api_ids);
+  return builder;
+}
+
+function credentialWhere(filter: CredentialFilter): SqlWhereBuilder {
+  return new SqlWhereBuilder()
+    .add(filter.user_id, 'user_id = ?', filter.user_id ?? null)
+    .add(filter.status, 'status = ?', filter.status ?? null)
+    .add(filter.credential_type, 'credential_type = ?', filter.credential_type ?? null)
+    .add(filter.ferrum_consumer_id, 'ferrum_consumer_id = ?', filter.ferrum_consumer_id ?? null);
+}
+
+function auditWhere(filter: AuditLogFilter): SqlWhereBuilder {
+  const builder = new SqlWhereBuilder()
+    .add(filter.actor_user_id, 'actor_user_id = ?', filter.actor_user_id ?? null)
+    .add(filter.action, 'action = ?', filter.action ?? null)
+    .add(filter.target_type, 'target_type = ?', filter.target_type ?? null)
+    .add(filter.target_id, 'target_id = ?', filter.target_id ?? null)
+    .add(filter.from, 'created_at >= ?', filter.from ?? null)
+    .add(filter.to, 'created_at < ?', filter.to ?? null);
+  if (filter.actions !== undefined) builder.addIn('action', filter.actions);
+  return builder;
+}
+
+/* ── Small dialect shims ────────────────────────────────────────────────── */
+
 /**
- * Minimal placeholder/identifier rewriter. We deliberately do NOT rewrite
- * dialect-specific operators (ILIKE, ON CONFLICT) any more — those are
- * generated per-dialect by helpers in `sql-common.ts`. The only thing we
- * still need is the $N → ? swap for MySQL and the COUNT(*)::text → COUNT(*)
- * cast strip.
+ * `column <=> ?` — an equality test where `NULL = NULL` is true.
+ *
+ * SQLite spells it `column IS ?`; neither PostgreSQL nor MySQL accepts that
+ * form, and they disagree with each other too.
  */
-const renderSql = (dialect: SqlDialect, sql: string): string => {
-  if (dialect === 'postgres') return sql;
-  return sql.replace(/COUNT\(\*\)::text/g, 'COUNT(*)').replace(/\$(\d+)/g, '?');
-};
+function nullSafeEq(dialect: SqlDialect, column: string): string {
+  return dialect === 'mysql' ? `${column} <=> ?` : `${column} IS NOT DISTINCT FROM ?`;
+}
 
-/** Lower-case search parameter for use with `caseInsensitiveLike`. */
-const lowerSearch = (dialect: SqlDialect, value: string | null): string | null => {
-  if (value == null) return null;
-  return dialect === 'postgres' ? value : value.toLowerCase();
-};
+/**
+ * `ORDER BY` fragment placing NULLs first, portably.
+ *
+ * SQLite and MySQL sort NULLs first on `ASC`; PostgreSQL sorts them last, and
+ * its `NULLS FIRST` modifier is not MySQL syntax. Sorting on the nullness test
+ * itself works everywhere.
+ */
+function nullsFirstAsc(column: string): string {
+  return `(${column} IS NULL) DESC, ${column} ASC`;
+}
 
-const J = (value: unknown): string => JSON.stringify(value ?? null);
+/** Comma-separated `?` placeholders for an `IN (...)` list. */
+function placeholders(count: number): string {
+  return new Array(count).fill('?').join(', ');
+}
 
-function hydrateUser(row: Record<string, unknown>): UserRow {
+/* ── Timestamps ─────────────────────────────────────────────────────────── */
+
+interface Timestamps {
+  id: Uuid;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
+}
+
+function stamps(input: {
+  id?: Uuid;
+  created_at?: IsoTimestamp;
+  updated_at?: IsoTimestamp;
+}): Timestamps {
+  const now = nowIso();
   return {
-    id: row.id as string,
-    email: row.email as string,
-    email_normalized: row.email_normalized as string,
-    name: (row.name as string | null) ?? null,
-    phone: (row.phone as string | null) ?? null,
-    status: row.status as UserRow['status'],
-    email_verified_at: toIsoString(row.email_verified_at),
-    password_hash: row.password_hash as string,
-    last_login_at: toIsoString(row.last_login_at),
-    failed_login_count: Number(row.failed_login_count ?? 0),
-    organization_id: (row.organization_id as string | null) ?? null,
-    created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-    updated_at: toIsoString(row.updated_at) ?? new Date().toISOString(),
+    id: input.id ?? newId(),
+    created_at: input.created_at ?? now,
+    updated_at: input.updated_at ?? input.created_at ?? now,
   };
 }
 
-function hydrateAsset(row: Record<string, unknown>): ApiAssetRow {
-  return {
-    id: row.id as string,
-    api_spec_id: row.api_spec_id as string,
-    proxy_id: row.proxy_id as string,
-    namespace: row.namespace as string,
-    provider_id: row.provider_id as string,
-    title: row.title as string,
-    description: (row.description as string | null) ?? null,
-    slug: row.slug as string,
-    version: row.version as string,
-    visibility: row.visibility as ApiAssetRow['visibility'],
-    requestable: asBool(row.requestable) ? 1 : 0,
-    lifecycle: row.lifecycle as ApiAssetRow['lifecycle'],
-    tags: asJson<string[]>(row.tags, []),
-    contact_email: (row.contact_email as string | null) ?? null,
-    support_notes: (row.support_notes as string | null) ?? null,
-    operation_count: Number(row.operation_count ?? 0),
-    content_hash: (row.content_hash as string | null) ?? null,
-    created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-    updated_at: toIsoString(row.updated_at) ?? new Date().toISOString(),
-  };
+/* ── The repositories ───────────────────────────────────────────────────── */
+
+/** Every repository of {@link NexusStore}, bound to one executor. */
+export interface SqlRepos {
+  users: UserRepo;
+  organizations: OrganizationRepo;
+  sessions: SessionRepo;
+  apis: ApiRepo;
+  apiSpecs: ApiSpecRepo;
+  accessRequests: AccessRequestRepo;
+  grants: GrantRepo;
+  credentials: CredentialRepo;
+  consumers: ConsumerRepo;
+  threads: ThreadRepo;
+  messages: MessageRepo;
+  notifications: NotificationRepo;
+  emailOutbox: EmailOutboxRepo;
+  auditLogs: AuditLogRepo;
+  settings: SettingRepo;
+  emailTemplates: EmailTemplateRepo;
+  verificationTokens: VerificationTokenRepo;
 }
 
-function hydrateAccessRequest(row: Record<string, unknown>): AccessRequestRow {
-  return {
-    id: row.id as string,
-    api_asset_id: row.api_asset_id as string,
-    client_user_id: row.client_user_id as string,
-    client_consumer_id: (row.client_consumer_id as string | null) ?? null,
-    justification: row.justification as string,
-    status: row.status as AccessRequestRow['status'],
-    provider_reason: (row.provider_reason as string | null) ?? null,
-    reviewed_by: (row.reviewed_by as string | null) ?? null,
-    created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-    reviewed_at: toIsoString(row.reviewed_at),
-  };
-}
+/**
+ * Build every repository over `exec`.
+ *
+ * @param exec          Pool or transaction connection every statement runs on.
+ * @param inTransaction Used by the few operations that must be atomic even when
+ *                      the caller did not open a transaction. When `exec` is
+ *                      already transaction-scoped this must simply invoke the
+ *                      callback with `exec`, so the operations join rather than
+ *                      nest.
+ */
+export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionRunner): SqlRepos {
+  const dialect = exec.dialect;
 
-function hydrateAccessGrant(row: Record<string, unknown>): AccessGrantRow {
-  return {
-    id: row.id as string,
-    api_asset_id: row.api_asset_id as string,
-    client_user_id: row.client_user_id as string,
-    client_consumer_id: row.client_consumer_id as string,
-    acl_group: row.acl_group as string,
-    status: row.status as AccessGrantRow['status'],
-    approved_by: row.approved_by as string,
-    approved_at: toIsoString(row.approved_at) ?? new Date().toISOString(),
-    revoked_by: (row.revoked_by as string | null) ?? null,
-    revoked_at: toIsoString(row.revoked_at),
-    revoked_reason: (row.revoked_reason as string | null) ?? null,
-  };
-}
+  /* ── users ──────────────────────────────────────────────────────────── */
 
-function hydrateConsumer(row: Record<string, unknown>): FerrumConsumerRow {
-  return {
-    id: row.id as string,
-    user_id: (row.user_id as string | null) ?? null,
-    organization_id: (row.organization_id as string | null) ?? null,
-    namespace: row.namespace as string,
-    ferrum_consumer_id: row.ferrum_consumer_id as string,
-    username: row.username as string,
-    status: row.status as FerrumConsumerRow['status'],
-    acl_groups: asJson<string[]>(row.acl_groups, []),
-    created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-  };
-}
+  const users: UserRepo = {
+    create: async (input: CreateInput<UserRecord>): Promise<UserRecord> => {
+      const meta = stamps(input);
+      const columns: Record<string, SqlParam | undefined> = {
+        id: meta.id,
+        email: input.email.trim().toLowerCase(),
+        password_hash: input.password_hash,
+        display_name: input.display_name,
+        role: input.role,
+        org_id: input.org_id ?? null,
+        company: input.company ?? null,
+        phone: input.phone ?? null,
+        status: input.status,
+        email_verified: encodeBool(input.email_verified),
+        last_login_at: input.last_login_at ?? null,
+        created_at: meta.created_at,
+        updated_at: meta.updated_at,
+      };
+      const parts = insertParts(columns);
+      await mapSqlConflict('An account with that email address already exists', () =>
+        execute(
+          exec,
+          `INSERT INTO users (${parts.names}) VALUES (${parts.placeholders})`,
+          parts.params,
+        ),
+      );
+      const created = await users.findById(meta.id);
+      if (!created) throw new Error('users.create: row vanished immediately after insert');
+      return created;
+    },
 
-export function buildSqlRepos(
-  client: SqlClient,
-  dialect: SqlDialect,
-): Omit<NexusStore, 'driver' | 'transaction' | 'migrate' | 'close'> {
-  const sql = (q: string): string => renderSql(dialect, q);
-  const boolValue = (v: boolean): boolean | number => (dialect === 'postgres' ? v : v ? 1 : 0);
+    findById: async (id) => {
+      const row = await queryOne(exec, 'SELECT * FROM users WHERE id = ?', [id]);
+      return row ? mapUser(row) : null;
+    },
 
-  return {
-    users: {
-      async insert(row) {
-        const now = new Date().toISOString();
-        const full: UserRow = { ...row, created_at: now, updated_at: now };
-        await client.exec(
-          sql(`INSERT INTO users (id, email, email_normalized, name, phone, status,
-                                  email_verified_at, password_hash, last_login_at,
-                                  failed_login_count, organization_id, created_at, updated_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`),
-          [
-            full.id,
-            full.email,
-            full.email_normalized,
-            full.name,
-            full.phone,
-            full.status,
-            full.email_verified_at,
-            full.password_hash,
-            full.last_login_at,
-            full.failed_login_count,
-            full.organization_id,
-            full.created_at,
-            full.updated_at,
-          ],
-        );
-        return full;
-      },
-      async findById(id) {
-        const row = await client.one<Record<string, unknown>>(
-          sql('SELECT * FROM users WHERE id = $1'),
-          [id],
-        );
-        return row ? hydrateUser(row) : null;
-      },
-      async findByEmail(emailNormalized) {
-        const row = await client.one<Record<string, unknown>>(
-          sql('SELECT * FROM users WHERE email_normalized = $1'),
-          [emailNormalized],
-        );
-        return row ? hydrateUser(row) : null;
-      },
-      async updateContact(id, fields) {
-        await client.exec(
-          sql(`UPDATE users SET name = COALESCE($1, name), phone = COALESCE($2, phone),
-               updated_at = $3 WHERE id = $4`),
-          [fields.name ?? null, fields.phone ?? null, new Date().toISOString(), id],
-        );
-        const row = await client.one<Record<string, unknown>>(
-          sql('SELECT * FROM users WHERE id = $1'),
-          [id],
-        );
-        return hydrateUser(row!);
-      },
-      async updatePassword(id, hash) {
-        await client.exec(
-          sql('UPDATE users SET password_hash = $1, updated_at = $2 WHERE id = $3'),
-          [hash, new Date().toISOString(), id],
-        );
-      },
-      async updateStatus(id, status) {
-        await client.exec(
-          sql('UPDATE users SET status = $1, updated_at = $2 WHERE id = $3'),
-          [status, new Date().toISOString(), id],
-        );
-      },
-      async markEmailVerified(id, at) {
-        await client.exec(
-          sql(`UPDATE users SET email_verified_at = $1, status = 'active', updated_at = $2
-               WHERE id = $3`),
-          [at, new Date().toISOString(), id],
-        );
-      },
-      async recordLogin(id, at) {
-        await client.exec(
-          sql(`UPDATE users SET last_login_at = $1, failed_login_count = 0,
-               updated_at = $2 WHERE id = $3`),
-          [at, new Date().toISOString(), id],
-        );
-      },
-      async recordFailedLogin(id) {
-        await client.exec(
-          sql(`UPDATE users SET failed_login_count = failed_login_count + 1,
-               updated_at = $1 WHERE id = $2`),
-          [new Date().toISOString(), id],
-        );
-        const row = await client.one<{ failed_login_count: number }>(
-          sql('SELECT failed_login_count FROM users WHERE id = $1'),
-          [id],
-        );
-        return Number(row?.failed_login_count ?? 0);
-      },
-      async resetFailedLogins(id) {
-        await client.exec(
-          sql('UPDATE users SET failed_login_count = 0, updated_at = $1 WHERE id = $2'),
-          [new Date().toISOString(), id],
-        );
-      },
-      async list(opts: ListOptions) {
-        const limit = opts.limit ?? 25;
-        const offset = opts.offset ?? 0;
-        const search = lowerSearch(dialect, opts.search ? `%${opts.search}%` : null);
-        const emailMatch = caseInsensitiveLike(dialect, 'email_normalized', '$2');
-        const nameMatch = caseInsensitiveLike(dialect, 'name', '$3');
-        const rows = await client.query<Record<string, unknown>>(
-          sql(`SELECT * FROM users
-               WHERE ($1::text IS NULL OR ${emailMatch} OR ${nameMatch})
-               ORDER BY created_at DESC LIMIT $4 OFFSET $5`),
-          [search, search, search, limit, offset],
-        );
-        const total = (
-          await client.one<{ c: string }>(
-            sql(`SELECT COUNT(*)::text as c FROM users
-                 WHERE ($1::text IS NULL OR ${emailMatch} OR ${nameMatch})`),
-            [search, search, search],
-          )
-        )?.c;
-        return { rows: rows.map(hydrateUser), total: Number(total ?? 0) };
-      },
-      async listFiltered(opts) {
-        const limit = opts.limit ?? 25;
-        const offset = opts.offset ?? 0;
-        const role = opts.role ?? null;
-        const status = opts.status ?? null;
-        // JOIN against user_roles inline; let the DB do filter + paginate.
-        const rows = await client.query<Record<string, unknown>>(
-          sql(`SELECT u.* FROM users u
-               WHERE ($1::text IS NULL OR u.status = $2)
-                 AND ($3::text IS NULL OR EXISTS (
-                   SELECT 1 FROM user_roles ur
-                   WHERE ur.user_id = u.id AND ur.role = $4
-                 ))
-               ORDER BY u.created_at DESC LIMIT $5 OFFSET $6`),
-          [status, status, role, role, limit, offset],
-        );
-        const totalRow = await client.one<{ c: string }>(
-          sql(`SELECT COUNT(*)::text as c FROM users u
-               WHERE ($1::text IS NULL OR u.status = $2)
-                 AND ($3::text IS NULL OR EXISTS (
-                   SELECT 1 FROM user_roles ur
-                   WHERE ur.user_id = u.id AND ur.role = $4
-                 ))`),
-          [status, status, role, role],
-        );
-        return { rows: rows.map(hydrateUser), total: Number(totalRow?.c ?? 0) };
-      },
-      async count() {
-        const row = await client.one<{ c: string }>(
-          sql('SELECT COUNT(*) as c FROM users'),
-          [],
-        );
-        return Number(row?.c ?? 0);
-      },
+    findByEmail: async (email) => {
+      const row = await queryOne(exec, 'SELECT * FROM users WHERE lower(email) = ?', [
+        email.trim().toLowerCase(),
+      ]);
+      return row ? mapUser(row) : null;
     },
-    userRoles: {
-      async add(userId, role) {
-        await client.exec(
-          sql(buildInsertIgnore(dialect, 'user_roles', ['user_id', 'role', 'created_at'])),
-          [userId, role, new Date().toISOString()],
-        );
-      },
-      async remove(userId, role) {
-        await client.exec(
-          sql('DELETE FROM user_roles WHERE user_id = $1 AND role = $2'),
-          [userId, role],
-        );
-      },
-      async forUser(userId) {
-        const rows = await client.query<{ role: UserRole }>(
-          sql('SELECT role FROM user_roles WHERE user_id = $1'),
-          [userId],
-        );
-        return rows.map((r) => r.role);
-      },
-      async setRoles(userId, roles) {
-        await client.exec(sql('DELETE FROM user_roles WHERE user_id = $1'), [userId]);
-        const now = new Date().toISOString();
-        const insertSql = sql(
-          buildInsertIgnore(dialect, 'user_roles', ['user_id', 'role', 'created_at']),
-        );
-        for (const role of roles) {
-          await client.exec(insertSql, [userId, role, now]);
-        }
-      },
+
+    findManyByIds: async (ids) => {
+      if (ids.length === 0) return [];
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM users WHERE id IN (${placeholders(ids.length)})`,
+        ids,
+      );
+      return rows.map(mapUser);
     },
-    sessions: {
-      async create(row) {
-        await client.exec(
-          sql(`INSERT INTO sessions (id, user_id, csrf_token, user_agent, ip, created_at,
-                                     expires_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7)`),
-          [row.id, row.user_id, row.csrf_token, row.user_agent, row.ip, row.created_at, row.expires_at],
-        );
-      },
-      async find(id) {
-        const row = await client.one<Record<string, unknown>>(
-          sql('SELECT * FROM sessions WHERE id = $1'),
-          [id],
-        );
-        if (!row) return null;
-        return {
-          id: row.id as string,
-          user_id: row.user_id as string,
-          csrf_token: row.csrf_token as string,
-          user_agent: (row.user_agent as string | null) ?? null,
-          ip: (row.ip as string | null) ?? null,
-          created_at: toIsoString(row.created_at) ?? '',
-          expires_at: toIsoString(row.expires_at) ?? '',
-        };
-      },
-      async delete(id) {
-        await client.exec(sql('DELETE FROM sessions WHERE id = $1'), [id]);
-      },
-      async deleteForUser(userId) {
-        await client.exec(sql('DELETE FROM sessions WHERE user_id = $1'), [userId]);
-      },
-      async cleanupExpired(now) {
-        return client.exec(sql('DELETE FROM sessions WHERE expires_at < $1'), [now]);
-      },
-    },
-    verifications: {
-      async createEmailToken(row: EmailVerificationRow) {
-        await client.exec(
-          sql(`INSERT INTO email_verifications (token, user_id, expires_at, consumed_at)
-               VALUES ($1,$2,$3,$4)`),
-          [row.token, row.user_id, row.expires_at, row.consumed_at],
-        );
-      },
-      async findEmailToken(token) {
-        const row = await client.one<Record<string, unknown>>(
-          sql('SELECT * FROM email_verifications WHERE token = $1'),
-          [token],
-        );
-        if (!row) return null;
-        return {
-          token: row.token as string,
-          user_id: row.user_id as string,
-          expires_at: toIsoString(row.expires_at) ?? '',
-          consumed_at: toIsoString(row.consumed_at),
-        };
-      },
-      async consumeEmailToken(token, at) {
-        await client.exec(
-          sql('UPDATE email_verifications SET consumed_at = $1 WHERE token = $2'),
-          [at, token],
-        );
-      },
-      async createPasswordReset(row: PasswordResetRow) {
-        await client.exec(
-          sql(`INSERT INTO password_resets (token, user_id, expires_at, consumed_at)
-               VALUES ($1,$2,$3,$4)`),
-          [row.token, row.user_id, row.expires_at, row.consumed_at],
-        );
-      },
-      async findPasswordReset(token) {
-        const row = await client.one<Record<string, unknown>>(
-          sql('SELECT * FROM password_resets WHERE token = $1'),
-          [token],
-        );
-        if (!row) return null;
-        return {
-          token: row.token as string,
-          user_id: row.user_id as string,
-          expires_at: toIsoString(row.expires_at) ?? '',
-          consumed_at: toIsoString(row.consumed_at),
-        };
-      },
-      async consumePasswordReset(token, at) {
-        await client.exec(
-          sql('UPDATE password_resets SET consumed_at = $1 WHERE token = $2'),
-          [at, token],
-        );
-      },
-      async countRecentPasswordResets(userId, since) {
-        // expires_at is reset_created_at + 1h, so this approximates "issued in
-        // the throttle window" without requiring a schema migration.
-        const row = await client.one<{ c: string }>(
-          sql('SELECT COUNT(*) as c FROM password_resets WHERE user_id = $1 AND expires_at >= $2'),
-          [userId, since],
-        );
-        return Number(row?.c ?? 0);
-      },
-    },
-    organizations: {
-      async insert(row: OrganizationRow) {
-        await client.exec(
-          sql(`INSERT INTO organizations (id, name, domain, status, created_at)
-               VALUES ($1,$2,$3,$4,$5)`),
-          [row.id, row.name, row.domain, row.status, row.created_at],
-        );
-        return row;
-      },
-      async findById(id) {
-        const row = await client.one<Record<string, unknown>>(
-          sql('SELECT * FROM organizations WHERE id = $1'),
-          [id],
-        );
-        if (!row) return null;
-        return {
-          id: row.id as string,
-          name: row.name as string,
-          domain: (row.domain as string | null) ?? null,
-          status: row.status as OrganizationRow['status'],
-          created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-        };
-      },
-      async list() {
-        const rows = await client.query<Record<string, unknown>>(
-          sql('SELECT * FROM organizations ORDER BY created_at DESC'),
-          [],
-        );
-        return rows.map((row) => ({
-          id: row.id as string,
-          name: row.name as string,
-          domain: (row.domain as string | null) ?? null,
-          status: row.status as OrganizationRow['status'],
-          created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-        }));
-      },
-      async addMember(row: OrganizationMemberRow) {
-        await client.exec(
-          sql(
-            buildInsertIgnore(dialect, 'organization_members', [
-              'organization_id',
-              'user_id',
-              'role',
-              'created_at',
-            ]),
-          ),
-          [row.organization_id, row.user_id, row.role, row.created_at],
-        );
-      },
-      async membersOf(orgId) {
-        const rows = await client.query<Record<string, unknown>>(
-          sql('SELECT * FROM organization_members WHERE organization_id = $1'),
-          [orgId],
-        );
-        return rows.map((row) => ({
-          organization_id: row.organization_id as string,
-          user_id: row.user_id as string,
-          role: row.role as OrganizationMemberRow['role'],
-          created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-        }));
-      },
-    },
-    consumers: {
-      async insert(row: FerrumConsumerRow) {
-        await client.exec(
-          sql(`INSERT INTO ferrum_consumers (id, user_id, organization_id, namespace,
-                  ferrum_consumer_id, username, status, acl_groups, created_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`),
-          [
-            row.id,
-            row.user_id,
-            row.organization_id,
-            row.namespace,
-            row.ferrum_consumer_id,
-            row.username,
-            row.status,
-            dialect === 'postgres' ? row.acl_groups : J(row.acl_groups),
-            row.created_at,
-          ],
-        );
-        return row;
-      },
-      async findById(id) {
-        const row = await client.one<Record<string, unknown>>(
-          sql('SELECT * FROM ferrum_consumers WHERE id = $1'),
-          [id],
-        );
-        return row ? hydrateConsumer(row) : null;
-      },
-      async findByUserNamespace(userId, namespace) {
-        const row = await client.one<Record<string, unknown>>(
-          sql('SELECT * FROM ferrum_consumers WHERE user_id = $1 AND namespace = $2'),
-          [userId, namespace],
-        );
-        return row ? hydrateConsumer(row) : null;
-      },
-      async updateAclGroups(id, groups) {
-        await client.exec(
-          sql('UPDATE ferrum_consumers SET acl_groups = $1 WHERE id = $2'),
-          [dialect === 'postgres' ? groups : J(groups), id],
-        );
-      },
-      async updateStatus(id, status) {
-        await client.exec(
-          sql('UPDATE ferrum_consumers SET status = $1 WHERE id = $2'),
-          [status, id],
-        );
-      },
-      async listForUser(userId) {
-        const rows = await client.query<Record<string, unknown>>(
-          sql('SELECT * FROM ferrum_consumers WHERE user_id = $1'),
-          [userId],
-        );
-        return rows.map(hydrateConsumer);
-      },
-    },
-    credentials: {
-      async insert(row: CredentialMetadataRow) {
-        await client.exec(
-          sql(`INSERT INTO credential_metadata (id, consumer_id, type, label, fingerprint,
-                  last4, ferrum_credential_index, status, created_at, rotated_at, expires_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`),
-          [
-            row.id,
-            row.consumer_id,
-            row.type,
-            row.label,
-            row.fingerprint,
-            row.last4,
-            row.ferrum_credential_index,
-            row.status,
-            row.created_at,
-            row.rotated_at,
-            row.expires_at,
-          ],
-        );
-        return row;
-      },
-      async findById(id) {
-        const row = await client.one<Record<string, unknown>>(
-          sql('SELECT * FROM credential_metadata WHERE id = $1'),
-          [id],
-        );
-        if (!row) return null;
-        return {
-          id: row.id as string,
-          consumer_id: row.consumer_id as string,
-          type: row.type as CredentialMetadataRow['type'],
-          label: row.label as string,
-          fingerprint: row.fingerprint as string,
-          last4: (row.last4 as string | null) ?? null,
-          ferrum_credential_index: Number(row.ferrum_credential_index ?? 0),
-          status: row.status as CredentialMetadataRow['status'],
-          created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-          rotated_at: toIsoString(row.rotated_at),
-          expires_at: toIsoString(row.expires_at),
-        };
-      },
-      async listForConsumer(consumerId) {
-        const rows = await client.query<Record<string, unknown>>(
-          sql(`SELECT * FROM credential_metadata WHERE consumer_id = $1
-               ORDER BY created_at DESC`),
-          [consumerId],
-        );
-        return rows.map((row) => ({
-          id: row.id as string,
-          consumer_id: row.consumer_id as string,
-          type: row.type as CredentialMetadataRow['type'],
-          label: row.label as string,
-          fingerprint: row.fingerprint as string,
-          last4: (row.last4 as string | null) ?? null,
-          ferrum_credential_index: Number(row.ferrum_credential_index ?? 0),
-          status: row.status as CredentialMetadataRow['status'],
-          created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-          rotated_at: toIsoString(row.rotated_at),
-          expires_at: toIsoString(row.expires_at),
-        }));
-      },
-      async updateStatus(id, status) {
-        await client.exec(
-          sql('UPDATE credential_metadata SET status = $1 WHERE id = $2'),
-          [status, id],
-        );
-      },
-      async delete(id) {
-        await client.exec(sql('DELETE FROM credential_metadata WHERE id = $1'), [id]);
-      },
-    },
-    apiAssets: {
-      async insert(row: ApiAssetRow) {
-        await client.exec(
-          sql(`INSERT INTO api_assets (id, api_spec_id, proxy_id, namespace, provider_id,
-                  title, description, slug, version, visibility, requestable, lifecycle,
-                  tags, contact_email, support_notes, operation_count, content_hash,
-                  created_at, updated_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`),
-          [
-            row.id,
-            row.api_spec_id,
-            row.proxy_id,
-            row.namespace,
-            row.provider_id,
-            row.title,
-            row.description,
-            row.slug,
-            row.version,
-            row.visibility,
-            boolValue(row.requestable === 1),
-            row.lifecycle,
-            dialect === 'postgres' ? row.tags : J(row.tags),
-            row.contact_email,
-            row.support_notes,
-            row.operation_count,
-            row.content_hash,
-            row.created_at,
-            row.updated_at,
-          ],
-        );
-        return row;
-      },
-      async update(id, fields) {
-        const existing = await this.findById(id);
-        if (!existing) throw new Error(`Asset not found: ${id}`);
-        const next = { ...existing, ...fields, updated_at: new Date().toISOString() };
-        await client.exec(
-          sql(`UPDATE api_assets SET
-                 title = $1, description = $2, version = $3, visibility = $4,
-                 requestable = $5, lifecycle = $6, tags = $7, contact_email = $8,
-                 support_notes = $9, operation_count = $10, content_hash = $11,
-                 api_spec_id = $12, proxy_id = $13, namespace = $14, updated_at = $15
-               WHERE id = $16`),
-          [
-            next.title,
-            next.description,
-            next.version,
-            next.visibility,
-            boolValue(next.requestable === 1),
-            next.lifecycle,
-            dialect === 'postgres' ? next.tags : J(next.tags),
-            next.contact_email,
-            next.support_notes,
-            next.operation_count,
-            next.content_hash,
-            next.api_spec_id,
-            next.proxy_id,
-            next.namespace,
-            next.updated_at,
+
+    update: async (id, patch) => {
+      const set = setParts(userUpdateColumns(patch));
+      if (set) {
+        await mapSqlConflict('An account with that email address already exists', () =>
+          execute(exec, `UPDATE users SET ${set.sql}, updated_at = ? WHERE id = ?`, [
+            ...set.params,
+            nowIso(),
             id,
-          ],
+          ]),
         );
-        return (await this.findById(id))!;
-      },
-      async findById(id) {
-        const row = await client.one<Record<string, unknown>>(
-          sql('SELECT * FROM api_assets WHERE id = $1'),
-          [id],
-        );
-        return row ? hydrateAsset(row) : null;
-      },
-      async findBySpecId(specId) {
-        const row = await client.one<Record<string, unknown>>(
-          sql('SELECT * FROM api_assets WHERE api_spec_id = $1'),
-          [specId],
-        );
-        return row ? hydrateAsset(row) : null;
-      },
-      async findBySlug(slug) {
-        const row = await client.one<Record<string, unknown>>(
-          sql('SELECT * FROM api_assets WHERE slug = $1'),
-          [slug],
-        );
-        return row ? hydrateAsset(row) : null;
-      },
-      async delete(id) {
-        await client.exec(sql('DELETE FROM api_assets WHERE id = $1'), [id]);
-      },
-      async list(opts) {
-        const limit = opts.limit ?? 25;
-        const offset = opts.offset ?? 0;
-        const search = lowerSearch(dialect, opts.search ? `%${opts.search}%` : null);
-        const visibility = (opts.visibility as ApiVisibility | undefined) ?? null;
-        const providerId = opts.providerId ?? null;
-        const titleMatch = caseInsensitiveLike(dialect, 'title', '$2');
-        const descMatch = caseInsensitiveLike(dialect, 'description', '$3');
-        const slugMatch = caseInsensitiveLike(dialect, 'slug', '$4');
-        const rows = await client.query<Record<string, unknown>>(
-          sql(`SELECT * FROM api_assets
-               WHERE ($1::text IS NULL OR ${titleMatch} OR ${descMatch} OR ${slugMatch})
-                 AND ($5::text IS NULL OR visibility = $6)
-                 AND ($7::text IS NULL OR provider_id = $8)
-               ORDER BY updated_at DESC LIMIT $9 OFFSET $10`),
-          [search, search, search, search, visibility, visibility, providerId, providerId, limit, offset],
-        );
-        const totalRow = await client.one<{ c: string }>(
-          sql(`SELECT COUNT(*)::text as c FROM api_assets
-               WHERE ($1::text IS NULL OR ${titleMatch} OR ${descMatch} OR ${slugMatch})
-                 AND ($5::text IS NULL OR visibility = $6)
-                 AND ($7::text IS NULL OR provider_id = $8)`),
-          [search, search, search, search, visibility, visibility, providerId, providerId],
-        );
-        return { rows: rows.map(hydrateAsset), total: Number(totalRow?.c ?? 0) };
-      },
+      }
+      return users.findById(id);
     },
-    apiSpecVersions: {
-      async insert(row: ApiSpecVersionRow) {
-        await client.exec(
-          sql(`INSERT INTO api_spec_versions (id, api_asset_id, version, content_hash,
-                  submitted_by, raw_spec, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)`),
-          [
-            row.id,
-            row.api_asset_id,
-            row.version,
-            row.content_hash,
-            row.submitted_by,
-            row.raw_spec,
-            row.created_at,
-          ],
-        );
-        return row;
-      },
-      async listForAsset(assetId) {
-        const rows = await client.query<Record<string, unknown>>(
-          sql(`SELECT * FROM api_spec_versions WHERE api_asset_id = $1
-               ORDER BY created_at DESC`),
-          [assetId],
-        );
-        return rows.map((row) => ({
-          id: row.id as string,
-          api_asset_id: row.api_asset_id as string,
-          version: row.version as string,
-          content_hash: row.content_hash as string,
-          submitted_by: row.submitted_by as string,
-          raw_spec: row.raw_spec as string,
-          created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-        }));
-      },
-      async latestForAsset(assetId) {
-        const rows = await this.listForAsset(assetId);
-        return rows[0] ?? null;
-      },
-      async get(id) {
-        const row = await client.one<Record<string, unknown>>(
-          sql('SELECT * FROM api_spec_versions WHERE id = $1'),
-          [id],
-        );
-        if (!row) return null;
-        return {
-          id: row.id as string,
-          api_asset_id: row.api_asset_id as string,
-          version: row.version as string,
-          content_hash: row.content_hash as string,
-          submitted_by: row.submitted_by as string,
-          raw_spec: row.raw_spec as string,
-          created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-        };
-      },
+
+    updateIfMatches: async (id, expected, patch) => {
+      const guard = new SqlWhereBuilder()
+        .always('id = ?', id)
+        .add(expected.role, 'role = ?', expected.role ?? null)
+        .add(expected.status, 'status = ?', expected.status ?? null)
+        .build();
+      /**
+       * Did the row survive the predicate?
+       *
+       * Reached when the `UPDATE` reported no change, which is not the same as
+       * "somebody else got here first": MySQL counts *changed* rows, not
+       * matched ones, so a patch that wrote identical values inside the same
+       * millisecond looks like a loss. Re-reading the predicate separates the
+       * two — a genuine loser no longer satisfies it.
+       */
+      const stillMatches = async (): Promise<UserRecord | null> => {
+        const row = await queryOne(exec, `SELECT id FROM users${guard.sql}`, guard.params);
+        return row ? users.findById(id) : null;
+      };
+
+      const set = setParts(userUpdateColumns(patch));
+      if (!set) return stillMatches();
+
+      const changed = await mapSqlConflict(
+        'An account with that email address already exists',
+        () =>
+          execute(exec, `UPDATE users SET ${set.sql}, updated_at = ?${guard.sql}`, [
+            ...set.params,
+            nowIso(),
+            ...guard.params,
+          ]),
+      );
+      return changed > 0 ? users.findById(id) : stillMatches();
     },
-    accessRequests: {
-      async insert(row: AccessRequestRow) {
-        await client.exec(
-          sql(`INSERT INTO access_requests (id, api_asset_id, client_user_id,
-                  client_consumer_id, justification, status, provider_reason, reviewed_by,
-                  created_at, reviewed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`),
-          [
-            row.id,
-            row.api_asset_id,
-            row.client_user_id,
-            row.client_consumer_id,
-            row.justification,
-            row.status,
-            row.provider_reason,
-            row.reviewed_by,
-            row.created_at,
-            row.reviewed_at,
-          ],
-        );
-        return row;
-      },
-      async update(id, fields) {
-        const existing = await this.findById(id);
-        if (!existing) throw new Error(`Request not found: ${id}`);
-        const next = { ...existing, ...fields };
-        await client.exec(
-          sql(`UPDATE access_requests SET status = $1, provider_reason = $2,
-                 reviewed_by = $3, reviewed_at = $4, client_consumer_id = $5,
-                 justification = $6 WHERE id = $7`),
-          [
-            next.status,
-            next.provider_reason,
-            next.reviewed_by,
-            next.reviewed_at,
-            next.client_consumer_id,
-            next.justification,
+
+    touchLastLogin: async (id, at) => {
+      await execute(exec, 'UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?', [
+        at,
+        nowIso(),
+        id,
+      ]);
+    },
+
+    list: async (filter, options) => {
+      const where = userWhere(filter).build();
+      const { limit, offset } = page(options);
+      const total = await queryCount(
+        exec,
+        `SELECT COUNT(*) AS cnt FROM users${where.sql}`,
+        where.params,
+      );
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM users${where.sql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
+      );
+      return { items: rows.map(mapUser), total };
+    },
+
+    count: async (filter = {}) => {
+      const where = userWhere(filter).build();
+      return queryCount(exec, `SELECT COUNT(*) AS cnt FROM users${where.sql}`, where.params);
+    },
+
+    countActiveSuperAdmins: async (excludeUserId) => {
+      const where = new SqlWhereBuilder()
+        .always("role = 'super_admin'")
+        .always("status = 'active'")
+        .add(excludeUserId, 'id <> ?', excludeUserId ?? null)
+        .build();
+      return queryCount(exec, `SELECT COUNT(*) AS cnt FROM users${where.sql}`, where.params);
+    },
+
+    listRecipients: async (filter) => {
+      const where = userWhere(filter).build();
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM users${where.sql} ORDER BY created_at ASC, id ASC`,
+        where.params,
+      );
+      return rows.map(mapUser);
+    },
+  };
+
+  /* ── organizations ──────────────────────────────────────────────────── */
+
+  const organizations: OrganizationRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      await mapSqlConflict('An organization with that name already exists', () =>
+        execute(
+          exec,
+          'INSERT INTO organizations (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+          [meta.id, input.name, input.description ?? null, meta.created_at, meta.updated_at],
+        ),
+      );
+      const created = await organizations.findById(meta.id);
+      if (!created) throw new Error('organizations.create: row vanished immediately after insert');
+      return created;
+    },
+
+    findById: async (id) => {
+      const row = await queryOne(exec, 'SELECT * FROM organizations WHERE id = ?', [id]);
+      return row ? mapOrganization(row) : null;
+    },
+
+    findByName: async (name) => {
+      const row = await queryOne(exec, 'SELECT * FROM organizations WHERE lower(name) = ?', [
+        name.trim().toLowerCase(),
+      ]);
+      return row ? mapOrganization(row) : null;
+    },
+
+    update: async (id, patch) => {
+      const set = setParts({ name: patch.name, description: patch.description });
+      if (set) {
+        await mapSqlConflict('An organization with that name already exists', () =>
+          execute(exec, `UPDATE organizations SET ${set.sql}, updated_at = ? WHERE id = ?`, [
+            ...set.params,
+            nowIso(),
             id,
-          ],
+          ]),
         );
-        return next;
-      },
-      async findById(id) {
-        const row = await client.one<Record<string, unknown>>(
-          sql('SELECT * FROM access_requests WHERE id = $1'),
-          [id],
-        );
-        return row ? hydrateAccessRequest(row) : null;
-      },
-      async findOpenFor(clientUserId, apiAssetId) {
-        const row = await client.one<Record<string, unknown>>(
-          sql(`SELECT * FROM access_requests
-               WHERE client_user_id = $1 AND api_asset_id = $2 AND status = 'pending'`),
-          [clientUserId, apiAssetId],
-        );
-        return row ? hydrateAccessRequest(row) : null;
-      },
-      // listForClient/Provider/Asset SELECT full rows and hydrate inline. The
-      // previous implementation re-fetched each row by id (N+1), which made
-      // every dashboard render a quadratic load.
-      async listForClient(clientUserId) {
-        const rows = await client.query<Record<string, unknown>>(
-          sql('SELECT * FROM access_requests WHERE client_user_id = $1 ORDER BY created_at DESC'),
-          [clientUserId],
-        );
-        return rows.map(hydrateAccessRequest);
-      },
-      async listForProvider(providerId, status?: AccessRequestStatus) {
-        const rows = await client.query<Record<string, unknown>>(
-          sql(`SELECT ar.* FROM access_requests ar
-               JOIN api_assets a ON a.id = ar.api_asset_id
-               WHERE a.provider_id = $1 AND ($2::text IS NULL OR ar.status = $3)
-               ORDER BY ar.created_at DESC`),
-          [providerId, status ?? null, status ?? null],
-        );
-        return rows.map(hydrateAccessRequest);
-      },
-      async listForAsset(apiAssetId) {
-        const rows = await client.query<Record<string, unknown>>(
-          sql('SELECT * FROM access_requests WHERE api_asset_id = $1 ORDER BY created_at DESC'),
-          [apiAssetId],
-        );
-        return rows.map(hydrateAccessRequest);
-      },
+      }
+      return organizations.findById(id);
     },
-    grants: {
-      async insert(row: AccessGrantRow) {
-        await client.exec(
-          sql(`INSERT INTO access_grants (id, api_asset_id, client_user_id,
-                  client_consumer_id, acl_group, status, approved_by, approved_at,
-                  revoked_by, revoked_at, revoked_reason)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`),
-          [
-            row.id,
-            row.api_asset_id,
-            row.client_user_id,
-            row.client_consumer_id,
-            row.acl_group,
-            row.status,
-            row.approved_by,
-            row.approved_at,
-            row.revoked_by,
-            row.revoked_at,
-            row.revoked_reason,
-          ],
-        );
-        return row;
-      },
-      async update(id, fields) {
-        const existing = await this.findById(id);
-        if (!existing) throw new Error(`Grant not found: ${id}`);
-        const next = { ...existing, ...fields };
-        await client.exec(
-          sql(`UPDATE access_grants SET status = $1, revoked_by = $2, revoked_at = $3,
-                 revoked_reason = $4 WHERE id = $5`),
-          [next.status, next.revoked_by, next.revoked_at, next.revoked_reason, id],
-        );
-        return next;
-      },
-      async findById(id) {
-        const row = await client.one<Record<string, unknown>>(
-          sql('SELECT * FROM access_grants WHERE id = $1'),
-          [id],
-        );
-        return row ? hydrateAccessGrant(row) : null;
-      },
-      async findActiveFor(consumerId, apiAssetId) {
-        const row = await client.one<Record<string, unknown>>(
-          sql(`SELECT * FROM access_grants
-               WHERE client_consumer_id = $1 AND api_asset_id = $2 AND status = 'active'`),
-          [consumerId, apiAssetId],
-        );
-        return row ? hydrateAccessGrant(row) : null;
-      },
-      // SELECT full rows + hydrate inline so list endpoints are a single query.
-      async listForClient(clientUserId) {
-        const rows = await client.query<Record<string, unknown>>(
-          sql('SELECT * FROM access_grants WHERE client_user_id = $1 ORDER BY approved_at DESC'),
-          [clientUserId],
-        );
-        return rows.map(hydrateAccessGrant);
-      },
-      async listForAsset(apiAssetId) {
-        const rows = await client.query<Record<string, unknown>>(
-          sql('SELECT * FROM access_grants WHERE api_asset_id = $1 ORDER BY approved_at DESC'),
-          [apiAssetId],
-        );
-        return rows.map(hydrateAccessGrant);
-      },
+
+    list: async (options) => {
+      const { limit, offset } = page(options);
+      const total = await queryCount(exec, 'SELECT COUNT(*) AS cnt FROM organizations');
+      const rows = await queryAll(
+        exec,
+        'SELECT * FROM organizations ORDER BY lower(name) ASC LIMIT ? OFFSET ?',
+        [limit, offset],
+      );
+      return { items: rows.map(mapOrganization), total };
     },
-    conversations: {
-      async insert(row: ConversationRow) {
-        await client.exec(
-          sql(`INSERT INTO conversations (id, api_asset_id, request_id, grant_id, type,
-                  subject, participants, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`),
+
+    delete: async (id) => (await execute(exec, 'DELETE FROM organizations WHERE id = ?', [id])) > 0,
+  };
+
+  /* ── sessions ───────────────────────────────────────────────────────── */
+
+  const sessions: SessionRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      await mapSqlConflict('Session token collision', () =>
+        execute(
+          exec,
+          `INSERT INTO sessions
+             (id, token_hash, user_id, csrf_token, expires_at, ip, user_agent, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
-            row.id,
-            row.api_asset_id,
-            row.request_id,
-            row.grant_id,
-            row.type,
-            row.subject,
-            dialect === 'postgres' ? row.participants : J(row.participants),
-            row.created_at,
+            meta.id,
+            input.token_hash,
+            input.user_id,
+            input.csrf_token,
+            input.expires_at,
+            input.ip ?? null,
+            input.user_agent ?? null,
+            meta.created_at,
+            meta.updated_at,
           ],
-        );
-        return row;
-      },
-      async findById(id) {
-        const row = await client.one<Record<string, unknown>>(
-          sql('SELECT * FROM conversations WHERE id = $1'),
-          [id],
-        );
-        if (!row) return null;
-        return {
-          id: row.id as string,
-          api_asset_id: (row.api_asset_id as string | null) ?? null,
-          request_id: (row.request_id as string | null) ?? null,
-          grant_id: (row.grant_id as string | null) ?? null,
-          type: row.type as ConversationRow['type'],
-          subject: row.subject as string,
-          participants: asJson<string[]>(row.participants, []),
-          created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-        };
-      },
-      async listForUser(userId) {
-        const rows =
-          dialect === 'postgres'
-            ? await client.query<{ id: string }>(
-                `SELECT id FROM conversations
-                 WHERE participants ? $1 ORDER BY created_at DESC`,
-                [userId],
-              )
-            : await client.query<{ id: string }>(
-                `SELECT id FROM conversations
-                 WHERE JSON_CONTAINS(participants, JSON_QUOTE(?)) ORDER BY created_at DESC`,
-                [userId],
-              );
-        return Promise.all(rows.map((r) => this.findById(r.id).then((v) => v!)));
-      },
-      async updateParticipants(id, participants) {
-        await client.exec(
-          sql('UPDATE conversations SET participants = $1 WHERE id = $2'),
-          [dialect === 'postgres' ? participants : J(participants), id],
-        );
-      },
+        ),
+      );
+      const created = await sessions.findById(meta.id);
+      if (!created) throw new Error('sessions.create: row vanished immediately after insert');
+      return created;
     },
-    messages: {
-      async insert(row: MessageRow) {
-        await client.exec(
-          sql(`INSERT INTO messages (id, conversation_id, sender_id, body, created_at, read_by)
-               VALUES ($1,$2,$3,$4,$5,$6)`),
+
+    findById: async (id) => {
+      const row = await queryOne(exec, 'SELECT * FROM sessions WHERE id = ?', [id]);
+      return row ? mapSession(row) : null;
+    },
+
+    findByTokenHash: async (tokenHash) => {
+      const row = await queryOne(exec, 'SELECT * FROM sessions WHERE token_hash = ?', [tokenHash]);
+      return row ? mapSession(row) : null;
+    },
+
+    touch: async (id, expiresAt) => {
+      await execute(exec, 'UPDATE sessions SET expires_at = ?, updated_at = ? WHERE id = ?', [
+        expiresAt,
+        nowIso(),
+        id,
+      ]);
+    },
+
+    delete: async (id) => (await execute(exec, 'DELETE FROM sessions WHERE id = ?', [id])) > 0,
+
+    deleteByTokenHash: async (tokenHash) =>
+      (await execute(exec, 'DELETE FROM sessions WHERE token_hash = ?', [tokenHash])) > 0,
+
+    deleteForUser: async (userId) =>
+      execute(exec, 'DELETE FROM sessions WHERE user_id = ?', [userId]),
+
+    deleteExpired: async (now) =>
+      execute(exec, 'DELETE FROM sessions WHERE expires_at <= ?', [now]),
+  };
+
+  /* ── apis ───────────────────────────────────────────────────────────── */
+
+  const apis: ApiRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      await mapSqlConflict('An API with that slug already exists', () =>
+        execute(
+          exec,
+          `INSERT INTO apis
+             (id, name, slug, description, owner_user_id, ferrum_proxy_id, namespace, version,
+              spec_format, requestable, auth_plugin, rate_limit_json, status, visibility,
+              created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
-            row.id,
-            row.conversation_id,
-            row.sender_id,
-            row.body,
-            row.created_at,
-            dialect === 'postgres' ? row.read_by : J(row.read_by),
+            meta.id,
+            input.name,
+            input.slug,
+            input.description ?? null,
+            input.owner_user_id,
+            input.ferrum_proxy_id ?? null,
+            input.namespace,
+            input.version,
+            input.spec_format,
+            encodeBool(input.requestable),
+            input.auth_plugin,
+            encodeJson(input.rate_limit ?? null),
+            input.status,
+            input.visibility,
+            meta.created_at,
+            meta.updated_at,
           ],
+        ),
+      );
+      const created = await apis.findById(meta.id);
+      if (!created) throw new Error('apis.create: row vanished immediately after insert');
+      return created;
+    },
+
+    findById: async (id) => {
+      const row = await queryOne(exec, 'SELECT * FROM apis WHERE id = ?', [id]);
+      return row ? mapApi(row) : null;
+    },
+
+    findBySlug: async (slug) => {
+      const row = await queryOne(exec, 'SELECT * FROM apis WHERE lower(slug) = ?', [
+        slug.trim().toLowerCase(),
+      ]);
+      return row ? mapApi(row) : null;
+    },
+
+    findByProxyId: async (ferrumProxyId) => {
+      const row = await queryOne(exec, 'SELECT * FROM apis WHERE ferrum_proxy_id = ?', [
+        ferrumProxyId,
+      ]);
+      return row ? mapApi(row) : null;
+    },
+
+    findManyByIds: async (ids) => {
+      if (ids.length === 0) return [];
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM apis WHERE id IN (${placeholders(ids.length)})`,
+        ids,
+      );
+      return rows.map(mapApi);
+    },
+
+    update: async (id, patch) => {
+      const set = setParts({
+        name: patch.name,
+        slug: patch.slug,
+        description: patch.description,
+        owner_user_id: patch.owner_user_id,
+        ferrum_proxy_id: patch.ferrum_proxy_id,
+        namespace: patch.namespace,
+        version: patch.version,
+        requestable: patch.requestable === undefined ? undefined : encodeBool(patch.requestable),
+        auth_plugin: patch.auth_plugin,
+        rate_limit_json: patch.rate_limit === undefined ? undefined : encodeJson(patch.rate_limit),
+        status: patch.status,
+        visibility: patch.visibility,
+      });
+      if (set) {
+        await mapSqlConflict('An API with that slug already exists', () =>
+          execute(exec, `UPDATE apis SET ${set.sql}, updated_at = ? WHERE id = ?`, [
+            ...set.params,
+            nowIso(),
+            id,
+          ]),
         );
-        return row;
-      },
-      async listForConversation(conversationId) {
-        const rows = await client.query<Record<string, unknown>>(
-          sql(`SELECT * FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC`),
-          [conversationId],
-        );
-        return rows.map((row) => ({
-          id: row.id as string,
-          conversation_id: row.conversation_id as string,
-          sender_id: row.sender_id as string,
-          body: row.body as string,
-          created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-          read_by: asJson<string[]>(row.read_by, []),
-        }));
-      },
-      async markRead(conversationId, userId) {
-        const rows = await this.listForConversation(conversationId);
-        for (const r of rows) {
-          if (r.sender_id !== userId && !r.read_by.includes(userId)) {
-            const next = [...r.read_by, userId];
-            await client.exec(
-              sql('UPDATE messages SET read_by = $1 WHERE id = $2'),
-              [dialect === 'postgres' ? next : J(next), r.id],
+      }
+      return apis.findById(id);
+    },
+
+    list: async (filter, options) => {
+      const where = apiWhere(filter).build();
+      const { limit, offset } = page(options);
+      const total = await queryCount(
+        exec,
+        `SELECT COUNT(*) AS cnt FROM apis${where.sql}`,
+        where.params,
+      );
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM apis${where.sql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
+      );
+      return { items: rows.map(mapApi), total };
+    },
+
+    count: async (filter = {}) => {
+      const where = apiWhere(filter).build();
+      return queryCount(exec, `SELECT COUNT(*) AS cnt FROM apis${where.sql}`, where.params);
+    },
+
+    listIdsByOwner: async (ownerUserId) =>
+      (await queryAll(exec, 'SELECT id FROM apis WHERE owner_user_id = ?', [ownerUserId])).map(
+        (row) => text(row.id),
+      ),
+
+    delete: async (id) => (await execute(exec, 'DELETE FROM apis WHERE id = ?', [id])) > 0,
+  };
+
+  /* ── apiSpecs ───────────────────────────────────────────────────────── */
+
+  const apiSpecs: ApiSpecRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      await mapSqlConflict('That spec revision already exists', () =>
+        inTransaction(async (tx) => {
+          if (input.is_current) {
+            await execute(
+              tx,
+              'UPDATE api_specs SET is_current = 0, updated_at = ? WHERE api_id = ? AND is_current = 1',
+              [meta.updated_at, input.api_id],
             );
           }
-        }
-      },
+          await execute(
+            tx,
+            `INSERT INTO api_specs
+               (id, api_id, version, raw_spec, parsed_title, parsed_version, is_current, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              meta.id,
+              input.api_id,
+              input.version,
+              input.raw_spec,
+              input.parsed_title ?? null,
+              input.parsed_version ?? null,
+              encodeBool(input.is_current),
+              meta.created_at,
+              meta.updated_at,
+            ],
+          );
+        }),
+      );
+      const created = await apiSpecs.findById(meta.id);
+      if (!created) throw new Error('apiSpecs.create: row vanished immediately after insert');
+      return created;
     },
-    notifications: {
-      async insert(row: NotificationRow) {
-        await client.exec(
-          sql(`INSERT INTO notifications (id, recipient_id, type, payload, read_at, created_at)
-               VALUES ($1,$2,$3,$4,$5,$6)`),
+
+    findById: async (id) => {
+      const row = await queryOne(exec, 'SELECT * FROM api_specs WHERE id = ?', [id]);
+      return row ? mapApiSpec(row) : null;
+    },
+
+    findCurrentByApi: async (apiId) => {
+      const row = await queryOne(
+        exec,
+        'SELECT * FROM api_specs WHERE api_id = ? AND is_current = 1',
+        [apiId],
+      );
+      return row ? mapApiSpec(row) : null;
+    },
+
+    setCurrent: async (apiId, specId) => {
+      await inTransaction(async (tx) => {
+        const at = nowIso();
+        await execute(
+          tx,
+          'UPDATE api_specs SET is_current = 0, updated_at = ? WHERE api_id = ? AND id <> ?',
+          [at, apiId, specId],
+        );
+        await execute(
+          tx,
+          'UPDATE api_specs SET is_current = 1, updated_at = ? WHERE api_id = ? AND id = ?',
+          [at, apiId, specId],
+        );
+      });
+    },
+
+    list: async (filter, options) => {
+      const where = new SqlWhereBuilder()
+        .add(filter.api_id, 'api_id = ?', filter.api_id ?? null)
+        .add(
+          filter.is_current,
+          'is_current = ?',
+          filter.is_current === undefined ? null : encodeBool(filter.is_current),
+        )
+        .build();
+      const { limit, offset } = page(options);
+      const total = await queryCount(
+        exec,
+        `SELECT COUNT(*) AS cnt FROM api_specs${where.sql}`,
+        where.params,
+      );
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM api_specs${where.sql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
+      );
+      return { items: rows.map(mapApiSpec), total };
+    },
+
+    delete: async (id) => (await execute(exec, 'DELETE FROM api_specs WHERE id = ?', [id])) > 0,
+
+    deleteByApi: async (apiId) => execute(exec, 'DELETE FROM api_specs WHERE api_id = ?', [apiId]),
+  };
+
+  /* ── accessRequests ─────────────────────────────────────────────────── */
+
+  const accessRequests: AccessRequestRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      await mapSqlConflict('You already have a pending request for this API', () =>
+        execute(
+          exec,
+          `INSERT INTO access_requests
+             (id, api_id, user_id, justification, status, decided_by, decided_at, decision_note,
+              created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
-            row.id,
-            row.recipient_id,
-            row.type,
-            dialect === 'postgres' ? row.payload : J(row.payload),
-            row.read_at,
-            row.created_at,
+            meta.id,
+            input.api_id,
+            input.user_id,
+            input.justification,
+            input.status,
+            input.decided_by ?? null,
+            input.decided_at ?? null,
+            input.decision_note ?? null,
+            meta.created_at,
+            meta.updated_at,
+          ],
+        ),
+      );
+      const created = await accessRequests.findById(meta.id);
+      if (!created) throw new Error('accessRequests.create: row vanished immediately after insert');
+      return created;
+    },
+
+    findById: async (id) => {
+      const row = await queryOne(exec, 'SELECT * FROM access_requests WHERE id = ?', [id]);
+      return row ? mapAccessRequest(row) : null;
+    },
+
+    update: async (id, patch) => {
+      const set = setParts(accessRequestUpdateColumns(patch));
+      if (set) {
+        await mapSqlConflict('You already have a pending request for this API', () =>
+          execute(exec, `UPDATE access_requests SET ${set.sql}, updated_at = ? WHERE id = ?`, [
+            ...set.params,
+            nowIso(),
+            id,
+          ]),
+        );
+      }
+      return accessRequests.findById(id);
+    },
+
+    updateIfStatus: async (id, expected, patch) => {
+      // See `users.updateIfMatches` for why "no rows changed" is re-read
+      // rather than reported as a lost race outright.
+      const stillMatches = async (): Promise<AccessRequestRecord | null> => {
+        const row = await queryOne(
+          exec,
+          'SELECT id FROM access_requests WHERE id = ? AND status = ?',
+          [id, expected],
+        );
+        return row ? accessRequests.findById(id) : null;
+      };
+
+      const set = setParts(accessRequestUpdateColumns(patch));
+      if (!set) return stillMatches();
+
+      const changed = await mapSqlConflict('You already have a pending request for this API', () =>
+        execute(
+          exec,
+          `UPDATE access_requests SET ${set.sql}, updated_at = ? WHERE id = ? AND status = ?`,
+          [...set.params, nowIso(), id, expected],
+        ),
+      );
+      return changed > 0 ? accessRequests.findById(id) : stillMatches();
+    },
+
+    list: async (filter, options) => {
+      const where = accessRequestWhere(filter).build();
+      const { limit, offset } = page(options);
+      const total = await queryCount(
+        exec,
+        `SELECT COUNT(*) AS cnt FROM access_requests${where.sql}`,
+        where.params,
+      );
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM access_requests${where.sql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
+      );
+      return { items: rows.map(mapAccessRequest), total };
+    },
+
+    findPendingByApiAndUser: async (apiId, userId) => {
+      const row = await queryOne(
+        exec,
+        "SELECT * FROM access_requests WHERE api_id = ? AND user_id = ? AND status = 'pending'",
+        [apiId, userId],
+      );
+      return row ? mapAccessRequest(row) : null;
+    },
+
+    findLatestByApiAndUser: async (apiId, userId) => {
+      const row = await queryOne(
+        exec,
+        `SELECT * FROM access_requests WHERE api_id = ? AND user_id = ?
+         ORDER BY created_at DESC, id DESC LIMIT 1`,
+        [apiId, userId],
+      );
+      return row ? mapAccessRequest(row) : null;
+    },
+
+    listLatestForUser: async (userId, apiIds) => {
+      if (apiIds.length === 0) return [];
+      // One row per API — the newest request the user made for it. SQLite gets
+      // there with `GROUP BY r.api_id`; the portable spelling is a window
+      // function, supported by PostgreSQL and MySQL 8.
+      const rows = await queryAll(
+        exec,
+        `SELECT id, api_id, user_id, justification, status, decided_by, decided_at,
+                decision_note, created_at, updated_at
+         FROM (
+           SELECT r.*,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY r.api_id ORDER BY r.created_at DESC, r.id DESC
+                  ) AS rn
+           FROM access_requests r
+           WHERE r.user_id = ? AND r.api_id IN (${placeholders(apiIds.length)})
+         ) ranked
+         WHERE rn = 1`,
+        [userId, ...apiIds],
+      );
+      return rows.map(mapAccessRequest);
+    },
+
+    count: async (filter) => {
+      const where = accessRequestWhere(filter).build();
+      return queryCount(
+        exec,
+        `SELECT COUNT(*) AS cnt FROM access_requests${where.sql}`,
+        where.params,
+      );
+    },
+
+    deleteByApi: async (apiId) =>
+      execute(exec, 'DELETE FROM access_requests WHERE api_id = ?', [apiId]),
+  };
+
+  /* ── grants ─────────────────────────────────────────────────────────── */
+
+  const grants: GrantRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      await mapSqlConflict('An active grant already exists for this API and user', () =>
+        execute(
+          exec,
+          `INSERT INTO grants
+             (id, api_id, user_id, access_request_id, acl_group, status, granted_by, revoked_by,
+              revoked_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            meta.id,
+            input.api_id,
+            input.user_id,
+            input.access_request_id ?? null,
+            input.acl_group,
+            input.status,
+            input.granted_by,
+            input.revoked_by ?? null,
+            input.revoked_at ?? null,
+            meta.created_at,
+            meta.updated_at,
+          ],
+        ),
+      );
+      const created = await grants.findById(meta.id);
+      if (!created) throw new Error('grants.create: row vanished immediately after insert');
+      return created;
+    },
+
+    findById: async (id) => {
+      const row = await queryOne(exec, 'SELECT * FROM grants WHERE id = ?', [id]);
+      return row ? mapGrant(row) : null;
+    },
+
+    update: async (id, patch) => {
+      const set = setParts(grantUpdateColumns(patch));
+      if (set) {
+        await mapSqlConflict('An active grant already exists for this API and user', () =>
+          execute(exec, `UPDATE grants SET ${set.sql}, updated_at = ? WHERE id = ?`, [
+            ...set.params,
+            nowIso(),
+            id,
+          ]),
+        );
+      }
+      return grants.findById(id);
+    },
+
+    updateIfStatus: async (id, expected, patch) => {
+      // See `users.updateIfMatches` for why "no rows changed" is re-read
+      // rather than reported as a lost race outright.
+      const stillMatches = async (): Promise<GrantRecord | null> => {
+        const row = await queryOne(exec, 'SELECT id FROM grants WHERE id = ? AND status = ?', [
+          id,
+          expected,
+        ]);
+        return row ? grants.findById(id) : null;
+      };
+
+      const set = setParts(grantUpdateColumns(patch));
+      if (!set) return stillMatches();
+
+      const changed = await mapSqlConflict(
+        'An active grant already exists for this API and user',
+        () =>
+          execute(
+            exec,
+            `UPDATE grants SET ${set.sql}, updated_at = ? WHERE id = ? AND status = ?`,
+            [...set.params, nowIso(), id, expected],
+          ),
+      );
+      return changed > 0 ? grants.findById(id) : stillMatches();
+    },
+
+    list: async (filter, options) => {
+      const where = grantWhere(filter).build();
+      const { limit, offset } = page(options);
+      const total = await queryCount(
+        exec,
+        `SELECT COUNT(*) AS cnt FROM grants${where.sql}`,
+        where.params,
+      );
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM grants${where.sql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
+      );
+      return { items: rows.map(mapGrant), total };
+    },
+
+    findActiveByApiAndUser: async (apiId, userId) => {
+      const row = await queryOne(
+        exec,
+        "SELECT * FROM grants WHERE api_id = ? AND user_id = ? AND status = 'active'",
+        [apiId, userId],
+      );
+      return row ? mapGrant(row) : null;
+    },
+
+    listActiveByUser: async (userId) =>
+      (
+        await queryAll(exec, "SELECT * FROM grants WHERE user_id = ? AND status = 'active'", [
+          userId,
+        ])
+      ).map(mapGrant),
+
+    listActiveByApi: async (apiId) =>
+      (
+        await queryAll(exec, "SELECT * FROM grants WHERE api_id = ? AND status = 'active'", [apiId])
+      ).map(mapGrant),
+
+    count: async (filter) => {
+      const where = grantWhere(filter).build();
+      return queryCount(exec, `SELECT COUNT(*) AS cnt FROM grants${where.sql}`, where.params);
+    },
+
+    deleteByApi: async (apiId) => execute(exec, 'DELETE FROM grants WHERE api_id = ?', [apiId]),
+  };
+
+  /* ── credentials ────────────────────────────────────────────────────── */
+
+  const credentials: CredentialRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      await mapSqlConflict('That credential is already registered', () =>
+        execute(
+          exec,
+          `INSERT INTO credential_metadata
+             (id, user_id, ferrum_consumer_id, credential_type, ferrum_credential_id, fingerprint,
+              last4, label, status, rotated_from_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            meta.id,
+            input.user_id,
+            input.ferrum_consumer_id,
+            input.credential_type,
+            input.ferrum_credential_id,
+            input.fingerprint,
+            input.last4,
+            input.label ?? null,
+            input.status,
+            input.rotated_from_id ?? null,
+            meta.created_at,
+            meta.updated_at,
+          ],
+        ),
+      );
+      const created = await credentials.findById(meta.id);
+      if (!created) throw new Error('credentials.create: row vanished immediately after insert');
+      return created;
+    },
+
+    findById: async (id) => {
+      const row = await queryOne(exec, 'SELECT * FROM credential_metadata WHERE id = ?', [id]);
+      return row ? mapCredential(row) : null;
+    },
+
+    update: async (id, patch) => {
+      const set = setParts({
+        label: patch.label,
+        status: patch.status,
+        ferrum_credential_id: patch.ferrum_credential_id,
+        rotated_from_id: patch.rotated_from_id,
+      });
+      if (set) {
+        await execute(
+          exec,
+          `UPDATE credential_metadata SET ${set.sql}, updated_at = ? WHERE id = ?`,
+          [...set.params, nowIso(), id],
+        );
+      }
+      return credentials.findById(id);
+    },
+
+    list: async (filter, options) => {
+      const where = credentialWhere(filter).build();
+      const { limit, offset } = page(options);
+      const total = await queryCount(
+        exec,
+        `SELECT COUNT(*) AS cnt FROM credential_metadata${where.sql}`,
+        where.params,
+      );
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM credential_metadata${where.sql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
+      );
+      return { items: rows.map(mapCredential), total };
+    },
+
+    listByConsumer: async (ferrumConsumerId, type) => {
+      const where = new SqlWhereBuilder()
+        .always('ferrum_consumer_id = ?', ferrumConsumerId)
+        .add(type, 'credential_type = ?', type ?? null)
+        .build();
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM credential_metadata${where.sql} ORDER BY created_at ASC, id ASC`,
+        where.params,
+      );
+      return rows.map(mapCredential);
+    },
+
+    findByFingerprint: async (fingerprint) => {
+      const row = await queryOne(exec, 'SELECT * FROM credential_metadata WHERE fingerprint = ?', [
+        fingerprint,
+      ]);
+      return row ? mapCredential(row) : null;
+    },
+
+    count: async (filter) => {
+      const where = credentialWhere(filter).build();
+      return queryCount(
+        exec,
+        `SELECT COUNT(*) AS cnt FROM credential_metadata${where.sql}`,
+        where.params,
+      );
+    },
+
+    delete: async (id) =>
+      (await execute(exec, 'DELETE FROM credential_metadata WHERE id = ?', [id])) > 0,
+  };
+
+  /* ── consumers ──────────────────────────────────────────────────────── */
+
+  const consumers: ConsumerRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      await mapSqlConflict('A gateway consumer already exists for this user', () =>
+        execute(
+          exec,
+          `INSERT INTO consumers
+             (id, user_id, namespace, ferrum_consumer_id, ferrum_username, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            meta.id,
+            input.user_id,
+            input.namespace,
+            input.ferrum_consumer_id,
+            input.ferrum_username,
+            meta.created_at,
+            meta.updated_at,
+          ],
+        ),
+      );
+      const created = await consumers.findById(meta.id);
+      if (!created) throw new Error('consumers.create: row vanished immediately after insert');
+      return created;
+    },
+
+    findById: async (id) => {
+      const row = await queryOne(exec, 'SELECT * FROM consumers WHERE id = ?', [id]);
+      return row ? mapConsumer(row) : null;
+    },
+
+    findByUserAndNamespace: async (userId, namespace) => {
+      const row = await queryOne(
+        exec,
+        'SELECT * FROM consumers WHERE user_id = ? AND namespace = ?',
+        [userId, namespace],
+      );
+      return row ? mapConsumer(row) : null;
+    },
+
+    findByFerrumId: async (ferrumConsumerId) => {
+      const row = await queryOne(exec, 'SELECT * FROM consumers WHERE ferrum_consumer_id = ?', [
+        ferrumConsumerId,
+      ]);
+      return row ? mapConsumer(row) : null;
+    },
+
+    findByUsername: async (namespace, ferrumUsername) => {
+      const row = await queryOne(
+        exec,
+        'SELECT * FROM consumers WHERE namespace = ? AND ferrum_username = ?',
+        [namespace, ferrumUsername],
+      );
+      return row ? mapConsumer(row) : null;
+    },
+
+    update: async (id, patch) => {
+      const set = setParts({
+        ferrum_consumer_id: patch.ferrum_consumer_id,
+        ferrum_username: patch.ferrum_username,
+        namespace: patch.namespace,
+      });
+      if (set) {
+        await mapSqlConflict('A gateway consumer already exists for this user', () =>
+          execute(exec, `UPDATE consumers SET ${set.sql}, updated_at = ? WHERE id = ?`, [
+            ...set.params,
+            nowIso(),
+            id,
+          ]),
+        );
+      }
+      return consumers.findById(id);
+    },
+
+    list: async (filter, options) => {
+      const where = new SqlWhereBuilder()
+        .add(filter.user_id, 'user_id = ?', filter.user_id ?? null)
+        .add(filter.namespace, 'namespace = ?', filter.namespace ?? null)
+        .build();
+      const { limit, offset } = page(options);
+      const total = await queryCount(
+        exec,
+        `SELECT COUNT(*) AS cnt FROM consumers${where.sql}`,
+        where.params,
+      );
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM consumers${where.sql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
+      );
+      return { items: rows.map(mapConsumer), total };
+    },
+
+    delete: async (id) => (await execute(exec, 'DELETE FROM consumers WHERE id = ?', [id])) > 0,
+  };
+
+  /* ── threads ────────────────────────────────────────────────────────── */
+
+  const threads: ThreadRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      await execute(
+        exec,
+        `INSERT INTO message_threads
+           (id, subject, api_id, created_by, participant_a, participant_b, last_message_at,
+            created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          meta.id,
+          input.subject,
+          input.api_id ?? null,
+          input.created_by,
+          input.participant_a,
+          input.participant_b ?? null,
+          input.last_message_at ?? null,
+          meta.created_at,
+          meta.updated_at,
+        ],
+      );
+      const created = await threads.findById(meta.id);
+      if (!created) throw new Error('threads.create: row vanished immediately after insert');
+      return created;
+    },
+
+    findById: async (id) => {
+      const row = await queryOne(exec, 'SELECT * FROM message_threads WHERE id = ?', [id]);
+      return row ? mapThread(row) : null;
+    },
+
+    update: async (id, patch) => {
+      const set = setParts({
+        subject: patch.subject,
+        api_id: patch.api_id,
+        participant_b: patch.participant_b,
+        last_message_at: patch.last_message_at,
+      });
+      if (set) {
+        await execute(exec, `UPDATE message_threads SET ${set.sql}, updated_at = ? WHERE id = ?`, [
+          ...set.params,
+          nowIso(),
+          id,
+        ]);
+      }
+      return threads.findById(id);
+    },
+
+    list: async (filter, options) => {
+      const builder = new SqlWhereBuilder();
+      if (filter.participant_user_id !== undefined) {
+        // Seats only — `created_by` is provenance, not membership. See
+        // `ThreadFilter.participant_user_id`.
+        builder.always(
+          '(participant_a = ? OR participant_b = ?)',
+          filter.participant_user_id,
+          filter.participant_user_id,
+        );
+      }
+      builder.add(filter.api_id, 'api_id = ?', filter.api_id ?? null);
+      builder.addSearch(filter.q, ['subject']);
+      const where = builder.build();
+      const { limit, offset } = page(options);
+      const total = await queryCount(
+        exec,
+        `SELECT COUNT(*) AS cnt FROM message_threads${where.sql}`,
+        where.params,
+      );
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM message_threads${where.sql}
+         ORDER BY coalesce(last_message_at, created_at) DESC, id DESC LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
+      );
+      return { items: rows.map(mapThread), total };
+    },
+
+    findExisting: async (participantA, participantB, apiId) => {
+      const row = await queryOne(
+        exec,
+        `SELECT * FROM message_threads
+         WHERE ${nullSafeEq(dialect, 'api_id')}
+           AND ((participant_a = ? AND ${nullSafeEq(dialect, 'participant_b')})
+             OR (${nullSafeEq(dialect, 'participant_a')} AND participant_b = ?))
+         ORDER BY created_at DESC LIMIT 1`,
+        [apiId, participantA, participantB, participantB, participantA],
+      );
+      return row ? mapThread(row) : null;
+    },
+
+    touchLastMessage: async (threadId, at) => {
+      await execute(
+        exec,
+        'UPDATE message_threads SET last_message_at = ?, updated_at = ? WHERE id = ?',
+        [at, nowIso(), threadId],
+      );
+    },
+
+    delete: async (id) =>
+      (await execute(exec, 'DELETE FROM message_threads WHERE id = ?', [id])) > 0,
+  };
+
+  /* ── messages ───────────────────────────────────────────────────────── */
+
+  const messages: MessageRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      await execute(
+        exec,
+        `INSERT INTO messages (id, thread_id, sender_user_id, body, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          meta.id,
+          input.thread_id,
+          input.sender_user_id,
+          input.body,
+          meta.created_at,
+          meta.updated_at,
+        ],
+      );
+      const created = await messages.findById(meta.id);
+      if (!created) throw new Error('messages.create: row vanished immediately after insert');
+      return created;
+    },
+
+    findById: async (id) => {
+      const row = await queryOne(exec, 'SELECT * FROM messages WHERE id = ?', [id]);
+      return row ? mapMessage(row) : null;
+    },
+
+    listByThread: async (threadId, options) => {
+      const { limit, offset } = page(options);
+      const total = await queryCount(
+        exec,
+        'SELECT COUNT(*) AS cnt FROM messages WHERE thread_id = ?',
+        [threadId],
+      );
+      const rows = await queryAll(
+        exec,
+        'SELECT * FROM messages WHERE thread_id = ? ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?',
+        [threadId, limit, offset],
+      );
+      return { items: rows.map(mapMessage), total };
+    },
+
+    findLatestByThread: async (threadId) => {
+      const row = await queryOne(
+        exec,
+        'SELECT * FROM messages WHERE thread_id = ? ORDER BY created_at DESC, id DESC LIMIT 1',
+        [threadId],
+      );
+      return row ? mapMessage(row) : null;
+    },
+
+    countByThread: async (threadId) =>
+      queryCount(exec, 'SELECT COUNT(*) AS cnt FROM messages WHERE thread_id = ?', [threadId]),
+
+    deleteByThread: async (threadId) =>
+      execute(exec, 'DELETE FROM messages WHERE thread_id = ?', [threadId]),
+  };
+
+  /* ── notifications ──────────────────────────────────────────────────── */
+
+  const notifications: NotificationRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      await execute(
+        exec,
+        `INSERT INTO notifications
+           (id, user_id, type, title, body, link, read_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          meta.id,
+          input.user_id,
+          input.type,
+          input.title,
+          input.body,
+          input.link ?? null,
+          input.read_at ?? null,
+          meta.created_at,
+          meta.updated_at,
+        ],
+      );
+      const created = await notifications.findById(meta.id);
+      if (!created) throw new Error('notifications.create: row vanished immediately after insert');
+      return created;
+    },
+
+    createMany: async (inputs) => {
+      if (inputs.length === 0) return [];
+      return inTransaction(async (tx) => {
+        const created: NotificationRecord[] = [];
+        for (const input of inputs) {
+          const meta = stamps(input);
+          await execute(
+            tx,
+            `INSERT INTO notifications
+               (id, user_id, type, title, body, link, read_at, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              meta.id,
+              input.user_id,
+              input.type,
+              input.title,
+              input.body,
+              input.link ?? null,
+              input.read_at ?? null,
+              meta.created_at,
+              meta.updated_at,
+            ],
+          );
+          const row = await queryOne(tx, 'SELECT * FROM notifications WHERE id = ?', [meta.id]);
+          if (row) created.push(mapNotification(row));
+        }
+        return created;
+      });
+    },
+
+    findById: async (id) => {
+      const row = await queryOne(exec, 'SELECT * FROM notifications WHERE id = ?', [id]);
+      return row ? mapNotification(row) : null;
+    },
+
+    list: async (filter, options) => {
+      const builder = new SqlWhereBuilder().always('user_id = ?', filter.user_id);
+      if (filter.unread === true) builder.always('read_at IS NULL');
+      if (filter.unread === false) builder.always('read_at IS NOT NULL');
+      builder.add(filter.type, 'type = ?', filter.type ?? null);
+      const where = builder.build();
+      const { limit, offset } = page(options);
+      const total = await queryCount(
+        exec,
+        `SELECT COUNT(*) AS cnt FROM notifications${where.sql}`,
+        where.params,
+      );
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM notifications${where.sql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
+      );
+      return { items: rows.map(mapNotification), total };
+    },
+
+    countUnread: async (userId) =>
+      queryCount(
+        exec,
+        'SELECT COUNT(*) AS cnt FROM notifications WHERE user_id = ? AND read_at IS NULL',
+        [userId],
+      ),
+
+    markRead: async (userId, ids, at) => {
+      if (ids.length === 0) return 0;
+      return execute(
+        exec,
+        `UPDATE notifications SET read_at = ?, updated_at = ?
+         WHERE user_id = ? AND read_at IS NULL AND id IN (${placeholders(ids.length)})`,
+        [at, nowIso(), userId, ...ids],
+      );
+    },
+
+    markAllRead: async (userId, at) =>
+      execute(
+        exec,
+        'UPDATE notifications SET read_at = ?, updated_at = ? WHERE user_id = ? AND read_at IS NULL',
+        [at, nowIso(), userId],
+      ),
+  };
+
+  /* ── emailOutbox ────────────────────────────────────────────────────── */
+
+  const emailOutbox: EmailOutboxRepo = {
+    enqueue: async (input) => {
+      const key = input.idempotency_key ?? null;
+      if (key !== null) {
+        const existing = await emailOutbox.findByIdempotencyKey(key);
+        if (existing) return { entry: existing, created: false };
+      }
+      const meta = stamps({ id: input.id });
+      try {
+        await execute(
+          exec,
+          `INSERT INTO email_outbox
+             (id, to_email, subject, body_html, body_text, status, attempts, next_attempt_at,
+              last_error, idempotency_key, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?, ?)`,
+          [
+            meta.id,
+            input.to_email,
+            input.subject,
+            input.body_html,
+            input.body_text,
+            input.next_attempt_at ?? meta.created_at,
+            key,
+            meta.created_at,
+            meta.updated_at,
           ],
         );
-        return row;
-      },
-      async listForUser(userId, limit) {
-        const rows = await client.query<Record<string, unknown>>(
-          sql(`SELECT * FROM notifications WHERE recipient_id = $1
-               ORDER BY created_at DESC LIMIT $2`),
-          [userId, limit],
-        );
-        return rows.map((row) => ({
-          id: row.id as string,
-          recipient_id: row.recipient_id as string,
-          type: row.type as NotificationRow['type'],
-          payload: asJson<Record<string, unknown>>(row.payload, {}),
-          read_at: toIsoString(row.read_at),
-          created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-        }));
-      },
-      async markRead(id, userId, at) {
-        return client.exec(
-          sql('UPDATE notifications SET read_at = $1 WHERE id = $2 AND recipient_id = $3'),
-          [at, id, userId],
-        );
-      },
-      async unreadCount(userId) {
-        const row = await client.one<{ c: string }>(
-          sql(`SELECT COUNT(*)::text as c FROM notifications
-               WHERE recipient_id = $1 AND read_at IS NULL`),
-          [userId],
-        );
-        return Number(row?.c ?? 0);
-      },
-    },
-    email: {
-      async enqueue(row: EmailOutboxRow) {
-        // The partial unique index on `idempotency_key` makes a duplicate
-        // enqueue with the same key violate the constraint — ON CONFLICT
-        // turns that into a no-op so the caller sees idempotent behavior.
-        const conflictClause =
-          dialect === 'postgres'
-            ? ' ON CONFLICT (idempotency_key) DO NOTHING'
-            : ' ON DUPLICATE KEY UPDATE idempotency_key = idempotency_key';
-        await client.exec(
-          sql(
-            `INSERT INTO email_outbox (id, to_address, subject, template_id, payload,
-                  status, attempts, last_error, scheduled_at, sent_at, created_at,
-                  idempotency_key, headers)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)` + conflictClause,
-          ),
-          [
-            row.id,
-            row.to_address,
-            row.subject,
-            row.template_id,
-            dialect === 'postgres' ? row.payload : J(row.payload),
-            row.status,
-            row.attempts,
-            row.last_error,
-            row.scheduled_at,
-            row.sent_at,
-            row.created_at,
-            row.idempotency_key,
-            row.headers == null
-              ? null
-              : dialect === 'postgres'
-                ? row.headers
-                : J(row.headers),
-          ],
-        );
-      },
-      async claimBatch(now, batchSize) {
-        // Find candidate ids, then atomically transition each one to
-        // `sending`. A conditional UPDATE guarantees that only one worker
-        // claims a given row even when several poll concurrently.
-        const candidates = await client.query<{ id: string }>(
-          sql(`SELECT id FROM email_outbox WHERE status = 'pending' AND scheduled_at <= $1
-               ORDER BY scheduled_at ASC LIMIT $2`),
-          [now, batchSize],
-        );
-        const claimed: EmailOutboxRow[] = [];
-        for (const c of candidates) {
-          const affected = await client.exec(
-            sql(`UPDATE email_outbox SET status = 'sending'
-                 WHERE id = $1 AND status = 'pending'`),
-            [c.id],
-          );
-          if (affected === 0) continue;
-          const row = await client.one<Record<string, unknown>>(
-            sql('SELECT * FROM email_outbox WHERE id = $1'),
-            [c.id],
-          );
-          if (!row) continue;
-          claimed.push({
-            id: row.id as string,
-            to_address: row.to_address as string,
-            subject: row.subject as string,
-            template_id: (row.template_id as string | null) ?? null,
-            payload: asJson<Record<string, unknown>>(row.payload, {}),
-            status: row.status as EmailOutboxRow['status'],
-            attempts: Number(row.attempts ?? 0),
-            last_error: (row.last_error as string | null) ?? null,
-            scheduled_at: toIsoString(row.scheduled_at) ?? new Date().toISOString(),
-            sent_at: toIsoString(row.sent_at),
-            created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-            idempotency_key: (row.idempotency_key as string | null) ?? null,
-            headers:
-              row.headers == null
-                ? null
-                : asJson<Record<string, string>>(row.headers, {}),
-          });
+      } catch (error) {
+        // Lost a race on the idempotency key — return the winner.
+        if (key !== null) {
+          const existing = await emailOutbox.findByIdempotencyKey(key);
+          if (existing) return { entry: existing, created: false };
         }
-        return claimed;
-      },
-      async markSent(id, at) {
-        await client.exec(
-          sql("UPDATE email_outbox SET status = 'sent', sent_at = $1 WHERE id = $2"),
-          [at, id],
-        );
-      },
-      async markFailed(id, attempts, error) {
-        const backoffMs = Math.min(60_000 * attempts, 30 * 60_000);
-        const scheduled = new Date(Date.now() + backoffMs).toISOString();
-        const status = attempts >= 5 ? 'failed' : 'pending';
-        await client.exec(
-          sql(`UPDATE email_outbox SET attempts = $1, last_error = $2,
-                 status = $3, scheduled_at = $4 WHERE id = $5`),
-          [attempts, error, status, scheduled, id],
-        );
-      },
-      async listFailed(opts) {
-        const limit = opts.limit ?? 50;
-        const offset = opts.offset ?? 0;
-        const rows = await client.query<Record<string, unknown>>(
-          sql(
-            "SELECT * FROM email_outbox WHERE status = 'failed' ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-          ),
-          [limit, offset],
-        );
-        const total = (
-          await client.one<{ c: string }>(
-            sql("SELECT COUNT(*)::text as c FROM email_outbox WHERE status = 'failed'"),
-            [],
+        throw error;
+      }
+      const entry = await emailOutbox.findById(meta.id);
+      if (!entry) throw new Error('emailOutbox.enqueue: row vanished immediately after insert');
+      return { entry, created: true };
+    },
+
+    findById: async (id) => {
+      const row = await queryOne(exec, 'SELECT * FROM email_outbox WHERE id = ?', [id]);
+      return row ? mapOutbox(row) : null;
+    },
+
+    findByIdempotencyKey: async (key) => {
+      const row = await queryOne(exec, 'SELECT * FROM email_outbox WHERE idempotency_key = ?', [
+        key,
+      ]);
+      return row ? mapOutbox(row) : null;
+    },
+
+    claimDue: async (now, limit) =>
+      inTransaction(async (tx) => {
+        // `FOR UPDATE SKIP LOCKED` is what makes two workers claim disjoint
+        // batches: rows another transaction already holds are passed over
+        // instead of blocking.
+        const ids = (
+          await queryAll(
+            tx,
+            `SELECT id FROM email_outbox
+             WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+             ORDER BY ${nullsFirstAsc('next_attempt_at')}, created_at ASC
+             LIMIT ?${FOR_UPDATE_SKIP_LOCKED}`,
+            [now, Math.max(1, Math.floor(limit))],
           )
-        )?.c;
-        return {
-          rows: rows.map((row) => ({
-            id: row.id as string,
-            to_address: row.to_address as string,
-            subject: row.subject as string,
-            template_id: (row.template_id as string | null) ?? null,
-            payload: asJson<Record<string, unknown>>(row.payload, {}),
-            status: row.status as EmailOutboxRow['status'],
-            attempts: Number(row.attempts ?? 0),
-            last_error: (row.last_error as string | null) ?? null,
-            scheduled_at: toIsoString(row.scheduled_at) ?? new Date().toISOString(),
-            sent_at: toIsoString(row.sent_at),
-            created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-            idempotency_key: (row.idempotency_key as string | null) ?? null,
-            headers:
-              row.headers == null
-                ? null
-                : asJson<Record<string, string>>(row.headers, {}),
-          })),
-          total: Number(total ?? 0),
-        };
-      },
-      async requeue(id) {
-        const changes = await client.exec(
-          sql(
-            "UPDATE email_outbox SET status = 'pending', attempts = 0, last_error = NULL, scheduled_at = $1 WHERE id = $2 AND status = 'failed'",
-          ),
-          [new Date().toISOString(), id],
+        ).map((row) => text(row.id));
+        if (ids.length === 0) return [];
+        await execute(
+          tx,
+          `UPDATE email_outbox
+           SET status = 'sending', attempts = attempts + 1, updated_at = ?
+           WHERE id IN (${placeholders(ids.length)}) AND status = 'pending'`,
+          [nowIso(), ...ids],
         );
-        return changes > 0;
-      },
-      async getTemplate(key) {
-        const keyCol = ident(dialect, 'key');
-        const row = await client.one<Record<string, unknown>>(
-          sql(`SELECT * FROM email_templates WHERE ${keyCol} = $1`),
-          [key],
+        const rows = await queryAll(
+          tx,
+          `SELECT * FROM email_outbox WHERE id IN (${placeholders(ids.length)})`,
+          ids,
         );
-        if (!row) return null;
-        return {
-          key: row.key as string,
-          subject_template: row.subject_template as string,
-          body_template: row.body_template as string,
-          enabled: asBool(row.enabled) ? 1 : 0,
-          updated_at: toIsoString(row.updated_at) ?? new Date().toISOString(),
-        };
-      },
-      async upsertTemplate(row: EmailTemplateRow) {
-        await client.exec(
-          sql(
-            buildUpsert(
-              dialect,
-              'email_templates',
-              ['key', 'subject_template', 'body_template', 'enabled', 'updated_at'],
-              ['key'],
-            ),
-          ),
-          [
-            row.key,
-            row.subject_template,
-            row.body_template,
-            boolValue(row.enabled === 1),
-            row.updated_at,
-          ],
-        );
-      },
-      async listTemplates() {
-        const keyCol = ident(dialect, 'key');
-        const rows = await client.query<Record<string, unknown>>(
-          sql(`SELECT * FROM email_templates ORDER BY ${keyCol} ASC`),
-          [],
-        );
-        return rows.map((row) => ({
-          key: row.key as string,
-          subject_template: row.subject_template as string,
-          body_template: row.body_template as string,
-          enabled: asBool(row.enabled) ? 1 : 0,
-          updated_at: toIsoString(row.updated_at) ?? new Date().toISOString(),
-        }));
-      },
+        return rows.map(mapOutbox);
+      }),
+
+    markSent: async (id, at) => {
+      await execute(
+        exec,
+        `UPDATE email_outbox SET status = 'sent', next_attempt_at = NULL, last_error = NULL,
+           updated_at = ? WHERE id = ?`,
+        [at, id],
+      );
     },
-    settings: {
-      async get<T>(key: string): Promise<T | null> {
-        const keyCol = ident(dialect, 'key');
-        const row = await client.one<Record<string, unknown>>(
-          sql(`SELECT * FROM app_settings WHERE ${keyCol} = $1`),
-          [key],
-        );
-        if (!row) return null;
-        return asJson<T>(row.value, null as T);
-      },
-      async set<T>(key: string, value: T, encrypted = false) {
-        await client.exec(
-          sql(
-            buildUpsert(
-              dialect,
-              'app_settings',
-              ['key', 'value', 'encrypted', 'updated_at'],
-              ['key'],
-            ),
-          ),
-          [key, JSON.stringify(value), boolValue(encrypted), new Date().toISOString()],
-        );
-      },
-      async setIfAbsent<T>(key: string, value: T, encrypted = false) {
-        const changed = await client.exec(
-          sql(
-            buildInsertIgnore(
-              dialect,
-              'app_settings',
-              ['key', 'value', 'encrypted', 'updated_at'],
-            ),
-          ),
-          [key, JSON.stringify(value), boolValue(encrypted), new Date().toISOString()],
-        );
-        return changed > 0;
-      },
-      async all() {
-        const keyCol = ident(dialect, 'key');
-        const rows = await client.query<Record<string, unknown>>(
-          sql(`SELECT * FROM app_settings ORDER BY ${keyCol} ASC`),
-          [],
-        );
-        return rows.map((row) => ({
-          key: row.key as string,
-          value: asJson<unknown>(row.value, null),
-          encrypted: asBool(row.encrypted) ? 1 : 0,
-          updated_at: toIsoString(row.updated_at) ?? new Date().toISOString(),
-        })) as AppSettingRow[];
-      },
+
+    reschedule: async (id, nextAttemptAt, lastError) => {
+      await execute(
+        exec,
+        `UPDATE email_outbox SET status = 'pending', next_attempt_at = ?, last_error = ?,
+           updated_at = ? WHERE id = ?`,
+        [nextAttemptAt, lastError, nowIso(), id],
+      );
     },
-    audit: {
-      async insert(row: AuditLogRow) {
-        await client.exec(
-          sql(`INSERT INTO audit_logs (id, actor_id, actor_email, action, target_type,
-                  target_id, reason, before, after, ip, user_agent, created_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`),
-          [
-            row.id,
-            row.actor_id,
-            row.actor_email,
-            row.action,
-            row.target_type,
-            row.target_id,
-            row.reason,
-            dialect === 'postgres' ? row.before : row.before == null ? null : JSON.stringify(row.before),
-            dialect === 'postgres' ? row.after : row.after == null ? null : JSON.stringify(row.after),
-            row.ip,
-            row.user_agent,
-            row.created_at,
-          ],
-        );
-      },
-      async list(opts) {
-        const limit = opts.limit ?? 50;
-        const offset = opts.offset ?? 0;
-        const action = opts.action ?? null;
-        const actorId = opts.actorId ?? null;
-        const rows = await client.query<Record<string, unknown>>(
-          sql(`SELECT * FROM audit_logs
-               WHERE ($1::text IS NULL OR action = $2)
-                 AND ($3::text IS NULL OR actor_id = $4)
-               ORDER BY created_at DESC LIMIT $5 OFFSET $6`),
-          [action, action, actorId, actorId, limit, offset],
-        );
-        const totalRow = await client.one<{ c: string }>(
-          sql(`SELECT COUNT(*)::text as c FROM audit_logs
-               WHERE ($1::text IS NULL OR action = $2)
-                 AND ($3::text IS NULL OR actor_id = $4)`),
-          [action, action, actorId, actorId],
-        );
-        return {
-          rows: rows.map((row) => ({
-            id: row.id as string,
-            actor_id: (row.actor_id as string | null) ?? null,
-            actor_email: (row.actor_email as string | null) ?? null,
-            action: row.action as string,
-            target_type: row.target_type as string,
-            target_id: (row.target_id as string | null) ?? null,
-            reason: (row.reason as string | null) ?? null,
-            before: asJson<unknown>(row.before, null),
-            after: asJson<unknown>(row.after, null),
-            ip: (row.ip as string | null) ?? null,
-            user_agent: (row.user_agent as string | null) ?? null,
-            created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-          })),
-          total: Number(totalRow?.c ?? 0),
-        };
-      },
+
+    markFailed: async (id, lastError) => {
+      await execute(
+        exec,
+        `UPDATE email_outbox SET status = 'failed', next_attempt_at = NULL, last_error = ?,
+           updated_at = ? WHERE id = ?`,
+        [lastError, nowIso(), id],
+      );
     },
-    massEmail: {
-      async insert(row: MassEmailCampaignRow) {
-        await client.exec(
-          sql(`INSERT INTO mass_email_campaigns (id, created_by, recipient_filter, subject,
-                  body, status, sent_count, failed_count, created_at, completed_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`),
-          [
-            row.id,
-            row.created_by,
-            dialect === 'postgres' ? row.recipient_filter : J(row.recipient_filter),
-            row.subject,
-            row.body,
-            row.status,
-            row.sent_count,
-            row.failed_count,
-            row.created_at,
-            row.completed_at,
-          ],
-        );
-        return row;
-      },
-      async update(id, fields) {
-        const existing = await this.findById(id);
-        if (!existing) throw new Error(`Campaign not found: ${id}`);
-        const next = { ...existing, ...fields };
-        await client.exec(
-          sql(`UPDATE mass_email_campaigns SET status = $1, sent_count = $2,
-                 failed_count = $3, completed_at = $4 WHERE id = $5`),
-          [next.status, next.sent_count, next.failed_count, next.completed_at, id],
-        );
-        return next;
-      },
-      async list() {
-        const rows = await client.query<Record<string, unknown>>(
-          sql('SELECT * FROM mass_email_campaigns ORDER BY created_at DESC'),
-          [],
-        );
-        return rows.map((row) => ({
-          id: row.id as string,
-          created_by: row.created_by as string,
-          recipient_filter: asJson<Record<string, unknown>>(row.recipient_filter, {}),
-          subject: row.subject as string,
-          body: row.body as string,
-          status: row.status as MassEmailCampaignRow['status'],
-          sent_count: Number(row.sent_count ?? 0),
-          failed_count: Number(row.failed_count ?? 0),
-          created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-          completed_at: toIsoString(row.completed_at),
-        }));
-      },
-      async findById(id) {
-        const row = await client.one<Record<string, unknown>>(
-          sql('SELECT * FROM mass_email_campaigns WHERE id = $1'),
-          [id],
-        );
-        if (!row) return null;
-        return {
-          id: row.id as string,
-          created_by: row.created_by as string,
-          recipient_filter: asJson<Record<string, unknown>>(row.recipient_filter, {}),
-          subject: row.subject as string,
-          body: row.body as string,
-          status: row.status as MassEmailCampaignRow['status'],
-          sent_count: Number(row.sent_count ?? 0),
-          failed_count: Number(row.failed_count ?? 0),
-          created_at: toIsoString(row.created_at) ?? new Date().toISOString(),
-          completed_at: toIsoString(row.completed_at),
-        };
-      },
+
+    releaseStale: async (olderThan) =>
+      execute(
+        exec,
+        `UPDATE email_outbox SET status = 'pending', next_attempt_at = ?, updated_at = ?
+         WHERE status = 'sending' AND updated_at <= ?`,
+        [nowIso(), nowIso(), olderThan],
+      ),
+
+    list: async (filter, options) => {
+      const where = new SqlWhereBuilder()
+        .add(filter.status, 'status = ?', filter.status ?? null)
+        .add(filter.to_email, 'lower(to_email) = ?', (filter.to_email ?? '').toLowerCase())
+        .build();
+      const { limit, offset } = page(options);
+      const total = await queryCount(
+        exec,
+        `SELECT COUNT(*) AS cnt FROM email_outbox${where.sql}`,
+        where.params,
+      );
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM email_outbox${where.sql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
+      );
+      return { items: rows.map(mapOutbox), total };
     },
   };
+
+  /* ── auditLogs ──────────────────────────────────────────────────────── */
+
+  const auditLogs: AuditLogRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      await execute(
+        exec,
+        `INSERT INTO audit_logs
+           (id, actor_user_id, actor_role, action, target_type, target_id, details_json, ip, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          meta.id,
+          input.actor_user_id ?? null,
+          input.actor_role ?? null,
+          input.action,
+          input.target_type,
+          input.target_id ?? null,
+          encodeJson(input.details ?? {}) ?? '{}',
+          input.ip ?? null,
+          meta.created_at,
+        ],
+      );
+      const row = await queryOne(exec, 'SELECT * FROM audit_logs WHERE id = ?', [meta.id]);
+      if (!row) throw new Error('auditLogs.create: row vanished immediately after insert');
+      return mapAuditLog(row);
+    },
+
+    list: async (filter, options) => {
+      const where = auditWhere(filter).build();
+      const { limit, offset } = page(options);
+      const total = await queryCount(
+        exec,
+        `SELECT COUNT(*) AS cnt FROM audit_logs${where.sql}`,
+        where.params,
+      );
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM audit_logs${where.sql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
+      );
+      return { items: rows.map(mapAuditLog), total };
+    },
+
+    count: async (filter) => {
+      const where = auditWhere(filter).build();
+      return queryCount(exec, `SELECT COUNT(*) AS cnt FROM audit_logs${where.sql}`, where.params);
+    },
+  };
+
+  /* ── settings ───────────────────────────────────────────────────────── */
+
+  // `key` is a reserved word in MySQL and not in PostgreSQL; the double quotes
+  // are rewritten to backticks by formatSql for the MySQL driver.
+  const SETTINGS_UPSERT = upsertSql(
+    dialect,
+    'app_settings',
+    ['"key"', 'value_json', 'encrypted', 'created_at', 'updated_at'],
+    '"key"',
+    ['value_json', 'encrypted', 'updated_at'],
+  );
+
+  // "Insert unless the key is taken", spelled for each server. Both report 0
+  // affected rows when the row already existed, which is the return value.
+  const SETTINGS_INSERT_IF_ABSENT =
+    dialect === 'pg'
+      ? `INSERT INTO app_settings ("key", value_json, encrypted, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?) ON CONFLICT ("key") DO NOTHING`
+      : `INSERT IGNORE INTO app_settings ("key", value_json, encrypted, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)`;
+
+  const settings: SettingRepo = {
+    get: async (key) => {
+      const row = await queryOne(exec, 'SELECT * FROM app_settings WHERE "key" = ?', [key]);
+      return row ? mapSetting(row) : null;
+    },
+
+    getMany: async (keys) => {
+      if (keys.length === 0) return [];
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM app_settings WHERE "key" IN (${placeholders(keys.length)})`,
+        keys,
+      );
+      return rows.map(mapSetting);
+    },
+
+    set: async (key, value, encrypted = false) => {
+      const at = nowIso();
+      await execute(exec, SETTINGS_UPSERT, [
+        key,
+        JSON.stringify(value ?? null),
+        encodeBool(encrypted),
+        at,
+        at,
+      ]);
+      const stored = await settings.get(key);
+      if (!stored) throw new Error('settings.set: row vanished immediately after upsert');
+      return stored;
+    },
+
+    insertIfAbsent: async (key, value, encrypted = false) => {
+      const at = nowIso();
+      const affected = await execute(exec, SETTINGS_INSERT_IF_ABSENT, [
+        key,
+        JSON.stringify(value ?? null),
+        encodeBool(encrypted),
+        at,
+        at,
+      ]);
+      return affected > 0;
+    },
+
+    setMany: async (entries) => {
+      if (entries.length === 0) return;
+      await inTransaction(async (tx) => {
+        const at = nowIso();
+        for (const entry of entries) {
+          await execute(tx, SETTINGS_UPSERT, [
+            entry.key,
+            JSON.stringify(entry.value ?? null),
+            encodeBool(entry.encrypted),
+            at,
+            at,
+          ]);
+        }
+      });
+    },
+
+    delete: async (key) =>
+      (await execute(exec, 'DELETE FROM app_settings WHERE "key" = ?', [key])) > 0,
+
+    all: async () =>
+      (await queryAll(exec, 'SELECT * FROM app_settings ORDER BY "key" ASC')).map(mapSetting),
+  };
+
+  /* ── emailTemplates ─────────────────────────────────────────────────── */
+
+  const TEMPLATE_UPSERT = upsertSql(
+    dialect,
+    'email_templates',
+    ['id', '"key"', 'subject', 'body_html', 'body_text', 'created_at', 'updated_at'],
+    '"key"',
+    ['subject', 'body_html', 'body_text', 'updated_at'],
+  );
+
+  const emailTemplates: EmailTemplateRepo = {
+    get: async (key) => {
+      const row = await queryOne(exec, 'SELECT * FROM email_templates WHERE "key" = ?', [key]);
+      return row ? mapEmailTemplate(row) : null;
+    },
+
+    upsert: async (key, value) => {
+      const at = nowIso();
+      await execute(exec, TEMPLATE_UPSERT, [
+        newId(),
+        key,
+        value.subject,
+        value.body_html,
+        value.body_text,
+        at,
+        at,
+      ]);
+      const stored = await emailTemplates.get(key);
+      if (!stored) throw new Error('emailTemplates.upsert: row vanished immediately after upsert');
+      return stored;
+    },
+
+    list: async () =>
+      (await queryAll(exec, 'SELECT * FROM email_templates ORDER BY "key" ASC')).map(
+        mapEmailTemplate,
+      ),
+
+    delete: async (key) =>
+      (await execute(exec, 'DELETE FROM email_templates WHERE "key" = ?', [key])) > 0,
+  };
+
+  /* ── verificationTokens ─────────────────────────────────────────────── */
+
+  const verificationTokens: VerificationTokenRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      await mapSqlConflict('Verification token collision', () =>
+        execute(
+          exec,
+          `INSERT INTO email_verification_tokens
+             (id, user_id, token_hash, expires_at, used_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            meta.id,
+            input.user_id,
+            input.token_hash,
+            input.expires_at,
+            input.used_at ?? null,
+            meta.created_at,
+            meta.updated_at,
+          ],
+        ),
+      );
+      const row = await queryOne(exec, 'SELECT * FROM email_verification_tokens WHERE id = ?', [
+        meta.id,
+      ]);
+      if (!row) throw new Error('verificationTokens.create: row vanished immediately after insert');
+      return mapVerificationToken(row);
+    },
+
+    findByTokenHash: async (tokenHash) => {
+      const row = await queryOne(
+        exec,
+        'SELECT * FROM email_verification_tokens WHERE token_hash = ?',
+        [tokenHash],
+      );
+      return row ? mapVerificationToken(row) : null;
+    },
+
+    markUsed: async (id, at) =>
+      (await execute(
+        exec,
+        'UPDATE email_verification_tokens SET used_at = ?, updated_at = ? WHERE id = ? AND used_at IS NULL',
+        [at, nowIso(), id],
+      )) > 0,
+
+    deleteForUser: async (userId) =>
+      execute(exec, 'DELETE FROM email_verification_tokens WHERE user_id = ?', [userId]),
+
+    deleteExpired: async (now) =>
+      execute(exec, 'DELETE FROM email_verification_tokens WHERE expires_at <= ?', [now]),
+  };
+
+  return {
+    users,
+    organizations,
+    sessions,
+    apis,
+    apiSpecs,
+    accessRequests,
+    grants,
+    credentials,
+    consumers,
+    threads,
+    messages,
+    notifications,
+    emailOutbox,
+    auditLogs,
+    settings,
+    emailTemplates,
+    verificationTokens,
+  };
+}
+
+/* ── The store shell ────────────────────────────────────────────────────── */
+
+/**
+ * Everything a concrete SQL adapter must supply. `postgres/index.ts` and
+ * `mysql/index.ts` implement exactly this and nothing else — connection setup,
+ * migration application, and the driver's native transaction primitive.
+ */
+export interface SqlStoreBackend {
+  /** Reported as {@link NexusStore.driver}. */
+  readonly driver: DbDriver;
+  /** Executor bound to the connection pool, used outside transactions. */
+  readonly pool: SqlExecutor;
+  init(): Promise<void>;
+  migrate(): Promise<void>;
+  close(): Promise<void>;
+  healthCheck(): Promise<StoreHealth>;
+  /**
+   * Check out a dedicated connection, `BEGIN`, run `fn` on it, then `COMMIT`
+   * on resolve or `ROLLBACK` on reject, releasing the connection either way.
+   */
+  withTransaction<T>(fn: (exec: SqlExecutor) => Promise<T>): Promise<T>;
+}
+
+/**
+ * A {@link NexusStore} over a {@link SqlStoreBackend}.
+ *
+ * Two behaviours are worth calling out, both of them deliberate fidelity to the
+ * contract documented at the top of `db/store.ts`:
+ *
+ * **Transaction bodies are serialised.** A pool could happily run several
+ * transactions at once, but the store contract promises the sqlite adapter's
+ * observable behaviour — one body at a time — and services are entitled to rely
+ * on it. A promise queue, the same shape the sqlite adapter uses, provides it;
+ * it also makes it impossible for a burst of transactions to exhaust the pool.
+ *
+ * **A nested `transaction()` joins the outer one.** The store handed to a
+ * transaction body is scoped to that connection, and calling `transaction()` on
+ * *it* simply invokes the callback with itself rather than opening a second
+ * transaction (which the drivers would either reject or silently flatten).
+ */
+class SqlStore implements NexusStore {
+  readonly driver: DbDriver;
+
+  readonly users: UserRepo;
+  readonly organizations: OrganizationRepo;
+  readonly sessions: SessionRepo;
+  readonly apis: ApiRepo;
+  readonly apiSpecs: ApiSpecRepo;
+  readonly accessRequests: AccessRequestRepo;
+  readonly grants: GrantRepo;
+  readonly credentials: CredentialRepo;
+  readonly consumers: ConsumerRepo;
+  readonly threads: ThreadRepo;
+  readonly messages: MessageRepo;
+  readonly notifications: NotificationRepo;
+  readonly emailOutbox: EmailOutboxRepo;
+  readonly auditLogs: AuditLogRepo;
+  readonly settings: SettingRepo;
+  readonly emailTemplates: EmailTemplateRepo;
+  readonly verificationTokens: VerificationTokenRepo;
+
+  private readonly backend: SqlStoreBackend;
+
+  /** Non-null only for a store scoped to an open transaction. */
+  private readonly scoped: SqlExecutor | null;
+
+  /** Serialises `transaction` bodies; see the class docblock. */
+  private queue: Promise<unknown> = Promise.resolve();
+
+  constructor(backend: SqlStoreBackend, scoped: SqlExecutor | null) {
+    this.backend = backend;
+    this.scoped = scoped;
+    this.driver = backend.driver;
+
+    const exec = scoped ?? backend.pool;
+    const runner: SqlTransactionRunner = scoped
+      ? (fn) => fn(scoped)
+      : (fn) => this.runInTransaction(fn);
+    const repos = createSqlRepos(exec, runner);
+
+    this.users = repos.users;
+    this.organizations = repos.organizations;
+    this.sessions = repos.sessions;
+    this.apis = repos.apis;
+    this.apiSpecs = repos.apiSpecs;
+    this.accessRequests = repos.accessRequests;
+    this.grants = repos.grants;
+    this.credentials = repos.credentials;
+    this.consumers = repos.consumers;
+    this.threads = repos.threads;
+    this.messages = repos.messages;
+    this.notifications = repos.notifications;
+    this.emailOutbox = repos.emailOutbox;
+    this.auditLogs = repos.auditLogs;
+    this.settings = repos.settings;
+    this.emailTemplates = repos.emailTemplates;
+    this.verificationTokens = repos.verificationTokens;
+  }
+
+  init(): Promise<void> {
+    return this.backend.init();
+  }
+
+  migrate(): Promise<void> {
+    return this.backend.migrate();
+  }
+
+  close(): Promise<void> {
+    return this.backend.close();
+  }
+
+  healthCheck(): Promise<StoreHealth> {
+    return this.backend.healthCheck();
+  }
+
+  transaction<T>(fn: (tx: NexusStore) => Promise<T>): Promise<T> {
+    if (this.scoped) return fn(this);
+    return this.runInTransaction((exec) => fn(new SqlStore(this.backend, exec)));
+  }
+
+  private runInTransaction<T>(fn: (exec: SqlExecutor) => Promise<T>): Promise<T> {
+    if (this.scoped) return fn(this.scoped);
+    const run = (): Promise<T> => this.backend.withTransaction(fn);
+    const result = this.queue.then(run, run);
+    this.queue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+}
+
+/** Wrap a backend into the {@link NexusStore} the service layer consumes. */
+export function createSqlStore(backend: SqlStoreBackend): NexusStore {
+  return new SqlStore(backend, null);
 }

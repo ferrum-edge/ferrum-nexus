@@ -1,485 +1,733 @@
 /**
- * Persistence interface for Ferrum Nexus.
+ * `NexusStore` — the complete persistence contract for Ferrum Nexus.
  *
- * Every adapter (SQLite, PostgreSQL, MySQL, MongoDB) implements `NexusStore`.
- * Service modules talk to this interface and never reach into the driver.
+ * **This file is the contract between the service layer and the four database
+ * adapters (`sqlite`, `postgres`, `mysql`, `mongodb`).** Nothing outside
+ * `db/adapters/` may import a driver package; every query lives behind one of
+ * the repositories below. Adding a query means adding it here first and then
+ * implementing it in all four adapters.
  *
- * Identifiers are string UUIDs across all backends so the same logical schema
- * works regardless of database. Timestamps are ISO-8601 strings.
+ * ## Representation rules (identical in every adapter)
+ *
+ * - **Ids** are string UUIDs. `create()` generates one when the caller does not
+ *   supply it, so an id can be pinned when it must match an external system
+ *   (e.g. reusing the Nexus user id as the Ferrum consumer id).
+ * - **Timestamps** are ISO-8601 strings (`2026-08-31T12:00:00.000Z`), never
+ *   `Date` objects and never epoch numbers. `created_at`/`updated_at` are
+ *   adapter-managed; `updated_at` is refreshed on every successful update.
+ * - **Booleans are real booleans** at this boundary. SQL adapters store 0/1 and
+ *   convert on the way in and out; Mongo stores them natively.
+ * - **Structured columns are parsed values**, not JSON text: `rate_limit`,
+ *   `details`, and setting `value` cross this interface as objects. SQL
+ *   adapters serialise them into their `*_json` columns.
+ * - **Email addresses are matched case-insensitively.** `users.create` and
+ *   `users.findByEmail` lowercase before touching storage.
+ * - Every `find*` returns `null` when nothing matches; `update` returns `null`
+ *   when the row does not exist; `delete` returns `false` in that case.
+ * - Every `list` takes filters plus `{ limit, offset }` and returns
+ *   `{ items, total }` where `total` ignores pagination. Adapters clamp
+ *   `limit` with `clampPageSize` and treat a negative `offset` as `0`.
+ * - Uniqueness violations surface as `NexusError('CONFLICT', …)`, never as a
+ *   driver-specific error.
+ *
+ * ## Transaction semantics
+ *
+ * `transaction(fn)` runs `fn` with a store scoped to a single transaction and
+ * commits when the promise resolves, rolling back when it rejects. The scoped
+ * store exposes the same repositories; calling `transaction` on it again joins
+ * the existing transaction rather than nesting a new one.
+ *
+ * The sqlite adapter is synchronous under the hood (better-sqlite3), so it
+ * cannot suspend a real `BEGIN`/`COMMIT` across an `await`. It instead
+ * serialises transaction bodies through a **per-connection promise queue**:
+ * only one `transaction(fn)` body runs at a time, it issues `BEGIN` before
+ * `fn` and `COMMIT`/`ROLLBACK` after it settles, and because the process is
+ * single-threaded no other statement can interleave as long as *all* writes go
+ * through this store. Other adapters use their driver's native transaction
+ * (a `pg` client checkout, a mysql2 connection, a Mongo session) and should
+ * keep the same observable behaviour: serialised bodies, atomic commit,
+ * rollback on throw.
  */
 
 import type {
+  AccessRequest,
   AccessRequestStatus,
-  ApiLifecycleStatus,
+  Api,
+  ApiSpec,
+  ApiStatus,
   ApiVisibility,
-  ConversationType,
+  AuditLog,
+  Consumer,
+  CredentialMetadata,
+  CredentialStatus,
   CredentialType,
+  DbDriver,
+  EmailOutboxEntry,
+  EmailTemplate,
+  EmailTemplateKey,
+  Grant,
   GrantStatus,
+  IsoTimestamp,
+  Message,
+  MessageThread,
+  Notification,
   NotificationType,
-  UserRole,
+  Organization,
+  Paginated,
+  Role,
+  User,
   UserStatus,
+  Uuid,
 } from '@ferrum-nexus/shared';
 
-// ---------- Row types ----------
+/* ── Generic helpers ────────────────────────────────────────────────────── */
 
-export interface UserRow {
-  id: string;
-  email: string;
-  email_normalized: string;
-  name: string | null;
-  phone: string | null;
-  status: UserStatus;
-  email_verified_at: string | null;
+/** Pagination accepted by every `list` method. */
+export interface ListOptions {
+  /** Page size; clamped to `[1, MAX_PAGE_SIZE]`, defaults to `DEFAULT_PAGE_SIZE`. */
+  limit?: number;
+  /** Zero-based row offset; negatives are treated as `0`. */
+  offset?: number;
+}
+
+/** Keys of `T` whose type admits `null` — these default to `null` on create. */
+type NullableKeys<T> = { [K in keyof T]-?: null extends T[K] ? K : never }[keyof T];
+
+/**
+ * Creation payload: everything except the adapter-managed identity/timestamp
+ * columns, each of which may still be supplied to pin a value.
+ *
+ * Nullable columns are optional and default to `null`, so callers only spell
+ * out the fields they actually set.
+ */
+export type CreateInput<T> = Omit<T, 'id' | 'created_at' | 'updated_at' | NullableKeys<T>> &
+  Partial<Pick<T, Extract<NullableKeys<T>, keyof T>>> & {
+    id?: Uuid;
+    created_at?: IsoTimestamp;
+    updated_at?: IsoTimestamp;
+  };
+
+/** Update payload: any subset of the mutable columns. `updated_at` is set by the adapter. */
+export type UpdateInput<T> = Partial<Omit<T, 'id' | 'created_at' | 'updated_at'>>;
+
+/* ── Stored record shapes ───────────────────────────────────────────────── */
+
+/**
+ * A `users` row. Identical to the wire {@link User} plus the password hash,
+ * which never leaves the server.
+ */
+export interface UserRecord extends User {
+  /** `scrypt:N:r:p:salt:hash` — see `lib/crypto.ts`. */
   password_hash: string;
-  last_login_at: string | null;
-  failed_login_count: number;
-  organization_id: string | null;
-  created_at: string;
-  updated_at: string;
 }
 
-export interface UserRoleRow {
-  user_id: string;
-  role: UserRole;
-  created_at: string;
-}
+/** An `organizations` row. */
+export type OrganizationRecord = Organization;
 
-export interface OrganizationRow {
-  id: string;
-  name: string;
-  domain: string | null;
-  status: UserStatus;
-  created_at: string;
-}
-
-export interface OrganizationMemberRow {
-  organization_id: string;
-  user_id: string;
-  role: 'member' | 'owner';
-  created_at: string;
-}
-
-export interface SessionRow {
-  id: string;
-  user_id: string;
+/** A `sessions` row. The plaintext token exists only in the browser cookie. */
+export interface SessionRecord {
+  id: Uuid;
+  /** HMAC-SHA-256 of the session token (`NexusCrypto.hashToken`). Unique. */
+  token_hash: string;
+  user_id: Uuid;
+  /** Double-submit CSRF token; the browser echoes it in `X-Nexus-CSRF`. */
   csrf_token: string;
-  user_agent: string | null;
+  expires_at: IsoTimestamp;
   ip: string | null;
-  created_at: string;
-  expires_at: string;
+  user_agent: string | null;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
 }
 
-export interface EmailVerificationRow {
-  token: string;
-  user_id: string;
-  expires_at: string;
-  consumed_at: string | null;
+/** An `apis` row. */
+export type ApiRecord = Api;
+
+/** An `api_specs` row, including the raw uploaded document. */
+export type ApiSpecRecord = ApiSpec;
+
+/** An `access_requests` row (without the denormalised joins the API adds). */
+export type AccessRequestRecord = Omit<AccessRequest, 'api' | 'requester'>;
+
+/** A `grants` row (without the denormalised joins the API adds). */
+export type GrantRecord = Omit<Grant, 'api' | 'user'>;
+
+/** A `credential_metadata` row. Plaintext material is never stored. */
+export type CredentialRecord = CredentialMetadata;
+
+/** A `consumers` row — the cached Nexus-user → Edge-consumer mapping. */
+export type ConsumerRecord = Consumer;
+
+/** A `message_threads` row (without joins/previews). */
+export type ThreadRecord = Omit<MessageThread, 'api' | 'participants' | 'last_message_preview'>;
+
+/** A `messages` row (without the joined sender). */
+export type MessageRecord = Omit<Message, 'sender'>;
+
+/** A `notifications` row. */
+export type NotificationRecord = Notification;
+
+/** An `email_outbox` row, including the rendered bodies the worker sends. */
+export interface EmailOutboxRecord extends EmailOutboxEntry {
+  body_html: string;
+  body_text: string;
 }
 
-export interface PasswordResetRow {
-  token: string;
-  user_id: string;
-  expires_at: string;
-  consumed_at: string | null;
-}
+/** An `audit_logs` row (append-only; without the joined actor summary). */
+export type AuditLogRecord = Omit<AuditLog, 'actor'>;
 
-export interface FerrumConsumerRow {
-  id: string;
-  user_id: string | null;
-  organization_id: string | null;
-  namespace: string;
-  ferrum_consumer_id: string;
-  username: string;
-  status: 'active' | 'denied' | 'archived';
-  acl_groups: string[];
-  created_at: string;
-}
-
-export interface CredentialMetadataRow {
-  id: string;
-  consumer_id: string;
-  type: CredentialType;
-  label: string;
-  fingerprint: string;
-  last4: string | null;
-  ferrum_credential_index: number;
-  status: 'active' | 'pending_removal' | 'expired';
-  created_at: string;
-  rotated_at: string | null;
-  expires_at: string | null;
-}
-
-export interface ApiAssetRow {
-  id: string;
-  api_spec_id: string;
-  proxy_id: string;
-  namespace: string;
-  provider_id: string;
-  title: string;
-  description: string | null;
-  slug: string;
-  version: string;
-  visibility: ApiVisibility;
-  requestable: number;
-  lifecycle: ApiLifecycleStatus;
-  tags: string[];
-  contact_email: string | null;
-  support_notes: string | null;
-  operation_count: number;
-  content_hash: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ApiSpecVersionRow {
-  id: string;
-  api_asset_id: string;
-  version: string;
-  content_hash: string;
-  submitted_by: string;
-  raw_spec: string;
-  created_at: string;
-}
-
-export interface AccessRequestRow {
-  id: string;
-  api_asset_id: string;
-  client_user_id: string;
-  client_consumer_id: string | null;
-  justification: string;
-  status: AccessRequestStatus;
-  provider_reason: string | null;
-  reviewed_by: string | null;
-  created_at: string;
-  reviewed_at: string | null;
-}
-
-export interface AccessGrantRow {
-  id: string;
-  api_asset_id: string;
-  client_user_id: string;
-  client_consumer_id: string;
-  acl_group: string;
-  status: GrantStatus;
-  approved_by: string;
-  approved_at: string;
-  revoked_by: string | null;
-  revoked_at: string | null;
-  revoked_reason: string | null;
-}
-
-export interface ConversationRow {
-  id: string;
-  api_asset_id: string | null;
-  request_id: string | null;
-  grant_id: string | null;
-  type: ConversationType;
-  subject: string;
-  created_at: string;
-  participants: string[];
-}
-
-export interface MessageRow {
-  id: string;
-  conversation_id: string;
-  sender_id: string;
-  body: string;
-  created_at: string;
-  read_by: string[];
-}
-
-export interface NotificationRow {
-  id: string;
-  recipient_id: string;
-  type: NotificationType;
-  payload: Record<string, unknown>;
-  read_at: string | null;
-  created_at: string;
-}
-
-export interface EmailOutboxRow {
-  id: string;
-  to_address: string;
-  subject: string;
-  template_id: string | null;
-  payload: Record<string, unknown>;
-  /**
-   * `pending` rows are eligible to be claimed by the worker. The worker
-   * atomically transitions a row to `sending` before delivering it; on
-   * success it becomes `sent`, on failure it goes back to `pending` (with
-   * backoff) or terminates at `failed`. The transient `sending` state
-   * prevents concurrent workers from double-claiming the same row.
-   */
-  status: 'pending' | 'sending' | 'sent' | 'failed';
-  attempts: number;
-  last_error: string | null;
-  scheduled_at: string;
-  sent_at: string | null;
-  created_at: string;
-  /**
-   * Optional caller-supplied dedup key. If a row with the same key already
-   * exists the second enqueue is a no-op. Used by mass-email to make
-   * campaign sends idempotent across worker retries.
-   */
-  idempotency_key: string | null;
-  /**
-   * Extra SMTP headers to set on the outgoing message (e.g.
-   * `List-Unsubscribe`). Stored as a JSON object; null when no extras.
-   */
-  headers: Record<string, string> | null;
-}
-
-export interface EmailTemplateRow {
-  key: string;
-  subject_template: string;
-  body_template: string;
-  enabled: number;
-  updated_at: string;
-}
-
-export interface AppSettingRow {
+/**
+ * An `app_settings` row.
+ *
+ * The store is deliberately crypto-unaware: when `encrypted` is `true`, `value`
+ * is the opaque `v1:iv:ciphertext:tag` string produced by
+ * `NexusCrypto.encryptJson`, and the settings service is responsible for
+ * encrypting before `set` and decrypting after `get`.
+ */
+export interface SettingRecord {
   key: string;
   value: unknown;
-  encrypted: number;
-  updated_at: string;
+  encrypted: boolean;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
 }
 
-export interface AuditLogRow {
-  id: string;
-  actor_id: string | null;
-  actor_email: string | null;
-  action: string;
-  target_type: string;
-  target_id: string | null;
-  reason: string | null;
-  before: unknown;
-  after: unknown;
-  ip: string | null;
-  user_agent: string | null;
-  created_at: string;
+/** An `email_templates` row. */
+export type EmailTemplateRecord = EmailTemplate;
+
+/** An `email_verification_tokens` row. */
+export interface VerificationTokenRecord {
+  id: Uuid;
+  user_id: Uuid;
+  /** HMAC-SHA-256 of the emailed token. Unique. */
+  token_hash: string;
+  expires_at: IsoTimestamp;
+  /** Set the first time the token is redeemed; a used token is never accepted again. */
+  used_at: IsoTimestamp | null;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
 }
 
-export interface MassEmailCampaignRow {
-  id: string;
-  created_by: string;
-  recipient_filter: Record<string, unknown>;
-  subject: string;
-  body: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
-  sent_count: number;
-  failed_count: number;
-  created_at: string;
-  completed_at: string | null;
+/* ── Filters ────────────────────────────────────────────────────────────── */
+
+/** Filters for `users.list` / `users.count` / `users.listRecipients`. */
+export interface UserFilter {
+  role?: Role;
+  /** Match any of these roles (used by mass-email audiences). */
+  roles?: Role[];
+  status?: UserStatus;
+  org_id?: Uuid | null;
+  /** Restrict to an explicit id set (explicit mass-email audience). */
+  ids?: Uuid[];
+  /** Case-insensitive substring match on email or display name. */
+  q?: string;
+  email_verified?: boolean;
 }
 
-// ---------- Query helpers ----------
-
-export interface ListOptions {
-  limit?: number;
-  offset?: number;
-  search?: string;
+/** Filters for `apis.list`. */
+export interface ApiFilter {
+  owner_user_id?: Uuid;
+  status?: ApiStatus;
+  visibility?: ApiVisibility;
+  requestable?: boolean;
+  /** Case-insensitive substring match on name, slug or description. */
+  q?: string;
+  ids?: Uuid[];
 }
 
-// ---------- Repositories ----------
+/** Filters for `apiSpecs.list`. */
+export interface ApiSpecFilter {
+  api_id?: Uuid;
+  is_current?: boolean;
+}
 
-export interface UsersRepo {
-  insert(row: Omit<UserRow, 'created_at' | 'updated_at'>): Promise<UserRow>;
-  findById(id: string): Promise<UserRow | null>;
-  findByEmail(emailNormalized: string): Promise<UserRow | null>;
-  updateContact(id: string, fields: Partial<Pick<UserRow, 'name' | 'phone'>>): Promise<UserRow>;
-  updatePassword(id: string, passwordHash: string): Promise<void>;
-  updateStatus(id: string, status: UserStatus): Promise<void>;
-  markEmailVerified(id: string, at: string): Promise<void>;
-  recordLogin(id: string, at: string): Promise<void>;
-  recordFailedLogin(id: string): Promise<number>;
-  resetFailedLogins(id: string): Promise<void>;
-  list(opts: ListOptions): Promise<{ rows: UserRow[]; total: number }>;
+/** Filters for `accessRequests.list`. */
+export interface AccessRequestFilter {
+  user_id?: Uuid;
+  api_id?: Uuid;
+  /** Restrict to APIs owned by this provider (the reviewer inbox). */
+  api_ids?: Uuid[];
+  status?: AccessRequestStatus;
+}
+
+/** Filters for `grants.list`. */
+export interface GrantFilter {
+  user_id?: Uuid;
+  api_id?: Uuid;
+  api_ids?: Uuid[];
+  status?: GrantStatus;
+}
+
+/** Filters for `credentials.list`. */
+export interface CredentialFilter {
+  user_id?: Uuid;
+  status?: CredentialStatus;
+  credential_type?: CredentialType;
+  ferrum_consumer_id?: string;
+}
+
+/** Filters for `consumers.list`. */
+export interface ConsumerFilter {
+  user_id?: Uuid;
+  namespace?: string;
+}
+
+/** Filters for `threads.list`. */
+export interface ThreadFilter {
   /**
-   * Paginated lookup with optional role and status filters. Used by mass-
-   * email and admin filtering so large user tables don't need to be loaded
-   * into memory just to filter in JS.
+   * Threads where this user occupies a seat — `participant_a` or
+   * `participant_b`.
+   *
+   * `created_by` is deliberately **not** a seat. It is immutable provenance,
+   * not membership: a god-mode broadcast seats only the recipient, so counting
+   * the creator would hand whoever sent it a permanent key to every
+   * recipient's platform thread, surviving their own demotion. Admin oversight
+   * comes from the caller's *current* role, never from this column.
    */
-  listFiltered(opts: ListOptions & {
-    role?: UserRole;
-    status?: UserStatus;
-  }): Promise<{ rows: UserRow[]; total: number }>;
-  count(): Promise<number>;
+  participant_user_id?: Uuid;
+  api_id?: Uuid;
+  /** Case-insensitive substring match on the subject. */
+  q?: string;
 }
 
-export interface UserRolesRepo {
-  add(userId: string, role: UserRole): Promise<void>;
-  remove(userId: string, role: UserRole): Promise<void>;
-  forUser(userId: string): Promise<UserRole[]>;
-  setRoles(userId: string, roles: UserRole[]): Promise<void>;
+/** Filters for `notifications.list`. */
+export interface NotificationFilter {
+  user_id: Uuid;
+  /** Only notifications with `read_at IS NULL`. */
+  unread?: boolean;
+  type?: NotificationType;
 }
 
-export interface SessionsRepo {
-  create(row: SessionRow): Promise<void>;
-  find(id: string): Promise<SessionRow | null>;
-  delete(id: string): Promise<void>;
-  deleteForUser(userId: string): Promise<void>;
-  cleanupExpired(now: string): Promise<number>;
+/** Filters for `emailOutbox.list`. */
+export interface EmailOutboxFilter {
+  status?: EmailOutboxEntry['status'];
+  to_email?: string;
 }
 
-export interface VerificationsRepo {
-  createEmailToken(row: EmailVerificationRow): Promise<void>;
-  findEmailToken(token: string): Promise<EmailVerificationRow | null>;
-  consumeEmailToken(token: string, at: string): Promise<void>;
-  createPasswordReset(row: PasswordResetRow): Promise<void>;
-  findPasswordReset(token: string): Promise<PasswordResetRow | null>;
-  consumePasswordReset(token: string, at: string): Promise<void>;
-  /** Count password reset rows issued for `userId` since `since` (ISO timestamp). */
-  countRecentPasswordResets(userId: string, since: string): Promise<number>;
+/** Filters for `auditLogs.list`. */
+export interface AuditLogFilter {
+  actor_user_id?: Uuid;
+  /** Exact action match, e.g. `access.approve`. */
+  action?: string;
+  /** Match any of these actions. */
+  actions?: string[];
+  target_type?: string;
+  target_id?: string;
+  /** Inclusive lower bound on `created_at`. */
+  from?: IsoTimestamp;
+  /** Exclusive upper bound on `created_at`. */
+  to?: IsoTimestamp;
 }
 
-export interface ConsumersRepo {
-  insert(row: FerrumConsumerRow): Promise<FerrumConsumerRow>;
-  findById(id: string): Promise<FerrumConsumerRow | null>;
-  findByUserNamespace(userId: string, namespace: string): Promise<FerrumConsumerRow | null>;
-  updateAclGroups(id: string, groups: string[]): Promise<void>;
-  updateStatus(id: string, status: FerrumConsumerRow['status']): Promise<void>;
-  listForUser(userId: string): Promise<FerrumConsumerRow[]>;
-}
+/* ── Repositories ───────────────────────────────────────────────────────── */
 
-export interface CredentialsRepo {
-  insert(row: CredentialMetadataRow): Promise<CredentialMetadataRow>;
-  findById(id: string): Promise<CredentialMetadataRow | null>;
-  listForConsumer(consumerId: string): Promise<CredentialMetadataRow[]>;
-  updateStatus(id: string, status: CredentialMetadataRow['status']): Promise<void>;
-  delete(id: string): Promise<void>;
-}
-
-export interface ApiAssetsRepo {
-  insert(row: ApiAssetRow): Promise<ApiAssetRow>;
-  update(id: string, fields: Partial<ApiAssetRow>): Promise<ApiAssetRow>;
-  findById(id: string): Promise<ApiAssetRow | null>;
-  findBySpecId(specId: string): Promise<ApiAssetRow | null>;
-  findBySlug(slug: string): Promise<ApiAssetRow | null>;
-  delete(id: string): Promise<void>;
-  list(opts: ListOptions & { visibility?: ApiVisibility; providerId?: string }): Promise<{
-    rows: ApiAssetRow[];
-    total: number;
-  }>;
-}
-
-export interface ApiSpecVersionsRepo {
-  insert(row: ApiSpecVersionRow): Promise<ApiSpecVersionRow>;
-  listForAsset(assetId: string): Promise<ApiSpecVersionRow[]>;
-  latestForAsset(assetId: string): Promise<ApiSpecVersionRow | null>;
-  get(id: string): Promise<ApiSpecVersionRow | null>;
-}
-
-export interface AccessRequestsRepo {
-  insert(row: AccessRequestRow): Promise<AccessRequestRow>;
-  update(id: string, fields: Partial<AccessRequestRow>): Promise<AccessRequestRow>;
-  findById(id: string): Promise<AccessRequestRow | null>;
-  findOpenFor(clientUserId: string, apiAssetId: string): Promise<AccessRequestRow | null>;
-  listForClient(clientUserId: string): Promise<AccessRequestRow[]>;
-  listForProvider(providerId: string, status?: AccessRequestStatus): Promise<AccessRequestRow[]>;
-  listForAsset(apiAssetId: string): Promise<AccessRequestRow[]>;
-}
-
-export interface GrantsRepo {
-  insert(row: AccessGrantRow): Promise<AccessGrantRow>;
-  update(id: string, fields: Partial<AccessGrantRow>): Promise<AccessGrantRow>;
-  findById(id: string): Promise<AccessGrantRow | null>;
-  findActiveFor(consumerId: string, apiAssetId: string): Promise<AccessGrantRow | null>;
-  listForClient(clientUserId: string): Promise<AccessGrantRow[]>;
-  listForAsset(apiAssetId: string): Promise<AccessGrantRow[]>;
-}
-
-export interface ConversationsRepo {
-  insert(row: ConversationRow): Promise<ConversationRow>;
-  findById(id: string): Promise<ConversationRow | null>;
-  listForUser(userId: string): Promise<ConversationRow[]>;
-  updateParticipants(id: string, participants: string[]): Promise<void>;
-}
-
-export interface MessagesRepo {
-  insert(row: MessageRow): Promise<MessageRow>;
-  listForConversation(conversationId: string): Promise<MessageRow[]>;
-  markRead(conversationId: string, userId: string, at: string): Promise<void>;
-}
-
-export interface NotificationsRepo {
-  insert(row: NotificationRow): Promise<NotificationRow>;
-  listForUser(userId: string, limit: number): Promise<NotificationRow[]>;
-  markRead(id: string, userId: string, at: string): Promise<number>;
-  unreadCount(userId: string): Promise<number>;
-}
-
-export interface EmailRepo {
-  enqueue(row: EmailOutboxRow): Promise<void>;
-  claimBatch(now: string, batchSize: number): Promise<EmailOutboxRow[]>;
-  markSent(id: string, at: string): Promise<void>;
-  markFailed(id: string, attempts: number, error: string): Promise<void>;
-  /** Dead-letter view: messages that hit max attempts and won't be retried. */
-  listFailed(opts: ListOptions): Promise<{ rows: EmailOutboxRow[]; total: number }>;
-  /** Re-queue a failed message for delivery. Resets attempts to 0. */
-  requeue(id: string): Promise<boolean>;
-  getTemplate(key: string): Promise<EmailTemplateRow | null>;
-  upsertTemplate(row: EmailTemplateRow): Promise<void>;
-  listTemplates(): Promise<EmailTemplateRow[]>;
-}
-
-export interface SettingsRepo {
-  get<T = unknown>(key: string): Promise<T | null>;
-  set<T = unknown>(key: string, value: T, encrypted?: boolean): Promise<void>;
-  setIfAbsent<T = unknown>(key: string, value: T, encrypted?: boolean): Promise<boolean>;
-  all(): Promise<AppSettingRow[]>;
-}
-
-export interface AuditRepo {
-  insert(row: AuditLogRow): Promise<void>;
-  list(opts: ListOptions & { action?: string; actorId?: string }): Promise<{
-    rows: AuditLogRow[];
-    total: number;
-  }>;
-}
-
-export interface MassEmailRepo {
-  insert(row: MassEmailCampaignRow): Promise<MassEmailCampaignRow>;
-  update(id: string, fields: Partial<MassEmailCampaignRow>): Promise<MassEmailCampaignRow>;
-  list(): Promise<MassEmailCampaignRow[]>;
-  findById(id: string): Promise<MassEmailCampaignRow | null>;
-}
-
-export interface OrganizationsRepo {
-  insert(row: OrganizationRow): Promise<OrganizationRow>;
-  findById(id: string): Promise<OrganizationRow | null>;
-  list(): Promise<OrganizationRow[]>;
-  addMember(row: OrganizationMemberRow): Promise<void>;
-  membersOf(orgId: string): Promise<OrganizationMemberRow[]>;
-}
-
-// ---------- Composite store ----------
-
-export interface NexusStore {
-  driver: 'sqlite' | 'postgres' | 'mysql' | 'mongodb';
-  users: UsersRepo;
-  userRoles: UserRolesRepo;
-  sessions: SessionsRepo;
-  verifications: VerificationsRepo;
-  organizations: OrganizationsRepo;
-  consumers: ConsumersRepo;
-  credentials: CredentialsRepo;
-  apiAssets: ApiAssetsRepo;
-  apiSpecVersions: ApiSpecVersionsRepo;
-  accessRequests: AccessRequestsRepo;
-  grants: GrantsRepo;
-  conversations: ConversationsRepo;
-  messages: MessagesRepo;
-  notifications: NotificationsRepo;
-  email: EmailRepo;
-  settings: SettingsRepo;
-  audit: AuditRepo;
-  massEmail: MassEmailRepo;
+/** Portal accounts. */
+export interface UserRepo {
+  /** Insert a user. The email is lowercased; a duplicate raises `CONFLICT`. */
+  create(input: CreateInput<UserRecord>): Promise<UserRecord>;
+  findById(id: Uuid): Promise<UserRecord | null>;
+  /** Case-insensitive lookup by email address. */
+  findByEmail(email: string): Promise<UserRecord | null>;
+  /** Batch lookup preserving no particular order; missing ids are simply absent. */
+  findManyByIds(ids: Uuid[]): Promise<UserRecord[]>;
+  /** Patch mutable columns. Returns `null` when the user does not exist. */
+  update(id: Uuid, patch: UpdateInput<UserRecord>): Promise<UserRecord | null>;
   /**
-   * Run a function within a transaction. With MongoDB this requires a replica
-   * set; standalone MongoDB will execute callbacks without atomicity (a
-   * warning is logged at startup).
+   * Compare-and-set update: apply `patch` **only while the row still matches
+   * every field of `expected`**, in one statement.
+   *
+   * Returns the updated row, or `null` when the user is gone or has already
+   * moved on — the caller lost the race and must not treat its earlier read as
+   * still true.
+   *
+   * This exists for the last-super-admin invariant, which is a check on *other*
+   * rows followed by a write to this one. `countActiveSuperAdmins` and this
+   * call belong inside the same {@link NexusStore.transaction} body: the
+   * transaction makes the check-then-write atomic against another demotion, and
+   * the predicate here makes the write refuse a target that changed underneath
+   * it anyway.
+   */
+  updateIfMatches(
+    id: Uuid,
+    expected: { role?: Role; status?: UserStatus },
+    patch: UpdateInput<UserRecord>,
+  ): Promise<UserRecord | null>;
+  /** Record a successful sign-in without rewriting the rest of the row. */
+  touchLastLogin(id: Uuid, at: IsoTimestamp): Promise<void>;
+  list(filter: UserFilter, options?: ListOptions): Promise<Paginated<UserRecord>>;
+  count(filter?: UserFilter): Promise<number>;
+  /**
+   * Number of `super_admin` users with `status = 'active'`, optionally
+   * excluding one id. Guards the "last super admin" rule.
+   */
+  countActiveSuperAdmins(excludeUserId?: Uuid): Promise<number>;
+  /**
+   * Unpaginated recipient list for mass email and broadcasts. Returns every
+   * matching user, so callers must keep audiences bounded.
+   */
+  listRecipients(filter: UserFilter): Promise<UserRecord[]>;
+}
+
+/** Lightweight provider groupings. */
+export interface OrganizationRepo {
+  create(input: CreateInput<OrganizationRecord>): Promise<OrganizationRecord>;
+  findById(id: Uuid): Promise<OrganizationRecord | null>;
+  /** Case-insensitive lookup by name; names are unique. */
+  findByName(name: string): Promise<OrganizationRecord | null>;
+  update(id: Uuid, patch: UpdateInput<OrganizationRecord>): Promise<OrganizationRecord | null>;
+  list(options?: ListOptions): Promise<Paginated<OrganizationRecord>>;
+  /** Members keep their `org_id` unless the caller clears it first. */
+  delete(id: Uuid): Promise<boolean>;
+}
+
+/** Browser sessions. */
+export interface SessionRepo {
+  create(input: CreateInput<SessionRecord>): Promise<SessionRecord>;
+  /** Primary auth lookup: the hashed cookie value. */
+  findByTokenHash(tokenHash: string): Promise<SessionRecord | null>;
+  findById(id: Uuid): Promise<SessionRecord | null>;
+  /** Sliding expiration: push `expires_at` forward on an authenticated request. */
+  touch(id: Uuid, expiresAt: IsoTimestamp): Promise<void>;
+  delete(id: Uuid): Promise<boolean>;
+  deleteByTokenHash(tokenHash: string): Promise<boolean>;
+  /** Terminate every session of a user (logout-everywhere, disable, role change). */
+  deleteForUser(userId: Uuid): Promise<number>;
+  /** Housekeeping: drop sessions whose `expires_at` is at or before `now`. */
+  deleteExpired(now: IsoTimestamp): Promise<number>;
+}
+
+/** Published APIs and their Edge proxies. */
+export interface ApiRepo {
+  create(input: CreateInput<ApiRecord>): Promise<ApiRecord>;
+  findById(id: Uuid): Promise<ApiRecord | null>;
+  /** Slugs are unique across the portal and form the gateway listen path. */
+  findBySlug(slug: string): Promise<ApiRecord | null>;
+  /** Reverse lookup used when reconciling against Edge. */
+  findByProxyId(ferrumProxyId: string): Promise<ApiRecord | null>;
+  findManyByIds(ids: Uuid[]): Promise<ApiRecord[]>;
+  update(id: Uuid, patch: UpdateInput<ApiRecord>): Promise<ApiRecord | null>;
+  list(filter: ApiFilter, options?: ListOptions): Promise<Paginated<ApiRecord>>;
+  count(filter?: ApiFilter): Promise<number>;
+  /** Ids of every API owned by a provider — feeds the reviewer inbox filters. */
+  listIdsByOwner(ownerUserId: Uuid): Promise<Uuid[]>;
+  /** Removes the API row only; specs/requests/grants are cascaded by the caller's transaction. */
+  delete(id: Uuid): Promise<boolean>;
+}
+
+/** Uploaded OpenAPI documents, one row per revision. */
+export interface ApiSpecRepo {
+  create(input: CreateInput<ApiSpecRecord>): Promise<ApiSpecRecord>;
+  findById(id: Uuid): Promise<ApiSpecRecord | null>;
+  /** The revision with `is_current = true` for an API, if any. */
+  findCurrentByApi(apiId: Uuid): Promise<ApiSpecRecord | null>;
+  /** Make one revision current and clear the flag on every other revision of the API. */
+  setCurrent(apiId: Uuid, specId: Uuid): Promise<void>;
+  list(filter: ApiSpecFilter, options?: ListOptions): Promise<Paginated<ApiSpecRecord>>;
+  delete(id: Uuid): Promise<boolean>;
+  /** Cascade helper for API deletion. Returns the number of revisions removed. */
+  deleteByApi(apiId: Uuid): Promise<number>;
+}
+
+/** Client requests for access to a requestable API. */
+export interface AccessRequestRepo {
+  create(input: CreateInput<AccessRequestRecord>): Promise<AccessRequestRecord>;
+  findById(id: Uuid): Promise<AccessRequestRecord | null>;
+  update(id: Uuid, patch: UpdateInput<AccessRequestRecord>): Promise<AccessRequestRecord | null>;
+  /**
+   * Atomically move a request out of one status: apply `patch` **only while the
+   * row still has `expected`**, in one statement
+   * (`… WHERE id = ? AND status = ?`).
+   *
+   * Returns the updated row when this caller won the transition, `null` when it
+   * lost — the request was absent, or somebody else already decided it.
+   *
+   * **Every transition out of `pending` must go through here**, never through
+   * {@link AccessRequestRepo.update}. Approve, deny and cancel each read a
+   * pending row and write it back later; a blind write lets a cancellation
+   * racing an approval succeed too, so the history says `cancelled` while the
+   * approval's grant and ACL group stay live. Only the winner of this call may
+   * create a grant or touch the gateway; the loser raises `CONFLICT`.
+   */
+  updateIfStatus(
+    id: Uuid,
+    expected: AccessRequestStatus,
+    patch: UpdateInput<AccessRequestRecord>,
+  ): Promise<AccessRequestRecord | null>;
+  list(filter: AccessRequestFilter, options?: ListOptions): Promise<Paginated<AccessRequestRecord>>;
+  /** Duplicate guard: an open request by this user for this API. */
+  findPendingByApiAndUser(apiId: Uuid, userId: Uuid): Promise<AccessRequestRecord | null>;
+  /** Newest request regardless of status — drives the catalog `access_state`. */
+  findLatestByApiAndUser(apiId: Uuid, userId: Uuid): Promise<AccessRequestRecord | null>;
+  /** Newest request per API for one user, for a page of catalog rows. */
+  listLatestForUser(userId: Uuid, apiIds: Uuid[]): Promise<AccessRequestRecord[]>;
+  count(filter: AccessRequestFilter): Promise<number>;
+  /** Cascade helper for API deletion. */
+  deleteByApi(apiId: Uuid): Promise<number>;
+}
+
+/** Approved authorizations, each backed by an Edge ACL group membership. */
+export interface GrantRepo {
+  create(input: CreateInput<GrantRecord>): Promise<GrantRecord>;
+  findById(id: Uuid): Promise<GrantRecord | null>;
+  update(id: Uuid, patch: UpdateInput<GrantRecord>): Promise<GrantRecord | null>;
+  /**
+   * Atomically move a grant out of one status: apply `patch` **only while the
+   * row still has `expected`**, in one statement
+   * (`… WHERE id = ? AND status = ?`).
+   *
+   * Returns the updated row when this caller won the transition, `null` when it
+   * lost — the grant was absent, or somebody else already moved it.
+   *
+   * **Every transition out of `active` must go through here**, never through
+   * {@link GrantRepo.update}. Revocation reads an active grant and writes it
+   * back after a round trip to the gateway, so a blind write let two
+   * concurrent revocations — a second click, god mode racing the API owner, an
+   * account teardown racing either — both pass the `status === 'active'` guard
+   * and both commit. The ACL group came off twice and the audit trail claimed
+   * the same access had been withdrawn twice. Only the winner of this call may
+   * touch the gateway, record the revocation or tell the grantee.
+   */
+  updateIfStatus(
+    id: Uuid,
+    expected: GrantStatus,
+    patch: UpdateInput<GrantRecord>,
+  ): Promise<GrantRecord | null>;
+  list(filter: GrantFilter, options?: ListOptions): Promise<Paginated<GrantRecord>>;
+  /**
+   * The single `status = 'active'` grant for an API/user pair, if any. The
+   * schema enforces at most one via a partial unique index.
+   */
+  findActiveByApiAndUser(apiId: Uuid, userId: Uuid): Promise<GrantRecord | null>;
+  /** Every active grant held by a user — used to rebuild their ACL group list. */
+  listActiveByUser(userId: Uuid): Promise<GrantRecord[]>;
+  /** Every active grant on an API — used by god-mode delete and bulk revoke. */
+  listActiveByApi(apiId: Uuid): Promise<GrantRecord[]>;
+  count(filter: GrantFilter): Promise<number>;
+  /** Cascade helper for API deletion. */
+  deleteByApi(apiId: Uuid): Promise<number>;
+}
+
+/** Show-once gateway credential metadata (fingerprint + last4 only). */
+export interface CredentialRepo {
+  create(input: CreateInput<CredentialRecord>): Promise<CredentialRecord>;
+  findById(id: Uuid): Promise<CredentialRecord | null>;
+  update(id: Uuid, patch: UpdateInput<CredentialRecord>): Promise<CredentialRecord | null>;
+  list(filter: CredentialFilter, options?: ListOptions): Promise<Paginated<CredentialRecord>>;
+  /** All credentials of a consumer, oldest first — mirrors the Edge array order. */
+  listByConsumer(ferrumConsumerId: string, type?: CredentialType): Promise<CredentialRecord[]>;
+  findByFingerprint(fingerprint: string): Promise<CredentialRecord | null>;
+  count(filter: CredentialFilter): Promise<number>;
+  delete(id: Uuid): Promise<boolean>;
+}
+
+/** Cache of the Nexus-user → Edge-consumer mapping, one row per user per namespace. */
+export interface ConsumerRepo {
+  create(input: CreateInput<ConsumerRecord>): Promise<ConsumerRecord>;
+  findById(id: Uuid): Promise<ConsumerRecord | null>;
+  /** The mapping used on every credential and approval operation. */
+  findByUserAndNamespace(userId: Uuid, namespace: string): Promise<ConsumerRecord | null>;
+  findByFerrumId(ferrumConsumerId: string): Promise<ConsumerRecord | null>;
+  findByUsername(namespace: string, ferrumUsername: string): Promise<ConsumerRecord | null>;
+  update(id: Uuid, patch: UpdateInput<ConsumerRecord>): Promise<ConsumerRecord | null>;
+  list(filter: ConsumerFilter, options?: ListOptions): Promise<Paginated<ConsumerRecord>>;
+  delete(id: Uuid): Promise<boolean>;
+}
+
+/** Conversations between a client and a provider (or the platform). */
+export interface ThreadRepo {
+  create(input: CreateInput<ThreadRecord>): Promise<ThreadRecord>;
+  findById(id: Uuid): Promise<ThreadRecord | null>;
+  update(id: Uuid, patch: UpdateInput<ThreadRecord>): Promise<ThreadRecord | null>;
+  list(filter: ThreadFilter, options?: ListOptions): Promise<Paginated<ThreadRecord>>;
+  /** Reuse an existing conversation instead of opening a duplicate. */
+  findExisting(
+    participantA: Uuid,
+    participantB: Uuid | null,
+    apiId: Uuid | null,
+  ): Promise<ThreadRecord | null>;
+  /** Bump `last_message_at` after a message is posted. */
+  touchLastMessage(threadId: Uuid, at: IsoTimestamp): Promise<void>;
+  delete(id: Uuid): Promise<boolean>;
+}
+
+/** Messages inside a thread. */
+export interface MessageRepo {
+  create(input: CreateInput<MessageRecord>): Promise<MessageRecord>;
+  findById(id: Uuid): Promise<MessageRecord | null>;
+  /** Oldest-first page of a thread's messages. */
+  listByThread(threadId: Uuid, options?: ListOptions): Promise<Paginated<MessageRecord>>;
+  /** Newest message of a thread, for list previews. */
+  findLatestByThread(threadId: Uuid): Promise<MessageRecord | null>;
+  countByThread(threadId: Uuid): Promise<number>;
+  /** Cascade helper for thread deletion. */
+  deleteByThread(threadId: Uuid): Promise<number>;
+}
+
+/** In-app notifications. */
+export interface NotificationRepo {
+  create(input: CreateInput<NotificationRecord>): Promise<NotificationRecord>;
+  /** Bulk insert for broadcasts. Returns the created rows. */
+  createMany(inputs: CreateInput<NotificationRecord>[]): Promise<NotificationRecord[]>;
+  findById(id: Uuid): Promise<NotificationRecord | null>;
+  list(filter: NotificationFilter, options?: ListOptions): Promise<Paginated<NotificationRecord>>;
+  countUnread(userId: Uuid): Promise<number>;
+  /** Mark specific notifications of a user read. Returns the number changed. */
+  markRead(userId: Uuid, ids: Uuid[], at: IsoTimestamp): Promise<number>;
+  /** Mark every unread notification of a user read. Returns the number changed. */
+  markAllRead(userId: Uuid, at: IsoTimestamp): Promise<number>;
+}
+
+/** Payload accepted by {@link EmailOutboxRepo.enqueue}. */
+export interface EnqueueEmailInput {
+  to_email: string;
+  subject: string;
+  body_html: string;
+  body_text: string;
+  /** Reusing a key suppresses the duplicate send (at-most-once). */
+  idempotency_key?: string | null;
+  /** Earliest delivery attempt; defaults to now (send on the next poll). */
+  next_attempt_at?: IsoTimestamp | null;
+  /** Pin the row id, e.g. to correlate with a notification. */
+  id?: Uuid;
+}
+
+/** Transactional email queue drained by the outbox worker. */
+export interface EmailOutboxRepo {
+  /**
+   * Enqueue a message as `pending` with `attempts = 0`. When
+   * `idempotency_key` is set and already present, the existing row is returned
+   * with `created: false` and nothing is inserted.
+   */
+  enqueue(input: EnqueueEmailInput): Promise<{ entry: EmailOutboxRecord; created: boolean }>;
+  findById(id: Uuid): Promise<EmailOutboxRecord | null>;
+  findByIdempotencyKey(key: string): Promise<EmailOutboxRecord | null>;
+  /**
+   * Atomically claim up to `limit` rows that are `pending` with
+   * `next_attempt_at <= now`, flipping them to `sending` and incrementing
+   * `attempts`. Two concurrent workers never claim the same row.
+   */
+  claimDue(now: IsoTimestamp, limit: number): Promise<EmailOutboxRecord[]>;
+  /** Delivery succeeded: `status = 'sent'`, `next_attempt_at = null`. */
+  markSent(id: Uuid, at: IsoTimestamp): Promise<void>;
+  /** Delivery failed but retries remain: back to `pending` with a backoff stamp. */
+  reschedule(id: Uuid, nextAttemptAt: IsoTimestamp, lastError: string): Promise<void>;
+  /** Retries exhausted: `status = 'failed'`. */
+  markFailed(id: Uuid, lastError: string): Promise<void>;
+  /** Return `sending` rows stuck since before `olderThan` to `pending` (crash recovery). */
+  releaseStale(olderThan: IsoTimestamp): Promise<number>;
+  list(filter: EmailOutboxFilter, options?: ListOptions): Promise<Paginated<EmailOutboxRecord>>;
+}
+
+/** Append-only audit trail. */
+export interface AuditLogRepo {
+  /** Append one record. There is no update or delete. */
+  create(input: CreateInput<AuditLogRecord>): Promise<AuditLogRecord>;
+  /** Newest-first page with actor/action/target/time filters. */
+  list(filter: AuditLogFilter, options?: ListOptions): Promise<Paginated<AuditLogRecord>>;
+  count(filter: AuditLogFilter): Promise<number>;
+}
+
+/** Key/value application settings, some of them encrypted at rest. */
+export interface SettingRepo {
+  get(key: string): Promise<SettingRecord | null>;
+  getMany(keys: string[]): Promise<SettingRecord[]>;
+  /** Upsert. `encrypted` records how `value` was stored, not what it means. */
+  set(key: string, value: unknown, encrypted?: boolean): Promise<SettingRecord>;
+  /**
+   * Insert `key` **only if it does not exist yet**, returning whether this
+   * caller was the one that created it. An existing row is left untouched and
+   * reported as `false`; this never throws `CONFLICT`.
+   *
+   * This is the store's one atomic compare-and-set, and it is atomic because
+   * `app_settings.key` is unique — not because of any transaction. Concurrent
+   * callers on any adapter (including PostgreSQL at READ COMMITTED and
+   * MongoDB, where two transactions can both observe "absent") see exactly one
+   * `true`. Used to elect the bootstrap `super_admin`; use it for any other
+   * "exactly one winner" decision rather than read-then-write.
+   */
+  insertIfAbsent(key: string, value: unknown, encrypted?: boolean): Promise<boolean>;
+  /** Upsert several keys; adapters apply them in one statement batch. */
+  setMany(entries: { key: string; value: unknown; encrypted?: boolean }[]): Promise<void>;
+  delete(key: string): Promise<boolean>;
+  all(): Promise<SettingRecord[]>;
+}
+
+/** Admin-editable transactional email templates. */
+export interface EmailTemplateRepo {
+  get(key: EmailTemplateKey): Promise<EmailTemplateRecord | null>;
+  /** Insert or replace the template for a key. */
+  upsert(
+    key: EmailTemplateKey,
+    value: { subject: string; body_html: string; body_text: string },
+  ): Promise<EmailTemplateRecord>;
+  list(): Promise<EmailTemplateRecord[]>;
+  /** Reverts a key to the built-in default by removing the override. */
+  delete(key: EmailTemplateKey): Promise<boolean>;
+}
+
+/** Single-use email verification tokens. */
+export interface VerificationTokenRepo {
+  create(input: CreateInput<VerificationTokenRecord>): Promise<VerificationTokenRecord>;
+  /** Lookup by the hashed token; callers must still check `used_at` and `expires_at`. */
+  findByTokenHash(tokenHash: string): Promise<VerificationTokenRecord | null>;
+  /** Burn the token. Returns `false` when it was already used or absent. */
+  markUsed(id: Uuid, at: IsoTimestamp): Promise<boolean>;
+  /** Invalidate outstanding tokens, e.g. when a new one is issued. */
+  deleteForUser(userId: Uuid): Promise<number>;
+  deleteExpired(now: IsoTimestamp): Promise<number>;
+}
+
+/* ── The store ──────────────────────────────────────────────────────────── */
+
+/** Result of {@link NexusStore.healthCheck}. */
+export interface StoreHealth {
+  ok: boolean;
+  /** Round-trip time of the probe query in milliseconds. */
+  latencyMs: number;
+  /** Failure detail when `ok` is false; safe to log, never echoed to browsers. */
+  error: string | null;
+}
+
+/**
+ * Everything the service layer is allowed to do with persistence.
+ *
+ * Obtain one from `createStore(config)` in `db/index.ts`; the concrete adapter
+ * is selected by `config.db.driver`.
+ */
+export interface NexusStore {
+  /** Which adapter is backing this store. */
+  readonly driver: DbDriver;
+
+  /** Open connections and validate the deployment (e.g. Mongo replica-set check). */
+  init(): Promise<void>;
+  /** Apply every pending migration; idempotent, safe to call on every boot. */
+  migrate(): Promise<void>;
+  /** Close pools/handles. Safe to call more than once. */
+  close(): Promise<void>;
+  /** Cheap probe for `GET /api/health`. Never throws. */
+  healthCheck(): Promise<StoreHealth>;
+
+  /**
+   * Run `fn` inside one transaction. Commits on resolve, rolls back on reject.
+   * The store handed to `fn` is scoped to the transaction — use it, not the
+   * outer store, for every statement inside the body.
    */
   transaction<T>(fn: (tx: NexusStore) => Promise<T>): Promise<T>;
-  close(): Promise<void>;
-  migrate(): Promise<void>;
+
+  readonly users: UserRepo;
+  readonly organizations: OrganizationRepo;
+  readonly sessions: SessionRepo;
+  readonly apis: ApiRepo;
+  readonly apiSpecs: ApiSpecRepo;
+  readonly accessRequests: AccessRequestRepo;
+  readonly grants: GrantRepo;
+  readonly credentials: CredentialRepo;
+  readonly consumers: ConsumerRepo;
+  readonly threads: ThreadRepo;
+  readonly messages: MessageRepo;
+  readonly notifications: NotificationRepo;
+  readonly emailOutbox: EmailOutboxRepo;
+  readonly auditLogs: AuditLogRepo;
+  readonly settings: SettingRepo;
+  readonly emailTemplates: EmailTemplateRepo;
+  readonly verificationTokens: VerificationTokenRepo;
 }

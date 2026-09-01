@@ -1,340 +1,308 @@
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+/**
+ * `/api/admin` — settings, email templates, mass email and the audit log.
+ *
+ * The whole plugin is behind `requireRole('admin')`; god-mode endpoints add a
+ * `super_admin` check of their own (see the marked section at the bottom).
+ * Secrets are write-only everywhere here: `smtp.password` and
+ * `captcha.secret_key` go in and are never read back out.
+ */
+
+import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import { requireRole } from '../auth/session.js';
-import type { UsersService } from '../users/service.js';
-import type { OrganizationsService } from '../organizations/service.js';
-import { auditActorFromRequest, type AuditService } from '../audit/service.js';
-import type { SettingsService } from '../admin/settings-service.js';
-import type { MassEmailService } from '../admin/mass-email-service.js';
-import type { DriftService } from '../drift/service.js';
-import type { PublishingService } from '../api-publishing/service.js';
-import type { AccessRequestsService } from '../access-requests/service.js';
-import type { CatalogService } from '../api-catalog/service.js';
-import type { NexusStore } from '../db/store.js';
+
 import {
-  BrandingInput,
-  CaptchaInput,
-  SenderInput,
-  RegistrationInput,
-} from '../admin/settings-service.js';
-import { MassEmailInput } from '../admin/mass-email-service.js';
-import { USER_ROLES, type UserRole } from '@ferrum-nexus/shared';
-import { badRequest } from '../lib/errors.js';
+  EMAIL_TEMPLATE_KEYS,
+  ROLE_ORDER,
+  type AdminSettingsResponse,
+  type GetEmailTemplateResponse,
+  type GodBroadcastResponse,
+  type GodDeleteApiResponse,
+  type GodDisableUserResponse,
+  type GodRevokeGrantResponse,
+  type ListAuditLogsResponse,
+  type ListEmailTemplatesResponse,
+  type MassEmailResponse,
+  type SmtpTestResponse,
+  type UpdateEmailTemplateResponse,
+  type UpdateSettingsResponse,
+} from '@ferrum-nexus/shared';
 
-const requireAdmin = (req: FastifyRequest) => requireRole(req, 'admin', 'super_admin');
-const requireSuperAdmin = (req: FastifyRequest) => requireRole(req, 'super_admin');
+import type { GodService } from '../admin/god-service.js';
+import type { MassEmailService } from '../admin/mass-email-service.js';
+import type { SettingsService } from '../admin/settings-service.js';
+import { AuditAction, type AuditService } from '../audit/service.js';
+import type { AuditLogFilter } from '../db/store.js';
+import type { EmailService } from '../email/service.js';
+import { assertRole, clientIp, requireAuth, requireRole } from '../middleware/auth-plugin.js';
+import { parseOrThrow } from '../middleware/error-handler.js';
+import { listOptions, listQuerySchema } from './common.js';
 
-export async function registerAdminRoutes(
-  app: FastifyInstance,
-  opts: {
-    users: UsersService;
-    organizations: OrganizationsService;
-    audit: AuditService;
-    settings: SettingsService;
-    massEmail: MassEmailService;
-    drift: DriftService;
-    publishing: PublishingService;
-    accessRequests: AccessRequestsService;
-    catalog: CatalogService;
-    store: NexusStore;
-  },
-): Promise<void> {
-  const {
-    users,
-    organizations,
-    audit,
-    settings,
-    massEmail,
-    drift,
-    publishing,
-    accessRequests,
-    catalog,
-    store,
-  } = opts;
+/** Services this route plugin needs. */
+export interface AdminRoutesOptions {
+  settings: SettingsService;
+  massEmail: MassEmailService;
+  email: EmailService;
+  audit: AuditService;
+  god: GodService;
+}
 
-  app.get('/api/admin/users', async (req, reply) => {
-    requireAdmin(req);
-    const q = z
-      .object({
-        limit: z.coerce.number().int().min(1).max(200).optional(),
-        offset: z.coerce.number().int().min(0).optional(),
-        search: z.string().optional(),
-      })
-      .parse(req.query);
-    const { rows, total } = await store.users.list(q);
-    const enriched = await Promise.all(
-      rows.map(async (row) => {
-        const roles = await store.userRoles.forUser(row.id);
-        return users.toPortalUser(row, roles);
-      }),
+/** Largest accepted logo, as a data URL. Roughly 384 KiB of binary. */
+export const MAX_LOGO_DATA_URL_LENGTH = 512 * 1024;
+
+const hexColor = z
+  .string()
+  .trim()
+  .regex(/^#[0-9a-fA-F]{3,8}$/, 'must be a CSS hex colour');
+
+const updateSettingsBody = z.object({
+  branding: z
+    .object({
+      portal_name: z.string().trim().min(1).max(120).optional(),
+      logo_data_url: z
+        .string()
+        .trim()
+        .max(MAX_LOGO_DATA_URL_LENGTH)
+        .regex(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, 'must be a base64 image data URL')
+        .nullish(),
+      primary_color: hexColor.optional(),
+      accent_color: hexColor.optional(),
+      default_theme: z.enum(['dark', 'light', 'system']).optional(),
+      tagline: z.string().trim().max(280).nullish(),
+      support_email: z.string().trim().email().max(320).nullish(),
+    })
+    .optional(),
+  captcha: z
+    .object({
+      enabled: z.boolean().optional(),
+      provider: z.enum(['none', 'recaptcha', 'hcaptcha', 'turnstile']).optional(),
+      site_key: z.string().trim().max(512).nullish(),
+      secret_key: z.string().trim().max(512).nullish(),
+    })
+    .optional(),
+  smtp: z
+    .object({
+      host: z.string().trim().max(255).nullish(),
+      port: z.number().int().min(1).max(65_535).optional(),
+      secure: z.boolean().optional(),
+      username: z.string().trim().max(255).nullish(),
+      password: z.string().max(1024).nullish(),
+      from_address: z.string().trim().max(320).nullish(),
+    })
+    .optional(),
+  registration: z
+    .object({
+      open_registration: z.boolean().optional(),
+      require_email_verification: z.boolean().optional(),
+      allowed_roles: z.array(z.enum(ROLE_ORDER)).max(4).optional(),
+    })
+    .optional(),
+});
+
+const smtpTestBody = z.object({ to_email: z.string().trim().email().max(320).optional() });
+
+const templateKeyParams = z.object({ key: z.enum(EMAIL_TEMPLATE_KEYS) });
+
+const updateTemplateBody = z.object({
+  subject: z.string().trim().min(1).max(300),
+  body_html: z.string().min(1).max(100_000),
+  body_text: z.string().min(1).max(100_000),
+});
+
+const massEmailBody = z.object({
+  subject: z.string().trim().min(1).max(300),
+  body_html: z.string().max(100_000).optional(),
+  body_text: z.string().max(100_000).optional(),
+  audience: z.object({
+    scope: z.enum(['all', 'filtered', 'explicit']),
+    roles: z.array(z.enum(ROLE_ORDER)).max(4).optional(),
+    status: z.enum(['active', 'disabled']).optional(),
+    org_id: z.string().trim().min(1).max(64).optional(),
+    user_ids: z.array(z.string().trim().min(1).max(64)).max(5_000).optional(),
+  }),
+  idempotency_key: z.string().trim().min(8).max(128).optional(),
+});
+
+const auditLogsQuery = listQuerySchema.extend({
+  actor_user_id: z.string().trim().min(1).max(64).optional(),
+  action: z.string().trim().max(120).optional(),
+  target_type: z.string().trim().max(120).optional(),
+  target_id: z.string().trim().max(120).optional(),
+  from: z.string().trim().datetime().optional(),
+  to: z.string().trim().datetime().optional(),
+});
+
+/* ── God-mode bodies ──────────────────────────────────────────────────────
+ * `reason` is required and non-empty on all four: an emergency action without
+ * a recorded justification is exactly the kind of thing the audit log exists to
+ * make impossible.
+ */
+
+const godReason = z.string().trim().min(1).max(2_000);
+
+const godRevokeGrantBody = z.object({
+  grant_id: z.string().trim().min(1).max(64),
+  reason: godReason,
+});
+
+const godDeleteApiBody = z.object({
+  api_id: z.string().trim().min(1).max(64),
+  reason: godReason,
+  revoke_grants: z.boolean().optional(),
+});
+
+const godDisableUserBody = z.object({
+  user_id: z.string().trim().min(1).max(64),
+  reason: godReason,
+  revoke_grants: z.boolean().optional(),
+});
+
+const godBroadcastBody = z.object({
+  subject: z.string().trim().min(1).max(300),
+  body: z.string().trim().min(1).max(20_000),
+  audience: z.object({
+    scope: z.enum(['all', 'filtered', 'explicit']),
+    roles: z.array(z.enum(ROLE_ORDER)).max(4).optional(),
+    status: z.enum(['active', 'disabled']).optional(),
+    org_id: z.string().trim().min(1).max(64).optional(),
+    user_ids: z.array(z.string().trim().min(1).max(64)).max(5_000).optional(),
+  }),
+  send_email: z.boolean().optional(),
+});
+
+/** `/api/admin` route plugin. */
+export const adminRoutes: FastifyPluginAsync<AdminRoutesOptions> = async (app, options) => {
+  const { settings, massEmail, email, audit, god } = options;
+  app.addHook('onRequest', requireRole('admin'));
+
+  /* ── Settings ─────────────────────────────────────────────────────────── */
+
+  app.get('/settings', async (): Promise<AdminSettingsResponse> => settings.getAdminSettings());
+
+  app.put('/settings', async (request): Promise<UpdateSettingsResponse> => {
+    const { user } = requireAuth(request);
+    const patch = parseOrThrow(updateSettingsBody, request.body);
+    return settings.updateSettings({ id: user.id, role: user.role }, patch, clientIp(request));
+  });
+
+  app.post('/settings/smtp-test', async (request): Promise<SmtpTestResponse> => {
+    const { user } = requireAuth(request);
+    const input = parseOrThrow(smtpTestBody, request.body ?? {});
+    const to = input.to_email ?? user.email;
+    const result = await email.sendTest(to);
+    await audit.record(
+      { id: user.id, role: user.role },
+      AuditAction.ADMIN_SMTP_TEST,
+      { type: 'settings', id: 'smtp' },
+      { to_email: to, ok: result.ok },
+      clientIp(request),
     );
-    reply.send({ users: await Promise.all(enriched), total });
+    return result;
   });
 
-  app.put('/api/admin/users/:id/status', async (req, reply) => {
-    requireAdmin(req);
-    const { id } = req.params as { id: string };
-    const { status } = z
-      .object({ status: z.enum(['pending', 'active', 'disabled']) })
-      .parse(req.body);
-    if (status === 'disabled') await ensureNotLastActiveSuperAdmin(id, store);
-    const user = await users.setStatus(id, status);
-    await audit.record(req, {
-      action: 'admin.user_status',
-      targetType: 'user',
-      targetId: id,
-      after: { status },
-    });
-    reply.send({ user });
+  /* ── Email templates ──────────────────────────────────────────────────── */
+
+  app.get('/email-templates', async (): Promise<ListEmailTemplatesResponse> =>
+    settings.listEmailTemplates(),
+  );
+
+  app.get('/email-templates/:key', async (request): Promise<GetEmailTemplateResponse> => {
+    const { key } = parseOrThrow(templateKeyParams, request.params);
+    return settings.getEmailTemplate(key);
   });
 
-  app.put('/api/admin/users/:id/roles', async (req, reply) => {
-    requireSuperAdmin(req);
-    const { id } = req.params as { id: string };
-    const { roles } = z
-      .object({ roles: z.array(z.enum(USER_ROLES)).min(1) })
-      .parse(req.body);
-    await ensureNotRemovingLastSuperAdmin(id, roles as UserRole[], store);
-    const user = await users.setRoles(id, roles as UserRole[]);
-    await audit.record(req, {
-      action: 'admin.user_roles',
-      targetType: 'user',
-      targetId: id,
-      after: { roles },
-    });
-    reply.send({ user });
-  });
-
-  app.get('/api/admin/organizations', async (req, reply) => {
-    requireAdmin(req);
-    reply.send({ organizations: await organizations.list() });
-  });
-
-  app.post('/api/admin/organizations', async (req, reply) => {
-    requireAdmin(req);
-    const input = z
-      .object({ name: z.string().min(1), domain: z.string().optional() })
-      .parse(req.body);
-    const org = await organizations.create(input);
-    await audit.record(req, { action: 'admin.org_create', targetType: 'organization', targetId: org.id });
-    reply.status(201).send({ organization: org });
-  });
-
-  app.get('/api/admin/settings', async (req, reply) => {
-    requireAdmin(req);
-    reply.send(await settings.full());
-  });
-
-  app.put('/api/admin/settings/branding', async (req, reply) => {
-    requireAdmin(req);
-    const branding = await settings.setBranding(BrandingInput.parse(req.body));
-    await audit.record(req, { action: 'admin.branding_update', targetType: 'settings', after: branding });
-    reply.send({ branding });
-  });
-
-  app.put('/api/admin/settings/captcha', async (req, reply) => {
-    requireAdmin(req);
-    const captcha = await settings.setCaptcha(CaptchaInput.parse(req.body));
-    await audit.record(req, { action: 'admin.captcha_update', targetType: 'settings', after: captcha });
-    reply.send({ captcha });
-  });
-
-  app.put('/api/admin/settings/sender', async (req, reply) => {
-    requireAdmin(req);
-    await settings.setSender(SenderInput.parse(req.body));
-    await audit.record(req, { action: 'admin.sender_update', targetType: 'settings' });
-    reply.status(204).send();
-  });
-
-  app.put('/api/admin/settings/registration', async (req, reply) => {
-    requireAdmin(req);
-    await settings.setRegistration(RegistrationInput.parse(req.body));
-    await audit.record(req, { action: 'admin.registration_update', targetType: 'settings' });
-    reply.status(204).send();
-  });
-
-  app.get('/api/admin/audit-logs', async (req, reply) => {
-    requireAdmin(req);
-    const q = z
-      .object({
-        limit: z.coerce.number().int().min(1).max(500).optional(),
-        offset: z.coerce.number().int().min(0).optional(),
-        action: z.string().optional(),
-        actorId: z.string().optional(),
-      })
-      .parse(req.query);
-    const { rows, total } = await audit.list(q);
-    reply.send({ entries: rows, total });
-  });
-
-  app.post('/api/admin/mass-email', async (req, reply) => {
-    const user = requireAdmin(req);
-    const input = MassEmailInput.parse(req.body);
-    const out = await massEmail.send({ actorId: user.id, input });
-    await audit.record(req, {
-      action: 'admin.mass_email',
-      targetType: 'mass_email',
-      targetId: out.campaignId,
-      after: { queued: out.queued, filter: input.filter },
-    });
-    reply.status(201).send(out);
-  });
-
-  app.get('/api/admin/mass-email', async (req, reply) => {
-    requireAdmin(req);
-    reply.send({ campaigns: await massEmail.list() });
-  });
-
-  // Dead-letter view: messages that hit the max attempt count and stopped
-  // retrying. Admins can inspect the last error and either re-queue or leave
-  // the row in place pending a fix to the underlying delivery issue.
-  app.get('/api/admin/email/failed', async (req, reply) => {
-    requireAdmin(req);
-    const { limit, offset } = z
-      .object({
-        limit: z.coerce.number().int().positive().max(200).default(50),
-        offset: z.coerce.number().int().nonnegative().default(0),
-      })
-      .parse(req.query ?? {});
-    const result = await store.email.listFailed({ limit, offset });
-    reply.send(result);
-  });
-
-  app.post('/api/admin/email/failed/:id/requeue', async (req, reply) => {
-    const actor = requireAdmin(req);
-    const { id } = req.params as { id: string };
-    const requeued = await store.email.requeue(id);
-    if (!requeued) {
-      reply.status(404).send({ error: { code: 'not_found', message: 'Not found or not failed' } });
-      return;
-    }
-    await audit.record(req, {
-      action: 'admin.email_requeue',
-      targetType: 'email_outbox',
-      targetId: id,
-      after: { actorId: actor.id },
-    });
-    reply.status(202).send({ ok: true });
-  });
-
-  app.get('/api/admin/drift', async (req, reply) => {
-    requireAdmin(req);
-    const { namespace } = (req.query ?? {}) as { namespace?: string };
-    reply.send(await drift.detect({ namespace }));
-  });
-
-  app.post('/api/admin/drift/sync', async (req, reply) => {
-    requireAdmin(req);
-    const { namespace } = (req.query ?? {}) as { namespace?: string };
-    const result = await publishing.syncFromEdge({ namespace });
-    await audit.record(req, { action: 'admin.drift_sync', targetType: 'gateway', after: result });
-    reply.send(result);
-  });
-
-  app.post('/api/admin/imports/api-spec', async (req, reply) => {
-    const user = requireAdmin(req);
-    const { specId, namespace, ownerId } = z
-      .object({ specId: z.string(), namespace: z.string().optional(), ownerId: z.string() })
-      .parse(req.body);
-    const asset = await publishing.importFromEdge({
-      ownerId,
-      specId,
-      namespace,
-      actor: auditActorFromRequest(req),
-    });
-    await audit.record(req, {
-      action: 'admin.import_api',
-      targetType: 'api_asset',
-      targetId: asset.id,
-      after: { actorId: user.id },
-    });
-    reply.status(201).send({ asset });
-  });
-
-  app.get('/api/admin/apis', async (req, reply) => {
-    requireAdmin(req);
-    const { items, total } = await catalog.list({ limit: 200 });
-    reply.send({ items, total });
-  });
-
-  app.delete('/api/admin/god-mode/apis/:id', async (req, reply) => {
-    const user = requireSuperAdmin(req);
-    const { id } = req.params as { id: string };
-    const { reason } = z.object({ reason: z.string().min(1) }).parse(req.body ?? {});
-    await publishing.deleteAsset({ actorId: user.id, assetId: id, actor: auditActorFromRequest(req) });
-    await audit.record(req, {
-      action: 'admin.god_delete_api',
-      targetType: 'api_asset',
-      targetId: id,
-      reason,
-    });
-    reply.status(204).send();
-  });
-
-  app.post('/api/admin/god-mode/grants/:id/revoke', async (req, reply) => {
-    const user = requireSuperAdmin(req);
-    const { id } = req.params as { id: string };
-    const { reason } = z.object({ reason: z.string().min(1) }).parse(req.body);
-    await accessRequests.godRevoke({
-      actorId: user.id,
-      grantId: id,
-      reason,
-      actor: auditActorFromRequest(req),
-    });
-    reply.status(204).send();
-  });
-
-  app.post('/api/admin/god-mode/users/:id/disable', async (req, reply) => {
-    requireSuperAdmin(req);
-    const { id } = req.params as { id: string };
-    const { reason } = z.object({ reason: z.string().min(1) }).parse(req.body);
-    await ensureNotLastActiveSuperAdmin(id, store);
-    const user = await users.setStatus(id, 'disabled');
-    await audit.record(req, {
-      action: 'admin.god_disable_user',
-      targetType: 'user',
-      targetId: id,
-      reason,
-    });
-    reply.send({ user });
-  });
-}
-
-async function ensureNotRemovingLastSuperAdmin(
-  targetUserId: string,
-  nextRoles: UserRole[],
-  store: NexusStore,
-): Promise<void> {
-  if (nextRoles.includes('super_admin')) return;
-  const currentRoles = await store.userRoles.forUser(targetUserId);
-  if (!currentRoles.includes('super_admin')) return;
-  await ensureMoreThanOneActiveSuperAdmin(targetUserId, store);
-}
-
-async function ensureNotLastActiveSuperAdmin(
-  targetUserId: string,
-  store: NexusStore,
-): Promise<void> {
-  const currentRoles = await store.userRoles.forUser(targetUserId);
-  if (!currentRoles.includes('super_admin')) return;
-  await ensureMoreThanOneActiveSuperAdmin(targetUserId, store);
-}
-
-async function ensureMoreThanOneActiveSuperAdmin(
-  targetUserId: string,
-  store: NexusStore,
-): Promise<void> {
-  const { rows } = await store.users.list({ limit: 10_000 });
-  let activeSuperAdmins = 0;
-  for (const row of rows) {
-    if (row.status === 'disabled') continue;
-    const roles = await store.userRoles.forUser(row.id);
-    if (roles.includes('super_admin')) activeSuperAdmins++;
-  }
-  if (activeSuperAdmins <= 1) {
-    throw badRequest(
-      'last_super_admin',
-      `Cannot remove or disable the last active super_admin (${targetUserId})`,
+  app.put('/email-templates/:key', async (request): Promise<UpdateEmailTemplateResponse> => {
+    const { user } = requireAuth(request);
+    const { key } = parseOrThrow(templateKeyParams, request.params);
+    const body = parseOrThrow(updateTemplateBody, request.body);
+    const template = await settings.upsertEmailTemplate(
+      { id: user.id, role: user.role },
+      key,
+      body,
+      clientIp(request),
     );
-  }
-}
+    return { template };
+  });
+
+  /* ── Mass email ───────────────────────────────────────────────────────── */
+
+  app.post('/mass-email', async (request): Promise<MassEmailResponse> => {
+    const { user } = requireAuth(request);
+    const body = parseOrThrow(massEmailBody, request.body);
+    return massEmail.send(
+      { id: user.id, role: user.role },
+      {
+        ...body,
+        body_html: body.body_html ?? '',
+        body_text: body.body_text ?? '',
+      },
+      clientIp(request),
+    );
+  });
+
+  /* ── Audit log ────────────────────────────────────────────────────────── */
+
+  app.get('/audit-logs', async (request): Promise<ListAuditLogsResponse> => {
+    const query = parseOrThrow(auditLogsQuery, request.query);
+    const filter: AuditLogFilter = {
+      ...(query.actor_user_id !== undefined ? { actor_user_id: query.actor_user_id } : {}),
+      ...(query.action !== undefined ? { action: query.action } : {}),
+      ...(query.target_type !== undefined ? { target_type: query.target_type } : {}),
+      ...(query.target_id !== undefined ? { target_id: query.target_id } : {}),
+      ...(query.from !== undefined ? { from: query.from } : {}),
+      ...(query.to !== undefined ? { to: query.to } : {}),
+    };
+    return audit.list(filter, listOptions(query));
+  });
+
+  /* ── God mode (super_admin only) ───────────────────────────────────────
+   * These four sit behind the plugin's `admin` hook and then raise the bar to
+   * `super_admin` per handler. Every one of them demands a non-empty `reason`,
+   * which the god service writes into the `god.*` audit row alongside the
+   * ordinary audit row the underlying operation produces.
+   */
+
+  app.post('/god/revoke-grant', async (request): Promise<GodRevokeGrantResponse> => {
+    const { user } = assertRole(request, 'super_admin');
+    const body = parseOrThrow(godRevokeGrantBody, request.body);
+    return { grant: await god.revokeGrant(user, body.grant_id, body.reason, clientIp(request)) };
+  });
+
+  app.post('/god/delete-api', async (request): Promise<GodDeleteApiResponse> => {
+    const { user } = assertRole(request, 'super_admin');
+    const body = parseOrThrow(godDeleteApiBody, request.body);
+    return god.deleteApi(
+      user,
+      body.api_id,
+      body.reason,
+      body.revoke_grants ?? false,
+      clientIp(request),
+    );
+  });
+
+  app.post('/god/disable-user', async (request): Promise<GodDisableUserResponse> => {
+    const { user } = assertRole(request, 'super_admin');
+    const body = parseOrThrow(godDisableUserBody, request.body);
+    return god.disableUser(
+      user,
+      body.user_id,
+      body.reason,
+      body.revoke_grants ?? false,
+      clientIp(request),
+    );
+  });
+
+  app.post('/god/broadcast', async (request): Promise<GodBroadcastResponse> => {
+    const { user } = assertRole(request, 'super_admin');
+    const body = parseOrThrow(godBroadcastBody, request.body);
+    return god.broadcast(
+      user,
+      {
+        subject: body.subject,
+        body: body.body,
+        audience: body.audience,
+        ...(body.send_email !== undefined ? { send_email: body.send_email } : {}),
+      },
+      clientIp(request),
+    );
+  });
+};

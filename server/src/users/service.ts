@@ -1,343 +1,407 @@
-import argon2 from 'argon2';
-import { v4 as uuid } from 'uuid';
-import { z } from 'zod';
-import type { NexusStore, UserRow } from '../db/store.js';
-import type { ResolvedConfig } from '../config/index.js';
-import { badRequest, conflict, notFound, tooManyRequests, unauthorized } from '../lib/errors.js';
-import type { PortalUser, UserRole } from '@ferrum-nexus/shared';
-import { randomToken } from '../lib/crypto.js';
-import type { EmailService } from '../email/service.js';
-import type { AuditActor, AuditService } from '../audit/service.js';
-import type { NotificationService } from '../notifications/service.js';
+/**
+ * Profile self-service, administrative user management and organizations.
+ *
+ * Three rules are enforced here rather than in the routes, so no future caller
+ * can route around them:
+ *
+ * 1. **Self-service cannot escalate.** `updateMe` touches display name, company
+ *    and phone (plus the password, with the current one). Role, status, email
+ *    and org membership are not reachable from that path at all.
+ * 2. **Only a `super_admin` confers or removes admin power.** A plain `admin`
+ *    can move accounts between `client` and `provider`, and nothing more —
+ *    neither promoting someone to `admin` nor demoting an existing one.
+ * 3. **The last active `super_admin` is untouchable.** Demoting or disabling it
+ *    raises `LAST_SUPER_ADMIN`, checked with `countActiveSuperAdmins` excluding
+ *    the target so the count is about *the others*. The check that decides is
+ *    the one **inside the transaction that performs the update** — a count made
+ *    outside one is advisory, because two administrators demoting each other
+ *    simultaneously each pass it and the portal is left with no super admin at
+ *    all.
+ *
+ * Disabling an account also deletes its sessions, so the next request from an
+ * open browser tab is a 401 rather than a working page — **and** strips its
+ * Ferrum consumer, because an issued API key needs no portal session at all.
+ */
 
-// OWASP 2024 guidance for argon2id: 19 MiB memory, 2 iterations, parallelism 1
-// (we use 64 MiB / 3 iterations to leave headroom for modern hardware).
-// Centralized so every hash call uses the same audited parameters.
-export const ARGON2_OPTIONS = {
-  type: argon2.argon2id,
-  memoryCost: 65536,
-  timeCost: 3,
-  parallelism: 1,
-} as const;
+import {
+  MIN_PASSWORD_LENGTH,
+  roleAtLeast,
+  type Organization,
+  type Paginated,
+  type Role,
+  type User,
+  type UserStatus,
+  type Uuid,
+} from '@ferrum-nexus/shared';
 
-// Per-email throttle for password-reset requests. Three within 24h is generous
-// enough for legitimate users while blocking outbound-mail spam aimed at a
-// single inbox.
-const PASSWORD_RESET_LIMIT = 3;
-const PASSWORD_RESET_WINDOW_MS = 24 * 60 * 60 * 1000;
+import { AuditAction, type AuditService } from '../audit/service.js';
+import {
+  toPublicUser,
+  type AuthService,
+  type IssuedSession,
+  type RequestContext,
+} from '../auth/service.js';
+import { tearDownGatewayAccess, type CredentialsService } from '../credentials/service.js';
+import type { ListOptions, NexusStore, UpdateInput, UserFilter, UserRecord } from '../db/store.js';
+import type { NexusCrypto } from '../lib/crypto.js';
+import { conflict, forbidden, lastSuperAdmin, notFound, validationFailed } from '../lib/errors.js';
+import type { NotificationsService } from '../notifications/service.js';
 
-export const RegistrationInput = z.object({
-  email: z.string().email().max(320),
-  password: z.string().min(8).max(256),
-  name: z.string().min(1).max(255).optional(),
-  phone: z.string().max(64).optional(),
-  desiredRole: z.enum(['client', 'provider']).default('client'),
-  captchaToken: z.string().optional(),
-});
-export type RegistrationInput = z.infer<typeof RegistrationInput>;
+/** Result of {@link UsersService.updateMe}. */
+export interface UpdateMeResult {
+  user: User;
+  /**
+   * Present only when the password changed: every session of the account was
+   * deleted, and this one was issued to keep the caller signed in. The route
+   * must write it to the reply's cookies.
+   */
+  reissued: IssuedSession | null;
+}
 
-export const LoginInput = z.object({
-  email: z.string().email(),
-  password: z.string().min(1),
-});
-export type LoginInput = z.infer<typeof LoginInput>;
+/** Patch accepted by {@link UsersService.updateMe}. */
+export interface UpdateMeInput {
+  display_name?: string;
+  company?: string | null;
+  phone?: string | null;
+  /** Required when `new_password` is supplied. */
+  current_password?: string;
+  new_password?: string;
+}
 
-export const ContactUpdate = z.object({
-  name: z.string().min(1).max(255).optional(),
-  phone: z.string().max(64).optional(),
-});
+/** Patch accepted by {@link UsersService.updateUser}. */
+export interface UpdateUserInput {
+  role?: Role;
+  status?: UserStatus;
+  org_id?: Uuid | null;
+  display_name?: string;
+}
 
+/** Filters accepted by {@link UsersService.listUsers}. */
+export interface UserListFilter {
+  role?: Role;
+  status?: UserStatus;
+  org_id?: Uuid;
+  q?: string;
+}
+
+/** Profile, user administration and organization operations. */
 export interface UsersService {
-  register(
-    input: RegistrationInput,
-    actor?: AuditActor | null,
-  ): Promise<{ user: PortalUser; verifyToken: string | null }>;
-  verifyEmail(token: string): Promise<PortalUser>;
-  login(input: LoginInput): Promise<PortalUser>;
-  toPortalUser(row: UserRow, roles: UserRole[]): Promise<PortalUser>;
-  loadById(id: string): Promise<PortalUser>;
-  updateContact(id: string, patch: { name?: string; phone?: string }): Promise<PortalUser>;
-  updatePassword(id: string, currentPassword: string, newPassword: string): Promise<void>;
-  startPasswordReset(email: string): Promise<{ token: string; userId: string } | null>;
-  completePasswordReset(token: string, newPassword: string): Promise<void>;
-  setStatus(id: string, status: UserRow['status']): Promise<PortalUser>;
-  setRoles(id: string, roles: UserRole[]): Promise<PortalUser>;
+  /** The caller's own account. */
+  getMe(user: UserRecord): User;
+  /**
+   * Self-service profile update. Never touches role, status or email.
+   *
+   * A password change also ends every session of the account and hands back a
+   * replacement for the caller — see {@link UpdateMeResult.reissued}.
+   */
+  updateMe(
+    user: UserRecord,
+    patch: UpdateMeInput,
+    context?: RequestContext,
+  ): Promise<UpdateMeResult>;
+  listUsers(filter?: UserListFilter, options?: ListOptions): Promise<Paginated<User>>;
+  /** Admin update of another account, with the role and last-super-admin guards. */
+  updateUser(
+    actor: UserRecord,
+    targetId: Uuid,
+    patch: UpdateUserInput,
+    ip?: string | null,
+  ): Promise<User>;
+  listOrganizations(options?: ListOptions): Promise<Paginated<Organization>>;
+  createOrganization(
+    actor: UserRecord,
+    input: { name: string; description?: string | null },
+    ip?: string | null,
+  ): Promise<Organization>;
+  updateOrganization(
+    actor: UserRecord,
+    id: Uuid,
+    patch: { name?: string; description?: string | null },
+    ip?: string | null,
+  ): Promise<Organization>;
 }
 
-// Lazily computed argon2id hash used to equalize login timing when the
-// supplied email does not match any user. Verifying against a real hash takes
-// the same time as a wrong-password verify, preventing user enumeration via
-// response timing. The plaintext is a random value; no real account uses it.
-let dummyHashPromise: Promise<string> | null = null;
-function getDummyHash(): Promise<string> {
-  if (!dummyHashPromise) {
-    dummyHashPromise = argon2.hash(`nexus-dummy-${Math.random()}`, ARGON2_OPTIONS);
-  }
-  return dummyHashPromise;
+/** Dependencies of {@link createUsersService}. */
+export interface UsersServiceDeps {
+  store: NexusStore;
+  crypto: NexusCrypto;
+  audit: AuditService;
+  /** Used to tell a user their role or account status changed. */
+  notifications: NotificationsService;
+  /** Issues the replacement session a password change needs. */
+  auth: AuthService;
+  /** Strips the gateway identity of an account being disabled. */
+  credentials: Pick<CredentialsService, 'disableGatewayAccess'>;
+  /** Records a gateway teardown that failed; the disable still goes through. */
+  log?: (obj: Record<string, unknown>, message: string) => void;
 }
 
-export function createUsersService(
-  config: ResolvedConfig,
-  store: NexusStore,
-  emailService: EmailService,
-  audit: AuditService,
-  notifications: NotificationService,
-): UsersService {
-  const normalizeEmail = (email: string): string => email.trim().toLowerCase();
+/** Roles that only a `super_admin` may confer or remove. */
+function isElevated(role: Role): boolean {
+  return roleAtLeast(role, 'admin');
+}
 
-  const toPortalUser = async (row: UserRow, roles: UserRole[]): Promise<PortalUser> => ({
-    id: row.id,
-    email: row.email,
-    name: row.name,
-    phone: row.phone,
-    status: row.status,
-    emailVerifiedAt: row.email_verified_at,
-    lastLoginAt: row.last_login_at,
-    createdAt: row.created_at,
-    roles,
-    organizationId: row.organization_id,
-  });
+/** Build the users service. */
+export function createUsersService(deps: UsersServiceDeps): UsersService {
+  const { store, crypto, audit, notifications, auth, credentials } = deps;
 
-  const register: UsersService['register'] = async (input, actor) => {
-    const emailNormalized = normalizeEmail(input.email);
-    const existing = await store.users.findByEmail(emailNormalized);
-    if (existing) throw conflict('email_taken', 'An account with that email already exists');
+  return {
+    getMe: (user) => toPublicUser(user),
 
-    const userId = uuid();
-    const passwordHash = await argon2.hash(input.password, ARGON2_OPTIONS);
+    async updateMe(user, patch, context = { ip: null, userAgent: null }): Promise<UpdateMeResult> {
+      const ip = context.ip;
+      const update: UpdateInput<UserRecord> = {};
+      const changed: string[] = [];
 
-    // Insert the user and their initial roles in a single transaction. The
-    // app_settings claim is a unique-key insert so only one concurrent
-    // registration can win the first-user super_admin bootstrap.
-    const { row, initialRoles } = await store.transaction(async (tx) => {
-      const totalUsers = await tx.users.count();
-      const claimedBootstrap =
-        totalUsers === 0
-          ? await tx.settings.setIfAbsent('bootstrapSuperAdminUserId', userId)
-          : false;
-      const roles: UserRole[] = claimedBootstrap
-        ? ['admin', 'super_admin', input.desiredRole]
-        : [input.desiredRole];
-      const inserted = await tx.users.insert({
-        id: userId,
-        email: input.email,
-        email_normalized: emailNormalized,
-        name: input.name ?? null,
-        phone: input.phone ?? null,
-        status: 'pending',
-        email_verified_at: null,
-        password_hash: passwordHash,
-        last_login_at: null,
-        failed_login_count: 0,
-        organization_id: null,
-      });
-      await tx.userRoles.setRoles(userId, roles);
-      return { row: inserted, initialRoles: roles };
-    });
-    await audit.record(null, {
-      action: 'user.register',
-      targetType: 'user',
-      targetId: userId,
-      after: { email: input.email, roles: initialRoles },
-      actor,
-    });
+      if (patch.display_name !== undefined) {
+        const name = patch.display_name.trim();
+        if (name === '') throw validationFailed('Display name cannot be empty');
+        update.display_name = name;
+        changed.push('display_name');
+      }
+      if (patch.company !== undefined) {
+        update.company = patch.company;
+        changed.push('company');
+      }
+      if (patch.phone !== undefined) {
+        update.phone = patch.phone;
+        changed.push('phone');
+      }
+      if (patch.new_password !== undefined) {
+        if (patch.new_password.length < MIN_PASSWORD_LENGTH) {
+          throw validationFailed(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+        }
+        if (!patch.current_password) {
+          throw validationFailed('Your current password is required to set a new one');
+        }
+        const ok = await crypto.verifyPassword(patch.current_password, user.password_hash);
+        if (!ok) throw forbidden('Your current password is incorrect');
+        update.password_hash = await crypto.hashPassword(patch.new_password);
+        changed.push('password');
+      }
 
-    const settings = await loadAppSettings(store);
-    const requireVerification = settings.emailVerificationRequired;
-    if (requireVerification) {
-      const token = randomToken(24);
-      await store.verifications.createEmailToken({
-        token,
-        user_id: userId,
-        expires_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
-        consumed_at: null,
-      });
-      const verifyUrl = `${config.publicUrl}/verify-email?token=${token}`;
-      await emailService.enqueue({
-        to: input.email,
-        templateKey: 'registration_confirmed',
-        vars: { name: input.name ?? input.email, verifyUrl },
-        // The verification token uniquely identifies the registration event,
-        // so re-submitting the same token (rare but possible on a retry) is
-        // a true no-op rather than a duplicate inbox delivery.
-        idempotencyKey: `verify:${token}`,
-      });
-      await notifications.push({
-        recipientId: userId,
-        type: 'registration_confirmed',
-        payload: { verifyUrl },
-      });
-      return { user: await toPortalUser(row, initialRoles), verifyToken: token };
-    }
+      if (changed.length === 0) return { user: toPublicUser(user), reissued: null };
 
-    await store.users.markEmailVerified(userId, new Date().toISOString());
-    const fresh = await store.users.findById(userId);
-    return { user: await toPortalUser(fresh!, initialRoles), verifyToken: null };
-  };
+      const updated = await store.users.update(user.id, update);
+      if (!updated) throw notFound('User', user.id);
 
-  const verifyEmail: UsersService['verifyEmail'] = async (token) => {
-    const record = await store.verifications.findEmailToken(token);
-    if (!record) throw notFound('Verification token not found');
-    if (record.consumed_at) throw badRequest('token_consumed', 'Verification link already used');
-    if (new Date(record.expires_at).getTime() < Date.now()) {
-      throw badRequest('token_expired', 'Verification link expired');
-    }
-    await store.users.markEmailVerified(record.user_id, new Date().toISOString());
-    await store.verifications.consumeEmailToken(token, new Date().toISOString());
-    const user = await store.users.findById(record.user_id);
-    const roles = await store.userRoles.forUser(record.user_id);
-    return toPortalUser(user!, roles);
-  };
+      // A password change ends every session of the account — the point of
+      // changing it is usually that somebody else might hold one. The caller
+      // gets a replacement so they are not signed out of the tab they did it
+      // in; every other session is gone, sliding expiry and all.
+      let reissued: IssuedSession | null = null;
+      let terminatedSessions = 0;
+      if (update.password_hash !== undefined) {
+        terminatedSessions = await store.sessions.deleteForUser(user.id);
+        reissued = await auth.issueSession(updated, context);
+      }
 
-  const login: UsersService['login'] = async (input) => {
-    const emailNormalized = normalizeEmail(input.email);
-    const user = await store.users.findByEmail(emailNormalized);
-    if (!user) {
-      // Verify against a dummy hash so a missing account takes the same time
-      // as one with a wrong password — prevents email enumeration.
-      const dummy = await getDummyHash();
-      await argon2.verify(dummy, input.password).catch(() => false);
-      throw unauthorized('Invalid email or password');
-    }
-    if (user.status === 'disabled') throw unauthorized('Account disabled');
-    if (user.failed_login_count >= 10) {
-      throw unauthorized('Too many failed attempts. Reset your password to continue.');
-    }
-    let ok = false;
-    try {
-      ok = await argon2.verify(user.password_hash, input.password);
-    } catch {
-      ok = false;
-    }
-    if (!ok) {
-      await store.users.recordFailedLogin(user.id);
-      throw unauthorized('Invalid email or password');
-    }
-    if (user.status === 'pending') {
-      throw unauthorized('Verify your email to activate your account');
-    }
-    await store.users.recordLogin(user.id, new Date().toISOString());
-    const roles = await store.userRoles.forUser(user.id);
-    return toPortalUser({ ...user, last_login_at: new Date().toISOString() }, roles);
-  };
-
-  const loadById: UsersService['loadById'] = async (id) => {
-    const user = await store.users.findById(id);
-    if (!user) throw notFound('User not found');
-    const roles = await store.userRoles.forUser(id);
-    return toPortalUser(user, roles);
-  };
-
-  const updateContact: UsersService['updateContact'] = async (id, patch) => {
-    const validated = ContactUpdate.parse(patch);
-    const updated = await store.users.updateContact(id, validated);
-    const roles = await store.userRoles.forUser(id);
-    return toPortalUser(updated, roles);
-  };
-
-  const updatePassword: UsersService['updatePassword'] = async (id, currentPassword, newPassword) => {
-    const user = await store.users.findById(id);
-    if (!user) throw notFound('User not found');
-    const ok = await argon2.verify(user.password_hash, currentPassword).catch(() => false);
-    if (!ok) throw unauthorized('Current password is incorrect');
-    if (newPassword.length < 8) throw badRequest('weak_password', 'Password must be 8+ characters');
-    const hash = await argon2.hash(newPassword, ARGON2_OPTIONS);
-    await store.users.updatePassword(id, hash);
-  };
-
-  const startPasswordReset: UsersService['startPasswordReset'] = async (email) => {
-    const user = await store.users.findByEmail(normalizeEmail(email));
-    // Generate the token unconditionally so the timing of this branch matches
-    // the existing-user branch up to the FS-bound randomBytes() call.
-    const token = randomToken(24);
-    if (!user) {
-      // Burn roughly the same wall-clock as the create-token + enqueue path so
-      // an attacker can't enumerate accounts via response timing.
-      const dummy = await getDummyHash();
-      await argon2.verify(dummy, token).catch(() => false);
-      return null;
-    }
-    // Per-email throttle: limit how many reset emails we send to a single
-    // address in a rolling window so a misbehaving caller can't flood an inbox.
-    // The global rate limiter on the route handles per-IP abuse; this guards
-    // outbound delivery to the targeted email regardless of source IP.
-    const recent = await store.verifications.countRecentPasswordResets(
-      user.id,
-      new Date(Date.now() - PASSWORD_RESET_WINDOW_MS).toISOString(),
-    );
-    if (recent >= PASSWORD_RESET_LIMIT) {
-      throw tooManyRequests(
-        'Too many password reset requests for this account. Try again later.',
+      await audit.record(
+        { id: user.id, role: user.role },
+        AuditAction.USER_UPDATE,
+        { type: 'user', id: user.id },
+        {
+          self: true,
+          changed_fields: changed,
+          ...(terminatedSessions > 0 ? { terminated_sessions: terminatedSessions } : {}),
+        },
+        ip,
       );
-    }
-    await store.verifications.createPasswordReset({
-      token,
-      user_id: user.id,
-      expires_at: new Date(Date.now() + 3600 * 1000).toISOString(),
-      consumed_at: null,
-    });
-    const resetUrl = `${config.publicUrl}/reset-password?token=${token}`;
-    await emailService.enqueue({
-      to: user.email,
-      templateKey: 'password_reset',
-      vars: { name: user.name ?? user.email, resetUrl },
-      idempotencyKey: `reset:${token}`,
-    });
-    return { token, userId: user.id };
-  };
+      return { user: toPublicUser(updated), reissued };
+    },
 
-  const completePasswordReset: UsersService['completePasswordReset'] = async (token, newPassword) => {
-    const reset = await store.verifications.findPasswordReset(token);
-    if (!reset) throw notFound('Reset token not found');
-    if (reset.consumed_at) throw badRequest('token_consumed', 'Reset link already used');
-    if (new Date(reset.expires_at).getTime() < Date.now()) {
-      throw badRequest('token_expired', 'Reset link expired');
-    }
-    if (newPassword.length < 8) throw badRequest('weak_password', 'Password must be 8+ characters');
-    const hash = await argon2.hash(newPassword, ARGON2_OPTIONS);
-    await store.users.updatePassword(reset.user_id, hash);
-    await store.users.resetFailedLogins(reset.user_id);
-    await store.verifications.consumePasswordReset(token, new Date().toISOString());
-    await store.sessions.deleteForUser(reset.user_id);
-  };
+    async listUsers(filter = {}, options): Promise<Paginated<User>> {
+      const storeFilter: UserFilter = {
+        ...(filter.role !== undefined ? { role: filter.role } : {}),
+        ...(filter.status !== undefined ? { status: filter.status } : {}),
+        ...(filter.org_id !== undefined ? { org_id: filter.org_id } : {}),
+        ...(filter.q !== undefined ? { q: filter.q } : {}),
+      };
+      const page = await store.users.list(storeFilter, options);
+      return { items: page.items.map(toPublicUser), total: page.total };
+    },
 
-  // Any change to a user's authorization state — status (disable, restore) or
-  // role membership — must invalidate existing sessions. Otherwise a user
-  // promoted to super_admin (or demoted) keeps acting under the cached auth
-  // payload on their session until natural expiry, defeating the change.
-  const setStatus: UsersService['setStatus'] = async (id, status) => {
-    await store.users.updateStatus(id, status);
-    await store.sessions.deleteForUser(id);
-    return loadById(id);
-  };
+    async updateUser(actor, targetId, patch, ip = null): Promise<User> {
+      const target = await store.users.findById(targetId);
+      if (!target) throw notFound('User', targetId);
 
-  const setRoles: UsersService['setRoles'] = async (id, roles) => {
-    await store.userRoles.setRoles(id, roles);
-    await store.sessions.deleteForUser(id);
-    return loadById(id);
-  };
+      const update: UpdateInput<UserRecord> = {};
+      const changed: string[] = [];
 
-  return {
-    register,
-    verifyEmail,
-    login,
-    toPortalUser,
-    loadById,
-    updateContact,
-    updatePassword,
-    startPasswordReset,
-    completePasswordReset,
-    setStatus,
-    setRoles,
-  };
-}
+      if (patch.display_name !== undefined) {
+        const name = patch.display_name.trim();
+        if (name === '') throw validationFailed('Display name cannot be empty');
+        update.display_name = name;
+        changed.push('display_name');
+      }
+      if (patch.org_id !== undefined) {
+        if (patch.org_id !== null && !(await store.organizations.findById(patch.org_id))) {
+          throw notFound('Organization', patch.org_id);
+        }
+        update.org_id = patch.org_id;
+        changed.push('org_id');
+      }
 
-export async function loadAppSettings(store: NexusStore): Promise<{
-  emailVerificationRequired: boolean;
-  registrationEnabled: boolean;
-}> {
-  return {
-    emailVerificationRequired: ((await store.settings.get<boolean>('emailVerificationRequired')) ?? true) === true,
-    registrationEnabled: ((await store.settings.get<boolean>('registrationEnabled')) ?? true) === true,
+      const roleChanged = patch.role !== undefined && patch.role !== target.role;
+      if (roleChanged && patch.role) {
+        // Conferring *or* removing admin power is a super_admin-only act.
+        if (
+          (isElevated(patch.role) || isElevated(target.role)) &&
+          !roleAtLeast(actor.role, 'super_admin')
+        ) {
+          throw forbidden('Only a super admin can grant or revoke administrator roles');
+        }
+        if (target.role === 'super_admin' && target.status === 'active') {
+          if ((await store.users.countActiveSuperAdmins(target.id)) === 0) throw lastSuperAdmin();
+        }
+        update.role = patch.role;
+        changed.push('role');
+      }
+
+      const statusChanged = patch.status !== undefined && patch.status !== target.status;
+      if (statusChanged && patch.status) {
+        if (patch.status === 'disabled') {
+          if (isElevated(target.role) && !roleAtLeast(actor.role, 'super_admin')) {
+            throw forbidden('Only a super admin can disable an administrator');
+          }
+          // Checked before the self-disable rule so the *reason* a lone founder
+          // cannot switch themselves off is the one the UI should explain.
+          if (
+            target.role === 'super_admin' &&
+            (await store.users.countActiveSuperAdmins(target.id)) === 0
+          ) {
+            throw lastSuperAdmin();
+          }
+          if (target.id === actor.id) throw conflict('You cannot disable your own account');
+        }
+        update.status = patch.status;
+        changed.push('status');
+      }
+
+      if (changed.length === 0) return toPublicUser(target);
+
+      // The last-super-admin rule is a count of *other* rows followed by a
+      // write to this one, and the checks above ran long before the write. Two
+      // administrators demoting each other's account at the same moment both
+      // passed them and the portal ended with zero active super admins.
+      //
+      // Both halves now happen inside one transaction body. Bodies are
+      // serialised (see `db/store.ts`), so the losing demotion re-counts after
+      // the winner committed and sees the invariant it would break; the
+      // conditional update is the second line of defence, refusing a target
+      // whose role or status moved underneath this call at all.
+      const guardsLastSuperAdmin =
+        target.role === 'super_admin' &&
+        ((roleChanged && target.status === 'active') || update.status === 'disabled');
+
+      const updated = await store.transaction(async (tx) => {
+        if (guardsLastSuperAdmin && (await tx.users.countActiveSuperAdmins(target.id)) === 0) {
+          throw lastSuperAdmin();
+        }
+        return tx.users.updateIfMatches(
+          target.id,
+          { role: target.role, status: target.status },
+          update,
+        );
+      });
+      if (!updated) {
+        if (!(await store.users.findById(target.id))) throw notFound('User', targetId);
+        throw conflict('That account changed while you were editing it — reload and try again');
+      }
+
+      // A disabled account must not keep a usable browser session — nor a
+      // working gateway identity, which outlives the session entirely.
+      let terminatedSessions = 0;
+      let teardown: Record<string, unknown> = {};
+      if (update.status === 'disabled') {
+        terminatedSessions = await store.sessions.deleteForUser(target.id);
+        teardown = await tearDownGatewayAccess(credentials, target.id, actor.id, deps.log);
+      }
+
+      const action = statusChanged
+        ? update.status === 'disabled'
+          ? AuditAction.USER_DISABLE
+          : AuditAction.USER_UPDATE
+        : roleChanged
+          ? AuditAction.USER_ROLE_CHANGE
+          : AuditAction.USER_UPDATE;
+
+      await audit.record(
+        { id: actor.id, role: actor.role },
+        action,
+        { type: 'user', id: target.id },
+        {
+          changed_fields: changed,
+          ...(roleChanged ? { from_role: target.role, to_role: update.role } : {}),
+          ...(statusChanged ? { from_status: target.status, to_status: update.status } : {}),
+          ...(terminatedSessions > 0 ? { terminated_sessions: terminatedSessions } : {}),
+          ...teardown,
+        },
+        ip,
+      );
+
+      if (roleChanged) {
+        await notifications.notify(
+          target.id,
+          'system',
+          'Your role changed',
+          `An administrator changed your role to ${update.role}.`,
+          '/profile',
+        );
+      }
+
+      return toPublicUser(updated);
+    },
+
+    async listOrganizations(options): Promise<Paginated<Organization>> {
+      return store.organizations.list(options);
+    },
+
+    async createOrganization(actor, input, ip = null): Promise<Organization> {
+      const name = input.name.trim();
+      if (name === '') throw validationFailed('An organization name is required');
+      const organization = await store.organizations.create({
+        name,
+        description: input.description ?? null,
+      });
+      await audit.record(
+        { id: actor.id, role: actor.role },
+        AuditAction.ORG_CREATE,
+        { type: 'organization', id: organization.id },
+        { name },
+        ip,
+      );
+      return organization;
+    },
+
+    async updateOrganization(actor, id, patch, ip = null): Promise<Organization> {
+      const existing = await store.organizations.findById(id);
+      if (!existing) throw notFound('Organization', id);
+
+      const update: UpdateInput<Organization> = {};
+      const changed: string[] = [];
+      if (patch.name !== undefined) {
+        const name = patch.name.trim();
+        if (name === '') throw validationFailed('An organization name is required');
+        update.name = name;
+        changed.push('name');
+      }
+      if (patch.description !== undefined) {
+        update.description = patch.description;
+        changed.push('description');
+      }
+      if (changed.length === 0) return existing;
+
+      const updated = await store.organizations.update(id, update);
+      if (!updated) throw notFound('Organization', id);
+      await audit.record(
+        { id: actor.id, role: actor.role },
+        AuditAction.ORG_UPDATE,
+        { type: 'organization', id },
+        { changed_fields: changed },
+        ip,
+      );
+      return updated;
+    },
   };
 }

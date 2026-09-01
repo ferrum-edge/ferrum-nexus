@@ -1,92 +1,70 @@
-import type { FastifyInstance } from 'fastify';
+/**
+ * `/api/catalog` — the browse surface, readable by any signed-in account.
+ *
+ * Everything here is a `GET`; there is no mutation and therefore no CSRF
+ * concern. The visibility policy lives entirely in the catalog service, which
+ * answers `404` rather than `403` for an API the caller may not see, so the
+ * catalog never confirms that an internal API exists.
+ */
+
+import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import type { CatalogService } from '../api-catalog/service.js';
-import type { AccessRequestsService } from '../access-requests/service.js';
-import type { ApiAssetRow, NexusStore } from '../db/store.js';
-import { requireAuth, requireRole, type AuthenticatedUser } from '../auth/session.js';
-import { RequestInput } from '../access-requests/service.js';
-import { notFound } from '../lib/errors.js';
-import { auditActorFromRequest } from '../audit/service.js';
 
-export async function registerCatalogRoutes(
-  app: FastifyInstance,
-  opts: {
-    catalog: CatalogService;
-    accessRequests: AccessRequestsService;
-    store: NexusStore;
-  },
-): Promise<void> {
-  const { catalog, accessRequests, store } = opts;
+import type {
+  CatalogDetailResponse,
+  CatalogListResponse,
+  CatalogSpecResponse,
+} from '@ferrum-nexus/shared';
 
-  app.get('/api/catalog/apis', async (req, reply) => {
-    const auth = requireAuth(req);
-    const q = z
-      .object({
-        limit: z.coerce.number().int().min(1).max(200).optional(),
-        offset: z.coerce.number().int().min(0).optional(),
-        search: z.string().optional(),
-      })
-      .parse(req.query);
-    const isAdmin = hasAdminRole(auth);
-    const { items, total } = await catalog.list({
-      ...q,
-      visibility: isAdmin ? undefined : 'public',
-    });
-    reply.send({ items, total });
-  });
+import type { CatalogService } from '../catalog/service.js';
+import { requireAuth, requireAuthHook } from '../middleware/auth-plugin.js';
+import { parseOrThrow } from '../middleware/error-handler.js';
+import { booleanQuerySchema, listOptions, listQuerySchema, toBoolean } from './common.js';
 
-  app.get('/api/catalog/apis/:id', async (req, reply) => {
-    const user = requireAuth(req);
-    const { id } = req.params as { id: string };
-    await requireVisibleAsset(user, id, store);
-    const asset = await catalog.get(id);
-    reply.send({ asset });
-  });
-
-  app.get('/api/catalog/apis/:id/spec', async (req, reply) => {
-    const user = requireAuth(req);
-    const { id } = req.params as { id: string };
-    await requireVisibleAsset(user, id, store);
-    const latest = await store.apiSpecVersions.latestForAsset(id);
-    reply.send({ assetId: id, version: latest?.version, rawSpec: latest?.raw_spec ?? null });
-  });
-
-  app.post('/api/catalog/apis/:id/access-requests', async (req, reply) => {
-    const user = requireRole(req, 'client', 'provider', 'admin', 'super_admin');
-    const { id } = req.params as { id: string };
-    const input = RequestInput.parse(req.body);
-    await requireVisibleAsset(user, id, store);
-    const userRow = await store.users.findById(user.id);
-    const request = await accessRequests.create({
-      clientUserId: user.id,
-      clientEmail: user.email,
-      clientName: userRow?.name ?? null,
-      apiAssetId: id,
-      justification: input.justification,
-      actor: auditActorFromRequest(req),
-    });
-    reply.status(201).send({ request });
-  });
+/** Services this route plugin needs. */
+export interface CatalogRoutesOptions {
+  catalog: CatalogService;
 }
 
-function hasAdminRole(user: AuthenticatedUser): boolean {
-  return user.roles.includes('admin') || user.roles.includes('super_admin');
-}
+const catalogQuery = listQuerySchema.extend({
+  q: z.string().trim().max(200).optional(),
+  requestable: booleanQuerySchema,
+  visibility: z.enum(['public', 'internal']).optional(),
+  owner_user_id: z.string().trim().min(1).max(64).optional(),
+});
 
-async function requireVisibleAsset(
-  user: AuthenticatedUser,
-  assetId: string,
-  store: NexusStore,
-): Promise<ApiAssetRow> {
-  const asset = await store.apiAssets.findById(assetId);
-  if (!asset) throw notFound('API asset not found');
-  if (hasAdminRole(user) || asset.provider_id === user.id || asset.visibility !== 'private') {
-    return asset;
-  }
-  const grants = await store.grants.listForClient(user.id);
-  const hasActiveGrant = grants.some(
-    (grant) => grant.api_asset_id === asset.id && grant.status === 'active',
-  );
-  if (!hasActiveGrant) throw notFound('API asset not found');
-  return asset;
-}
+const slugParams = z.object({ slug: z.string().trim().min(1).max(120) });
+
+/** `/api/catalog` route plugin. */
+export const catalogRoutes: FastifyPluginAsync<CatalogRoutesOptions> = async (app, options) => {
+  const { catalog } = options;
+  app.addHook('onRequest', requireAuthHook);
+
+  app.get('/', async (request): Promise<CatalogListResponse> => {
+    const { user } = requireAuth(request);
+    const query = parseOrThrow(catalogQuery, request.query);
+    const requestable = toBoolean(query.requestable);
+    return catalog.list(
+      user,
+      {
+        ...(query.q !== undefined ? { q: query.q } : {}),
+        ...(requestable !== undefined ? { requestable } : {}),
+        ...(query.visibility !== undefined ? { visibility: query.visibility } : {}),
+        ...(query.owner_user_id !== undefined ? { owner_user_id: query.owner_user_id } : {}),
+      },
+      listOptions(query),
+    );
+  });
+
+  app.get('/:slug', async (request): Promise<CatalogDetailResponse> => {
+    const { user } = requireAuth(request);
+    const { slug } = parseOrThrow(slugParams, request.params);
+    return catalog.detail(user, slug);
+  });
+
+  app.get('/:slug/spec', async (request): Promise<CatalogSpecResponse> => {
+    const { user } = requireAuth(request);
+    const { slug } = parseOrThrow(slugParams, request.params);
+    return catalog.spec(user, slug);
+  });
+};

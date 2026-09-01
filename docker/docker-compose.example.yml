@@ -1,44 +1,68 @@
-version: '3.9'
-
-# Example end-to-end stack for Ferrum Nexus. Stand up a Postgres database, the
-# Nexus BFF + SPA in one container, and (optionally) a Ferrum Edge instance.
-# Copy this file to `docker-compose.yml` and edit before use.
+# Example full stack: Ferrum Nexus + PostgreSQL + a Ferrum Edge gateway.
+#
+#   cp docker/docker-compose.example.yml docker-compose.yml
+#   export NEXUS_SECRET_KEY=$(openssl rand -hex 32)
+#   export FERRUM_ADMIN_JWT_SECRET=$(openssl rand -hex 32)
+#   docker compose up -d
+#
+# The portal is then on http://127.0.0.1:8787 and the gateway's proxy
+# listener on http://127.0.0.1:8000.
 
 services:
-  postgres:
-    image: postgres:16-alpine
+  nexus:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - '127.0.0.1:8787:8787'
+    environment:
+      NEXUS_SECRET_KEY: ${NEXUS_SECRET_KEY:?set NEXUS_SECRET_KEY}
+      NEXUS_PUBLIC_URL: http://127.0.0.1:8787
+      NEXUS_DB_DRIVER: postgres
+      NEXUS_DB_URL: postgres://nexus:nexus@postgres:5432/nexus
+      FERRUM_ADMIN_URL: http://ferrum-edge:9000
+      FERRUM_ADMIN_JWT_SECRET: ${FERRUM_ADMIN_JWT_SECRET:?set FERRUM_ADMIN_JWT_SECRET}
+      FERRUM_ADMIN_ALLOW_INSECURE_HTTP: 'true' # in-network compose traffic only
+      FERRUM_NAMESPACE: nexus
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ferrum-edge:
+        condition: service_started
     restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
     environment:
       POSTGRES_USER: nexus
       POSTGRES_PASSWORD: nexus
       POSTGRES_DB: nexus
     volumes:
-      - nexus_pgdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-
-  nexus:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    image: ferrum-nexus:latest
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U nexus']
+      interval: 5s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
-    depends_on:
-      - postgres
+
+  ferrum-edge:
+    image: ferrumedge/ferrum-edge:latest
+    command: run -m database
     environment:
-      NEXUS_HOST: 0.0.0.0
-      NEXUS_PORT: 8787
-      NEXUS_PUBLIC_URL: http://localhost:8787
-      NEXUS_CORS_ORIGINS: http://localhost:8787
-      NEXUS_SECRET_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-      NEXUS_DB_DRIVER: postgres
-      NEXUS_DB_URL: postgres://nexus:nexus@postgres:5432/nexus
-      FERRUM_ADMIN_URL: http://ferrum-edge:8000
-      FERRUM_ADMIN_JWT_SECRET: 0123456789abcdef0123456789abcdef
-      FERRUM_DEFAULT_NAMESPACE: default
-      NEXUS_EMAIL_FROM: 'Ferrum Nexus <noreply@example.com>'
+      FERRUM_MODE: database
+      FERRUM_DB_TYPE: sqlite
+      FERRUM_DB_URL: 'sqlite:///data/ferrum.db?mode=rwc'
+      FERRUM_NAMESPACE: nexus
+      FERRUM_ADMIN_JWT_SECRET: ${FERRUM_ADMIN_JWT_SECRET:?set FERRUM_ADMIN_JWT_SECRET}
+      FERRUM_ADMIN_BIND_ADDRESS: 0.0.0.0
+      FERRUM_ALLOW_INSECURE_ADMIN_HTTP: 'true' # in-network compose traffic only
     ports:
-      - "8787:8787"
+      - '127.0.0.1:8000:8000'
+    volumes:
+      - ferrumdata:/data
+    restart: unless-stopped
 
 volumes:
-  nexus_pgdata: {}
+  pgdata:
+  ferrumdata:

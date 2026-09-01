@@ -1,6 +1,15 @@
 node_modules
 dist
-build
+dist-server
 coverage
 data
-*.sqlite
+package-lock.json
+
+# Legal texts — must not be reformatted
+LICENSE
+LICENSE-COMMERCIAL.md
+NOTICE
+
+# Agent tooling ported from ferrum-edge; kept byte-identical to ease re-syncing
+.claude/
+.agents/
