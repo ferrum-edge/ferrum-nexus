@@ -63,6 +63,16 @@ the process prints every offending variable and exits non-zero. The repo-root
 | `FERRUM_ADMIN_TIMEOUT_MS`          | `5000`                  | Per-request deadline for Admin API calls, 250 – 60 000.                                                                                                                                                                                   |
 | `FERRUM_MAX_CREDENTIALS_PER_TYPE`  | `2`                     | 1 – 10. **Mirror of the gateway's own setting** — set them to the same value. Values above 1 are what make append-then-delete rotation gapless.                                                                                           |
 
+#### Set on the gateway, not on Nexus
+
+Two gateway-side variables change what Nexus can successfully publish, so they
+belong in the same checklist even though Nexus never reads them:
+
+| Variable (on Ferrum Edge)       | Notes                                                                                                                                                                                                                                                                                                     |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FERRUM_ADMIN_JWT_SECRET`       | Must equal Nexus's own value exactly. This shared secret is the whole trust relationship; a mismatch makes every Admin API call `401`.                                                                                                                                                                    |
+| `FERRUM_BASIC_AUTH_HMAC_SECRET` | At least 32 bytes. The key the gateway HMACs Basic-auth passwords with. **Required before any `basic_auth` API is published** — without it the gateway refuses to construct the plugin and the publish fails with `EDGE_ERROR`; the gateway's own message is passed through in `details.gateway_message`. |
+
 ### Email
 
 All optional; an admin can also configure SMTP from the UI, and the stored
@@ -101,10 +111,15 @@ collection) and skipped on the next boot.
 For deployments that prefer a separate schema step:
 
 ```bash
-npm run migrate --workspace server
+npm run migrate                      # from the repo root
 # or, from a built image:
 node server/dist/db/migrate-cli.ts   # (tsx in dev: npx tsx src/db/migrate-cli.ts)
 ```
+
+Run the **root** script, not `npm run migrate --workspace server`: the server
+resolves `@ferrum-nexus/shared` through that workspace's `dist/`, and only the
+root script builds it first. On a clean clone the workspace-level script fails
+until you have run `npm run build --workspace shared` yourself.
 
 The CLI loads the same env, applies pending migrations, prints
 `Migrations applied (driver: postgres).` and exits. It exits non-zero on
@@ -228,9 +243,14 @@ brings up Nexus + PostgreSQL + a Ferrum Edge gateway:
 ```bash
 cp docker/docker-compose.example.yml docker-compose.yml
 export NEXUS_SECRET_KEY=$(openssl rand -hex 32)
+export NEXUS_DB_PASSWORD=$(openssl rand -hex 16)
 export FERRUM_ADMIN_JWT_SECRET=$(openssl rand -hex 32)
+export FERRUM_BASIC_AUTH_HMAC_SECRET=$(openssl rand -hex 32)
 docker compose up -d
 ```
+
+All four are required — every one of them is declared `${VAR:?...}`, so compose
+refuses to start rather than falling back to a shipped default.
 
 Portal on `http://127.0.0.1:8787`, gateway proxy listener on
 `http://127.0.0.1:8000`. Points worth understanding before adapting it:
@@ -244,8 +264,16 @@ Portal on `http://127.0.0.1:8787`, gateway proxy listener on
   is reachable only on the compose network. Publish the Admin port and that
   stops being true.
 - Postgres has a `pg_isready` healthcheck and Nexus waits on it, so the first
-  boot's migrations do not race the database.
-- The example ships a development-grade Postgres password. Change it.
+  boot's migrations do not race the database. The Postgres password comes from
+  `NEXUS_DB_PASSWORD` and is interpolated into both `POSTGRES_PASSWORD` and
+  `NEXUS_DB_URL`, so there is one value to rotate and none hard-coded.
+- A `ferrum-edge-init` one-shot container `chown`s the `ferrumdata` volume to
+  `65532:65532` before the gateway starts, and the gateway `depends_on` it with
+  `condition: service_completed_successfully`. The Edge image is distroless
+  `nonroot` and ships no `/data`, so without this a fresh named volume is
+  root-owned and SQLite cannot create its database file.
+- `FERRUM_BASIC_AUTH_HMAC_SECRET` must be set **before** anyone publishes a
+  `basic_auth` API — see the gateway env table in [§1](#ferrum-edge-integration).
 
 ---
 

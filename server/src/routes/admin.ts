@@ -2,9 +2,10 @@
  * `/api/admin` — settings, email templates, mass email and the audit log.
  *
  * The whole plugin is behind `requireRole('admin')`; god-mode endpoints add a
- * `super_admin` check of their own (see the marked section at the bottom).
- * Secrets are write-only everywhere here: `smtp.password` and
- * `captcha.secret_key` go in and are never read back out.
+ * `super_admin` check of their own (see the marked section at the bottom), and
+ * so do the `smtp`/`captcha` sections of `PUT /settings`, which are escalation
+ * surfaces rather than preferences. Secrets are write-only everywhere here:
+ * `smtp.password` and `captcha.secret_key` go in and are never read back out.
  */
 
 import type { FastifyPluginAsync } from 'fastify';
@@ -181,6 +182,9 @@ export const adminRoutes: FastifyPluginAsync<AdminRoutesOptions> = async (app, o
   app.put('/settings', async (request): Promise<UpdateSettingsResponse> => {
     const { user } = requireAuth(request);
     const patch = parseOrThrow(updateSettingsBody, request.body);
+    // Branding and registration policy are `admin`; the `smtp` and `captcha`
+    // sections need `super_admin`, enforced by the service so the rule holds
+    // wherever `updateSettings` is called from.
     return settings.updateSettings({ id: user.id, role: user.role }, patch, clientIp(request));
   });
 

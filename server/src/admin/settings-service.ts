@@ -13,17 +13,21 @@
  * | `smtp.password`   | SMTP password                              | **yes**   |
  * | `registration`    | open registration / verification policy    | no        |
  *
- * Two invariants the rest of the server relies on:
+ * Three invariants the rest of the server relies on:
  *
  * 1. **Secrets are write-only.** `password`/`secret_key` are never returned;
  *    the DTOs expose `password_set`/`secret_set` booleans instead.
  * 2. **Audit rows record changed keys, never values.** A settings update writes
  *    `admin.settings_update` with the list of touched keys and nothing else, so
  *    the audit log can be read by anyone allowed to read audit logs.
+ * 3. **`smtp` and `captcha` are `super_admin`-only** (see
+ *    {@link PRIVILEGED_SETTINGS_SECTIONS}); `branding` and `registration` are
+ *    editable by any `admin`.
  */
 
 import {
   EMAIL_TEMPLATE_KEYS,
+  roleAtLeast,
   type AdminSettingsResponse,
   type BrandingSettings,
   type CaptchaAdminSettings,
@@ -44,7 +48,18 @@ import type { NexusConfig } from '../config/index.js';
 import type { NexusStore } from '../db/store.js';
 import { DEFAULT_EMAIL_TEMPLATES, TEMPLATE_VARIABLES } from '../email/templates.js';
 import type { NexusCrypto } from '../lib/crypto.js';
+import { forbidden } from '../lib/errors.js';
 import { newId, nowIso } from '../lib/ids.js';
+
+/**
+ * Sections of {@link UpdateSettingsRequest} that only a `super_admin` may touch.
+ *
+ * Both are escalation paths rather than presentation: whoever owns `smtp` owns
+ * every verification and password-reset link the portal sends, and whoever owns
+ * `captcha` owns the registration brake. `branding` and `registration` stay at
+ * `admin`.
+ */
+export const PRIVILEGED_SETTINGS_SECTIONS = ['smtp', 'captcha'] as const;
 
 /** `app_settings` key holding the public branding block. */
 export const BRANDING_SETTINGS_KEY = 'branding';
@@ -252,6 +267,17 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
     getAdminSettings: snapshot,
 
     async updateSettings(actor, patch, ip = null): Promise<AdminSettingsResponse> {
+      // Mail and CAPTCHA are privilege-escalation surfaces, not preferences:
+      // repointing SMTP hands the operator every verification and
+      // password-reset message, and turning CAPTCHA off (or swapping its
+      // secret) removes the registration brake. `/api/admin` only requires
+      // `admin`, so the extra step is enforced here.
+      for (const section of PRIVILEGED_SETTINGS_SECTIONS) {
+        if (patch[section] !== undefined && !roleAtLeast(actor.role ?? 'client', 'super_admin')) {
+          throw forbidden(`Only a super admin can change the ${section} settings`);
+        }
+      }
+
       const changed: string[] = [];
 
       if (patch.branding) {

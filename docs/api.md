@@ -371,8 +371,9 @@ Guards enforced in the service:
 - Only a `super_admin` may disable an `admin` or `super_admin` →
   `403 FORBIDDEN`.
 - Demoting or disabling the **last active `super_admin`** →
-  `409 LAST_SUPER_ADMIN`.
-- Disabling **your own** account → `409 CONFLICT`.
+  `409 LAST_SUPER_ADMIN`. This is checked before the self-disable rule, so it is
+  also what you get for disabling yourself while you are the last one.
+- Disabling **your own** account in any other case → `409 CONFLICT`.
 - Disabling an account deletes every session it holds.
 - `404 NOT_FOUND` when `org_id` names an organization that does not exist.
 
@@ -491,7 +492,8 @@ another user are ignored.
 ## Admin
 
 Registered under `/api/admin`. The **entire** plugin requires _admin_; the four
-`god/*` endpoints additionally require _super_admin_.
+`god/*` endpoints additionally require _super_admin_, and so do the `smtp` and
+`captcha` sections of `PUT /settings`.
 
 ### `GET /api/admin/settings`
 
@@ -528,14 +530,21 @@ report whether one is stored.
 
 ### `PUT /api/admin/settings`
 
-_admin_ — partial update; **omitted sections are untouched**, and omitted
-fields inside a supplied section keep their current value.
+_admin_, except `smtp` and `captcha` which are **_super_admin_** — partial
+update; **omitted sections are untouched**, and omitted fields inside a supplied
+section keep their current value.
+
+A body carrying an `smtp` or `captcha` section from an ordinary `admin` is
+refused with `403 FORBIDDEN` and nothing is written — not even the sections that
+would have been allowed. Mail and CAPTCHA are escalation surfaces, not
+preferences: repointing SMTP delivers every verification and password-reset link
+to the operator, and CAPTCHA is the registration brake.
 
 | Section        | Fields                                                                                                                                                                                                                                                   |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `branding`     | `portal_name` (1–120), `logo_data_url` (base64 image data URL, ≤ 512 KiB, nullable), `primary_color` / `accent_color` (CSS hex `#rgb`–`#rrggbbaa`), `default_theme` (`dark`\|`light`\|`system`), `tagline` (≤ 280, nullable), `support_email` (nullable) |
-| `captcha`      | `enabled`, `provider` (`none`\|`recaptcha`\|`hcaptcha`\|`turnstile`), `site_key` (nullable), `secret_key` — **write-only**, stored AES-256-GCM encrypted; pass `null` or `""` to clear                                                                   |
-| `smtp`         | `host`, `port` (1–65535), `secure`, `username`, `password` — **write-only**, encrypted; `null`/`""` clears — `from_address`                                                                                                                              |
+| `captcha`      | _super_admin_ — `enabled`, `provider` (`none`\|`recaptcha`\|`hcaptcha`\|`turnstile`), `site_key` (nullable), `secret_key` — **write-only**, stored AES-256-GCM encrypted; pass `null` or `""` to clear                                                   |
+| `smtp`         | _super_admin_ — `host`, `port` (1–65535), `secure`, `username`, `password` — **write-only**, encrypted; `null`/`""` clears — `from_address`                                                                                                              |
 | `registration` | `open_registration`, `require_email_verification`, `allowed_roles` (array of roles)                                                                                                                                                                      |
 
 → the same shape as `GET /api/admin/settings`. The audit row records the
@@ -686,7 +695,10 @@ Body `{ "user_id": uuid, "reason": string, "revoke_grants"?: boolean }`
 ```
 
 Disables the account and destroys every session it holds. Errors:
-`409 CONFLICT` (disabling yourself), `409 LAST_SUPER_ADMIN`.
+`409 LAST_SUPER_ADMIN` when the target is the last active super admin —
+**including when that is you**, because "promote someone else first" is the
+useful message; `409 CONFLICT` for any other attempt to disable your own
+account.
 
 #### `POST /api/admin/god/broadcast`
 

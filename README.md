@@ -55,14 +55,14 @@ See [`docs/architecture.md`](docs/architecture.md) for the full design.
 ## Quickstart
 
 ```bash
-# Requires Node.js 20.19+ (or 22.12+)
+# Requires Node.js 22.12+ (see .nvmrc)
 npm install
 
 cp .env.example .env
 # edit .env — at minimum set NEXUS_SECRET_KEY and FERRUM_ADMIN_JWT_SECRET
 # (both at least 32 characters; FERRUM_ADMIN_URL defaults to http://127.0.0.1:9000)
 
-npm run migrate --workspace server
+npm run migrate   # builds shared, then applies migrations
 npm run dev
 ```
 
@@ -98,8 +98,18 @@ docker run --rm -p 8787:8787 \
   ferrum-nexus
 ```
 
-See [`docker/docker-compose.example.yml`](docker/docker-compose.example.yml)
-for a full stack alongside Postgres and a Ferrum Edge instance.
+For a full stack alongside Postgres and a Ferrum Edge instance, copy
+[`docker/docker-compose.example.yml`](docker/docker-compose.example.yml) and
+export its four required secrets first — compose refuses to start without them:
+
+```bash
+cp docker/docker-compose.example.yml docker-compose.yml
+export NEXUS_SECRET_KEY=$(openssl rand -hex 32)
+export NEXUS_DB_PASSWORD=$(openssl rand -hex 16)
+export FERRUM_ADMIN_JWT_SECRET=$(openssl rand -hex 32)
+export FERRUM_BASIC_AUTH_HMAC_SECRET=$(openssl rand -hex 32)
+docker compose up -d
+```
 
 ## Documentation
 

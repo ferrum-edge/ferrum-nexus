@@ -5,8 +5,10 @@
  *
  * 1. `onRequest` — resolve the `nexus_session` cookie into `request.session`
  *    and `request.currentUser`, applying expiry, account-status and sliding
- *    expiration rules. It never rejects: an anonymous request simply carries
- *    `null`, and the route's own guard decides whether that is acceptable.
+ *    expiration rules. When it slides the row it also re-issues both cookies
+ *    with a fresh `Max-Age`, so the browser's expiry tracks the database's.
+ *    It never rejects: an anonymous request simply carries `null`, and the
+ *    route's own guard decides whether that is acceptable.
  * 2. `onRequest` (after the first) — enforce the double-submit CSRF check on
  *    every mutating `/api` request that carries a session, except the
  *    pre-authentication auth endpoints.
@@ -41,6 +43,7 @@ import type { NexusStore, SessionRecord, UserRecord } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
 import { csrfMismatch, forbidden, unauthorized, userDisabled } from '../lib/errors.js';
 import { isoInSeconds } from '../lib/ids.js';
+import { setSessionCookies } from './session-cookies.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -113,7 +116,7 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (app, options) =
   app.decorateRequest('currentUser', null);
   app.decorateRequest('session', null);
 
-  app.addHook('onRequest', async (request: FastifyRequest) => {
+  app.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
     const token = request.cookies[SESSION_COOKIE];
     if (!token) return;
 
@@ -143,6 +146,11 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (app, options) =
       const expiresAt = isoInSeconds(config.sessionTtlSeconds);
       await store.sessions.touch(session.id, expiresAt);
       request.session = { ...session, expires_at: expiresAt };
+      // Extending only the row would leave the browser dropping both cookies at
+      // the wall-clock set when the session was issued, so a still-live session
+      // would look logged out. Re-stamp the pair with a fresh full-TTL Max-Age;
+      // the values are unchanged, so nothing about the session is rotated.
+      setSessionCookies(reply, config, { token, csrfToken: session.csrf_token });
     }
   });
 

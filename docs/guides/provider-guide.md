@@ -112,6 +112,13 @@ API Key is the usual default: simplest for callers, and the gateway hides the
 header from your upstream. Choose JWT when callers need short-lived
 credentials they mint themselves.
 
+> **HTTP Basic needs one piece of gateway configuration.** Publishing fails
+> unless the operator has set `FERRUM_BASIC_AUTH_HMAC_SECRET` (at least 32
+> bytes) on Ferrum Edge — it is the key the gateway hashes Basic passwords
+> with, and it refuses to build the plugin without one. The publish error
+> carries the gateway's own message in `details.gateway_message`; ask an
+> operator to set it and try again.
+
 ### Requestable
 
 **Requestable on** is the normal setting. It attaches an `access_control`

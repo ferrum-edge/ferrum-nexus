@@ -85,10 +85,17 @@ private address is outside what a hostname check can see either way.
 - **Cookie flags.** `nexus_session` is `HttpOnly`, `SameSite=Lax`, `Path=/`,
   `Max-Age=NEXUS_SESSION_TTL`, and `Secure` unless `NEXUS_COOKIE_SECURE=false`
   (the default outside `NEXUS_ENV=development`). Clear it only for a plaintext
-  `http://` deployment.
+  `http://` deployment. The pair is written in exactly one place —
+  `server/src/middleware/session-cookies.ts` — shared by the auth routes, the
+  password-change re-issue and the sliding-expiry hook, so the flags cannot
+  drift between them.
 - **Sliding expiry.** Default idle lifetime 12 hours (`NEXUS_SESSION_TTL`).
   Any request extends it, but the row is only written when less than half the
-  TTL remains, so an active SPA does not issue one `UPDATE` per request.
+  TTL remains, so an active SPA does not issue one `UPDATE` per request. A
+  request that does trigger the write also gets both cookies re-issued with a
+  fresh full-TTL `Max-Age` and their **existing** values — nothing is rotated,
+  only the lifetime moves, so the browser's expiry tracks `sessions.expires_at`
+  instead of the wall-clock stamped at sign-in.
 - **Revocation is immediate.** The `onRequest` hook re-reads the user on every
   request. A session whose account is expired, deleted or no longer `active` is
   destroyed on the spot — along with **every** session for that user — so the
@@ -159,33 +166,44 @@ the route, while "is this your API" is a property of the row.
 
 ### Capability matrix
 
-| Capability                                              | client | provider | admin | super_admin |
-| ------------------------------------------------------- | :----: | :------: | :---: | :---------: |
-| Register, sign in, manage own profile                   |   ✓    |    ✓     |   ✓   |      ✓      |
-| Browse catalog, read specs                              |   ✓    |    ✓     |   ✓   |      ✓      |
-| Request access, cancel own request                      |   ✓    |    ✓     |   ✓   |      ✓      |
-| Issue / rotate / revoke **own** credentials             |   ✓    |    ✓     |   ✓   |      ✓      |
-| Messaging, notifications                                |   ✓    |    ✓     |   ✓   |      ✓      |
-| Publish an API, update own API/spec                     |   —    |    ✓     |   ✓   |      ✓      |
-| Create a test consumer for own API                      |   —    |    ✓     |   ✓   |      ✓      |
-| Approve / deny requests on **own** APIs                 |   —    |    ✓     |   ✓   |      ✓      |
-| Revoke grants on **own** APIs                           |   —    |    ✓     |   ✓   |      ✓      |
-| Edit / delete **another** provider's API                |   —    |    —     |   ✓   |      ✓      |
-| Decide requests / revoke grants on **any** API          |   —    |    —     |   ✓   |      ✓      |
-| List all users; change `client` ⇄ `provider`            |   —    |    —     |   ✓   |      ✓      |
-| Manage organizations                                    |   —    |    —     |   ✓   |      ✓      |
-| List another account's credential metadata              |   —    |    —     |   ✓   |      ✓      |
-| Read/reply in the platform inbox; read any thread       |   —    |    —     |   ✓   |      ✓      |
-| Portal settings (branding, CAPTCHA, SMTP, registration) |   —    |    —     |   ✓   |      ✓      |
-| Email templates, mass email                             |   —    |    —     |   ✓   |      ✓      |
-| Read the audit log                                      |   —    |    —     |   ✓   |      ✓      |
-| Grant or revoke `admin` / `super_admin`                 |   —    |    —     | **—** |      ✓      |
-| Disable an `admin` or `super_admin`                     |   —    |    —     | **—** |      ✓      |
-| God mode (4 endpoints)                                  |   —    |    —     |   —   |      ✓      |
+| Capability                                        | client | provider | admin | super_admin |
+| ------------------------------------------------- | :----: | :------: | :---: | :---------: |
+| Register, sign in, manage own profile             |   ✓    |    ✓     |   ✓   |      ✓      |
+| Browse catalog, read specs                        |   ✓    |    ✓     |   ✓   |      ✓      |
+| Request access, cancel own request                |   ✓    |    ✓     |   ✓   |      ✓      |
+| Issue / rotate / revoke **own** credentials       |   ✓    |    ✓     |   ✓   |      ✓      |
+| Messaging, notifications                          |   ✓    |    ✓     |   ✓   |      ✓      |
+| Publish an API, update own API/spec               |   —    |    ✓     |   ✓   |      ✓      |
+| Create a test consumer for own API                |   —    |    ✓     |   ✓   |      ✓      |
+| Approve / deny requests on **own** APIs           |   —    |    ✓     |   ✓   |      ✓      |
+| Revoke grants on **own** APIs                     |   —    |    ✓     |   ✓   |      ✓      |
+| Edit / delete **another** provider's API          |   —    |    —     |   ✓   |      ✓      |
+| Decide requests / revoke grants on **any** API    |   —    |    —     |   ✓   |      ✓      |
+| List all users; change `client` ⇄ `provider`      |   —    |    —     |   ✓   |      ✓      |
+| Manage organizations                              |   —    |    —     |   ✓   |      ✓      |
+| List another account's credential metadata        |   —    |    —     |   ✓   |      ✓      |
+| Read/reply in the platform inbox; read any thread |   —    |    —     |   ✓   |      ✓      |
+| Portal settings: branding, registration policy    |   —    |    —     |   ✓   |      ✓      |
+| Email templates, mass email                       |   —    |    —     |   ✓   |      ✓      |
+| Read the audit log                                |   —    |    —     |   ✓   |      ✓      |
+| Portal settings: **SMTP and CAPTCHA**             |   —    |    —     | **—** |      ✓      |
+| Grant or revoke `admin` / `super_admin`           |   —    |    —     | **—** |      ✓      |
+| Disable an `admin` or `super_admin`               |   —    |    —     | **—** |      ✓      |
+| God mode (4 endpoints)                            |   —    |    —     |   —   |      ✓      |
 
-The two bolded gaps are the point of the `super_admin` tier: an `admin` has
+The three bolded gaps are the point of the `super_admin` tier: an `admin` has
 broad authority over content and users but **cannot escalate itself or another
-account**, and cannot switch off an administrator.
+account**, cannot switch off an administrator, and cannot take over the
+platform's mail.
+
+`smtp` and `captcha` are `super_admin`-only because they are escalation paths
+dressed as preferences. Whoever controls the SMTP host receives every
+verification and password-reset link the portal sends, which is an account
+takeover of every user; whoever controls the CAPTCHA settings can switch off
+the registration brake. `PUT /api/admin/settings` answers `403 FORBIDDEN` for
+an `admin` sending either section, and the check lives in the service, so it
+holds however `updateSettings` is reached. Branding and registration policy
+stay at `admin`.
 
 ### Scoping rules worth knowing
 
@@ -224,7 +242,9 @@ admins _excluding the target_, so it is genuinely asking "is anyone else left?".
 It is implemented twice on purpose — in `users/service.ts` for
 `PATCH /api/users/:id`, and again in `admin/god-service.ts`, because god mode
 does not route through the ordinary path. Disabling your own account is refused
-separately with `409 CONFLICT`.
+separately with `409 CONFLICT`, but the last-super-admin count is checked
+**first** on both paths: when the two rules collide, `LAST_SUPER_ADMIN` is the
+answer that says how to fix it — promote a second super admin.
 
 ### Disabling an account
 

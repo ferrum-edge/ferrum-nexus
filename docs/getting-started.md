@@ -14,7 +14,7 @@ without the SPA; the corresponding UI steps are noted as you go.
 
 ## 1. Prerequisites
 
-- **Node.js 20.19+** (or 22.12+) — see [`.nvmrc`](../.nvmrc).
+- **Node.js 22.12+** — see [`.nvmrc`](../.nvmrc).
 - **Docker**, for the Ferrum Edge gateway.
 - `curl` and `jq` for the examples.
 
@@ -28,22 +28,49 @@ Nexus is a front end for a gateway, so the gateway comes first. The only thing
 that has to match on both sides is the **admin JWT secret** (and, later, the
 namespace).
 
+The gateway image is distroless `nonroot` and runs as **UID 65532**, and it
+bakes in no `/data` directory. A brand-new named volume is therefore root-owned,
+so SQLite cannot create its database file and the container exits on startup.
+Create the volume and hand it to that user first — this is a one-time step:
+
+```bash
+docker volume create ferrum-data
+docker run --rm -v ferrum-data:/data alpine chown 65532:65532 /data
+```
+
+Then start the gateway:
+
 ```bash
 export FERRUM_ADMIN_JWT_SECRET="$(openssl rand -hex 32)"
+export FERRUM_BASIC_AUTH_HMAC_SECRET="$(openssl rand -hex 32)"
 
 docker run -d --name ferrum-edge \
   -p 127.0.0.1:8000:8000 \
   -p 127.0.0.1:9000:9000 \
+  --add-host=host.docker.internal:host-gateway \
   -e FERRUM_MODE=database \
   -e FERRUM_DB_TYPE=sqlite \
   -e FERRUM_DB_URL='sqlite:///data/ferrum.db?mode=rwc' \
   -e FERRUM_NAMESPACE=nexus \
   -e FERRUM_ADMIN_JWT_SECRET="$FERRUM_ADMIN_JWT_SECRET" \
+  -e FERRUM_BASIC_AUTH_HMAC_SECRET="$FERRUM_BASIC_AUTH_HMAC_SECRET" \
   -e FERRUM_ADMIN_BIND_ADDRESS=0.0.0.0 \
   -e FERRUM_ALLOW_INSECURE_ADMIN_HTTP=true \
   -v ferrum-data:/data \
   ferrumedge/ferrum-edge:latest run -m database
 ```
+
+Two additions worth explaining before you move on:
+
+- `--add-host=host.docker.internal:host-gateway` makes the hostname the
+  walkthrough uses for the upstream resolve inside the container. Docker
+  Desktop provides it anyway, so this is harmless there and **required** on
+  plain Linux, where it does not exist by default.
+- `FERRUM_BASIC_AUTH_HMAC_SECRET` (at least 32 bytes) is what the gateway hashes
+  Basic-auth passwords with. Set it now: without it the gateway refuses to build
+  the `basic_auth` plugin at all, so publishing a `basic_auth` API fails with a
+  `400` from Edge. Nexus passes the gateway's own message through in
+  `EDGE_ERROR.details.gateway_message`, which is where you will see it.
 
 Two ports, and confusing them is the most common first-run mistake:
 
@@ -86,14 +113,30 @@ FERRUM_ADMIN_URL=http://127.0.0.1:9000
 FERRUM_ADMIN_JWT_SECRET=<the same value you exported in step 2>
 FERRUM_NAMESPACE=nexus
 NEXUS_PUBLIC_URL=http://127.0.0.1:5173
+
+# Session cookies are `Secure` by default, which a browser will not store over
+# plain http. This walkthrough is http-only, so say so; production keeps the
+# default and serves the portal over https.
+NEXUS_ENV=development
+
+# Publishing refuses loopback, private-range and `.internal` upstreams unless
+# this is set — the walkthrough's `host.docker.internal` upstream is one of
+# them. Leave it unset (the default) anywhere the catalog is not fully trusted.
+NEXUS_ALLOW_PRIVATE_UPSTREAMS=true
 ```
 
 Then:
 
 ```bash
-npm run migrate --workspace server   # also runs automatically at startup
-npm run dev                          # backend :8787, web :5173
+npm run migrate   # also runs automatically at startup
+npm run dev       # backend :8787, web :5173
 ```
+
+> Run `npm run migrate` from the repo root, not
+> `npm run migrate --workspace server`: the server imports
+> `@ferrum-nexus/shared` from its build output, and only the root script builds
+> that workspace first. On a clean clone the workspace-level script fails until
+> you have run `npm run build --workspace shared` yourself.
 
 Confirm both halves are talking:
 
@@ -171,8 +214,15 @@ You need a backend for the gateway to forward to. Any HTTP service will do —
 for the walkthrough, run a throwaway echo server:
 
 ```bash
-docker run -d --name echo -p 127.0.0.1:8081:80 ealen/echo-server
+docker run -d --name echo -p 8081:80 ealen/echo-server
 ```
+
+Note the missing `127.0.0.1:` — the echo server is published on **all**
+interfaces on purpose. The gateway reaches it from inside its own container via
+the host's docker0/bridge address, which is not loopback, so a port published
+only on `127.0.0.1` would be unreachable and every proxied call would fail to
+connect. This opens port 8081 to your LAN for the length of the walkthrough;
+step 11 removes the container.
 
 Write a minimal OpenAPI 3.1 document. Nexus requires only `openapi` (3.x),
 `info.title`, `info.version` and a `paths` object; it is a portal, not a spec
@@ -211,9 +261,13 @@ paths:
 YAML
 ```
 
-> `host.docker.internal` is how the gateway container reaches a service on your
-> host (Docker Desktop). On plain Linux, use the host's LAN address or put both
-> containers on one network and use the service name.
+> `host.docker.internal` is how the gateway container reaches a service running
+> on your host. Docker Desktop defines it for you; on plain Linux it only exists
+> because of the `--add-host=host.docker.internal:host-gateway` flag in step 2.
+> If you started the gateway without that flag, add it and recreate the
+> container — or put both containers on one user-defined network
+> (`docker network create demo`, `--network demo` on each) and use `http://echo`
+> as the upstream instead.
 
 In the browser: **My APIs → Publish an API**, paste the document, choose the
 auth plugin, visibility and rate limit.
