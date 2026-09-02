@@ -30,6 +30,69 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - Agent-dispatch skills under `.claude/skills/` (`.agents/skills` is a
   symlink to the same tree) for delegating work to external CLI coding
   agents on isolated git worktrees.
+- **Self-service password reset** (`POST /api/auth/forgot-password`,
+  `POST /api/auth/reset-password`) and **re-sending a lost verification
+  email** (`POST /api/auth/resend-verification`), with a `password_reset`
+  email template, portal pages, and a "Forgot password?" link. All three
+  routes answer identically and take the same time whether or not the
+  address exists, is throttled or is disabled, so they cannot be used to
+  enumerate accounts. Email tokens now carry a `purpose`, so a verification
+  link can never be redeemed as a reset link.
+- **Per-API CORS policy** (`cors: { allowed_origins, allow_credentials }` on
+  publish and update), attached to the proxy as an Edge `cors` plugin.
+  Omitting it means the gateway adds no CORS headers.
+- **`upstream_url` on the API object** — the normalized backend the proxy was
+  last pointed at — returned by every list/get/publish/update response and
+  kept in sync on `PATCH` and spec-following updates.
+- `NEXUS_ALLOW_PRIVATE_UPSTREAMS` (default `false`): publishing refuses
+  loopback, private, link-local and `.internal`/`.local` upstreams unless a
+  deployment opts in. See `docs/security.md`.
+- `GET /api/health` distinguishes a gateway that answered `503` with
+  `ready: false` (`edge.status: "not_ready"`) from one that is unreachable
+  (`"down"`), and answers HTTP `503` itself only when the database is down.
+  The Docker image now ships a `HEALTHCHECK` on it.
+- A root `npm run migrate` script that builds `shared` first, so migrations
+  work on a clean clone.
+
+### Changed
+
+- Every Ferrum Edge admin JWT now carries an `ns` claim naming the configured
+  namespace, so a gateway running with `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true`
+  accepts Nexus.
+- `EDGE_ERROR` responses for a gateway `400`/`409`/`422` include the gateway's
+  own validation text in `details.gateway_message` (for example that
+  `FERRUM_BASIC_AUTH_HMAC_SECRET` must be set before a `basic_auth` API can be
+  published). `401`/`403`/`5xx` stay opaque.
+- Rate limits are capped at 1 000 000 requests per window, the ceiling Edge
+  enforces, instead of being accepted and then rejected by the gateway.
+- Changing SMTP or CAPTCHA settings requires `super_admin`; branding and the
+  registration policy stay at `admin`. The settings UI disables those sections
+  for other admins.
+- `engines.node` is `>=22.12` (two dependencies already required it); the
+  Vite dev server binds `127.0.0.1` so the documented URL works everywhere.
+- The getting-started walkthrough and the compose example work on Linux
+  out of the box: the Edge data volume is handed to the image's non-root
+  user, `host.docker.internal` is defined for the gateway container, and
+  `FERRUM_BASIC_AUTH_HMAC_SECRET` is set. Compose no longer hard-codes the
+  Postgres password.
+
+### Fixed
+
+- **Published APIs were unprotected on a live gateway.** Nexus created the
+  auth, access-control and rate-limit plugin configs but never listed them in
+  the proxy's `plugins[]`, which is what Ferrum Edge actually enforces; every
+  published API answered unauthenticated requests. Plugin configs are now
+  associated on publish and on every later change, and proxy writes are
+  read-modify-write so operator-set fields (hosts, timeouts, TLS,
+  `upstream_id`) and the associations survive an upstream move.
+- `GET /plugins/config` is paged; a namespace with more than 1000 plugin
+  configs could previously hide an API's own plugins from edits and cleanup.
+- Sliding sessions re-issue the session cookies, so the browser's cookie
+  lifetime tracks the server's instead of expiring at the original login
+  wall-clock.
+- God-mode disable of the acting last `super_admin` reports
+  `LAST_SUPER_ADMIN` rather than `CONFLICT`.
+- `GET /api/health` documented a gateway version it can never observe.
 
 ### Security
 
