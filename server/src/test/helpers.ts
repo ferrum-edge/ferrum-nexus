@@ -45,7 +45,7 @@ export const SAMPLE_SPEC_YAML = [
   '  version: 2.4.0',
   '  description: Invoices and payments.',
   'servers:',
-  '  - url: https://billing.internal:8443/v2',
+  '  - url: https://billing.example.com:8443/v2',
   'paths:',
   '  /invoices:',
   '    get:',
@@ -67,7 +67,7 @@ export const SAMPLE_SPEC_JSON = JSON.stringify(
   {
     openapi: '3.0.3',
     info: { title: 'Shipping API', version: '1.0.0' },
-    servers: [{ url: 'https://shipping.internal/api' }],
+    servers: [{ url: 'https://shipping.example.com/api' }],
     paths: { '/shipments': { get: { responses: { '200': { description: 'OK' } } } } },
   },
   null,
