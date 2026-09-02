@@ -4,7 +4,7 @@ Thanks for helping improve Ferrum Nexus!
 
 ## Prerequisites
 
-- Node.js 20.19+ (or 22.12+) — see `.nvmrc`.
+- Node.js 22.12+ — see `.nvmrc`.
 - A Ferrum Edge gateway for end-to-end work (unit and integration tests run
   against a built-in mock Admin API and need no gateway).
 
@@ -13,7 +13,7 @@ Thanks for helping improve Ferrum Nexus!
 ```bash
 npm install
 cp .env.example .env   # set NEXUS_SECRET_KEY, FERRUM_ADMIN_URL, FERRUM_ADMIN_JWT_SECRET
-npm run migrate --workspace server
+npm run migrate        # builds shared, then applies migrations
 npm run dev            # backend on :8787, web on :5173
 ```
 

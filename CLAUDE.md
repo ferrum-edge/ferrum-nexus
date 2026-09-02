@@ -25,7 +25,8 @@ Run from repo root unless noted.
 npm install                              # install all workspaces
 
 cp .env.example .env                     # then set NEXUS_SECRET_KEY + FERRUM_ADMIN_URL + FERRUM_ADMIN_JWT_SECRET
-npm run migrate --workspace server       # apply migrations (also runs automatically at server startup)
+npm run migrate                          # build shared + apply migrations (also runs at server startup)
+                                         # `npm run migrate --workspace server` needs shared built first
 
 npm run dev                              # concurrently: server (tsx watch) + web (vite). Backend :8787, web :5173
 
