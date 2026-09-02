@@ -31,9 +31,28 @@ function shouldToast(error: unknown, meta: Record<string, unknown> | undefined):
   return true;
 }
 
-function describe(error: unknown): string {
-  if (ApiError.is(error)) return error.message;
-  return error instanceof Error ? error.message : 'Unexpected error';
+/**
+ * Text shown in the failure toast.
+ *
+ * An `EDGE_ERROR` from a gateway validation refusal (400/409/422) carries
+ * `details.gateway_message` — the gateway's own reason, e.g.
+ * "FERRUM_BASIC_AUTH_HMAC_SECRET must be set…". A provider cannot act on
+ * "the gateway rejected the request" alone, so the reason is appended when the
+ * message does not already contain it.
+ */
+export function describeError(error: unknown): string {
+  if (!ApiError.is(error)) {
+    return error instanceof Error ? error.message : 'Unexpected error';
+  }
+  const details = error.details;
+  const gatewayMessage =
+    details !== null && typeof details === 'object' && 'gateway_message' in details
+      ? (details as { gateway_message?: unknown }).gateway_message
+      : undefined;
+  if (typeof gatewayMessage !== 'string' || gatewayMessage === '') return error.message;
+  return error.message.includes(gatewayMessage)
+    ? error.message
+    : `${error.message} — ${gatewayMessage}`;
 }
 
 const queryClient = new QueryClient({
@@ -48,14 +67,14 @@ const queryClient = new QueryClient({
   queryCache: new QueryCache({
     onError: (error, query) => {
       if (shouldToast(error, query.meta)) {
-        emitToast('Could not load data', { description: describe(error), variant: 'error' });
+        emitToast('Could not load data', { description: describeError(error), variant: 'error' });
       }
     },
   }),
   mutationCache: new MutationCache({
     onError: (error, _variables, _context, mutation) => {
       if (shouldToast(error, mutation.meta)) {
-        emitToast('Request failed', { description: describe(error), variant: 'error' });
+        emitToast('Request failed', { description: describeError(error), variant: 'error' });
       }
     },
   }),
