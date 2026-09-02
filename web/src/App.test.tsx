@@ -1,7 +1,8 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ERROR_CODES } from '@ferrum-nexus/shared';
-import { App } from './App';
+import { App, describeError } from './App';
+import { ApiError } from './lib/api';
 
 /**
  * Smoke test for the whole provider + router composition: an unauthenticated
@@ -66,5 +67,38 @@ describe('App', () => {
     expect(await screen.findByText('Acme Developer Portal')).toBeInTheDocument();
     // Nothing from the authenticated shell leaks into the public page.
     expect(screen.queryByRole('navigation', { name: 'Primary' })).not.toBeInTheDocument();
+  });
+});
+
+describe('describeError', () => {
+  const edgeError = (message: string, details?: unknown): ApiError =>
+    new ApiError(ERROR_CODES.EDGE_ERROR, message, 502, details);
+
+  it('appends the gateway’s own reason so a provider can act on it', () => {
+    const error = edgeError('The gateway rejected the request', {
+      status: 400,
+      gateway_message: 'FERRUM_BASIC_AUTH_HMAC_SECRET must be set',
+    });
+    expect(describeError(error)).toBe(
+      'The gateway rejected the request — FERRUM_BASIC_AUTH_HMAC_SECRET must be set',
+    );
+  });
+
+  it('does not repeat a reason the message already carries', () => {
+    const error = edgeError('The gateway rejected the request: listen_path already exists', {
+      status: 409,
+      gateway_message: 'listen_path already exists',
+    });
+    expect(describeError(error)).toBe(
+      'The gateway rejected the request: listen_path already exists',
+    );
+  });
+
+  it('falls back to the message when there is no gateway detail', () => {
+    expect(describeError(edgeError('The gateway rejected the request', { status: 500 }))).toBe(
+      'The gateway rejected the request',
+    );
+    expect(describeError(new Error('boom'))).toBe('boom');
+    expect(describeError('not an error')).toBe('Unexpected error');
   });
 });

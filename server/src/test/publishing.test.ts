@@ -492,6 +492,78 @@ describe('publishing', () => {
       assert.equal(response.statusCode, 403);
       assert.equal(errorCode(response.body), 'FORBIDDEN');
     });
+
+    it('hands the provider the gateway’s reason for a validation refusal', async () => {
+      // Publishing a basic_auth API against a gateway with no
+      // FERRUM_BASIC_AUTH_HMAC_SECRET is the canonical case: the provider can
+      // do nothing about it until they can read why the plugin was refused.
+      const gatewayText =
+        'FERRUM_BASIC_AUTH_HMAC_SECRET must be set to accept basic_auth credentials';
+      harness.edge.queueFailure(400, { error: gatewayText }, '/plugins/config', 'POST');
+
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'basic-auth-refused', auth_plugin: 'basic_auth' }),
+      });
+      assert.equal(response.statusCode, 502);
+
+      const body = JSON.parse(response.body) as ApiErrorBody;
+      assert.equal(body.error.code, 'EDGE_ERROR');
+      assert.match(body.error.message, /FERRUM_BASIC_AUTH_HMAC_SECRET/);
+      const details = body.error.details as { status: number; gateway_message: string };
+      assert.equal(details.status, 400);
+      assert.equal(details.gateway_message, gatewayText);
+
+      // The proxy created before the failing plugin is still rolled back.
+      assert.equal(harness.edge.proxyByName('nexus-basic-auth-refused'), undefined);
+    });
+
+    it('finds this API’s plugins on a gateway holding more than one page of them', async () => {
+      // `GET /plugins/config` has no proxy_id filter and Edge clamps `limit` to
+      // 1000, so a single-page read silently truncated on any busy gateway.
+      const noiseProxyId = 'pagination-noise-proxy';
+      harness.edge.proxies.set(`nexus/${noiseProxyId}`, {
+        id: noiseProxyId,
+        namespace: 'nexus',
+        listen_path: '/nexus/pagination-noise',
+        backend_host: 'noise.internal',
+        backend_port: 443,
+      });
+      for (let index = 0; index < 1_200; index += 1) {
+        const id = `noise-${index}`;
+        harness.edge.pluginConfigs.set(`nexus/${id}`, {
+          id,
+          namespace: 'nexus',
+          plugin_name: 'key_auth',
+          scope: 'proxy',
+          proxy_id: noiseProxyId,
+          enabled: true,
+          config: {},
+        });
+      }
+
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'paginated' }),
+      });
+      assert.equal(response.statusCode, 201);
+      const proxyId = response.json<PublishApiResponse>().api.ferrum_proxy_id;
+      assert.ok(proxyId);
+
+      const attached = await harness.edgeClient.pluginConfigs.listByProxy(proxyId);
+      assert.deepEqual(
+        attached.map((config) => config.plugin_name).sort(),
+        ['access_control', 'key_auth'],
+        'the scan must page past the 1000-row clamp instead of truncating',
+      );
+      assert.equal(
+        (await harness.edgeClient.pluginConfigs.listByProxy(noiseProxyId)).length,
+        1_200,
+        'every page of the noisy proxy’s configs is visited too',
+      );
+    });
   });
 
   describe('update', () => {

@@ -8,9 +8,18 @@
  *
  * - HS256 admin JWT verification: required `iss`/`sub`/`iat`/`nbf`/`exp`/`jti`/
  *   `role` claims, and an `aud` claim is **rejected** unless the mock was
- *   configured with an audience (§1.3).
+ *   configured with an audience (§1.3). A malformed `ns` claim is a `401`
+ *   whether or not namespace enforcement is on, and with
+ *   {@link MockFerrumEdgeOptions.requireNamespaceClaim} a namespace-scoped
+ *   route the claim does not authorize is a `403`.
  * - `X-Ferrum-Namespace` scoping for every namespaced route, with `ferrum` as
  *   the default (§1.6).
+ * - `GET /health` and `/status` answer **`503` with the full payload** whenever
+ *   `ready` is false, exactly as Edge does while `starting`, `draining` or
+ *   `unavailable`.
+ * - Proxy `plugins[]` associations: an id must resolve inside the namespace,
+ *   appear once, and be proxy- or proxy_group-scoped — never global, and never
+ *   a proxy-scoped config aimed at a different proxy.
  * - Consumers: one unique keyspace across `id`/`username`/`custom_id` (§4.2),
  *   `PUT` whole-resource replace with the credential-preservation rules
  *   (§4.4), and the closed read projection — `keyauth.key` and `jwt.secret`
@@ -63,6 +72,16 @@ export interface MockFerrumEdgeOptions {
   audience?: string;
   /** Cap enforced by the credential append endpoint. Defaults to 2. */
   maxCredentialsPerType?: number;
+  /**
+   * Stand in for the gateway's `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true`.
+   *
+   * When set, every namespace-scoped route (`/consumers`, `/proxies`,
+   * `/plugins/config`) requires the token's `ns` claim to authorize the
+   * `X-Ferrum-Namespace` of the request, and `GET`/`DELETE /namespaces/{name}`
+   * requires it to authorize that name. A token with no `ns` at all is refused
+   * — tenancy intent must be explicit.
+   */
+  requireNamespaceClaim?: boolean;
 }
 
 /** A queued synthetic failure, consumed by the next matching request. */
@@ -89,7 +108,12 @@ export interface MockFerrumEdge {
   stop(): Promise<void>;
   /** Clear stored resources, recorded requests and queued failures. */
   reset(): void;
-  /** Replace the payload returned by the authenticated `GET /health`. */
+  /**
+   * Replace the payload returned by `GET /health` and `GET /status`.
+   *
+   * A payload with `ready: false` is served with **HTTP 503**, the way Edge
+   * reports `starting` / `draining` / `unavailable`; anything else is a 200.
+   */
   setHealth(payload: Record<string, unknown>): void;
   /**
    * Make the next matching request fail with `status` and `body`.
@@ -118,8 +142,25 @@ export interface MockFerrumEdge {
   consumerByUsername(username: string, namespace?: string): StoredConsumer | undefined;
   /** The stored proxy with this `name` (`nexus-<slug>`), or `undefined`. */
   proxyByName(name: string, namespace?: string): Record<string, unknown> | undefined;
-  /** Every plugin config attached to a proxy, in creation order. */
+  /**
+   * Every plugin config whose `proxy_id` names this proxy, in creation order.
+   *
+   * **This is not what the gateway runs.** Live Edge only installs a
+   * proxy-scoped config once the proxy's own `plugins[]` carries an
+   * association with its id (`plugin_cache.rs`
+   * `scoped_plugin_config_applies_to_proxy`); a config with a matching
+   * `proxy_id` and no association is inert. Use this helper to assert what was
+   * *written*, and {@link MockFerrumEdge.effectivePluginsForProxy} to assert
+   * what would actually *run*.
+   */
   pluginsForProxy(proxyId: string, namespace?: string): Record<string, unknown>[];
+  /**
+   * The plugin configs Edge would actually execute for this proxy: every
+   * enabled config referenced from the proxy's `plugins[]` that its scope lets
+   * attach, plus the enabled global configs no such scoped config of the same
+   * `plugin_name` shadows.
+   */
+  effectivePluginsForProxy(proxyId: string, namespace?: string): Record<string, unknown>[];
   /** The single plugin config of `pluginName` on a proxy, or `undefined`. */
   pluginForProxy(
     proxyId: string,
@@ -135,18 +176,76 @@ const REDACTED = '[REDACTED]';
 const REDACTABLE_TYPES = new Set(['keyauth', 'jwt', 'hmac_auth']);
 const KNOWN_CREDENTIAL_TYPES = new Set(['basicauth', 'keyauth', 'jwt', 'hmac_auth', 'mtls_auth']);
 
+/**
+ * Every field Edge's `Proxy` deserializer accepts, from the openapi `Proxy`
+ * schema minus the `#[serde(skip)]` derived-only members (`dispatch_kind`,
+ * `resolved_tls`, `dispatch_port_overrides`, `h2_upgrade_policy`,
+ * `pool_http1_max_pending_requests`, `pending_limit_scope`,
+ * `compiled_stream_match`). The struct carries `deny_unknown_fields`, so
+ * anything outside this set is a 400.
+ *
+ * `namespace`, `created_at` and `updated_at` **are** accepted (they have serde
+ * defaults) but are server-owned: the namespace comes from
+ * `X-Ferrum-Namespace` and the timestamps from the server, so a value sent for
+ * them is overwritten rather than honoured. Nexus writes only a narrow HTTP
+ * subset; the rest is here so a test can represent an operator-enriched proxy.
+ */
 const PROXY_KEYS = new Set([
   'id',
   'name',
-  'listen_path',
+  'namespace',
   'hosts',
+  'listen_path',
   'backend_scheme',
   'backend_host',
   'backend_port',
   'backend_path',
   'strip_listen_path',
   'preserve_host_header',
+  'backend_connect_timeout_ms',
+  'backend_read_timeout_ms',
+  'backend_write_timeout_ms',
+  'backend_tls_client_cert_path',
+  'backend_tls_client_key_path',
+  'backend_tls_verify_server_cert',
+  'backend_tls_server_ca_cert_path',
+  'dns_override',
+  'dns_cache_ttl_seconds',
+  'auth_mode',
   'plugins',
+  'pool_idle_timeout_seconds',
+  'pool_enable_http_keep_alive',
+  'pool_enable_http2',
+  'pool_tcp_keepalive_seconds',
+  'pool_http2_keep_alive_interval_seconds',
+  'pool_http2_keep_alive_timeout_seconds',
+  'pool_http2_initial_stream_window_size',
+  'pool_http2_initial_connection_window_size',
+  'pool_http2_adaptive_window',
+  'pool_http2_max_frame_size',
+  'pool_http2_max_concurrent_streams',
+  'pool_http3_connections_per_backend',
+  'pool_max_requests_per_connection',
+  'upstream_id',
+  'upstream_subset',
+  'api_spec_id',
+  'circuit_breaker',
+  'retry',
+  'response_body_mode',
+  'listen_port',
+  'frontend_tls',
+  'passthrough',
+  'tcp_idle_timeout_seconds',
+  'stream_proxy_protocol',
+  'backend_proxy_protocol',
+  'stream_match',
+  'websocket_idle_timeout_seconds',
+  'udp_idle_timeout_seconds',
+  'udp_max_response_amplification_factor',
+  'allowed_methods',
+  'allowed_ws_origins',
+  'created_at',
+  'updated_at',
 ]);
 
 /**
@@ -186,6 +285,16 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
     'redis_pool_size',
     'redis_failure_policy',
   ],
+  cors: [
+    'allowed_origins',
+    'allowed_methods',
+    'allowed_headers',
+    'exposed_headers',
+    'allow_credentials',
+    'max_age',
+    'preflight_continue',
+    'unmatched_preflights',
+  ],
 };
 
 const RATE_LIMIT_RULE_KEYS = new Set([
@@ -198,14 +307,42 @@ const RATE_LIMIT_RULE_KEYS = new Set([
   'max_requests',
 ]);
 
+/**
+ * Inclusive bounds on every numeric `rate_limiting` rule field (openapi
+ * `RateLimitingRuleConfig`). Edge rejects an out-of-range quota with a 400, so
+ * a "generous" limit typed with one digit too many fails here too rather than
+ * being silently accepted by a permissive fake.
+ */
+const RATE_LIMIT_RULE_BOUNDS: Readonly<Record<string, readonly [number, number]>> = {
+  requests_per_second: [1, 1_000_000],
+  requests_per_minute: [1, 1_000_000],
+  requests_per_hour: [1, 1_000_000],
+  max_requests: [1, 1_000_000],
+  // 2678400 = 31 days, so the window stays a representable Redis TTL.
+  window_seconds: [1, 2_678_400],
+};
+
+/** `cors.allowed_origins` is required and bounded at 64 entries. */
+const MAX_CORS_ORIGINS = 64;
+
+/**
+ * Every field Edge's `PluginConfig` deserializer accepts (openapi
+ * `PluginConfig`); `deny_unknown_fields` makes anything else a 400.
+ * `namespace`, `created_at` and `updated_at` are accepted but server-owned.
+ */
 const PLUGIN_CONFIG_KEYS = new Set([
   'id',
   'plugin_name',
+  'namespace',
   'config',
   'scope',
   'proxy_id',
   'enabled',
   'priority_override',
+  'trigger',
+  'api_spec_id',
+  'created_at',
+  'updated_at',
 ]);
 
 const CONSUMER_KEYS = new Set(['id', 'username', 'custom_id', 'credentials', 'acl_groups']);
@@ -226,7 +363,12 @@ function nowIso(): string {
 function validatePluginConfig(pluginName: string, config: unknown): string | null {
   const allowed = PLUGIN_CONFIG_ALLOWED_KEYS[pluginName];
   if (allowed === undefined) return null;
-  if (config === null || config === undefined) return null;
+  if (config === null || config === undefined) {
+    // `cors` has a required field, so an absent config is not an empty one.
+    return pluginName === 'cors'
+      ? "cors: 'allowed_origins' is required and must list at least one origin"
+      : null;
+  }
   if (!isRecord(config)) return `${pluginName}: config must be a JSON object`;
 
   const keys = Object.keys(config);
@@ -294,6 +436,26 @@ function validatePluginConfig(pluginName: string, config: unknown): string | nul
       if (custom && (rule.window_seconds === undefined || rule.max_requests === undefined)) {
         return "rate_limiting: 'window_seconds' and 'max_requests' are required together";
       }
+      for (const [field, [min, max]] of Object.entries(RATE_LIMIT_RULE_BOUNDS)) {
+        const value = rule[field];
+        if (value === undefined) continue;
+        if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
+          return `rate_limiting: '${field}' must be an integer between ${min} and ${max}`;
+        }
+      }
+    }
+  }
+
+  if (pluginName === 'cors') {
+    const origins = config.allowed_origins;
+    if (!Array.isArray(origins) || origins.length === 0) {
+      return "cors: 'allowed_origins' is required and must list at least one origin";
+    }
+    if (origins.length > MAX_CORS_ORIGINS) {
+      return `cors: 'allowed_origins' accepts at most ${MAX_CORS_ORIGINS} entries`;
+    }
+    if (config.preflight_continue !== undefined && config.unmatched_preflights !== undefined) {
+      return "cors: 'preflight_continue' and 'unmatched_preflights' are mutually exclusive";
     }
   }
 
@@ -337,6 +499,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   const issuer = options.issuer ?? 'ferrum-edge';
   const audience = options.audience;
   const maxCredentials = options.maxCredentialsPerType ?? 2;
+  const requireNamespaceClaim = options.requireNamespaceClaim ?? false;
 
   const consumers = new Map<string, StoredConsumer>();
   const proxies = new Map<string, Record<string, unknown>>();
@@ -422,10 +585,48 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       if (audience !== undefined && claims.aud !== audience) {
         return new Error('Token audience mismatch');
       }
+      // A garbled tenancy claim is refused at authentication time whether or
+      // not enforcement is on — it must never widen access.
+      if (claims.ns !== undefined && namespacesInClaim(claims.ns) === null) {
+        return new Error('Malformed "ns" claim');
+      }
       return claims;
     } catch (error) {
       return new Error(error instanceof Error ? error.message : 'Invalid token');
     }
+  }
+
+  /**
+   * The namespaces an `ns` claim authorizes, or `null` when it is malformed.
+   *
+   * Edge accepts a single string (`"ns": "prod"`) or an array of strings
+   * (`"ns": ["prod", "staging"]`). Non-string entries and empty strings are
+   * malformed.
+   */
+  function namespacesInClaim(claim: unknown): string[] | null {
+    if (typeof claim === 'string') return claim === '' ? null : [claim];
+    if (!Array.isArray(claim) || claim.length === 0) return null;
+    const names: string[] = [];
+    for (const entry of claim) {
+      if (typeof entry !== 'string' || entry === '') return null;
+      names.push(entry);
+    }
+    return names;
+  }
+
+  /**
+   * Whether `claims` may address `namespace`, mirroring the gateway's
+   * `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true`. With enforcement off every
+   * token addresses every namespace; with it on, a token carrying no `ns` at
+   * all is refused because tenancy intent must be explicit.
+   */
+  function claimAuthorizesNamespace(
+    claims: Record<string, unknown> | null,
+    namespace: string,
+  ): boolean {
+    if (!requireNamespaceClaim) return true;
+    const allowed = namespacesInClaim(claims?.ns);
+    return allowed !== null && allowed.includes(namespace);
   }
 
   async function readBody(req: IncomingMessage): Promise<unknown> {
@@ -627,6 +828,62 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     return result;
   }
 
+  /**
+   * Validate a proxy's `plugins[]` the way Edge's
+   * `validate_proxy_plugin_associations` does, returning the joined 400 text or
+   * `null`.
+   *
+   * The association id is resolved **namespace-locally**, so a config in
+   * another tenant reads as non-existent rather than leaking across.
+   */
+  function proxyAssociationError(
+    proxyId: string,
+    namespace: string,
+    plugins: unknown,
+  ): string | null {
+    if (plugins === undefined || plugins === null) return null;
+    if (!Array.isArray(plugins)) return 'plugins must be an array of plugin associations';
+
+    const errors: string[] = [];
+    const seen = new Set<string>();
+    for (const association of plugins) {
+      if (!isRecord(association) || typeof association.plugin_config_id !== 'string') {
+        return 'plugins entries must be objects carrying a string plugin_config_id';
+      }
+      const configId = association.plugin_config_id;
+      if (seen.has(configId)) {
+        errors.push(`Proxy '${proxyId}' references plugin_config '${configId}' more than once`);
+        continue;
+      }
+      seen.add(configId);
+
+      const config = pluginConfigs.get(key(namespace, configId));
+      if (!config) {
+        errors.push(`Proxy '${proxyId}' references non-existent plugin_config '${configId}'`);
+        continue;
+      }
+      if (config.scope === 'global') {
+        errors.push(
+          `Proxy '${proxyId}' references plugin_config '${configId}' with scope 'global' — proxy associations may only reference proxy-scoped or proxy_group-scoped plugin configs`,
+        );
+        continue;
+      }
+      if (config.scope === 'proxy' && config.proxy_id !== proxyId) {
+        errors.push(
+          `Proxy '${proxyId}' references plugin_config '${configId}' targeted to proxy '${String(config.proxy_id ?? '<none>')}'`,
+        );
+        continue;
+      }
+      if (config.scope === 'proxy_group' && config.proxy_id != null) {
+        errors.push(
+          `Proxy '${proxyId}' references proxy_group plugin_config '${configId}' with proxy_id '${String(config.proxy_id)}'`,
+        );
+      }
+    }
+
+    return errors.length === 0 ? null : `Invalid proxy plugin associations: ${errors.join('; ')}`;
+  }
+
   function handleProxies(
     res: ServerResponse,
     method: string,
@@ -656,9 +913,12 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
           (proxy) => proxy.namespace === namespace && proxy.listen_path === body.listen_path,
         );
         if (duplicate) return fail(res, 409, 'listen_path already exists in this namespace');
+        const newId = typeof body.id === 'string' && body.id !== '' ? body.id : randomUUID();
+        const associationProblem = proxyAssociationError(newId, namespace, body.plugins);
+        if (associationProblem) return fail(res, 400, associationProblem);
         const proxy = {
           ...body,
-          id: typeof body.id === 'string' && body.id !== '' ? body.id : randomUUID(),
+          id: newId,
           namespace,
           strip_listen_path: body.strip_listen_path ?? true,
           created_at: nowIso(),
@@ -680,6 +940,8 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       for (const field of Object.keys(body)) {
         if (!PROXY_KEYS.has(field)) return fail(res, 400, `unknown field: ${field}`);
       }
+      const associationProblem = proxyAssociationError(id, namespace, body.plugins);
+      if (associationProblem) return fail(res, 400, associationProblem);
       const updated = {
         ...body,
         id,
@@ -871,6 +1133,20 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       return fail(res, 403, `Admin role '${String(claims?.role)}' cannot access this endpoint`);
     }
 
+    // Namespace-scoped surfaces are selected by `X-Ferrum-Namespace`; the
+    // `/namespaces/{name}` registry routes are selected by the name in the path.
+    const scopedNamespace =
+      segments[0] === 'consumers' || segments[0] === 'proxies'
+        ? namespace
+        : segments[0] === 'plugins' && segments[1] === 'config'
+          ? namespace
+          : segments[0] === 'namespaces' && segments[1] !== undefined
+            ? decodeURIComponent(segments[1])
+            : null;
+    if (scopedNamespace !== null && !claimAuthorizesNamespace(claims, scopedNamespace)) {
+      return fail(res, 403, `Token is not authorized for namespace '${scopedNamespace}'`);
+    }
+
     const failure = failures.find(
       (entry) =>
         (entry.pathContains === undefined || url.pathname.includes(entry.pathContains)) &&
@@ -884,7 +1160,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     switch (segments[0]) {
       case 'health':
       case 'status':
-        return send(res, 200, health);
+        // Edge serves the *complete* payload with a 503 while it is
+        // `starting`, `draining` or `unavailable` — not an error body.
+        return send(res, health.ready === false ? 503 : 200, health);
       case 'version':
         // Real Edge has no /version; the mock answers 404 so the client's
         // tolerant probe is exercised.
@@ -905,6 +1183,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
             'basic_auth',
             'jwt_auth',
             'access_control',
+            'cors',
             'rate_limiting',
           ]);
         }
@@ -1000,6 +1279,39 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       return [...pluginConfigs.values()].filter(
         (config) => config.namespace === namespace && config.proxy_id === proxyId,
       );
+    },
+
+    effectivePluginsForProxy(proxyId, namespace = 'nexus'): Record<string, unknown>[] {
+      const proxy = proxies.get(key(namespace, proxyId));
+      if (!proxy) return [];
+      const associated = new Set(
+        (Array.isArray(proxy.plugins) ? proxy.plugins : [])
+          .filter(isRecord)
+          .map((association) => String(association.plugin_config_id)),
+      );
+
+      // A scoped config runs only when the proxy associates it, and a
+      // proxy-scoped one additionally has to name this proxy.
+      const scopedApplies = (config: Record<string, unknown>): boolean => {
+        if (config.namespace !== namespace || config.enabled === false) return false;
+        if (config.scope === 'proxy') {
+          return config.proxy_id === proxyId && associated.has(String(config.id));
+        }
+        if (config.scope === 'proxy_group') return associated.has(String(config.id));
+        return false;
+      };
+
+      const scoped = [...pluginConfigs.values()].filter(scopedApplies);
+      // A global config is shadowed by any scoped config of the same plugin
+      // that applies to this proxy.
+      const globals = [...pluginConfigs.values()].filter(
+        (config) =>
+          config.namespace === namespace &&
+          config.enabled !== false &&
+          config.scope === 'global' &&
+          !scoped.some((candidate) => candidate.plugin_name === config.plugin_name),
+      );
+      return [...globals, ...scoped];
     },
 
     pluginForProxy(proxyId, pluginName, namespace = 'nexus'): Record<string, unknown> | undefined {

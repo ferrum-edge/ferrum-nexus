@@ -444,9 +444,30 @@ export interface AppHealth {
 /** Supported persistence backends. */
 export type DbDriver = 'sqlite' | 'postgres' | 'mysql' | 'mongodb';
 
+/**
+ * Coarse verdict for the gateway.
+ *
+ * `not_ready` is its own state on purpose: Edge answers `503` with a complete
+ * health payload while it is `starting`, `draining` or `unavailable`, which is
+ * a reachable gateway reporting itself unready — not an unreachable one.
+ */
+export type EdgeHealthStatus = 'ok' | 'not_ready' | 'down';
+
 /** Health of the Ferrum Edge Admin API, as reported by `GET /api/health/edge`. */
-export interface EdgeHealth extends DependencyHealth {
-  /** Edge version string when the probe succeeded. */
+export interface EdgeHealth extends Omit<DependencyHealth, 'status'> {
+  status: EdgeHealthStatus;
+  /** Edge's own readiness verdict, or `null` when it did not answer. */
+  ready: boolean | null;
+  /** Gateway operating mode (`database`, `file`, `cp`, `dp`, …), or `null`. */
+  mode: string | null;
+  /** Whether the gateway will currently accept config writes, or `null`. */
+  admin_writes_enabled: boolean | null;
+  /**
+   * Gateway version string.
+   *
+   * Always `null` against a stock gateway — Ferrum Edge exposes **no version
+   * endpoint**. Take the real version from your deployment metadata.
+   */
   edge_version: string | null;
   namespace: string;
 }

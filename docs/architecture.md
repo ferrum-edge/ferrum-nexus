@@ -44,10 +44,13 @@ Three rules define the boundary, and every change has to keep all three true:
    arrives → the session is resolved → CSRF is checked → the route's role guard
    runs → the service checks row-level ownership → the Edge call is made → an
    `audit_logs` row is written. Skipping any step is a bug, not a shortcut.
-3. **Nexus never echoes upstream text to a browser.** Edge's flat
+3. **Upstream text crosses to a browser in exactly one case.** Edge's flat
    `{"error": "..."}` bodies can carry operator-facing configuration detail, so
-   `ferrum-admin/client.ts` logs them and returns a generic `EDGE_ERROR` /
-   `EDGE_UNAVAILABLE` to the caller.
+   `ferrum-admin/client.ts` logs every one of them and answers a generic
+   `EDGE_ERROR` / `EDGE_UNAVAILABLE`. The exception is a gateway **validation**
+   refusal (`400`, `409`, `422`), which is Edge judging the caller's own
+   request: that text is echoed in `details.gateway_message`. `401`, `403` and
+   `5xx` are never echoed. `classify()` is the only place this is decided.
 
 The only unauthenticated read in the whole API is `GET /api/branding`, which
 exists so the login page can render with the right name, logo and colours
@@ -263,16 +266,17 @@ Above it, the codebase deals in domain objects and `NexusError`s.
 Edge verifies HS256 tokens and rejects one that is missing any required claim.
 `jwt.ts` mints exactly:
 
-| Claim          | Value                                                                                                               |
-| -------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `alg` (header) | `HS256`                                                                                                             |
-| `iss`          | `FERRUM_ADMIN_JWT_ISSUER` — **must equal the gateway's configured issuer** (default `ferrum-edge`)                  |
-| `sub`          | `ferrum-nexus` by default; overridden per call with the acting Nexus user id, so Edge's own audit log names a human |
-| `iat`, `nbf`   | now (identical)                                                                                                     |
-| `exp`          | `iat + FERRUM_ADMIN_JWT_TTL` (default 60s; Edge caps at 3600)                                                       |
-| `jti`          | fresh UUID                                                                                                          |
-| `role`         | `admin`                                                                                                             |
-| `aud`          | **omitted unless** `FERRUM_ADMIN_JWT_AUDIENCE` is set — an unexpected `aud` is rejected outright                    |
+| Claim          | Value                                                                                                                                                        |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `alg` (header) | `HS256`                                                                                                                                                      |
+| `iss`          | `FERRUM_ADMIN_JWT_ISSUER` — **must equal the gateway's configured issuer** (default `ferrum-edge`)                                                           |
+| `sub`          | `ferrum-nexus` by default; overridden per call with the acting Nexus user id, so Edge's own audit log names a human                                          |
+| `iat`, `nbf`   | now (identical)                                                                                                                                              |
+| `exp`          | `iat + FERRUM_ADMIN_JWT_TTL` (default 60s; Edge caps at 3600)                                                                                                |
+| `jti`          | fresh UUID                                                                                                                                                   |
+| `role`         | `admin`                                                                                                                                                      |
+| `ns`           | `FERRUM_NAMESPACE`, always stamped as a plain string — required by a gateway running `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true`, ignored by one that is not |
+| `aud`          | **omitted unless** `FERRUM_ADMIN_JWT_AUDIENCE` is set — an unexpected `aud` is rejected outright                                                             |
 
 Tokens are cached in a 256-entry LRU keyed by every signing input (the secret
 is hashed into the key, never stored in it) and re-minted once the remaining
@@ -286,6 +290,19 @@ gateway answered non-2xx). A `503` carrying `applied: false` is special: the
 write **is durable**, it just is not live yet. It surfaces as `EDGE_ERROR` with
 an explicit message and is never retried automatically, because a blind retry
 of a create would `409`.
+
+Edge's error text is echoed to the caller only on a **validation** refusal
+(`400`, `409`, `422`), in `details.gateway_message` — those messages are about
+the caller's own request. `401`, `403` and `5xx` stay opaque; see
+[`security.md` §9](security.md#9-ferrum-edge-admin-jwt-hygiene).
+
+`GET /health` is the one endpoint where a non-2xx is not a failure: Edge answers
+`503` with a **complete** health payload while it is `starting`, `draining` or
+`unavailable`, so `health()` parses that body and `probe()` reports
+`reachable: true, ready: false`. `/api/health` renders it as
+`edge.status = "not_ready"`, distinct from an unreachable `"down"`. There is no
+`/version` endpoint on Edge at all, so `edge_version` is always `null` against a
+stock gateway.
 
 ### 5.2 `serializePerKey`, and the concurrency hazard it fixes
 
