@@ -307,6 +307,121 @@ describe('publishing', () => {
       assert.equal(response.json<PublishApiResponse>().api.slug, 'payments-gateway-v3');
     });
 
+    it("records the normalized upstream taken from the document's servers[0]", async () => {
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'upstream-from-spec' }),
+      });
+      assert.equal(response.statusCode, 201);
+      // The sample document's server is `https://billing.example.com:8443/v2`.
+      assert.equal(
+        response.json<PublishApiResponse>().api.upstream_url,
+        'https://billing.example.com:8443/v2',
+      );
+    });
+
+    it('records an explicit upstream_url in preference to the document', async () => {
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'upstream-explicit',
+          upstream_url: 'http://override.example.com:8080/base',
+        }),
+      });
+      assert.equal(response.statusCode, 201);
+      assert.equal(
+        response.json<PublishApiResponse>().api.upstream_url,
+        'http://override.example.com:8080/base',
+      );
+    });
+
+    it('round-trips a CORS policy on the published API', async () => {
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'cors-published',
+          cors: { allowed_origins: ['https://app.example.com'], allow_credentials: true },
+        }),
+      });
+      assert.equal(response.statusCode, 201);
+      assert.deepEqual(response.json<PublishApiResponse>().api.cors, {
+        allowed_origins: ['https://app.example.com'],
+        allow_credentials: true,
+      });
+    });
+
+    it('defaults allow_credentials to false, and omitting cors means no policy', async () => {
+      const withDefault = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'cors-default',
+          cors: { allowed_origins: ['https://app.example.com'] },
+        }),
+      });
+      assert.equal(withDefault.statusCode, 201);
+      assert.equal(withDefault.json<PublishApiResponse>().api.cors?.allow_credentials, false);
+
+      const without = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'cors-absent' }),
+      });
+      assert.equal(without.statusCode, 201);
+      assert.equal(without.json<PublishApiResponse>().api.cors, null);
+    });
+
+    it('rejects a CORS policy that is empty, oversized or not a list of origins', async () => {
+      const bodies = [
+        { allowed_origins: [], allow_credentials: false },
+        {
+          allowed_origins: Array.from(
+            { length: 65 },
+            (_, index) => `https://o${index}.example.com`,
+          ),
+          allow_credentials: false,
+        },
+        { allowed_origins: ['https://app.example.com', 42], allow_credentials: false },
+        { allowed_origins: ['https://a.example.com https://b.example.com'] },
+      ];
+      for (const [index, cors] of bodies.entries()) {
+        const response = await harness.authed(provider, {
+          method: 'POST',
+          url: '/api/apis',
+          payload: publishPayload({ slug: `cors-invalid-${index}`, cors }),
+        });
+        assert.equal(response.statusCode, 400, `body ${index} should not have been accepted`);
+        assert.equal(errorCode(response.body), 'VALIDATION_FAILED');
+      }
+    });
+
+    it("refuses a rate limit above Edge's ceiling instead of letting the gateway 400", async () => {
+      const tooMany = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'limit-too-high',
+          rate_limit: { limit: 1_000_001, window_seconds: 60 },
+        }),
+      });
+      assert.equal(tooMany.statusCode, 400);
+      assert.equal(errorCode(tooMany.body), 'VALIDATION_FAILED');
+
+      const atCeiling = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'limit-at-ceiling',
+          rate_limit: { limit: 1_000_000, window_seconds: 60 },
+        }),
+      });
+      assert.equal(atCeiling.statusCode, 201);
+      assert.equal(atCeiling.json<PublishApiResponse>().api.rate_limit?.limit, 1_000_000);
+    });
+
     it('keeps clients out of the publishing routes entirely', async () => {
       const response = await harness.authed(client, {
         method: 'POST',
@@ -881,6 +996,29 @@ describe('publishing', () => {
       assert.equal(body.stats.active_grants, 0);
       assert.equal(body.stats.total_requests, 1);
       assert.equal(body.spec?.parsed_title, 'Billing API');
+    });
+
+    it('returns the recorded upstream and CORS policy on the detail endpoint', async () => {
+      harness.edge.reset();
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'detail-cors',
+          upstream_url: 'http://override.example.com:8080/base',
+          cors: { allowed_origins: ['https://app.example.com'], allow_credentials: true },
+        }),
+      });
+      const apiId = published.json<PublishApiResponse>().api.id;
+
+      const response = await harness.authed(provider, { method: 'GET', url: `/api/apis/${apiId}` });
+      assert.equal(response.statusCode, 200);
+      const body = response.json<GetApiResponse>();
+      assert.equal(body.api.upstream_url, 'http://override.example.com:8080/base');
+      assert.deepEqual(body.api.cors, {
+        allowed_origins: ['https://app.example.com'],
+        allow_credentials: true,
+      });
     });
   });
 });

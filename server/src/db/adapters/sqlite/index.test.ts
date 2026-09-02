@@ -256,6 +256,58 @@ describe('sqlite store', () => {
       assert.equal(cleared?.rate_limit, null);
     });
 
+    it('stores the recorded upstream and the CORS policy, and clears both', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const cors = { allowed_origins: ['https://app.example.com'], allow_credentials: true };
+      const api = await store.apis.create({
+        name: 'Fronted',
+        slug: `fronted-${newId().slice(0, 8)}`,
+        owner_user_id: owner.id,
+        upstream_url: 'https://billing.example.com:8443/v2',
+        namespace: 'nexus',
+        version: '1.0.0',
+        spec_format: 'openapi',
+        requestable: true,
+        auth_plugin: 'key_auth',
+        cors,
+        status: 'published',
+        visibility: 'public',
+      });
+      assert.equal(api.upstream_url, 'https://billing.example.com:8443/v2');
+      assert.deepEqual(api.cors, cors);
+      assert.deepEqual(await store.apis.findById(api.id), api);
+
+      const moved = await store.apis.update(api.id, {
+        upstream_url: 'http://other.example.com:8080/base',
+        cors: { allowed_origins: ['https://a.example.com'], allow_credentials: false },
+      });
+      assert.equal(moved?.upstream_url, 'http://other.example.com:8080/base');
+      assert.deepEqual(moved?.cors, {
+        allowed_origins: ['https://a.example.com'],
+        allow_credentials: false,
+      });
+
+      const cleared = await store.apis.update(api.id, { upstream_url: null, cors: null });
+      assert.equal(cleared?.upstream_url, null);
+      assert.equal(cleared?.cors, null);
+
+      // Omitting both on create leaves them NULL rather than defaulting.
+      const bare = await store.apis.create({
+        name: 'Bare',
+        slug: `bare-${newId().slice(0, 8)}`,
+        owner_user_id: owner.id,
+        namespace: 'nexus',
+        version: '1.0.0',
+        spec_format: 'openapi',
+        requestable: false,
+        auth_plugin: 'key_auth',
+        status: 'published',
+        visibility: 'public',
+      });
+      assert.equal(bare.upstream_url, null);
+      assert.equal(bare.cors, null);
+    });
+
     it('keeps exactly one current spec revision per API', async () => {
       const owner = await makeUser({ role: 'provider' });
       const api = await store.apis.create({
