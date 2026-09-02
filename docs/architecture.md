@@ -339,6 +339,18 @@ all.
 > lock; until then, run one writer. See
 > [`operations.md`](operations.md#8-scaling).
 
+**Proxy writes are read-modify-write too.** `PUT /proxies/{id}` has exactly the
+same shape as `PUT /consumers/{id}` — a whole-resource replace against a struct
+carrying `deny_unknown_fields`, with no concurrency token — and `Proxy` is far
+wider than Nexus models: `hosts`, three timeouts, backend TLS paths, connection
+pooling, `upstream_id`, stream listeners, and the plugin association list. A
+body built only from the fields Nexus knows resets every one of them to its
+default. So the publishing service routes every proxy write through
+`mutateProxy`: `GET /proxies/{id}`, overwrite the handful of fields that are
+actually changing, `PUT` the whole document back minus the server-owned
+`namespace` / `created_at` / `updated_at`, all inside
+`serializePerKey('proxy:<id>', …)`.
+
 ### 5.3 The plugin naming trap
 
 Edge's _plugin_ names and its _credential-type_ keys are deliberately
@@ -369,8 +381,21 @@ Plugin configs are closed key sets; a typo is a 400. What Nexus sends:
   custom-window pair (`window_seconds` + `max_requests`). Edge also offers a
   preset trio (`requests_per_second|minute|hour`); mixing the two families in
   one rule is a 400, so Nexus only ever uses the custom pair.
+- **`cors`** — `{ allowed_origins, allow_credentials }`, and nothing else. Edge
+  accepts six more keys (`allowed_methods`, `allowed_headers`,
+  `exposed_headers`, `max_age`, `preflight_continue`, `unmatched_preflights`);
+  each has a native default that suits a portal-published API, and sending a key
+  a provider cannot change would only freeze that default in place.
 
-Plugins attach as `{ plugin_name, scope: 'proxy', proxy_id, enabled, config }`.
+Plugins attach as `{ plugin_name, scope: 'proxy', proxy_id, enabled, config }`
+— **and then have to be associated.** A proxy-scoped plugin config is inert
+until the proxy's own `plugins[]` carries `{ plugin_config_id }` for it; Edge
+decides what to install in `plugin_cache.rs`
+(`scoped_plugin_config_applies_to_proxy`), and a config with a matching
+`proxy_id` and no association simply does not run. So every create is followed
+by an association write on the proxy and every removal is preceded by a
+disassociation, both through `mutateProxy` (§5.2).
+
 Nexus stores the proxy id on the `apis` row but **not** the plugin config ids —
 they are looked up with `GET /plugins/config` filtered by `proxy_id` whenever
 they need changing, which keeps the schema free of ids whose lifecycle Nexus
@@ -446,22 +471,46 @@ there is nothing to remove.
 ### 5.6 Publishing: a multi-write sequence with no transaction
 
 Edge has no cross-resource transaction, so `publish` creates the proxy, then
-each plugin config, and **rolls back what it created** (delete plugin configs,
-then the proxy) if any step fails, before rethrowing. The Nexus rows are
-written last, so a failed publish leaves nothing behind on either side.
+each plugin config, then associates all of them on the proxy in **one**
+`PUT /proxies/{id}`, and **rolls back what it created** (delete plugin configs,
+then the proxy — which cascades both the association rows and any
+proxy-scoped config the explicit deletes missed) if any step fails, before
+rethrowing. The Nexus rows are written last, so a failed publish leaves nothing
+behind on either side.
 
 ```
-apis row ─┬─ proxy          name `nexus-<slug>`, listen_path `/<namespace>/<slug>`
-          ├─ plugin_config  the auth plugin (key_auth | basic_auth | jwt_auth)
-          ├─ plugin_config  access_control    — only when `requestable`
-          ├─ plugin_config  rate_limiting     — only when a rate limit is set
-          └─ plugin_config  cors              — only when `cors` names origins
+apis row ─── proxy          name `nexus-<slug>`, listen_path `/<namespace>/<slug>`
+              │
+              │ proxy.plugins[] ─ the association list: a config the proxy does
+              │                   not name is stored but never runs
+              ├─ plugin_config  the auth plugin (key_auth | basic_auth | jwt_auth)
+              ├─ plugin_config  access_control    — only when `requestable`
+              ├─ plugin_config  rate_limiting     — only when a rate limit is set
+              └─ plugin_config  cors              — only when `cors` names origins
 ```
+
+The single association write is also why the proxy is briefly live with no
+plugins: Edge refuses a plugin config whose `proxy_id` does not exist yet, so
+the window cannot be closed from the Nexus side, only kept to one round trip
+and rolled back if anything in it fails.
+
+A `PATCH` maintains the association through every plugin change, each with a
+matching undo step. The orderings are chosen so the gateway is never _less_
+restrictive than the portal claims: an auth swap creates and associates the
+replacement before detaching the incumbent (for that moment both credentials
+work, which beats a live proxy with no auth plugin at all), and a removal
+disassociates before deleting. `DELETE /api/apis/:id` inverts it and deletes the
+**proxy first**: Edge's `DELETE /plugins/config/{id}` clears the association
+rows rather than refusing, so removing the auth config first would leave the
+proxy live and unauthenticated for the length of the teardown.
 
 The `apis` row also records `upstream_url`, the normalized
 `scheme://host:port[/basePath]` form of the backend the proxy was last pointed
 at, so the portal can show and reason about the upstream without reading it back
-from Edge.
+from Edge. It is rewritten every time the gateway actually moves: at publish, on
+a `PATCH` that supplies a new `upstream_url`, and on a spec revision the proxy
+follows — that last one inside the same store transaction as the revision, so
+the two roll back together.
 
 The upstream comes from the provider's explicit `upstream_url`, else the
 document's first _absolute_ `servers[].url`. Relative server URLs are legal

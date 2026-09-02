@@ -1109,6 +1109,7 @@ describe('publishing', () => {
 
     it('retires an API without touching the gateway, and hides it from the catalog', async () => {
       const before = harness.edge.pluginsForProxy(proxyId).length;
+      const enforcedBefore = effectiveNames(harness, proxyId);
       const response = await harness.authed(provider, {
         method: 'PATCH',
         url: `/api/apis/${apiId}`,
@@ -1117,9 +1118,11 @@ describe('publishing', () => {
       assert.equal(response.statusCode, 200);
       assert.equal(response.json<UpdateApiResponse>().api.status, 'retired');
 
-      // The proxy and its plugins are deliberately left alone.
+      // The proxy and its plugins are deliberately left alone — both the
+      // configs that exist and the ones the gateway actually runs.
       assert.ok(harness.edge.proxies.get(`nexus/${proxyId}`));
       assert.equal(harness.edge.pluginsForProxy(proxyId).length, before);
+      assert.deepEqual(effectiveNames(harness, proxyId), enforcedBefore);
 
       const catalog = await harness.authed(client, { method: 'GET', url: '/api/catalog' });
       const slugs = catalog.json<CatalogListResponse>().items.map((api) => api.id);

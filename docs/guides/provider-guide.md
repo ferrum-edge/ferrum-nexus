@@ -181,12 +181,19 @@ is the authentication plugin and the ACL group.
 ### What publishing actually does
 
 ```
-apis row ─┬─ proxy          name `nexus-<slug>`, listening on /<namespace>/<slug>
-          ├─ plugin_config  your auth plugin
-          ├─ plugin_config  access_control      — only when requestable
-          ├─ plugin_config  rate_limiting       — only when a rate limit is set
-          └─ plugin_config  cors                — only when origins are listed
+apis row ─── proxy          name `nexus-<slug>`, listening on /<namespace>/<slug>
+              │
+              │ …then the proxy is told to run them
+              ├─ plugin_config  your auth plugin
+              ├─ plugin_config  access_control      — only when requestable
+              ├─ plugin_config  rate_limiting       — only when a rate limit is set
+              └─ plugin_config  cors                — only when origins are listed
 ```
+
+The last step matters: on Ferrum Edge a plugin has to be both configured _and_
+listed on the proxy before the gateway runs it, so publishing finishes by
+attaching the whole set to the proxy in one write. Nothing you configure here is
+live until that lands.
 
 If any step fails, everything created is torn back down and nothing is saved on
 either side. A failed publish leaves no debris.
@@ -202,8 +209,9 @@ API, but two of them have consequences worth reading first.
 | -------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | Name, description, version | Catalog metadata only.                                                                                                     |
 | Visibility                 | Listing only. Existing grants and calls are unaffected.                                                                    |
-| Upstream URL               | Re-points the gateway's backend. Takes effect immediately.                                                                 |
+| Upstream URL               | Re-points the gateway's backend. Takes effect immediately, and the upstream shown on the API page updates with it.         |
 | Rate limit                 | Attaches, updates, or (cleared) removes the quota.                                                                         |
+| CORS                       | Attaches, replaces, or (cleared) removes the browser CORS policy.                                                          |
 | **Requestable → off**      | ⚠️ Removes the access gate. **Every authenticated consumer can now call this API.** Existing grants stay but become inert. |
 | **Authentication plugin**  | ⚠️ Breaks every existing client until they issue a new credential.                                                         |
 
