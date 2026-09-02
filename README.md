@@ -15,15 +15,16 @@ and per-user authorization before forwarding to Edge.
 
 ## Features
 
-- **API clients** can register, manage contact info, create and rotate
+- **API clients** can register, verify their email (and re-send the link),
+  reset a forgotten password, manage contact info, create and rotate
   gateway credentials, browse the API catalog with rendered OpenAPI docs,
   request access with a justification, message providers, and receive
   email + in-app notifications.
 - **API providers** can publish OpenAPI specs (which create Ferrum Edge
   proxies), choose whether an API is externally requestable, review and
   approve / deny / revoke access requests, edit safe runtime settings (rate
-  limits, auth plugin selection, access policy), message clients, and create
-  test consumers for their own APIs.
+  limits, auth plugin selection, access policy, browser CORS policy, the
+  upstream), message clients, and create test consumers for their own APIs.
 - **Portal admins** can configure CAPTCHA, branding, email senders and
   templates, send mass emails, manage users / providers / APIs / grants,
   view a historical audit log, and use **god mode** for emergency revoke,
