@@ -1,0 +1,10 @@
+{
+  // Typechecks the test files too. `tsconfig.json` excludes them from the
+  // build so `dist/` stays free of tests; without this second pass a test's
+  // type errors (or a stale `@ts-expect-error`) would only surface at runtime,
+  // if at all — `tsx` strips types without checking them.
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": true },
+  "include": ["src/**/*.ts"],
+  "exclude": []
+}

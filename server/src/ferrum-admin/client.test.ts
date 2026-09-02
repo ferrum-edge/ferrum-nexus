@@ -569,7 +569,6 @@ describe('ferrum admin client', () => {
         listen_path: '/nexus/eff',
         backend_host: 'eff.internal',
         backend_port: 443,
-        // @ts-expect-error `plugins` is not part of the narrow Nexus write shape
         plugins: [{ plugin_config_id: config.id }],
       });
       assert.deepEqual(
