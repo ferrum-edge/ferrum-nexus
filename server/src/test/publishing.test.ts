@@ -115,7 +115,7 @@ describe('publishing', () => {
       assert.ok(proxy, 'expected a proxy named nexus-billing-exact');
       assert.equal(proxy.listen_path, '/nexus/billing-exact');
       assert.equal(proxy.backend_scheme, 'https');
-      assert.equal(proxy.backend_host, 'billing.internal');
+      assert.equal(proxy.backend_host, 'billing.example.com');
       assert.equal(proxy.backend_port, 8443);
       assert.equal(proxy.backend_path, '/v2');
       assert.equal(proxy.strip_listen_path, true);
@@ -191,7 +191,7 @@ describe('publishing', () => {
       });
       assert.equal(response.statusCode, 201);
       const proxy = harness.edge.proxyByName('nexus-from-spec');
-      assert.equal(proxy?.backend_host, 'shipping.internal');
+      assert.equal(proxy?.backend_host, 'shipping.example.com');
       assert.equal(proxy?.backend_port, 443);
     });
 
@@ -201,12 +201,12 @@ describe('publishing', () => {
         url: '/api/apis',
         payload: publishPayload({
           slug: 'explicit-upstream',
-          upstream_url: 'http://override.internal:8080',
+          upstream_url: 'http://override.example.com:8080',
         }),
       });
       assert.equal(response.statusCode, 201);
       const proxy = harness.edge.proxyByName('nexus-explicit-upstream');
-      assert.equal(proxy?.backend_host, 'override.internal');
+      assert.equal(proxy?.backend_host, 'override.example.com');
       assert.equal(proxy?.backend_port, 8080);
       assert.equal(proxy?.backend_scheme, 'http');
     });
@@ -487,10 +487,10 @@ describe('publishing', () => {
       await harness.authed(provider, {
         method: 'PATCH',
         url: `/api/apis/${apiId}`,
-        payload: { upstream_url: 'http://moved.internal:9100/base' },
+        payload: { upstream_url: 'http://moved.example.com:9100/base' },
       });
       const proxy = harness.edge.proxies.get(`nexus/${proxyId}`);
-      assert.equal(proxy?.backend_host, 'moved.internal');
+      assert.equal(proxy?.backend_host, 'moved.example.com');
       assert.equal(proxy?.backend_port, 9100);
       assert.equal(proxy?.backend_path, '/base');
     });
@@ -550,17 +550,17 @@ describe('publishing', () => {
         url: '/api/apis',
         payload: publishPayload({
           slug: 'spec-follow',
-          spec: specWithServer('https://v1.internal:8443'),
+          spec: specWithServer('https://v1.example.com:8443'),
         }),
       });
       const apiId = published.json<PublishApiResponse>().api.id;
       const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
-      assert.equal(harness.edge.proxies.get(`nexus/${proxyId}`)?.backend_host, 'v1.internal');
+      assert.equal(harness.edge.proxies.get(`nexus/${proxyId}`)?.backend_host, 'v1.example.com');
 
       const response = await harness.authed(provider, {
         method: 'PUT',
         url: `/api/apis/${apiId}/spec`,
-        payload: { spec: specWithServer('https://v2.internal:8443', '3.0.0') },
+        payload: { spec: specWithServer('https://v2.example.com:8443', '3.0.0') },
       });
       assert.equal(response.statusCode, 200);
       const body = response.json<UpdateApiSpecResponse>();
@@ -568,7 +568,7 @@ describe('publishing', () => {
       assert.equal(body.spec.parsed_version, '3.0.0');
       assert.equal(body.api.version, '3.0.0');
 
-      assert.equal(harness.edge.proxies.get(`nexus/${proxyId}`)?.backend_host, 'v2.internal');
+      assert.equal(harness.edge.proxies.get(`nexus/${proxyId}`)?.backend_host, 'v2.example.com');
 
       // The previous revision is retained but is no longer current.
       const specs = await harness.store.apiSpecs.list({ api_id: apiId });
@@ -586,8 +586,8 @@ describe('publishing', () => {
         url: '/api/apis',
         payload: publishPayload({
           slug: 'spec-pinned',
-          spec: specWithServer('https://v1.internal:8443'),
-          upstream_url: 'https://pinned.internal:8443',
+          spec: specWithServer('https://v1.example.com:8443'),
+          upstream_url: 'https://pinned.example.com:8443',
         }),
       });
       const api = published.json<PublishApiResponse>().api;
@@ -595,11 +595,11 @@ describe('publishing', () => {
       await harness.authed(provider, {
         method: 'PUT',
         url: `/api/apis/${api.id}/spec`,
-        payload: { spec: specWithServer('https://v2.internal:8443') },
+        payload: { spec: specWithServer('https://v2.example.com:8443') },
       });
       assert.equal(
         harness.edge.proxies.get(`nexus/${String(api.ferrum_proxy_id)}`)?.backend_host,
-        'pinned.internal',
+        'pinned.example.com',
       );
     });
 
@@ -631,7 +631,7 @@ describe('publishing', () => {
         url: '/api/apis',
         payload: publishPayload({
           slug: 'spec-edge-fails',
-          spec: specWithServer('https://v1.internal:8443'),
+          spec: specWithServer('https://v1.example.com:8443'),
         }),
       });
       const api = published.json<PublishApiResponse>().api;
@@ -643,13 +643,13 @@ describe('publishing', () => {
       const response = await harness.authed(provider, {
         method: 'PUT',
         url: `/api/apis/${api.id}/spec`,
-        payload: { spec: specWithServer('https://v2.internal:8443', '3.0.0') },
+        payload: { spec: specWithServer('https://v2.example.com:8443', '3.0.0') },
       });
       assert.notEqual(response.statusCode, 200);
 
       assert.equal(
         harness.edge.proxies.get(`nexus/${proxyId}`)?.backend_host,
-        'v1.internal',
+        'v1.example.com',
         'the gateway never moved',
       );
       const specs = await harness.store.apiSpecs.list({ api_id: api.id });
@@ -665,7 +665,7 @@ describe('publishing', () => {
         url: '/api/apis',
         payload: publishPayload({
           slug: 'spec-store-fails',
-          spec: specWithServer('https://v1.internal:8443'),
+          spec: specWithServer('https://v1.example.com:8443'),
         }),
       });
       const api = published.json<PublishApiResponse>().api;
@@ -675,13 +675,13 @@ describe('publishing', () => {
       const response = await harness.authed(provider, {
         method: 'PUT',
         url: `/api/apis/${api.id}/spec`,
-        payload: { spec: specWithServer('https://v2.internal:8443', '3.0.0') },
+        payload: { spec: specWithServer('https://v2.example.com:8443', '3.0.0') },
       });
       assert.notEqual(response.statusCode, 200);
 
       assert.equal(
         harness.edge.proxies.get(`nexus/${proxyId}`)?.backend_host,
-        'v1.internal',
+        'v1.example.com',
         'the backend that was moved for the failed revision is put back',
       );
       const specs = await harness.store.apiSpecs.list({ api_id: api.id });

@@ -61,8 +61,8 @@ const VALID_YAML = [
   '  version: 2.4.0',
   '  description: "  Invoices and payments.  "',
   'servers:',
-  '  - url: https://billing.internal:8443/v2',
-  '  - url: https://billing.eu.internal',
+  '  - url: https://billing.example.com:8443/v2',
+  '  - url: https://billing.example.net',
   'paths:',
   '  /invoices:',
   '    get:',
@@ -103,9 +103,9 @@ describe('OpenAPI parsing', () => {
   it('splits servers[0] into the Edge backend fields, port and base path included', () => {
     const spec = parseOpenApiSpec(VALID_YAML);
     assert.deepEqual(spec.defaultUpstream, {
-      url: 'https://billing.internal:8443/v2',
+      url: 'https://billing.example.com:8443/v2',
       scheme: 'https',
-      host: 'billing.internal',
+      host: 'billing.example.com',
       port: 8443,
       basePath: '/v2',
     });
@@ -116,7 +116,7 @@ describe('OpenAPI parsing', () => {
       JSON.stringify({
         openapi: '3.1.0',
         info: { title: 'A', version: '1' },
-        servers: [{ url: 'http://plain.internal' }],
+        servers: [{ url: 'http://plain.example.com' }],
         paths: {},
       }),
     );
@@ -130,11 +130,11 @@ describe('OpenAPI parsing', () => {
       JSON.stringify({
         openapi: '3.1.0',
         info: { title: 'A', version: '1' },
-        servers: [{ url: '/v1' }, { url: 'https://real.internal' }],
+        servers: [{ url: '/v1' }, { url: 'https://real.example.com' }],
         paths: {},
       }),
     );
-    assert.equal(spec.defaultUpstream?.host, 'real.internal');
+    assert.equal(spec.defaultUpstream?.host, 'real.example.com');
   });
 
   it('yields no upstream when every server URL is relative', () => {
@@ -265,21 +265,37 @@ describe('OpenAPI parsing', () => {
 
 describe('upstream URL parsing', () => {
   it('accepts absolute http and https URLs only', () => {
-    assert.equal(parseUpstreamUrl('https://a.internal')?.scheme, 'https');
-    assert.equal(parseUpstreamUrl('http://a.internal:9000')?.port, 9000);
-    assert.equal(parseUpstreamUrl('ftp://a.internal'), null);
+    assert.equal(parseUpstreamUrl('https://example.com')?.scheme, 'https');
+    assert.equal(parseUpstreamUrl('http://example.com:9000')?.port, 9000);
+    assert.equal(parseUpstreamUrl('ftp://example.com'), null);
     assert.equal(parseUpstreamUrl('/relative'), null);
     assert.equal(parseUpstreamUrl(''), null);
   });
 
-  it('strips the brackets from an IPv6 literal, which Edge does not accept', () => {
-    assert.equal(parseUpstreamUrl('https://[::1]:8443')?.host, '::1');
+  it('rejects local, private, link-local, and internal destinations', () => {
+    for (const url of [
+      'http://127.0.0.1',
+      'http://10.0.0.1',
+      'http://172.16.0.1',
+      'http://192.168.0.1',
+      'http://169.254.169.254/latest/meta-data',
+      'http://[::1]',
+      'http://[::ffff:127.0.0.1]',
+      'http://[fc00::1]',
+      'http://[fe80::1]',
+      'http://localhost',
+      'http://service.internal',
+      'http://printer.local',
+    ]) {
+      assert.equal(parseUpstreamUrl(url), null, url);
+    }
+    assert.equal(parseUpstreamUrl('https://[2606:4700:4700::1111]')?.host, '2606:4700:4700::1111');
   });
 
   it('prefers an explicit upstream over the document', () => {
     const spec = parseOpenApiSpec(VALID_YAML);
-    const upstream = resolveUpstream(spec, 'http://override.internal:8080/base');
-    assert.equal(upstream.host, 'override.internal');
+    const upstream = resolveUpstream(spec, 'http://override.example.com:8080/base');
+    assert.equal(upstream.host, 'override.example.com');
     assert.equal(upstream.port, 8080);
     assert.equal(upstream.basePath, '/base');
   });
@@ -292,8 +308,8 @@ describe('upstream URL parsing', () => {
 
   it('falls back to the document when the explicit upstream is blank', () => {
     const spec = parseOpenApiSpec(VALID_YAML);
-    assert.equal(resolveUpstream(spec, '   ').host, 'billing.internal');
-    assert.equal(resolveUpstream(spec, null).host, 'billing.internal');
+    assert.equal(resolveUpstream(spec, '   ').host, 'billing.example.com');
+    assert.equal(resolveUpstream(spec, null).host, 'billing.example.com');
   });
 });
 
