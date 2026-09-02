@@ -47,6 +47,21 @@ untrusted browser ──┬── session cookie + CSRF ──> Nexus BFF ──
 The browser is never trusted with anything the gateway would accept. It holds a
 session cookie, and that cookie is only useful against Nexus.
 
+**Upstream destinations.** A published API is an egress path: the gateway will
+forward traffic to whatever `upstream_url` (or `servers[0].url`) the provider
+supplied. A provider account is only semi-trusted — registration may be open —
+so by default Nexus refuses to point a proxy at a loopback, RFC 1918, carrier-
+grade NAT, link-local, multicast or IPv4-mapped address, or at a `.local`,
+`.internal`, `.localhost` or `.home.arpa` name. That closes the obvious SSRF
+targets (cloud metadata at `169.254.169.254`, the Admin API, databases on the
+gateway's subnet) without resolving DNS. The check runs at publish, on a
+`PATCH` of `upstream_url`, and when a spec revision would move a proxy that
+follows its document; it returns `400 SPEC_INVALID` with
+`details.reason = "private_upstream"`. A portal that legitimately fronts
+internal services sets `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` and relies on
+network egress policy instead — a public name that is later re-pointed at a
+private address is outside what a hostname check can see either way.
+
 ### Out of scope
 
 - The security of Ferrum Edge itself, and of the upstream services behind it.
@@ -552,6 +567,9 @@ Before going live:
       the same origin.
 - [ ] `NEXUS_RATE_LIMIT_ENABLED=true`; a proxy-level limit exists if you run
       more than one instance.
+- [ ] `NEXUS_ALLOW_PRIVATE_UPSTREAMS` is left at `false` unless the portal is
+      meant to front internal services, in which case gateway egress is
+      restricted at the network layer.
 - [ ] CAPTCHA configured if registration is open to the internet.
 - [ ] Registration policy reviewed: `open_registration`, `allowed_roles`,
       `require_email_verification`.

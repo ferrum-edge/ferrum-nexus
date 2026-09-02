@@ -307,6 +307,67 @@ describe('publishing', () => {
       assert.equal(response.json<PublishApiResponse>().api.slug, 'payments-gateway-v3');
     });
 
+    it('refuses a private, loopback or internal upstream by default', async () => {
+      for (const upstream_url of [
+        'http://169.254.169.254/latest/meta-data',
+        'http://10.20.30.40:5432',
+        'http://host.docker.internal:8081',
+        'http://[::1]:9000',
+      ]) {
+        const response = await harness.authed(provider, {
+          method: 'POST',
+          url: '/api/apis',
+          payload: publishPayload({ slug: 'ssrf', upstream_url }),
+        });
+        assert.equal(response.statusCode, 400, upstream_url);
+        const body = response.json<ApiErrorBody>();
+        assert.equal(body.error.code, 'SPEC_INVALID');
+        assert.equal(
+          (body.error.details as { reason?: string }).reason,
+          'private_upstream',
+          upstream_url,
+        );
+      }
+      assert.equal(harness.edge.proxies.size, 0, 'nothing reached the gateway');
+      assert.equal(await harness.store.apis.findBySlug('ssrf'), null);
+    });
+
+    it('applies the same policy to the document’s servers[0]', async () => {
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'ssrf-spec',
+          spec: specWithServer('http://192.168.1.10:8080'),
+        }),
+      });
+      assert.equal(response.statusCode, 400);
+      assert.equal(errorCode(response.body), 'SPEC_INVALID');
+      assert.equal(harness.edge.proxies.size, 0);
+    });
+
+    it('publishes to a private upstream when the deployment allows it', async () => {
+      const permissive = await buildTestApp({ env: { NEXUS_ALLOW_PRIVATE_UPSTREAMS: 'true' } });
+      try {
+        const owner = await permissive.registerUser({ email: 'lan-provider@example.test' });
+        const response = await permissive.authed(owner, {
+          method: 'POST',
+          url: '/api/apis',
+          payload: publishPayload({
+            slug: 'lan',
+            upstream_url: 'http://host.docker.internal:8081',
+          }),
+        });
+        assert.equal(response.statusCode, 201, response.body);
+        assert.equal(
+          permissive.edge.proxyByName('nexus-lan')?.backend_host,
+          'host.docker.internal',
+        );
+      } finally {
+        await permissive.close();
+      }
+    });
+
     it('keeps clients out of the publishing routes entirely', async () => {
       const response = await harness.authed(client, {
         method: 'POST',
@@ -495,6 +556,18 @@ describe('publishing', () => {
       assert.equal(proxy?.backend_path, '/base');
     });
 
+    it('refuses to repoint the proxy at a private upstream', async () => {
+      const proxyBefore = harness.edge.proxies.get(`nexus/${proxyId}`);
+      const response = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { upstream_url: 'http://10.0.0.5:9100' },
+      });
+      assert.equal(response.statusCode, 400);
+      assert.equal(errorCode(response.body), 'SPEC_INVALID');
+      assert.deepEqual(harness.edge.proxies.get(`nexus/${proxyId}`), proxyBefore);
+    });
+
     it('retires an API without touching the gateway, and hides it from the catalog', async () => {
       const before = harness.edge.pluginsForProxy(proxyId).length;
       const response = await harness.authed(provider, {
@@ -597,6 +670,56 @@ describe('publishing', () => {
         url: `/api/apis/${api.id}/spec`,
         payload: { spec: specWithServer('https://v2.example.com:8443') },
       });
+      assert.equal(
+        harness.edge.proxies.get(`nexus/${String(api.ferrum_proxy_id)}`)?.backend_host,
+        'pinned.example.com',
+      );
+    });
+
+    it('refuses a revision that would move a following proxy to a private host', async () => {
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'spec-follow-private',
+          spec: specWithServer('https://v1.example.com:8443'),
+        }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const api = published.json<PublishApiResponse>().api;
+      const proxyId = String(api.ferrum_proxy_id);
+
+      const response = await harness.authed(provider, {
+        method: 'PUT',
+        url: `/api/apis/${api.id}/spec`,
+        payload: { spec: specWithServer('http://10.1.1.1:8443', '3.0.0') },
+      });
+      assert.equal(response.statusCode, 400);
+      assert.equal(errorCode(response.body), 'SPEC_INVALID');
+      assert.equal(harness.edge.proxies.get(`nexus/${proxyId}`)?.backend_host, 'v1.example.com');
+      const specs = await harness.store.apiSpecs.list({ api_id: api.id });
+      assert.equal(specs.items.length, 1, 'the rejected revision was not stored');
+    });
+
+    it('stores a revision with a private servers[0] when the backend is pinned', async () => {
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'spec-pinned-private',
+          spec: specWithServer('https://v1.example.com:8443'),
+          upstream_url: 'https://pinned.example.com:8443',
+        }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const api = published.json<PublishApiResponse>().api;
+
+      const response = await harness.authed(provider, {
+        method: 'PUT',
+        url: `/api/apis/${api.id}/spec`,
+        payload: { spec: specWithServer('http://10.1.1.1:8443', '3.0.0') },
+      });
+      assert.equal(response.statusCode, 200, response.body);
       assert.equal(
         harness.edge.proxies.get(`nexus/${String(api.ferrum_proxy_id)}`)?.backend_host,
         'pinned.example.com',

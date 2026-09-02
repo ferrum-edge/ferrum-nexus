@@ -34,6 +34,14 @@
  * OpenAPI and simply mean "same origin as wherever this document is served
  * from" — there is no origin to resolve them against here, so they yield no
  * upstream and the provider must supply one.
+ *
+ * Parsing is deliberately policy-free. Whether a given host may be *used* as an
+ * upstream (loopback, RFC 1918, cloud metadata, `.internal` names — the SSRF
+ * surface a provider-owned proxy opens) is decided by
+ * {@link assertUpstreamAllowed}, which the publishing service applies at every
+ * point it is about to write a backend to the gateway. Keeping the two apart
+ * lets a spec with a private `servers[0]` still be *stored* for an API whose
+ * backend is pinned elsewhere.
  */
 
 import { isIP } from 'node:net';
@@ -111,8 +119,8 @@ export function parseUpstreamUrl(raw: string): SpecUpstream | null {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
   if (url.hostname === '' || url.username !== '' || url.password !== '') return null;
 
+  // `URL.hostname` keeps IPv6 literals in brackets; Edge wants the bare form.
   const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
-  if (!isPublicUpstreamHost(host)) return null;
 
   const scheme = url.protocol === 'https:' ? 'https' : 'http';
   const port = url.port === '' ? (scheme === 'https' ? 443 : 80) : Number(url.port);
@@ -128,15 +136,45 @@ export function parseUpstreamUrl(raw: string): SpecUpstream | null {
   };
 }
 
+/** How the publishing service decides which upstream destinations are acceptable. */
+export interface UpstreamPolicy {
+  /**
+   * `NEXUS_ALLOW_PRIVATE_UPSTREAMS`. When `false` (the default) a proxy may only
+   * be pointed at a public destination; loopback, link-local, RFC 1918,
+   * carrier-grade NAT, IPv4-mapped IPv6, multicast and the `.local`/`.internal`/
+   * `.localhost`/`.home.arpa` name suffixes are refused.
+   */
+  allowPrivate: boolean;
+}
+
 /**
- * Reject destinations that must never be reachable through a provider-owned proxy.
+ * Refuse an upstream the deployment's policy does not allow.
  *
- * This check intentionally happens while parsing so it covers explicit upstreams,
- * OpenAPI `servers`, API updates, and spec-following proxy moves alike. Network
- * egress controls should still be used to defend against a public DNS name that is
- * changed after publication.
+ * A provider account is only semi-trusted, and a proxy is an egress path from
+ * the gateway's network: without this check any provider could publish an API
+ * whose backend is the cloud metadata service, a database on the gateway's
+ * subnet, or the Admin API itself. Deployments that legitimately front internal
+ * services opt in with `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` and lean on network
+ * egress controls instead; a public DNS name that is later re-pointed at a
+ * private address is outside what this check can see either way.
+ *
+ * @throws NexusError `SPEC_INVALID` naming the host and the setting to change.
  */
-function isPublicUpstreamHost(host: string): boolean {
+export function assertUpstreamAllowed(upstream: SpecUpstream, policy: UpstreamPolicy): void {
+  if (policy.allowPrivate || isPublicUpstreamHost(upstream.host)) return;
+  throw specInvalid(
+    `The upstream host '${upstream.host}' is a loopback, private, link-local or internal destination; ` +
+      'this portal only publishes APIs with public upstreams (set NEXUS_ALLOW_PRIVATE_UPSTREAMS=true to change that)',
+    { field: 'upstream_url', host: upstream.host, reason: 'private_upstream' },
+  );
+}
+
+/**
+ * Whether `host` (a lower-cased hostname or bare IP literal) is a public
+ * destination. Exported for the policy check above and for tests; the parser
+ * itself never consults it.
+ */
+export function isPublicUpstreamHost(host: string): boolean {
   if (
     host === 'localhost' ||
     host.endsWith('.localhost') ||

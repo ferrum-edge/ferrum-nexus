@@ -87,11 +87,13 @@ import { conflict, forbidden, notFound, specInvalid, validationFailed } from '..
 import { newId } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
 import {
+  assertUpstreamAllowed,
   parseOpenApiSpec,
   parseUpstreamUrl,
   resolveUpstream,
   slugify,
   type SpecUpstream,
+  type UpstreamPolicy,
 } from './oas.js';
 
 /** Result of {@link PublishingService.publish} and `updateSpec`. */
@@ -240,6 +242,9 @@ function safeDefaultUpstream(rawSpec: string): SpecUpstream | null {
 export function createPublishingService(deps: PublishingServiceDeps): PublishingService {
   const { config, store, edge, audit, notifications, credentials } = deps;
   const namespace = config.edge.namespace;
+  // Applied at every point a backend is about to be written to the gateway:
+  // publish, PATCH `upstream_url`, and a spec revision the proxy follows.
+  const upstreamPolicy: UpstreamPolicy = { allowPrivate: config.allowPrivateUpstreams };
 
   function assertCanAdminister(actor: UserRecord, api: ApiRecord): void {
     if (api.owner_user_id === actor.id) return;
@@ -343,6 +348,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
 
       const parsed = parseOpenApiSpec(input.spec);
       const upstream = resolveUpstream(parsed, input.upstream_url);
+      assertUpstreamAllowed(upstream, upstreamPolicy);
       const slug = await resolveSlug(input.slug, name);
 
       // The id is minted here because the ACL group name is derived from it and
@@ -522,6 +528,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               value: patch.upstream_url,
             });
           }
+          assertUpstreamAllowed(upstream, upstreamPolicy);
           const before = await edge.proxies.get(proxyId);
           await replaceProxyBackend(proxyId, api.slug, upstream, actor.id);
           if (before) undo.push(() => restoreProxy(before, api.slug, actor.id));
@@ -696,6 +703,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           previousUpstream.port !== nextUpstream.port ||
           previousUpstream.scheme !== nextUpstream.scheme;
         if (proxy && followsSpec && moved) {
+          // Only a move the gateway would actually make is subject to the
+          // policy: a document whose `servers[0]` is private can still be
+          // stored for an API whose backend is pinned elsewhere.
+          assertUpstreamAllowed(nextUpstream, upstreamPolicy);
           await replaceProxyBackend(api.ferrum_proxy_id, api.slug, nextUpstream, actor.id);
           backendUpdated = true;
           restoreBackend = () => restoreProxy(proxy, api.slug, actor.id);

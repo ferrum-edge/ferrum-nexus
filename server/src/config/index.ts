@@ -8,7 +8,8 @@
  * Every variable documented in the repo-root `.env.example` is covered here
  * with the same default. A handful of extra variables exist for testing and
  * container deployment (`NEXUS_ENV`, `NEXUS_RATE_LIMIT_ENABLED`,
- * `NEXUS_WEB_DIST`, `FERRUM_ADMIN_TIMEOUT_MS`, `FERRUM_MAX_CREDENTIALS_PER_TYPE`);
+ * `NEXUS_WEB_DIST`, `NEXUS_ALLOW_PRIVATE_UPSTREAMS`, `FERRUM_ADMIN_TIMEOUT_MS`,
+ * `FERRUM_MAX_CREDENTIALS_PER_TYPE`);
  * they are all optional and default to production-safe values.
  */
 
@@ -128,6 +129,15 @@ export interface NexusConfig {
   sessionTtlSeconds: number;
   /** Whether the `/api/auth/*` rate limiter is installed. Off under `NEXUS_ENV=test`. */
   rateLimitEnabled: boolean;
+  /**
+   * Whether a provider may publish an API whose upstream is a loopback, private,
+   * link-local or internal destination (`NEXUS_ALLOW_PRIVATE_UPSTREAMS`).
+   *
+   * Defaults to `false`: a proxy is an egress path from the gateway's network,
+   * so an open portal must not let a provider aim one at cloud metadata or the
+   * gateway's own subnet. Deployments fronting internal services opt in.
+   */
+  allowPrivateUpstreams: boolean;
   /** Directory of the built SPA to serve in production; `undefined` disables static serving. */
   webDistPath: string | undefined;
   db: DbConfig;
@@ -230,6 +240,7 @@ const envSchema = z.object({
     }),
   NEXUS_SESSION_TTL: intish(DEFAULT_SESSION_TTL_SECONDS, 60, 60 * 60 * 24 * 30),
   NEXUS_RATE_LIMIT_ENABLED: boolish(true),
+  NEXUS_ALLOW_PRIVATE_UPSTREAMS: boolish(false),
   NEXUS_WEB_DIST: optionalString(),
 
   NEXUS_DB_DRIVER: z
@@ -363,6 +374,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     secretKey: raw.NEXUS_SECRET_KEY,
     sessionTtlSeconds: raw.NEXUS_SESSION_TTL,
     rateLimitEnabled: nodeEnv === 'test' ? false : raw.NEXUS_RATE_LIMIT_ENABLED,
+    allowPrivateUpstreams: raw.NEXUS_ALLOW_PRIVATE_UPSTREAMS,
     webDistPath: raw.NEXUS_WEB_DIST,
     db: {
       driver: raw.NEXUS_DB_DRIVER,

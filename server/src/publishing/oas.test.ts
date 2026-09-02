@@ -9,7 +9,14 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { isNexusError } from '../lib/errors.js';
-import { parseOpenApiSpec, parseUpstreamUrl, resolveUpstream, slugify } from './oas.js';
+import {
+  assertUpstreamAllowed,
+  isPublicUpstreamHost,
+  parseOpenApiSpec,
+  parseUpstreamUrl,
+  resolveUpstream,
+  slugify,
+} from './oas.js';
 
 /** A minimal, structurally valid operation object. */
 const OPERATION = { responses: { '200': { description: 'OK' } } };
@@ -272,26 +279,87 @@ describe('upstream URL parsing', () => {
     assert.equal(parseUpstreamUrl(''), null);
   });
 
-  it('rejects local, private, link-local, and internal destinations', () => {
-    for (const url of [
-      'http://127.0.0.1',
-      'http://10.0.0.1',
-      'http://172.16.0.1',
-      'http://192.168.0.1',
-      'http://169.254.169.254/latest/meta-data',
-      'http://[::1]',
-      'http://[::ffff:127.0.0.1]',
-      'http://[fc00::1]',
-      'http://[fe80::1]',
-      'http://localhost',
-      'http://service.internal',
-      'http://printer.local',
-    ]) {
-      assert.equal(parseUpstreamUrl(url), null, url);
-    }
+  it('strips the brackets from an IPv6 literal, which Edge does not accept', () => {
+    assert.equal(parseUpstreamUrl('https://[::1]:8443')?.host, '::1');
     assert.equal(parseUpstreamUrl('https://[2606:4700:4700::1111]')?.host, '2606:4700:4700::1111');
   });
 
+  it('rejects embedded credentials and lower-cases the host', () => {
+    assert.equal(parseUpstreamUrl('https://user:pw@example.com'), null);
+    assert.equal(parseUpstreamUrl('https://API.Example.COM/v1')?.host, 'api.example.com');
+  });
+
+  it('parses private destinations; policy is applied separately', () => {
+    // The parser is policy-free so a pinned API can still store a document
+    // whose servers[0] is internal. `assertUpstreamAllowed` is the gate.
+    assert.equal(parseUpstreamUrl('http://10.0.0.1')?.host, '10.0.0.1');
+    assert.equal(parseUpstreamUrl('http://host.docker.internal:8081')?.port, 8081);
+  });
+});
+
+describe('upstream destination policy', () => {
+  const PRIVATE_HOSTS = [
+    '127.0.0.1',
+    '127.8.8.8',
+    '0.0.0.0',
+    '10.0.0.1',
+    '100.64.0.1',
+    '169.254.169.254',
+    '172.16.0.1',
+    '172.31.255.254',
+    '192.0.0.1',
+    '192.168.0.1',
+    '198.18.0.1',
+    '224.0.0.1',
+    '::',
+    '::1',
+    '::ffff:127.0.0.1',
+    'fc00::1',
+    'fd12::1',
+    'fe80::1',
+    'ff02::1',
+    'localhost',
+    'app.localhost',
+    'service.internal',
+    'host.docker.internal',
+    'printer.local',
+    'router.home.arpa',
+  ];
+  const PUBLIC_HOSTS = [
+    '93.184.216.34',
+    '172.32.0.1',
+    '100.128.0.1',
+    '2606:4700:4700::1111',
+    'example.com',
+    'api.internal.example.com',
+  ];
+
+  it('classifies loopback, private, link-local, multicast and internal names as private', () => {
+    for (const host of PRIVATE_HOSTS) assert.equal(isPublicUpstreamHost(host), false, host);
+    for (const host of PUBLIC_HOSTS) assert.equal(isPublicUpstreamHost(host), true, host);
+  });
+
+  it('refuses a private upstream unless the deployment allows them', () => {
+    const upstream = parseUpstreamUrl('http://169.254.169.254/latest/meta-data');
+    assert.ok(upstream);
+    const error = expectSpecInvalid(() => assertUpstreamAllowed(upstream, { allowPrivate: false }));
+    assert.match(error.message, /NEXUS_ALLOW_PRIVATE_UPSTREAMS/);
+    assert.deepEqual(error.details, {
+      field: 'upstream_url',
+      host: '169.254.169.254',
+      reason: 'private_upstream',
+    });
+    assert.doesNotThrow(() => assertUpstreamAllowed(upstream, { allowPrivate: true }));
+  });
+
+  it('always passes a public upstream', () => {
+    const upstream = parseUpstreamUrl('https://api.example.com');
+    assert.ok(upstream);
+    assert.doesNotThrow(() => assertUpstreamAllowed(upstream, { allowPrivate: false }));
+  });
+});
+
+describe('upstream resolution', () => {
   it('prefers an explicit upstream over the document', () => {
     const spec = parseOpenApiSpec(VALID_YAML);
     const upstream = resolveUpstream(spec, 'http://override.example.com:8080/base');
