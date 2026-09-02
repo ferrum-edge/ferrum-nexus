@@ -1,9 +1,12 @@
 /**
  * `/api/health` — public liveness/readiness for the portal itself.
  *
- * The Edge probe must never fail the endpoint: an unreachable gateway is
- * reported as `edge.status = 'down'` with the overall status `degraded`, so a
- * load balancer keeps the portal in rotation while the gateway recovers.
+ * The Edge probe must never fail the endpoint. A gateway that is unreachable
+ * (`edge.status = 'down'`) or reachable-but-unready (`'not_ready'`) both leave
+ * the portal `degraded` on **HTTP 200**, so a load balancer keeps it in
+ * rotation while the gateway recovers. Only a broken database makes the
+ * overall status `down`, and that answers **HTTP 503** — container and
+ * load-balancer probes key on the status code, not the body.
  *
  * **This endpoint is unauthenticated**, so no failure detail crosses it. A
  * driver message ("connect ECONNREFUSED 10.0.3.14:5432", `password
@@ -12,13 +15,14 @@
  * {@link OPAQUE_ERROR} instead and the real text goes to the log.
  */
 
-import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 
 import {
   roleAtLeast,
   type AppHealth,
   type DependencyHealth,
   type EdgeHealth,
+  type EdgeHealthStatus,
   type HealthStatus,
 } from '@ferrum-nexus/shared';
 
@@ -48,6 +52,12 @@ export const OPAQUE_ERROR = 'unreachable';
  * API's host and port, so the detail is reserved for admins the same way the
  * database driver's message is. Everyone else gets {@link OPAQUE_ERROR}; the
  * real text is always logged.
+ *
+ * `ready === false` is reported as `not_ready`, never as `down`: Edge answers
+ * `503` with a full health payload while it is `starting`, `draining` or
+ * `unavailable`, and conflating that with an unreachable gateway hid a
+ * recovering gateway behind a connectivity diagnostic. A gateway that answered
+ * without a `ready` field at all is taken at its word and reads `ok`.
  */
 async function probeEdge(
   edge: FerrumAdminClient,
@@ -58,12 +68,26 @@ async function probeEdge(
   if (!result.reachable && result.error !== null) {
     request.log.error({ error: result.error }, 'Ferrum Edge health probe failed');
   }
+  if (result.reachable && result.ready === false) {
+    request.log.warn(
+      { edgeStatus: result.status, mode: result.mode },
+      'Ferrum Edge answered but is not ready',
+    );
+  }
+  const status: EdgeHealthStatus = !result.reachable
+    ? 'down'
+    : result.ready === false
+      ? 'not_ready'
+      : 'ok';
   const detailAllowed =
     request.currentUser !== null && roleAtLeast(request.currentUser.role, 'admin');
   return {
-    status: result.reachable ? 'ok' : 'down',
+    status,
     latency_ms: result.latencyMs,
     error: result.error === null ? null : detailAllowed ? result.error : OPAQUE_ERROR,
+    ready: result.ready,
+    mode: result.mode,
+    admin_writes_enabled: result.adminWritesEnabled,
     edge_version: result.version,
     namespace,
   };
@@ -73,7 +97,7 @@ async function probeEdge(
 export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (app, options) => {
   const { config, store, edge } = options;
 
-  app.get('/', async (request): Promise<AppHealth> => {
+  app.get('/', async (request, reply: FastifyReply): Promise<AppHealth> => {
     const dbResult = await store.healthCheck();
     if (!dbResult.ok) {
       // The operator gets the driver's text; the caller gets a constant.
@@ -90,12 +114,18 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (app,
     };
     const edgeHealth = await probeEdge(edge, config.edge.namespace, request);
 
-    // The database is load-bearing; the gateway only degrades the portal.
+    // The database is load-bearing; the gateway only degrades the portal —
+    // both `not_ready` and `down` on the Edge side keep the portal serving.
     const status: HealthStatus = !dbResult.ok
       ? 'down'
       : edgeHealth.status === 'ok'
         ? 'ok'
         : 'degraded';
+
+    // Probes key on the status code: `down` must not answer 200, and
+    // `degraded` must not answer 503 or a gateway restart pulls the whole
+    // portal out of rotation.
+    if (status === 'down') reply.status(503);
 
     return {
       status,
