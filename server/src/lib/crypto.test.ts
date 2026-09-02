@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
+  constantTimeEqual,
   createCrypto,
   decryptJsonWithKey,
   deriveKey,
@@ -133,6 +134,31 @@ describe('createCrypto', () => {
     const crypto = createCrypto(SECRET);
     const blob = crypto.encryptJson({ host: 'smtp.example.com', password: 'hunter2' });
     assert.deepEqual(crypto.decryptJson(blob), { host: 'smtp.example.com', password: 'hunter2' });
+  });
+});
+
+describe('constantTimeEqual', () => {
+  it('matches identical values and rejects different ones', () => {
+    assert.equal(constantTimeEqual('a-token', 'a-token'), true);
+    assert.equal(constantTimeEqual('a-token', 'b-token'), false);
+    assert.equal(constantTimeEqual(Buffer.from('abc'), Buffer.from('abc')), true);
+  });
+
+  it('compares UTF-8 byte lengths, not character counts', () => {
+    // 'é' is two bytes, so these are 32 characters but 33 vs 32 bytes. Comparing
+    // `String#length` would call `timingSafeEqual` on mismatched buffers, which
+    // throws — turning a CSRF header check into a 500.
+    const twoByteFirst = `é${'A'.repeat(31)}`;
+    const plain = 'A'.repeat(32);
+    assert.equal(twoByteFirst.length, plain.length, 'equal in characters');
+    assert.notEqual(Buffer.byteLength(twoByteFirst), Buffer.byteLength(plain));
+    assert.equal(constantTimeEqual(twoByteFirst, plain), false);
+    assert.equal(constantTimeEqual(plain, twoByteFirst), false);
+  });
+
+  it('returns false for a plain length mismatch instead of throwing', () => {
+    assert.equal(constantTimeEqual('', 'x'), false);
+    assert.equal(constantTimeEqual('short', 'much-longer-value'), false);
   });
 });
 
