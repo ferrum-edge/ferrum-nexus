@@ -150,13 +150,17 @@ export interface EdgePluginAssociation {
 }
 
 /**
- * Body for `POST /proxies` / `PUT /proxies/{id}`.
+ * Body for `POST /proxies` — the shape Nexus **composes** from scratch.
  *
  * Only the HTTP-family fields Nexus actually sets — Edge's `Proxy` write shape
  * is far wider (timeouts, backend TLS, pooling, upstreams, stream listeners).
  * `namespace`, `created_at` and `updated_at` are *accepted* by the deserializer
  * but server-owned: the namespace comes from `X-Ferrum-Namespace` and the
  * timestamps from the server, so Nexus never sends them.
+ *
+ * A proxy is created before its plugin configs exist, so there is nothing to
+ * associate yet and `plugins` is deliberately absent here — see
+ * {@link EdgeProxyReplace}, which is the shape every *later* write takes.
  */
 export interface EdgeProxyWrite {
   id?: string;
@@ -170,6 +174,35 @@ export interface EdgeProxyWrite {
   backend_path?: string | null;
   strip_listen_path?: boolean;
   preserve_host_header?: boolean;
+}
+
+/**
+ * Body for `PUT /proxies/{id}` — the shape Nexus **echoes** rather than
+ * composes.
+ *
+ * `PUT` is a whole-resource replace with no concurrency token, and `Proxy`
+ * carries `deny_unknown_fields`, so the only safe body is the document
+ * `GET /proxies/{id}` just returned, with the handful of fields being changed
+ * overwritten and the server-owned ones (`namespace`, `created_at`,
+ * `updated_at`) dropped. Edge's `Proxy` is far wider than {@link EdgeProxy}
+ * models — timeouts, backend TLS, pooling, `upstream_id`, stream listeners —
+ * and every unmodelled key an operator set has to survive the round trip, so
+ * the index signature is deliberate: those values come straight off the wire
+ * and are never interpreted.
+ *
+ * **Never hand-write one.** Build it by copying a `GET` response; the
+ * publishing service's `mutateProxy` is the only intended producer.
+ */
+export interface EdgeProxyReplace {
+  /**
+   * Which plugin configs this proxy runs. A proxy-scoped config is inert until
+   * its id appears here (`plugin_cache.rs`
+   * `scoped_plugin_config_applies_to_proxy`), and an omitted or empty list
+   * detaches every one of them.
+   */
+  plugins?: EdgePluginAssociation[];
+  /** Every other field, copied verbatim from the preceding `GET`. */
+  [field: string]: unknown;
 }
 
 /* ── Plugin configs ─────────────────────────────────────────────────────── */
