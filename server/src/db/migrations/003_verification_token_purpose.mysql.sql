@@ -9,8 +9,9 @@
 -- MySQL has no `IF NOT EXISTS` for either statement; the migration runner only
 -- calls this once per database, which is what makes that safe.
 
+-- One ALTER, not two: MySQL DDL is not transactional, so a column added by a
+-- first statement whose index statement then failed would leave the migration
+-- pending and unable to re-run. A single statement either applies or does not.
 ALTER TABLE email_verification_tokens
-  ADD COLUMN purpose VARCHAR(32) NOT NULL DEFAULT 'email_verification';
-
-ALTER TABLE email_verification_tokens
+  ADD COLUMN purpose VARCHAR(32) NOT NULL DEFAULT 'email_verification',
   ADD KEY ix_verification_tokens_user_purpose (user_id, purpose);

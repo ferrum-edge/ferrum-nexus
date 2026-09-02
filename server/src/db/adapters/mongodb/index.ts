@@ -820,7 +820,7 @@ const INDEXES: IndexDefinition[] = [
   },
 ];
 
-/** Indexes added by `002_verification_token_purpose`. */
+/** Indexes added by `003_verification_token_purpose`. */
 const PURPOSE_INDEXES: IndexDefinition[] = [
   {
     collection: 'email_verification_tokens',
@@ -855,7 +855,7 @@ const MONGO_MIGRATIONS: { id: string; apply: (db: Db) => Promise<void> }[] = [
     apply: (db: Db): Promise<void> => createIndexes(db, INDEXES),
   },
   {
-    id: '002_verification_token_purpose',
+    id: '003_verification_token_purpose',
     apply: async (db: Db): Promise<void> => {
       // The SQL dialects backfill through a column default; Mongo has to write
       // the field. Every document that predates the column is a verification
