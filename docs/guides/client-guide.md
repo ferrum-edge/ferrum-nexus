@@ -43,10 +43,37 @@ Depending on how your portal is configured you may hit one of these:
 - **A CAPTCHA challenge.** Complete it as part of the form.
 - **Email verification required.** You will not be able to sign in until you
   click the link in the verification email. It is single-use and expires after
-  **24 hours**. If it has expired or never arrived, ask an admin — they can
-  mark you verified or re-send.
+  **24 hours**. If it has expired or never arrived, use **Resend the
+  verification email** — it is on the confirmation screen after you register,
+  and on the sign-in page whenever a sign-in is refused for an unverified
+  address. A new link replaces the old one, so use the most recent email. The
+  portal will only send one every 10 minutes; if a second click seems to do
+  nothing, check your spam folder before trying again.
 
 If verification is _not_ required, registering signs you straight in.
+
+### If you forget your password
+
+Choose **Forgot password?** under the password box on the sign-in page, enter
+the address you registered with, and follow the link in the email. The link is
+single-use and expires after **one hour**.
+
+Two things to expect:
+
+- The confirmation says "if an account exists for that address" and says it for
+  every address. That is deliberate: the portal will not tell an anonymous
+  visitor which addresses are registered. It is not a sign that anything went
+  wrong.
+- **Setting a new password signs you out everywhere** — every browser, tab and
+  device. Sign in again with the new password. Your API credentials are
+  unaffected: keys, Basic auth users and JWT secrets keep working, because they
+  authenticate to the gateway rather than to the portal.
+
+If the link has expired, just request another. Only one reset link per account
+is live at a time, and requesting a second inside 10 minutes sends nothing —
+so if no email arrives, wait rather than clicking repeatedly. If you never
+receive one, the address may not be registered, or the account may have been
+disabled; ask an administrator.
 
 ### Your profile
 
