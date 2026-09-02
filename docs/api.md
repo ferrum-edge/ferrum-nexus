@@ -845,8 +845,10 @@ then persists.
 ```
 
 Errors: `400 SPEC_INVALID` (unparseable, Swagger 2.0, missing
-`openapi`/`info.title`/`info.version`/`paths`, oversized, or no upstream
-determinable), `409 CONFLICT` (slug taken), `502 EDGE_ERROR` /
+`openapi`/`info.title`/`info.version`/`paths`, oversized, no upstream
+determinable, or — unless `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` — an upstream
+that is a loopback, private, link-local or `.internal`/`.local` destination,
+reported with `details.reason = "private_upstream"`), `409 CONFLICT` (slug taken), `502 EDGE_ERROR` /
 `502 EDGE_UNAVAILABLE`. A failed Edge step is rolled back — the plugin configs
 and proxy are deleted — and nothing is written to the Nexus store.
 
@@ -887,7 +889,8 @@ route. Every field optional; nothing supplied returns the row unchanged.
 | `rate_limit`                     | attaches, replaces, or (with `null`) deletes `rate_limiting`; `limit` 1–1 000 000                                                                              |
 | `cors`                           | attaches, replaces, or (with `null`) deletes `cors`. Omitting the field leaves the existing policy alone — only an explicit `null` removes it                  |
 
-→ `{ "api": Api }`. Errors: `400 SPEC_INVALID` (bad `upstream_url`),
+→ `{ "api": Api }`. Errors: `400 SPEC_INVALID` (bad or, by default, private
+`upstream_url` — see `POST /api/apis`),
 `502 EDGE_ERROR`.
 
 ### `DELETE /api/apis/:id`
