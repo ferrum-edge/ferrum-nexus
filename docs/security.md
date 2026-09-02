@@ -563,14 +563,14 @@ ordinary reporting.
 
 ### Publishing
 
-| Action                 | Target type | Description                                                                                                                                                                     |
-| ---------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `api.publish`          | `api`       | An API was published and its Edge proxy + plugins created. `details`: slug, listen path, proxy id, auth plugin, requestable, visibility, rate limit, upstream, spec path count. |
-| `api.update`           | `api`       | Safe runtime settings changed. `details`: `changed_fields`, plus context such as `previous_auth_plugin` and `existing_credentials_invalidated`.                                 |
-| `api.spec_update`      | `api`       | A new spec revision was published and made current. `details`: spec id, version, path count, `backend_updated`.                                                                 |
-| `api.retire`           | `api`       | An API moved to `retired`. Emitted instead of `api.update` for that transition. `details.gateway_untouched` records that the proxy and live grants were left alone.             |
-| `api.delete`           | `api`       | An API and its Edge objects were destroyed. `details`: slug, proxy id, `revoked_grants`.                                                                                        |
-| `test_consumer.create` | `api`       | A provider created (or replaced) the disposable `nexus-test-<api_id>` consumer. `details`: consumer username/id, credential type, `replaced`.                                   |
+| Action                 | Target type | Description                                                                                                                                                                                                                                               |
+| ---------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `api.publish`          | `api`       | An API was published: its Edge proxy and plugin configs created, then associated on the proxy so the gateway runs them. `details`: slug, listen path, proxy id, auth plugin, requestable, visibility, rate limit, CORS policy, upstream, spec path count. |
+| `api.update`           | `api`       | Safe runtime settings changed. `details`: `changed_fields`, plus context such as `previous_auth_plugin` and `existing_credentials_invalidated`.                                                                                                           |
+| `api.spec_update`      | `api`       | A new spec revision was published and made current. `details`: spec id, version, path count, `backend_updated`.                                                                                                                                           |
+| `api.retire`           | `api`       | An API moved to `retired`. Emitted instead of `api.update` for that transition. `details.gateway_untouched` records that the proxy and live grants were left alone.                                                                                       |
+| `api.delete`           | `api`       | An API and its Edge objects were destroyed. `details`: slug, proxy id, `revoked_grants`.                                                                                                                                                                  |
+| `test_consumer.create` | `api`       | A provider created (or replaced) the disposable `nexus-test-<api_id>` consumer. `details`: consumer username/id, credential type, `replaced`.                                                                                                             |
 
 ### Access workflow
 

@@ -46,6 +46,7 @@ import type {
   EdgePluginConfigWrite,
   EdgeProbe,
   EdgeProxy,
+  EdgeProxyReplace,
   EdgeProxyWrite,
 } from './types.js';
 
@@ -196,7 +197,11 @@ export interface FerrumAdminClient {
     list(query?: EdgeListQuery): Promise<EdgePage<EdgeProxy>>;
     get(id: string): Promise<EdgeProxy | null>;
     create(body: EdgeProxyWrite, subject?: string): Promise<EdgeProxy>;
-    replace(id: string, body: EdgeProxyWrite, subject?: string): Promise<EdgeProxy>;
+    /**
+     * Whole-resource replace. The body must be a `GET` response with the
+     * changed fields overwritten — see {@link EdgeProxyReplace}.
+     */
+    replace(id: string, body: EdgeProxyReplace, subject?: string): Promise<EdgeProxy>;
     delete(id: string, subject?: string): Promise<void>;
   };
 
@@ -638,7 +643,7 @@ export function createFerrumAdminClient(
       async create(body: EdgeProxyWrite, subject?: string): Promise<EdgeProxy> {
         return callRequired<EdgeProxy>('POST', '/proxies', { body, subject });
       },
-      async replace(id: string, body: EdgeProxyWrite, subject?: string): Promise<EdgeProxy> {
+      async replace(id: string, body: EdgeProxyReplace, subject?: string): Promise<EdgeProxy> {
         return callRequired<EdgeProxy>('PUT', `/proxies/${encodeURIComponent(id)}`, {
           body,
           subject,

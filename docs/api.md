@@ -970,16 +970,16 @@ _provider_, owner-or-admin
 _provider_, owner-or-admin — safe runtime settings only; the spec has its own
 route. Every field optional; nothing supplied returns the row unchanged.
 
-| Field                            | Effect                                                                                                                                                         |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`, `description`, `version` | metadata only                                                                                                                                                  |
-| `visibility`                     | `public` ⇄ `internal`; catalog listing only                                                                                                                    |
-| `status`                         | `published` ⇄ `retired` — **catalog state only**, the proxy and every live grant keep working                                                                  |
-| `upstream_url`                   | rewrites the Edge proxy's backend                                                                                                                              |
-| `auth_plugin`                    | deletes the old auth plugin config and attaches the new one; existing credentials of the old flavour no longer satisfy this API, and every grantee is notified |
-| `requestable`                    | attaches or deletes `access_control`. Turning it **off** opens the API to every authenticated consumer; existing grants stay on the consumers and become inert |
-| `rate_limit`                     | attaches, replaces, or (with `null`) deletes `rate_limiting`; `limit` 1–1 000 000                                                                              |
-| `cors`                           | attaches, replaces, or (with `null`) deletes `cors`. Omitting the field leaves the existing policy alone — only an explicit `null` removes it                  |
+| Field                            | Effect                                                                                                                                                                                          |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`, `description`, `version` | metadata only                                                                                                                                                                                   |
+| `visibility`                     | `public` ⇄ `internal`; catalog listing only                                                                                                                                                     |
+| `status`                         | `published` ⇄ `retired` — **catalog state only**, the proxy and every live grant keep working                                                                                                   |
+| `upstream_url`                   | re-points the Edge proxy's backend and records the normalized form on the row; everything else on the proxy is left as it was found                                                             |
+| `auth_plugin`                    | attaches and associates the new auth plugin config before detaching and deleting the old one; existing credentials of the old flavour no longer satisfy this API, and every grantee is notified |
+| `requestable`                    | attaches or deletes `access_control`. Turning it **off** opens the API to every authenticated consumer; existing grants stay on the consumers and become inert                                  |
+| `rate_limit`                     | attaches, replaces, or (with `null`) deletes `rate_limiting`; `limit` 1–1 000 000                                                                                                               |
+| `cors`                           | attaches, replaces, or (with `null`) deletes `cors`. Omitting the field leaves the existing policy alone — only an explicit `null` removes it                                                   |
 
 → `{ "api": Api }`. Errors: `400 SPEC_INVALID` (bad or, by default, private
 `upstream_url` — see `POST /api/apis`),
@@ -989,11 +989,13 @@ route. Every field optional; nothing supplied returns the row unchanged.
 
 _provider_, owner-or-admin → `{ "ok": true }`.
 
-Destructive and ordered deliberately: plugin configs and proxy are deleted from
-Edge **first** (so nothing stays reachable-but-untracked), then the ACL group is
-stripped from every grantee's consumer, then the grants, requests, spec
-revisions and the API row are deleted in one store transaction. Grantees get a
-notification.
+Destructive and ordered deliberately: the Edge proxy is deleted **first** (so
+nothing stays reachable-but-untracked, and so the API never spends the teardown
+live with its auth plugin already gone), which cascades its plugin associations
+and proxy-scoped plugin configs; any config the cascade missed is swept up
+after. Then the ACL group is stripped from every grantee's consumer, then the
+grants, requests, spec revisions and the API row are deleted in one store
+transaction. Grantees get a notification.
 
 ### `PUT /api/apis/:id/spec`
 
@@ -1009,7 +1011,9 @@ the parsed `info.version`).
 The new revision becomes current. The proxy backend is re-pointed at the
 document's `servers[0]` **only** if the proxy is still pointing where the
 _previous_ revision said it should — once a provider supplies an explicit
-upstream, the document stops being authoritative for it.
+upstream, the document stops being authoritative for it. When the backend does
+move, `upstream_url` on the row moves with it, in the same store transaction as
+the revision; when it does not, `upstream_url` is left alone.
 
 ### `POST /api/apis/:id/test-consumer`
 
