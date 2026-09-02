@@ -2,17 +2,16 @@
  * `/api/auth` — register, login, logout, me, verify-email, captcha config.
  *
  * Routes never import service modules: everything arrives through the plugin
- * registration options. Cookie policy lives here and nowhere else.
+ * registration options. Cookie policy lives in
+ * `../middleware/session-cookies.js`, shared with the sliding-expiration hook.
  */
 
-import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 
 import {
-  CSRF_COOKIE,
   MIN_PASSWORD_LENGTH,
   REGISTRABLE_ROLES,
-  SESSION_COOKIE,
   type CaptchaConfigResponse,
   type LoginResponse,
   type LogoutResponse,
@@ -21,10 +20,11 @@ import {
   type VerifyEmailResponse,
 } from '@ferrum-nexus/shared';
 
-import type { AuthService, IssuedSession } from '../auth/service.js';
+import type { AuthService } from '../auth/service.js';
 import type { CaptchaService } from '../auth/captcha.js';
 import type { NexusConfig } from '../config/index.js';
 import { requestContext, requireAuth } from '../middleware/auth-plugin.js';
+import { clearSessionCookies, setSessionCookies } from '../middleware/session-cookies.js';
 import { parseOrThrow } from '../middleware/error-handler.js';
 
 /** Services this route plugin needs. */
@@ -53,36 +53,6 @@ const loginBody = z.object({
 const verifyEmailBody = z.object({
   token: z.string().trim().min(8).max(512),
 });
-
-/**
- * Write the session pair.
- *
- * `nexus_session` is HttpOnly (bearer-equivalent); `nexus_csrf` deliberately is
- * not, because the double-submit check needs the browser to read it. Both are
- * `SameSite=Lax`, path `/`, and `Secure` unless `NEXUS_COOKIE_SECURE=false`
- * (the default outside `NEXUS_ENV=development`).
- */
-export function setSessionCookies(
-  reply: FastifyReply,
-  config: NexusConfig,
-  issued: IssuedSession,
-): void {
-  const base = {
-    path: '/',
-    sameSite: 'lax' as const,
-    secure: config.cookieSecure,
-    maxAge: config.sessionTtlSeconds,
-  };
-  reply.setCookie(SESSION_COOKIE, issued.token, { ...base, httpOnly: true });
-  reply.setCookie(CSRF_COOKIE, issued.csrfToken, { ...base, httpOnly: false });
-}
-
-/** Clear the session pair on sign-out. */
-export function clearSessionCookies(reply: FastifyReply, config: NexusConfig): void {
-  const base = { path: '/', sameSite: 'lax' as const, secure: config.cookieSecure };
-  reply.clearCookie(SESSION_COOKIE, { ...base, httpOnly: true });
-  reply.clearCookie(CSRF_COOKIE, { ...base, httpOnly: false });
-}
 
 /** `/api/auth` route plugin. */
 export const authRoutes: FastifyPluginAsync<AuthRoutesOptions> = async (app, options) => {

@@ -23,8 +23,8 @@ import {
 import type { NexusConfig } from '../config/index.js';
 import { clientIp, requestContext, requireAuth, requireRole } from '../middleware/auth-plugin.js';
 import { parseOrThrow } from '../middleware/error-handler.js';
+import { setSessionCookies } from '../middleware/session-cookies.js';
 import type { UsersService } from '../users/service.js';
-import { setSessionCookies } from './auth.js';
 import { idParamSchema, listOptions, listQuerySchema } from './common.js';
 
 /** Services this route plugin needs. */
