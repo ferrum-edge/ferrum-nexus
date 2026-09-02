@@ -53,6 +53,77 @@ describe('admin settings', () => {
     assert.equal(errorCode(response.body), 'FORBIDDEN');
   });
 
+  describe('mail and CAPTCHA are super_admin-only', () => {
+    let admin: TestSession;
+
+    before(async () => {
+      const account = await harness.registerUser({ email: 'plain-admin@example.test' });
+      const promoted = await harness.authed(founder, {
+        method: 'PATCH',
+        url: `/api/users/${account.user.id}`,
+        payload: { role: 'admin' },
+      });
+      assert.equal(promoted.statusCode, 200, promoted.body);
+      admin = await harness.loginUser('plain-admin@example.test');
+      assert.equal(admin.user.role, 'admin');
+    });
+
+    it('refuses an ordinary admin repointing SMTP', async () => {
+      const response = await harness.authed(admin, {
+        method: 'PUT',
+        url: '/api/admin/settings',
+        payload: { smtp: { host: 'smtp.attacker.test', username: 'me' } },
+      });
+      assert.equal(response.statusCode, 403);
+      assert.equal(errorCode(response.body), 'FORBIDDEN');
+
+      const settings = await harness.authed(founder, {
+        method: 'GET',
+        url: '/api/admin/settings',
+      });
+      assert.notEqual(
+        settings.json<AdminSettingsResponse>().smtp.host,
+        'smtp.attacker.test',
+        'nothing was written',
+      );
+    });
+
+    it('refuses an ordinary admin touching the CAPTCHA section', async () => {
+      const response = await harness.authed(admin, {
+        method: 'PUT',
+        url: '/api/admin/settings',
+        payload: { captcha: { enabled: false } },
+      });
+      assert.equal(response.statusCode, 403);
+      assert.equal(errorCode(response.body), 'FORBIDDEN');
+    });
+
+    it('still lets an ordinary admin change registration policy and branding', async () => {
+      const response = await harness.authed(admin, {
+        method: 'PUT',
+        url: '/api/admin/settings',
+        payload: {
+          registration: { open_registration: true },
+          branding: { tagline: 'Set by an ordinary admin' },
+        },
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      const settings = response.json<AdminSettingsResponse>();
+      assert.equal(settings.registration.open_registration, true);
+      assert.equal(settings.branding.tagline, 'Set by an ordinary admin');
+    });
+
+    it('lets a super_admin change the same SMTP section', async () => {
+      const response = await harness.authed(founder, {
+        method: 'PUT',
+        url: '/api/admin/settings',
+        payload: { smtp: { host: 'smtp.trusted.test' } },
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      assert.equal(response.json<AdminSettingsResponse>().smtp.host, 'smtp.trusted.test');
+    });
+  });
+
   it('stores the SMTP password encrypted and never returns it', async () => {
     const response = await harness.authed(founder, {
       method: 'PUT',
