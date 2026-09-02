@@ -437,8 +437,14 @@ written last, so a failed publish leaves nothing behind on either side.
 apis row ─┬─ proxy          name `nexus-<slug>`, listen_path `/<namespace>/<slug>`
           ├─ plugin_config  the auth plugin (key_auth | basic_auth | jwt_auth)
           ├─ plugin_config  access_control    — only when `requestable`
-          └─ plugin_config  rate_limiting     — only when a rate limit is set
+          ├─ plugin_config  rate_limiting     — only when a rate limit is set
+          └─ plugin_config  cors              — only when `cors` names origins
 ```
+
+The `apis` row also records `upstream_url`, the normalized
+`scheme://host:port[/basePath]` form of the backend the proxy was last pointed
+at, so the portal can show and reason about the upstream without reading it back
+from Edge.
 
 The upstream comes from the provider's explicit `upstream_url`, else the
 document's first _absolute_ `servers[].url`. Relative server URLs are legal
