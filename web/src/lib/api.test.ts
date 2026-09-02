@@ -120,6 +120,51 @@ describe('lib/api', () => {
     expect(onUnauthorized).not.toHaveBeenCalled();
   });
 
+  it('posts the password recovery bodies to their routes', async () => {
+    // A Response body can only be read once, so each call needs a fresh one.
+    vi.mocked(globalThis.fetch).mockImplementation(() =>
+      Promise.resolve(jsonResponse({ ok: true })),
+    );
+
+    await expect(authApi.forgotPassword({ email: 'someone@example.test' })).resolves.toEqual({
+      ok: true,
+    });
+    const [forgotUrl, forgotInit] = lastCall();
+    expect(forgotUrl).toBe('/api/auth/forgot-password');
+    expect(forgotInit.method).toBe('POST');
+    expect(JSON.parse(String(forgotInit.body))).toEqual({ email: 'someone@example.test' });
+
+    await authApi.resetPassword({ token: 'tok-123', new_password: 'a-long-enough-password' });
+    const [resetUrl, resetInit] = lastCall();
+    expect(resetUrl).toBe('/api/auth/reset-password');
+    expect(JSON.parse(String(resetInit.body))).toEqual({
+      token: 'tok-123',
+      new_password: 'a-long-enough-password',
+    });
+
+    await authApi.resendVerification({ email: 'someone@example.test' });
+    const [resendUrl, resendInit] = lastCall();
+    expect(resendUrl).toBe('/api/auth/resend-verification');
+    expect(resendInit.method).toBe('POST');
+  });
+
+  it('does not fire the unauthorized handler for a rate-limited reset request', async () => {
+    // These three routes are reachable without a session; a 429 from the
+    // `/api/auth/*` limiter must not be mistaken for a dead session.
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      jsonResponse({ error: { code: ERROR_CODES.RATE_LIMITED, message: 'slow down' } }, 429),
+    );
+    const onUnauthorized = vi.fn();
+    setUnauthorizedHandler(onUnauthorized);
+
+    const error = (await authApi
+      .forgotPassword({ email: 'someone@example.test' })
+      .catch((caught: unknown) => caught)) as ApiError;
+
+    expect(error.code).toBe(ERROR_CODES.RATE_LIMITED);
+    expect(onUnauthorized).not.toHaveBeenCalled();
+  });
+
   it('builds query strings, dropping empty values', () => {
     expect(buildQuery({ limit: 25, offset: 0, q: '', mine: true, status: undefined })).toBe(
       '?limit=25&offset=0&mine=true',

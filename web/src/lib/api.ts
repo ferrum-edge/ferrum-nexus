@@ -43,6 +43,8 @@ import {
   type EdgeHealthResponse,
   type EmailTemplateKey,
   type ErrorCode,
+  type ForgotPasswordRequest,
+  type ForgotPasswordResponse,
   type GetApiResponse,
   type GetEmailTemplateResponse,
   type GetMeUserResponse,
@@ -89,6 +91,10 @@ import {
   type PublishApiResponse,
   type RegisterRequest,
   type RegisterResponse,
+  type ResendVerificationRequest,
+  type ResendVerificationResponse,
+  type ResetPasswordRequest,
+  type ResetPasswordResponse,
   type RevokeGrantRequest,
   type RevokeGrantResponse,
   type RotateCredentialRequest,
@@ -300,6 +306,21 @@ export const authApi = {
     request<MeResponse>('GET', '/auth/me', { skipUnauthorizedHandler: true }),
   verifyEmail: (body: VerifyEmailRequest): Promise<VerifyEmailResponse> =>
     post<VerifyEmailResponse>('/auth/verify-email', body),
+  /**
+   * Ask for a fresh verification link.
+   *
+   * Resolves with `{ ok: true }` even for an address with no account — the
+   * server deliberately says nothing about who exists, so the UI must not
+   * present the result as confirmation that the address is registered.
+   */
+  resendVerification: (body: ResendVerificationRequest): Promise<ResendVerificationResponse> =>
+    post<ResendVerificationResponse>('/auth/resend-verification', body),
+  /** Ask for a password-reset link. Same uninformative contract as above. */
+  forgotPassword: (body: ForgotPasswordRequest): Promise<ForgotPasswordResponse> =>
+    post<ForgotPasswordResponse>('/auth/forgot-password', body),
+  /** Redeem a reset link. On success every session of the account is gone. */
+  resetPassword: (body: ResetPasswordRequest): Promise<ResetPasswordResponse> =>
+    post<ResetPasswordResponse>('/auth/reset-password', body),
   captcha: (): Promise<CaptchaConfigResponse> => get<CaptchaConfigResponse>('/auth/captcha'),
 };
 
