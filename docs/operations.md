@@ -605,8 +605,10 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
 Structured JSON (pino) at `NEXUS_LOG_LEVEL`. Unhandled 5xx errors log at
 `error` with the URL and the full error; sub-500 responses log at `debug` with
 `{ code, status, url }`. The Edge client logs upstream error text at `error`
-(`Ferrum Edge Admin API returned an error`) — that text is deliberately **only**
-in the log and never in the HTTP response, so this is where you look when a
+(`Ferrum Edge Admin API returned an error`). For a `400`, `409` or `422` — the
+gateway validating the caller's own request — the same text is echoed to the
+caller in `EDGE_ERROR.details.gateway_message`; for `401`/`403` and every `5xx`
+it is deliberately **only** in the log, so this is where you look when a
 provider reports an unexplained `EDGE_ERROR`.
 
 ### Shutdown

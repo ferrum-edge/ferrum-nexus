@@ -86,8 +86,11 @@ async function probeEdge(
     latency_ms: result.latencyMs,
     error: result.error === null ? null : detailAllowed ? result.error : OPAQUE_ERROR,
     ready: result.ready,
-    mode: result.mode,
-    admin_writes_enabled: result.adminWritesEnabled,
+    // Edge itself only reveals `mode` and `admin_writes_enabled` to an
+    // authenticated caller; the portal keeps the same line for its anonymous
+    // probe. `ready` is the readiness signal a monitor needs and stays public.
+    mode: detailAllowed ? result.mode : null,
+    admin_writes_enabled: detailAllowed ? result.adminWritesEnabled : null,
     edge_version: result.version,
     namespace,
   };

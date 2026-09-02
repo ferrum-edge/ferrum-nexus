@@ -180,8 +180,10 @@ Overall `status` is `ok` | `degraded` | `down`; `edge.status` is `ok` |
 complete health payload** while it is `starting`, `draining` or `unavailable`.
 That is a reachable gateway reporting its own state, so Nexus parses the body
 and reports `ready: false` rather than calling the gateway unreachable.
-`ready`, `mode` and `admin_writes_enabled` come straight from that payload and
-are `null` when nothing answered.
+`ready` comes straight from that payload and is `null` when nothing answered.
+`mode` and `admin_writes_enabled` are gateway detail: they are filled in only
+for an authenticated admin, and are `null` for everyone else — the same rule
+`error` follows.
 
 `edge_version` is **always `null` against a stock gateway**: Ferrum Edge
 exposes no version endpoint at all. Take the real version from your deployment

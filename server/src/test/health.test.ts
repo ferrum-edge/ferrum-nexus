@@ -29,8 +29,8 @@ describe('health endpoints', () => {
     assert.equal(body.edge.status, 'ok');
     assert.equal(body.edge.namespace, 'nexus');
     assert.equal(body.edge.ready, true);
-    assert.equal(body.edge.mode, 'database');
-    assert.equal(body.edge.admin_writes_enabled, true);
+    assert.equal(body.edge.mode, null, 'gateway mode is admin-only detail');
+    assert.equal(body.edge.admin_writes_enabled, null, 'admin-only detail');
     assert.equal(body.edge.edge_version, null, 'Ferrum Edge exposes no version endpoint');
     assert.ok(body.uptime_seconds >= 0);
     assert.ok(Date.parse(body.checked_at) > 0);
@@ -118,9 +118,15 @@ describe('health endpoints', () => {
       assert.equal(body.status, 'degraded');
       assert.equal(body.edge.status, 'not_ready');
       assert.equal(body.edge.ready, false);
-      assert.equal(body.edge.mode, 'database');
-      assert.equal(body.edge.admin_writes_enabled, false);
+      assert.equal(body.edge.mode, null);
+      assert.equal(body.edge.admin_writes_enabled, null);
       assert.equal(body.edge.error, null, 'a 503 health payload is not a probe failure');
+
+      const admin = await harness.registerUser({ email: 'health-admin@example.test' });
+      const detailed = await harness.authed(admin, { method: 'GET', url: '/api/health' });
+      assert.equal(detailed.statusCode, 200);
+      assert.equal(detailed.json<AppHealth>().edge.mode, 'database');
+      assert.equal(detailed.json<AppHealth>().edge.admin_writes_enabled, false);
 
       const edgeOnly = await harness.app.inject({ method: 'GET', url: '/api/health/edge' });
       assert.equal(edgeOnly.statusCode, 200);
