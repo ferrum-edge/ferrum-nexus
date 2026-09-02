@@ -1364,16 +1364,22 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       const token = await store.verificationTokens.create({
         user_id: user.id,
         token_hash: tokenHash,
+        purpose: 'email_verification',
         expires_at: isoInSeconds(600),
       });
       assert.equal(token.used_at, null);
-      assert.deepEqual(await store.verificationTokens.findByTokenHash(tokenHash), token);
+      assert.equal(token.purpose, 'email_verification');
+      assert.deepEqual(
+        await store.verificationTokens.findByTokenHash(tokenHash, 'email_verification'),
+        token,
+      );
 
       await assert.rejects(
         () =>
           store.verificationTokens.create({
             user_id: user.id,
             token_hash: tokenHash,
+            purpose: 'email_verification',
             expires_at: isoInSeconds(600),
           }),
         (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
@@ -1385,14 +1391,83 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         false,
         'a token can only be burned once',
       );
-      assert.ok((await store.verificationTokens.findByTokenHash(tokenHash))?.used_at);
+      assert.ok(
+        (await store.verificationTokens.findByTokenHash(tokenHash, 'email_verification'))?.used_at,
+      );
 
       await store.verificationTokens.create({
         user_id: user.id,
         token_hash: `expired-${newId()}`,
+        purpose: 'email_verification',
         expires_at: isoInSeconds(-10),
       });
       assert.equal(await store.verificationTokens.deleteExpired(nowIso()), 1);
+      assert.equal(await store.verificationTokens.deleteForUser(user.id), 1);
+    });
+
+    it('verificationTokens: purpose partitions lookups, throttle reads and sweeps', async () => {
+      const user = await makeUser();
+      const resetHash = `reset-${newId()}`;
+      const reset = await store.verificationTokens.create({
+        user_id: user.id,
+        token_hash: resetHash,
+        purpose: 'password_reset',
+        expires_at: isoInSeconds(600),
+      });
+
+      // A reset token is invisible to the verification flow and vice versa —
+      // this is what stops one flow redeeming the other's links.
+      assert.equal(
+        await store.verificationTokens.findByTokenHash(resetHash, 'email_verification'),
+        null,
+      );
+      assert.deepEqual(
+        await store.verificationTokens.findByTokenHash(resetHash, 'password_reset'),
+        reset,
+      );
+
+      const now = nowIso();
+      assert.deepEqual(
+        await store.verificationTokens.findLatestLiveForUser(user.id, 'password_reset', now),
+        reset,
+        'the live reset token is what the resend throttle sees',
+      );
+      assert.equal(
+        await store.verificationTokens.findLatestLiveForUser(user.id, 'email_verification', now),
+        null,
+      );
+
+      // Burned and expired tokens are not "live": neither should throttle a
+      // request for a link the user can no longer use.
+      await store.verificationTokens.markUsed(reset.id, nowIso());
+      assert.equal(
+        await store.verificationTokens.findLatestLiveForUser(user.id, 'password_reset', now),
+        null,
+        'a burned token no longer throttles',
+      );
+      await store.verificationTokens.create({
+        user_id: user.id,
+        token_hash: `stale-${newId()}`,
+        purpose: 'password_reset',
+        expires_at: isoInSeconds(-10),
+      });
+      assert.equal(
+        await store.verificationTokens.findLatestLiveForUser(user.id, 'password_reset', now),
+        null,
+        'an expired token no longer throttles',
+      );
+
+      await store.verificationTokens.create({
+        user_id: user.id,
+        token_hash: `verify-${newId()}`,
+        purpose: 'email_verification',
+        expires_at: isoInSeconds(600),
+      });
+      assert.equal(
+        await store.verificationTokens.deleteForUser(user.id, 'password_reset'),
+        2,
+        'a purpose-scoped sweep leaves the other flow alone',
+      );
       assert.equal(await store.verificationTokens.deleteForUser(user.id), 1);
     });
 

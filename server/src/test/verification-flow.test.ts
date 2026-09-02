@@ -153,6 +153,7 @@ describe('register to verified, end to end through the outbox', () => {
     );
     const row = await harness.store.verificationTokens.findByTokenHash(
       harness.app.nexus.crypto.hashToken(token),
+      'email_verification',
     );
     assert.equal(row?.used_at, null, 'the burn rolled back with the update it was protecting');
     assert.equal(

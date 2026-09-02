@@ -139,6 +139,7 @@ export const THEME_STORAGE_KEY = 'nexus:theme';
 /** Key identifying a stored, admin-editable email template. */
 export type EmailTemplateKey =
   | 'verification'
+  | 'password_reset'
   | 'access_approved'
   | 'access_denied'
   | 'access_revoked'
@@ -149,6 +150,7 @@ export type EmailTemplateKey =
 /** Every email template key, in admin UI display order. */
 export const EMAIL_TEMPLATE_KEYS = [
   'verification',
+  'password_reset',
   'access_approved',
   'access_denied',
   'access_revoked',
@@ -160,6 +162,7 @@ export const EMAIL_TEMPLATE_KEYS = [
 /** Human-readable labels for {@link EmailTemplateKey}. */
 export const EMAIL_TEMPLATE_LABELS: Readonly<Record<EmailTemplateKey, string>> = {
   verification: 'Email verification',
+  password_reset: 'Password reset',
   access_approved: 'Access request approved',
   access_denied: 'Access request denied',
   access_revoked: 'Access revoked',
@@ -186,6 +189,27 @@ export const DEFAULT_SESSION_TTL_SECONDS = 43_200;
 
 /** Email verification token lifetime in seconds (24 hours). */
 export const EMAIL_VERIFICATION_TTL_SECONDS = 86_400;
+
+/** Password reset token lifetime in seconds (1 hour). */
+export const PASSWORD_RESET_TTL_SECONDS = 3_600;
+
+/**
+ * Minimum gap between two password-reset emails for the same account.
+ *
+ * A second `POST /api/auth/forgot-password` inside this window is answered
+ * exactly like the first but sends nothing, so the endpoint cannot be used to
+ * flood someone's inbox. It never changes the response, so it also cannot be
+ * used to tell an existing address from an unknown one.
+ */
+export const PASSWORD_RESET_THROTTLE_SECONDS = 600;
+
+/**
+ * Minimum gap between two verification emails for the same account.
+ *
+ * Same contract as {@link PASSWORD_RESET_THROTTLE_SECONDS}: a resend inside the
+ * window is answered identically and sends nothing.
+ */
+export const VERIFICATION_RESEND_THROTTLE_SECONDS = 600;
 
 /** Outbox worker poll interval in milliseconds. */
 export const OUTBOX_POLL_INTERVAL_MS = 5_000;

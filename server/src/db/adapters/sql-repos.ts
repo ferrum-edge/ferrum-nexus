@@ -84,6 +84,7 @@ import type {
   UserFilter,
   UserRecord,
   UserRepo,
+  VerificationTokenPurpose,
   VerificationTokenRecord,
   VerificationTokenRepo,
 } from '../store.js';
@@ -390,6 +391,7 @@ function mapVerificationToken(row: Row): VerificationTokenRecord {
     id: text(row.id),
     user_id: text(row.user_id),
     token_hash: text(row.token_hash),
+    purpose: text(row.purpose) as VerificationTokenPurpose,
     expires_at: text(row.expires_at),
     used_at: textOrNull(row.used_at),
     created_at: text(row.created_at),
@@ -2104,12 +2106,13 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         execute(
           exec,
           `INSERT INTO email_verification_tokens
-             (id, user_id, token_hash, expires_at, used_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+             (id, user_id, token_hash, purpose, expires_at, used_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             meta.id,
             input.user_id,
             input.token_hash,
+            input.purpose,
             input.expires_at,
             input.used_at ?? null,
             meta.created_at,
@@ -2124,11 +2127,22 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return mapVerificationToken(row);
     },
 
-    findByTokenHash: async (tokenHash) => {
+    findByTokenHash: async (tokenHash, purpose) => {
       const row = await queryOne(
         exec,
-        'SELECT * FROM email_verification_tokens WHERE token_hash = ?',
-        [tokenHash],
+        'SELECT * FROM email_verification_tokens WHERE token_hash = ? AND purpose = ?',
+        [tokenHash, purpose],
+      );
+      return row ? mapVerificationToken(row) : null;
+    },
+
+    findLatestLiveForUser: async (userId, purpose, now) => {
+      const row = await queryOne(
+        exec,
+        `SELECT * FROM email_verification_tokens
+          WHERE user_id = ? AND purpose = ? AND used_at IS NULL AND expires_at > ?
+          ORDER BY created_at DESC, id DESC LIMIT 1`,
+        [userId, purpose, now],
       );
       return row ? mapVerificationToken(row) : null;
     },
@@ -2140,8 +2154,13 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         [at, nowIso(), id],
       )) > 0,
 
-    deleteForUser: async (userId) =>
-      execute(exec, 'DELETE FROM email_verification_tokens WHERE user_id = ?', [userId]),
+    deleteForUser: async (userId, purpose) =>
+      purpose === undefined
+        ? execute(exec, 'DELETE FROM email_verification_tokens WHERE user_id = ?', [userId])
+        : execute(exec, 'DELETE FROM email_verification_tokens WHERE user_id = ? AND purpose = ?', [
+            userId,
+            purpose,
+          ]),
 
     deleteExpired: async (now) =>
       execute(exec, 'DELETE FROM email_verification_tokens WHERE expires_at <= ?', [now]),

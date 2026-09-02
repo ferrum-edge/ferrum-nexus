@@ -127,6 +127,7 @@ import type {
   UserFilter,
   UserRecord,
   UserRepo,
+  VerificationTokenPurpose,
   VerificationTokenRecord,
   VerificationTokenRepo,
 } from '../../store.js';
@@ -547,6 +548,7 @@ function mapVerificationToken(row: Row): VerificationTokenRecord {
     id: str(row._id),
     user_id: str(row.user_id),
     token_hash: str(row.token_hash),
+    purpose: str(row.purpose) as VerificationTokenPurpose,
     expires_at: str(row.expires_at),
     used_at: strOrNull(row.used_at),
     created_at: str(row.created_at),
@@ -815,26 +817,50 @@ const INDEXES: IndexDefinition[] = [
   },
 ];
 
+/** Indexes added by `002_verification_token_purpose`. */
+const PURPOSE_INDEXES: IndexDefinition[] = [
+  {
+    collection: 'email_verification_tokens',
+    name: 'ix_verification_tokens_user_purpose',
+    key: { user_id: 1, purpose: 1 },
+  },
+];
+
+/** Create one batch of {@link IndexDefinition}s. */
+async function createIndexes(db: Db, indexes: IndexDefinition[]): Promise<void> {
+  for (const index of indexes) {
+    await db.collection(index.collection).createIndex(index.key, {
+      name: index.name,
+      ...(index.unique === true ? { unique: true } : {}),
+      ...(index.partialFilterExpression
+        ? { partialFilterExpression: index.partialFilterExpression }
+        : {}),
+    });
+  }
+}
+
 /**
  * Mongo's "migrations".
  *
- * There is no DDL to apply, but the ids must stay in lockstep with the SQL
- * variants so `schema_migrations` means the same thing on every driver — and so
- * a future `002_…` lands exactly once here too.
+ * Mostly index creation rather than DDL, but the ids stay in lockstep with the
+ * SQL variants so `schema_migrations` means the same thing on every driver and
+ * each step lands exactly once here too.
  */
 const MONGO_MIGRATIONS: { id: string; apply: (db: Db) => Promise<void> }[] = [
   {
     id: '001_initial',
+    apply: (db: Db): Promise<void> => createIndexes(db, INDEXES),
+  },
+  {
+    id: '002_verification_token_purpose',
     apply: async (db: Db): Promise<void> => {
-      for (const index of INDEXES) {
-        await db.collection(index.collection).createIndex(index.key, {
-          name: index.name,
-          ...(index.unique === true ? { unique: true } : {}),
-          ...(index.partialFilterExpression
-            ? { partialFilterExpression: index.partialFilterExpression }
-            : {}),
-        });
-      }
+      // The SQL dialects backfill through a column default; Mongo has to write
+      // the field. Every document that predates the column is a verification
+      // token, since that was the only kind the table held.
+      await db
+        .collection('email_verification_tokens')
+        .updateMany({ purpose: { $exists: false } }, { $set: { purpose: 'email_verification' } });
+      await createIndexes(db, PURPOSE_INDEXES);
     },
   },
 ];
@@ -2435,6 +2461,7 @@ class MongoStore implements NexusStore {
         _id: meta.id,
         user_id: input.user_id,
         token_hash: input.token_hash,
+        purpose: input.purpose,
         expires_at: input.expires_at,
         used_at: input.used_at ?? null,
         created_at: meta.created_at,
@@ -2446,11 +2473,26 @@ class MongoStore implements NexusStore {
       return mapVerificationToken(doc as Row);
     },
 
-    findByTokenHash: async (tokenHash) => {
+    findByTokenHash: async (tokenHash, purpose) => {
       const row = asRow(
         await this.col(COLLECTIONS.verificationTokens).findOne(
-          { token_hash: tokenHash },
+          { token_hash: tokenHash, purpose },
           this.opts,
+        ),
+      );
+      return row ? mapVerificationToken(row) : null;
+    },
+
+    findLatestLiveForUser: async (userId, purpose, now) => {
+      const row = asRow(
+        await this.col(COLLECTIONS.verificationTokens).findOne(
+          {
+            user_id: userId,
+            purpose,
+            used_at: null,
+            expires_at: { $gt: now },
+          } as Filter<NexusDoc>,
+          { ...this.opts, sort: { created_at: -1, _id: -1 } },
         ),
       );
       return row ? mapVerificationToken(row) : null;
@@ -2465,9 +2507,13 @@ class MongoStore implements NexusStore {
       return result.modifiedCount > 0;
     },
 
-    deleteForUser: async (userId) =>
-      (await this.col(COLLECTIONS.verificationTokens).deleteMany({ user_id: userId }, this.opts))
-        .deletedCount,
+    deleteForUser: async (userId, purpose) =>
+      (
+        await this.col(COLLECTIONS.verificationTokens).deleteMany(
+          purpose === undefined ? { user_id: userId } : { user_id: userId, purpose },
+          this.opts,
+        )
+      ).deletedCount,
 
     deleteExpired: async (now) =>
       (

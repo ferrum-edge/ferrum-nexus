@@ -66,6 +66,9 @@ export const CSRF_EXEMPT_PATHS: readonly string[] = [
   '/api/auth/login',
   '/api/auth/register',
   '/api/auth/verify-email',
+  '/api/auth/resend-verification',
+  '/api/auth/forgot-password',
+  '/api/auth/reset-password',
   '/api/auth/captcha',
 ];
 

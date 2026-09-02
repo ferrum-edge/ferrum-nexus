@@ -1,5 +1,5 @@
 /**
- * Registration, sign-in, sign-out and email verification.
+ * Registration, sign-in, sign-out, email verification and password recovery.
  *
  * Rules enforced here rather than in the routes, so every caller gets them:
  *
@@ -11,12 +11,19 @@
  *   counting users — see {@link AuthService.register}.
  * - Passwords are scrypt-hashed; verification is constant-time and a missing
  *   account still costs one hash so sign-in does not leak which emails exist.
- * - Every successful register/login/logout/verify writes an audit row.
+ * - The two "email me a link" endpoints — {@link AuthService.requestPasswordReset}
+ *   and {@link AuthService.resendVerification} — answer `ok` to everything and
+ *   pay the same scrypt cost whatever they decide, so neither the body, the
+ *   status nor the latency says whether an address has an account.
+ * - Every successful register/login/logout/verify/reset writes an audit row.
  */
 
 import {
   EMAIL_VERIFICATION_TTL_SECONDS,
   MIN_PASSWORD_LENGTH,
+  PASSWORD_RESET_THROTTLE_SECONDS,
+  PASSWORD_RESET_TTL_SECONDS,
+  VERIFICATION_RESEND_THROTTLE_SECONDS,
   isRegistrableRole,
   roleAtLeast,
   type Capabilities,
@@ -27,7 +34,12 @@ import {
 
 import { AuditAction, ANONYMOUS_ACTOR, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
-import type { NexusStore, SessionRecord, UserRecord } from '../db/store.js';
+import type {
+  NexusStore,
+  SessionRecord,
+  UserRecord,
+  VerificationTokenPurpose,
+} from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
 import {
   conflict,
@@ -65,6 +77,29 @@ export interface RegistrationPolicy {
  * timing when the email address does not exist.
  */
 const DECOY_PASSWORD_HASH = `scrypt:16384:8:1:AAAAAAAAAAAAAAAAAAAAAA==:${'A'.repeat(43)}=`;
+
+/**
+ * Value hashed to pad out the "email me a link" endpoints.
+ *
+ * Those endpoints do very different amounts of work depending on the answer —
+ * mint a token and queue a message, or return immediately — and the difference
+ * is exactly the fact the response is not allowed to reveal. Hashing this
+ * string with the real scrypt parameters costs ~100 ms, an order of magnitude
+ * more than the queueing it hides, and {@link withTimingFloor} starts it before
+ * the branch and awaits it after, so every path takes about that long.
+ */
+const TIMING_FLOOR_SECRET = 'ferrum-nexus-anti-enumeration-timing-floor';
+
+/**
+ * The single rejection every bad reset link gets.
+ *
+ * Unknown, expired and already-spent all produce this one code and this one
+ * message. Distinguishing them would hand an attacker holding a guessed token
+ * an oracle telling them how close they were.
+ */
+function invalidResetLink(): Error {
+  return validationFailed('That password reset link is not valid or has expired');
+}
 
 const DEFAULT_REGISTRATION_POLICY: RegistrationPolicy = {
   open_registration: true,
@@ -136,6 +171,24 @@ export type OnRegistered = (event: {
   requestContext: RequestContext;
 }) => Promise<void>;
 
+/**
+ * Hook invoked when a fresh single-use link has been minted and must be
+ * emailed — a password reset, or a re-sent verification.
+ *
+ * The service deliberately does not depend on the email service: it mints and
+ * audits, the composition root delivers. `tokenId` is the row id of the token,
+ * which is what the outbox idempotency key is built from, so one minted token
+ * can produce at most one message.
+ */
+export type OnEmailTokenIssued = (event: {
+  user: User;
+  /** Plaintext token for the link; only its hash is stored. */
+  token: string;
+  /** `email_verification_tokens.id` — a stable, non-secret handle for the token. */
+  tokenId: string;
+  requestContext: RequestContext;
+}) => Promise<void>;
+
 /** Authentication operations. */
 export interface AuthService {
   register(input: RegisterInput, context: RequestContext): Promise<RegisterResult>;
@@ -153,6 +206,29 @@ export interface AuthService {
   ): { user: User; csrf_token: string; expires_at: string; capabilities: Capabilities };
   /** Redeem a single-use verification token. */
   verifyEmail(token: string, context: RequestContext): Promise<{ verified: boolean; user: User }>;
+  /**
+   * Queue a fresh verification link for an unverified account.
+   *
+   * Resolves with nothing whatever it decided — unknown address, disabled
+   * account, already verified, or throttled all look the same from outside.
+   */
+  resendVerification(email: string, context: RequestContext): Promise<void>;
+  /**
+   * Queue a password-reset link.
+   *
+   * Same contract as {@link AuthService.resendVerification}: it never reports
+   * whether anything was sent.
+   */
+  requestPasswordReset(email: string, context: RequestContext): Promise<void>;
+  /**
+   * Redeem a reset link: set the new password, verify the address, and
+   * terminate every session of the account.
+   *
+   * Throws `VALIDATION_FAILED` for a token that is unknown, expired or already
+   * spent — one code and one message for all three, so a caller cannot probe
+   * which it was.
+   */
+  resetPassword(token: string, newPassword: string, context: RequestContext): Promise<void>;
   /** Issue a fresh session for a user (used by login and post-registration). */
   issueSession(user: UserRecord, context: RequestContext): Promise<IssuedSession>;
   /** Current registration policy, with defaults applied. */
@@ -168,6 +244,10 @@ export interface AuthServiceDeps {
   captcha: CaptchaService;
   /** Optional hook so the email service can enqueue the verification mail. */
   onRegistered?: OnRegistered;
+  /** Optional hook that delivers a re-sent verification link. */
+  onVerificationResend?: OnEmailTokenIssued;
+  /** Optional hook that delivers a password-reset link. */
+  onPasswordResetRequested?: OnEmailTokenIssued;
 }
 
 /** Strip the password hash: the wire shape of a user. */
@@ -205,6 +285,42 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         ? value.allowed_roles.filter((role): role is Role => typeof role === 'string')
         : DEFAULT_REGISTRATION_POLICY.allowed_roles,
     };
+  }
+
+  /**
+   * Run `body` with a scrypt derivation racing alongside it, and return only
+   * once both have finished.
+   *
+   * The point is that `body` returns after wildly different amounts of work —
+   * "this address has no account" is a single indexed SELECT, "here is your
+   * reset link" is a token insert, an audit row and a rendered message — and
+   * the endpoint's whole contract is that an observer cannot tell those apart.
+   * A floor that costs more than the widest branch flattens them; starting it
+   * first rather than adding it afterwards keeps the endpoint's latency at one
+   * hash instead of two.
+   */
+  async function withTimingFloor<T>(body: () => Promise<T>): Promise<T> {
+    const floor = crypto.hashPassword(TIMING_FLOOR_SECRET);
+    try {
+      return await body();
+    } finally {
+      await floor;
+    }
+  }
+
+  /**
+   * True when a live token of this purpose was minted for the user inside
+   * `throttleSeconds` — i.e. a usable link is already in their inbox and
+   * sending another would only help someone flood it.
+   */
+  async function issuedRecently(
+    userId: string,
+    purpose: VerificationTokenPurpose,
+    throttleSeconds: number,
+  ): Promise<boolean> {
+    const live = await store.verificationTokens.findLatestLiveForUser(userId, purpose, nowIso());
+    if (!live) return false;
+    return Date.parse(live.created_at) > Date.now() - throttleSeconds * 1000;
   }
 
   async function issueSession(user: UserRecord, context: RequestContext): Promise<IssuedSession> {
@@ -303,6 +419,7 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         await store.verificationTokens.create({
           user_id: record.id,
           token_hash: crypto.hashToken(verificationToken),
+          purpose: 'email_verification',
           expires_at: isoInSeconds(EMAIL_VERIFICATION_TTL_SECONDS),
         });
       }
@@ -384,7 +501,10 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
     },
 
     async verifyEmail(token, context): Promise<{ verified: boolean; user: User }> {
-      const row = await store.verificationTokens.findByTokenHash(crypto.hashToken(token));
+      const row = await store.verificationTokens.findByTokenHash(
+        crypto.hashToken(token),
+        'email_verification',
+      );
       if (!row) throw validationFailed('That verification link is not valid');
       if (row.used_at !== null) throw conflict('That verification link has already been used');
       if (Date.parse(row.expires_at) <= Date.now()) {
@@ -417,6 +537,144 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
       });
 
       return { verified: true, user: toPublicUser(updated) };
+    },
+
+    async resendVerification(rawEmail, context): Promise<void> {
+      await withTimingFloor(async () => {
+        const email = rawEmail.trim().toLowerCase();
+        const record = await store.users.findByEmail(email);
+        // Four different reasons to send nothing, all of them invisible to the
+        // caller: no such address, the account is disabled, it is already
+        // verified, or a link is already on its way.
+        if (!record || record.status !== 'active' || record.email_verified) return;
+        if (
+          await issuedRecently(
+            record.id,
+            'email_verification',
+            VERIFICATION_RESEND_THROTTLE_SECONDS,
+          )
+        ) {
+          return;
+        }
+
+        const token = crypto.newSessionToken();
+        // Supersede the link from registration (or an earlier resend): the
+        // address should only ever have one live verification token.
+        await store.verificationTokens.deleteForUser(record.id, 'email_verification');
+        const row = await store.verificationTokens.create({
+          user_id: record.id,
+          token_hash: crypto.hashToken(token),
+          purpose: 'email_verification',
+          expires_at: isoInSeconds(EMAIL_VERIFICATION_TTL_SECONDS),
+        });
+
+        await audit.record(
+          { id: record.id, role: record.role },
+          AuditAction.AUTH_VERIFICATION_RESEND,
+          { type: 'user', id: record.id },
+          { email },
+          context.ip,
+        );
+
+        if (deps.onVerificationResend) {
+          await deps.onVerificationResend({
+            user: toPublicUser(record),
+            token,
+            tokenId: row.id,
+            requestContext: context,
+          });
+        }
+      });
+    },
+
+    async requestPasswordReset(rawEmail, context): Promise<void> {
+      await withTimingFloor(async () => {
+        const email = rawEmail.trim().toLowerCase();
+        const record = await store.users.findByEmail(email);
+        if (!record || record.status !== 'active') return;
+        if (await issuedRecently(record.id, 'password_reset', PASSWORD_RESET_THROTTLE_SECONDS)) {
+          return;
+        }
+
+        const token = crypto.newSessionToken();
+        const row = await store.verificationTokens.create({
+          user_id: record.id,
+          token_hash: crypto.hashToken(token),
+          purpose: 'password_reset',
+          expires_at: isoInSeconds(PASSWORD_RESET_TTL_SECONDS),
+        });
+
+        // Only the path that actually issued a link is audited, so the log
+        // distinguishes the four outcomes the response cannot.
+        await audit.record(
+          { id: record.id, role: record.role },
+          AuditAction.AUTH_PASSWORD_RESET_REQUEST,
+          { type: 'user', id: record.id },
+          { email },
+          context.ip,
+        );
+
+        if (deps.onPasswordResetRequested) {
+          await deps.onPasswordResetRequested({
+            user: toPublicUser(record),
+            token,
+            tokenId: row.id,
+            requestContext: context,
+          });
+        }
+      });
+    },
+
+    async resetPassword(token, newPassword, context): Promise<void> {
+      if (newPassword.length < MIN_PASSWORD_LENGTH) {
+        throw validationFailed(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+      }
+
+      const row = await store.verificationTokens.findByTokenHash(
+        crypto.hashToken(token),
+        'password_reset',
+      );
+      if (!row || row.used_at !== null || Date.parse(row.expires_at) <= Date.now()) {
+        throw invalidResetLink();
+      }
+      const record = await store.users.findById(row.user_id);
+      if (!record) throw invalidResetLink();
+      if (record.status !== 'active') throw userDisabled();
+
+      // Hash outside the transaction: scrypt takes ~100 ms and holding a write
+      // transaction open across it would serialise unrelated work behind it.
+      const passwordHash = await crypto.hashPassword(newPassword);
+
+      await store.transaction(async (tx) => {
+        // The compare-and-set burn is what makes the link single-use; the
+        // transaction is what keeps a burn from outliving the password change
+        // it was spent on.
+        const burned = await tx.verificationTokens.markUsed(row.id, nowIso());
+        if (!burned) throw invalidResetLink();
+
+        const updated = await tx.users.update(record.id, {
+          password_hash: passwordHash,
+          // Redeeming a link mailed to the address proves the mailbox, which is
+          // all verification ever claimed.
+          email_verified: true,
+        });
+        if (!updated) throw invalidResetLink();
+
+        // Any other reset link for this account dies with this one, and every
+        // session goes: whoever prompted the reset must not keep a live one.
+        await tx.verificationTokens.deleteForUser(record.id, 'password_reset');
+        await tx.sessions.deleteForUser(record.id);
+
+        await audit
+          .forStore(tx)
+          .record(
+            { id: updated.id, role: updated.role },
+            AuditAction.AUTH_PASSWORD_RESET,
+            { type: 'user', id: updated.id },
+            { email: updated.email },
+            context.ip,
+          );
+      });
     },
   };
 }

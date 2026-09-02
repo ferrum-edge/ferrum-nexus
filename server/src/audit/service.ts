@@ -22,6 +22,17 @@ export const AuditAction = {
   AUTH_LOGIN: 'auth.login',
   AUTH_LOGOUT: 'auth.logout',
   AUTH_VERIFY_EMAIL: 'auth.verify_email',
+  /** A fresh verification link was minted and queued for an unverified account. */
+  AUTH_VERIFICATION_RESEND: 'auth.verification_resend',
+  /**
+   * A password-reset link was minted and queued. Absent for an address with no
+   * account, a disabled one, or a request inside the resend throttle — the
+   * endpoint answers all four identically, and the log is what tells them
+   * apart afterwards.
+   */
+  AUTH_PASSWORD_RESET_REQUEST: 'auth.password_reset_request',
+  /** A reset link was redeemed: new password set, every session terminated. */
+  AUTH_PASSWORD_RESET: 'auth.password_reset',
 
   /* users & organizations */
   USER_UPDATE: 'user.update',
