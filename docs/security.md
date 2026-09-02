@@ -111,6 +111,47 @@ private address is outside what a hostname check can see either way.
 - **Sign-in does not leak which addresses exist.** A missing account still
   costs one real scrypt derivation against a decoy hash, and "no such account"
   and "wrong password" return the identical `401 UNAUTHORIZED`.
+- **Resetting a password ends every session.** Unlike a self-service change,
+  a reset assumes the account may already be in someone else's hands, so it
+  keeps nothing: `POST /api/auth/reset-password` deletes every session of the
+  account and clears the calling browser's cookies. The user signs in again.
+
+### Password recovery
+
+`POST /api/auth/forgot-password` mails a single-use link and
+`POST /api/auth/reset-password` redeems it. Both are anonymous by necessity,
+which makes them the portal's most attractive account-enumeration oracle, so
+they are built to answer nothing:
+
+- **One response for every input.** `200 { "ok": true }`, whether the address
+  has an account, has none, belongs to a disabled account, or was asked for
+  again inside the 10-minute throttle. The same holds for
+  `POST /api/auth/resend-verification`.
+- **One latency for every input.** Those branches do wildly different amounts
+  of work — one indexed `SELECT` versus a token insert, an audit row and a
+  rendered message — so the service starts a scrypt derivation before the
+  branch and awaits it after. The floor costs more than the widest branch, and
+  starting it first rather than adding it afterwards keeps the endpoint at one
+  hash rather than two.
+- **One rejection for every bad link.** Unknown, expired and already-spent all
+  return `400 VALIDATION_FAILED` with the same message, so a caller working
+  through guessed tokens learns nothing from how close it got.
+- **Tokens cannot cross flows.** `email_verification_tokens.purpose`
+  (migration `002`) marks each token `email_verification` or `password_reset`,
+  and every lookup names the purpose it expects. A 24-hour verification link is
+  therefore not spendable as a password reset, which would otherwise turn
+  one-time read access to a mailbox into account takeover a day later.
+- **A reset link is single-use and short-lived.** One hour
+  (`PASSWORD_RESET_TTL_SECONDS`), burned by a compare-and-set inside the same
+  transaction that writes the new password, so a burn cannot outlive the change
+  it was spent on. Redeeming one also deletes any other outstanding reset link
+  for that account.
+- **The audit log is where the truth is.** `auth.password_reset_request` and
+  `auth.verification_resend` are written only when a link was really issued, so
+  operators can see what the response would not say.
+- **Rate limiting still applies.** Both routes sit under the `/api/auth/*`
+  limiter (20 requests per minute per IP), which is what bounds the cost of the
+  scrypt floor.
 
 ### Password storage
 
@@ -500,12 +541,15 @@ ordinary reporting.
 
 ### Authentication
 
-| Action              | Target type | Description                                                                                                                 |
-| ------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `auth.register`     | `user`      | An account was created. `details`: email, role, `first_user`, `verification_required`. The actor is the new account itself. |
-| `auth.login`        | `user`      | A successful sign-in. Failed sign-ins are **not** audited (they are rate-limited instead).                                  |
-| `auth.logout`       | `session`   | A session was destroyed by its owner.                                                                                       |
-| `auth.verify_email` | `user`      | An email-verification token was redeemed.                                                                                   |
+| Action                        | Target type | Description                                                                                                                                                                                 |
+| ----------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auth.register`               | `user`      | An account was created. `details`: email, role, `first_user`, `verification_required`. The actor is the new account itself.                                                                 |
+| `auth.login`                  | `user`      | A successful sign-in. Failed sign-ins are **not** audited (they are rate-limited instead).                                                                                                  |
+| `auth.logout`                 | `session`   | A session was destroyed by its owner.                                                                                                                                                       |
+| `auth.verify_email`           | `user`      | An email-verification token was redeemed.                                                                                                                                                   |
+| `auth.verification_resend`    | `user`      | A fresh verification link was issued and queued. Written **only** when a link was really sent, so it is what distinguishes the four outcomes the endpoint's response deliberately does not. |
+| `auth.password_reset_request` | `user`      | A password-reset link was issued and queued. Absent for an unknown address, a disabled account, or a request inside the 10-minute throttle.                                                 |
+| `auth.password_reset`         | `user`      | A reset link was redeemed: new password set, address marked verified, every session of the account terminated.                                                                              |
 
 ### Users and organizations
 

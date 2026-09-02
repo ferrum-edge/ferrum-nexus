@@ -139,6 +139,29 @@ export const DEFAULT_EMAIL_TEMPLATES: Readonly<Record<EmailTemplateKey, EmailTem
       'This link expires in 24 hours. If you did not create an account, ignore this email.\n',
   },
 
+  password_reset: {
+    subject: 'Reset your {{portal_name}} password',
+    body_html: htmlDocument(
+      '<p>Hello {{recipient_name}},</p>' +
+        '<p>Someone asked to reset the password for your {{portal_name}} account. ' +
+        'Choose a new one with the link below.</p>' +
+        '<p><a href="{{reset_url}}">Set a new password</a></p>' +
+        '<p>If the link does not work, paste this address into your browser:<br />' +
+        '{{reset_url}}</p>' +
+        '<p>This link expires in one hour and can only be used once. Using it signs ' +
+        'you out everywhere. If you did not ask for this, ignore this email — your ' +
+        'password has not changed.</p>',
+    ),
+    body_text:
+      'Hello {{recipient_name}},\n\n' +
+      'Someone asked to reset the password for your {{portal_name}} account.\n' +
+      'Choose a new one here:\n\n' +
+      '{{reset_url}}\n\n' +
+      'This link expires in one hour and can only be used once. Using it signs you\n' +
+      'out everywhere. If you did not ask for this, ignore this email — your\n' +
+      'password has not changed.\n',
+  },
+
   access_approved: {
     subject: 'Access approved: {{api_name}}',
     body_html: htmlDocument(
@@ -235,6 +258,7 @@ export const DEFAULT_EMAIL_TEMPLATES: Readonly<Record<EmailTemplateKey, EmailTem
  */
 export const TEMPLATE_VARIABLES: Readonly<Record<EmailTemplateKey, readonly string[]>> = {
   verification: [...COMMON_TEMPLATE_VARIABLES, 'verification_url', 'verification_token'],
+  password_reset: [...COMMON_TEMPLATE_VARIABLES, 'reset_url', 'reset_token'],
   access_approved: [
     ...COMMON_TEMPLATE_VARIABLES,
     'api_name',

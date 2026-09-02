@@ -481,6 +481,7 @@ describe('email verification', () => {
     await harness.store.verificationTokens.create({
       user_id: user.id,
       token_hash: harness.app.nexus.crypto.hashToken(expiredToken),
+      purpose: 'email_verification',
       expires_at: isoInSeconds(-60),
     });
 

@@ -48,7 +48,9 @@ row. A mismatch is `403 CSRF_MISMATCH`.
 
 Exempt (they are reached before a session exists): `POST /api/auth/login`,
 `POST /api/auth/register`, `POST /api/auth/verify-email`,
-`GET /api/auth/captcha`. **`POST /api/auth/logout` is not exempt.**
+`POST /api/auth/resend-verification`, `POST /api/auth/forgot-password`,
+`POST /api/auth/reset-password`, `GET /api/auth/captcha`.
+**`POST /api/auth/logout` is not exempt.**
 
 ### Auth requirement column
 
@@ -305,6 +307,73 @@ _public_, CSRF-exempt. Body `{ "token": string }` (8–512 chars).
 Tokens are single-use and expire after 24 hours. Errors:
 `400 VALIDATION_FAILED` (unknown or expired link), `409 CONFLICT` (already
 used).
+
+### The anti-enumeration contract
+
+The next three routes exist so a visitor can recover an account without help,
+which means they take an email address from anyone who asks. All three answer
+
+```json
+{ "ok": true }
+```
+
+with status `200` **in every case** — the address has an account, it has none,
+the account is disabled, it is already verified, or a link was already sent
+inside the throttle window. They also pay the same scrypt-sized cost whatever
+they decide, so latency does not separate the cases either. Treat the response
+as an acknowledgement that the request was accepted, never as confirmation that
+an account exists; the portal's own pages word their confirmations as
+conditionals for the same reason.
+
+What actually happened is recorded in the audit log
+(`auth.verification_resend`, `auth.password_reset_request`), which is only
+written when a link was really issued.
+
+The only errors these routes return are `400 VALIDATION_FAILED` for a malformed
+body and `429 RATE_LIMITED` from the shared `/api/auth/*` limiter.
+
+### `POST /api/auth/resend-verification`
+
+_public_, CSRF-exempt. Body `{ "email": string }` (valid address, ≤ 320 chars).
+
+Queues a fresh 24-hour verification link when the address belongs to an active,
+unverified account and no verification link was issued for it in the last 10
+minutes. A new link supersedes the previous one, which stops working
+immediately.
+
+### `POST /api/auth/forgot-password`
+
+_public_, CSRF-exempt. Body `{ "email": string }` (valid address, ≤ 320 chars).
+
+Queues a password-reset link when the address belongs to an active account and
+no reset link was issued for it in the last 10 minutes. The link points at
+`<public URL>/reset-password?token=…` and expires after one hour
+(`PASSWORD_RESET_TTL_SECONDS`).
+
+### `POST /api/auth/reset-password`
+
+_public_, CSRF-exempt.
+
+| Field          | Type   | Notes                                            |
+| -------------- | ------ | ------------------------------------------------ |
+| `token`        | string | 8–512 chars, from the emailed link.              |
+| `new_password` | string | ≥ 12 characters (`MIN_PASSWORD_LENGTH`), ≤ 1024. |
+
+```json
+{ "ok": true }
+```
+
+Redeeming a link burns it, sets the new password, marks the address verified
+(reading the mailbox is what verification ever proved), invalidates any other
+outstanding reset link for the account, and **terminates every session the
+account has** — including the caller's, whose cookies are cleared on the
+response. Sign in again afterwards.
+
+Errors: `400 VALIDATION_FAILED` for a token that is unknown, expired or already
+spent — deliberately one code and one message for all three, so a caller
+holding a guessed token learns nothing — and for a password below the minimum
+length (checked before the token is spent, so a rejected password does not
+waste the link). `403 USER_DISABLED` when the account has been disabled.
 
 ### `GET /api/auth/captcha`
 

@@ -1,7 +1,8 @@
 /**
  * Code-based TanStack Router tree.
  *
- * Public routes (login/register/verify-email) sit directly under the root; every
+ * Public routes (login/register/verify-email/password recovery) sit directly
+ * under the root; every
  * authenticated page hangs off a pathless layout route rendered by `AppShell`,
  * which doubles as the authentication guard. Each page is loaded lazily so the
  * initial bundle only carries the shell.
@@ -27,6 +28,13 @@ const rootRoute = createRootRoute({
 const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/login',
+  // `?reset` is how the reset page hands the "your password was changed"
+  // notice over: the reset itself signs every session out, so the confirmation
+  // has to be shown on the page the user is sent to next. The key is omitted
+  // rather than set to `false`, which is what keeps every other `to="/login"`
+  // link from having to spell it out.
+  validateSearch: (search: Record<string, unknown>): { reset?: true } =>
+    search.reset === true || search.reset === 'true' || search.reset === '1' ? { reset: true } : {},
   component: lazyRouteComponent(() => import('./routes/LoginPage'), 'LoginPage'),
 });
 
@@ -43,6 +51,21 @@ const verifyEmailRoute = createRoute({
     token: typeof search.token === 'string' ? search.token : '',
   }),
   component: lazyRouteComponent(() => import('./routes/VerifyEmailPage'), 'VerifyEmailPage'),
+});
+
+const forgotPasswordRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/forgot-password',
+  component: lazyRouteComponent(() => import('./routes/ForgotPasswordPage'), 'ForgotPasswordPage'),
+});
+
+const resetPasswordRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/reset-password',
+  validateSearch: (search: Record<string, unknown>): { token: string } => ({
+    token: typeof search.token === 'string' ? search.token : '',
+  }),
+  component: lazyRouteComponent(() => import('./routes/ResetPasswordPage'), 'ResetPasswordPage'),
 });
 
 /* ── Authenticated shell ────────────────────────────────────────────────── */
@@ -165,6 +188,8 @@ const routeTree = rootRoute.addChildren([
   loginRoute,
   registerRoute,
   verifyEmailRoute,
+  forgotPasswordRoute,
+  resetPasswordRoute,
   shellRoute.addChildren([
     dashboardRoute,
     catalogRoute,
