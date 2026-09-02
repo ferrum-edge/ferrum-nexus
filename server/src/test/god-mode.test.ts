@@ -329,11 +329,37 @@ describe('API deletion and god mode', () => {
         url: '/api/admin/god/disable-user',
         payload: { user_id: superAdmin.user.id, reason: 'Testing the guard.' },
       });
-      // Self-disablement is caught first and is the more useful message.
+      // Being the last super admin is why this is refused, and it is the
+      // message that says how to fix it — promote someone else first. The
+      // self-disable rule is the weaker one and must not mask it.
+      assert.equal(response.statusCode, 409);
+      assert.equal(errorCode(response.body), 'LAST_SUPER_ADMIN');
+
+      const stillActive = await harness.store.users.findById(superAdmin.user.id);
+      assert.equal(stillActive?.status, 'active');
+    });
+
+    it('still refuses an ordinary self-disable with CONFLICT', async () => {
+      // A second seat, so the caller below is not the last super admin and the
+      // self-disable rule is the only one left standing.
+      const peer = await harness.registerUser({ email: 'god-self-disable@example.test' });
+      const promoted = await harness.authed(superAdmin, {
+        method: 'PATCH',
+        url: `/api/users/${peer.user.id}`,
+        payload: { role: 'super_admin' },
+      });
+      assert.equal(promoted.statusCode, 200, promoted.body);
+      const peerSession = await harness.loginUser('god-self-disable@example.test');
+
+      const response = await harness.authed(peerSession, {
+        method: 'POST',
+        url: '/api/admin/god/disable-user',
+        payload: { user_id: peerSession.user.id, reason: 'Testing the guard.' },
+      });
       assert.equal(response.statusCode, 409);
       assert.equal(errorCode(response.body), 'CONFLICT');
 
-      const stillActive = await harness.store.users.findById(superAdmin.user.id);
+      const stillActive = await harness.store.users.findById(peerSession.user.id);
       assert.equal(stillActive?.status, 'active');
     });
   });

@@ -171,7 +171,10 @@ export function createGodService(deps: GodServiceDeps): GodService {
       const why = requireReason(reason);
       const target = await store.users.findById(userId);
       if (!target) throw notFound('User', userId);
-      if (target.id === actor.id) throw conflict('You cannot disable your own account');
+      // Order matters, and matches `users.updateUser`: a last super admin
+      // disabling *themselves* is refused because they are the last one, not
+      // because it is a self-disable, so `LAST_SUPER_ADMIN` must win over
+      // `CONFLICT` — that is the message that tells them how to fix it.
       if (
         target.role === 'super_admin' &&
         target.status === 'active' &&
@@ -179,6 +182,7 @@ export function createGodService(deps: GodServiceDeps): GodService {
       ) {
         throw lastSuperAdmin();
       }
+      if (target.id === actor.id) throw conflict('You cannot disable your own account');
 
       const revoked = revokeGrants ? await access.revokeAllForUser(actor, target.id, why, ip) : 0;
 
