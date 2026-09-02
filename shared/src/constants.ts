@@ -199,6 +199,22 @@ export const MIN_PASSWORD_LENGTH = 12;
 /** Maximum length of an access-request justification. */
 export const MAX_JUSTIFICATION_LENGTH = 2_000;
 
+/**
+ * Largest `limit` a rate limit may ask for.
+ *
+ * This is Ferrum Edge's own ceiling on the `rate_limiting` plugin's
+ * `max_requests`. Nexus validates against it so an out-of-range value is a
+ * `400 VALIDATION_FAILED` from the portal rather than a `400` from the gateway
+ * half-way through publishing.
+ */
+export const MAX_RATE_LIMIT_REQUESTS = 1_000_000;
+
+/** Longest rate-limit window Edge accepts, in seconds (24 hours). */
+export const MAX_RATE_LIMIT_WINDOW_SECONDS = 86_400;
+
+/** Maximum number of origins the Edge `cors` plugin accepts in one config. */
+export const MAX_CORS_ORIGINS = 64;
+
 /** Maximum size in bytes of an uploaded OpenAPI document. */
 export const MAX_SPEC_BYTES = 2 * 1024 * 1024;
 

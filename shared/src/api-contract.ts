@@ -23,6 +23,7 @@ import type {
   CaptchaProvider,
   CaptchaPublicConfig,
   CatalogApi,
+  CorsConfig,
   CredentialMetadata,
   CredentialType,
   EdgeHealth,
@@ -287,6 +288,8 @@ export interface PublishApiRequest {
   requestable: boolean;
   visibility: ApiVisibility;
   rate_limit?: RateLimitConfig | null;
+  /** Browser CORS policy; omit or send `null` for no gateway CORS headers. */
+  cors?: CorsConfig | null;
 }
 
 /** `POST /api/apis` */
@@ -320,6 +323,8 @@ export interface UpdateApiRequest {
   requestable?: boolean;
   visibility?: ApiVisibility;
   rate_limit?: RateLimitConfig | null;
+  /** Replace the CORS policy, or send `null` to remove it from the gateway. */
+  cors?: CorsConfig | null;
   status?: ApiStatus;
 }
 

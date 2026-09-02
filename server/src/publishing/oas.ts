@@ -401,3 +401,19 @@ export function slugify(name: string): string {
     .replace(/^-+|-+$/g, '')
     .slice(0, 60);
 }
+
+/**
+ * Normalized textual form of an upstream: `scheme://host:port[/basePath]`.
+ *
+ * This is what Nexus records on the `apis` row as "where the proxy is pointed",
+ * so it has to be canonical rather than whatever the provider typed: the port
+ * is always explicit (the scheme default when none was given), the host was
+ * lowercased by {@link parseUpstreamUrl}, and a trailing slash is not a base
+ * path. An IPv6 host is re-bracketed here because the parser keeps it bare for
+ * Edge's `backend_host`, and `https://::1:8080` would otherwise be
+ * unparseable.
+ */
+export function formatUpstreamUrl(upstream: SpecUpstream): string {
+  const host = upstream.host.includes(':') ? `[${upstream.host}]` : upstream.host;
+  return `${upstream.scheme}://${host}:${upstream.port}${upstream.basePath ?? ''}`;
+}

@@ -71,3 +71,17 @@ export function formatBytes(bytes: number): string {
 export function truncate(value: string, max: number): string {
   return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
 }
+
+/**
+ * Split a CORS origins box into individual origins.
+ *
+ * One per line is what the forms ask for, but commas are split too: a provider
+ * pasting an origin list out of another config would otherwise submit a single
+ * entry, which the server rejects for containing whitespace.
+ */
+export function parseCorsOrigins(text: string): string[] {
+  return text
+    .split(/[\n,]/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '');
+}

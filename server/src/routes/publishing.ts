@@ -15,7 +15,11 @@ import { z } from 'zod';
 
 import {
   AUTH_PLUGIN_TYPES,
+  MAX_CORS_ORIGINS,
+  MAX_RATE_LIMIT_REQUESTS,
+  MAX_RATE_LIMIT_WINDOW_SECONDS,
   MAX_SPEC_BYTES,
+  type CorsConfig,
   type CreateTestConsumerResponse,
   type DeleteApiResponse,
   type GetApiResponse,
@@ -46,10 +50,44 @@ const specField = z.string().min(1).max(MAX_SPEC_BYTES);
 
 const rateLimitSchema = z
   .object({
-    limit: z.number().int().min(1).max(10_000_000),
-    window_seconds: z.number().int().min(1).max(86_400),
+    limit: z.number().int().min(1).max(MAX_RATE_LIMIT_REQUESTS),
+    window_seconds: z.number().int().min(1).max(MAX_RATE_LIMIT_WINDOW_SECONDS),
   })
   .nullable();
+
+/**
+ * Browser CORS policy.
+ *
+ * An origin is a single token — `https://app.example.com`, or `*` — so any
+ * internal whitespace means the provider pasted a comma- or newline-separated
+ * list into one entry, which Edge would happily store and then never match.
+ * Rejecting it here is a clearer failure than a silently dead policy.
+ *
+ * An *empty* origin list is rejected rather than accepted as "no CORS": that is
+ * what `null` means, and the two are different plugin states on the gateway.
+ */
+const corsSchema = z.object({
+  allowed_origins: z
+    .array(z.string().trim().min(1).max(255).regex(/^\S+$/, 'An origin cannot contain whitespace'))
+    .min(1)
+    .max(MAX_CORS_ORIGINS),
+  allow_credentials: z.boolean().optional(),
+});
+
+/**
+ * Apply the `allow_credentials` default and collapse "absent" onto `null`.
+ *
+ * The default lives here rather than as `z.boolean().default(false)` because a
+ * zod default makes a schema's input and output types differ, which
+ * {@link parseOrThrow}'s single-type signature cannot express.
+ */
+function corsOrNull(value: z.infer<typeof corsSchema> | null | undefined): CorsConfig | null {
+  if (value === undefined || value === null) return null;
+  return {
+    allowed_origins: value.allowed_origins,
+    allow_credentials: value.allow_credentials ?? false,
+  };
+}
 
 const listApisQuery = listQuerySchema.extend({
   mine: booleanQuerySchema,
@@ -72,6 +110,7 @@ const publishBody = z.object({
   requestable: z.boolean(),
   visibility: z.enum(['public', 'internal']),
   rate_limit: rateLimitSchema.optional(),
+  cors: corsSchema.nullish(),
 });
 
 const updateBody = z.object({
@@ -83,6 +122,7 @@ const updateBody = z.object({
   requestable: z.boolean().optional(),
   visibility: z.enum(['public', 'internal']).optional(),
   rate_limit: rateLimitSchema.optional(),
+  cors: corsSchema.nullish(),
   status: z.enum(['published', 'retired']).optional(),
 });
 
@@ -129,6 +169,7 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
         upstream_url: input.upstream_url ?? '',
         description: input.description ?? null,
         rate_limit: input.rate_limit ?? null,
+        cors: corsOrNull(input.cors),
       },
       clientIp(request),
     );
@@ -146,7 +187,9 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
     const { user } = requireAuth(request);
     const { id } = parseOrThrow(idParamSchema, request.params);
     const patch = parseOrThrow(updateBody, request.body);
-    return { api: await publishing.update(user, id, patch, clientIp(request)) };
+    // `undefined` means "leave the policy alone"; `null` means "remove it".
+    const body = { ...patch, cors: patch.cors === undefined ? undefined : corsOrNull(patch.cors) };
+    return { api: await publishing.update(user, id, body, clientIp(request)) };
   });
 
   app.delete('/:id', async (request): Promise<DeleteApiResponse> => {

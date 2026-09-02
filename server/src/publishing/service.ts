@@ -88,6 +88,7 @@ import { newId } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
 import {
   assertUpstreamAllowed,
+  formatUpstreamUrl,
   parseOpenApiSpec,
   parseUpstreamUrl,
   resolveUpstream,
@@ -413,12 +414,14 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             description: input.description ?? parsed.description,
             owner_user_id: owner.id,
             ferrum_proxy_id: created.proxyId ?? null,
+            upstream_url: formatUpstreamUrl(upstream),
             namespace,
             version,
             spec_format: 'openapi',
             requestable: input.requestable,
             auth_plugin: input.auth_plugin,
             rate_limit: input.rate_limit ?? null,
+            cors: input.cors ?? null,
             status: 'published',
             visibility: input.visibility,
           });
