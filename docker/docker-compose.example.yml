@@ -2,8 +2,15 @@
 #
 #   cp docker/docker-compose.example.yml docker-compose.yml
 #   export NEXUS_SECRET_KEY=$(openssl rand -hex 32)
+#   export NEXUS_DB_PASSWORD=$(openssl rand -hex 16)
 #   export FERRUM_ADMIN_JWT_SECRET=$(openssl rand -hex 32)
+#   export FERRUM_BASIC_AUTH_HMAC_SECRET=$(openssl rand -hex 32)
 #   docker compose up -d
+#
+# All four are required and every one of them must be unique per deployment —
+# compose refuses to start if any is unset. `FERRUM_BASIC_AUTH_HMAC_SECRET`
+# must be at least 32 bytes and has to exist *before* anyone publishes a
+# `basic_auth` API: the gateway refuses to build the plugin without it.
 #
 # The portal is then on http://127.0.0.1:8787 and the gateway's proxy
 # listener on http://127.0.0.1:8000.
@@ -19,7 +26,7 @@ services:
       NEXUS_SECRET_KEY: ${NEXUS_SECRET_KEY:?set NEXUS_SECRET_KEY}
       NEXUS_PUBLIC_URL: http://127.0.0.1:8787
       NEXUS_DB_DRIVER: postgres
-      NEXUS_DB_URL: postgres://nexus:nexus@postgres:5432/nexus
+      NEXUS_DB_URL: postgres://nexus:${NEXUS_DB_PASSWORD:?set NEXUS_DB_PASSWORD}@postgres:5432/nexus
       FERRUM_ADMIN_URL: http://ferrum-edge:9000
       FERRUM_ADMIN_JWT_SECRET: ${FERRUM_ADMIN_JWT_SECRET:?set FERRUM_ADMIN_JWT_SECRET}
       FERRUM_ADMIN_ALLOW_INSECURE_HTTP: 'true' # in-network compose traffic only
@@ -35,7 +42,7 @@ services:
     image: postgres:17-alpine
     environment:
       POSTGRES_USER: nexus
-      POSTGRES_PASSWORD: nexus
+      POSTGRES_PASSWORD: ${NEXUS_DB_PASSWORD:?set NEXUS_DB_PASSWORD}
       POSTGRES_DB: nexus
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -46,6 +53,18 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # The Ferrum Edge image is distroless `nonroot` and runs as UID 65532, and it
+  # bakes in no `/data`. A freshly created named volume is therefore root-owned
+  # and mode 0755, so SQLite cannot create its database file and the gateway
+  # exits on startup. This one-shot container takes ownership before the
+  # gateway starts; it is a no-op on every run after the first.
+  ferrum-edge-init:
+    image: alpine:3
+    command: ['chown', '65532:65532', '/data']
+    volumes:
+      - ferrumdata:/data
+    restart: 'no'
+
   ferrum-edge:
     image: ferrumedge/ferrum-edge:latest
     command: run -m database
@@ -55,12 +74,17 @@ services:
       FERRUM_DB_URL: 'sqlite:///data/ferrum.db?mode=rwc'
       FERRUM_NAMESPACE: nexus
       FERRUM_ADMIN_JWT_SECRET: ${FERRUM_ADMIN_JWT_SECRET:?set FERRUM_ADMIN_JWT_SECRET}
+      # Required before any `basic_auth` API can be published; at least 32 bytes.
+      FERRUM_BASIC_AUTH_HMAC_SECRET: ${FERRUM_BASIC_AUTH_HMAC_SECRET:?set FERRUM_BASIC_AUTH_HMAC_SECRET}
       FERRUM_ADMIN_BIND_ADDRESS: 0.0.0.0
       FERRUM_ALLOW_INSECURE_ADMIN_HTTP: 'true' # in-network compose traffic only
     ports:
       - '127.0.0.1:8000:8000'
     volumes:
       - ferrumdata:/data
+    depends_on:
+      ferrum-edge-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 volumes:
