@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { decryptSetting, encryptSetting, fingerprint, last4, randomToken } from '../lib/crypto.js';
+import {
+  constantTimeEqual,
+  decryptSetting,
+  encryptSetting,
+  fingerprint,
+  last4,
+  randomToken,
+} from '../lib/crypto.js';
 
 test('encrypt/decrypt round trip', () => {
   const key = 'a'.repeat(64);
@@ -23,4 +30,8 @@ test('last4 truncates', () => {
 test('randomToken length grows with bytes', () => {
   const t = randomToken(8);
   assert.ok(t.length >= 10);
+});
+
+test('constantTimeEqual rejects mismatched UTF-8 byte lengths without throwing', () => {
+  assert.equal(constantTimeEqual('é' + 'A'.repeat(31), 'A'.repeat(32)), false);
 });
