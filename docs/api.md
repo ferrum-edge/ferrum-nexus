@@ -110,25 +110,25 @@ booleans accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`.
 change; `details` is present only when there is structured context (per-field
 validation issues, a conflicting slug, an Edge status).
 
-| Code                 | HTTP | When                                                                                |
-| -------------------- | ---- | ----------------------------------------------------------------------------------- |
-| `VALIDATION_FAILED`  | 400  | Body, query or params failed schema validation.                                     |
-| `UNAUTHORIZED`       | 401  | No valid session, or it expired.                                                    |
-| `FORBIDDEN`          | 403  | Authenticated, but the role or ownership check failed.                              |
-| `NOT_FOUND`          | 404  | Target does not exist, or is not visible to the caller.                             |
-| `CONFLICT`           | 409  | Uniqueness or state conflict (duplicate email/slug, active grant, already decided). |
-| `CSRF_MISMATCH`      | 403  | `X-Nexus-CSRF` missing or not matching the cookie/session.                          |
-| `CAPTCHA_FAILED`     | 400  | CAPTCHA token missing, expired, or rejected by the vendor.                          |
-| `RATE_LIMITED`       | 429  | Too many requests from this identity/IP.                                            |
-| `EMAIL_NOT_VERIFIED` | 403  | Account exists but its email is unverified and verification is required.            |
-| `USER_DISABLED`      | 403  | Account has been disabled by an admin.                                              |
-| `LAST_SUPER_ADMIN`   | 409  | Refused: would remove, demote or disable the last active `super_admin`.             |
-| `SHOW_ONCE_ALREADY`  | 410  | Show-once material was already retrieved and cannot be shown again.                 |
-| `EDGE_UNAVAILABLE`   | 502  | Ferrum Edge Admin API unreachable (network error / timeout).                        |
-| `EDGE_ERROR`         | 502  | Ferrum Edge Admin API returned an error response.                                   |
-| `SPEC_INVALID`       | 400  | Uploaded OpenAPI document could not be parsed or failed validation.                 |
-| `OUTBOX_FAILURE`     | 500  | Email could not be enqueued, or exhausted its outbox retries.                       |
-| `INTERNAL`           | 500  | Unexpected server-side failure.                                                     |
+| Code                 | HTTP | When                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| -------------------- | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VALIDATION_FAILED`  | 400  | Body, query or params failed schema validation.                                                                                                                                                                                                                                                                                                                                                                               |
+| `UNAUTHORIZED`       | 401  | No valid session, or it expired.                                                                                                                                                                                                                                                                                                                                                                                              |
+| `FORBIDDEN`          | 403  | Authenticated, but the role or ownership check failed.                                                                                                                                                                                                                                                                                                                                                                        |
+| `NOT_FOUND`          | 404  | Target does not exist, or is not visible to the caller.                                                                                                                                                                                                                                                                                                                                                                       |
+| `CONFLICT`           | 409  | Uniqueness or state conflict (duplicate email/slug, active grant, already decided).                                                                                                                                                                                                                                                                                                                                           |
+| `CSRF_MISMATCH`      | 403  | `X-Nexus-CSRF` missing or not matching the cookie/session.                                                                                                                                                                                                                                                                                                                                                                    |
+| `CAPTCHA_FAILED`     | 400  | CAPTCHA token missing, expired, or rejected by the vendor.                                                                                                                                                                                                                                                                                                                                                                    |
+| `RATE_LIMITED`       | 429  | Too many requests from this identity/IP.                                                                                                                                                                                                                                                                                                                                                                                      |
+| `EMAIL_NOT_VERIFIED` | 403  | Account exists but its email is unverified and verification is required.                                                                                                                                                                                                                                                                                                                                                      |
+| `USER_DISABLED`      | 403  | Account has been disabled by an admin.                                                                                                                                                                                                                                                                                                                                                                                        |
+| `LAST_SUPER_ADMIN`   | 409  | Refused: would remove, demote or disable the last active `super_admin`.                                                                                                                                                                                                                                                                                                                                                       |
+| `SHOW_ONCE_ALREADY`  | 410  | Show-once material was already retrieved and cannot be shown again.                                                                                                                                                                                                                                                                                                                                                           |
+| `EDGE_UNAVAILABLE`   | 502  | Ferrum Edge Admin API unreachable (network error / timeout).                                                                                                                                                                                                                                                                                                                                                                  |
+| `EDGE_ERROR`         | 502  | Ferrum Edge Admin API returned an error response. On a gateway **validation** refusal (`400`, `409`, `422`) `details` is `{ status, gateway_message }`, where `gateway_message` is Edge's own text about the request, trimmed to 500 characters, and the top-level `message` repeats it. A `401`, `403` or `5xx` from the gateway stays opaque — that text is about the gateway's own configuration and only reaches the log. |
+| `SPEC_INVALID`       | 400  | Uploaded OpenAPI document could not be parsed or failed validation.                                                                                                                                                                                                                                                                                                                                                           |
+| `OUTBOX_FAILURE`     | 500  | Email could not be enqueued, or exhausted its outbox retries.                                                                                                                                                                                                                                                                                                                                                                 |
+| `INTERNAL`           | 500  | Unexpected server-side failure.                                                                                                                                                                                                                                                                                                                                                                                               |
 
 `UNAUTHORIZED`, `FORBIDDEN`, `CSRF_MISMATCH`, `USER_DISABLED` and
 `VALIDATION_FAILED` can come back from any endpoint and are not repeated in the
@@ -144,10 +144,14 @@ Public. Registered under `/api/health`.
 
 _public_ — aggregate liveness/readiness.
 
-The Edge probe never fails the endpoint: an unreachable gateway is reported as
-`edge.status = "down"` with an overall `degraded`, so a load balancer keeps the
-portal in rotation while the gateway recovers. Only a broken database makes the
-overall status `down`.
+**Status code contract:** `200` for `ok` and `degraded`, `503` for `down`.
+Container and load-balancer probes key on the code, so a gateway outage alone
+must never take the portal out of rotation — only a broken database does.
+
+The Edge probe therefore never fails the endpoint. An unreachable gateway is
+`edge.status = "down"` and a gateway that answered but reports itself unready is
+`edge.status = "not_ready"`; both leave the overall status `degraded` on a
+`200`.
 
 ```json
 {
@@ -160,24 +164,41 @@ overall status `down`.
     "status": "ok",
     "latency_ms": 7,
     "error": null,
-    "edge_version": "1.4.2",
+    "ready": true,
+    "mode": "database",
+    "admin_writes_enabled": true,
+    "edge_version": null,
     "namespace": "nexus"
   }
 }
 ```
 
-`status` is `ok` | `degraded` | `down`. `edge_version` is `null` when the
-gateway has no `/version` endpoint — take the real version from your deployment
+Overall `status` is `ok` | `degraded` | `down`; `edge.status` is `ok` |
+`not_ready` | `down`.
+
+`not_ready` exists because Edge answers `GET /health` with **`503` and a
+complete health payload** while it is `starting`, `draining` or `unavailable`.
+That is a reachable gateway reporting its own state, so Nexus parses the body
+and reports `ready: false` rather than calling the gateway unreachable.
+`ready`, `mode` and `admin_writes_enabled` come straight from that payload and
+are `null` when nothing answered.
+
+`edge_version` is **always `null` against a stock gateway**: Ferrum Edge
+exposes no version endpoint at all. Take the real version from your deployment
 metadata.
 
 Because this endpoint is unauthenticated, `database.error` is never the
 driver's own message — a failing database reports the constant `"unreachable"`
 and the real text (`connect ECONNREFUSED 10.0.3.14:5432`, authentication
 failures, and so on) is written to the server log at `error` level instead.
+`edge.error` is treated the same way: an admin sees the probe's real failure,
+everyone else sees `"unreachable"`.
 
 ### `GET /api/health/edge`
 
-_public_ — the Edge half on its own, same `edge` object as above.
+_public_ — the Edge half on its own, same `edge` object as above. Always `200`;
+the gateway's state is in the body, because the portal itself is fine either
+way.
 
 ---
 

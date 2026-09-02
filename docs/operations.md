@@ -63,6 +63,27 @@ the process prints every offending variable and exits non-zero. The repo-root
 | `FERRUM_ADMIN_TIMEOUT_MS`          | `5000`                  | Per-request deadline for Admin API calls, 250 – 60 000.                                                                                                                                                                                   |
 | `FERRUM_MAX_CREDENTIALS_PER_TYPE`  | `2`                     | 1 – 10. **Mirror of the gateway's own setting** — set them to the same value. Values above 1 are what make append-then-delete rotation gapless.                                                                                           |
 
+#### Multi-tenant gateways (`FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM`)
+
+Every admin JWT Nexus mints carries `ns` set to `FERRUM_NAMESPACE`, in the
+single-string form. There is nothing to configure.
+
+By default Edge treats admin tokens as **global**: `X-Ferrum-Namespace` is a
+routing selector, not an authorization boundary, and any valid token can address
+any namespace. A gateway started with
+`FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true` — the right setting for a control
+plane fronting several tenants — instead requires the token's `ns` claim to
+authorize the requested namespace on `/proxies`, `/consumers`,
+`/plugins/config` and friends, and answers `403` to a token that carries no
+`ns` at all. Because Nexus always stamps it, both configurations work with no
+change on the portal side; just make sure `FERRUM_NAMESPACE` names a namespace
+the gateway has granted this portal.
+
+A malformed claim (an empty or non-string entry) is rejected by Edge at
+authentication time whether or not the flag is on, so an empty
+`FERRUM_NAMESPACE` fails at signing time rather than producing a token the
+gateway will reject.
+
 ### Email
 
 All optional; an admin can also configure SMTP from the UI, and the stored

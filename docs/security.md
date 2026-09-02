@@ -394,6 +394,15 @@ authority. `ferrum-admin/jwt.ts` mints it and nothing else does.
 - **`aud` is omitted by default.** Edge rejects a token carrying an `aud` claim
   when it has no audience configured, so Nexus stamps one only when
   `FERRUM_ADMIN_JWT_AUDIENCE` is explicitly set.
+- **`ns` is always stamped** with `FERRUM_NAMESPACE`, in the single-string form.
+  A gateway started with `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true` treats the
+  claim as the authorization boundary for every namespace-scoped route and
+  answers `403` to a token that has no `ns`; a gateway without the flag ignores
+  it. Stamping it unconditionally costs nothing on a permissive control plane
+  and is what lets Nexus work against a locked-down one. Edge also rejects a
+  _malformed_ claim (empty or non-string entries) at authentication time
+  regardless of the flag, so an empty namespace is refused at signing time
+  rather than minted.
 - **`jti` is a fresh UUID** on every mint; `nbf` equals `iat`.
 
 Handling the secret:
@@ -411,9 +420,22 @@ Handling the secret:
 - Rotation is a coordinated restart of both processes — see
   [`operations.md`](operations.md#rotating-ferrum_admin_jwt_secret).
 
-Upstream error text from Edge is logged and **never** echoed to a browser: it
-can carry operator-facing configuration detail. Callers see only
-`EDGE_ERROR` / `EDGE_UNAVAILABLE` with a generic message.
+Upstream error text from Edge is always logged. Whether it is _also_ echoed to
+the browser depends on whose problem the message describes:
+
+- **`400`, `409` and `422` are echoed.** These are Edge validating the body
+  Nexus built out of the caller's own request —
+  `FERRUM_BASIC_AUTH_HMAC_SECRET must be set…`, `listen_path already exists in
+this namespace`. A provider cannot fix a publish they cannot read the reason
+  for, so the text rides along in `details.gateway_message` (trimmed to 500
+  characters) and is repeated in the message.
+- **`401`, `403` and every `5xx` stay opaque.** Those describe the gateway's own
+  configuration or the Nexus↔Edge trust relationship and can name internal
+  hosts and settings; callers see only `EDGE_ERROR` / `EDGE_UNAVAILABLE` with a
+  generic message and the real text goes to the log alone.
+
+The split is enforced in one place — `classify()` in `ferrum-admin/client.ts`.
+Nothing else in the codebase reads an Edge error body.
 
 ---
 
