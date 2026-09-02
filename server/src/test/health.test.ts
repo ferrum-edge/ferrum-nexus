@@ -4,13 +4,16 @@ import { after, before, describe, it } from 'node:test';
 import type { AppHealth, EdgeHealth } from '@ferrum-nexus/shared';
 
 import { OPAQUE_ERROR } from '../routes/health.js';
-import { buildTestApp, type TestApp } from './helpers.js';
+import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
 describe('health endpoints', () => {
   let harness: TestApp;
+  /** The first account registered on an empty portal is the super_admin. */
+  let admin: TestSession;
 
   before(async () => {
     harness = await buildTestApp();
+    admin = await harness.registerUser();
   });
 
   after(async () => {
@@ -78,8 +81,6 @@ describe('health endpoints', () => {
   });
 
   it('gives an admin the real gateway diagnostic', async () => {
-    // The first account registered on an empty portal is the super_admin.
-    const admin = await harness.registerUser();
     await harness.edge.stop();
     try {
       const response = await harness.app.inject({
@@ -122,7 +123,6 @@ describe('health endpoints', () => {
       assert.equal(body.edge.admin_writes_enabled, null);
       assert.equal(body.edge.error, null, 'a 503 health payload is not a probe failure');
 
-      const admin = await harness.registerUser({ email: 'health-admin@example.test' });
       const detailed = await harness.authed(admin, { method: 'GET', url: '/api/health' });
       assert.equal(detailed.statusCode, 200);
       assert.equal(detailed.json<AppHealth>().edge.mode, 'database');
