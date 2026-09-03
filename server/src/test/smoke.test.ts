@@ -77,8 +77,15 @@ function withDatabase(url: string, database: string): string {
 
 async function sqliteTarget(): Promise<SmokeTarget> {
   const store = createStore(testConfig('sqlite'));
-  await store.init();
-  await store.migrate();
+  try {
+    await store.init();
+    await store.migrate();
+  } catch (error) {
+    // A failed setup must release the pool, or the process never exits and the
+    // failure detail is lost behind a timeout.
+    await store.close().catch(() => undefined);
+    throw error;
+  }
   return { store, teardown: () => store.close() };
 }
 
@@ -90,8 +97,15 @@ async function postgresTarget(adminUrl: string): Promise<SmokeTarget> {
   await admin.end();
 
   const store = createStore(testConfig('postgres', withDatabase(adminUrl, database)));
-  await store.init();
-  await store.migrate();
+  try {
+    await store.init();
+    await store.migrate();
+  } catch (error) {
+    // A failed setup must release the pool, or the process never exits and the
+    // failure detail is lost behind a timeout.
+    await store.close().catch(() => undefined);
+    throw error;
+  }
 
   return {
     store,
@@ -112,8 +126,15 @@ async function mysqlTarget(adminUrl: string): Promise<SmokeTarget> {
   await admin.end();
 
   const store = createStore(testConfig('mysql', withDatabase(adminUrl, database)));
-  await store.init();
-  await store.migrate();
+  try {
+    await store.init();
+    await store.migrate();
+  } catch (error) {
+    // A failed setup must release the pool, or the process never exits and the
+    // failure detail is lost behind a timeout.
+    await store.close().catch(() => undefined);
+    throw error;
+  }
 
   return {
     store,
@@ -129,8 +150,15 @@ async function mysqlTarget(adminUrl: string): Promise<SmokeTarget> {
 async function mongoTarget(baseUrl: string): Promise<SmokeTarget> {
   const database = throwawayDbName();
   const store = createStore(testConfig('mongodb', withDatabase(baseUrl, database)));
-  await store.init();
-  await store.migrate();
+  try {
+    await store.init();
+    await store.migrate();
+  } catch (error) {
+    // A failed setup must release the pool, or the process never exits and the
+    // failure detail is lost behind a timeout.
+    await store.close().catch(() => undefined);
+    throw error;
+  }
 
   return {
     store,
