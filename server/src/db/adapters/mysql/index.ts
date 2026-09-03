@@ -21,11 +21,10 @@
  *   Nested `transaction()` calls join the outer one, and bodies are serialised,
  *   both handled by the shared `SqlStore` shell.
  *
- * Statements go through `pool.query` rather than `pool.execute`: the repos
- * build SQL dynamically (filters, `IN` lists), so a server-side prepared
- * statement per shape would be churn rather than reuse, and `query`'s
- * client-side escaping sidesteps the prepared-protocol's refusal to bind
- * `LIMIT`/`OFFSET` placeholders.
+ * Repository statements go through `execute`, so parameters are bound by the
+ * server-side prepared-statement protocol rather than escaped into SQL text.
+ * This remains safe regardless of the server's string-literal SQL mode (for
+ * example, `NO_BACKSLASH_ESCAPES`).
  */
 
 import mysql from 'mysql2/promise';
@@ -49,10 +48,8 @@ import { createSqlStore, type SqlStoreBackend } from '../sql-repos.js';
 type MysqlPool = mysql.Pool;
 type MysqlConnection = mysql.PoolConnection;
 
-/** Anything that answers `query` — the pool itself or one checked-out connection. */
-interface MysqlQueryable {
-  query(sql: string, params?: unknown[]): Promise<[unknown, unknown]>;
-}
+/** Anything that answers `execute` — the pool itself or one checked-out connection. */
+type MysqlQueryable = Pick<MysqlPool, 'execute'>;
 
 /** Rows for a SELECT, or a header carrying `affectedRows` for everything else. */
 function affectedRows(result: unknown): number {
@@ -67,11 +64,11 @@ function mysqlExecutor(queryable: MysqlQueryable): SqlExecutor {
   return {
     dialect: 'mysql',
     async query(sql: string, params: SqlParam[] = []): Promise<Row[]> {
-      const [rows] = await queryable.query(formatSql(sql, 'mysql'), params);
+      const [rows] = await queryable.execute(formatSql(sql, 'mysql'), params);
       return Array.isArray(rows) ? (rows as Row[]) : [];
     },
     async execute(sql: string, params: SqlParam[] = []): Promise<number> {
-      const [result] = await queryable.query(formatSql(sql, 'mysql'), params);
+      const [result] = await queryable.execute(formatSql(sql, 'mysql'), params);
       return affectedRows(result);
     },
   };
@@ -98,7 +95,7 @@ function createMigrationDriver(pool: MysqlPool): MigrationDriver {
       for (const statement of splitSqlStatements(migration.sql)) {
         await pool.query(statement);
       }
-      await pool.query(`INSERT INTO ${SCHEMA_MIGRATIONS_TABLE} (id, applied_at) VALUES (?, ?)`, [
+      await pool.execute(`INSERT INTO ${SCHEMA_MIGRATIONS_TABLE} (id, applied_at) VALUES (?, ?)`, [
         migration.id,
         nowIso(),
       ]);
