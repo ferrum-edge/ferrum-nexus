@@ -47,6 +47,10 @@ export const AuditAction = {
   API_SPEC_UPDATE: 'api.spec_update',
   API_RETIRE: 'api.retire',
   API_DELETE: 'api.delete',
+  /** A palette plugin was created or replaced on an API's proxy. */
+  API_PLUGIN_SET: 'api.plugin_set',
+  /** A palette plugin was detached from an API's proxy and deleted. */
+  API_PLUGIN_REMOVE: 'api.plugin_remove',
   TEST_CONSUMER_CREATE: 'test_consumer.create',
 
   /* access workflow */
