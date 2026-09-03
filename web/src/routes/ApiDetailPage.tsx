@@ -48,6 +48,7 @@ import {
   timeoutDraftFrom,
   type TimeoutDraft,
 } from '../components/publishing/AdvancedProxySettings';
+import { PluginsTab } from '../components/plugins/PluginsTab';
 import { SpecEditor, isSpecValid } from '../components/publishing/SpecEditor';
 import { Badge, type BadgeTone } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -933,6 +934,7 @@ function ApiDetail({ apiId }: { apiId: string }): ReactElement {
             ),
           },
           { value: 'settings', label: 'Settings', content: <SettingsTab api={api} /> },
+          { value: 'plugins', label: 'Plugins', content: <PluginsTab api={api} /> },
           { value: 'spec', label: 'Specification', content: <SpecTab api={api} /> },
           {
             value: 'requests',
