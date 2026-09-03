@@ -632,10 +632,7 @@ describe('publishing', () => {
       assert.equal(errorCode(response.body), 'FORBIDDEN');
     });
 
-    it('hands the provider the gateway’s reason for a validation refusal', async () => {
-      // Publishing a basic_auth API against a gateway with no
-      // FERRUM_BASIC_AUTH_HMAC_SECRET is the canonical case: the provider can
-      // do nothing about it until they can read why the plugin was refused.
+    it('does not expose a gateway validation refusal to the provider', async () => {
       const gatewayText =
         'FERRUM_BASIC_AUTH_HMAC_SECRET must be set to accept basic_auth credentials';
       harness.edge.queueFailure(400, { error: gatewayText }, '/plugins/config', 'POST');
@@ -649,10 +646,10 @@ describe('publishing', () => {
 
       const body = JSON.parse(response.body) as ApiErrorBody;
       assert.equal(body.error.code, 'EDGE_ERROR');
-      assert.match(body.error.message, /FERRUM_BASIC_AUTH_HMAC_SECRET/);
-      const details = body.error.details as { status: number; gateway_message: string };
+      assert.ok(!body.error.message.includes(gatewayText));
+      const details = body.error.details as { status: number };
       assert.equal(details.status, 400);
-      assert.equal(details.gateway_message, gatewayText);
+      assert.ok(!('gateway_message' in details));
 
       // The proxy created before the failing plugin is still rolled back.
       assert.equal(harness.edge.proxyByName('nexus-basic-auth-refused'), undefined);

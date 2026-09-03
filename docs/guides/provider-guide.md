@@ -115,9 +115,9 @@ credentials they mint themselves.
 > **HTTP Basic needs one piece of gateway configuration.** Publishing fails
 > unless the operator has set `FERRUM_BASIC_AUTH_HMAC_SECRET` (at least 32
 > bytes) on Ferrum Edge — it is the key the gateway hashes Basic passwords
-> with, and it refuses to build the plugin without one. The publish error
-> carries the gateway's own message in `details.gateway_message`; ask an
-> operator to set it and try again.
+> with, and it refuses to build the plugin without one. If publishing fails
+> with `EDGE_ERROR`, ask an operator to inspect the Nexus logs and verify this
+> setting before trying again.
 
 ### Requestable
 

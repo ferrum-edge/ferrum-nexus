@@ -8,17 +8,9 @@
  *   the gateway.
  * - `EDGE_ERROR` — the gateway answered with a non-2xx status.
  *
- * Edge's flat `{"error": "..."}` text is always logged. Whether it is *also*
- * echoed to the caller depends on who the message is about:
- *
- * - `400`, `409` and `422` are Edge validating the body Nexus just built out of
- *   the caller's own request ("FERRUM_BASIC_AUTH_HMAC_SECRET must be set…",
- *   "listen_path already exists in this namespace"). A provider cannot fix
- *   those without reading them, so the text rides along in
- *   `details.gateway_message` (trimmed to {@link MAX_GATEWAY_MESSAGE} chars).
- * - `401`, `403` and every `5xx` stay **opaque**: those describe the gateway's
- *   own configuration or the Nexus↔Edge trust relationship, not the caller's
- *   request, and can name internal hosts and settings.
+ * Edge's flat `{"error": "..."}` text is always logged but never echoed to the
+ * caller: upstream error bodies are operator-facing and can contain internal
+ * configuration details regardless of the response status.
  *
  * A `503` carrying `applied: false` is a special case worth knowing about: the
  * write **is durable**, it just is not live yet. It surfaces as `EDGE_ERROR`
@@ -241,15 +233,6 @@ const EDGE_MAX_PAGE_SIZE = 1000;
 /** Page cap for the plugin-config scan: 50 × 1000 rows in one namespace. */
 const MAX_PLUGIN_CONFIG_SCAN_PAGES = 50;
 
-/** Longest Edge validation text echoed back to the caller. */
-const MAX_GATEWAY_MESSAGE = 500;
-
-/**
- * Edge statuses whose `{"error": …}` text is about the caller's own request and
- * is therefore safe — and necessary — to surface. See the module doc comment.
- */
-const ECHOED_EDGE_STATUSES = new Set([400, 409, 422]);
-
 function buildDispatcher(config: EdgeConfig): Dispatcher {
   const isHttps = config.adminUrl.startsWith('https://');
   let ca: string | undefined;
@@ -380,17 +363,6 @@ export function createFerrumAdminClient(
     }
     if (status === 401 || status === 403) {
       return edgeError('The gateway rejected the Nexus admin credentials', { status });
-    }
-    // A validation refusal is about the body Nexus built from the caller's own
-    // request, so the provider needs the gateway's reason to act on it.
-    if (ECHOED_EDGE_STATUSES.has(status) && typeof body.error === 'string') {
-      const gatewayMessage = body.error.trim().slice(0, MAX_GATEWAY_MESSAGE);
-      if (gatewayMessage !== '') {
-        return edgeError(`The gateway rejected the request: ${gatewayMessage}`, {
-          status,
-          gateway_message: gatewayMessage,
-        });
-      }
     }
     return edgeError('The gateway rejected the request', { status });
   }

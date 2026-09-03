@@ -44,13 +44,10 @@ Three rules define the boundary, and every change has to keep all three true:
    arrives → the session is resolved → CSRF is checked → the route's role guard
    runs → the service checks row-level ownership → the Edge call is made → an
    `audit_logs` row is written. Skipping any step is a bug, not a shortcut.
-3. **Upstream text crosses to a browser in exactly one case.** Edge's flat
+3. **Nexus never echoes upstream text to a browser.** Edge's flat
    `{"error": "..."}` bodies can carry operator-facing configuration detail, so
-   `ferrum-admin/client.ts` logs every one of them and answers a generic
-   `EDGE_ERROR` / `EDGE_UNAVAILABLE`. The exception is a gateway **validation**
-   refusal (`400`, `409`, `422`), which is Edge judging the caller's own
-   request: that text is echoed in `details.gateway_message`. `401`, `403` and
-   `5xx` are never echoed. `classify()` is the only place this is decided.
+   `ferrum-admin/client.ts` logs them and returns a generic `EDGE_ERROR` /
+   `EDGE_UNAVAILABLE` to the caller, regardless of the upstream status.
 
 The only unauthenticated read in the whole API is `GET /api/branding`, which
 exists so the login page can render with the right name, logo and colours
@@ -291,9 +288,8 @@ write **is durable**, it just is not live yet. It surfaces as `EDGE_ERROR` with
 an explicit message and is never retried automatically, because a blind retry
 of a create would `409`.
 
-Edge's error text is echoed to the caller only on a **validation** refusal
-(`400`, `409`, `422`), in `details.gateway_message` — those messages are about
-the caller's own request. `401`, `403` and `5xx` stay opaque; see
+Edge's operator-facing error text is logged but never echoed to the caller,
+regardless of status, because it can expose gateway configuration; see
 [`security.md` §9](security.md#9-ferrum-edge-admin-jwt-hygiene).
 
 `GET /health` is the one endpoint where a non-2xx is not a failure: Edge answers

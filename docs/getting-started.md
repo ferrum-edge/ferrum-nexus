@@ -69,8 +69,8 @@ Two additions worth explaining before you move on:
 - `FERRUM_BASIC_AUTH_HMAC_SECRET` (at least 32 bytes) is what the gateway hashes
   Basic-auth passwords with. Set it now: without it the gateway refuses to build
   the `basic_auth` plugin at all, so publishing a `basic_auth` API fails with a
-  `400` from Edge. Nexus passes the gateway's own message through in
-  `EDGE_ERROR.details.gateway_message`, which is where you will see it.
+  `400` from Edge. Nexus returns a generic `EDGE_ERROR`; inspect the Nexus logs
+  for the operator-facing gateway message.
 
 Two ports, and confusing them is the most common first-run mistake:
 

@@ -207,47 +207,21 @@ describe('ferrum admin client', () => {
       );
     });
 
-    it('echoes the gateway text on a validation refusal but not on a 5xx', async () => {
-      // 400/409/422 describe the caller's own request, so the reason travels.
-      edge.queueFailure(409, { error: 'listen_path already exists in this namespace' });
-      await assert.rejects(
-        () => client.consumers.list(),
-        (error: unknown) => {
-          assert.ok(isNexusError(error));
-          assert.equal(error.code, 'EDGE_ERROR');
-          assert.match(error.message, /listen_path already exists/);
-          assert.deepEqual(error.details, {
-            status: 409,
-            gateway_message: 'listen_path already exists in this namespace',
-          });
-          return true;
-        },
-      );
-
-      // A 500 is about the gateway's own state and stays opaque.
-      edge.queueFailure(500, { error: 'internal detail nobody outside should see' });
-      await assert.rejects(
-        () => client.consumers.list(),
-        (error: unknown) => {
-          assert.ok(isNexusError(error));
-          assert.ok(!error.message.includes('nobody outside should see'));
-          assert.deepEqual(error.details, { status: 500 });
-          return true;
-        },
-      );
-    });
-
-    it('trims a runaway gateway message to 500 characters', async () => {
-      edge.queueFailure(400, { error: 'x'.repeat(2_000) });
-      await assert.rejects(
-        () => client.consumers.list(),
-        (error: unknown) => {
-          assert.ok(isNexusError(error));
-          const { gateway_message: message } = error.details as { gateway_message: string };
-          assert.equal(message.length, 500);
-          return true;
-        },
-      );
+    it('keeps upstream error text opaque regardless of status', async () => {
+      for (const status of [400, 409, 422, 500]) {
+        const upstream = `internal detail for status ${status}`;
+        edge.queueFailure(status, { error: upstream });
+        await assert.rejects(
+          () => client.consumers.list(),
+          (error: unknown) => {
+            assert.ok(isNexusError(error));
+            assert.equal(error.code, 'EDGE_ERROR');
+            assert.ok(!error.message.includes(upstream));
+            assert.deepEqual(error.details, { status });
+            return true;
+          },
+        );
+      }
     });
 
     it('maps a refused connection to EDGE_UNAVAILABLE', async () => {
@@ -441,7 +415,8 @@ describe('ferrum admin client', () => {
         (error: unknown) => {
           assert.ok(isNexusError(error));
           assert.equal(error.code, 'EDGE_ERROR');
-          assert.match(error.message, /max_requests/);
+          assert.equal(error.message, 'The gateway rejected the request');
+          assert.deepEqual(error.details, { status: 400 });
           return true;
         },
       );
@@ -474,7 +449,10 @@ describe('ferrum admin client', () => {
             enabled: true,
             config: { allowed_origins: [] },
           }),
-        (error: unknown) => isNexusError(error) && /allowed_origins/.test(error.message),
+        (error: unknown) =>
+          isNexusError(error) &&
+          error.message === 'The gateway rejected the request' &&
+          (error.details as { status?: number }).status === 400,
       );
 
       const created = await client.pluginConfigs.create({
@@ -518,7 +496,7 @@ describe('ferrum admin client', () => {
         config: { allowed_groups: [aclGroupForApi('api-1')] },
       });
 
-      const rejects = async (plugins: unknown, pattern: RegExp): Promise<void> => {
+      const rejects = async (plugins: unknown): Promise<void> => {
         await assert.rejects(
           () =>
             client.proxies.replace('assoc-b', {
@@ -530,19 +508,17 @@ describe('ferrum admin client', () => {
             }),
           (error: unknown) => {
             assert.ok(isNexusError(error));
-            assert.match(error.message, pattern);
+            assert.equal(error.message, 'The gateway rejected the request');
+            assert.deepEqual(error.details, { status: 400 });
             return true;
           },
         );
       };
 
-      await rejects([{ plugin_config_id: 'nope' }], /non-existent plugin_config/);
-      await rejects([{ plugin_config_id: 'cfg-global' }], /scope 'global'/);
-      await rejects([{ plugin_config_id: onA.id }], /targeted to proxy 'assoc-a'/);
-      await rejects(
-        [{ plugin_config_id: 'cfg-on-a' }, { plugin_config_id: 'cfg-on-a' }],
-        /more than once/,
-      );
+      await rejects([{ plugin_config_id: 'nope' }]);
+      await rejects([{ plugin_config_id: 'cfg-global' }]);
+      await rejects([{ plugin_config_id: onA.id }]);
+      await rejects([{ plugin_config_id: 'cfg-on-a' }, { plugin_config_id: 'cfg-on-a' }]);
     });
 
     it('separates the plugin configs Edge stores from the ones it would run', async () => {

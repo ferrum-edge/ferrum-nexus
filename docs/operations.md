@@ -69,10 +69,10 @@ the process prints every offending variable and exits non-zero. The repo-root
 Two gateway-side variables change what Nexus can successfully publish, so they
 belong in the same checklist even though Nexus never reads them:
 
-| Variable (on Ferrum Edge)       | Notes                                                                                                                                                                                                                                                                                                     |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `FERRUM_ADMIN_JWT_SECRET`       | Must equal Nexus's own value exactly. This shared secret is the whole trust relationship; a mismatch makes every Admin API call `401`.                                                                                                                                                                    |
-| `FERRUM_BASIC_AUTH_HMAC_SECRET` | At least 32 bytes. The key the gateway HMACs Basic-auth passwords with. **Required before any `basic_auth` API is published** — without it the gateway refuses to construct the plugin and the publish fails with `EDGE_ERROR`; the gateway's own message is passed through in `details.gateway_message`. |
+| Variable (on Ferrum Edge)       | Notes                                                                                                                                                                                                                                                                                             |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FERRUM_ADMIN_JWT_SECRET`       | Must equal Nexus's own value exactly. This shared secret is the whole trust relationship; a mismatch makes every Admin API call `401`.                                                                                                                                                            |
+| `FERRUM_BASIC_AUTH_HMAC_SECRET` | At least 32 bytes. The key the gateway HMACs Basic-auth passwords with. **Required before any `basic_auth` API is published** — without it the gateway refuses to construct the plugin and the publish fails with `EDGE_ERROR`; inspect the Nexus logs for the gateway's operator-facing message. |
 
 #### Multi-tenant gateways (`FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM`)
 
@@ -605,10 +605,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
 Structured JSON (pino) at `NEXUS_LOG_LEVEL`. Unhandled 5xx errors log at
 `error` with the URL and the full error; sub-500 responses log at `debug` with
 `{ code, status, url }`. The Edge client logs upstream error text at `error`
-(`Ferrum Edge Admin API returned an error`). For a `400`, `409` or `422` — the
-gateway validating the caller's own request — the same text is echoed to the
-caller in `EDGE_ERROR.details.gateway_message`; for `401`/`403` and every `5xx`
-it is deliberately **only** in the log, so this is where you look when a
+(`Ferrum Edge Admin API returned an error`). It is deliberately **only** in the
+log regardless of the upstream status, so this is where you look when a
 provider reports an unexplained `EDGE_ERROR`.
 
 ### Shutdown
