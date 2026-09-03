@@ -337,7 +337,40 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
     'preflight_continue',
     'unmatched_preflights',
   ],
+  openapi_validator: [
+    'enforcement_mode',
+    'validate_request',
+    'validate_response',
+    'fail_on_unknown_operation',
+    'fail_on_missing_response_schema',
+    'max_body_bytes',
+    'request_content_types',
+    'response_content_types',
+    'schema_draft',
+    'operations',
+    'bypass',
+    'error_response',
+    'error_truncate_chars',
+  ],
 };
+
+/**
+ * Fixed fields of an `openapi_validator` operation entry. Edge closes this
+ * object too, so a `path_template` typed `pathTemplate` is a 400 and not a
+ * silently ignored key.
+ */
+const OPENAPI_OPERATION_KEYS = new Set([
+  'method',
+  'path_template',
+  'path_regex',
+  'operation_label',
+  'request_required',
+  'request_body',
+  'responses',
+]);
+
+/** `openapi_validator.bypass` is a closed key set as well. */
+const OPENAPI_BYPASS_KEYS = new Set(['paths', 'methods', 'consumers', 'header_present']);
 
 const RATE_LIMIT_RULE_KEYS = new Set([
   'scope',
@@ -548,6 +581,79 @@ function validatePluginConfig(pluginName: string, config: unknown): string | nul
     if (config.preflight_continue !== undefined && config.unmatched_preflights !== undefined) {
       return "cors: 'preflight_continue' and 'unmatched_preflights' are mutually exclusive";
     }
+  }
+
+  if (pluginName === 'openapi_validator') {
+    const problem = openapiValidatorError(config);
+    if (problem) return problem;
+  }
+
+  return null;
+}
+
+/**
+ * Edge's admission checks for `openapi_validator`, reduced to what Nexus can
+ * actually get wrong.
+ *
+ * The plugin is registered `FailClosed`, so a rejected config never becomes
+ * the running policy — a direct Admin write is a 400. That makes a permissive
+ * fake actively misleading: the interesting failure is a config Nexus writes,
+ * the mock accepts, and the real gateway would refuse. So the three things
+ * that decide whether the generated body is admissible are checked here — the
+ * closed key sets, the required non-empty `operations` array with its three
+ * mandatory string fields, and a `path_regex` that compiles.
+ *
+ * The schema-bearing parts (`request_body`, `responses`, media maps, draft
+ * selection) are not modelled: Nexus never generates them.
+ */
+function openapiValidatorError(config: Record<string, unknown>): string | null {
+  const operations = config.operations;
+  if (!Array.isArray(operations)) {
+    return "openapi_validator: 'operations' is required and must be an array";
+  }
+  if (operations.length === 0) return "openapi_validator: 'operations' must not be empty";
+
+  for (const [index, operation] of operations.entries()) {
+    if (!isRecord(operation)) {
+      return `openapi_validator: operations[${index}] must be an object`;
+    }
+    for (const field of Object.keys(operation)) {
+      if (!OPENAPI_OPERATION_KEYS.has(field)) {
+        return `openapi_validator: operations[${index}] unknown field '${field}'`;
+      }
+    }
+    for (const field of ['method', 'path_template', 'path_regex']) {
+      const value = operation[field];
+      if (typeof value !== 'string' || value === '') {
+        return `openapi_validator: operations[${index}].${field} is required and must be a non-empty string`;
+      }
+    }
+    try {
+      // Edge anchors the operator's pattern into `^(?:…)$` before compiling it,
+      // so an already-anchored regex is double-anchored and must still compile.
+      new RegExp(`^(?:${String(operation.path_regex)})$`);
+    } catch {
+      return `openapi_validator: operations[${index}].path_regex is invalid`;
+    }
+  }
+
+  const bypass = config.bypass;
+  if (bypass !== undefined) {
+    if (!isRecord(bypass)) return "openapi_validator: 'bypass' must be an object";
+    for (const field of Object.keys(bypass)) {
+      if (!OPENAPI_BYPASS_KEYS.has(field)) {
+        return `openapi_validator: bypass unknown field '${field}'`;
+      }
+    }
+    if (bypass.methods !== undefined && !Array.isArray(bypass.methods)) {
+      return "openapi_validator: 'bypass.methods' must be an array of strings";
+    }
+  }
+
+  // A config with no schemas and no unknown-operation check enforces nothing at
+  // all, which Edge refuses rather than accepting as a no-op policy.
+  if (config.fail_on_unknown_operation === false) {
+    return 'openapi_validator: no validation rules configured -- provide request or response schemas';
   }
 
   return null;
@@ -1428,6 +1534,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
             'access_control',
             'cors',
             'rate_limiting',
+            'openapi_validator',
           ]);
         }
         return fail(res, 404, 'Not found');

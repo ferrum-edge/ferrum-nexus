@@ -15,12 +15,14 @@ import { z } from 'zod';
 
 import {
   AUTH_PLUGIN_TYPES,
+  DEFAULT_SPEC_ENFORCEMENT,
   HTTP_METHODS,
   MAX_BACKEND_TIMEOUT_MS,
   MAX_CORS_ORIGINS,
   MAX_RATE_LIMIT_REQUESTS,
   MAX_RATE_LIMIT_WINDOW_SECONDS,
   MAX_SPEC_BYTES,
+  SPEC_ENFORCEMENT_LEVELS,
   type ApiUsageResponse,
   MIN_BACKEND_TIMEOUT_MS,
   type CorsConfig,
@@ -150,6 +152,7 @@ const publishBody = z.object({
   allowed_methods: allowedMethodsSchema.nullish(),
   timeouts: timeoutsSchema.nullish(),
   circuit_breaker: z.boolean().optional(),
+  spec_enforcement: z.enum(SPEC_ENFORCEMENT_LEVELS).optional(),
 });
 
 const updateBody = z.object({
@@ -165,6 +168,8 @@ const updateBody = z.object({
   allowed_methods: allowedMethodsSchema.nullish(),
   timeouts: timeoutsSchema.nullish(),
   circuit_breaker: z.boolean().optional(),
+  // `undefined` leaves the level — and therefore the validator plugin — alone.
+  spec_enforcement: z.enum(SPEC_ENFORCEMENT_LEVELS).optional(),
   status: z.enum(['published', 'retired']).optional(),
 });
 
@@ -215,6 +220,7 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
         allowed_methods: input.allowed_methods ?? null,
         timeouts: input.timeouts ?? null,
         circuit_breaker: input.circuit_breaker ?? false,
+        spec_enforcement: input.spec_enforcement ?? DEFAULT_SPEC_ENFORCEMENT,
       },
       clientIp(request),
     );

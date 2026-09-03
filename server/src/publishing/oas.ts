@@ -70,6 +70,21 @@ export interface SpecUpstream {
   basePath: string | null;
 }
 
+/**
+ * One declared path item: the template exactly as the document spells it, and
+ * the HTTP methods it declares an operation for.
+ *
+ * Uppercased and de-duplicated, in {@link OPENAPI_OPERATION_METHODS} order, so
+ * the generated validator config is stable across two uploads of the same
+ * document with its keys in a different order.
+ */
+export interface SpecPath {
+  /** The path template as written, e.g. `/invoices/{id}`. */
+  path: string;
+  /** Uppercase HTTP methods declared on it, e.g. `['GET', 'POST']`. */
+  methods: string[];
+}
+
 /** Everything the publishing service needs out of an uploaded document. */
 export interface ParsedSpec {
   /** `info.title`. */
@@ -86,6 +101,16 @@ export interface ParsedSpec {
   pathCount: number;
   /** Number of operations (path item × HTTP method) across the whole document. */
   operationCount: number;
+  /**
+   * Every declared path item with the methods it carries, in document order.
+   *
+   * This is what `routes` enforcement is generated from. A path item that is
+   * not an object, or that declares no HTTP-method key at all, is omitted
+   * rather than rejected — the parser stays as permissive as it has always
+   * been, and a document made entirely of such entries simply yields nothing
+   * to enforce.
+   */
+  paths: SpecPath[];
   /** Content type matching {@link ParsedSpec.raw}. */
   contentType: 'application/json' | 'application/yaml';
   /** The document as uploaded, with only surrounding whitespace trimmed. */
@@ -331,6 +356,9 @@ export function parseOpenApiSpec(text: string): ParsedSpec {
     defaultUpstream: readDefaultUpstream(value.servers),
     pathCount,
     operationCount,
+    // Walked only after both limits have been cleared, so a document built to
+    // be expensive to enumerate is rejected before it is enumerated.
+    paths: readPaths(paths),
     contentType,
     raw,
   };
@@ -353,6 +381,31 @@ function countOperations(paths: Record<string, unknown>): number {
     }
   }
   return count;
+}
+
+/**
+ * Every path item that declares at least one operation, with its methods.
+ *
+ * A second walk over `paths` rather than a by-product of {@link countOperations},
+ * deliberately: that function's exact counting rule (a method *key* present,
+ * whatever its value) is what the `MAX_SPEC_OPERATIONS` limit has always meant,
+ * and reusing one traversal for both would tie the two together. The two agree
+ * on which keys count, and this one is only reached once the limits pass.
+ *
+ * Path items that are not objects, and objects declaring no method key, are
+ * skipped: they contribute no operation to enforce, and rejecting them would
+ * make the portal stricter than the gateway it fronts.
+ */
+function readPaths(paths: Record<string, unknown>): SpecPath[] {
+  const declared: SpecPath[] = [];
+  for (const [path, item] of Object.entries(paths)) {
+    if (!isRecord(item)) continue;
+    const methods = OPENAPI_OPERATION_METHODS.filter((method) => item[method] !== undefined).map(
+      (method) => method.toUpperCase(),
+    );
+    if (methods.length > 0) declared.push({ path, methods });
+  }
+  return declared;
 }
 
 /** `servers[0].url` as an upstream, when it is absolute http(s). */

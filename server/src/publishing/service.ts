@@ -14,8 +14,15 @@
  *               ├─ plugin_config    the auth plugin (key_auth | basic_auth | jwt_auth)
  *               ├─ plugin_config    access_control, only when `requestable`
  *               ├─ plugin_config    rate_limiting, only when a rate limit is set
- *               └─ plugin_config    cors, only when a CORS policy is set
+ *               ├─ plugin_config    cors, only when a CORS policy is set
+ *               └─ plugin_config    openapi_validator, only in `routes` mode
  * ```
+ *
+ * The `openapi_validator` is the one config generated from the *spec* rather
+ * than from a setting on the row, so it is regenerated whenever either input
+ * moves: a new spec revision, and a CORS change (which decides whether the
+ * `OPTIONS` preflight is bypassed). See `spec-enforcement.ts` for what the
+ * generated config does and — just as importantly — does not enforce.
  *
  * ## Two settings are not free-standing
  *
@@ -93,6 +100,7 @@ import {
   DEFAULT_BACKEND_CONNECT_TIMEOUT_MS,
   DEFAULT_BACKEND_READ_TIMEOUT_MS,
   DEFAULT_BACKEND_WRITE_TIMEOUT_MS,
+  DEFAULT_SPEC_ENFORCEMENT,
   RATE_LIMIT_PLUGIN,
   aclGroupForApi,
   listenPathFor,
@@ -110,6 +118,7 @@ import {
   type Paginated,
   type PublishApiRequest,
   type RateLimitConfig,
+  type SpecEnforcementLevel,
   type UpdateApiRequest,
   type Uuid,
 } from '@ferrum-nexus/shared';
@@ -146,9 +155,11 @@ import {
   parseUpstreamUrl,
   resolveUpstream,
   slugify,
+  type SpecPath,
   type SpecUpstream,
   type UpstreamPolicy,
 } from './oas.js';
+import { OPENAPI_VALIDATOR_PLUGIN, validatorConfigFor } from './spec-enforcement.js';
 
 /** Result of {@link PublishingService.publish} and `updateSpec`. */
 export interface PublishResult {
@@ -318,6 +329,37 @@ export function corsPluginConfig(cors: CorsConfig): EdgePluginSettings {
   };
 }
 
+/**
+ * Config for `openapi_validator`, or `null` when the API is `docs_only`.
+ *
+ * The two inputs beyond the enforcement level are the document's declared
+ * paths and the CORS policy, which is why this is recomputed on a spec upload
+ * and on a CORS change and not only when the level itself moves.
+ *
+ * @throws NexusError `SPEC_INVALID` when `routes` is asked for but the document
+ * declares no operation to enforce. Edge refuses an empty `operations` array,
+ * so the only alternatives are a row claiming enforcement the gateway is not
+ * doing, or a proxy that rejects every request — both worse than refusing.
+ */
+export function openapiValidatorConfig(
+  enforcement: SpecEnforcementLevel,
+  paths: SpecPath[],
+  listenPath: string,
+  cors: CorsConfig | null,
+): EdgePluginSettings | null {
+  if (enforcement !== 'routes') return null;
+  const config = validatorConfigFor(paths, listenPath, { hasCors: cors !== null });
+  if (!config) {
+    throw specInvalid(
+      "OpenAPI enforcement is set to 'routes', but the document declares no operations for the " +
+        'gateway to allow; add a path with at least one method, or set the enforcement level back ' +
+        "to 'docs_only'",
+      { field: 'spec_enforcement', reason: 'no_operations' },
+    );
+  }
+  return config;
+}
+
 /* ── Proxy runtime settings ─────────────────────────────────────────────── */
 
 /**
@@ -423,6 +465,24 @@ function safeDefaultUpstream(rawSpec: string): SpecUpstream | null {
     return parseOpenApiSpec(rawSpec).defaultUpstream;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Declared paths of an already-stored revision, or `[]` when it can no longer
+ * be parsed — the same tolerance {@link safeDefaultUpstream} applies, for the
+ * same reason.
+ *
+ * An empty result is not silently ignored: {@link openapiValidatorConfig}
+ * turns it into a `SPEC_INVALID`, so switching enforcement on for an API whose
+ * stored document no longer parses fails loudly instead of recording a level
+ * the gateway is not enforcing.
+ */
+function safeSpecPaths(rawSpec: string): SpecPath[] {
+  try {
+    return parseOpenApiSpec(rawSpec).paths;
+  } catch {
+    return [];
   }
 }
 
@@ -731,6 +791,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const allowedMethods = proxyAllowedMethods(methods, cors);
       const timeouts = input.timeouts ?? null;
       const circuitBreaker = input.circuit_breaker ?? false;
+      const specEnforcement = input.spec_enforcement ?? DEFAULT_SPEC_ENFORCEMENT;
+      // Built before the first gateway write: a document with nothing to
+      // enforce must fail the request outright, not halfway through creating a
+      // proxy that would then have to be rolled back.
+      const validator = openapiValidatorConfig(specEnforcement, parsed.paths, listenPath, cors);
 
       const created: { proxyId?: string; pluginIds: string[] } = { pluginIds: [] };
       let persisted: { api: ApiRecord; spec: ApiSpecRecord };
@@ -787,6 +852,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           const corsPlugin = await attach(proxy.id, CORS_PLUGIN, corsPluginConfig(cors), owner.id);
           created.pluginIds.push(corsPlugin.id);
         }
+        if (validator) {
+          const enforcer = await attach(proxy.id, OPENAPI_VALIDATOR_PLUGIN, validator, owner.id);
+          created.pluginIds.push(enforcer.id);
+        }
 
         // None of the above is live yet. A proxy-scoped plugin config only runs
         // once the proxy's own `plugins[]` names it, so this single write is
@@ -821,6 +890,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             allowed_methods: methods,
             timeouts,
             circuit_breaker: circuitBreaker,
+            spec_enforcement: specEnforcement,
             status: 'published',
             visibility: input.visibility,
           });
@@ -872,6 +942,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           allowed_methods: methods,
           timeouts,
           circuit_breaker: circuitBreaker,
+          spec_enforcement: specEnforcement,
           upstream: `${upstream.scheme}://${upstream.host}:${upstream.port}`,
           spec_paths: parsed.pathCount,
           spec_operations: parsed.operationCount,
@@ -1031,6 +1102,45 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           changed.push('cors');
         }
 
+        // ── OpenAPI enforcement ─────────────────────────────────────────
+        // The validator config is generated from three inputs; this PATCH can
+        // move two of them. The level decides whether the plugin exists at all,
+        // and the CORS policy decides whether the browser's `OPTIONS` preflight
+        // is bypassed — without that bypass, adding CORS to a `routes` API would
+        // make every preflight a `400`. The third input is the document, which
+        // `updateSpec` owns.
+        const nextEnforcement = patch.spec_enforcement ?? api.spec_enforcement;
+        const enforcementMoved =
+          patch.spec_enforcement !== undefined && patch.spec_enforcement !== api.spec_enforcement;
+        if (
+          proxyId &&
+          (enforcementMoved || (patch.cors !== undefined && nextEnforcement === 'routes'))
+        ) {
+          const corsAfterPatch = patch.cors === undefined ? api.cors : patch.cors;
+          const current = await store.apiSpecs.findCurrentByApi(api.id);
+          await reconcileOptionalPlugin(
+            proxyId,
+            findPlugin(plugins, OPENAPI_VALIDATOR_PLUGIN),
+            OPENAPI_VALIDATOR_PLUGIN,
+            openapiValidatorConfig(
+              nextEnforcement,
+              current ? safeSpecPaths(current.raw_spec) : [],
+              listenPathFor(api.namespace, api.slug),
+              corsAfterPatch,
+            ),
+            actor.id,
+            undo,
+          );
+        }
+        if (
+          patch.spec_enforcement !== undefined &&
+          patch.spec_enforcement !== api.spec_enforcement
+        ) {
+          update.spec_enforcement = patch.spec_enforcement;
+          changed.push('spec_enforcement');
+          details.spec_enforcement = patch.spec_enforcement;
+        }
+
         // ── Proxy runtime settings ──────────────────────────────────────
         // One read-modify-write for all of them, and only for the ones this
         // PATCH actually addresses: `undefined` leaves a setting alone,
@@ -1179,9 +1289,35 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         }
       }
 
+      // The operation table follows the document, so a `routes` API's validator
+      // is regenerated here — before the revision becomes current, in the same
+      // direction and for the same reason as the backend move above. A replace
+      // keeps the config id, so the proxy's association list is untouched and
+      // there is no window in which the plugin is missing.
+      //
+      // Ordered *after* the backend move so its undo runs first on the way
+      // back out: the compensation below unwinds this stack in reverse and
+      // then restores the backend.
+      const undo: (() => Promise<void>)[] = [];
       let spec: ApiSpecRecord;
       let updated: ApiRecord;
       try {
+        if (api.spec_enforcement === 'routes' && api.ferrum_proxy_id) {
+          await reconcileOptionalPlugin(
+            api.ferrum_proxy_id,
+            findPlugin(await pluginsOf(api), OPENAPI_VALIDATOR_PLUGIN),
+            OPENAPI_VALIDATOR_PLUGIN,
+            openapiValidatorConfig(
+              api.spec_enforcement,
+              parsed.paths,
+              listenPathFor(api.namespace, api.slug),
+              api.cors,
+            ),
+            actor.id,
+            undo,
+          );
+        }
+
         const persisted = await store.transaction(async (tx) => {
           const revision = await tx.apiSpecs.create({
             api_id: api.id,
@@ -1208,6 +1344,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         spec = persisted.spec;
         updated = persisted.api;
       } catch (error) {
+        for (const step of undo.reverse()) {
+          await step().catch(() => undefined);
+        }
         if (restoreBackend) await restoreBackend().catch(() => undefined);
         throw error;
       }
@@ -1221,6 +1360,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           version: nextVersion,
           spec_paths: parsed.pathCount,
           spec_operations: parsed.operationCount,
+          spec_enforcement: api.spec_enforcement,
           backend_updated: backendUpdated,
         },
         ip,

@@ -605,6 +605,36 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(bare?.circuit_breaker, false);
     });
 
+    it('apis: round-trips the OpenAPI enforcement level', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const api = await store.apis.create({
+        name: 'Enforced',
+        slug: `enforced-${newId().slice(0, 8)}`,
+        owner_user_id: owner.id,
+        namespace: 'nexus',
+        version: '1.0.0',
+        spec_format: 'openapi',
+        requestable: true,
+        auth_plugin: 'key_auth',
+        spec_enforcement: 'routes',
+        status: 'published',
+        visibility: 'public',
+      });
+      assert.equal(api.spec_enforcement, 'routes');
+      assert.deepEqual(await store.apis.findById(api.id), api);
+
+      const relaxed = await store.apis.update(api.id, { spec_enforcement: 'docs_only' });
+      assert.equal(relaxed?.spec_enforcement, 'docs_only');
+
+      const untouched = await store.apis.update(api.id, { version: '2.0.0' });
+      assert.equal(untouched?.spec_enforcement, 'docs_only', 'an untouched column is left alone');
+
+      // A row created without it — every row predating migration 005 — reads
+      // back as "the document is catalog metadata only".
+      const bare = await store.apis.findById((await makeApi(owner.id)).id);
+      assert.equal(bare?.spec_enforcement, 'docs_only');
+    });
+
     it('apiSpecs: keeps exactly one current revision per API', async () => {
       const owner = await makeUser({ role: 'provider' });
       const api = await makeApi(owner.id);

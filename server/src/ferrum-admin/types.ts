@@ -364,6 +364,56 @@ export interface EdgeCorsConfig {
   unmatched_preflights?: 'forward' | 'ignore';
 }
 
+/**
+ * One entry of `openapi_validator.operations`.
+ *
+ * These three fields are the whole required set: `request_body` and
+ * `responses` are optional, and a schema-free entry is legal as long as the
+ * config also sets `fail_on_unknown_operation`. `path_regex` is anchored by
+ * Edge into `^(?:…)$` on top of whatever it is given, so an already-anchored
+ * pattern — which is what Edge's own spec importer emits — is accepted and
+ * behaves identically.
+ */
+export interface EdgeOpenapiValidatorOperation {
+  /** Uppercase HTTP method; Edge upper-cases it again on the way in. */
+  method: string;
+  /** The path template, used for the operation label and for ordering ties. */
+  path_template: string;
+  /** Full-match regex over the canonical policy path (listen path included). */
+  path_regex: string;
+}
+
+/**
+ * `openapi_validator` config — a closed key set at every level.
+ *
+ * Nexus generates only the routes-level subset: the operation table plus
+ * `fail_on_unknown_operation`, with body validation switched off. The
+ * remaining published fields (`request_content_types`, `max_body_bytes`,
+ * `schema_draft`, `error_response`, …) are omitted so the gateway's own
+ * defaults stay in force.
+ */
+export interface EdgeOpenapiValidatorConfig {
+  /** `block` rejects, `log_only` records, `disabled` skips. Native default `block`. */
+  enforcement_mode?: 'block' | 'log_only' | 'disabled';
+  validate_request?: boolean;
+  validate_response?: boolean;
+  /** Reject a request matching no operation. Native default `true`. */
+  fail_on_unknown_operation?: boolean;
+  /** Required, and rejected when empty. */
+  operations: EdgeOpenapiValidatorOperation[];
+  /** Escape hatches evaluated *before* the unknown-operation check. */
+  bypass?: {
+    /** Regexes over the request path. */
+    paths?: string[];
+    /** HTTP methods skipped wholesale — how a CORS preflight survives. */
+    methods?: string[];
+    /** Authenticated identities or consumer usernames. */
+    consumers?: string[];
+    /** Header name → required value, or `null` for "any value". */
+    header_present?: Record<string, string | null>;
+  };
+}
+
 /** Any plugin config body Nexus writes. */
 export type EdgePluginSettings =
   | EdgeKeyAuthConfig
@@ -372,6 +422,7 @@ export type EdgePluginSettings =
   | EdgeAccessControlConfig
   | EdgeRateLimitingConfig
   | EdgeCorsConfig
+  | EdgeOpenapiValidatorConfig
   | Record<string, unknown>;
 
 /** A plugin config resource. */

@@ -358,6 +358,44 @@ describe('sqlite store', () => {
       assert.equal(bare.circuit_breaker, false);
     });
 
+    it('stores the OpenAPI enforcement level and defaults it to docs_only', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const enforcing = await store.apis.create({
+        name: 'Enforced',
+        slug: `enforced-${newId().slice(0, 8)}`,
+        owner_user_id: owner.id,
+        namespace: 'nexus',
+        version: '1.0.0',
+        spec_format: 'openapi',
+        requestable: true,
+        auth_plugin: 'key_auth',
+        spec_enforcement: 'routes',
+        status: 'published',
+        visibility: 'public',
+      });
+      assert.equal(enforcing.spec_enforcement, 'routes');
+      assert.deepEqual(await store.apis.findById(enforcing.id), enforcing);
+
+      const relaxed = await store.apis.update(enforcing.id, { spec_enforcement: 'docs_only' });
+      assert.equal(relaxed?.spec_enforcement, 'docs_only');
+
+      // Omitting it on create takes the column default, which is what every row
+      // published before migration 005 reads back as.
+      const bare = await store.apis.create({
+        name: 'Unenforced',
+        slug: `unenforced-${newId().slice(0, 8)}`,
+        owner_user_id: owner.id,
+        namespace: 'nexus',
+        version: '1.0.0',
+        spec_format: 'openapi',
+        requestable: false,
+        auth_plugin: 'key_auth',
+        status: 'published',
+        visibility: 'public',
+      });
+      assert.equal(bare.spec_enforcement, 'docs_only');
+    });
+
     it('keeps exactly one current spec revision per API', async () => {
       const owner = await makeUser({ role: 'provider' });
       const api = await store.apis.create({
