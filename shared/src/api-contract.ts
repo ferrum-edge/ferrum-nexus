@@ -409,6 +409,107 @@ export interface CreateTestConsumerResponse {
   secret: ShowOnceSecret;
 }
 
+/* ── Usage & backend health ─────────────────────────────────────────────── */
+
+/**
+ * `GET /api/apis/:id/usage` — what the gateway currently reports for this
+ * API's proxy.
+ *
+ * ## What this is, and what it deliberately is not
+ *
+ * Nexus runs no metrics pipeline. This is a **cached read-through** of the two
+ * things Ferrum Edge already exposes for a proxy: the Prometheus counters on
+ * `GET /metrics` and the runtime state on `GET /admin/metrics`. Consequences a
+ * reader must keep in mind:
+ *
+ * - **Every count is cumulative since the gateway process started**, not "this
+ *   month" or "the last hour". Edge exposes no per-proxy time window and Nexus
+ *   stores no history, so a restart resets the numbers to zero. Point
+ *   Prometheus at Edge if you need rates or retention.
+ * - **There are no per-consumer counts.** Edge's request counter is not labelled
+ *   by consumer, so "who is using this API" cannot be answered from here.
+ * - `available: false` means the gateway could not be read (unreachable, an
+ *   error status, or an unparseable body), or the API has no proxy yet. The
+ *   route still answers `200`: a gateway hiccup is not a portal failure.
+ */
+export interface ApiUsageResponse {
+  /** Whether the numbers below came from a successful gateway read. */
+  available: boolean;
+  /** When Nexus produced this answer (a cached read may be up to 10s older). */
+  sampled_at: IsoTimestamp;
+  /**
+   * `gateway.uptime_seconds` — how far back the cumulative counters reach.
+   * Absent when the gateway did not report it.
+   */
+  gateway_uptime_seconds?: number;
+  requests: ApiUsageRequests;
+  /**
+   * Percentiles interpolated from the gateway's `ferrum_request_duration_ms`
+   * histogram buckets, exactly as `histogram_quantile` does: the value is
+   * linearly interpolated inside the bucket the quantile falls in, so its
+   * accuracy is bounded by that bucket's width, and a quantile landing in the
+   * open-ended top bucket is reported as the highest finite bucket bound.
+   * `null` when the histogram is empty or was not readable.
+   */
+  latency_ms: ApiUsageLatency | null;
+  backend: ApiUsageBackend;
+}
+
+/** Cumulative request counters for one API's proxy. */
+export interface ApiUsageRequests {
+  /** Every counted request, summed across methods and status codes. */
+  total: number;
+  /** Requests grouped by HTTP status class. Non-numeric statuses are dropped. */
+  by_status_class: ApiUsageStatusClasses;
+  /** `status_code` → count, e.g. `{ '200': 1200, '429': 18 }`. */
+  by_status: Record<string, number>;
+  /** `method` → count, e.g. `{ GET: 900, POST: 318 }`. */
+  by_method: Record<string, number>;
+  /** `429`s — the rate limit turning traffic away. */
+  rate_limited: number;
+  /** `401`s — a missing or invalid credential. */
+  unauthorized: number;
+  /** `403`s — authenticated, but not in the API's ACL group. */
+  forbidden: number;
+}
+
+/** Request counts bucketed by HTTP status class. */
+export interface ApiUsageStatusClasses {
+  '2xx': number;
+  '3xx': number;
+  '4xx': number;
+  '5xx': number;
+}
+
+/** Interpolated latency percentiles, in milliseconds. */
+export interface ApiUsageLatency {
+  p50: number;
+  p95: number;
+  p99: number;
+}
+
+/**
+ * How the gateway currently sees this API's backend.
+ *
+ * - `healthy` — a closed circuit breaker and no ejected target.
+ * - `failing` — an open breaker, or a target passive health checking has
+ *   ejected.
+ * - `recovering` — a half-open breaker probing whether the backend is back.
+ * - `unknown` — the gateway reports nothing about this proxy. That is the
+ *   normal state for a proxy with no `circuit_breaker` configured, and for one
+ *   that has never been called; it is **not** a claim that the backend is down.
+ */
+export interface ApiUsageBackend {
+  status: ApiUsageBackendStatus;
+  /** One human-readable sentence explaining `status`, or `null`. */
+  detail: string | null;
+  /** Since when the backend has been in a failing state, when Edge reports it. */
+  since?: IsoTimestamp;
+}
+
+/** @see {@link ApiUsageBackend} */
+export type ApiUsageBackendStatus = 'healthy' | 'failing' | 'recovering' | 'unknown';
+
 /* ── Access requests & grants ───────────────────────────────────────────── */
 
 /** `POST /api/access-requests` */

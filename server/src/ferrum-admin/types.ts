@@ -387,3 +387,98 @@ export interface EdgeProbe {
   /** Failure detail, safe to log; never echoed to browsers. */
   error: string | null;
 }
+
+/* ── Runtime metrics ────────────────────────────────────────────────────── */
+
+/**
+ * `ferrum_requests_total` for one proxy, reduced to the two label dimensions
+ * Nexus renders.
+ *
+ * Every count is **cumulative since the gateway process started** — Edge
+ * exposes no windowed per-proxy counter and Nexus stores no history, so there
+ * is no honest way to derive "requests in the last hour" from this.
+ */
+export interface EdgeRequestCounts {
+  /** `method` label → cumulative count. */
+  byMethod: Record<string, number>;
+  /** `status_code` label → cumulative count. */
+  byStatus: Record<string, number>;
+  /** Sum over every kept series. */
+  total: number;
+}
+
+/** One `le` bucket of `ferrum_request_duration_ms`. */
+export interface EdgeLatencyBucket {
+  /** Upper bound in milliseconds; `Infinity` for the `+Inf` bucket. */
+  le: number;
+  /** Cumulative count of observations at or below `le`. */
+  count: number;
+}
+
+/** `ferrum_request_duration_ms` for one proxy. */
+export interface EdgeLatencyHistogram {
+  /** Buckets sorted ascending by `le`, with the `+Inf` bucket last. */
+  buckets: EdgeLatencyBucket[];
+  /** The `_count` sample, or `null` when the exposition carried none. */
+  count: number | null;
+  /** The `_sum` sample, or `null` when the exposition carried none. */
+  sum: number | null;
+}
+
+/** What one `GET /metrics` scrape yielded for a single proxy. */
+export interface EdgeProxyMetrics {
+  /**
+   * `false` when the scrape could not be completed or produced nothing usable
+   * (gateway unreachable, non-2xx, or a body with no recognisable samples). The
+   * counters are then zeroed rather than absent, so callers never branch on
+   * `undefined`.
+   */
+  available: boolean;
+  requests: EdgeRequestCounts;
+  latency: EdgeLatencyHistogram;
+}
+
+/**
+ * One `circuit_breakers[]` entry from `GET /admin/metrics`.
+ *
+ * `target` is present only for per-target (upstream) breakers; a proxy with a
+ * direct backend gets one per-proxy breaker with no target. A proxy that has no
+ * `circuit_breaker` config, or has one but has never been hit, does not appear
+ * in the array at all — which is why "no breaker" cannot be read as "healthy".
+ */
+export interface EdgeCircuitBreaker {
+  namespace?: string;
+  proxy_id: string;
+  target?: string;
+  /** `closed` | `open` | `half_open`. Treated as an open set. */
+  state: string;
+  failure_count?: number;
+  success_count?: number;
+}
+
+/** One `health_check.unhealthy_targets[]` entry from `GET /admin/metrics`. */
+export interface EdgeUnhealthyTarget {
+  namespace?: string;
+  /** Set for passive (traffic-based) ejections on a direct-backend proxy. */
+  proxy_id?: string;
+  /** Set for active health-check failures against an upstream's target. */
+  upstream_id?: string;
+  /** `host:port` of the failing target. */
+  target?: string;
+  /** `active` | `passive`. */
+  type?: string;
+  /** Unix epoch milliseconds since which the target has been unhealthy. */
+  since_epoch_ms?: number;
+}
+
+/** What one `GET /admin/metrics` read yielded for a single proxy. */
+export interface EdgeBackendState {
+  /** `false` when the gateway was unreachable or answered unusably. */
+  available: boolean;
+  /** Breakers scoped to this proxy, per-proxy and per-target alike. */
+  breakers: EdgeCircuitBreaker[];
+  /** Unhealthy targets attributed to this proxy. */
+  unhealthyTargets: EdgeUnhealthyTarget[];
+  /** `gateway.uptime_seconds`, or `null` when absent. */
+  uptimeSeconds: number | null;
+}

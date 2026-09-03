@@ -200,6 +200,64 @@ either side. A failed publish leaves no debris.
 
 ---
 
+## Usage and backend health
+
+**My APIs → the API → Overview → Usage.** The card is a live read of what the
+gateway itself reports for your proxy — refreshed every 30 seconds, cached for
+10 — not a Nexus database of its own.
+
+It shows:
+
+| Row             | What it is                                                                                                                 |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| **Backend**     | Healthy, Failing, Recovering or Unknown, with a sentence saying why                                                        |
+| **Requests**    | Every call the gateway has counted for this API                                                                            |
+| **By status**   | The same total split into 2xx / 3xx / 4xx / 5xx                                                                            |
+| **Turned away** | The three refusals worth watching separately: `429` (your rate limit), `401` (bad or missing credential), `403` (no grant) |
+| **Latency**     | p95, with p50 and p99 beside it, in milliseconds                                                                           |
+
+### Read the window before you read the numbers
+
+Every count is **cumulative since the gateway process started**. It is not "this
+week" and not "since you published" — a gateway restart puts every number back
+to zero. The line under the card says when the sample was taken.
+
+That is a deliberate limit, not an oversight. Ferrum Edge exposes no per-proxy
+time window, and Nexus keeps no history, so any "requests this month" here would
+be invented. If you need rates, trends or retention, point Prometheus and
+Grafana at the gateway — your administrator has the details in the operations
+guide.
+
+### What it cannot tell you
+
+- **Who is calling.** The gateway's request counter carries no consumer label,
+  so there is no per-client breakdown and no unique-consumer count. **Grants**
+  tells you who _may_ call; nothing tells you who did.
+- **Which endpoints are hot.** Counts are per API, not per path.
+- **Anything about a call that never reached the gateway.** A client with a DNS
+  problem or a blocked egress rule shows up nowhere here.
+
+### Making sense of "Unknown"
+
+Unknown means the gateway reported nothing about your backend, and the card says
+which of the two reasons applies:
+
+- **No traffic yet** — nothing has called this API since the gateway started.
+- **No circuit breaker is configured** — Edge tracks backend state through a
+  circuit breaker, and this proxy has none, so there is nothing to report even
+  though calls are flowing.
+
+Unknown is never a claim that your backend is down. **Failing** is: it means the
+circuit breaker has opened, or health checking has pulled a target out of
+rotation, and the `since` line says when that started. **Recovering** means the
+breaker is half-open and letting probe traffic through to find out whether the
+backend is back.
+
+If the whole card says gateway metrics are unavailable, Nexus could not read the
+gateway — the API itself may well be serving traffic normally.
+
+---
+
 ## Updating an API
 
 **My APIs → the API → Settings.** Everything here is safe to change on a live
@@ -422,7 +480,10 @@ their grant was revoked or never approved. Check **Grants** for their account.
 the wrong type for this API — most often after an authentication-plugin change.
 
 **"A client says they get 502/503."** That is your upstream, not the portal.
-Check that the backend is healthy and reachable **from the gateway**.
+Check the **Backend** row on the Overview tab first: _Failing_ confirms the
+gateway agrees with them and says since when. _Unknown_ does not clear your
+backend — it usually just means this proxy has no circuit breaker — so check
+that the backend is healthy and reachable **from the gateway**.
 
 **"My rate limit is not being applied."** It attaches per consumer. Confirm the
 limit is saved in Settings, and remember a test consumer counts as its own

@@ -20,6 +20,7 @@ import {
   ERROR_CODES,
   isErrorCode,
   type AdminSettingsResponse,
+  type ApiUsageResponse,
   type ApproveAccessRequestResponse,
   type BrandingResponse,
   type CancelAccessRequestResponse,
@@ -361,6 +362,9 @@ export const apisApi = {
     get<ListApisResponse>('/apis', { ...query }),
   get: (id: string): Promise<GetApiResponse> =>
     get<GetApiResponse>(`/apis/${encodeURIComponent(id)}`),
+  /** Gateway counters and backend state; answers 200 even when Edge is down. */
+  usage: (id: string): Promise<ApiUsageResponse> =>
+    get<ApiUsageResponse>(`/apis/${encodeURIComponent(id)}/usage`),
   publish: (body: PublishApiRequest): Promise<PublishApiResponse> =>
     post<PublishApiResponse>('/apis', body),
   update: (id: string, body: UpdateApiRequest): Promise<UpdateApiResponse> =>

@@ -62,6 +62,26 @@ export interface StoredConsumer {
   updated_at: string;
 }
 
+/** One seeded batch of requests against a proxy, for `GET /metrics`. */
+export interface SeededRequests {
+  /** HTTP method label, e.g. `GET`. */
+  method: string;
+  /** HTTP status label, e.g. `200` or `429`. */
+  status: number | string;
+  /** How many requests to add to the cumulative counter. */
+  count: number;
+  /** Observed durations in milliseconds, folded into the latency histogram. */
+  durations?: number[];
+}
+
+/** Runtime backend state for a proxy, for `GET /admin/metrics`. */
+export interface SeededBackendState {
+  /** Circuit breaker state, or omitted for "this proxy has no breaker". */
+  breaker?: 'closed' | 'open' | 'half_open';
+  /** `host:port` of a target passive health checking has ejected. */
+  unhealthyTarget?: string;
+}
+
 /** Options for {@link createMockFerrumEdge}. */
 export interface MockFerrumEdgeOptions {
   /** Must match the client's `FERRUM_ADMIN_JWT_SECRET`. */
@@ -133,6 +153,21 @@ export interface MockFerrumEdge {
     consumer: Partial<StoredConsumer> & { username: string; namespace?: string },
   ): StoredConsumer;
 
+  /**
+   * Add to the cumulative request counters `GET /metrics` renders for a proxy.
+   *
+   * Counters accumulate exactly as Edge's do — calling this twice with the same
+   * method and status sums the counts — and are cleared by `reset()`.
+   * `namespace` defaults to `nexus`, matching the assertion helpers below and
+   * the namespace `buildTestApp` configures.
+   */
+  recordRequests(proxyId: string, entry: SeededRequests, namespace?: string): void;
+  /**
+   * Set (or, with an empty object, clear) the runtime backend state
+   * `GET /admin/metrics` reports for a proxy. `namespace` defaults to `nexus`.
+   */
+  setBackendState(proxyId: string, state: SeededBackendState, namespace?: string): void;
+
   /* ── Assertion helpers ──────────────────────────────────────────────────
    * These read the mock's *unredacted* state, which is what a test needs to
    * check that the right thing landed on the gateway.
@@ -172,6 +207,13 @@ export interface MockFerrumEdge {
 }
 
 const DEFAULT_NAMESPACE = 'ferrum';
+
+/** Fixed `gateway.uptime_seconds`, so a test can assert an exact value. */
+const MOCK_GATEWAY_UPTIME_SECONDS = 3_600;
+
+/** Finite `le` bounds of the rendered `ferrum_request_duration_ms` histogram. */
+const HISTOGRAM_BOUNDS = [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000] as const;
+
 const REDACTED = '[REDACTED]';
 const REDACTABLE_TYPES = new Set(['keyauth', 'jwt', 'hmac_auth']);
 const KNOWN_CREDENTIAL_TYPES = new Set(['basicauth', 'keyauth', 'jwt', 'hmac_auth', 'mtls_auth']);
@@ -508,6 +550,13 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   const requests: RecordedRequest[] = [];
   const failures: QueuedFailure[] = [];
 
+  /** `<namespace>|<proxy_id>|<method>|<status>` → cumulative count. */
+  const requestCounters = new Map<string, number>();
+  /** `<namespace>|<proxy_id>` → observed durations in milliseconds. */
+  const requestDurations = new Map<string, number[]>();
+  /** `<namespace>|<proxy_id>` → seeded runtime backend state. */
+  const backendStates = new Map<string, SeededBackendState & { sinceEpochMs: number }>();
+
   let health: Record<string, unknown> = {
     status: 'ok',
     ready: true,
@@ -539,6 +588,137 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         (consumer.custom_id !== null && wanted.has(consumer.custom_id))
       );
     });
+  }
+
+  /* ── Metrics rendering ────────────────────────────────────────────────── */
+
+  /**
+   * Escape a label value the way the exposition format requires: backslash,
+   * double quote and newline. Present so the client's parser is exercised
+   * against real escaping rather than only against tidy identifiers.
+   */
+  function escapeLabel(value: string): string {
+    return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+  }
+
+  function renderLabels(labels: Record<string, string>): string {
+    const rendered = Object.entries(labels)
+      .map(([name, value]) => `${name}="${escapeLabel(value)}"`)
+      .join(',');
+    return `{${rendered}}`;
+  }
+
+  /**
+   * Render the Prometheus exposition for every seeded proxy.
+   *
+   * Only the two families Nexus reads are emitted in full, plus one unrelated
+   * family and the usual `# HELP` / `# TYPE` comments, so a scrape has
+   * something to ignore.
+   */
+  function renderMetrics(): string {
+    const lines: string[] = [
+      '# HELP ferrum_gateway_uptime_seconds Seconds since the gateway process started.',
+      '# TYPE ferrum_gateway_uptime_seconds gauge',
+      `ferrum_gateway_uptime_seconds ${MOCK_GATEWAY_UPTIME_SECONDS}`,
+      '# HELP ferrum_requests_total Total number of requests processed.',
+      '# TYPE ferrum_requests_total counter',
+    ];
+
+    for (const [counterKey, count] of requestCounters) {
+      const [namespace, proxyId, method, status] = counterKey.split('|');
+      lines.push(
+        `ferrum_requests_total${renderLabels({
+          proxy_id: proxyId ?? '',
+          method: method ?? '',
+          status_code: status ?? '',
+          namespace: namespace ?? '',
+        })} ${count}`,
+      );
+    }
+
+    lines.push(
+      '# HELP ferrum_request_duration_ms Request duration in milliseconds.',
+      '# TYPE ferrum_request_duration_ms histogram',
+    );
+
+    for (const [durationKey, observations] of requestDurations) {
+      const [namespace, proxyId] = durationKey.split('|');
+      const labels = { proxy_id: proxyId ?? '', namespace: namespace ?? '' };
+      let cumulative = 0;
+      for (const bound of HISTOGRAM_BOUNDS) {
+        cumulative = observations.filter((value) => value <= bound).length;
+        lines.push(
+          `ferrum_request_duration_ms_bucket${renderLabels({
+            ...labels,
+            le: String(bound),
+          })} ${cumulative}`,
+        );
+      }
+      lines.push(
+        `ferrum_request_duration_ms_bucket${renderLabels({ ...labels, le: '+Inf' })} ${
+          observations.length
+        }`,
+        `ferrum_request_duration_ms_sum${renderLabels(labels)} ${observations.reduce(
+          (sum, value) => sum + value,
+          0,
+        )}`,
+        `ferrum_request_duration_ms_count${renderLabels(labels)} ${observations.length}`,
+      );
+    }
+
+    return `${lines.join('\n')}\n`;
+  }
+
+  /** The `GET /admin/metrics` JSON payload, shaped like `docs/admin_metrics.md`. */
+  function renderAdminMetrics(): Record<string, unknown> {
+    const circuitBreakers: Record<string, unknown>[] = [];
+    const unhealthyTargets: Record<string, unknown>[] = [];
+
+    for (const [stateKey, state] of backendStates) {
+      const [namespace, proxyId] = stateKey.split('|');
+      if (state.breaker !== undefined) {
+        circuitBreakers.push({
+          namespace,
+          proxy_id: proxyId,
+          state: state.breaker,
+          failure_count: state.breaker === 'closed' ? 0 : 5,
+          success_count: state.breaker === 'half_open' ? 1 : 0,
+        });
+      }
+      if (state.unhealthyTarget !== undefined) {
+        unhealthyTargets.push({
+          namespace,
+          proxy_id: proxyId,
+          target: state.unhealthyTarget,
+          type: 'passive',
+          since_epoch_ms: state.sinceEpochMs,
+        });
+      }
+    }
+
+    let totalRequests = 0;
+    for (const count of requestCounters.values()) totalRequests += count;
+
+    return {
+      gateway: {
+        mode: 'database',
+        ferrum_version: '0.9.0',
+        uptime_seconds: MOCK_GATEWAY_UPTIME_SECONDS,
+        total_requests: totalRequests,
+        proxy_count: proxies.size,
+        consumer_count: consumers.size,
+      },
+      circuit_breakers: circuitBreakers,
+      health_check: {
+        unhealthy_target_count: unhealthyTargets.length,
+        unhealthy_targets: unhealthyTargets,
+      },
+    };
+  }
+
+  function sendText(res: ServerResponse, status: number, body: string): void {
+    res.writeHead(status, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8' });
+    res.end(body);
   }
 
   function send(res: ServerResponse, status: number, body?: unknown): void {
@@ -1167,6 +1347,16 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         // Real Edge has no /version; the mock answers 404 so the client's
         // tolerant probe is exercised.
         return fail(res, 404, 'Not found');
+      case 'metrics':
+        // Authenticated like every other admin surface. Series are labelled by
+        // namespace rather than scoped by the request header, exactly as the
+        // process-global Prometheus exporter does.
+        if (method !== 'GET') return fail(res, 405, 'Method not allowed');
+        return sendText(res, 200, renderMetrics());
+      case 'admin':
+        if (segments[1] !== 'metrics') return fail(res, 404, 'Not found');
+        if (method !== 'GET') return fail(res, 405, 'Method not allowed');
+        return send(res, 200, renderAdminMetrics());
       case 'namespaces':
         return handleNamespaces(res, method, segments, body, url.searchParams);
       case 'consumers':
@@ -1232,6 +1422,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       namespaces.clear();
       requests.length = 0;
       failures.length = 0;
+      requestCounters.clear();
+      requestDurations.clear();
+      backendStates.clear();
     },
 
     setHealth(payload: Record<string, unknown>): void {
@@ -1261,6 +1454,21 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       };
       consumers.set(key(namespace, stored.id), stored);
       return stored;
+    },
+
+    recordRequests(proxyId, entry, namespace = 'nexus'): void {
+      const counterKey = `${namespace}|${proxyId}|${entry.method}|${String(entry.status)}`;
+      requestCounters.set(counterKey, (requestCounters.get(counterKey) ?? 0) + entry.count);
+      if (entry.durations && entry.durations.length > 0) {
+        const durationKey = `${namespace}|${proxyId}`;
+        const existing = requestDurations.get(durationKey) ?? [];
+        existing.push(...entry.durations);
+        requestDurations.set(durationKey, existing);
+      }
+    },
+
+    setBackendState(proxyId, state, namespace = 'nexus'): void {
+      backendStates.set(`${namespace}|${proxyId}`, { ...state, sinceEpochMs: Date.now() });
     },
 
     consumerByUsername(username, namespace = 'nexus'): StoredConsumer | undefined {
