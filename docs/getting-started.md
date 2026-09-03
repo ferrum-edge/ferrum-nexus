@@ -270,7 +270,10 @@ YAML
 > as the upstream instead.
 
 In the browser: **My APIs → Publish an API**, paste the document, choose the
-auth plugin, visibility and rate limit.
+auth plugin, visibility and rate limit. The **Advanced** section is optional:
+it restricts the HTTP methods the gateway accepts (the button fills it in from
+the document you just pasted), sets backend timeouts, and turns on a circuit
+breaker.
 
 With curl:
 
@@ -303,6 +306,14 @@ itself back if any step fails:
    `nexus:api:2b1c…:approved`, because `requestable: true`;
 4. a `rate_limiting` plugin config, 1000 requests per 60 seconds **per
    consumer**.
+
+> ⚠️ That quota is enforced **per gateway process**. One data-plane replica
+> makes it exactly 1000/minute; N replicas make it N × 1000/minute, because
+> Edge keeps the counters in memory unless the plugin config names a Redis
+> endpoint. Set `FERRUM_RATE_LIMIT_SYNC_MODE=redis` and
+> `FERRUM_RATE_LIMIT_REDIS_URL` on Nexus to share one counter across replicas;
+> the change applies to rate limits saved after it. See
+> [operations.md](operations.md#ferrum-edge-integration).
 
 Save the id:
 

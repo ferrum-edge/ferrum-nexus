@@ -893,13 +893,27 @@ Spec documents arrive as a JSON string field, not a multipart upload — the SPA
 reads the file client-side, which keeps the CSRF story and the error shape
 identical to every other route.
 
-Two fields of the returned `Api` object describe the gateway side of a
+Several fields of the returned `Api` object describe the gateway side of a
 publication:
 
-| Field          | Type                                             | Notes                                                                                                                                                              |
-| -------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `upstream_url` | string \| null                                   | the upstream Nexus last wrote to the gateway, normalized to `scheme://host:port[/basePath]` (the port always explicit, IPv6 hosts bracketed). `null` on older rows |
-| `cors`         | `{ allowed_origins, allow_credentials }` \| null | the browser CORS policy. `null` means **no `cors` plugin at all** — the gateway adds no CORS headers, which is not the same as an empty allow-list                 |
+| Field             | Type                                             | Notes                                                                                                                                                                                                                                                                                                      |
+| ----------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `upstream_url`    | string \| null                                   | the upstream Nexus last wrote to the gateway, normalized to `scheme://host:port[/basePath]` (the port always explicit, IPv6 hosts bracketed). `null` on older rows                                                                                                                                         |
+| `cors`            | `{ allowed_origins, allow_credentials }` \| null | the browser CORS policy. `null` means **no `cors` plugin at all** — the gateway adds no CORS headers, which is not the same as an empty allow-list                                                                                                                                                         |
+| `allowed_methods` | `HttpMethod[]` \| null                           | methods the gateway accepts; `null` accepts every one. This is the **provider's** list: the copy on the proxy additionally carries `OPTIONS` whenever `cors` is set, because a method outside the list is `405`ed **before any plugin runs** and the browser preflight would never reach the `cors` plugin |
+| `timeouts`        | `{ connect_ms, read_ms, write_ms }` \| null      | backend timeouts in milliseconds; `null` keeps the gateway defaults (5000 / 30000 / 30000). All three move together                                                                                                                                                                                        |
+| `circuit_breaker` | boolean                                          | when true the proxy carries Edge's default `CircuitBreakerConfig` (5 failures to open, 3 successes to close, 30 s open, tripping on 500/502/503/504 and on connection errors); when false it carries none                                                                                                  |
+
+`HttpMethod` is `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`,
+`TRACE` or `CONNECT` — Edge's own enum.
+
+An API's CORS origins are additionally mirrored onto the proxy's
+`allowed_ws_origins`, which is the Cross-Site WebSocket Hijacking check: an
+HTTP proxy on Edge also accepts WebSocket upgrades on the same listen path, and
+the `cors` plugin does not run on an upgrade. Only plain `scheme://host[:port]`
+origins are mirrored; `*` (and no policy at all) leaves the list empty, which
+performs no check. There is no separate field for it — see
+[security.md](security.md).
 
 ### `GET /api/apis`
 
@@ -918,19 +932,22 @@ _provider_ — `Paginated<Api>`.
 _provider_ → `201` — validates the spec, builds the Edge proxy and its plugins,
 then persists.
 
-| Field          | Type                                             | Notes                                                                                                                                                                                                                     |
-| -------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`         | string                                           | 1–200, required                                                                                                                                                                                                           |
-| `slug`         | string                                           | ≤ 60, **optional** — derived from `name` when omitted; the listen path becomes `/<namespace>/<slug>`                                                                                                                      |
-| `description`  | string \| null                                   | ≤ 4000; falls back to `info.description` from the spec                                                                                                                                                                    |
-| `version`      | string                                           | ≤ 60, optional — defaults to the spec's `info.version`                                                                                                                                                                    |
-| `upstream_url` | string                                           | ≤ 2000, **optional** when the document has an absolute `servers[0].url`                                                                                                                                                   |
-| `spec`         | string                                           | the OpenAPI 3.x document as JSON or YAML text, ≤ 2 MiB — required                                                                                                                                                         |
-| `auth_plugin`  | `key_auth` \| `basic_auth` \| `jwt_auth`         | required                                                                                                                                                                                                                  |
-| `requestable`  | boolean                                          | required — attaches `access_control` when true                                                                                                                                                                            |
-| `visibility`   | `public` \| `internal`                           | required                                                                                                                                                                                                                  |
-| `rate_limit`   | `{ limit, window_seconds }` \| null              | optional; `limit` 1–1 000 000, `window_seconds` 1–86 400 — both are Edge's own ceilings                                                                                                                                   |
-| `cors`         | `{ allowed_origins, allow_credentials }` \| null | optional; `allowed_origins` is 1–64 whitespace-free strings of ≤ 255 characters, `allow_credentials` defaults to `false`. Omit it (or send `null`) and the API gets no `cors` plugin, so the gateway adds no CORS headers |
+| Field             | Type                                             | Notes                                                                                                                                                                                                                      |
+| ----------------- | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`            | string                                           | 1–200, required                                                                                                                                                                                                            |
+| `slug`            | string                                           | ≤ 60, **optional** — derived from `name` when omitted; the listen path becomes `/<namespace>/<slug>`                                                                                                                       |
+| `description`     | string \| null                                   | ≤ 4000; falls back to `info.description` from the spec                                                                                                                                                                     |
+| `version`         | string                                           | ≤ 60, optional — defaults to the spec's `info.version`                                                                                                                                                                     |
+| `upstream_url`    | string                                           | ≤ 2000, **optional** when the document has an absolute `servers[0].url`                                                                                                                                                    |
+| `spec`            | string                                           | the OpenAPI 3.x document as JSON or YAML text, ≤ 2 MiB — required                                                                                                                                                          |
+| `auth_plugin`     | `key_auth` \| `basic_auth` \| `jwt_auth`         | required                                                                                                                                                                                                                   |
+| `requestable`     | boolean                                          | required — attaches `access_control` when true                                                                                                                                                                             |
+| `visibility`      | `public` \| `internal`                           | required                                                                                                                                                                                                                   |
+| `rate_limit`      | `{ limit, window_seconds }` \| null              | optional; `limit` 1–1 000 000, `window_seconds` 1–86 400 — both are Edge's own ceilings                                                                                                                                    |
+| `cors`            | `{ allowed_origins, allow_credentials }` \| null | optional; `allowed_origins` is 1–64 whitespace-free strings of ≤ 255 characters, `allow_credentials` defaults to `false`. Omit it (or send `null`) and the API gets no `cors` plugin, so the gateway adds no CORS headers  |
+| `allowed_methods` | `HttpMethod[]` \| null                           | optional; 1–9 entries from Edge's enum, duplicates collapsed. Omit it (or send `null`) to accept every method — an **empty array is rejected**, because a proxy whose `allowed_methods` is `[]` accepts nothing at all     |
+| `timeouts`        | `{ connect_ms, read_ms, write_ms }` \| null      | optional; each an integer 100–300 000 ms. All three are required together — the proxy `PUT` is a whole-resource replace, so a partial set would silently reset the rest. Omit it (or send `null`) for the gateway defaults |
+| `circuit_breaker` | boolean                                          | optional, defaults to `false`                                                                                                                                                                                              |
 
 ```json
 { "api": { … }, "spec": { … } }
@@ -970,16 +987,19 @@ _provider_, owner-or-admin
 _provider_, owner-or-admin — safe runtime settings only; the spec has its own
 route. Every field optional; nothing supplied returns the row unchanged.
 
-| Field                            | Effect                                                                                                                                                                                          |
-| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`, `description`, `version` | metadata only                                                                                                                                                                                   |
-| `visibility`                     | `public` ⇄ `internal`; catalog listing only                                                                                                                                                     |
-| `status`                         | `published` ⇄ `retired` — **catalog state only**, the proxy and every live grant keep working                                                                                                   |
-| `upstream_url`                   | re-points the Edge proxy's backend and records the normalized form on the row; everything else on the proxy is left as it was found                                                             |
-| `auth_plugin`                    | attaches and associates the new auth plugin config before detaching and deleting the old one; existing credentials of the old flavour no longer satisfy this API, and every grantee is notified |
-| `requestable`                    | attaches or deletes `access_control`. Turning it **off** opens the API to every authenticated consumer; existing grants stay on the consumers and become inert                                  |
-| `rate_limit`                     | attaches, replaces, or (with `null`) deletes `rate_limiting`; `limit` 1–1 000 000                                                                                                               |
-| `cors`                           | attaches, replaces, or (with `null`) deletes `cors`. Omitting the field leaves the existing policy alone — only an explicit `null` removes it                                                   |
+| Field                            | Effect                                                                                                                                                                                                                                           |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `name`, `description`, `version` | metadata only                                                                                                                                                                                                                                    |
+| `visibility`                     | `public` ⇄ `internal`; catalog listing only                                                                                                                                                                                                      |
+| `status`                         | `published` ⇄ `retired` — **catalog state only**, the proxy and every live grant keep working                                                                                                                                                    |
+| `upstream_url`                   | re-points the Edge proxy's backend and records the normalized form on the row; everything else on the proxy is left as it was found                                                                                                              |
+| `auth_plugin`                    | attaches and associates the new auth plugin config before detaching and deleting the old one; existing credentials of the old flavour no longer satisfy this API, and every grantee is notified                                                  |
+| `requestable`                    | attaches or deletes `access_control`. Turning it **off** opens the API to every authenticated consumer; existing grants stay on the consumers and become inert                                                                                   |
+| `rate_limit`                     | attaches, replaces, or (with `null`) deletes `rate_limiting`; `limit` 1–1 000 000                                                                                                                                                                |
+| `cors`                           | attaches, replaces, or (with `null`) deletes `cors`. Omitting the field leaves the existing policy alone — only an explicit `null` removes it. Also re-derives the proxy's `allowed_ws_origins` and the `OPTIONS` entry of its `allowed_methods` |
+| `allowed_methods`                | replaces the method allow-list, or (with `null`) accepts every method again. Omitting it leaves the list alone                                                                                                                                   |
+| `timeouts`                       | replaces all three backend timeouts, or (with `null`) writes the gateway defaults back explicitly. Omitting it leaves whatever is on the proxy alone, including values an operator set by hand                                                   |
+| `circuit_breaker`                | attaches Edge's default breaker config to the proxy, or removes it                                                                                                                                                                               |
 
 → `{ "api": Api }`. Errors: `400 SPEC_INVALID` (bad or, by default, private
 `upstream_url` — see `POST /api/apis`),
