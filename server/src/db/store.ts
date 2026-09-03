@@ -75,6 +75,7 @@ import type {
   Organization,
   Paginated,
   Role,
+  SpecEnforcementLevel,
   User,
   UserStatus,
   Uuid,
@@ -417,14 +418,19 @@ export interface SessionRepo {
 /**
  * Creation payload for an API row.
  *
- * `circuit_breaker` is a non-nullable boolean, so {@link CreateInput} would
- * make it mandatory; it is optional here instead because the column carries a
- * `DEFAULT 0` and "the provider did not ask for a breaker" is by far the
- * common case.
+ * `circuit_breaker` and `spec_enforcement` are non-nullable, so
+ * {@link CreateInput} would make them mandatory; they are optional here instead
+ * because both columns carry a `DEFAULT` and their default *is* the common
+ * case — no breaker, and an OpenAPI document that is catalog metadata only.
  */
-export type CreateApiInput = Omit<CreateInput<ApiRecord>, 'circuit_breaker'> & {
+export type CreateApiInput = Omit<
+  CreateInput<ApiRecord>,
+  'circuit_breaker' | 'spec_enforcement'
+> & {
   /** Defaults to `false`, matching the column default. */
   circuit_breaker?: boolean;
+  /** Defaults to `'docs_only'`, matching the column default. */
+  spec_enforcement?: SpecEnforcementLevel;
 };
 
 /** Published APIs and their Edge proxies. */

@@ -12,7 +12,12 @@
  */
 
 import type { Role } from './roles.js';
-import type { AuthPluginType, EmailTemplateKey, HttpMethod } from './constants.js';
+import type {
+  AuthPluginType,
+  EmailTemplateKey,
+  HttpMethod,
+  SpecEnforcementLevel,
+} from './constants.js';
 
 /** A string UUID primary key. */
 export type Uuid = string;
@@ -173,6 +178,16 @@ export interface Api {
    * writes `null`. Tuning the thresholds is an operator's job.
    */
   circuit_breaker: boolean;
+  /**
+   * How much of the current OpenAPI revision the gateway enforces.
+   *
+   * `docs_only` (the default, and what every API published before this field
+   * existed reads back as) means the document is catalog metadata only.
+   * `routes` attaches an `openapi_validator` plugin that rejects any request
+   * whose path and method the document does not declare — request and response
+   * *bodies* are never validated at either level.
+   */
+  spec_enforcement: SpecEnforcementLevel;
   status: ApiStatus;
   visibility: ApiVisibility;
   created_at: IsoTimestamp;

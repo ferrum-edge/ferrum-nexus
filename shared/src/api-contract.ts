@@ -9,7 +9,12 @@
 
 import type { RegistrableRole, Role } from './roles.js';
 import type { ErrorCode } from './error-codes.js';
-import type { AuthPluginType, EmailTemplateKey, HttpMethod } from './constants.js';
+import type {
+  AuthPluginType,
+  EmailTemplateKey,
+  HttpMethod,
+  SpecEnforcementLevel,
+} from './constants.js';
 import type {
   AccessRequest,
   AccessRequestStatus,
@@ -344,6 +349,12 @@ export interface PublishApiRequest {
   timeouts?: ApiTimeouts | null;
   /** Trip a circuit breaker on repeated backend failures. Defaults to `false`. */
   circuit_breaker?: boolean;
+  /**
+   * How much of the uploaded document the gateway enforces. Defaults to
+   * `docs_only`; `routes` additionally rejects any path/method the spec does
+   * not declare. Bodies are never validated.
+   */
+  spec_enforcement?: SpecEnforcementLevel;
 }
 
 /** `POST /api/apis` */
@@ -384,6 +395,11 @@ export interface UpdateApiRequest {
   /** Replace the backend timeouts, or send `null` to restore the gateway defaults. */
   timeouts?: ApiTimeouts | null;
   circuit_breaker?: boolean;
+  /**
+   * Switch OpenAPI enforcement on (`routes`) or back off (`docs_only`), which
+   * attaches or detaches the gateway's `openapi_validator` accordingly.
+   */
+  spec_enforcement?: SpecEnforcementLevel;
   status?: ApiStatus;
 }
 

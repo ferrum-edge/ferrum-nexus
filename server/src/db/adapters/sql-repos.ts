@@ -39,9 +39,11 @@ import type {
   NotificationType,
   RateLimitConfig,
   Role,
+  SpecEnforcementLevel,
   UserStatus,
   Uuid,
 } from '@ferrum-nexus/shared';
+import { DEFAULT_SPEC_ENFORCEMENT, isSpecEnforcementLevel } from '@ferrum-nexus/shared';
 
 import { newId, nowIso } from '../../lib/ids.js';
 import type {
@@ -202,6 +204,19 @@ function mapSession(row: Row): SessionRecord {
   };
 }
 
+/**
+ * Decode the `spec_enforcement` column, falling back to `docs_only`.
+ *
+ * The CHECK constraint keeps the domain honest for rows this build wrote, but
+ * a row a newer schema wrote with a level this binary has no generator for
+ * must read back as "the gateway enforces nothing extra" rather than as an
+ * enforcement mode nothing here can reconcile.
+ */
+function specEnforcement(value: unknown): SpecEnforcementLevel {
+  const raw = text(value);
+  return isSpecEnforcementLevel(raw) ? raw : DEFAULT_SPEC_ENFORCEMENT;
+}
+
 function mapApi(row: Row): ApiRecord {
   return {
     id: text(row.id),
@@ -221,6 +236,7 @@ function mapApi(row: Row): ApiRecord {
     allowed_methods: json<HttpMethod[] | null>(row.allowed_methods_json, null),
     timeouts: json<ApiTimeouts | null>(row.timeouts_json, null),
     circuit_breaker: bool(row.circuit_breaker),
+    spec_enforcement: specEnforcement(row.spec_enforcement),
     status: text(row.status) as ApiStatus,
     visibility: text(row.visibility) as ApiVisibility,
     created_at: text(row.created_at),
@@ -843,8 +859,8 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
              (id, name, slug, description, owner_user_id, ferrum_proxy_id, upstream_url,
               namespace, version, spec_format, requestable, auth_plugin, rate_limit_json,
               cors_json, allowed_methods_json, timeouts_json, circuit_breaker,
-              status, visibility, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              spec_enforcement, status, visibility, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             meta.id,
             input.name,
@@ -863,6 +879,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
             encodeJson(input.allowed_methods ?? null),
             encodeJson(input.timeouts ?? null),
             encodeBool(input.circuit_breaker ?? false),
+            input.spec_enforcement ?? DEFAULT_SPEC_ENFORCEMENT,
             input.status,
             input.visibility,
             meta.created_at,
@@ -923,6 +940,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         timeouts_json: patch.timeouts === undefined ? undefined : encodeJson(patch.timeouts),
         circuit_breaker:
           patch.circuit_breaker === undefined ? undefined : encodeBool(patch.circuit_breaker),
+        spec_enforcement: patch.spec_enforcement,
         status: patch.status,
         visibility: patch.visibility,
       });

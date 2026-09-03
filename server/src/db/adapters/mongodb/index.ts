@@ -72,10 +72,15 @@ import type {
   NotificationType,
   RateLimitConfig,
   Role,
+  SpecEnforcementLevel,
   UserStatus,
   Uuid,
 } from '@ferrum-nexus/shared';
-import { clampPageSize } from '@ferrum-nexus/shared';
+import {
+  clampPageSize,
+  DEFAULT_SPEC_ENFORCEMENT,
+  isSpecEnforcementLevel,
+} from '@ferrum-nexus/shared';
 
 import type { NexusConfig } from '../../../config/index.js';
 import { conflict, NexusError } from '../../../lib/errors.js';
@@ -359,6 +364,18 @@ function mapSession(row: Row): SessionRecord {
   };
 }
 
+/**
+ * Decode the `spec_enforcement` field, falling back to `docs_only`.
+ *
+ * Unlike the SQL adapters there is no migration to backfill: a document
+ * written before this field existed simply does not carry it, and neither it
+ * nor a level a newer build introduced may read back as enforcement this
+ * binary cannot generate a plugin config for.
+ */
+function specEnforcement(value: unknown): SpecEnforcementLevel {
+  return isSpecEnforcementLevel(value) ? value : DEFAULT_SPEC_ENFORCEMENT;
+}
+
 function mapApi(row: Row): ApiRecord {
   return {
     id: str(row._id),
@@ -378,6 +395,7 @@ function mapApi(row: Row): ApiRecord {
     allowed_methods: (row.allowed_methods ?? null) as HttpMethod[] | null,
     timeouts: (row.timeouts ?? null) as ApiTimeouts | null,
     circuit_breaker: flag(row.circuit_breaker),
+    spec_enforcement: specEnforcement(row.spec_enforcement),
     status: str(row.status) as ApiStatus,
     visibility: str(row.visibility) as ApiVisibility,
     created_at: str(row.created_at),
@@ -1331,6 +1349,7 @@ class MongoStore implements NexusStore {
             allowed_methods: normalizeJson(input.allowed_methods ?? null),
             timeouts: normalizeJson(input.timeouts ?? null),
             circuit_breaker: input.circuit_breaker ?? false,
+            spec_enforcement: input.spec_enforcement ?? DEFAULT_SPEC_ENFORCEMENT,
             status: input.status,
             visibility: input.visibility,
             created_at: meta.created_at,
@@ -1393,6 +1412,7 @@ class MongoStore implements NexusStore {
           patch.allowed_methods === undefined ? undefined : normalizeJson(patch.allowed_methods),
         timeouts: patch.timeouts === undefined ? undefined : normalizeJson(patch.timeouts),
         circuit_breaker: patch.circuit_breaker,
+        spec_enforcement: patch.spec_enforcement,
         status: patch.status,
         visibility: patch.visibility,
       });

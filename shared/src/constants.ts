@@ -117,6 +117,38 @@ export const ACCESS_CONTROL_PLUGIN = 'access_control';
 /** Name of the Edge plugin used to enforce a per-API rate limit. */
 export const RATE_LIMIT_PLUGIN = 'rate_limiting';
 
+/* ── OpenAPI enforcement ────────────────────────────────────────────────── */
+
+/**
+ * How much of the uploaded OpenAPI document the gateway actually enforces.
+ *
+ * - `docs_only` — the historical behaviour, and still the default: the document
+ *   is stored, rendered in the catalog and handed to clients, but the proxy is
+ *   a reverse proxy with auth in front of it. A path the document never
+ *   declares reaches the backend like any other.
+ * - `routes` — Edge additionally rejects any request whose **path and method**
+ *   the current revision does not declare, with `400`.
+ *
+ * Request and response *body* validation is deliberately not offered. It needs
+ * the schemas materialised out of the document — `$ref` resolution, Swagger
+ * conversion, draft selection — which is Edge's own spec importer's job, not a
+ * portal's.
+ */
+export const SPEC_ENFORCEMENT_LEVELS = ['docs_only', 'routes'] as const;
+
+/** One entry of {@link SPEC_ENFORCEMENT_LEVELS}. */
+export type SpecEnforcementLevel = (typeof SPEC_ENFORCEMENT_LEVELS)[number];
+
+/** The level a row carries when nobody chose one. */
+export const DEFAULT_SPEC_ENFORCEMENT: SpecEnforcementLevel = 'docs_only';
+
+/** Runtime type guard for {@link SpecEnforcementLevel}. */
+export function isSpecEnforcementLevel(value: unknown): value is SpecEnforcementLevel {
+  return (
+    typeof value === 'string' && (SPEC_ENFORCEMENT_LEVELS as readonly string[]).includes(value)
+  );
+}
+
 /* ── Proxy runtime settings ─────────────────────────────────────────────── */
 
 /**
