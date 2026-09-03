@@ -12,7 +12,7 @@
  *    so the plugin config types are exact, not "at least these keys".
  */
 
-import type { AuthPluginType, EdgeCredentialType } from '@ferrum-nexus/shared';
+import type { AuthPluginType, EdgeCredentialType, HttpMethod } from '@ferrum-nexus/shared';
 
 /* ── Envelopes ──────────────────────────────────────────────────────────── */
 
@@ -125,6 +125,30 @@ export interface EdgeConsumerWrite {
 /** Backend scheme enum. Nexus only ever uses the HTTP family. */
 export type EdgeBackendScheme = 'http' | 'https' | 'tcp' | 'tcps' | 'udp' | 'dtls';
 
+/**
+ * `Proxy.circuit_breaker` — passive failure detection in front of the backend.
+ *
+ * Every field carries a serde default, so `{}` is a legal config; Nexus sends
+ * the defaults explicitly instead, because a proxy document that shows its own
+ * thresholds is what an operator can reason about, and because a gateway
+ * upgrade that changed a default must not silently change the failure policy of
+ * an already-published API.
+ */
+export interface EdgeCircuitBreakerConfig {
+  /** Consecutive failures that trip the circuit open. Default 5. */
+  failure_threshold: number;
+  /** Consecutive half-open successes that close it again. Default 3. */
+  success_threshold: number;
+  /** Seconds to stay open before probing. Default 30. */
+  timeout_seconds: number;
+  /** Response codes counted as failures. Default `[500, 502, 503, 504]`. */
+  failure_status_codes: number[];
+  /** Concurrent probes allowed while half-open. Default 1. */
+  half_open_max_requests: number;
+  /** Count TCP/DNS/TLS/connect-timeout errors as failures. Default true. */
+  trip_on_connection_errors: boolean;
+}
+
 /** A Ferrum proxy (HTTP-family subset). */
 export interface EdgeProxy {
   id: string;
@@ -138,6 +162,21 @@ export interface EdgeProxy {
   backend_path?: string | null;
   strip_listen_path?: boolean;
   preserve_host_header?: boolean;
+  /** TCP connect timeout in ms. Gateway default 5000. */
+  backend_connect_timeout_ms?: number;
+  /** Backend read timeout in ms. Gateway default 30000; `0` disables it. */
+  backend_read_timeout_ms?: number;
+  /** Backend write timeout in ms. Gateway default 30000; `0` disables it. */
+  backend_write_timeout_ms?: number;
+  /** Accepted HTTP methods; `null` (the default) accepts all of them. */
+  allowed_methods?: HttpMethod[] | null;
+  /**
+   * Origins accepted on a WebSocket upgrade, compared case-insensitively.
+   * `[]` (the default) performs no check at all. Independent of the `cors`
+   * plugin, which does not run on upgrades.
+   */
+  allowed_ws_origins?: string[];
+  circuit_breaker?: EdgeCircuitBreakerConfig | null;
   plugins?: EdgePluginAssociation[];
   api_spec_id?: string | null;
   created_at?: string;
@@ -174,6 +213,18 @@ export interface EdgeProxyWrite {
   backend_path?: string | null;
   strip_listen_path?: boolean;
   preserve_host_header?: boolean;
+  backend_connect_timeout_ms?: number;
+  backend_read_timeout_ms?: number;
+  backend_write_timeout_ms?: number;
+  /**
+   * Accepted HTTP methods. A method outside the list is `405`ed **before any
+   * plugin runs**, so a proxy carrying a `cors` plugin must list `OPTIONS` or
+   * every browser preflight fails.
+   */
+  allowed_methods?: HttpMethod[] | null;
+  /** WebSocket `Origin` allow-list; `[]` means no check. */
+  allowed_ws_origins?: string[];
+  circuit_breaker?: EdgeCircuitBreakerConfig | null;
 }
 
 /**
@@ -266,6 +317,16 @@ export interface EdgeRateLimitingConfig {
   limit_by?: 'ip' | 'consumer' | 'spiffe';
   expose_headers?: boolean;
   limits: EdgeRateLimitRule[];
+  /**
+   * Where the counters live. `local` (the default) is **per gateway process**,
+   * so N data-plane replicas enforce N times the quota; `redis` shares one
+   * counter across them.
+   */
+  sync_mode?: 'local' | 'redis';
+  /** `redis://` or `rediss://`. Required when `sync_mode` is `redis`. */
+  redis_url?: string;
+  /** Upgrade a `redis://` connection to TLS. */
+  redis_tls?: boolean;
 }
 
 /**

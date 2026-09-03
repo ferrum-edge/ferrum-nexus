@@ -158,6 +158,14 @@ The limit is **per consumer**, not per source IP — which is the point of a
 portal quota. One noisy client cannot exhaust everyone else's budget. Clients
 see rate-limit headers on their responses and a `429` when they exceed it.
 
+⚠️ **The quota is enforced per gateway process.** If your operator runs more
+than one Ferrum Edge data-plane replica, each one counts separately, so the
+effective limit is your number multiplied by the replica count — unless they
+have configured Redis-synced counters (`FERRUM_RATE_LIMIT_SYNC_MODE=redis`).
+Ask them which it is before you rely on the number as a hard ceiling; and note
+that changing that setting only affects rate limits saved afterwards, so an old
+API may need its limit re-saved.
+
 ### CORS
 
 Optional, and only relevant if a **browser** calls your API directly. Server-to-
@@ -178,10 +186,50 @@ Note that CORS is a browser rule, not an access control: it decides which web
 pages may read your responses, and nothing else. What actually protects the data
 is the authentication plugin and the ACL group.
 
+**Your CORS origins also guard WebSocket.** Publishing an HTTP API on Ferrum
+Edge publishes WebSocket on the same path — the gateway passes upgrades through
+transparently — and the CORS plugin does not run on an upgrade. The portal
+mirrors the exact origins you list onto the proxy's WebSocket origin check, so
+a page on any other origin is refused the socket. List `*`, or leave the box
+empty, and there is **no** origin check on upgrades: anyone's page can open a
+socket, and only your authentication plugin stands between it and your backend.
+If your backend speaks WebSocket to browsers, list your origins.
+
+### Advanced
+
+Three settings that go onto the gateway proxy itself rather than onto a plugin.
+All of them are optional, and all of them are safe to change on a live API.
+
+**Allowed HTTP methods.** Tick the methods your API actually serves and the
+gateway answers `405` to everything else — before authentication, before the
+access gate, before anything. Tick nothing and every method is accepted, which
+is the default and means a `GET`-only catalog API still accepts `POST` at the
+gateway once a client holds a key. The **Use the methods declared in the spec**
+button fills the list in from your OpenAPI document. You do not need to tick
+`OPTIONS` for CORS: the portal adds it to the gateway's copy of the list
+whenever you have a CORS policy, because a preflight rejected with `405` would
+never reach the CORS plugin.
+
+**Backend timeouts.** Connect, read and write, in milliseconds, 100 – 300 000.
+Leave them blank to keep the gateway defaults shown in the boxes (5000 / 30 000
+/ 30 000). The read timeout is the one that matters most: without it a hung
+upstream holds a gateway worker for the full default. The three travel together
+— filling one in and leaving the others blank gives the blank ones their
+default value.
+
+**Circuit breaker.** When on, five consecutive failures (a 500, 502, 503 or 504,
+or a connection error) stop the gateway forwarding to your backend for thirty
+seconds; it then lets one probe through at a time until three succeed. Clients
+see a fast failure instead of a slow one, and a struggling backend is not
+hammered while it recovers. The thresholds are not adjustable from the portal —
+that is an operator setting on the proxy.
+
 ### What publishing actually does
 
 ```
 apis row ─── proxy          name `nexus-<slug>`, listening on /<namespace>/<slug>
+              │             plus your Advanced settings: allowed methods,
+              │             timeouts, circuit breaker, WebSocket origins
               │
               │ …then the proxy is told to run them
               ├─ plugin_config  your auth plugin
@@ -269,7 +317,9 @@ API, but two of them have consequences worth reading first.
 | Visibility                 | Listing only. Existing grants and calls are unaffected.                                                                    |
 | Upstream URL               | Re-points the gateway's backend. Takes effect immediately, and the upstream shown on the API page updates with it.         |
 | Rate limit                 | Attaches, updates, or (cleared) removes the quota.                                                                         |
-| CORS                       | Attaches, replaces, or (cleared) removes the browser CORS policy.                                                          |
+| CORS                       | Attaches, replaces, or (cleared) removes the browser CORS policy — and with it the WebSocket origin check.                 |
+| Allowed methods            | Takes effect immediately. Untick everything to accept every method again.                                                  |
+| Timeouts, circuit breaker  | Take effect immediately. Clearing the timeout boxes restores the gateway defaults.                                         |
 | **Requestable → off**      | ⚠️ Removes the access gate. **Every authenticated consumer can now call this API.** Existing grants stay but become inert. |
 | **Authentication plugin**  | ⚠️ Breaks every existing client until they issue a new credential.                                                         |
 

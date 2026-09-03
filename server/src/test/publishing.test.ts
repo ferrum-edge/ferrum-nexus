@@ -73,6 +73,13 @@ function associatedIds(harness: TestApp, proxyId: string): string[] {
     .sort();
 }
 
+/** The proxy document the mock currently stores. */
+function storedProxy(harness: TestApp, proxyId: string): Record<string, unknown> {
+  const proxy = harness.edge.proxies.get(`nexus/${proxyId}`);
+  assert.ok(proxy, `expected proxy ${proxyId} to exist`);
+  return proxy;
+}
+
 /** Ids of every plugin config written for the proxy, sorted. */
 function writtenIds(harness: TestApp, proxyId: string): string[] {
   return harness.edge
@@ -284,6 +291,149 @@ describe('publishing', () => {
         allowed_origins: ['https://app.example.com', 'https://admin.example.com'],
         allow_credentials: true,
       });
+    });
+
+    it('writes the method allow-list, the timeouts and the circuit breaker onto the proxy', async () => {
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'proxy-settings',
+          allowed_methods: ['GET', 'POST', 'GET'],
+          timeouts: { connect_ms: 1_500, read_ms: 20_000, write_ms: 25_000 },
+          circuit_breaker: true,
+        }),
+      });
+      assert.equal(response.statusCode, 201, response.body);
+      const api = response.json<PublishApiResponse>().api;
+
+      // The row keeps the provider's list, deduplicated by the route.
+      assert.deepEqual(api.allowed_methods, ['GET', 'POST']);
+      assert.deepEqual(api.timeouts, { connect_ms: 1_500, read_ms: 20_000, write_ms: 25_000 });
+      assert.equal(api.circuit_breaker, true);
+
+      const proxy = storedProxy(harness, String(api.ferrum_proxy_id));
+      assert.deepEqual(proxy.allowed_methods, ['GET', 'POST']);
+      assert.equal(proxy.backend_connect_timeout_ms, 1_500);
+      assert.equal(proxy.backend_read_timeout_ms, 20_000);
+      assert.equal(proxy.backend_write_timeout_ms, 25_000);
+      assert.deepEqual(proxy.circuit_breaker, {
+        failure_threshold: 5,
+        success_threshold: 3,
+        timeout_seconds: 30,
+        failure_status_codes: [500, 502, 503, 504],
+        half_open_max_requests: 1,
+        trip_on_connection_errors: true,
+      });
+      // No CORS policy, so the WS origin check stays off.
+      assert.deepEqual(proxy.allowed_ws_origins, []);
+
+      const row = (await harness.auditRows('api.publish')).find(
+        (entry) => entry.target_id === api.id,
+      );
+      assert.deepEqual(row?.details.allowed_methods, ['GET', 'POST']);
+      assert.equal(row?.details.circuit_breaker, true);
+    });
+
+    it('leaves the proxy on the gateway defaults when no advanced settings are sent', async () => {
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'proxy-defaults' }),
+      });
+      assert.equal(response.statusCode, 201);
+      const api = response.json<PublishApiResponse>().api;
+      assert.equal(api.allowed_methods, null);
+      assert.equal(api.timeouts, null);
+      assert.equal(api.circuit_breaker, false);
+
+      // Absent, not written: an omitted key on `POST /proxies` takes Edge's
+      // serde default, and pinning a default the portal cannot express would
+      // stop a gateway upgrade from changing it.
+      const proxy = storedProxy(harness, String(api.ferrum_proxy_id));
+      assert.equal(proxy.allowed_methods, undefined);
+      assert.equal(proxy.backend_connect_timeout_ms, undefined);
+      assert.equal(proxy.backend_read_timeout_ms, undefined);
+      assert.equal(proxy.backend_write_timeout_ms, undefined);
+      assert.equal(proxy.circuit_breaker, undefined);
+    });
+
+    it('adds OPTIONS to the gateway list when a CORS policy is set, but not to the row', async () => {
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'preflight',
+          allowed_methods: ['GET', 'POST'],
+          cors: { allowed_origins: ['https://app.example.com'], allow_credentials: false },
+        }),
+      });
+      assert.equal(response.statusCode, 201, response.body);
+      const api = response.json<PublishApiResponse>().api;
+
+      // Without this the browser preflight would be 405ed before the cors
+      // plugin ever ran, and the policy would be dead on arrival.
+      assert.deepEqual(storedProxy(harness, String(api.ferrum_proxy_id)).allowed_methods, [
+        'GET',
+        'POST',
+        'OPTIONS',
+      ]);
+      assert.deepEqual(api.allowed_methods, ['GET', 'POST'], 'the row keeps the provider’s list');
+    });
+
+    it('mirrors exact CORS origins into allowed_ws_origins', async () => {
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'ws-origins',
+          cors: {
+            allowed_origins: ['https://app.example.com', 'https://admin.example.com:8443'],
+            allow_credentials: true,
+          },
+        }),
+      });
+      assert.equal(response.statusCode, 201, response.body);
+      const proxyId = String(response.json<PublishApiResponse>().api.ferrum_proxy_id);
+      assert.deepEqual(storedProxy(harness, proxyId).allowed_ws_origins, [
+        'https://app.example.com',
+        'https://admin.example.com:8443',
+      ]);
+    });
+
+    it('leaves the WS origin check off for a wildcard CORS policy', async () => {
+      // `*` is not an origin the upgrade check could compare against, and an
+      // API open to every browser origin gains nothing from a partial list.
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'ws-wildcard',
+          cors: { allowed_origins: ['*'], allow_credentials: false },
+        }),
+      });
+      assert.equal(response.statusCode, 201, response.body);
+      const proxyId = String(response.json<PublishApiResponse>().api.ferrum_proxy_id);
+      assert.deepEqual(storedProxy(harness, proxyId).allowed_ws_origins, []);
+    });
+
+    it('rejects a method outside Edge’s enum and an out-of-range timeout', async () => {
+      const bodies = [
+        { allowed_methods: ['GET', 'FETCH'] },
+        { allowed_methods: [] },
+        { timeouts: { connect_ms: 1, read_ms: 1_000, write_ms: 1_000 } },
+        { timeouts: { connect_ms: 1_000, read_ms: 1_000 } },
+        { timeouts: { connect_ms: 1_000, read_ms: 400_000, write_ms: 1_000 } },
+      ];
+      for (const [index, overrides] of bodies.entries()) {
+        const response = await harness.authed(provider, {
+          method: 'POST',
+          url: '/api/apis',
+          payload: publishPayload({ slug: `bad-settings-${index}`, ...overrides }),
+        });
+        assert.equal(response.statusCode, 400, JSON.stringify(overrides));
+        assert.equal(errorCode(response.body), 'VALIDATION_FAILED');
+      }
     });
 
     it('records a null cors policy in the audit row when none was asked for', async () => {
@@ -895,6 +1045,134 @@ describe('publishing', () => {
       assert.ok(!associatedIds(harness, proxyId).includes(corsId));
       assert.deepEqual(effectiveNames(harness, proxyId), ['access_control', 'key_auth']);
       assert.deepEqual(associatedIds(harness, proxyId), writtenIds(harness, proxyId));
+    });
+
+    it('applies the proxy settings and resets them to the gateway defaults on null', async () => {
+      const applied = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: {
+          allowed_methods: ['GET', 'DELETE'],
+          timeouts: { connect_ms: 800, read_ms: 9_000, write_ms: 11_000 },
+          circuit_breaker: true,
+        },
+      });
+      assert.equal(applied.statusCode, 200, applied.body);
+      const updated = applied.json<UpdateApiResponse>().api;
+      assert.deepEqual(updated.allowed_methods, ['GET', 'DELETE']);
+      assert.deepEqual(updated.timeouts, { connect_ms: 800, read_ms: 9_000, write_ms: 11_000 });
+      assert.equal(updated.circuit_breaker, true);
+
+      const proxy = storedProxy(harness, proxyId);
+      assert.deepEqual(proxy.allowed_methods, ['GET', 'DELETE']);
+      assert.equal(proxy.backend_connect_timeout_ms, 800);
+      assert.equal(proxy.backend_read_timeout_ms, 9_000);
+      assert.equal(proxy.backend_write_timeout_ms, 11_000);
+      assert.equal((proxy.circuit_breaker as Record<string, unknown>).failure_threshold, 5);
+
+      const cleared = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { allowed_methods: null, timeouts: null, circuit_breaker: false },
+      });
+      assert.equal(cleared.statusCode, 200, cleared.body);
+      assert.equal(cleared.json<UpdateApiResponse>().api.allowed_methods, null);
+      assert.equal(cleared.json<UpdateApiResponse>().api.timeouts, null);
+
+      // `PUT /proxies/{id}` echoes the document, so "back to the default" has
+      // to be written as a value — omitting the key would keep 800 / 9000.
+      const reset = storedProxy(harness, proxyId);
+      assert.equal(reset.allowed_methods, null);
+      assert.equal(reset.backend_connect_timeout_ms, 5_000);
+      assert.equal(reset.backend_read_timeout_ms, 30_000);
+      assert.equal(reset.backend_write_timeout_ms, 30_000);
+      assert.equal(reset.circuit_breaker, null);
+    });
+
+    it('re-derives OPTIONS and the WS origins when CORS arrives later and leaves', async () => {
+      await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { allowed_methods: ['GET'] },
+      });
+      assert.deepEqual(storedProxy(harness, proxyId).allowed_methods, ['GET']);
+      // Publishing already wrote the (empty) WS allow-list, so the check is off.
+      assert.deepEqual(storedProxy(harness, proxyId).allowed_ws_origins, []);
+
+      // The provider adds CORS without touching the method list; the preflight
+      // still has to survive the 405 check that runs before every plugin.
+      const withCors = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: {
+          cors: { allowed_origins: ['https://app.example.com'], allow_credentials: false },
+        },
+      });
+      assert.equal(withCors.statusCode, 200, withCors.body);
+      assert.deepEqual(storedProxy(harness, proxyId).allowed_methods, ['GET', 'OPTIONS']);
+      assert.deepEqual(storedProxy(harness, proxyId).allowed_ws_origins, [
+        'https://app.example.com',
+      ]);
+      assert.deepEqual(
+        withCors.json<UpdateApiResponse>().api.allowed_methods,
+        ['GET'],
+        'the row still carries only what the provider chose',
+      );
+
+      const withoutCors = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { cors: null },
+      });
+      assert.equal(withoutCors.statusCode, 200);
+      assert.deepEqual(storedProxy(harness, proxyId).allowed_methods, ['GET']);
+      assert.deepEqual(storedProxy(harness, proxyId).allowed_ws_origins, []);
+    });
+
+    it('rolls the proxy settings back when a later step of the PATCH fails', async () => {
+      await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: {
+          allowed_methods: ['GET'],
+          timeouts: { connect_ms: 800, read_ms: 9_000, write_ms: 11_000 },
+        },
+      });
+
+      // The settings write is the last gateway call of a PATCH, so the row
+      // update is the step whose failure has to unwind it.
+      failNextApiUpdate(harness, 'database is gone');
+      const failed = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: {
+          allowed_methods: ['GET', 'POST', 'DELETE'],
+          timeouts: { connect_ms: 250, read_ms: 500, write_ms: 750 },
+          circuit_breaker: true,
+        },
+      });
+      assert.notEqual(failed.statusCode, 200);
+
+      const proxy = storedProxy(harness, proxyId);
+      assert.deepEqual(proxy.allowed_methods, ['GET']);
+      assert.equal(proxy.backend_connect_timeout_ms, 800);
+      assert.equal(proxy.backend_read_timeout_ms, 9_000);
+      assert.equal(proxy.backend_write_timeout_ms, 11_000);
+      assert.equal(proxy.circuit_breaker, null, 'a breaker that was never there stays absent');
+    });
+
+    it('leaves operator-set proxy fields alone when the PATCH does not name them', async () => {
+      enrichProxy(harness, proxyId);
+      const response = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { allowed_methods: ['GET'], circuit_breaker: true },
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      // `backend_read_timeout_ms` is one of the enriched fields: a PATCH that
+      // says nothing about timeouts must not reset it to Edge's default.
+      assertEnrichmentSurvived(harness, proxyId);
+      assert.deepEqual(storedProxy(harness, proxyId).allowed_methods, ['GET']);
     });
 
     it('swaps the auth plugin and records that old credentials stop working', async () => {
@@ -1661,6 +1939,71 @@ describe('publishing', () => {
         allowed_origins: ['https://app.example.com'],
         allow_credentials: true,
       });
+    });
+  });
+});
+
+describe('publishing with Redis-synced rate limits', () => {
+  let harness: TestApp;
+  let provider: TestSession;
+
+  before(async () => {
+    harness = await buildTestApp({
+      env: {
+        FERRUM_RATE_LIMIT_SYNC_MODE: 'redis',
+        FERRUM_RATE_LIMIT_REDIS_URL: 'redis://cache.example.com:6379/2',
+        FERRUM_RATE_LIMIT_REDIS_TLS: 'true',
+      },
+    });
+    await harness.registerUser({ email: 'sync-founder@example.test' });
+    provider = await harness.registerUser({
+      email: 'sync-provider@example.test',
+      role: 'provider',
+    });
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  it('stamps the endpoint onto the rate_limiting config, on publish and on PATCH', async () => {
+    const published = await harness.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: publishPayload({
+        slug: 'synced',
+        rate_limit: { limit: 100, window_seconds: 60 },
+      }),
+    });
+    assert.equal(published.statusCode, 201, published.body);
+    const api = published.json<PublishApiResponse>().api;
+    const proxyId = String(api.ferrum_proxy_id);
+
+    // The exact body Edge receives: without `sync_mode`/`redis_url` the
+    // counters would be per gateway process, so N replicas would enforce N×
+    // the provider's quota.
+    assert.deepEqual(harness.edge.pluginForProxy(proxyId, 'rate_limiting')?.config, {
+      limit_by: 'consumer',
+      expose_headers: true,
+      limits: [{ scope: 'default', window_seconds: 60, max_requests: 100 }],
+      sync_mode: 'redis',
+      redis_url: 'redis://cache.example.com:6379/2',
+      redis_tls: true,
+    });
+
+    const patched = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { rate_limit: { limit: 5, window_seconds: 1 } },
+    });
+    assert.equal(patched.statusCode, 200, patched.body);
+    assert.deepEqual(harness.edge.pluginForProxy(proxyId, 'rate_limiting')?.config, {
+      limit_by: 'consumer',
+      expose_headers: true,
+      limits: [{ scope: 'default', window_seconds: 1, max_requests: 5 }],
+      sync_mode: 'redis',
+      redis_url: 'redis://cache.example.com:6379/2',
+      redis_tls: true,
     });
   });
 });

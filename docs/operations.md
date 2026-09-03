@@ -65,6 +65,32 @@ the process prints every offending variable and exits non-zero. The repo-root
 | `FERRUM_ADMIN_ALLOW_INSECURE_HTTP` | `false`                 | Permits plaintext `http://` Admin URLs on non-loopback hosts. Container-network-only deployments are the intended use.                                                                                                                                                                                                                                                                           |
 | `FERRUM_ADMIN_TIMEOUT_MS`          | `5000`                  | Per-request deadline for Admin API calls, 250 – 60 000.                                                                                                                                                                                                                                                                                                                                          |
 | `FERRUM_MAX_CREDENTIALS_PER_TYPE`  | `2`                     | 1 – 10. **Mirror of the gateway's own setting** — set them to the same value. Values above 1 are what make append-then-delete rotation gapless.                                                                                                                                                                                                                                                  |
+| `FERRUM_RATE_LIMIT_SYNC_MODE`      | `local`                 | `local` \| `redis`. Where Edge keeps the counters of every consumer quota Nexus publishes. See the warning below — `local` counters are **per gateway process**.                                                                                                                                                                                                                                 |
+| `FERRUM_RATE_LIMIT_REDIS_URL`      | _(unset)_               | **Required when `FERRUM_RATE_LIMIT_SYNC_MODE=redis`.** Must be `redis://` or `rediss://`; startup fails otherwise. Ignored (and not written to any plugin config) in `local` mode.                                                                                                                                                                                                               |
+| `FERRUM_RATE_LIMIT_REDIS_TLS`      | `false`                 | Upgrade a `redis://` endpoint to TLS. `rediss://` already implies it. CA verification uses the gateway's own `FERRUM_TLS_CA_BUNDLE_PATH`.                                                                                                                                                                                                                                                        |
+
+> **⚠️ Consumer quotas are enforced per gateway process.**
+>
+> Edge's `rate_limiting` plugin keeps its counters in the memory of the process
+> that served the request unless the plugin config names a Redis endpoint. A
+> portal in front of **N** data-plane replicas therefore enforces **N × the
+> quota** a provider chose: an API limited to 1000 requests a minute answers up
+> to 1000 a minute _on each replica_. Nothing in the portal, the provider's
+> form, or the gateway reports this — the numbers simply do not add up in
+> production.
+>
+> Setting `FERRUM_RATE_LIMIT_SYNC_MODE=redis` with an endpoint makes Nexus
+> stamp `sync_mode`, `redis_url` and `redis_tls` onto every `rate_limiting`
+> config it writes, so all replicas share one counter. There is no
+> gateway-level environment variable for this: the endpoint is part of each
+> plugin config, which is why the switch lives here.
+>
+> **Changing the mode applies to rate limits saved afterwards.** It rewrites
+> nothing that already exists — an already-published API picks the new mode up
+> the next time its rate limit is saved (any `PATCH /api/apis/:id` carrying a
+> `rate_limit`, including re-saving the same numbers from the Settings tab).
+> After flipping the switch on a live portal, re-save the rate limit of every
+> API you care about, or accept that older APIs stay on per-process counters.
 
 #### Set on the gateway, not on Nexus
 

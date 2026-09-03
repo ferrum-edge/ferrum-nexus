@@ -205,8 +205,12 @@ describe('api usage', () => {
 
     it('answers 200 with available:false when the metrics endpoints error', async () => {
       const { apiId } = await publishApi('usage-erroring');
-      harness.edge.queueFailure(503, { error: 'metrics disabled' }, '/metrics', 'GET');
+      // The two scrapes run concurrently and the mock hands a request the
+      // *first* queued failure whose substring matches, and `/admin/metrics`
+      // contains `/metrics` — so the narrower path is queued first to keep the
+      // outcome independent of which request lands first.
       harness.edge.queueFailure(500, { error: 'boom' }, '/admin/metrics', 'GET');
+      harness.edge.queueFailure(503, { error: 'metrics disabled' }, '/metrics', 'GET');
 
       const usage = await usageFor(provider, apiId);
 

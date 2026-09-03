@@ -34,6 +34,7 @@ function configFor(url: string, overrides: Partial<EdgeConfig> = {}): EdgeConfig
     allowInsecureHttp: false,
     timeoutMs: 2_000,
     maxCredentialsPerType: 2,
+    rateLimit: { syncMode: 'local', redisUrl: undefined, redisTls: false },
     ...overrides,
   };
 }

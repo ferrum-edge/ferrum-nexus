@@ -19,6 +19,7 @@ function configFor(url: string, overrides: Partial<EdgeConfig> = {}): EdgeConfig
     jwtAudience: undefined,
     namespace: 'nexus',
     gatewayPublicUrl: undefined,
+    rateLimit: { syncMode: 'local', redisUrl: undefined, redisTls: false },
     caFile: undefined,
     allowInsecureHttp: false,
     timeoutMs: 2_000,

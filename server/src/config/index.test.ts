@@ -47,6 +47,11 @@ describe('loadConfig', () => {
     assert.equal(config.edge.jwtAudience, undefined);
     assert.equal(config.edge.gatewayPublicUrl, undefined);
     assert.equal(config.edge.maxCredentialsPerType, 2);
+    assert.deepEqual(config.edge.rateLimit, {
+      syncMode: 'local',
+      redisUrl: undefined,
+      redisTls: false,
+    });
     assert.equal(config.smtp.port, 587);
     assert.equal(config.smtp.from, 'Ferrum Nexus <no-reply@example.com>');
   });
@@ -208,6 +213,45 @@ describe('loadConfig', () => {
       false,
     );
     expectConfigError(baseEnv({ NEXUS_COOKIE_SECURE: 'maybe' }), 'NEXUS_COOKIE_SECURE');
+  });
+
+  it('defaults rate-limit counters to local and takes a Redis endpoint', () => {
+    const redis = loadConfig(
+      baseEnv({
+        FERRUM_RATE_LIMIT_SYNC_MODE: 'redis',
+        FERRUM_RATE_LIMIT_REDIS_URL: 'rediss://cache.example.com:6380/1',
+        FERRUM_RATE_LIMIT_REDIS_TLS: 'true',
+      }),
+    );
+    assert.deepEqual(redis.edge.rateLimit, {
+      syncMode: 'redis',
+      redisUrl: 'rediss://cache.example.com:6380/1',
+      redisTls: true,
+    });
+
+    // An endpoint left over from a previous experiment must not be stamped onto
+    // plugin configs that say `local` — Edge would reject the combination.
+    const local = loadConfig(baseEnv({ FERRUM_RATE_LIMIT_REDIS_URL: 'redis://127.0.0.1:6379/0' }));
+    assert.equal(local.edge.rateLimit.syncMode, 'local');
+    assert.equal(local.edge.rateLimit.redisUrl, undefined);
+  });
+
+  it('rejects an unknown sync mode, a missing endpoint and a non-Redis URL', () => {
+    expectConfigError(
+      baseEnv({ FERRUM_RATE_LIMIT_SYNC_MODE: 'memcached' }),
+      'FERRUM_RATE_LIMIT_SYNC_MODE must be local or redis',
+    );
+    expectConfigError(
+      baseEnv({ FERRUM_RATE_LIMIT_SYNC_MODE: 'redis' }),
+      'FERRUM_RATE_LIMIT_REDIS_URL is required when FERRUM_RATE_LIMIT_SYNC_MODE=redis',
+    );
+    expectConfigError(
+      baseEnv({
+        FERRUM_RATE_LIMIT_SYNC_MODE: 'redis',
+        FERRUM_RATE_LIMIT_REDIS_URL: 'https://cache.example.com',
+      }),
+      'FERRUM_RATE_LIMIT_REDIS_URL must be a redis:// or rediss:// URL',
+    );
   });
 
   it('reads NEXUS_ALLOW_PRIVATE_UPSTREAMS as a boolean', () => {

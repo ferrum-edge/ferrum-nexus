@@ -480,6 +480,8 @@ behind on either side.
 
 ```
 apis row ─── proxy          name `nexus-<slug>`, listen_path `/<namespace>/<slug>`
+              │             allowed_methods, backend_{connect,read,write}_timeout_ms,
+              │             circuit_breaker, allowed_ws_origins
               │
               │ proxy.plugins[] ─ the association list: a config the proxy does
               │                   not name is stored but never runs
@@ -488,6 +490,24 @@ apis row ─── proxy          name `nexus-<slug>`, listen_path `/<namespace>
               ├─ plugin_config  rate_limiting     — only when a rate limit is set
               └─ plugin_config  cors              — only when `cors` names origins
 ```
+
+The four fields on the proxy itself are settings, not plugins, and two of them
+are **partly derived from the CORS policy** because Edge evaluates them before —
+and independently of — the `cors` plugin:
+
+- a method outside `allowed_methods` is answered `405` **before any plugin
+  runs**, so the list written to the gateway carries `OPTIONS` whenever the API
+  has a CORS policy, or every browser preflight would fail. The `apis` row keeps
+  the provider's own list, so removing CORS later removes the implied `OPTIONS`
+  with it;
+- `allowed_ws_origins` is the WebSocket upgrade origin check, which the `cors`
+  plugin never runs for. The API's exact CORS origins are mirrored into it; a
+  wildcard or absent policy leaves it `[]`, which performs no check.
+
+Both derivations are recomputed whenever either input changes, in a single
+read-modify-write with one undo step. A PATCH that does not name a setting does
+not write it at all, so timeouts an operator tuned by hand on the proxy survive
+a provider changing something else.
 
 The single association write is also why the proxy is briefly live with no
 plugins: Edge refuses a plugin config whose `proxy_id` does not exist yet, so

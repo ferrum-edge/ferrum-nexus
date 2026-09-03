@@ -389,6 +389,55 @@ const PLUGIN_CONFIG_KEYS = new Set([
 
 const CONSUMER_KEYS = new Set(['id', 'username', 'custom_id', 'credentials', 'acl_groups']);
 
+/** `Proxy.allowed_methods` entries, from the openapi enum. */
+const PROXY_HTTP_METHODS = new Set([
+  'GET',
+  'POST',
+  'PUT',
+  'PATCH',
+  'DELETE',
+  'HEAD',
+  'OPTIONS',
+  'TRACE',
+  'CONNECT',
+]);
+
+/**
+ * Validate the proxy fields Nexus now writes beyond the backend/listen set,
+ * the way Edge's `Proxy` deserializer does. Returns an error message, or
+ * `null` when the body is acceptable.
+ *
+ * Only the checks a Nexus bug could actually trip are modelled: a method
+ * outside the enum, a circuit breaker that is not an object, and a WS origin
+ * list that is not an array of strings. Each is a `400` on a real gateway, so
+ * a permissive fake would let a broken publish look healthy.
+ */
+function validateProxySettings(body: Record<string, unknown>): string | null {
+  const methods = body.allowed_methods;
+  if (methods !== undefined && methods !== null) {
+    if (!Array.isArray(methods)) return 'allowed_methods must be an array of HTTP methods or null';
+    for (const method of methods) {
+      if (typeof method !== 'string' || !PROXY_HTTP_METHODS.has(method)) {
+        return `allowed_methods: unknown HTTP method '${String(method)}'`;
+      }
+    }
+  }
+
+  const breaker = body.circuit_breaker;
+  if (breaker !== undefined && breaker !== null && !isRecord(breaker)) {
+    return 'circuit_breaker must be an object or null';
+  }
+
+  const origins = body.allowed_ws_origins;
+  if (origins !== undefined) {
+    if (!Array.isArray(origins) || origins.some((origin) => typeof origin !== 'string')) {
+      return 'allowed_ws_origins must be an array of strings';
+    }
+  }
+
+  return null;
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -1089,6 +1138,8 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         if (typeof body.backend_host !== 'string' || body.backend_host === '') {
           return fail(res, 400, 'backend_host must be non-empty (or set upstream_id)');
         }
+        const settingsProblem = validateProxySettings(body);
+        if (settingsProblem) return fail(res, 400, settingsProblem);
         const duplicate = [...proxies.values()].some(
           (proxy) => proxy.namespace === namespace && proxy.listen_path === body.listen_path,
         );
@@ -1122,6 +1173,8 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
       const associationProblem = proxyAssociationError(id, namespace, body.plugins);
       if (associationProblem) return fail(res, 400, associationProblem);
+      const settingsProblem = validateProxySettings(body);
+      if (settingsProblem) return fail(res, 400, settingsProblem);
       const updated = {
         ...body,
         id,

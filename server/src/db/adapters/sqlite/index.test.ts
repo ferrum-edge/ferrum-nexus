@@ -308,6 +308,56 @@ describe('sqlite store', () => {
       assert.equal(bare.cors, null);
     });
 
+    it('stores the proxy runtime settings and their cleared state', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const api = await store.apis.create({
+        name: 'Tuned',
+        slug: `tuned-${newId().slice(0, 8)}`,
+        owner_user_id: owner.id,
+        namespace: 'nexus',
+        version: '1.0.0',
+        spec_format: 'openapi',
+        requestable: true,
+        auth_plugin: 'key_auth',
+        allowed_methods: ['GET', 'POST'],
+        timeouts: { connect_ms: 1_000, read_ms: 2_000, write_ms: 3_000 },
+        circuit_breaker: true,
+        status: 'published',
+        visibility: 'public',
+      });
+      assert.deepEqual(api.allowed_methods, ['GET', 'POST']);
+      assert.deepEqual(api.timeouts, { connect_ms: 1_000, read_ms: 2_000, write_ms: 3_000 });
+      assert.equal(api.circuit_breaker, true, 'the 0/1 column crosses the boundary as a boolean');
+      assert.deepEqual(await store.apis.findById(api.id), api);
+
+      const cleared = await store.apis.update(api.id, {
+        allowed_methods: null,
+        timeouts: null,
+        circuit_breaker: false,
+      });
+      assert.equal(cleared?.allowed_methods, null);
+      assert.equal(cleared?.timeouts, null);
+      assert.equal(cleared?.circuit_breaker, false);
+
+      // Omitting them on create leaves NULL / the column default, which is what
+      // every row published before migration 004 reads back as.
+      const bare = await store.apis.create({
+        name: 'Untuned',
+        slug: `untuned-${newId().slice(0, 8)}`,
+        owner_user_id: owner.id,
+        namespace: 'nexus',
+        version: '1.0.0',
+        spec_format: 'openapi',
+        requestable: false,
+        auth_plugin: 'key_auth',
+        status: 'published',
+        visibility: 'public',
+      });
+      assert.equal(bare.allowed_methods, null);
+      assert.equal(bare.timeouts, null);
+      assert.equal(bare.circuit_breaker, false);
+    });
+
     it('keeps exactly one current spec revision per API', async () => {
       const owner = await makeUser({ role: 'provider' });
       const api = await store.apis.create({

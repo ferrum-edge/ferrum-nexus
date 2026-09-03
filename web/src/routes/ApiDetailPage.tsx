@@ -1,8 +1,9 @@
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
-import { useState, type FormEvent, type ReactElement } from 'react';
+import { useMemo, useState, type FormEvent, type ReactElement } from 'react';
 import {
   AUTH_PLUGIN_LABELS,
   AUTH_PLUGIN_TYPES,
+  HTTP_METHODS,
   MAX_CORS_ORIGINS,
   MAX_RATE_LIMIT_REQUESTS,
   aclGroupForApi,
@@ -16,6 +17,7 @@ import {
   type AuthPluginType,
   type CorsConfig,
   type Grant,
+  type HttpMethod,
   type RateLimitConfig,
   type ShowOnceSecret,
 } from '@ferrum-nexus/shared';
@@ -38,6 +40,13 @@ import { useGrants, useRevokeGrant } from '../hooks/useGrants';
 import { useToast } from '../stores/toast';
 import { RoleGuard } from '../components/layout/RoleGuard';
 import { ShowOnceSecretDialog } from '../components/credentials/ShowOnceSecretDialog';
+import { declaredMethods } from '../components/openapi/parse';
+import {
+  AdvancedProxySettings,
+  parseTimeoutDraft,
+  timeoutDraftFrom,
+  type TimeoutDraft,
+} from '../components/publishing/AdvancedProxySettings';
 import { SpecEditor, isSpecValid } from '../components/publishing/SpecEditor';
 import { Badge, type BadgeTone } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -83,7 +92,21 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
   );
   const [corsOrigins, setCorsOrigins] = useState(api.cors?.allowed_origins.join('\n') ?? '');
   const [corsCredentials, setCorsCredentials] = useState(api.cors?.allow_credentials ?? false);
+  const [methods, setMethods] = useState<HttpMethod[]>(api.allowed_methods ?? []);
+  const [timeouts, setTimeouts] = useState<TimeoutDraft>(timeoutDraftFrom(api.timeouts));
+  const [circuitBreaker, setCircuitBreaker] = useState(api.circuit_breaker);
   const [deleteOpen, setDeleteOpen] = useState(false);
+
+  // The current document is not on this page, so it is fetched to offer the
+  // same "use the methods declared in the spec" shortcut the publish form has.
+  // An API with no stored revision simply does not get the shortcut.
+  const specQuery = useCatalogSpec(api.slug);
+  const specMethods = useMemo<HttpMethod[]>(() => {
+    const raw = specQuery.data?.raw_spec;
+    if (!raw) return [];
+    const declared = declaredMethods(raw);
+    return HTTP_METHODS.filter((method) => declared.includes(method));
+  }, [specQuery.data?.raw_spec]);
 
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
@@ -114,6 +137,12 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
     const cors: CorsConfig | null =
       origins.length > 0 ? { allowed_origins: origins, allow_credentials: corsCredentials } : null;
 
+    const parsedTimeouts = parseTimeoutDraft(timeouts);
+    if (typeof parsedTimeouts === 'string') {
+      toast.error('Timeout out of range', parsedTimeouts);
+      return;
+    }
+
     update.mutate(
       {
         id: api.id,
@@ -127,6 +156,11 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
           requestable,
           rate_limit: rateLimit,
           cors,
+          // Clearing every checkbox sends `null`, which accepts every method
+          // again; clearing the timeout boxes restores the gateway defaults.
+          allowed_methods: methods.length > 0 ? methods : null,
+          timeouts: parsedTimeouts,
+          circuit_breaker: circuitBreaker,
           ...(upstreamUrl.trim() ? { upstream_url: upstreamUrl.trim() } : {}),
         },
       },
@@ -254,6 +288,18 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
                 description="Lets browsers send cookies and Authorization headers cross-origin. Ignored when no origins are listed."
                 checked={corsCredentials}
                 onChange={(event) => setCorsCredentials(event.target.checked)}
+              />
+            </div>
+            <div className="border-t border-border pt-4 md:col-span-2">
+              <p className="mb-3 text-sm font-medium text-fg">Advanced</p>
+              <AdvancedProxySettings
+                methods={methods}
+                onMethodsChange={setMethods}
+                timeouts={timeouts}
+                onTimeoutsChange={setTimeouts}
+                circuitBreaker={circuitBreaker}
+                onCircuitBreakerChange={setCircuitBreaker}
+                specMethods={specMethods}
               />
             </div>
             <div className="md:col-span-2">
