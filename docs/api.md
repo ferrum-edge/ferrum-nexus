@@ -616,9 +616,13 @@ report whether one is stored.
     "open_registration": true,
     "require_email_verification": false,
     "allowed_roles": ["client", "provider"]
-  }
+  },
+  "gateway": { "public_url": "https://api.example.com" }
 }
 ```
+
+`gateway.public_url` is the stored override when one is set, otherwise the
+`FERRUM_GATEWAY_PUBLIC_URL` environment default, otherwise `null`.
 
 ### `PUT /api/admin/settings`
 
@@ -638,6 +642,7 @@ to the operator, and CAPTCHA is the registration brake.
 | `captcha`      | _super_admin_ — `enabled`, `provider` (`none`\|`recaptcha`\|`hcaptcha`\|`turnstile`), `site_key` (nullable), `secret_key` — **write-only**, stored AES-256-GCM encrypted; pass `null` or `""` to clear                                                   |
 | `smtp`         | _super_admin_ — `host`, `port` (1–65535), `secure`, `username`, `password` — **write-only**, encrypted; `null`/`""` clears — `from_address`                                                                                                              |
 | `registration` | `open_registration`, `require_email_verification`, `allowed_roles` (array of roles)                                                                                                                                                                      |
+| `gateway`      | `public_url` — absolute `http(s)` **origin** of the gateway's proxy listener, no path, query or credentials; a trailing slash is stripped. `null` or `""` clears the override and falls back to `FERRUM_GATEWAY_PUBLIC_URL`. Editable by any `admin`.    |
 
 → the same shape as `GET /api/admin/settings`. The audit row records the
 **names** of the changed keys and never their values.
@@ -893,13 +898,19 @@ Spec documents arrive as a JSON string field, not a multipart upload — the SPA
 reads the file client-side, which keeps the CSRF story and the error shape
 identical to every other route.
 
-Two fields of the returned `Api` object describe the gateway side of a
-publication:
+Four fields of the returned `Api` object describe the gateway side of a
+publication. `listen_path` and `invoke_url` are **derived, not stored**: they
+are recomputed on every read from the namespace, the slug and the operator's
+gateway origin, so moving the gateway never leaves a stale row behind. Both are
+also present on the compact `ApiSummary` embedded in access requests, grants and
+message threads.
 
-| Field          | Type                                             | Notes                                                                                                                                                              |
-| -------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `upstream_url` | string \| null                                   | the upstream Nexus last wrote to the gateway, normalized to `scheme://host:port[/basePath]` (the port always explicit, IPv6 hosts bracketed). `null` on older rows |
-| `cors`         | `{ allowed_origins, allow_credentials }` \| null | the browser CORS policy. `null` means **no `cors` plugin at all** — the gateway adds no CORS headers, which is not the same as an empty allow-list                 |
+| Field          | Type                                             | Notes                                                                                                                                                                                                                                               |
+| -------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `listen_path`  | string                                           | always `/<namespace>/<slug>`, the path the gateway listens on                                                                                                                                                                                       |
+| `invoke_url`   | string \| null                                   | absolute URL a client calls: the configured gateway origin followed by `listen_path`, e.g. `https://api.example.com/nexus/billing`. `null` when neither `gateway.public_url` nor `FERRUM_GATEWAY_PUBLIC_URL` is set — Nexus never guesses an origin |
+| `upstream_url` | string \| null                                   | the upstream Nexus last wrote to the gateway, normalized to `scheme://host:port[/basePath]` (the port always explicit, IPv6 hosts bracketed). `null` on older rows                                                                                  |
+| `cors`         | `{ allowed_origins, allow_credentials }` \| null | the browser CORS policy. `null` means **no `cors` plugin at all** — the gateway adds no CORS headers, which is not the same as an empty allow-list                                                                                                  |
 
 ### `GET /api/apis`
 

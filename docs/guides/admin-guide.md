@@ -128,6 +128,38 @@ signs in), so keep it to genuinely public information.
 
 ---
 
+## Gateway address
+
+**Administration → Settings → Gateway.** One field, and the catalog is
+noticeably less useful without it.
+
+A client who has been approved and holds a credential still needs to know
+**where to send the request**. That address is the gateway's **proxy
+listener** — a different host and port from the Admin API Nexus talks to, and a
+different one again from the portal itself. Nexus cannot infer it, so until you
+set it every API reports a `null` invoke URL and the catalog can only show the
+listen path.
+
+| Field                  | Notes                                                                                                                                                                          |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Public gateway URL** | Absolute `http(s)` **origin** — scheme, host, and port if non-default. No path, no query string, no credentials; a trailing slash is stripped. E.g. `https://api.example.com`. |
+
+Once it is set, every API in the catalog gains an **invoke URL** of
+`<origin>/<namespace>/<slug>`, shown with a copy button on the catalog detail
+page, next to each of a client's granted APIs, and on the provider's API
+overview.
+
+Unlike SMTP and CAPTCHA this is **not** super-admin-only: a public gateway
+address is published information, not a secret. It is also not the portal's own
+address — that is `NEXUS_PUBLIC_URL`, used for the links in outbound email.
+
+Leaving the field blank falls back to the `FERRUM_GATEWAY_PUBLIC_URL`
+environment variable, which is the right place to set it if your deployment is
+configured entirely from the environment. The stored setting wins when both are
+present.
+
+---
+
 ## CAPTCHA
 
 **Administration → Settings → CAPTCHA.** Protects registration and sign-in from

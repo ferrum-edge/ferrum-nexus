@@ -232,15 +232,26 @@ rotate an existing one first.
 
 ## Calling an API
 
-Requests go to the **gateway's proxy listener**, not to the portal. The path is
-always:
+Requests go to the **gateway's proxy listener**, not to the portal.
+
+**The catalog tells you the address.** Open the API, and the **Call this API**
+panel on the _Access_ tab shows the full **invoke URL** with a copy button,
+along with the exact header to send. The same URL appears next to each of your
+granted APIs on the **Credentials** page. Append the operation path from the
+OpenAPI document to it:
 
 ```
-https://<gateway-host>/<namespace>/<slug>/<the path from the OpenAPI document>
+<invoke URL>/<the path from the OpenAPI document>
 ```
 
-`<namespace>` and `<slug>` are shown on the API's catalog page — for a
-namespace of `nexus` and a slug of `billing`, the base is `/nexus/billing`.
+The invoke URL is the gateway's public origin followed by the API's listen
+path, which is always `/<namespace>/<slug>` — for a namespace of `nexus` and a
+slug of `billing`, `https://gateway.example.com/nexus/billing`.
+
+If the panel shows only the listen path and says the gateway address is not
+published, your portal administrator has not configured one yet. Ask them for
+the gateway host rather than guessing a port — the portal deliberately shows
+nothing rather than an address that might not route.
 
 ### API key (`keyauth`)
 

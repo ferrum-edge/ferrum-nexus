@@ -114,6 +114,12 @@ FERRUM_ADMIN_JWT_SECRET=<the same value you exported in step 2>
 FERRUM_NAMESPACE=nexus
 NEXUS_PUBLIC_URL=http://127.0.0.1:5173
 
+# Where the gateway's PROXY listener answers — not the Admin API, not the
+# portal. The catalog shows each API's full invoke URL from this, so a client
+# never has to guess the port. An admin can change it later in
+# Settings → Gateway.
+FERRUM_GATEWAY_PUBLIC_URL=http://127.0.0.1:8000
+
 # Session cookies are `Secure` by default, which a browser will not store over
 # plain http. This walkthrough is http-only, so say so; production keeps the
 # default and serves the portal over https.
@@ -412,8 +418,13 @@ export API_KEY='nxs_pQ7v3H2s…'
 
 ## 9. Call the API through the gateway
 
-Now use the **proxy listener** (`:8000`), the listen path
-`/<namespace>/<slug>`, and the key:
+The catalog page for the API shows the exact URL under **Call this API** —
+that is what `FERRUM_GATEWAY_PUBLIC_URL` is for, and it is the same value the
+`invoke_url` field carries on every API the API returns. For this walkthrough
+it is `http://127.0.0.1:8000/nexus/billing`: the **proxy listener** (`:8000`)
+followed by the listen path `/<namespace>/<slug>`.
+
+Copy it from the portal, and call it with the key:
 
 ```bash
 curl -sS -i http://127.0.0.1:8000/nexus/billing/invoices \
