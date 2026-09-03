@@ -17,6 +17,7 @@ function edgeConfig(overrides: Partial<EdgeConfig> = {}): EdgeConfig {
     jwtIssuer: 'ferrum-edge',
     jwtAudience: undefined,
     namespace: 'nexus',
+    gatewayPublicUrl: undefined,
     caFile: undefined,
     allowInsecureHttp: false,
     timeoutMs: 5_000,

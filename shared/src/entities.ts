@@ -110,6 +110,22 @@ export interface Api {
    */
   upstream_url: string | null;
   namespace: string;
+  /**
+   * Gateway listen path, always `/<namespace>/<slug>`. Derived, never stored —
+   * see {@link listenPathFor}.
+   */
+  listen_path: string;
+  /**
+   * Absolute URL a client sends requests to: the configured public origin of
+   * the gateway's proxy listener followed by {@link Api.listen_path}, e.g.
+   * `https://api.example.com/nexus/billing`.
+   *
+   * `null` when no operator has configured a public gateway origin (neither the
+   * `gateway.public_url` setting nor `FERRUM_GATEWAY_PUBLIC_URL`). Nexus never
+   * guesses one: the Admin API's address is not the proxy listener's, and a
+   * fabricated host would send clients somewhere real requests do not land.
+   */
+  invoke_url: string | null;
   version: string;
   spec_format: SpecFormat;
   /** Whether clients may submit access requests for this API. */
@@ -181,6 +197,10 @@ export interface ApiSummary {
   slug: string;
   version: string;
   owner_user_id: Uuid;
+  /** Gateway listen path, always `/<namespace>/<slug>`. */
+  listen_path: string;
+  /** Absolute invoke URL, or `null` when no public gateway origin is set. */
+  invoke_url: string | null;
 }
 
 /** Lifecycle of a grant. */
@@ -384,6 +404,24 @@ export interface BrandingSettings {
 
 /** Theme selection persisted under `nexus:theme`. */
 export type ThemePreference = 'dark' | 'light' | 'system';
+
+/**
+ * Where the gateway's **proxy listener** answers, so the catalog can tell a
+ * client the absolute URL to call.
+ *
+ * Deliberately not the portal's own origin and not the Edge Admin API's: those
+ * are three different listeners, and only this one takes data-plane traffic.
+ */
+export interface GatewaySettings {
+  /**
+   * Public origin of the proxy listener — scheme, host and (non-default) port
+   * only, no path, query or credentials, e.g. `https://api.example.com`.
+   *
+   * `null` means unconfigured, which surfaces as a `null` `invoke_url` on every
+   * API rather than a guessed address.
+   */
+  public_url: string | null;
+}
 
 /** Supported CAPTCHA vendors. */
 export type CaptchaProvider = 'none' | 'recaptcha' | 'hcaptcha' | 'turnstile';

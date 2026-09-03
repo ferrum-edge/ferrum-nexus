@@ -18,6 +18,7 @@ import { z } from 'zod';
 import { DEFAULT_FERRUM_NAMESPACE, DEFAULT_SESSION_TTL_SECONDS } from '@ferrum-nexus/shared';
 import type { DbDriver } from '@ferrum-nexus/shared';
 import { NexusError } from '../lib/errors.js';
+import { GATEWAY_PUBLIC_URL_RULE, normalizeGatewayPublicUrl } from '../lib/gateway-url.js';
 
 /** Raw environment shape accepted by {@link loadConfig}. */
 export type EnvRecord = Record<string, string | undefined>;
@@ -76,6 +77,15 @@ export interface EdgeConfig {
   jwtAudience: string | undefined;
   /** Namespace sent in `X-Ferrum-Namespace` on every call. */
   namespace: string;
+  /**
+   * Default public origin of the gateway's **proxy listener**
+   * (`FERRUM_GATEWAY_PUBLIC_URL`), used to build each API's `invoke_url`.
+   *
+   * Not {@link EdgeConfig.adminUrl} (the control plane) and not
+   * {@link NexusConfig.publicUrl} (the portal). `undefined` when unset, in
+   * which case only the `gateway.public_url` setting can supply one.
+   */
+  gatewayPublicUrl: string | undefined;
   /** Optional PEM CA bundle path for a TLS-protected Admin API. */
   caFile: string | undefined;
   /** Set to allow a plaintext `http://` Admin URL on a non-loopback host. */
@@ -267,6 +277,7 @@ const envSchema = z.object({
   FERRUM_ADMIN_JWT_ISSUER: stringish('ferrum-edge'),
   FERRUM_ADMIN_JWT_AUDIENCE: optionalString(),
   FERRUM_NAMESPACE: stringish(DEFAULT_FERRUM_NAMESPACE),
+  FERRUM_GATEWAY_PUBLIC_URL: optionalString(),
   FERRUM_ADMIN_CA_FILE: optionalString(),
   FERRUM_ADMIN_ALLOW_INSECURE_HTTP: boolish(false),
   FERRUM_ADMIN_TIMEOUT_MS: intish(5_000, 250, 60_000),
@@ -341,6 +352,19 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     );
   }
 
+  // ── Gateway proxy-listener origin ────────────────────────────────────────
+  // Optional: with neither this nor the `gateway.public_url` setting, APIs
+  // report a null `invoke_url` rather than a guessed address.
+  let gatewayPublicUrl: string | undefined;
+  if (raw.FERRUM_GATEWAY_PUBLIC_URL !== undefined) {
+    const normalized = normalizeGatewayPublicUrl(raw.FERRUM_GATEWAY_PUBLIC_URL);
+    if (normalized === null) {
+      problems.push(`FERRUM_GATEWAY_PUBLIC_URL ${GATEWAY_PUBLIC_URL_RULE}`);
+    } else {
+      gatewayPublicUrl = normalized;
+    }
+  }
+
   // ── Proxy trust and cookie policy ────────────────────────────────────────
   // Two independent decisions. `NEXUS_TRUST_PROXY=true` survives only as an
   // alias for "one hop", so an existing deployment keeps working.
@@ -389,6 +413,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
       jwtIssuer: raw.FERRUM_ADMIN_JWT_ISSUER,
       jwtAudience: raw.FERRUM_ADMIN_JWT_AUDIENCE,
       namespace: raw.FERRUM_NAMESPACE,
+      gatewayPublicUrl,
       caFile: raw.FERRUM_ADMIN_CA_FILE,
       allowInsecureHttp: raw.FERRUM_ADMIN_ALLOW_INSECURE_HTTP,
       timeoutMs: raw.FERRUM_ADMIN_TIMEOUT_MS,

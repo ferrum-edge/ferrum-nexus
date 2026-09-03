@@ -28,6 +28,7 @@ import type {
   CredentialType,
   EdgeHealth,
   EmailTemplate,
+  GatewaySettings,
   Grant,
   GrantStatus,
   IsoTimestamp,
@@ -627,6 +628,8 @@ export interface AdminSettingsResponse {
   captcha: CaptchaAdminSettings;
   smtp: SmtpSettings;
   registration: RegistrationSettings;
+  /** Public origin of the gateway's proxy listener, for the catalog's invoke URLs. */
+  gateway: GatewaySettings;
 }
 
 /** `PUT /api/admin/settings` — every section is optional; omitted ones are untouched. */
@@ -649,6 +652,14 @@ export interface UpdateSettingsRequest {
     from_address?: string | null;
   };
   registration?: Partial<RegistrationSettings>;
+  gateway?: {
+    /**
+     * Absolute `http(s)` origin with no path, query or credentials; a trailing
+     * slash is stripped. `null` clears the stored value and falls back to
+     * `FERRUM_GATEWAY_PUBLIC_URL`.
+     */
+    public_url?: string | null;
+  };
 }
 
 /** `PUT /api/admin/settings` */

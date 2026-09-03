@@ -45,9 +45,41 @@ describe('loadConfig', () => {
     assert.equal(config.edge.jwtTtlSeconds, 60);
     assert.equal(config.edge.jwtIssuer, 'ferrum-edge');
     assert.equal(config.edge.jwtAudience, undefined);
+    assert.equal(config.edge.gatewayPublicUrl, undefined);
     assert.equal(config.edge.maxCredentialsPerType, 2);
     assert.equal(config.smtp.port, 587);
     assert.equal(config.smtp.from, 'Ferrum Nexus <no-reply@example.com>');
+  });
+
+  describe('FERRUM_GATEWAY_PUBLIC_URL', () => {
+    it('normalises an origin and strips a trailing slash', () => {
+      const config = loadConfig(
+        baseEnv({ FERRUM_GATEWAY_PUBLIC_URL: 'https://api.example.com:8443/' }),
+      );
+      assert.equal(config.edge.gatewayPublicUrl, 'https://api.example.com:8443');
+    });
+
+    it('treats a blank value as unset', () => {
+      assert.equal(
+        loadConfig(baseEnv({ FERRUM_GATEWAY_PUBLIC_URL: '  ' })).edge.gatewayPublicUrl,
+        undefined,
+      );
+    });
+
+    for (const value of [
+      'https://api.example.com/v1',
+      'https://api.example.com?x=1',
+      'https://user:pass@api.example.com',
+      'ftp://api.example.com',
+      'api.example.com',
+    ]) {
+      it(`rejects ${value}`, () => {
+        expectConfigError(
+          baseEnv({ FERRUM_GATEWAY_PUBLIC_URL: value }),
+          'FERRUM_GATEWAY_PUBLIC_URL',
+        );
+      });
+    }
   });
 
   it('requires NEXUS_SECRET_KEY and FERRUM_ADMIN_JWT_SECRET', () => {
