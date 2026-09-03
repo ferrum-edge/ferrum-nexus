@@ -113,6 +113,21 @@ describe('admin settings', () => {
       assert.equal(settings.branding.tagline, 'Set by an ordinary admin');
     });
 
+    it('lets an ordinary admin publish the gateway address', async () => {
+      // Deliberately not privileged: a proxy-listener origin is published
+      // information, not an escalation path like SMTP or CAPTCHA.
+      const response = await harness.authed(admin, {
+        method: 'PUT',
+        url: '/api/admin/settings',
+        payload: { gateway: { public_url: 'https://gw.example.com' } },
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      assert.equal(
+        response.json<AdminSettingsResponse>().gateway.public_url,
+        'https://gw.example.com',
+      );
+    });
+
     it('lets a super_admin change the same SMTP section', async () => {
       const response = await harness.authed(founder, {
         method: 'PUT',
@@ -121,6 +136,84 @@ describe('admin settings', () => {
       });
       assert.equal(response.statusCode, 200, response.body);
       assert.equal(response.json<AdminSettingsResponse>().smtp.host, 'smtp.trusted.test');
+    });
+  });
+
+  describe('the gateway address', () => {
+    async function put(publicUrl: string | null): Promise<ReturnType<typeof harness.authed>> {
+      return harness.authed(founder, {
+        method: 'PUT',
+        url: '/api/admin/settings',
+        payload: { gateway: { public_url: publicUrl } },
+      });
+    }
+
+    it('reads back null when nothing is stored and no env default is set', async () => {
+      // This harness runs without `FERRUM_GATEWAY_PUBLIC_URL`, so an empty
+      // override means the catalog has no origin at all to offer.
+      await put(null);
+      const response = await harness.authed(founder, {
+        method: 'GET',
+        url: '/api/admin/settings',
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      assert.equal(response.json<AdminSettingsResponse>().gateway.public_url, null);
+    });
+
+    it('round-trips an origin and strips a trailing slash', async () => {
+      const saved = await put('https://api.example.com/');
+      assert.equal(saved.statusCode, 200, saved.body);
+      assert.equal(
+        saved.json<AdminSettingsResponse>().gateway.public_url,
+        'https://api.example.com',
+      );
+
+      const reread = await harness.authed(founder, {
+        method: 'GET',
+        url: '/api/admin/settings',
+      });
+      assert.equal(
+        reread.json<AdminSettingsResponse>().gateway.public_url,
+        'https://api.example.com',
+      );
+    });
+
+    it('keeps a non-default port', async () => {
+      const saved = await put('http://127.0.0.1:8000');
+      assert.equal(saved.statusCode, 200, saved.body);
+      assert.equal(saved.json<AdminSettingsResponse>().gateway.public_url, 'http://127.0.0.1:8000');
+    });
+
+    it('records the key name, not the value, in the audit row', async () => {
+      const rows = await harness.auditRows('admin.settings_update');
+      const named = rows.filter((row) =>
+        JSON.stringify(row.details).includes('gateway.public_url'),
+      );
+      assert.ok(named.length > 0, 'the changed key is named');
+      assert.ok(
+        named.every((row) => !JSON.stringify(row.details).includes('127.0.0.1:8000')),
+        'the value itself never lands in the log',
+      );
+    });
+
+    for (const [label, value] of [
+      ['a path', 'https://api.example.com/v1'],
+      ['a query string', 'https://api.example.com?x=1'],
+      ['embedded credentials', 'https://user:pass@api.example.com'],
+      ['a non-http scheme', 'ftp://api.example.com'],
+      ['a bare hostname', 'api.example.com'],
+    ] as const) {
+      it(`refuses ${label}`, async () => {
+        const response = await put(value);
+        assert.equal(response.statusCode, 400, response.body);
+        assert.equal(errorCode(response.body), 'VALIDATION_FAILED');
+      });
+    }
+
+    it('clears the override with null', async () => {
+      const cleared = await put(null);
+      assert.equal(cleared.statusCode, 200, cleared.body);
+      assert.equal(cleared.json<AdminSettingsResponse>().gateway.public_url, null);
     });
   });
 

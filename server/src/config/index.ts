@@ -18,6 +18,7 @@ import { z } from 'zod';
 import { DEFAULT_FERRUM_NAMESPACE, DEFAULT_SESSION_TTL_SECONDS } from '@ferrum-nexus/shared';
 import type { DbDriver } from '@ferrum-nexus/shared';
 import { NexusError } from '../lib/errors.js';
+import { GATEWAY_PUBLIC_URL_RULE, normalizeGatewayPublicUrl } from '../lib/gateway-url.js';
 
 /** Raw environment shape accepted by {@link loadConfig}. */
 export type EnvRecord = Record<string, string | undefined>;
@@ -76,6 +77,15 @@ export interface EdgeConfig {
   jwtAudience: string | undefined;
   /** Namespace sent in `X-Ferrum-Namespace` on every call. */
   namespace: string;
+  /**
+   * Default public origin of the gateway's **proxy listener**
+   * (`FERRUM_GATEWAY_PUBLIC_URL`), used to build each API's `invoke_url`.
+   *
+   * Not {@link EdgeConfig.adminUrl} (the control plane) and not
+   * {@link NexusConfig.publicUrl} (the portal). `undefined` when unset, in
+   * which case only the `gateway.public_url` setting can supply one.
+   */
+  gatewayPublicUrl: string | undefined;
   /** Optional PEM CA bundle path for a TLS-protected Admin API. */
   caFile: string | undefined;
   /** Set to allow a plaintext `http://` Admin URL on a non-loopback host. */
@@ -84,6 +94,26 @@ export interface EdgeConfig {
   timeoutMs: number;
   /** Mirror of the gateway's `FERRUM_MAX_CREDENTIALS_PER_TYPE` (append cap). */
   maxCredentialsPerType: number;
+  /** How Edge should store the counters of every rate limit Nexus writes. */
+  rateLimit: EdgeRateLimitSyncConfig;
+}
+
+/**
+ * Counter storage for the `rate_limiting` plugin configs Nexus writes.
+ *
+ * Edge keeps rate-limit counters **per gateway process** unless a rule names a
+ * Redis endpoint, so a portal in front of N data-plane replicas enforces N
+ * times the quota the provider chose. There is no gateway-level environment
+ * variable for this — the endpoint lives in each plugin config — which is why
+ * it is configured on Nexus and stamped onto every rate limit it writes.
+ */
+export interface EdgeRateLimitSyncConfig {
+  /** `local` (default, per process) or `redis` (shared across replicas). */
+  syncMode: 'local' | 'redis';
+  /** `redis://` or `rediss://` endpoint; only set when `syncMode` is `redis`. */
+  redisUrl: string | undefined;
+  /** Upgrade a `redis://` endpoint to TLS. */
+  redisTls: boolean;
 }
 
 /** SMTP configuration; may be overridden at runtime from encrypted `app_settings`. */
@@ -267,10 +297,23 @@ const envSchema = z.object({
   FERRUM_ADMIN_JWT_ISSUER: stringish('ferrum-edge'),
   FERRUM_ADMIN_JWT_AUDIENCE: optionalString(),
   FERRUM_NAMESPACE: stringish(DEFAULT_FERRUM_NAMESPACE),
+  FERRUM_GATEWAY_PUBLIC_URL: optionalString(),
   FERRUM_ADMIN_CA_FILE: optionalString(),
   FERRUM_ADMIN_ALLOW_INSECURE_HTTP: boolish(false),
   FERRUM_ADMIN_TIMEOUT_MS: intish(5_000, 250, 60_000),
   FERRUM_MAX_CREDENTIALS_PER_TYPE: intish(2, 1, 10),
+  FERRUM_RATE_LIMIT_SYNC_MODE: z
+    .string()
+    .optional()
+    .transform((raw, ctx) => {
+      const value = (raw ?? '').trim().toLowerCase();
+      if (value === '') return 'local' as const;
+      if (value === 'local' || value === 'redis') return value;
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'must be local or redis' });
+      return z.NEVER;
+    }),
+  FERRUM_RATE_LIMIT_REDIS_URL: optionalString(),
+  FERRUM_RATE_LIMIT_REDIS_TLS: boolish(false),
 
   NEXUS_SMTP_HOST: optionalString(),
   NEXUS_SMTP_PORT: intish(587, 1, 65_535),
@@ -341,6 +384,19 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     );
   }
 
+  // ── Gateway proxy-listener origin ────────────────────────────────────────
+  // Optional: with neither this nor the `gateway.public_url` setting, APIs
+  // report a null `invoke_url` rather than a guessed address.
+  let gatewayPublicUrl: string | undefined;
+  if (raw.FERRUM_GATEWAY_PUBLIC_URL !== undefined) {
+    const normalized = normalizeGatewayPublicUrl(raw.FERRUM_GATEWAY_PUBLIC_URL);
+    if (normalized === null) {
+      problems.push(`FERRUM_GATEWAY_PUBLIC_URL ${GATEWAY_PUBLIC_URL_RULE}`);
+    } else {
+      gatewayPublicUrl = normalized;
+    }
+  }
+
   // ── Proxy trust and cookie policy ────────────────────────────────────────
   // Two independent decisions. `NEXUS_TRUST_PROXY=true` survives only as an
   // alias for "one hop", so an existing deployment keeps working.
@@ -355,6 +411,20 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     nodeEnv !== 'development',
     problems,
   );
+
+  // ── Redis-backed rate limits need an endpoint ────────────────────────────
+  // Edge validates `redis_url` against `^rediss?://…` and rejects the whole
+  // plugin config otherwise, which would surface as a `502 EDGE_ERROR` on the
+  // provider's *publish* rather than as a misconfigured portal. Catch it here.
+  const redisUrl = raw.FERRUM_RATE_LIMIT_REDIS_URL;
+  if (raw.FERRUM_RATE_LIMIT_SYNC_MODE === 'redis' && redisUrl === undefined) {
+    problems.push('FERRUM_RATE_LIMIT_REDIS_URL is required when FERRUM_RATE_LIMIT_SYNC_MODE=redis');
+  }
+  if (redisUrl !== undefined && !/^rediss?:\/\/[^\s]+$/.test(redisUrl)) {
+    problems.push(
+      'FERRUM_RATE_LIMIT_REDIS_URL must be a redis:// or rediss:// URL, e.g. redis://127.0.0.1:6379/0',
+    );
+  }
 
   // ── Non-sqlite drivers need a connection URL ─────────────────────────────
   if (raw.NEXUS_DB_DRIVER !== 'sqlite' && raw.NEXUS_DB_URL === '') {
@@ -389,10 +459,18 @@ export function loadConfig(env: EnvRecord): NexusConfig {
       jwtIssuer: raw.FERRUM_ADMIN_JWT_ISSUER,
       jwtAudience: raw.FERRUM_ADMIN_JWT_AUDIENCE,
       namespace: raw.FERRUM_NAMESPACE,
+      gatewayPublicUrl,
       caFile: raw.FERRUM_ADMIN_CA_FILE,
       allowInsecureHttp: raw.FERRUM_ADMIN_ALLOW_INSECURE_HTTP,
       timeoutMs: raw.FERRUM_ADMIN_TIMEOUT_MS,
       maxCredentialsPerType: raw.FERRUM_MAX_CREDENTIALS_PER_TYPE,
+      rateLimit: {
+        syncMode: raw.FERRUM_RATE_LIMIT_SYNC_MODE,
+        // Carried only in `redis` mode: a stale endpoint left in the
+        // environment must not end up on a plugin config that says `local`.
+        redisUrl: raw.FERRUM_RATE_LIMIT_SYNC_MODE === 'redis' ? redisUrl : undefined,
+        redisTls: raw.FERRUM_RATE_LIMIT_REDIS_TLS,
+      },
     },
     smtp: {
       host: raw.NEXUS_SMTP_HOST,

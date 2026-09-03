@@ -6,14 +6,39 @@
  *
  * ```
  * apis row ─── proxy  name `nexus-<slug>`, listen_path `/<ns>/<slug>`
+ *               │      allowed_methods, backend_*_timeout_ms, circuit_breaker,
+ *               │      allowed_ws_origins — settings on the proxy itself
  *               │
  *               │  proxy.plugins[] ── the association list; this is what makes
  *               │                     a config run at all
  *               ├─ plugin_config    the auth plugin (key_auth | basic_auth | jwt_auth)
  *               ├─ plugin_config    access_control, only when `requestable`
  *               ├─ plugin_config    rate_limiting, only when a rate limit is set
- *               └─ plugin_config    cors, only when a CORS policy is set
+ *               ├─ plugin_config    cors, only when a CORS policy is set
+ *               └─ plugin_config    openapi_validator, only in `routes` mode
  * ```
+ *
+ * The `openapi_validator` is the one config generated from the *spec* rather
+ * than from a setting on the row, so it is regenerated whenever either input
+ * moves: a new spec revision, and a CORS change (which decides whether the
+ * `OPTIONS` preflight is bypassed). See `spec-enforcement.ts` for what the
+ * generated config does and — just as importantly — does not enforce.
+ *
+ * ## Two settings are not free-standing
+ *
+ * `allowed_methods` and `allowed_ws_origins` live on the proxy but are partly
+ * *derived from the CORS policy*, because Edge evaluates them before, and
+ * independently of, the `cors` plugin:
+ *
+ * - a method outside `allowed_methods` is `405`ed **before any plugin runs**,
+ *   so the list written to the gateway carries `OPTIONS` whenever the API has a
+ *   CORS policy, or every browser preflight would fail;
+ * - the `cors` plugin does not run on a WebSocket upgrade at all, and an
+ *   HTTP proxy on Edge accepts upgrades on the same listen path, so the CORS
+ *   origins are mirrored into `allowed_ws_origins` as the CSWSH check.
+ *
+ * The `apis` row stores the provider's own method list and nothing for the WS
+ * origins; both derivations are recomputed whenever either input changes.
  *
  * **A plugin config with a matching `proxy_id` is inert until the proxy's own
  * `plugins[]` names it.** Edge decides what to run in `plugin_cache.rs`
@@ -67,9 +92,15 @@
  * @see ref-edge-admin.md §3 (proxies), §7 (access_control), §8 (plugin configs)
  */
 
+import { isDeepStrictEqual } from 'node:util';
+
 import {
   ACCESS_CONTROL_PLUGIN,
   CREDENTIAL_TYPE_FOR_PLUGIN,
+  DEFAULT_BACKEND_CONNECT_TIMEOUT_MS,
+  DEFAULT_BACKEND_READ_TIMEOUT_MS,
+  DEFAULT_BACKEND_WRITE_TIMEOUT_MS,
+  DEFAULT_SPEC_ENFORCEMENT,
   RATE_LIMIT_PLUGIN,
   aclGroupForApi,
   listenPathFor,
@@ -79,18 +110,21 @@ import {
   type ApiSpecSummary,
   type ApiStats,
   type ApiStatus,
+  type ApiTimeouts,
   type AuthPluginType,
   type CorsConfig,
   type CreateTestConsumerResponse,
+  type HttpMethod,
   type Paginated,
   type PublishApiRequest,
   type RateLimitConfig,
+  type SpecEnforcementLevel,
   type UpdateApiRequest,
   type Uuid,
 } from '@ferrum-nexus/shared';
 
 import { AuditAction, type AuditService } from '../audit/service.js';
-import type { NexusConfig } from '../config/index.js';
+import type { EdgeRateLimitSyncConfig, NexusConfig } from '../config/index.js';
 import type {
   ApiFilter,
   ApiRecord,
@@ -102,6 +136,7 @@ import type {
 import type { CredentialsService } from '../credentials/service.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import type {
+  EdgeCircuitBreakerConfig,
   EdgePluginAssociation,
   EdgePluginConfig,
   EdgePluginConfigWrite,
@@ -112,6 +147,7 @@ import type {
 import { conflict, forbidden, notFound, specInvalid, validationFailed } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
+import { presentApi, type GatewayUrlSource } from './present.js';
 import {
   assertUpstreamAllowed,
   formatUpstreamUrl,
@@ -119,9 +155,11 @@ import {
   parseUpstreamUrl,
   resolveUpstream,
   slugify,
+  type SpecPath,
   type SpecUpstream,
   type UpstreamPolicy,
 } from './oas.js';
+import { OPENAPI_VALIDATOR_PLUGIN, validatorConfigFor } from './spec-enforcement.js';
 
 /** Result of {@link PublishingService.publish} and `updateSpec`. */
 export interface PublishResult {
@@ -140,25 +178,16 @@ export interface ApiListFilter {
 /** Publishing operations. All of them are provider-or-above. */
 export interface PublishingService {
   /** APIs the caller may administer: their own, or every API for an admin. */
-  list(
-    actor: UserRecord,
-    filter?: ApiListFilter,
-    options?: ListOptions,
-  ): Promise<Paginated<ApiRecord>>;
+  list(actor: UserRecord, filter?: ApiListFilter, options?: ListOptions): Promise<Paginated<Api>>;
   /** One API with its current spec metadata and request/grant counters. */
   get(
     actor: UserRecord,
     apiId: Uuid,
-  ): Promise<{ api: ApiRecord; spec: ApiSpecSummary | null; stats: ApiStats }>;
+  ): Promise<{ api: Api; spec: ApiSpecSummary | null; stats: ApiStats }>;
   /** Validate the spec, build the Edge objects, then persist the rows. */
   publish(owner: UserRecord, input: PublishApiRequest, ip?: string | null): Promise<PublishResult>;
   /** Change safe runtime settings; reconciles the Edge plugin configs. */
-  update(
-    actor: UserRecord,
-    apiId: Uuid,
-    patch: UpdateApiRequest,
-    ip?: string | null,
-  ): Promise<ApiRecord>;
+  update(actor: UserRecord, apiId: Uuid, patch: UpdateApiRequest, ip?: string | null): Promise<Api>;
   /** Store a new spec revision and make it current. */
   updateSpec(
     actor: UserRecord,
@@ -188,6 +217,8 @@ export interface PublishingServiceDeps {
   audit: AuditService;
   notifications: NotificationsService;
   credentials: CredentialsService;
+  /** Resolves the gateway origin each returned API's `invoke_url` is built from. */
+  settings: GatewayUrlSource;
 }
 
 /* ── Edge plugin config bodies ──────────────────────────────────────────── */
@@ -256,7 +287,10 @@ export function accessControlConfig(apiId: Uuid): EdgePluginSettings {
  * `limit_by: 'consumer'` is the whole point of a portal quota: the limit is per
  * authenticated identity, not per source IP.
  */
-export function rateLimitConfig(rateLimit: RateLimitConfig): EdgePluginSettings {
+export function rateLimitConfig(
+  rateLimit: RateLimitConfig,
+  sync: EdgeRateLimitSyncConfig,
+): EdgePluginSettings {
   return {
     limit_by: 'consumer',
     expose_headers: true,
@@ -267,6 +301,13 @@ export function rateLimitConfig(rateLimit: RateLimitConfig): EdgePluginSettings 
         max_requests: rateLimit.limit,
       },
     ],
+    // Only stamped in `redis` mode. `local` is Edge's own default, and sending
+    // it explicitly would pin a value the portal cannot otherwise express while
+    // adding two keys (`redis_url` is *required* alongside `sync_mode: redis`)
+    // that must not appear at all in the local case.
+    ...(sync.syncMode === 'redis' && sync.redisUrl !== undefined
+      ? { sync_mode: 'redis', redis_url: sync.redisUrl, redis_tls: sync.redisTls }
+      : {}),
   };
 }
 
@@ -288,6 +329,127 @@ export function corsPluginConfig(cors: CorsConfig): EdgePluginSettings {
   };
 }
 
+/**
+ * Config for `openapi_validator`, or `null` when the API is `docs_only`.
+ *
+ * The two inputs beyond the enforcement level are the document's declared
+ * paths and the CORS policy, which is why this is recomputed on a spec upload
+ * and on a CORS change and not only when the level itself moves.
+ *
+ * @throws NexusError `SPEC_INVALID` when `routes` is asked for but the document
+ * declares no operation to enforce. Edge refuses an empty `operations` array,
+ * so the only alternatives are a row claiming enforcement the gateway is not
+ * doing, or a proxy that rejects every request — both worse than refusing.
+ */
+export function openapiValidatorConfig(
+  enforcement: SpecEnforcementLevel,
+  paths: SpecPath[],
+  listenPath: string,
+  cors: CorsConfig | null,
+): EdgePluginSettings | null {
+  if (enforcement !== 'routes') return null;
+  const config = validatorConfigFor(paths, listenPath, { hasCors: cors !== null });
+  if (!config) {
+    throw specInvalid(
+      "OpenAPI enforcement is set to 'routes', but the document declares no operations for the " +
+        'gateway to allow; add a path with at least one method, or set the enforcement level back ' +
+        "to 'docs_only'",
+      { field: 'spec_enforcement', reason: 'no_operations' },
+    );
+  }
+  return config;
+}
+
+/* ── Proxy runtime settings ─────────────────────────────────────────────── */
+
+/**
+ * Edge's own `CircuitBreakerConfig` defaults, written verbatim whenever the
+ * provider turns the breaker on.
+ *
+ * Every field has a serde default, so `{}` would also be accepted — but a proxy
+ * document that spells its thresholds out is one an operator can read, and
+ * pinning them means a gateway upgrade that moved a default cannot silently
+ * change the failure policy of an already-published API. The portal deliberately
+ * offers no way to tune them: that is an operator's decision, made on the proxy.
+ */
+export const DEFAULT_CIRCUIT_BREAKER: EdgeCircuitBreakerConfig = {
+  failure_threshold: 5,
+  success_threshold: 3,
+  timeout_seconds: 30,
+  failure_status_codes: [500, 502, 503, 504],
+  half_open_max_requests: 1,
+  trip_on_connection_errors: true,
+};
+
+/**
+ * The proxy's `allowed_methods` as it must reach the gateway.
+ *
+ * Edge rejects a method outside the list with `405` **before any plugin runs**,
+ * including the `cors` plugin. A CORS policy is therefore only real if the
+ * browser's `OPTIONS` preflight survives long enough to reach it, so the list
+ * written to the gateway carries `OPTIONS` whenever the API has a CORS policy —
+ * while the `apis` row keeps the provider's own list, so removing CORS later
+ * removes the implied `OPTIONS` with it.
+ */
+export function proxyAllowedMethods(
+  methods: HttpMethod[] | null,
+  cors: CorsConfig | null,
+): HttpMethod[] | null {
+  if (methods === null) return null;
+  if (cors === null || methods.includes('OPTIONS')) return methods;
+  return [...methods, 'OPTIONS'];
+}
+
+/**
+ * The proxy's `allowed_ws_origins`, derived from the API's CORS policy.
+ *
+ * Edge treats WebSocket as transparent on an `http(s)` proxy, so publishing an
+ * HTTP API also publishes WS on the same listen path — and the `cors` plugin
+ * does **not** run on an upgrade. `allowed_ws_origins` is the separate origin
+ * check that does, and its default (`[]`) is "no check at all", which is
+ * Cross-Site WebSocket Hijacking waiting to happen.
+ *
+ * A provider who named the browser origins allowed to call the API has already
+ * expressed the answer, so the same list is mirrored here. Anything that is not
+ * a plain `scheme://host[:port]` origin — `*`, or one of Edge's wildcard/
+ * `StringMatch` forms — is dropped, because the WS check is an exact,
+ * case-insensitive string comparison and a pattern would silently never match.
+ * No CORS policy, or a wildcard one, means `[]`: an API deliberately open to
+ * every browser origin gains nothing from a WS allow-list, and a half-populated
+ * one would be worse than none.
+ */
+export function wsOriginsFor(cors: CorsConfig | null): string[] {
+  if (cors === null) return [];
+  if (cors.allowed_origins.includes('*')) return [];
+  return cors.allowed_origins.filter((origin) =>
+    /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^*\s]+$/.test(origin),
+  );
+}
+
+/** The proxy fields the three timeout settings map onto. */
+function timeoutFields(timeouts: ApiTimeouts | null): Record<string, number> {
+  return {
+    backend_connect_timeout_ms: timeouts?.connect_ms ?? DEFAULT_BACKEND_CONNECT_TIMEOUT_MS,
+    backend_read_timeout_ms: timeouts?.read_ms ?? DEFAULT_BACKEND_READ_TIMEOUT_MS,
+    backend_write_timeout_ms: timeouts?.write_ms ?? DEFAULT_BACKEND_WRITE_TIMEOUT_MS,
+  };
+}
+
+/**
+ * What each proxy setting reverts to when the provider clears it.
+ *
+ * Used by the undo step: `PUT /proxies/{id}` echoes the document the preceding
+ * `GET` returned, so a field the gateway did not report has to be restored to
+ * the gateway's documented default rather than left `undefined`, which the
+ * whole-resource replace would drop.
+ */
+const PROXY_SETTING_DEFAULTS: Readonly<Record<string, unknown>> = {
+  allowed_methods: null,
+  allowed_ws_origins: [],
+  circuit_breaker: null,
+  ...timeoutFields(null),
+};
+
 /** Proxy name for an API's slug — a stable, greppable marker on the gateway. */
 export function proxyNameForSlug(slug: string): string {
   return `nexus-${slug}`;
@@ -306,11 +468,29 @@ function safeDefaultUpstream(rawSpec: string): SpecUpstream | null {
   }
 }
 
+/**
+ * Declared paths of an already-stored revision, or `[]` when it can no longer
+ * be parsed — the same tolerance {@link safeDefaultUpstream} applies, for the
+ * same reason.
+ *
+ * An empty result is not silently ignored: {@link openapiValidatorConfig}
+ * turns it into a `SPEC_INVALID`, so switching enforcement on for an API whose
+ * stored document no longer parses fails loudly instead of recording a level
+ * the gateway is not enforcing.
+ */
+function safeSpecPaths(rawSpec: string): SpecPath[] {
+  try {
+    return parseOpenApiSpec(rawSpec).paths;
+  } catch {
+    return [];
+  }
+}
+
 /* ── Service ────────────────────────────────────────────────────────────── */
 
 /** Build the publishing service. */
 export function createPublishingService(deps: PublishingServiceDeps): PublishingService {
-  const { config, store, edge, audit, notifications, credentials } = deps;
+  const { config, store, edge, audit, notifications, credentials, settings } = deps;
   const namespace = config.edge.namespace;
   // Applied at every point a backend is about to be written to the gateway:
   // publish, PATCH `upstream_url`, and a spec revision the proxy follows.
@@ -478,7 +658,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   }
 
   /**
-   * Bring one *optional* plugin to `settings`, or remove it when `settings` is
+   * Bring one *optional* plugin to `pluginSettings`, or remove it when that is
    * `null`, pushing the step that undoes whatever it did onto `undo`.
    *
    * `rate_limiting` and `cors` are the same problem — an optional, replaceable,
@@ -490,11 +670,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     proxyId: string,
     existing: EdgePluginConfig | undefined,
     pluginName: string,
-    settings: EdgePluginSettings | null,
+    pluginSettings: EdgePluginSettings | null,
     subject: string,
     undo: (() => Promise<void>)[],
   ): Promise<void> {
-    if (settings === null) {
+    if (pluginSettings === null) {
       if (!existing) return;
       undo.push(undoRemoval(proxyId, existing, subject));
       await disassociate(proxyId, [existing.id], subject);
@@ -510,7 +690,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         enabled,
         config,
       });
-      await edge.pluginConfigs.replace(existing.id, body(settings, true), subject);
+      await edge.pluginConfigs.replace(existing.id, body(pluginSettings, true), subject);
       undo.push(async () => {
         await edge.pluginConfigs.replace(
           existing.id,
@@ -521,7 +701,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       return;
     }
 
-    const attached = await attach(proxyId, pluginName, settings, subject);
+    const attached = await attach(proxyId, pluginName, pluginSettings, subject);
     undo.push(undoAttach(proxyId, attached.id, subject));
     await associate(proxyId, [attached.id], subject);
   }
@@ -556,7 +736,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   return {
     assertCanAdminister,
 
-    async list(actor, filter = {}, options): Promise<Paginated<ApiRecord>> {
+    async list(actor, filter = {}, options): Promise<Paginated<Api>> {
       const isAdmin = roleAtLeast(actor.role, 'admin');
       // A provider only ever sees their own APIs; `mine` is the admin's opt-in.
       const owner = !isAdmin || filter.mine ? actor.id : filter.owner_user_id;
@@ -565,7 +745,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         ...(filter.status !== undefined ? { status: filter.status } : {}),
         ...(filter.q !== undefined ? { q: filter.q } : {}),
       };
-      return store.apis.list(storeFilter, options);
+      const [page, gatewayUrl] = await Promise.all([
+        store.apis.list(storeFilter, options),
+        settings.getGatewayPublicUrl(),
+      ]);
+      return { ...page, items: page.items.map((row) => presentApi(row, gatewayUrl)) };
     },
 
     async get(actor, apiId) {
@@ -578,7 +762,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         store.accessRequests.count({ api_id: api.id }),
       ]);
       return {
-        api,
+        api: presentApi(api, await settings.getGatewayPublicUrl()),
         spec: spec ? specSummary(spec) : null,
         stats: { pending_requests: pending, active_grants: active, total_requests: total },
       };
@@ -599,6 +783,20 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const listenPath = listenPathFor(namespace, slug);
       const version = input.version?.trim() || parsed.version;
 
+      // Resolved once: the proxy body, the `apis` row and the audit row must all
+      // agree, and `allowed_methods` is the provider's list *plus* the `OPTIONS`
+      // a CORS policy implies — only on the gateway, never on the row.
+      const cors = input.cors ?? null;
+      const methods = input.allowed_methods ?? null;
+      const allowedMethods = proxyAllowedMethods(methods, cors);
+      const timeouts = input.timeouts ?? null;
+      const circuitBreaker = input.circuit_breaker ?? false;
+      const specEnforcement = input.spec_enforcement ?? DEFAULT_SPEC_ENFORCEMENT;
+      // Built before the first gateway write: a document with nothing to
+      // enforce must fail the request outright, not halfway through creating a
+      // proxy that would then have to be rolled back.
+      const validator = openapiValidatorConfig(specEnforcement, parsed.paths, listenPath, cors);
+
       const created: { proxyId?: string; pluginIds: string[] } = { pluginIds: [] };
       let persisted: { api: ApiRecord; spec: ApiSpecRecord };
       try {
@@ -611,6 +809,14 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             backend_port: upstream.port,
             ...(upstream.basePath ? { backend_path: upstream.basePath } : {}),
             strip_listen_path: true,
+            // The runtime settings go on at creation rather than in a later
+            // `PUT`: they are part of what the API *is*, and a proxy that spent
+            // even one round trip accepting every method or with no timeout
+            // ceiling would be live in a shape the portal never promised.
+            ...(allowedMethods !== null ? { allowed_methods: allowedMethods } : {}),
+            ...(timeouts !== null ? timeoutFields(timeouts) : {}),
+            ...(circuitBreaker ? { circuit_breaker: DEFAULT_CIRCUIT_BREAKER } : {}),
+            allowed_ws_origins: wsOriginsFor(cors),
           },
           owner.id,
         );
@@ -637,14 +843,18 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           const limiter = await attach(
             proxy.id,
             RATE_LIMIT_PLUGIN,
-            rateLimitConfig(input.rate_limit),
+            rateLimitConfig(input.rate_limit, config.edge.rateLimit),
             owner.id,
           );
           created.pluginIds.push(limiter.id);
         }
-        if (input.cors) {
-          const cors = await attach(proxy.id, CORS_PLUGIN, corsPluginConfig(input.cors), owner.id);
-          created.pluginIds.push(cors.id);
+        if (cors) {
+          const corsPlugin = await attach(proxy.id, CORS_PLUGIN, corsPluginConfig(cors), owner.id);
+          created.pluginIds.push(corsPlugin.id);
+        }
+        if (validator) {
+          const enforcer = await attach(proxy.id, OPENAPI_VALIDATOR_PLUGIN, validator, owner.id);
+          created.pluginIds.push(enforcer.id);
         }
 
         // None of the above is live yet. A proxy-scoped plugin config only runs
@@ -675,7 +885,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             requestable: input.requestable,
             auth_plugin: input.auth_plugin,
             rate_limit: input.rate_limit ?? null,
-            cors: input.cors ?? null,
+            cors,
+            // The provider's own list, without the CORS-implied `OPTIONS`.
+            allowed_methods: methods,
+            timeouts,
+            circuit_breaker: circuitBreaker,
+            spec_enforcement: specEnforcement,
             status: 'published',
             visibility: input.visibility,
           });
@@ -723,7 +938,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           requestable: input.requestable,
           visibility: input.visibility,
           rate_limit: input.rate_limit ?? null,
-          cors: input.cors ?? null,
+          cors,
+          allowed_methods: methods,
+          timeouts,
+          circuit_breaker: circuitBreaker,
+          spec_enforcement: specEnforcement,
           upstream: `${upstream.scheme}://${upstream.host}:${upstream.port}`,
           spec_paths: parsed.pathCount,
           spec_operations: parsed.operationCount,
@@ -731,10 +950,13 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         ip,
       );
 
-      return { api, spec: specSummary(spec) };
+      return {
+        api: presentApi(api, await settings.getGatewayPublicUrl()),
+        spec: specSummary(spec),
+      };
     },
 
-    async update(actor, apiId, patch, ip = null): Promise<ApiRecord> {
+    async update(actor, apiId, patch, ip = null): Promise<Api> {
       const api = await loadApi(apiId);
       assertCanAdminister(actor, api);
 
@@ -857,7 +1079,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             proxyId,
             findPlugin(plugins, RATE_LIMIT_PLUGIN),
             RATE_LIMIT_PLUGIN,
-            patch.rate_limit === null ? null : rateLimitConfig(patch.rate_limit),
+            patch.rate_limit === null
+              ? null
+              : rateLimitConfig(patch.rate_limit, config.edge.rateLimit),
             actor.id,
             undo,
           );
@@ -878,7 +1102,114 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           changed.push('cors');
         }
 
-        if (changed.length === 0) return api;
+        // ── OpenAPI enforcement ─────────────────────────────────────────
+        // The validator config is generated from three inputs; this PATCH can
+        // move two of them. The level decides whether the plugin exists at all,
+        // and the CORS policy decides whether the browser's `OPTIONS` preflight
+        // is bypassed — without that bypass, adding CORS to a `routes` API would
+        // make every preflight a `400`. The third input is the document, which
+        // `updateSpec` owns.
+        const nextEnforcement = patch.spec_enforcement ?? api.spec_enforcement;
+        const enforcementMoved =
+          patch.spec_enforcement !== undefined && patch.spec_enforcement !== api.spec_enforcement;
+        if (
+          proxyId &&
+          (enforcementMoved || (patch.cors !== undefined && nextEnforcement === 'routes'))
+        ) {
+          const corsAfterPatch = patch.cors === undefined ? api.cors : patch.cors;
+          const current = await store.apiSpecs.findCurrentByApi(api.id);
+          await reconcileOptionalPlugin(
+            proxyId,
+            findPlugin(plugins, OPENAPI_VALIDATOR_PLUGIN),
+            OPENAPI_VALIDATOR_PLUGIN,
+            openapiValidatorConfig(
+              nextEnforcement,
+              current ? safeSpecPaths(current.raw_spec) : [],
+              listenPathFor(api.namespace, api.slug),
+              corsAfterPatch,
+            ),
+            actor.id,
+            undo,
+          );
+        }
+        // Guarded on the proxy like every other gateway-backed field: without
+        // one there is nothing to attach the validator to, and recording a level
+        // the gateway is not enforcing would make the portal claim something
+        // untrue.
+        if (proxyId && enforcementMoved && patch.spec_enforcement !== undefined) {
+          update.spec_enforcement = patch.spec_enforcement;
+          changed.push('spec_enforcement');
+          details.spec_enforcement = patch.spec_enforcement;
+        }
+
+        // ── Proxy runtime settings ──────────────────────────────────────
+        // One read-modify-write for all of them, and only for the ones this
+        // PATCH actually addresses: `undefined` leaves a setting alone,
+        // including whatever an operator set on the proxy by hand, while
+        // `null` writes the gateway's documented default back explicitly —
+        // `PUT` echoes the `GET`, so "reset" is a value, not an omission.
+        //
+        // Guarded on the proxy like every other gateway-backed field: recording
+        // a preference the gateway is not enforcing would make the portal claim
+        // something untrue.
+        if (proxyId) {
+          const nextCors = patch.cors === undefined ? api.cors : patch.cors;
+          const nextMethods =
+            patch.allowed_methods === undefined ? api.allowed_methods : patch.allowed_methods;
+          const proxySettings: Record<string, unknown> = {};
+          // A CORS change re-derives the method list even when the provider did
+          // not touch it: adding a policy has to add `OPTIONS`, and removing one
+          // has to take it away again.
+          if (patch.allowed_methods !== undefined || (patch.cors !== undefined && nextMethods)) {
+            proxySettings.allowed_methods = proxyAllowedMethods(nextMethods, nextCors);
+          }
+          if (patch.timeouts !== undefined)
+            Object.assign(proxySettings, timeoutFields(patch.timeouts));
+          if (patch.circuit_breaker !== undefined) {
+            proxySettings.circuit_breaker = patch.circuit_breaker ? DEFAULT_CIRCUIT_BREAKER : null;
+          }
+          if (patch.cors !== undefined) proxySettings.allowed_ws_origins = wsOriginsFor(nextCors);
+
+          if (Object.keys(proxySettings).length > 0) {
+            let written = false;
+            const before = await mutateProxy(
+              proxyId,
+              (proxy) => {
+                const record = proxy as unknown as Record<string, unknown>;
+                const differs = Object.entries(proxySettings).some(
+                  ([field, value]) => !isDeepStrictEqual(record[field], value),
+                );
+                if (!differs) return null;
+                written = true;
+                return { ...proxy, ...proxySettings };
+              },
+              actor.id,
+            );
+            if (written)
+              undo.push(restoreProxySettings(before, Object.keys(proxySettings), actor.id));
+          }
+
+          if (patch.allowed_methods !== undefined) {
+            // The row keeps the provider's list; the gateway's copy may carry an
+            // extra `OPTIONS` that belongs to the CORS policy, not to this field.
+            update.allowed_methods = patch.allowed_methods;
+            changed.push('allowed_methods');
+          }
+          if (patch.timeouts !== undefined) {
+            update.timeouts = patch.timeouts;
+            changed.push('timeouts');
+          }
+          if (
+            patch.circuit_breaker !== undefined &&
+            patch.circuit_breaker !== api.circuit_breaker
+          ) {
+            update.circuit_breaker = patch.circuit_breaker;
+            changed.push('circuit_breaker');
+          }
+        }
+
+        // A no-op PATCH still answers with the API as the wire describes it.
+        if (changed.length === 0) return presentApi(api, await settings.getGatewayPublicUrl());
 
         const persisted = await store.apis.update(api.id, update);
         if (!persisted) throw notFound('API', apiId);
@@ -908,7 +1239,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         );
       }
 
-      return updated;
+      return presentApi(updated, await settings.getGatewayPublicUrl());
     },
 
     async updateSpec(actor, apiId, specText, version, ip = null): Promise<PublishResult> {
@@ -959,9 +1290,35 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         }
       }
 
+      // The operation table follows the document, so a `routes` API's validator
+      // is regenerated here — before the revision becomes current, in the same
+      // direction and for the same reason as the backend move above. A replace
+      // keeps the config id, so the proxy's association list is untouched and
+      // there is no window in which the plugin is missing.
+      //
+      // Ordered *after* the backend move so its undo runs first on the way
+      // back out: the compensation below unwinds this stack in reverse and
+      // then restores the backend.
+      const undo: (() => Promise<void>)[] = [];
       let spec: ApiSpecRecord;
       let updated: ApiRecord;
       try {
+        if (api.spec_enforcement === 'routes' && api.ferrum_proxy_id) {
+          await reconcileOptionalPlugin(
+            api.ferrum_proxy_id,
+            findPlugin(await pluginsOf(api), OPENAPI_VALIDATOR_PLUGIN),
+            OPENAPI_VALIDATOR_PLUGIN,
+            openapiValidatorConfig(
+              api.spec_enforcement,
+              parsed.paths,
+              listenPathFor(api.namespace, api.slug),
+              api.cors,
+            ),
+            actor.id,
+            undo,
+          );
+        }
+
         const persisted = await store.transaction(async (tx) => {
           const revision = await tx.apiSpecs.create({
             api_id: api.id,
@@ -988,6 +1345,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         spec = persisted.spec;
         updated = persisted.api;
       } catch (error) {
+        for (const step of undo.reverse()) {
+          await step().catch(() => undefined);
+        }
         if (restoreBackend) await restoreBackend().catch(() => undefined);
         throw error;
       }
@@ -1001,12 +1361,16 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           version: nextVersion,
           spec_paths: parsed.pathCount,
           spec_operations: parsed.operationCount,
+          spec_enforcement: api.spec_enforcement,
           backend_updated: backendUpdated,
         },
         ip,
       );
 
-      return { api: updated, spec: specSummary(spec) };
+      return {
+        api: presentApi(updated, await settings.getGatewayPublicUrl()),
+        spec: specSummary(spec),
+      };
     },
 
     async remove(actor, apiId, ip = null): Promise<{ revoked_grants: number }> {
@@ -1186,6 +1550,31 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * association changes a later step of the same PATCH made — those are undone
    * by their own steps, in their own order.
    */
+  /**
+   * Undo step that puts a proxy's runtime settings back where the PATCH found
+   * them.
+   *
+   * Only the fields that were actually written are rewound, on top of a fresh
+   * read, for the same reason {@link restoreProxyBackend} is narrow: a blanket
+   * restore of the captured document would also revert plugin association
+   * changes made by other steps of the same PATCH, which have their own undo.
+   * A field the gateway did not report falls back to its documented default —
+   * a whole-resource `PUT` would otherwise drop it rather than leave it alone.
+   */
+  function restoreProxySettings(
+    previous: EdgeProxy,
+    fields: string[],
+    subject: string,
+  ): () => Promise<void> {
+    const record = previous as unknown as Record<string, unknown>;
+    const restored = Object.fromEntries(
+      fields.map((field) => [field, record[field] ?? PROXY_SETTING_DEFAULTS[field] ?? null]),
+    );
+    return async () => {
+      await mutateProxy(previous.id, (proxy) => ({ ...proxy, ...restored }), subject);
+    };
+  }
+
   function restoreProxyBackend(previous: EdgeProxy, subject: string): () => Promise<void> {
     const backend = {
       backend_scheme: previous.backend_scheme,

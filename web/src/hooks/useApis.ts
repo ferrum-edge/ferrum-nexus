@@ -6,6 +6,7 @@ import {
   type UseQueryResult,
 } from '@tanstack/react-query';
 import type {
+  ApiUsageResponse,
   CreateTestConsumerRequest,
   CreateTestConsumerResponse,
   DeleteApiResponse,
@@ -48,6 +49,24 @@ export function useApi(id: string): UseQueryResult<GetApiResponse> {
     queryKey: queryKeys.apis.detail(id),
     queryFn: () => apisApi.get(id),
     enabled: id.length > 0,
+  });
+}
+
+/**
+ * Gateway counters and backend state for one API.
+ *
+ * Polled every 30s while the page is open. The route answers `200` with
+ * `available: false` when the gateway cannot be read, so a down gateway shows
+ * as a message on the card rather than as a query error; `retry: false` keeps a
+ * genuine failure (a 403, say) from being retried behind the user's back.
+ */
+export function useApiUsage(id: string, enabled = true): UseQueryResult<ApiUsageResponse> {
+  return useQuery({
+    queryKey: queryKeys.apis.usage(id),
+    queryFn: () => apisApi.usage(id),
+    enabled: enabled && id.length > 0,
+    refetchInterval: 30_000,
+    retry: false,
   });
 }
 

@@ -24,6 +24,7 @@
 import type {
   AccessRequestStatus,
   ApiStatus,
+  ApiTimeouts,
   ApiVisibility,
   AuthPluginType,
   CorsConfig,
@@ -33,13 +34,16 @@ import type {
   EmailOutboxStatus,
   EmailTemplateKey,
   GrantStatus,
+  HttpMethod,
   IsoTimestamp,
   NotificationType,
   RateLimitConfig,
   Role,
+  SpecEnforcementLevel,
   UserStatus,
   Uuid,
 } from '@ferrum-nexus/shared';
+import { DEFAULT_SPEC_ENFORCEMENT, isSpecEnforcementLevel } from '@ferrum-nexus/shared';
 
 import { newId, nowIso } from '../../lib/ids.js';
 import type {
@@ -200,6 +204,19 @@ function mapSession(row: Row): SessionRecord {
   };
 }
 
+/**
+ * Decode the `spec_enforcement` column, falling back to `docs_only`.
+ *
+ * The CHECK constraint keeps the domain honest for rows this build wrote, but
+ * a row a newer schema wrote with a level this binary has no generator for
+ * must read back as "the gateway enforces nothing extra" rather than as an
+ * enforcement mode nothing here can reconcile.
+ */
+function specEnforcement(value: unknown): SpecEnforcementLevel {
+  const raw = text(value);
+  return isSpecEnforcementLevel(raw) ? raw : DEFAULT_SPEC_ENFORCEMENT;
+}
+
 function mapApi(row: Row): ApiRecord {
   return {
     id: text(row.id),
@@ -216,6 +233,10 @@ function mapApi(row: Row): ApiRecord {
     auth_plugin: text(row.auth_plugin) as AuthPluginType,
     rate_limit: json<RateLimitConfig | null>(row.rate_limit_json, null),
     cors: json<CorsConfig | null>(row.cors_json, null),
+    allowed_methods: json<HttpMethod[] | null>(row.allowed_methods_json, null),
+    timeouts: json<ApiTimeouts | null>(row.timeouts_json, null),
+    circuit_breaker: bool(row.circuit_breaker),
+    spec_enforcement: specEnforcement(row.spec_enforcement),
     status: text(row.status) as ApiStatus,
     visibility: text(row.visibility) as ApiVisibility,
     created_at: text(row.created_at),
@@ -837,8 +858,9 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
           `INSERT INTO apis
              (id, name, slug, description, owner_user_id, ferrum_proxy_id, upstream_url,
               namespace, version, spec_format, requestable, auth_plugin, rate_limit_json,
-              cors_json, status, visibility, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              cors_json, allowed_methods_json, timeouts_json, circuit_breaker,
+              spec_enforcement, status, visibility, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             meta.id,
             input.name,
@@ -854,6 +876,10 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
             input.auth_plugin,
             encodeJson(input.rate_limit ?? null),
             encodeJson(input.cors ?? null),
+            encodeJson(input.allowed_methods ?? null),
+            encodeJson(input.timeouts ?? null),
+            encodeBool(input.circuit_breaker ?? false),
+            input.spec_enforcement ?? DEFAULT_SPEC_ENFORCEMENT,
             input.status,
             input.visibility,
             meta.created_at,
@@ -909,6 +935,12 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         auth_plugin: patch.auth_plugin,
         rate_limit_json: patch.rate_limit === undefined ? undefined : encodeJson(patch.rate_limit),
         cors_json: patch.cors === undefined ? undefined : encodeJson(patch.cors),
+        allowed_methods_json:
+          patch.allowed_methods === undefined ? undefined : encodeJson(patch.allowed_methods),
+        timeouts_json: patch.timeouts === undefined ? undefined : encodeJson(patch.timeouts),
+        circuit_breaker:
+          patch.circuit_breaker === undefined ? undefined : encodeBool(patch.circuit_breaker),
+        spec_enforcement: patch.spec_enforcement,
         status: patch.status,
         visibility: patch.visibility,
       });

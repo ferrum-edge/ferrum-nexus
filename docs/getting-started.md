@@ -114,6 +114,12 @@ FERRUM_ADMIN_JWT_SECRET=<the same value you exported in step 2>
 FERRUM_NAMESPACE=nexus
 NEXUS_PUBLIC_URL=http://127.0.0.1:5173
 
+# Where the gateway's PROXY listener answers — not the Admin API, not the
+# portal. The catalog shows each API's full invoke URL from this, so a client
+# never has to guess the port. An admin can change it later in
+# Settings → Gateway.
+FERRUM_GATEWAY_PUBLIC_URL=http://127.0.0.1:8000
+
 # Session cookies are `Secure` by default, which a browser will not store over
 # plain http. This walkthrough is http-only, so say so; production keeps the
 # default and serves the portal over https.
@@ -270,7 +276,10 @@ YAML
 > as the upstream instead.
 
 In the browser: **My APIs → Publish an API**, paste the document, choose the
-auth plugin, visibility and rate limit.
+auth plugin, visibility and rate limit. The **Advanced** section is optional:
+it restricts the HTTP methods the gateway accepts (the button fills it in from
+the document you just pasted), sets backend timeouts, and turns on a circuit
+breaker.
 
 With curl:
 
@@ -303,6 +312,14 @@ itself back if any step fails:
    `nexus:api:2b1c…:approved`, because `requestable: true`;
 4. a `rate_limiting` plugin config, 1000 requests per 60 seconds **per
    consumer**.
+
+> ⚠️ That quota is enforced **per gateway process**. One data-plane replica
+> makes it exactly 1000/minute; N replicas make it N × 1000/minute, because
+> Edge keeps the counters in memory unless the plugin config names a Redis
+> endpoint. Set `FERRUM_RATE_LIMIT_SYNC_MODE=redis` and
+> `FERRUM_RATE_LIMIT_REDIS_URL` on Nexus to share one counter across replicas;
+> the change applies to rate limits saved after it. See
+> [operations.md](operations.md#ferrum-edge-integration).
 
 Save the id:
 
@@ -412,8 +429,13 @@ export API_KEY='nxs_pQ7v3H2s…'
 
 ## 9. Call the API through the gateway
 
-Now use the **proxy listener** (`:8000`), the listen path
-`/<namespace>/<slug>`, and the key:
+The catalog page for the API shows the exact URL under **Call this API** —
+that is what `FERRUM_GATEWAY_PUBLIC_URL` is for, and it is the same value the
+`invoke_url` field carries on every API the API returns. For this walkthrough
+it is `http://127.0.0.1:8000/nexus/billing`: the **proxy listener** (`:8000`)
+followed by the listen path `/<namespace>/<slug>`.
+
+Copy it from the portal, and call it with the key:
 
 ```bash
 curl -sS -i http://127.0.0.1:8000/nexus/billing/invoices \

@@ -62,6 +62,7 @@ import {
 
 import type { ApiFilter, ApiRecord, ListOptions, NexusStore, UserRecord } from '../db/store.js';
 import { notFound } from '../lib/errors.js';
+import { presentApi, type GatewayUrlSource } from '../publishing/present.js';
 
 /** Filters accepted by {@link CatalogService.list}. */
 export interface CatalogFilter {
@@ -92,6 +93,8 @@ export interface CatalogService {
 /** Dependencies of {@link createCatalogService}. */
 export interface CatalogServiceDeps {
   store: NexusStore;
+  /** Resolves the gateway origin each row's `invoke_url` is built from. */
+  settings: GatewayUrlSource;
 }
 
 /** Content type matching a stored raw document. */
@@ -102,7 +105,7 @@ export function contentTypeOf(rawSpec: string): string {
 
 /** Build the catalog service. */
 export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
-  const { store } = deps;
+  const { store, settings } = deps;
 
   /** Owner, admin and grantee always see everything about an API. */
   function isInsider(viewer: UserRecord, api: ApiRecord, hasGrant: boolean): boolean {
@@ -197,9 +200,12 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
         ).map((request) => [request.api_id, request]),
       );
 
+      // One resolve for the whole page, not one per row.
+      const gatewayUrl = await settings.getGatewayPublicUrl();
+
       return {
         items: page.map((api) => ({
-          ...api,
+          ...presentApi(api, gatewayUrl),
           owner: summary(owners.get(api.owner_user_id)),
           access_state: accessState(
             viewer,
@@ -233,7 +239,7 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
 
       return {
         api: {
-          ...api,
+          ...presentApi(api, await settings.getGatewayPublicUrl()),
           owner: summary(owner ?? undefined),
           access_state: accessState(viewer, api, grant, request),
         },

@@ -232,15 +232,26 @@ rotate an existing one first.
 
 ## Calling an API
 
-Requests go to the **gateway's proxy listener**, not to the portal. The path is
-always:
+Requests go to the **gateway's proxy listener**, not to the portal.
+
+**The catalog tells you the address.** Open the API, and the **Call this API**
+panel on the _Access_ tab shows the full **invoke URL** with a copy button,
+along with the exact header to send. The same URL appears next to each of your
+granted APIs on the **Credentials** page. Append the operation path from the
+OpenAPI document to it:
 
 ```
-https://<gateway-host>/<namespace>/<slug>/<the path from the OpenAPI document>
+<invoke URL>/<the path from the OpenAPI document>
 ```
 
-`<namespace>` and `<slug>` are shown on the API's catalog page — for a
-namespace of `nexus` and a slug of `billing`, the base is `/nexus/billing`.
+The invoke URL is the gateway's public origin followed by the API's listen
+path, which is always `/<namespace>/<slug>` — for a namespace of `nexus` and a
+slug of `billing`, `https://gateway.example.com/nexus/billing`.
+
+If the panel shows only the listen path and says the gateway address is not
+published, your portal administrator has not configured one yet. Ask them for
+the gateway host rather than guessing a port — the portal deliberately shows
+nothing rather than an address that might not route.
 
 ### API key (`keyauth`)
 
@@ -293,12 +304,42 @@ as you.
 | **401**       | The gateway did not recognise your credential.  | Wrong or missing header; wrong credential _type_ for this API; the credential was revoked or rotated away. |
 | **403**       | Authenticated, but not authorised for this API. | Your grant was revoked, or was never approved. Check the catalog badge.                                    |
 | **404**       | Wrong path.                                     | Check the namespace and slug, and that the path exists in the document.                                    |
-| **429**       | Rate limit.                                     | The provider set a per-consumer quota. Back off; check the rate-limit response headers.                    |
+| **429**       | Rate limit.                                     | The provider set a per-consumer quota. Back off, and watch the rate-limit headers below.                   |
 | **502 / 503** | The API's own backend is unhealthy.             | Not your credential. Message the provider.                                                                 |
 
 A useful diagnostic: **401 is about the credential, 403 is about the grant.**
 If you can call one approved API but not another, the credential is fine and
 the second grant is the problem.
+
+### Staying under a rate limit
+
+The portal does not display your remaining quota. It cannot: the budget is
+counted at the gateway, per consumer, and Nexus never sees it. What you get
+instead is better — the gateway tells you on every call.
+
+Whenever a provider sets a quota, Nexus turns on the gateway's header exposure,
+so responses carry:
+
+| Header                  | Meaning                              |
+| ----------------------- | ------------------------------------ |
+| `x-ratelimit-limit`     | Requests allowed in one window       |
+| `x-ratelimit-remaining` | How many of them you have left       |
+| `x-ratelimit-window`    | The length of the window, in seconds |
+
+The names go out lowercase; HTTP header names are case-insensitive, so most
+clients will hand them to you as `X-RateLimit-Remaining` just as happily.
+
+Two things worth knowing:
+
+- They ride on the requests the limiter **admitted**. Read `x-ratelimit-remaining`
+  as it approaches zero and slow down — do not wait for the `429` to tell you.
+  A request that never reached the rate-limit check carries no such headers at
+  all, so their absence is not a signal.
+- There is **no reset timestamp**. `x-ratelimit-window` is what you have: after a
+  `429`, backing off for at least that many seconds is the safe move.
+
+If a call has no rate-limit headers at all and never returns `429`, the API
+simply has no quota set on it.
 
 ---
 

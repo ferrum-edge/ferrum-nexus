@@ -1,26 +1,31 @@
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
-import { useState, type FormEvent, type ReactElement } from 'react';
+import { useMemo, useState, type FormEvent, type ReactElement } from 'react';
 import {
   AUTH_PLUGIN_LABELS,
   AUTH_PLUGIN_TYPES,
+  HTTP_METHODS,
   MAX_CORS_ORIGINS,
   MAX_RATE_LIMIT_REQUESTS,
   aclGroupForApi,
-  listenPathFor,
   testConsumerUsername,
   type AccessRequest,
   type Api,
   type ApiStatus,
+  type ApiUsageBackendStatus,
+  type ApiUsageResponse,
   type ApiVisibility,
   type AuthPluginType,
   type CorsConfig,
   type Grant,
+  type HttpMethod,
   type RateLimitConfig,
   type ShowOnceSecret,
+  type SpecEnforcementLevel,
 } from '@ferrum-nexus/shared';
 import { formatDateTime, parseCorsOrigins } from '../lib/format';
 import {
   useApi,
+  useApiUsage,
   useCreateTestConsumer,
   useDeleteApi,
   useUpdateApi,
@@ -36,14 +41,22 @@ import { useGrants, useRevokeGrant } from '../hooks/useGrants';
 import { useToast } from '../stores/toast';
 import { RoleGuard } from '../components/layout/RoleGuard';
 import { ShowOnceSecretDialog } from '../components/credentials/ShowOnceSecretDialog';
+import { declaredMethods } from '../components/openapi/parse';
+import {
+  AdvancedProxySettings,
+  parseTimeoutDraft,
+  timeoutDraftFrom,
+  type TimeoutDraft,
+} from '../components/publishing/AdvancedProxySettings';
 import { SpecEditor, isSpecValid } from '../components/publishing/SpecEditor';
-import { Badge } from '../components/ui/Badge';
+import { Badge, type BadgeTone } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import { Card, CardBody, CardHeader, DetailRow, PageHeader } from '../components/ui/Card';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Checkbox, LabeledInput, LabeledTextarea } from '../components/ui/Input';
 import { LabeledSelect } from '../components/ui/Select';
+import { SpecEnforcementSelect } from '../components/publishing/SpecEnforcementSelect';
 import { LoadingPanel } from '../components/ui/Spinner';
 import { StatusPill } from '../components/ui/StatusPill';
 import { Tabs } from '../components/ui/Tabs';
@@ -81,7 +94,24 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
   );
   const [corsOrigins, setCorsOrigins] = useState(api.cors?.allowed_origins.join('\n') ?? '');
   const [corsCredentials, setCorsCredentials] = useState(api.cors?.allow_credentials ?? false);
+  const [methods, setMethods] = useState<HttpMethod[]>(api.allowed_methods ?? []);
+  const [timeouts, setTimeouts] = useState<TimeoutDraft>(timeoutDraftFrom(api.timeouts));
+  const [circuitBreaker, setCircuitBreaker] = useState(api.circuit_breaker);
+  const [specEnforcement, setSpecEnforcement] = useState<SpecEnforcementLevel>(
+    api.spec_enforcement,
+  );
   const [deleteOpen, setDeleteOpen] = useState(false);
+
+  // The current document is not on this page, so it is fetched to offer the
+  // same "use the methods declared in the spec" shortcut the publish form has.
+  // An API with no stored revision simply does not get the shortcut.
+  const specQuery = useCatalogSpec(api.slug);
+  const specMethods = useMemo<HttpMethod[]>(() => {
+    const raw = specQuery.data?.raw_spec;
+    if (!raw) return [];
+    const declared = declaredMethods(raw);
+    return HTTP_METHODS.filter((method) => declared.includes(method));
+  }, [specQuery.data?.raw_spec]);
 
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
@@ -112,6 +142,12 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
     const cors: CorsConfig | null =
       origins.length > 0 ? { allowed_origins: origins, allow_credentials: corsCredentials } : null;
 
+    const parsedTimeouts = parseTimeoutDraft(timeouts);
+    if (typeof parsedTimeouts === 'string') {
+      toast.error('Timeout out of range', parsedTimeouts);
+      return;
+    }
+
     update.mutate(
       {
         id: api.id,
@@ -125,6 +161,12 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
           requestable,
           rate_limit: rateLimit,
           cors,
+          // Clearing every checkbox sends `null`, which accepts every method
+          // again; clearing the timeout boxes restores the gateway defaults.
+          allowed_methods: methods.length > 0 ? methods : null,
+          timeouts: parsedTimeouts,
+          circuit_breaker: circuitBreaker,
+          spec_enforcement: specEnforcement,
           ...(upstreamUrl.trim() ? { upstream_url: upstreamUrl.trim() } : {}),
         },
       },
@@ -237,6 +279,11 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
                 />
               </>
             ) : null}
+            <SpecEnforcementSelect
+              className="md:col-span-2"
+              value={specEnforcement}
+              onValueChange={setSpecEnforcement}
+            />
             <LabeledTextarea
               className="md:col-span-2"
               label="CORS allowed origins"
@@ -252,6 +299,18 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
                 description="Lets browsers send cookies and Authorization headers cross-origin. Ignored when no origins are listed."
                 checked={corsCredentials}
                 onChange={(event) => setCorsCredentials(event.target.checked)}
+              />
+            </div>
+            <div className="border-t border-border pt-4 md:col-span-2">
+              <p className="mb-3 text-sm font-medium text-fg">Advanced</p>
+              <AdvancedProxySettings
+                methods={methods}
+                onMethodsChange={setMethods}
+                timeouts={timeouts}
+                onTimeoutsChange={setTimeouts}
+                circuitBreaker={circuitBreaker}
+                onCircuitBreakerChange={setCircuitBreaker}
+                specMethods={specMethods}
               />
             </div>
             <div className="md:col-span-2">
@@ -634,6 +693,141 @@ function TestConsumerTab({ api }: { api: Api }): ReactElement {
   );
 }
 
+/* ── Usage ──────────────────────────────────────────────────────────────── */
+
+/**
+ * Colours for the backend verdict.
+ *
+ * `unknown` is deliberately neutral rather than a warning: the gateway lists a
+ * circuit breaker only for a proxy that has one configured *and* has been
+ * called, so "nothing reported" is the ordinary state for a quiet API, not a
+ * problem to draw attention to.
+ */
+const BACKEND_TONES: Readonly<Record<ApiUsageBackendStatus, BadgeTone>> = {
+  healthy: 'success',
+  failing: 'danger',
+  recovering: 'warning',
+  unknown: 'neutral',
+};
+
+const BACKEND_LABELS: Readonly<Record<ApiUsageBackendStatus, string>> = {
+  healthy: 'Healthy',
+  failing: 'Failing',
+  recovering: 'Recovering',
+  unknown: 'Unknown',
+};
+
+function count(value: number): string {
+  return value.toLocaleString();
+}
+
+/** The counters themselves, once a response has arrived. */
+function UsageDetails({ usage }: { usage: ApiUsageResponse }): ReactElement {
+  const { requests, latency_ms: latency, backend } = usage;
+  const classes = requests.by_status_class;
+
+  return (
+    <CardBody>
+      {usage.available ? null : (
+        <p className="mb-4 text-sm text-fg-muted">
+          Gateway metrics are unavailable, so there are no counts to show. {backend.detail}
+        </p>
+      )}
+
+      <dl>
+        <DetailRow label="Backend">
+          <span className="flex flex-wrap items-center gap-2">
+            <Badge tone={BACKEND_TONES[backend.status]}>{BACKEND_LABELS[backend.status]}</Badge>
+            {backend.detail && usage.available ? (
+              <span className="text-sm text-fg-muted">{backend.detail}</span>
+            ) : null}
+          </span>
+          {backend.since ? (
+            <span className="mt-1 block text-xs text-fg-subtle">
+              Since {formatDateTime(backend.since)}
+            </span>
+          ) : null}
+        </DetailRow>
+
+        <DetailRow label="Requests">{count(requests.total)}</DetailRow>
+
+        <DetailRow label="By status">
+          <span className="flex flex-wrap items-center gap-1.5">
+            <Badge tone="success">2xx {count(classes['2xx'])}</Badge>
+            <Badge>3xx {count(classes['3xx'])}</Badge>
+            <Badge tone={classes['4xx'] > 0 ? 'warning' : 'neutral'}>
+              4xx {count(classes['4xx'])}
+            </Badge>
+            <Badge tone={classes['5xx'] > 0 ? 'danger' : 'neutral'}>
+              5xx {count(classes['5xx'])}
+            </Badge>
+          </span>
+        </DetailRow>
+
+        <DetailRow label="Turned away">
+          <span className="flex flex-wrap items-center gap-1.5">
+            <Badge tone={requests.rate_limited > 0 ? 'warning' : 'neutral'}>
+              429 rate limited {count(requests.rate_limited)}
+            </Badge>
+            <Badge tone={requests.unauthorized > 0 ? 'warning' : 'neutral'}>
+              401 unauthorized {count(requests.unauthorized)}
+            </Badge>
+            <Badge tone={requests.forbidden > 0 ? 'warning' : 'neutral'}>
+              403 forbidden {count(requests.forbidden)}
+            </Badge>
+          </span>
+        </DetailRow>
+
+        <DetailRow label="Latency (p95)">
+          {latency ? (
+            <span className="flex flex-wrap items-baseline gap-2">
+              <span>{latency.p95} ms</span>
+              <span className="text-xs text-fg-subtle">
+                p50 {latency.p50} ms · p99 {latency.p99} ms
+              </span>
+            </span>
+          ) : (
+            'No timed requests yet'
+          )}
+        </DetailRow>
+      </dl>
+
+      <p className="mt-3 text-xs text-fg-subtle">
+        Cumulative since the gateway process started; sampled {formatDateTime(usage.sampled_at)}.
+      </p>
+    </CardBody>
+  );
+}
+
+/**
+ * What the gateway currently reports for this API's proxy.
+ *
+ * Refetched every 30 seconds. There is no per-consumer breakdown and no time
+ * window here because Ferrum Edge exposes neither for a proxy — see the
+ * provider guide.
+ */
+function UsageCard({ apiId }: { apiId: string }): ReactElement {
+  const query = useApiUsage(apiId);
+
+  return (
+    <Card>
+      <CardHeader
+        title="Usage"
+        description="Read straight from the gateway each time. Nexus stores no metrics of its own."
+      />
+      {query.isLoading ? (
+        <LoadingPanel label="Loading usage" />
+      ) : query.isError || !query.data ? (
+        <CardBody>
+          <p className="text-sm text-fg-muted">Usage could not be loaded for this API.</p>
+        </CardBody>
+      ) : (
+        <UsageDetails usage={query.data} />
+      )}
+    </Card>
+  );
+}
+
 function ApiDetail({ apiId }: { apiId: string }): ReactElement {
   const query = useApi(apiId);
   const [tab, setTab] = useState('overview');
@@ -689,38 +883,53 @@ function ApiDetail({ apiId }: { apiId: string }): ReactElement {
             value: 'overview',
             label: 'Overview',
             content: (
-              <Card>
-                <CardHeader title="Overview" />
-                <CardBody>
-                  <dl>
-                    <DetailRow label="Gateway path">
-                      <code className="font-mono text-xs">
-                        {listenPathFor(api.namespace, api.slug)}
-                      </code>
-                    </DetailRow>
-                    <DetailRow label="Edge proxy id">
-                      <code className="font-mono text-xs">{api.ferrum_proxy_id ?? '—'}</code>
-                    </DetailRow>
-                    <DetailRow label="ACL group">
-                      <code className="font-mono text-xs">{aclGroupForApi(api.id)}</code>
-                    </DetailRow>
-                    <DetailRow label="Rate limit">
-                      {api.rate_limit
-                        ? `${api.rate_limit.limit} requests / ${api.rate_limit.window_seconds}s`
-                        : 'Not enforced'}
-                    </DetailRow>
-                    <DetailRow label="Pending requests">{stats.pending_requests}</DetailRow>
-                    <DetailRow label="Active grants">{stats.active_grants}</DetailRow>
-                    <DetailRow label="Total requests">{stats.total_requests}</DetailRow>
-                    <DetailRow label="Current spec">
-                      {spec
-                        ? `${spec.parsed_title ?? api.name} (${spec.parsed_version ?? spec.version})`
-                        : 'None published'}
-                    </DetailRow>
-                    <DetailRow label="Updated">{formatDateTime(api.updated_at)}</DetailRow>
-                  </dl>
-                </CardBody>
-              </Card>
+              <div className="flex flex-col gap-4">
+                <Card>
+                  <CardHeader title="Overview" />
+                  <CardBody>
+                    <dl>
+                      <DetailRow label="Invoke URL">
+                        {api.invoke_url ? (
+                          <code className="font-mono text-xs">{api.invoke_url}</code>
+                        ) : (
+                          <span className="text-fg-muted">
+                            No gateway address configured — an admin sets it in Settings → Gateway.
+                          </span>
+                        )}
+                      </DetailRow>
+                      <DetailRow label="Gateway path">
+                        <code className="font-mono text-xs">{api.listen_path}</code>
+                      </DetailRow>
+                      <DetailRow label="Edge proxy id">
+                        <code className="font-mono text-xs">{api.ferrum_proxy_id ?? '—'}</code>
+                      </DetailRow>
+                      <DetailRow label="ACL group">
+                        <code className="font-mono text-xs">{aclGroupForApi(api.id)}</code>
+                      </DetailRow>
+                      <DetailRow label="Rate limit">
+                        {api.rate_limit
+                          ? `${api.rate_limit.limit} requests / ${api.rate_limit.window_seconds}s`
+                          : 'Not enforced'}
+                      </DetailRow>
+                      <DetailRow label="Pending access requests">
+                        {stats.pending_requests}
+                      </DetailRow>
+                      <DetailRow label="Active grants">{stats.active_grants}</DetailRow>
+                      {/* Access requests, not calls — the Usage card below counts the traffic. */}
+                      <DetailRow label="Access requests (all time)">
+                        {stats.total_requests}
+                      </DetailRow>
+                      <DetailRow label="Current spec">
+                        {spec
+                          ? `${spec.parsed_title ?? api.name} (${spec.parsed_version ?? spec.version})`
+                          : 'None published'}
+                      </DetailRow>
+                      <DetailRow label="Updated">{formatDateTime(api.updated_at)}</DetailRow>
+                    </dl>
+                  </CardBody>
+                </Card>
+                <UsageCard apiId={api.id} />
+              </div>
             ),
           },
           { value: 'settings', label: 'Settings', content: <SettingsTab api={api} /> },

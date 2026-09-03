@@ -12,7 +12,7 @@
  *    so the plugin config types are exact, not "at least these keys".
  */
 
-import type { AuthPluginType, EdgeCredentialType } from '@ferrum-nexus/shared';
+import type { AuthPluginType, EdgeCredentialType, HttpMethod } from '@ferrum-nexus/shared';
 
 /* ── Envelopes ──────────────────────────────────────────────────────────── */
 
@@ -125,6 +125,30 @@ export interface EdgeConsumerWrite {
 /** Backend scheme enum. Nexus only ever uses the HTTP family. */
 export type EdgeBackendScheme = 'http' | 'https' | 'tcp' | 'tcps' | 'udp' | 'dtls';
 
+/**
+ * `Proxy.circuit_breaker` — passive failure detection in front of the backend.
+ *
+ * Every field carries a serde default, so `{}` is a legal config; Nexus sends
+ * the defaults explicitly instead, because a proxy document that shows its own
+ * thresholds is what an operator can reason about, and because a gateway
+ * upgrade that changed a default must not silently change the failure policy of
+ * an already-published API.
+ */
+export interface EdgeCircuitBreakerConfig {
+  /** Consecutive failures that trip the circuit open. Default 5. */
+  failure_threshold: number;
+  /** Consecutive half-open successes that close it again. Default 3. */
+  success_threshold: number;
+  /** Seconds to stay open before probing. Default 30. */
+  timeout_seconds: number;
+  /** Response codes counted as failures. Default `[500, 502, 503, 504]`. */
+  failure_status_codes: number[];
+  /** Concurrent probes allowed while half-open. Default 1. */
+  half_open_max_requests: number;
+  /** Count TCP/DNS/TLS/connect-timeout errors as failures. Default true. */
+  trip_on_connection_errors: boolean;
+}
+
 /** A Ferrum proxy (HTTP-family subset). */
 export interface EdgeProxy {
   id: string;
@@ -138,6 +162,21 @@ export interface EdgeProxy {
   backend_path?: string | null;
   strip_listen_path?: boolean;
   preserve_host_header?: boolean;
+  /** TCP connect timeout in ms. Gateway default 5000. */
+  backend_connect_timeout_ms?: number;
+  /** Backend read timeout in ms. Gateway default 30000; `0` disables it. */
+  backend_read_timeout_ms?: number;
+  /** Backend write timeout in ms. Gateway default 30000; `0` disables it. */
+  backend_write_timeout_ms?: number;
+  /** Accepted HTTP methods; `null` (the default) accepts all of them. */
+  allowed_methods?: HttpMethod[] | null;
+  /**
+   * Origins accepted on a WebSocket upgrade, compared case-insensitively.
+   * `[]` (the default) performs no check at all. Independent of the `cors`
+   * plugin, which does not run on upgrades.
+   */
+  allowed_ws_origins?: string[];
+  circuit_breaker?: EdgeCircuitBreakerConfig | null;
   plugins?: EdgePluginAssociation[];
   api_spec_id?: string | null;
   created_at?: string;
@@ -174,6 +213,18 @@ export interface EdgeProxyWrite {
   backend_path?: string | null;
   strip_listen_path?: boolean;
   preserve_host_header?: boolean;
+  backend_connect_timeout_ms?: number;
+  backend_read_timeout_ms?: number;
+  backend_write_timeout_ms?: number;
+  /**
+   * Accepted HTTP methods. A method outside the list is `405`ed **before any
+   * plugin runs**, so a proxy carrying a `cors` plugin must list `OPTIONS` or
+   * every browser preflight fails.
+   */
+  allowed_methods?: HttpMethod[] | null;
+  /** WebSocket `Origin` allow-list; `[]` means no check. */
+  allowed_ws_origins?: string[];
+  circuit_breaker?: EdgeCircuitBreakerConfig | null;
 }
 
 /**
@@ -266,6 +317,16 @@ export interface EdgeRateLimitingConfig {
   limit_by?: 'ip' | 'consumer' | 'spiffe';
   expose_headers?: boolean;
   limits: EdgeRateLimitRule[];
+  /**
+   * Where the counters live. `local` (the default) is **per gateway process**,
+   * so N data-plane replicas enforce N times the quota; `redis` shares one
+   * counter across them.
+   */
+  sync_mode?: 'local' | 'redis';
+  /** `redis://` or `rediss://`. Required when `sync_mode` is `redis`. */
+  redis_url?: string;
+  /** Upgrade a `redis://` connection to TLS. */
+  redis_tls?: boolean;
 }
 
 /**
@@ -303,6 +364,56 @@ export interface EdgeCorsConfig {
   unmatched_preflights?: 'forward' | 'ignore';
 }
 
+/**
+ * One entry of `openapi_validator.operations`.
+ *
+ * These three fields are the whole required set: `request_body` and
+ * `responses` are optional, and a schema-free entry is legal as long as the
+ * config also sets `fail_on_unknown_operation`. `path_regex` is anchored by
+ * Edge into `^(?:…)$` on top of whatever it is given, so an already-anchored
+ * pattern — which is what Edge's own spec importer emits — is accepted and
+ * behaves identically.
+ */
+export interface EdgeOpenapiValidatorOperation {
+  /** Uppercase HTTP method; Edge upper-cases it again on the way in. */
+  method: string;
+  /** The path template, used for the operation label and for ordering ties. */
+  path_template: string;
+  /** Full-match regex over the canonical policy path (listen path included). */
+  path_regex: string;
+}
+
+/**
+ * `openapi_validator` config — a closed key set at every level.
+ *
+ * Nexus generates only the routes-level subset: the operation table plus
+ * `fail_on_unknown_operation`, with body validation switched off. The
+ * remaining published fields (`request_content_types`, `max_body_bytes`,
+ * `schema_draft`, `error_response`, …) are omitted so the gateway's own
+ * defaults stay in force.
+ */
+export interface EdgeOpenapiValidatorConfig {
+  /** `block` rejects, `log_only` records, `disabled` skips. Native default `block`. */
+  enforcement_mode?: 'block' | 'log_only' | 'disabled';
+  validate_request?: boolean;
+  validate_response?: boolean;
+  /** Reject a request matching no operation. Native default `true`. */
+  fail_on_unknown_operation?: boolean;
+  /** Required, and rejected when empty. */
+  operations: EdgeOpenapiValidatorOperation[];
+  /** Escape hatches evaluated *before* the unknown-operation check. */
+  bypass?: {
+    /** Regexes over the request path. */
+    paths?: string[];
+    /** HTTP methods skipped wholesale — how a CORS preflight survives. */
+    methods?: string[];
+    /** Authenticated identities or consumer usernames. */
+    consumers?: string[];
+    /** Header name → required value, or `null` for "any value". */
+    header_present?: Record<string, string | null>;
+  };
+}
+
 /** Any plugin config body Nexus writes. */
 export type EdgePluginSettings =
   | EdgeKeyAuthConfig
@@ -311,6 +422,7 @@ export type EdgePluginSettings =
   | EdgeAccessControlConfig
   | EdgeRateLimitingConfig
   | EdgeCorsConfig
+  | EdgeOpenapiValidatorConfig
   | Record<string, unknown>;
 
 /** A plugin config resource. */
@@ -386,4 +498,99 @@ export interface EdgeProbe {
   version: string | null;
   /** Failure detail, safe to log; never echoed to browsers. */
   error: string | null;
+}
+
+/* ── Runtime metrics ────────────────────────────────────────────────────── */
+
+/**
+ * `ferrum_requests_total` for one proxy, reduced to the two label dimensions
+ * Nexus renders.
+ *
+ * Every count is **cumulative since the gateway process started** — Edge
+ * exposes no windowed per-proxy counter and Nexus stores no history, so there
+ * is no honest way to derive "requests in the last hour" from this.
+ */
+export interface EdgeRequestCounts {
+  /** `method` label → cumulative count. */
+  byMethod: Record<string, number>;
+  /** `status_code` label → cumulative count. */
+  byStatus: Record<string, number>;
+  /** Sum over every kept series. */
+  total: number;
+}
+
+/** One `le` bucket of `ferrum_request_duration_ms`. */
+export interface EdgeLatencyBucket {
+  /** Upper bound in milliseconds; `Infinity` for the `+Inf` bucket. */
+  le: number;
+  /** Cumulative count of observations at or below `le`. */
+  count: number;
+}
+
+/** `ferrum_request_duration_ms` for one proxy. */
+export interface EdgeLatencyHistogram {
+  /** Buckets sorted ascending by `le`, with the `+Inf` bucket last. */
+  buckets: EdgeLatencyBucket[];
+  /** The `_count` sample, or `null` when the exposition carried none. */
+  count: number | null;
+  /** The `_sum` sample, or `null` when the exposition carried none. */
+  sum: number | null;
+}
+
+/** What one `GET /metrics` scrape yielded for a single proxy. */
+export interface EdgeProxyMetrics {
+  /**
+   * `false` when the scrape could not be completed or produced nothing usable
+   * (gateway unreachable, non-2xx, or a body with no recognisable samples). The
+   * counters are then zeroed rather than absent, so callers never branch on
+   * `undefined`.
+   */
+  available: boolean;
+  requests: EdgeRequestCounts;
+  latency: EdgeLatencyHistogram;
+}
+
+/**
+ * One `circuit_breakers[]` entry from `GET /admin/metrics`.
+ *
+ * `target` is present only for per-target (upstream) breakers; a proxy with a
+ * direct backend gets one per-proxy breaker with no target. A proxy that has no
+ * `circuit_breaker` config, or has one but has never been hit, does not appear
+ * in the array at all — which is why "no breaker" cannot be read as "healthy".
+ */
+export interface EdgeCircuitBreaker {
+  namespace?: string;
+  proxy_id: string;
+  target?: string;
+  /** `closed` | `open` | `half_open`. Treated as an open set. */
+  state: string;
+  failure_count?: number;
+  success_count?: number;
+}
+
+/** One `health_check.unhealthy_targets[]` entry from `GET /admin/metrics`. */
+export interface EdgeUnhealthyTarget {
+  namespace?: string;
+  /** Set for passive (traffic-based) ejections on a direct-backend proxy. */
+  proxy_id?: string;
+  /** Set for active health-check failures against an upstream's target. */
+  upstream_id?: string;
+  /** `host:port` of the failing target. */
+  target?: string;
+  /** `active` | `passive`. */
+  type?: string;
+  /** Unix epoch milliseconds since which the target has been unhealthy. */
+  since_epoch_ms?: number;
+}
+
+/** What one `GET /admin/metrics` read yielded for a single proxy. */
+export interface EdgeBackendState {
+  /** `false` when the gateway was unreachable or answered unusably. */
+  available: boolean;
+  /** Breakers scoped to this proxy, per-proxy and per-target alike. */
+  breakers: EdgeCircuitBreaker[];
+  /** Unhealthy targets attributed to this proxy. */
+  unhealthyTargets: EdgeUnhealthyTarget[];
+  /** `gateway.uptime_seconds`, or `null` when absent. */
+  uptimeSeconds: number | null;
 }

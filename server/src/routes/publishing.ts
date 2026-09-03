@@ -15,10 +15,16 @@ import { z } from 'zod';
 
 import {
   AUTH_PLUGIN_TYPES,
+  DEFAULT_SPEC_ENFORCEMENT,
+  HTTP_METHODS,
+  MAX_BACKEND_TIMEOUT_MS,
   MAX_CORS_ORIGINS,
   MAX_RATE_LIMIT_REQUESTS,
   MAX_RATE_LIMIT_WINDOW_SECONDS,
   MAX_SPEC_BYTES,
+  SPEC_ENFORCEMENT_LEVELS,
+  type ApiUsageResponse,
+  MIN_BACKEND_TIMEOUT_MS,
   type CorsConfig,
   type CreateTestConsumerResponse,
   type DeleteApiResponse,
@@ -32,6 +38,7 @@ import {
 import { clientIp, requireAuth, requireRole } from '../middleware/auth-plugin.js';
 import { parseOrThrow } from '../middleware/error-handler.js';
 import type { PublishingService } from '../publishing/service.js';
+import type { UsageService } from '../usage/service.js';
 import {
   booleanQuerySchema,
   idParamSchema,
@@ -43,6 +50,7 @@ import {
 /** Services this route plugin needs. */
 export interface PublishingRoutesOptions {
   publishing: PublishingService;
+  usage: UsageService;
 }
 
 /** Character ceiling on an uploaded document; the byte check lives in `oas.ts`. */
@@ -89,6 +97,36 @@ function corsOrNull(value: z.infer<typeof corsSchema> | null | undefined): CorsC
   };
 }
 
+/**
+ * Methods the gateway will accept, as the provider chose them.
+ *
+ * Deduplicated because Edge stores the list verbatim and a repeated entry is
+ * noise the portal would then show back; the order the provider sent is kept
+ * so the round trip is stable. An *empty* list is rejected rather than read as
+ * "all methods" — that is what `null` means, and a proxy whose
+ * `allowed_methods` is `[]` accepts nothing at all.
+ */
+const allowedMethodsSchema = z
+  .array(z.enum(HTTP_METHODS))
+  .min(1)
+  .max(HTTP_METHODS.length)
+  .transform((methods) => [...new Set(methods)]);
+
+/**
+ * Backend timeouts, in milliseconds.
+ *
+ * All three are required together: `PUT /proxies/{id}` is a whole-resource
+ * replace, so a half-supplied set would silently reset the omitted ones to
+ * Edge's defaults rather than leave them alone. `null` is the way to ask for
+ * the defaults explicitly.
+ */
+const timeoutMs = z.number().int().min(MIN_BACKEND_TIMEOUT_MS).max(MAX_BACKEND_TIMEOUT_MS);
+const timeoutsSchema = z.object({
+  connect_ms: timeoutMs,
+  read_ms: timeoutMs,
+  write_ms: timeoutMs,
+});
+
 const listApisQuery = listQuerySchema.extend({
   mine: booleanQuerySchema,
   owner_user_id: z.string().trim().min(1).max(64).optional(),
@@ -111,6 +149,10 @@ const publishBody = z.object({
   visibility: z.enum(['public', 'internal']),
   rate_limit: rateLimitSchema.optional(),
   cors: corsSchema.nullish(),
+  allowed_methods: allowedMethodsSchema.nullish(),
+  timeouts: timeoutsSchema.nullish(),
+  circuit_breaker: z.boolean().optional(),
+  spec_enforcement: z.enum(SPEC_ENFORCEMENT_LEVELS).optional(),
 });
 
 const updateBody = z.object({
@@ -123,6 +165,11 @@ const updateBody = z.object({
   visibility: z.enum(['public', 'internal']).optional(),
   rate_limit: rateLimitSchema.optional(),
   cors: corsSchema.nullish(),
+  allowed_methods: allowedMethodsSchema.nullish(),
+  timeouts: timeoutsSchema.nullish(),
+  circuit_breaker: z.boolean().optional(),
+  // `undefined` leaves the level — and therefore the validator plugin — alone.
+  spec_enforcement: z.enum(SPEC_ENFORCEMENT_LEVELS).optional(),
   status: z.enum(['published', 'retired']).optional(),
 });
 
@@ -138,7 +185,7 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
   app,
   options,
 ) => {
-  const { publishing } = options;
+  const { publishing, usage } = options;
   app.addHook('onRequest', requireRole('provider'));
 
   app.get('/', async (request): Promise<ListApisResponse> => {
@@ -170,6 +217,10 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
         description: input.description ?? null,
         rate_limit: input.rate_limit ?? null,
         cors: corsOrNull(input.cors),
+        allowed_methods: input.allowed_methods ?? null,
+        timeouts: input.timeouts ?? null,
+        circuit_breaker: input.circuit_breaker ?? false,
+        spec_enforcement: input.spec_enforcement ?? DEFAULT_SPEC_ENFORCEMENT,
       },
       clientIp(request),
     );
@@ -183,11 +234,26 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
     return publishing.get(user, id);
   });
 
+  /**
+   * Read-only gateway telemetry for one API. Owner or admin, like every other
+   * provider-side read of the row.
+   *
+   * This answers `200` even when the gateway is unreachable — the body then
+   * carries `available: false`. A provider's overview page must not break
+   * because Edge is restarting.
+   */
+  app.get('/:id/usage', async (request): Promise<ApiUsageResponse> => {
+    const { user } = requireAuth(request);
+    const { id } = parseOrThrow(idParamSchema, request.params);
+    return usage.forApi(user, id);
+  });
+
   app.patch('/:id', async (request): Promise<UpdateApiResponse> => {
     const { user } = requireAuth(request);
     const { id } = parseOrThrow(idParamSchema, request.params);
     const patch = parseOrThrow(updateBody, request.body);
-    // `undefined` means "leave the policy alone"; `null` means "remove it".
+    // `undefined` means "leave the setting alone"; `null` means "remove it" —
+    // for the proxy fields, "back to the gateway default".
     const body = { ...patch, cors: patch.cors === undefined ? undefined : corsOrNull(patch.cors) };
     return { api: await publishing.update(user, id, body, clientIp(request)) };
   });

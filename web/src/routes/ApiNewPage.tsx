@@ -1,20 +1,31 @@
 import { useNavigate } from '@tanstack/react-router';
-import { useState, type FormEvent, type ReactElement } from 'react';
+import { useMemo, useState, type FormEvent, type ReactElement } from 'react';
 import {
   AUTH_PLUGIN_LABELS,
   AUTH_PLUGIN_TYPES,
+  HTTP_METHODS,
   MAX_CORS_ORIGINS,
   MAX_RATE_LIMIT_REQUESTS,
   type ApiVisibility,
   type AuthPluginType,
   type CorsConfig,
+  type HttpMethod,
   type RateLimitConfig,
+  type SpecEnforcementLevel,
 } from '@ferrum-nexus/shared';
 import { parseCorsOrigins, slugify } from '../lib/format';
 import { usePublishApi } from '../hooks/useApis';
 import { useToast } from '../stores/toast';
 import { RoleGuard } from '../components/layout/RoleGuard';
+import { declaredMethods } from '../components/openapi/parse';
+import {
+  AdvancedProxySettings,
+  EMPTY_TIMEOUT_DRAFT,
+  parseTimeoutDraft,
+  type TimeoutDraft,
+} from '../components/publishing/AdvancedProxySettings';
 import { SpecEditor, isSpecValid } from '../components/publishing/SpecEditor';
+import { SpecEnforcementSelect } from '../components/publishing/SpecEnforcementSelect';
 import { Button } from '../components/ui/Button';
 import { Card, CardBody, CardHeader, PageHeader } from '../components/ui/Card';
 import { Checkbox, LabeledInput, LabeledTextarea } from '../components/ui/Input';
@@ -52,10 +63,20 @@ function PublishForm(): ReactElement {
   const [rateLimitWindow, setRateLimitWindow] = useState<string>('60');
   const [corsOrigins, setCorsOrigins] = useState('');
   const [corsCredentials, setCorsCredentials] = useState(false);
+  const [methods, setMethods] = useState<HttpMethod[]>([]);
+  const [timeouts, setTimeouts] = useState<TimeoutDraft>(EMPTY_TIMEOUT_DRAFT);
+  const [circuitBreaker, setCircuitBreaker] = useState(false);
+  const [specEnforcement, setSpecEnforcement] = useState<SpecEnforcementLevel>('docs_only');
   const [spec, setSpec] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   const effectiveSlug = slugTouched ? slug : slugify(name);
+  // The document is right here, so the method list it declares is the obvious
+  // starting point for the allow-list — issue #36's "default with an override".
+  const specMethods = useMemo<HttpMethod[]>(() => {
+    const declared = declaredMethods(spec);
+    return HTTP_METHODS.filter((method) => declared.includes(method));
+  }, [spec]);
 
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
@@ -88,6 +109,12 @@ function PublishForm(): ReactElement {
     const cors: CorsConfig | null =
       origins.length > 0 ? { allowed_origins: origins, allow_credentials: corsCredentials } : null;
 
+    const parsedTimeouts = parseTimeoutDraft(timeouts);
+    if (typeof parsedTimeouts === 'string') {
+      setError(parsedTimeouts);
+      return;
+    }
+
     publish.mutate(
       {
         name: name.trim(),
@@ -101,6 +128,11 @@ function PublishForm(): ReactElement {
         visibility,
         rate_limit: rateLimit,
         cors,
+        // No selection means "every method", which is the absence of a list.
+        allowed_methods: methods.length > 0 ? methods : null,
+        timeouts: parsedTimeouts,
+        circuit_breaker: circuitBreaker,
+        spec_enforcement: specEnforcement,
       },
       {
         onSuccess: (response) => {
@@ -244,10 +276,29 @@ function PublishForm(): ReactElement {
 
       <Card>
         <CardHeader
+          title="Advanced"
+          description="Settings written onto the gateway proxy itself rather than as a plugin."
+        />
+        <CardBody>
+          <AdvancedProxySettings
+            methods={methods}
+            onMethodsChange={setMethods}
+            timeouts={timeouts}
+            onTimeoutsChange={setTimeouts}
+            circuitBreaker={circuitBreaker}
+            onCircuitBreakerChange={setCircuitBreaker}
+            specMethods={specMethods}
+          />
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader
           title="Specification"
           description="Parsed locally before upload; the server validates it again."
         />
-        <CardBody>
+        <CardBody className="flex flex-col gap-4">
+          <SpecEnforcementSelect value={specEnforcement} onValueChange={setSpecEnforcement} />
           <SpecEditor value={spec} onChange={setSpec} />
         </CardBody>
       </Card>

@@ -1,7 +1,8 @@
 # Operations
 
 Running Ferrum Nexus in production: configuration, databases, containers, TLS,
-backups, key rotation, the email outbox, scaling limits, and health checks.
+backups, key rotation, the email outbox, scaling limits, health checks, and
+metrics.
 
 - Architecture background: [`architecture.md`](architecture.md)
 - Security posture: [`security.md`](security.md)
@@ -52,17 +53,44 @@ the process prints every offending variable and exits non-zero. The repo-root
 
 ### Ferrum Edge integration
 
-| Variable                           | Default                 | Notes                                                                                                                                                                                                                                     |
-| ---------------------------------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `FERRUM_ADMIN_URL`                 | `http://127.0.0.1:9000` | Base URL of the **Admin** API (not the proxy listener). Must be absolute `http://` or `https://`; a trailing slash is stripped. Plaintext `http://` to a **non-loopback** host is refused unless `FERRUM_ADMIN_ALLOW_INSECURE_HTTP=true`. |
-| `FERRUM_ADMIN_JWT_TTL`             | `60`                    | Admin JWT lifetime in seconds, 5 – 3600. Edge caps it at 3600. Short is correct — tokens are minted per call and cached.                                                                                                                  |
-| `FERRUM_ADMIN_JWT_ISSUER`          | `ferrum-edge`           | The `iss` claim. **Must equal the gateway's configured issuer** or every call is rejected.                                                                                                                                                |
-| `FERRUM_ADMIN_JWT_AUDIENCE`        | _(unset)_               | Only set when the gateway configures an audience. An unexpected `aud` claim is rejected by the gateway, so Nexus omits it entirely by default.                                                                                            |
-| `FERRUM_NAMESPACE`                 | `nexus`                 | Namespace Nexus manages, sent as `X-Ferrum-Namespace` on every call. Must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, ≤ 254 chars. Also becomes the first segment of every listen path (`/<namespace>/<slug>`).                                 |
-| `FERRUM_ADMIN_CA_FILE`             | _(unset)_               | Path to a PEM CA bundle for a TLS-protected Admin API. An unreadable file fails startup.                                                                                                                                                  |
-| `FERRUM_ADMIN_ALLOW_INSECURE_HTTP` | `false`                 | Permits plaintext `http://` Admin URLs on non-loopback hosts. Container-network-only deployments are the intended use.                                                                                                                    |
-| `FERRUM_ADMIN_TIMEOUT_MS`          | `5000`                  | Per-request deadline for Admin API calls, 250 – 60 000.                                                                                                                                                                                   |
-| `FERRUM_MAX_CREDENTIALS_PER_TYPE`  | `2`                     | 1 – 10. **Mirror of the gateway's own setting** — set them to the same value. Values above 1 are what make append-then-delete rotation gapless.                                                                                           |
+| Variable                           | Default                 | Notes                                                                                                                                                                                                                                                                                                                                                                                            |
+| ---------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `FERRUM_ADMIN_URL`                 | `http://127.0.0.1:9000` | Base URL of the **Admin** API (not the proxy listener). Must be absolute `http://` or `https://`; a trailing slash is stripped. Plaintext `http://` to a **non-loopback** host is refused unless `FERRUM_ADMIN_ALLOW_INSECURE_HTTP=true`.                                                                                                                                                        |
+| `FERRUM_ADMIN_JWT_TTL`             | `60`                    | Admin JWT lifetime in seconds, 5 – 3600. Edge caps it at 3600. Short is correct — tokens are minted per call and cached.                                                                                                                                                                                                                                                                         |
+| `FERRUM_ADMIN_JWT_ISSUER`          | `ferrum-edge`           | The `iss` claim. **Must equal the gateway's configured issuer** or every call is rejected.                                                                                                                                                                                                                                                                                                       |
+| `FERRUM_ADMIN_JWT_AUDIENCE`        | _(unset)_               | Only set when the gateway configures an audience. An unexpected `aud` claim is rejected by the gateway, so Nexus omits it entirely by default.                                                                                                                                                                                                                                                   |
+| `FERRUM_NAMESPACE`                 | `nexus`                 | Namespace Nexus manages, sent as `X-Ferrum-Namespace` on every call. Must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, ≤ 254 chars. Also becomes the first segment of every listen path (`/<namespace>/<slug>`).                                                                                                                                                                                        |
+| `FERRUM_GATEWAY_PUBLIC_URL`        | _(unset)_               | Public origin of the gateway's **proxy listener** — where clients send API traffic. Absolute `http(s)` origin, no path/query/credentials; a trailing slash is stripped. Feeds each API's `invoke_url` in the catalog. Distinct from `FERRUM_ADMIN_URL` (control plane) and `NEXUS_PUBLIC_URL` (the portal). The `gateway.public_url` setting overrides it; with neither, `invoke_url` is `null`. |
+| `FERRUM_ADMIN_CA_FILE`             | _(unset)_               | Path to a PEM CA bundle for a TLS-protected Admin API. An unreadable file fails startup.                                                                                                                                                                                                                                                                                                         |
+| `FERRUM_ADMIN_ALLOW_INSECURE_HTTP` | `false`                 | Permits plaintext `http://` Admin URLs on non-loopback hosts. Container-network-only deployments are the intended use.                                                                                                                                                                                                                                                                           |
+| `FERRUM_ADMIN_TIMEOUT_MS`          | `5000`                  | Per-request deadline for Admin API calls, 250 – 60 000.                                                                                                                                                                                                                                                                                                                                          |
+| `FERRUM_MAX_CREDENTIALS_PER_TYPE`  | `2`                     | 1 – 10. **Mirror of the gateway's own setting** — set them to the same value. Values above 1 are what make append-then-delete rotation gapless.                                                                                                                                                                                                                                                  |
+| `FERRUM_RATE_LIMIT_SYNC_MODE`      | `local`                 | `local` \| `redis`. Where Edge keeps the counters of every consumer quota Nexus publishes. See the warning below — `local` counters are **per gateway process**.                                                                                                                                                                                                                                 |
+| `FERRUM_RATE_LIMIT_REDIS_URL`      | _(unset)_               | **Required when `FERRUM_RATE_LIMIT_SYNC_MODE=redis`.** Must be `redis://` or `rediss://`; startup fails otherwise. Ignored (and not written to any plugin config) in `local` mode.                                                                                                                                                                                                               |
+| `FERRUM_RATE_LIMIT_REDIS_TLS`      | `false`                 | Upgrade a `redis://` endpoint to TLS. `rediss://` already implies it. CA verification uses the gateway's own `FERRUM_TLS_CA_BUNDLE_PATH`.                                                                                                                                                                                                                                                        |
+
+> **⚠️ Consumer quotas are enforced per gateway process.**
+>
+> Edge's `rate_limiting` plugin keeps its counters in the memory of the process
+> that served the request unless the plugin config names a Redis endpoint. A
+> portal in front of **N** data-plane replicas therefore enforces **N × the
+> quota** a provider chose: an API limited to 1000 requests a minute answers up
+> to 1000 a minute _on each replica_. Nothing in the portal, the provider's
+> form, or the gateway reports this — the numbers simply do not add up in
+> production.
+>
+> Setting `FERRUM_RATE_LIMIT_SYNC_MODE=redis` with an endpoint makes Nexus
+> stamp `sync_mode`, `redis_url` and `redis_tls` onto every `rate_limiting`
+> config it writes, so all replicas share one counter. There is no
+> gateway-level environment variable for this: the endpoint is part of each
+> plugin config, which is why the switch lives here.
+>
+> **Changing the mode applies to rate limits saved afterwards.** It rewrites
+> nothing that already exists — an already-published API picks the new mode up
+> the next time its rate limit is saved (any `PATCH /api/apis/:id` carrying a
+> `rate_limit`, including re-saving the same numbers from the Settings tab).
+> After flipping the switch on a live portal, re-save the rate limit of every
+> API you care about, or accept that older APIs stay on per-process counters.
 
 #### Set on the gateway, not on Nexus
 
@@ -616,3 +644,86 @@ provider reports an unexplained `EDGE_ERROR`.
 `SIGINT`/`SIGTERM` trigger a graceful shutdown: the outbox poller stops, the
 Edge dispatcher closes, Fastify drains, then the store closes. Give the
 container at least a few seconds of termination grace.
+
+---
+
+## 10. Metrics
+
+**Nexus is not a metrics system.** It stores no time series, runs no scraper and
+retains no history. What it does is read the gateway's own telemetry on demand
+so a provider can see it next to their API.
+
+### Nexus emits nothing; point Prometheus at Edge
+
+There is no `/metrics` endpoint on the Nexus server. Traffic metrics belong to
+the data plane, and the data plane is Ferrum Edge:
+
+- **`GET /metrics`** on the gateway — Prometheus exposition. The two families
+  that matter for per-API traffic are `ferrum_requests_total{proxy_id, method,
+status_code, grpc_status, error_class, namespace}` and the
+  `ferrum_request_duration_ms{proxy_id, le, namespace}` histogram. It also
+  carries everything else the gateway measures.
+- **`GET /admin/metrics`** on the gateway — a JSON snapshot: circuit breakers,
+  health-check state, connection pools, cache and rate-limiter counters.
+
+Both are **gated by default**. A scrape needs an admin JWT, a matching
+`FERRUM_METRICS_BEARER_TOKEN`, or a source address inside
+`FERRUM_METRICS_ALLOWED_CIDRS`. For Prometheus, prefer the bearer token or the
+CIDR allow-list over handing the scraper an admin credential:
+
+```yaml
+scrape_configs:
+  - job_name: ferrum-edge
+    scrape_interval: 15s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['ferrum-edge:9000']
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/ferrum-metrics-token
+```
+
+Correlating a dashboard back to a portal API is the `proxy_id` label: it is the
+`ferrum_proxy_id` on the Nexus `apis` row, shown as **Edge proxy id** on the API
+detail page.
+
+Grafana, alerting rules and retention all live on that side. Nothing about this
+is configured in Nexus.
+
+### What Nexus shows, and its cache
+
+`GET /api/apis/:id/usage` (the provider's **Usage** card) reads both gateway
+endpoints for one proxy and reshapes them: request counts by status class and
+method, the `429`/`401`/`403` totals, interpolated p50/p95/p99 latency, and a
+backend verdict derived from the proxy's circuit breaker and any ejected target.
+
+| Layer   | Cache                                               |
+| ------- | --------------------------------------------------- |
+| Edge    | 5 s, on its own rendering of both endpoints         |
+| Nexus   | 10 s, in-process, **per proxy**, per server process |
+| The SPA | refetches every 30 s while an API page is open      |
+
+So a figure on the card can be up to about 15 seconds behind reality, and a
+horizontally scaled Nexus keeps one cache per process — two browser tabs served
+by different instances may briefly disagree. Neither matters for a diagnostic
+read; both would matter if you tried to bill from it, which is why you should
+not.
+
+Operational consequences worth knowing:
+
+- **A scrape is one HTTP GET per proxy per 10 s**, at worst. Edge's own 5-second
+  cache absorbs the rendering cost, so the load is a request, not a computation.
+- **The route never returns 5xx for a gateway problem.** An unreachable,
+  erroring or unparseable gateway produces `200` with `available: false`. The
+  failure is logged at `warn` by the Edge client (`Ferrum Edge metrics scrape
+could not reach the gateway`, `… returned a non-2xx status`, `… produced no
+parseable samples`), so **the log is where a metrics outage shows up**, not
+  the HTTP status.
+- **Counters are cumulative since the gateway process started.** A gateway
+  restart zeroes every provider's card. This is Edge's model, not a Nexus bug;
+  the card says so, and `gateway_uptime_seconds` says how far back the numbers
+  reach.
+- **There is no per-consumer attribution anywhere in this path**, because
+  `ferrum_requests_total` carries no consumer label. If someone needs "which
+  client burned the quota", that is an Edge access-log question, not a portal
+  one.

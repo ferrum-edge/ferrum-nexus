@@ -71,7 +71,6 @@ import {
   roleAtLeast,
   type AccessRequest,
   type AccessRequestStatus,
-  type ApiSummary,
   type Grant,
   type GrantStatus,
   type Paginated,
@@ -95,6 +94,7 @@ import type { EmailService } from '../email/service.js';
 import { conflict, forbidden, notFound, validationFailed, type NexusError } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
+import { presentApiSummary, type GatewayUrlSource } from '../publishing/present.js';
 import { withGroup, withoutGroup, type ConsumerProvisioner } from '../credentials/consumers.js';
 
 /** Filters accepted by {@link AccessService.listRequests}. */
@@ -173,23 +173,15 @@ export interface AccessServiceDeps {
   notifications: NotificationsService;
   email: EmailService;
   provisioner: ConsumerProvisioner;
+  /** Resolves the gateway origin the embedded API summaries' `invoke_url` uses. */
+  settings: GatewayUrlSource;
   log?: (obj: Record<string, unknown>, message: string) => void;
 }
 
 /** Build the access service. */
 export function createAccessService(deps: AccessServiceDeps): AccessService {
-  const { config, store, audit, notifications, email, provisioner } = deps;
+  const { config, store, audit, notifications, email, provisioner, settings } = deps;
   const namespace = config.edge.namespace;
-
-  function apiSummary(api: ApiRecord): ApiSummary {
-    return {
-      id: api.id,
-      name: api.name,
-      slug: api.slug,
-      version: api.version,
-      owner_user_id: api.owner_user_id,
-    };
-  }
 
   function userSummary(user: UserRecord): UserSummary {
     return { id: user.id, email: user.email, display_name: user.display_name, role: user.role };
@@ -234,12 +226,13 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         (user) => [user.id, user],
       ),
     );
+    const gatewayUrl = await settings.getGatewayPublicUrl();
     return rows.map((row) => {
       const api = apis.get(row.api_id);
       const requester = users.get(row.user_id);
       return {
         ...row,
-        ...(api ? { api: apiSummary(api) } : {}),
+        ...(api ? { api: presentApiSummary(api, gatewayUrl) } : {}),
         ...(requester ? { requester: userSummary(requester) } : {}),
       };
     });
@@ -258,12 +251,13 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         (user) => [user.id, user],
       ),
     );
+    const gatewayUrl = await settings.getGatewayPublicUrl();
     return rows.map((row) => {
       const api = apis.get(row.api_id);
       const user = users.get(row.user_id);
       return {
         ...row,
-        ...(api ? { api: apiSummary(api) } : {}),
+        ...(api ? { api: presentApiSummary(api, gatewayUrl) } : {}),
         ...(user ? { user: userSummary(user) } : {}),
       };
     });

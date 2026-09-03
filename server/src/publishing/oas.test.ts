@@ -233,6 +233,37 @@ describe('OpenAPI parsing', () => {
     assert.equal(spec.operationCount, 3);
   });
 
+  it('exposes the declared paths and their methods, uppercased', () => {
+    const spec = parseOpenApiSpec(
+      JSON.stringify({
+        openapi: '3.1.0',
+        info: { title: 'Multi', version: '1.0.0' },
+        paths: {
+          '/a': {
+            summary: 'not an operation',
+            parameters: [],
+            'x-internal': true,
+            post: { responses: { '201': { description: 'Created' } } },
+            get: { responses: { '200': { description: 'OK' } } },
+          },
+          '/b': { delete: { responses: { '204': { description: 'No content' } } } },
+          // A path item that declares nothing to call contributes no entry, and
+          // a non-object one is skipped rather than failing the document.
+          '/c': { summary: 'metadata only' },
+          '/d': 'not an object',
+        },
+      }),
+    );
+    // Methods come out in OPENAPI_OPERATION_METHODS order, not document order,
+    // so the same document always generates the same enforcement config.
+    assert.deepEqual(spec.paths, [
+      { path: '/a', methods: ['GET', 'POST'] },
+      { path: '/b', methods: ['DELETE'] },
+    ]);
+    // `pathCount` still counts every key, including the two with no operations.
+    assert.equal(spec.pathCount, 4);
+  });
+
   it('accepts a document at the operation limit and rejects one just over it', () => {
     assert.equal(parseOpenApiSpec(specWithOperations(MAX_SPEC_OPERATIONS)).operationCount, 3_000);
 

@@ -9,13 +9,19 @@
 
 import type { RegistrableRole, Role } from './roles.js';
 import type { ErrorCode } from './error-codes.js';
-import type { AuthPluginType, EmailTemplateKey } from './constants.js';
+import type {
+  AuthPluginType,
+  EmailTemplateKey,
+  HttpMethod,
+  SpecEnforcementLevel,
+} from './constants.js';
 import type {
   AccessRequest,
   AccessRequestStatus,
   Api,
   ApiSpecSummary,
   ApiStatus,
+  ApiTimeouts,
   ApiVisibility,
   AppHealth,
   AuditLog,
@@ -28,6 +34,7 @@ import type {
   CredentialType,
   EdgeHealth,
   EmailTemplate,
+  GatewaySettings,
   Grant,
   GrantStatus,
   IsoTimestamp,
@@ -332,6 +339,22 @@ export interface PublishApiRequest {
   rate_limit?: RateLimitConfig | null;
   /** Browser CORS policy; omit or send `null` for no gateway CORS headers. */
   cors?: CorsConfig | null;
+  /**
+   * HTTP methods the gateway accepts. Omit or send `null` to accept every
+   * method. `OPTIONS` is added to the list written to the gateway whenever
+   * `cors` is set, so a preflight is not rejected before the plugin runs.
+   */
+  allowed_methods?: HttpMethod[] | null;
+  /** Backend timeouts; omit or send `null` to keep the gateway defaults. */
+  timeouts?: ApiTimeouts | null;
+  /** Trip a circuit breaker on repeated backend failures. Defaults to `false`. */
+  circuit_breaker?: boolean;
+  /**
+   * How much of the uploaded document the gateway enforces. Defaults to
+   * `docs_only`; `routes` additionally rejects any path/method the spec does
+   * not declare. Bodies are never validated.
+   */
+  spec_enforcement?: SpecEnforcementLevel;
 }
 
 /** `POST /api/apis` */
@@ -367,6 +390,16 @@ export interface UpdateApiRequest {
   rate_limit?: RateLimitConfig | null;
   /** Replace the CORS policy, or send `null` to remove it from the gateway. */
   cors?: CorsConfig | null;
+  /** Replace the method allow-list, or send `null` to accept every method again. */
+  allowed_methods?: HttpMethod[] | null;
+  /** Replace the backend timeouts, or send `null` to restore the gateway defaults. */
+  timeouts?: ApiTimeouts | null;
+  circuit_breaker?: boolean;
+  /**
+   * Switch OpenAPI enforcement on (`routes`) or back off (`docs_only`), which
+   * attaches or detaches the gateway's `openapi_validator` accordingly.
+   */
+  spec_enforcement?: SpecEnforcementLevel;
   status?: ApiStatus;
 }
 
@@ -407,6 +440,107 @@ export interface CreateTestConsumerResponse {
   consumer_username: string;
   secret: ShowOnceSecret;
 }
+
+/* ── Usage & backend health ─────────────────────────────────────────────── */
+
+/**
+ * `GET /api/apis/:id/usage` — what the gateway currently reports for this
+ * API's proxy.
+ *
+ * ## What this is, and what it deliberately is not
+ *
+ * Nexus runs no metrics pipeline. This is a **cached read-through** of the two
+ * things Ferrum Edge already exposes for a proxy: the Prometheus counters on
+ * `GET /metrics` and the runtime state on `GET /admin/metrics`. Consequences a
+ * reader must keep in mind:
+ *
+ * - **Every count is cumulative since the gateway process started**, not "this
+ *   month" or "the last hour". Edge exposes no per-proxy time window and Nexus
+ *   stores no history, so a restart resets the numbers to zero. Point
+ *   Prometheus at Edge if you need rates or retention.
+ * - **There are no per-consumer counts.** Edge's request counter is not labelled
+ *   by consumer, so "who is using this API" cannot be answered from here.
+ * - `available: false` means the gateway could not be read (unreachable, an
+ *   error status, or an unparseable body), or the API has no proxy yet. The
+ *   route still answers `200`: a gateway hiccup is not a portal failure.
+ */
+export interface ApiUsageResponse {
+  /** Whether the numbers below came from a successful gateway read. */
+  available: boolean;
+  /** When Nexus produced this answer (a cached read may be up to 10s older). */
+  sampled_at: IsoTimestamp;
+  /**
+   * `gateway.uptime_seconds` — how far back the cumulative counters reach.
+   * Absent when the gateway did not report it.
+   */
+  gateway_uptime_seconds?: number;
+  requests: ApiUsageRequests;
+  /**
+   * Percentiles interpolated from the gateway's `ferrum_request_duration_ms`
+   * histogram buckets, exactly as `histogram_quantile` does: the value is
+   * linearly interpolated inside the bucket the quantile falls in, so its
+   * accuracy is bounded by that bucket's width, and a quantile landing in the
+   * open-ended top bucket is reported as the highest finite bucket bound.
+   * `null` when the histogram is empty or was not readable.
+   */
+  latency_ms: ApiUsageLatency | null;
+  backend: ApiUsageBackend;
+}
+
+/** Cumulative request counters for one API's proxy. */
+export interface ApiUsageRequests {
+  /** Every counted request, summed across methods and status codes. */
+  total: number;
+  /** Requests grouped by HTTP status class. Non-numeric statuses are dropped. */
+  by_status_class: ApiUsageStatusClasses;
+  /** `status_code` → count, e.g. `{ '200': 1200, '429': 18 }`. */
+  by_status: Record<string, number>;
+  /** `method` → count, e.g. `{ GET: 900, POST: 318 }`. */
+  by_method: Record<string, number>;
+  /** `429`s — the rate limit turning traffic away. */
+  rate_limited: number;
+  /** `401`s — a missing or invalid credential. */
+  unauthorized: number;
+  /** `403`s — authenticated, but not in the API's ACL group. */
+  forbidden: number;
+}
+
+/** Request counts bucketed by HTTP status class. */
+export interface ApiUsageStatusClasses {
+  '2xx': number;
+  '3xx': number;
+  '4xx': number;
+  '5xx': number;
+}
+
+/** Interpolated latency percentiles, in milliseconds. */
+export interface ApiUsageLatency {
+  p50: number;
+  p95: number;
+  p99: number;
+}
+
+/**
+ * How the gateway currently sees this API's backend.
+ *
+ * - `healthy` — a closed circuit breaker and no ejected target.
+ * - `failing` — an open breaker, or a target passive health checking has
+ *   ejected.
+ * - `recovering` — a half-open breaker probing whether the backend is back.
+ * - `unknown` — the gateway reports nothing about this proxy. That is the
+ *   normal state for a proxy with no `circuit_breaker` configured, and for one
+ *   that has never been called; it is **not** a claim that the backend is down.
+ */
+export interface ApiUsageBackend {
+  status: ApiUsageBackendStatus;
+  /** One human-readable sentence explaining `status`, or `null`. */
+  detail: string | null;
+  /** Since when the backend has been in a failing state, when Edge reports it. */
+  since?: IsoTimestamp;
+}
+
+/** @see {@link ApiUsageBackend} */
+export type ApiUsageBackendStatus = 'healthy' | 'failing' | 'recovering' | 'unknown';
 
 /* ── Access requests & grants ───────────────────────────────────────────── */
 
@@ -627,6 +761,8 @@ export interface AdminSettingsResponse {
   captcha: CaptchaAdminSettings;
   smtp: SmtpSettings;
   registration: RegistrationSettings;
+  /** Public origin of the gateway's proxy listener, for the catalog's invoke URLs. */
+  gateway: GatewaySettings;
 }
 
 /** `PUT /api/admin/settings` — every section is optional; omitted ones are untouched. */
@@ -649,6 +785,14 @@ export interface UpdateSettingsRequest {
     from_address?: string | null;
   };
   registration?: Partial<RegistrationSettings>;
+  gateway?: {
+    /**
+     * Absolute `http(s)` origin with no path, query or credentials; a trailing
+     * slash is stripped. `null` clears the stored value and falls back to
+     * `FERRUM_GATEWAY_PUBLIC_URL`.
+     */
+    public_url?: string | null;
+  };
 }
 
 /** `PUT /api/admin/settings` */

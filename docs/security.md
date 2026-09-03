@@ -65,6 +65,12 @@ private address is outside what a hostname check can see either way.
 ### Out of scope
 
 - The security of Ferrum Edge itself, and of the upstream services behind it.
+- **Request and response body validation.** An API may ask the gateway to reject
+  paths and methods its OpenAPI document does not declare (`spec_enforcement:
+routes`, see the [provider guide](guides/provider-guide.md#enforcement-level)),
+  but no level validates a body against a declared schema — that is the
+  backend's own responsibility. Enforcing routes narrows the reachable surface;
+  it is not input validation.
 - Anyone with shell access to the Nexus process or read access to its
   environment — they hold `NEXUS_SECRET_KEY` and `FERRUM_ADMIN_JWT_SECRET`, and
   that is game over by construction.
@@ -392,6 +398,47 @@ proxy if you run more than one. The limiter keys on `request.ip`, which honours
 client rotate the limiter's key once per request _and_ forge the IP recorded in
 the audit log, so the allowlist/hop-count form is the only one accepted.
 
+### Consumer quotas are per gateway process
+
+A per-API rate limit is enforced by Edge's `rate_limiting` plugin, and its
+counters live **in the memory of one gateway process** unless the plugin config
+names a Redis endpoint. A portal in front of N data-plane replicas therefore
+enforces **N × the quota** the provider chose: a "1000 per minute" API answers
+up to 1000 requests per minute _per replica_.
+
+Set `FERRUM_RATE_LIMIT_SYNC_MODE=redis` and `FERRUM_RATE_LIMIT_REDIS_URL` and
+Nexus stamps `sync_mode`/`redis_url`/`redis_tls` onto every `rate_limiting`
+config it writes, so the replicas share one counter. The setting applies to
+rate limits **saved after the change** — an already-published API picks it up
+the next time its rate limit is saved. There is no gateway-level environment
+variable for this; the endpoint is part of each plugin config, which is why it
+is configured on the portal.
+
+### Cross-Site WebSocket Hijacking
+
+Ferrum Edge treats WebSocket as transparent on an `http(s)` proxy, so
+**publishing an HTTP API also publishes WebSocket on the same listen path**.
+The `cors` plugin does not run on an upgrade — a browser's same-origin policy
+does not apply to `WebSocket` either — so the only origin check on that path is
+the proxy's own `allowed_ws_origins`, whose default (`[]`) is _no check at all_.
+A page on any origin could otherwise open a socket to a published API and ride
+a logged-in browser's ambient credentials.
+
+Nexus mirrors the API's CORS origins into `allowed_ws_origins` at publish time
+and whenever the CORS policy changes: a provider who named the browser origins
+allowed to call the API has already answered the question. Only plain
+`scheme://host[:port]` origins are mirrored, because the upgrade check is an
+exact, case-insensitive string comparison and a wildcard pattern would silently
+never match. An API with **no CORS policy, or a `*` one, gets `[]`** — a
+half-populated allow-list would be worse than none, and an API deliberately open
+to every browser origin gains nothing from one.
+
+The consequence is worth stating plainly: **an API with no CORS policy accepts
+WebSocket upgrades from any origin.** Authentication still applies — the auth
+plugin and the ACL group run on the upgrade request — so this is a CSRF-shaped
+risk against browser-borne credentials, not an open door. Providers fronting a
+WebSocket backend from a browser should list their origins.
+
 ### CAPTCHA
 
 Optional, configured from the admin UI rather than the environment. Supported
@@ -563,14 +610,14 @@ ordinary reporting.
 
 ### Publishing
 
-| Action                 | Target type | Description                                                                                                                                                                                                                                               |
-| ---------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `api.publish`          | `api`       | An API was published: its Edge proxy and plugin configs created, then associated on the proxy so the gateway runs them. `details`: slug, listen path, proxy id, auth plugin, requestable, visibility, rate limit, CORS policy, upstream, spec path count. |
-| `api.update`           | `api`       | Safe runtime settings changed. `details`: `changed_fields`, plus context such as `previous_auth_plugin` and `existing_credentials_invalidated`.                                                                                                           |
-| `api.spec_update`      | `api`       | A new spec revision was published and made current. `details`: spec id, version, path count, `backend_updated`.                                                                                                                                           |
-| `api.retire`           | `api`       | An API moved to `retired`. Emitted instead of `api.update` for that transition. `details.gateway_untouched` records that the proxy and live grants were left alone.                                                                                       |
-| `api.delete`           | `api`       | An API and its Edge objects were destroyed. `details`: slug, proxy id, `revoked_grants`.                                                                                                                                                                  |
-| `test_consumer.create` | `api`       | A provider created (or replaced) the disposable `nexus-test-<api_id>` consumer. `details`: consumer username/id, credential type, `replaced`.                                                                                                             |
+| Action                 | Target type | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ---------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `api.publish`          | `api`       | An API was published: its Edge proxy and plugin configs created, then associated on the proxy so the gateway runs them. `details`: slug, listen path, proxy id, auth plugin, requestable, visibility, rate limit, CORS policy, method allow-list, backend timeouts, circuit breaker, OpenAPI enforcement level, upstream, spec path count. The proxy's `allowed_ws_origins` is not logged separately — it is a pure function of the CORS policy already recorded here. |
+| `api.update`           | `api`       | Safe runtime settings changed. `details`: `changed_fields`, plus context such as `previous_auth_plugin` and `existing_credentials_invalidated`.                                                                                                                                                                                                                                                                                                                        |
+| `api.spec_update`      | `api`       | A new spec revision was published and made current. `details`: spec id, version, path count, OpenAPI enforcement level, `backend_updated`. At the `routes` level the revision also changes what the gateway accepts, so the level is recorded on every upload.                                                                                                                                                                                                         |
+| `api.retire`           | `api`       | An API moved to `retired`. Emitted instead of `api.update` for that transition. `details.gateway_untouched` records that the proxy and live grants were left alone.                                                                                                                                                                                                                                                                                                    |
+| `api.delete`           | `api`       | An API and its Edge objects were destroyed. `details`: slug, proxy id, `revoked_grants`.                                                                                                                                                                                                                                                                                                                                                                               |
+| `test_consumer.create` | `api`       | A provider created (or replaced) the disposable `nexus-test-<api_id>` consumer. `details`: consumer username/id, credential type, `replaced`.                                                                                                                                                                                                                                                                                                                          |
 
 ### Access workflow
 
@@ -653,6 +700,11 @@ Before going live:
       the same origin.
 - [ ] `NEXUS_RATE_LIMIT_ENABLED=true`; a proxy-level limit exists if you run
       more than one instance.
+- [ ] `FERRUM_RATE_LIMIT_SYNC_MODE=redis` (with an endpoint) if you run more
+      than one Ferrum Edge data-plane replica — otherwise every provider's
+      quota is multiplied by the replica count.
+- [ ] Providers fronting a browser-facing WebSocket backend have listed their
+      CORS origins, which is what populates the proxy's `allowed_ws_origins`.
 - [ ] `NEXUS_ALLOW_PRIVATE_UPSTREAMS` is left at `false` unless the portal is
       meant to front internal services, in which case gateway egress is
       restricted at the network layer.

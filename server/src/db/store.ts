@@ -75,6 +75,7 @@ import type {
   Organization,
   Paginated,
   Role,
+  SpecEnforcementLevel,
   User,
   UserStatus,
   Uuid,
@@ -139,8 +140,15 @@ export interface SessionRecord {
   updated_at: IsoTimestamp;
 }
 
-/** An `apis` row. */
-export type ApiRecord = Api;
+/**
+ * An `apis` row.
+ *
+ * `listen_path` and `invoke_url` are on the wire {@link Api} but not here:
+ * both are derived at presentation time from the namespace, the slug and the
+ * operator's gateway origin (see `publishing/present.ts`). Storing them would
+ * leave every row stale the moment the gateway moves.
+ */
+export type ApiRecord = Omit<Api, 'listen_path' | 'invoke_url'>;
 
 /** An `api_specs` row, including the raw uploaded document. */
 export type ApiSpecRecord = ApiSpec;
@@ -407,9 +415,27 @@ export interface SessionRepo {
   deleteExpired(now: IsoTimestamp): Promise<number>;
 }
 
+/**
+ * Creation payload for an API row.
+ *
+ * `circuit_breaker` and `spec_enforcement` are non-nullable, so
+ * {@link CreateInput} would make them mandatory; they are optional here instead
+ * because both columns carry a `DEFAULT` and their default *is* the common
+ * case — no breaker, and an OpenAPI document that is catalog metadata only.
+ */
+export type CreateApiInput = Omit<
+  CreateInput<ApiRecord>,
+  'circuit_breaker' | 'spec_enforcement'
+> & {
+  /** Defaults to `false`, matching the column default. */
+  circuit_breaker?: boolean;
+  /** Defaults to `'docs_only'`, matching the column default. */
+  spec_enforcement?: SpecEnforcementLevel;
+};
+
 /** Published APIs and their Edge proxies. */
 export interface ApiRepo {
-  create(input: CreateInput<ApiRecord>): Promise<ApiRecord>;
+  create(input: CreateApiInput): Promise<ApiRecord>;
   findById(id: Uuid): Promise<ApiRecord | null>;
   /** Slugs are unique across the portal and form the gateway listen path. */
   findBySlug(slug: string): Promise<ApiRecord | null>;

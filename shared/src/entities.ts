@@ -12,7 +12,12 @@
  */
 
 import type { Role } from './roles.js';
-import type { AuthPluginType, EmailTemplateKey } from './constants.js';
+import type {
+  AuthPluginType,
+  EmailTemplateKey,
+  HttpMethod,
+  SpecEnforcementLevel,
+} from './constants.js';
 
 /** A string UUID primary key. */
 export type Uuid = string;
@@ -95,6 +100,24 @@ export interface CorsConfig {
   allow_credentials: boolean;
 }
 
+/**
+ * Backend timeouts written onto the Edge proxy, in milliseconds.
+ *
+ * All three move together: `null` on an {@link Api} means the proxy keeps the
+ * gateway's own defaults (5 000 / 30 000 / 30 000), and the portal never
+ * writes a partial set, because Edge's `PUT /proxies/{id}` is a
+ * whole-resource replace where an omitted key means "reset to the default"
+ * rather than "leave alone".
+ */
+export interface ApiTimeouts {
+  /** TCP connect timeout (`backend_connect_timeout_ms`). */
+  connect_ms: number;
+  /** Backend response read timeout (`backend_read_timeout_ms`). */
+  read_ms: number;
+  /** Backend write timeout (`backend_write_timeout_ms`). */
+  write_ms: number;
+}
+
 /** A published API and the Edge proxy backing it. */
 export interface Api {
   id: Uuid;
@@ -110,6 +133,22 @@ export interface Api {
    */
   upstream_url: string | null;
   namespace: string;
+  /**
+   * Gateway listen path, always `/<namespace>/<slug>`. Derived, never stored —
+   * see {@link listenPathFor}.
+   */
+  listen_path: string;
+  /**
+   * Absolute URL a client sends requests to: the configured public origin of
+   * the gateway's proxy listener followed by {@link Api.listen_path}, e.g.
+   * `https://api.example.com/nexus/billing`.
+   *
+   * `null` when no operator has configured a public gateway origin (neither the
+   * `gateway.public_url` setting nor `FERRUM_GATEWAY_PUBLIC_URL`). Nexus never
+   * guesses one: the Admin API's address is not the proxy listener's, and a
+   * fabricated host would send clients somewhere real requests do not land.
+   */
+  invoke_url: string | null;
   version: string;
   spec_format: SpecFormat;
   /** Whether clients may submit access requests for this API. */
@@ -118,6 +157,37 @@ export interface Api {
   rate_limit: RateLimitConfig | null;
   /** Browser CORS policy, or `null` when the gateway adds no CORS headers. */
   cors: CorsConfig | null;
+  /**
+   * HTTP methods the gateway accepts, or `null` for "every method".
+   *
+   * This is the provider's own list. A request using a method outside it is
+   * rejected with `405` **before any plugin runs**, so the list Nexus writes to
+   * the proxy also carries `OPTIONS` whenever {@link Api.cors} is set —
+   * otherwise the browser preflight would 405 before the `cors` plugin could
+   * answer it.
+   */
+  allowed_methods: HttpMethod[] | null;
+  /** Backend timeouts, or `null` when the proxy keeps the gateway defaults. */
+  timeouts: ApiTimeouts | null;
+  /**
+   * Whether the proxy trips a circuit breaker on repeated backend failures.
+   *
+   * The portal models this as a switch: `true` writes Edge's own default
+   * `CircuitBreakerConfig` (5 failures to open, 3 successes to close, 30 s
+   * open, tripping on 500/502/503/504 and on connection errors), `false`
+   * writes `null`. Tuning the thresholds is an operator's job.
+   */
+  circuit_breaker: boolean;
+  /**
+   * How much of the current OpenAPI revision the gateway enforces.
+   *
+   * `docs_only` (the default, and what every API published before this field
+   * existed reads back as) means the document is catalog metadata only.
+   * `routes` attaches an `openapi_validator` plugin that rejects any request
+   * whose path and method the document does not declare — request and response
+   * *bodies* are never validated at either level.
+   */
+  spec_enforcement: SpecEnforcementLevel;
   status: ApiStatus;
   visibility: ApiVisibility;
   created_at: IsoTimestamp;
@@ -181,6 +251,10 @@ export interface ApiSummary {
   slug: string;
   version: string;
   owner_user_id: Uuid;
+  /** Gateway listen path, always `/<namespace>/<slug>`. */
+  listen_path: string;
+  /** Absolute invoke URL, or `null` when no public gateway origin is set. */
+  invoke_url: string | null;
 }
 
 /** Lifecycle of a grant. */
@@ -384,6 +458,24 @@ export interface BrandingSettings {
 
 /** Theme selection persisted under `nexus:theme`. */
 export type ThemePreference = 'dark' | 'light' | 'system';
+
+/**
+ * Where the gateway's **proxy listener** answers, so the catalog can tell a
+ * client the absolute URL to call.
+ *
+ * Deliberately not the portal's own origin and not the Edge Admin API's: those
+ * are three different listeners, and only this one takes data-plane traffic.
+ */
+export interface GatewaySettings {
+  /**
+   * Public origin of the proxy listener — scheme, host and (non-default) port
+   * only, no path, query or credentials, e.g. `https://api.example.com`.
+   *
+   * `null` means unconfigured, which surfaces as a `null` `invoke_url` on every
+   * API rather than a guessed address.
+   */
+  public_url: string | null;
+}
 
 /** Supported CAPTCHA vendors. */
 export type CaptchaProvider = 'none' | 'recaptcha' | 'hcaptcha' | 'turnstile';

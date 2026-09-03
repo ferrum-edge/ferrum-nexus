@@ -158,6 +158,14 @@ The limit is **per consumer**, not per source IP — which is the point of a
 portal quota. One noisy client cannot exhaust everyone else's budget. Clients
 see rate-limit headers on their responses and a `429` when they exceed it.
 
+⚠️ **The quota is enforced per gateway process.** If your operator runs more
+than one Ferrum Edge data-plane replica, each one counts separately, so the
+effective limit is your number multiplied by the replica count — unless they
+have configured Redis-synced counters (`FERRUM_RATE_LIMIT_SYNC_MODE=redis`).
+Ask them which it is before you rely on the number as a hard ceiling; and note
+that changing that setting only affects rate limits saved afterwards, so an old
+API may need its limit re-saved.
+
 ### CORS
 
 Optional, and only relevant if a **browser** calls your API directly. Server-to-
@@ -178,16 +186,131 @@ Note that CORS is a browser rule, not an access control: it decides which web
 pages may read your responses, and nothing else. What actually protects the data
 is the authentication plugin and the ACL group.
 
+**Your CORS origins also guard WebSocket.** Publishing an HTTP API on Ferrum
+Edge publishes WebSocket on the same path — the gateway passes upgrades through
+transparently — and the CORS plugin does not run on an upgrade. The portal
+mirrors the exact origins you list onto the proxy's WebSocket origin check, so
+a page on any other origin is refused the socket. List `*`, or leave the box
+empty, and there is **no** origin check on upgrades: anyone's page can open a
+socket, and only your authentication plugin stands between it and your backend.
+If your backend speaks WebSocket to browsers, list your origins.
+
+### Enforcement level
+
+By default your OpenAPI document is **documentation**. It is stored, rendered in
+the catalog and handed to clients, and the gateway does not consult it: a client
+with a key and a grant can call `/nexus/billing/anything-at-all` and the request
+reaches your backend exactly like a declared one would. That is the right
+default — it never breaks an API whose document is incomplete — but it is
+usually not what "I uploaded my OpenAPI spec" feels like it should mean.
+
+The **OpenAPI enforcement** select, next to the spec editor, offers two levels.
+
+**Documentation only (default).** The behaviour above. Nothing is enforced.
+
+**Reject requests to paths and methods not in the spec.** The portal generates
+one gateway rule per declared operation, and anything that matches none of them
+is answered `400` with an `application/problem+json` body, before your backend
+is ever contacted. Concretely, for a document declaring `GET /invoices` and
+`GET /invoices/{id}` published at `/nexus/billing`:
+
+| Request                              | Result                                   |
+| ------------------------------------ | ---------------------------------------- |
+| `GET /nexus/billing/invoices`        | forwarded                                |
+| `GET /nexus/billing/invoices/42`     | forwarded — `{id}` matches one segment   |
+| `GET /nexus/billing/invoices/42/pdf` | `400` — `{id}` never spans a `/`         |
+| `POST /nexus/billing/invoices`       | `400` — the document declares only `get` |
+| `HEAD /nexus/billing/invoices`       | `400` — see below                        |
+| `GET /nexus/billing/internal-debug`  | `400` — not in the document              |
+
+#### What it does not do
+
+**Request and response bodies are not validated.** A `POST` to a declared path
+reaches your backend whatever its body contains, even if your document declares
+a `requestBody` schema that the body violates. Enforcing schemas means
+materialising them out of the document — resolving `$ref`s, converting between
+JSON Schema drafts, handling media types and encodings — which is the gateway's
+own spec importer's job. A second implementation living in the portal would
+inevitably differ from it and start rejecting traffic the gateway itself would
+have accepted, so the portal generates only the part it can generate exactly.
+
+**`HEAD` is a separate operation.** OpenAPI treats `head` as its own path-item
+key, so a document declaring only `get` on a path does not declare `head` on it,
+and a `HEAD` request is rejected. If your backend serves `HEAD`, declare it.
+The same goes for `TRACE` and any other method your clients actually send.
+
+**Trailing slashes are literal.** A declared `/invoices` does not also allow
+`/invoices/`, and vice versa. Declare whichever spelling your clients use.
+
+#### CORS preflights
+
+A browser's `OPTIONS` preflight targets a path with no `options` operation
+behind it, so on its own it would be rejected as undeclared — and the browser
+would report a CORS failure rather than anything that points at the real cause.
+The portal handles this for you: whenever the API has a **CORS policy**, the
+generated rules skip `OPTIONS` entirely so the preflight reaches the CORS plugin
+that answers it. Adding or removing your CORS origins later regenerates the
+rules to match; you never have to declare an `options` operation yourself.
+
+An API with **no** CORS policy keeps `OPTIONS` closed, which is what you want:
+there is no preflight to serve.
+
+#### Turning it on and off
+
+Safe to change on a live API, in either direction, from the API's Settings tab.
+Switching to `routes` attaches the rules; switching back to documentation-only
+removes them and the API immediately behaves as it did before.
+
+Every spec upload regenerates the rules, so the enforced surface always matches
+the revision currently shown in the catalog — a path you delete from your
+document stops being reachable, and one you add becomes reachable, in the same
+operation. Because of that, uploading a document that declares **no** operations
+while enforcement is on is refused: the portal will not record a level it is not
+enforcing, and rules that allow nothing would reject every request. Switch back
+to documentation-only first if that is genuinely what you want.
+
+### Advanced
+
+Three settings that go onto the gateway proxy itself rather than onto a plugin.
+All of them are optional, and all of them are safe to change on a live API.
+
+**Allowed HTTP methods.** Tick the methods your API actually serves and the
+gateway answers `405` to everything else — before authentication, before the
+access gate, before anything. Tick nothing and every method is accepted, which
+is the default and means a `GET`-only catalog API still accepts `POST` at the
+gateway once a client holds a key. The **Use the methods declared in the spec**
+button fills the list in from your OpenAPI document. You do not need to tick
+`OPTIONS` for CORS: the portal adds it to the gateway's copy of the list
+whenever you have a CORS policy, because a preflight rejected with `405` would
+never reach the CORS plugin.
+
+**Backend timeouts.** Connect, read and write, in milliseconds, 100 – 300 000.
+Leave them blank to keep the gateway defaults shown in the boxes (5000 / 30 000
+/ 30 000). The read timeout is the one that matters most: without it a hung
+upstream holds a gateway worker for the full default. The three travel together
+— filling one in and leaving the others blank gives the blank ones their
+default value.
+
+**Circuit breaker.** When on, five consecutive failures (a 500, 502, 503 or 504,
+or a connection error) stop the gateway forwarding to your backend for thirty
+seconds; it then lets one probe through at a time until three succeed. Clients
+see a fast failure instead of a slow one, and a struggling backend is not
+hammered while it recovers. The thresholds are not adjustable from the portal —
+that is an operator setting on the proxy.
+
 ### What publishing actually does
 
 ```
 apis row ─── proxy          name `nexus-<slug>`, listening on /<namespace>/<slug>
+              │             plus your Advanced settings: allowed methods,
+              │             timeouts, circuit breaker, WebSocket origins
               │
               │ …then the proxy is told to run them
               ├─ plugin_config  your auth plugin
               ├─ plugin_config  access_control      — only when requestable
               ├─ plugin_config  rate_limiting       — only when a rate limit is set
-              └─ plugin_config  cors                — only when origins are listed
+              ├─ plugin_config  cors                — only when origins are listed
+              └─ plugin_config  openapi_validator   — only at the `routes` enforcement level
 ```
 
 The last step matters: on Ferrum Edge a plugin has to be both configured _and_
@@ -197,6 +320,64 @@ live until that lands.
 
 If any step fails, everything created is torn back down and nothing is saved on
 either side. A failed publish leaves no debris.
+
+---
+
+## Usage and backend health
+
+**My APIs → the API → Overview → Usage.** The card is a live read of what the
+gateway itself reports for your proxy — refreshed every 30 seconds, cached for
+10 — not a Nexus database of its own.
+
+It shows:
+
+| Row             | What it is                                                                                                                 |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| **Backend**     | Healthy, Failing, Recovering or Unknown, with a sentence saying why                                                        |
+| **Requests**    | Every call the gateway has counted for this API                                                                            |
+| **By status**   | The same total split into 2xx / 3xx / 4xx / 5xx                                                                            |
+| **Turned away** | The three refusals worth watching separately: `429` (your rate limit), `401` (bad or missing credential), `403` (no grant) |
+| **Latency**     | p95, with p50 and p99 beside it, in milliseconds                                                                           |
+
+### Read the window before you read the numbers
+
+Every count is **cumulative since the gateway process started**. It is not "this
+week" and not "since you published" — a gateway restart puts every number back
+to zero. The line under the card says when the sample was taken.
+
+That is a deliberate limit, not an oversight. Ferrum Edge exposes no per-proxy
+time window, and Nexus keeps no history, so any "requests this month" here would
+be invented. If you need rates, trends or retention, point Prometheus and
+Grafana at the gateway — your administrator has the details in the operations
+guide.
+
+### What it cannot tell you
+
+- **Who is calling.** The gateway's request counter carries no consumer label,
+  so there is no per-client breakdown and no unique-consumer count. **Grants**
+  tells you who _may_ call; nothing tells you who did.
+- **Which endpoints are hot.** Counts are per API, not per path.
+- **Anything about a call that never reached the gateway.** A client with a DNS
+  problem or a blocked egress rule shows up nowhere here.
+
+### Making sense of "Unknown"
+
+Unknown means the gateway reported nothing about your backend, and the card says
+which of the two reasons applies:
+
+- **No traffic yet** — nothing has called this API since the gateway started.
+- **No circuit breaker is configured** — Edge tracks backend state through a
+  circuit breaker, and this proxy has none, so there is nothing to report even
+  though calls are flowing.
+
+Unknown is never a claim that your backend is down. **Failing** is: it means the
+circuit breaker has opened, or health checking has pulled a target out of
+rotation, and the `since` line says when that started. **Recovering** means the
+breaker is half-open and letting probe traffic through to find out whether the
+backend is back.
+
+If the whole card says gateway metrics are unavailable, Nexus could not read the
+gateway — the API itself may well be serving traffic normally.
 
 ---
 
@@ -211,7 +392,9 @@ API, but two of them have consequences worth reading first.
 | Visibility                 | Listing only. Existing grants and calls are unaffected.                                                                    |
 | Upstream URL               | Re-points the gateway's backend. Takes effect immediately, and the upstream shown on the API page updates with it.         |
 | Rate limit                 | Attaches, updates, or (cleared) removes the quota.                                                                         |
-| CORS                       | Attaches, replaces, or (cleared) removes the browser CORS policy.                                                          |
+| CORS                       | Attaches, replaces, or (cleared) removes the browser CORS policy — and with it the WebSocket origin check.                 |
+| Allowed methods            | Takes effect immediately. Untick everything to accept every method again.                                                  |
+| Timeouts, circuit breaker  | Take effect immediately. Clearing the timeout boxes restores the gateway defaults.                                         |
 | **Requestable → off**      | ⚠️ Removes the access gate. **Every authenticated consumer can now call this API.** Existing grants stay but become inert. |
 | **Authentication plugin**  | ⚠️ Breaks every existing client until they issue a new credential.                                                         |
 
@@ -252,6 +435,17 @@ In practice:
 
 Set the upstream explicitly for anything production-facing. It makes "publish
 new docs" and "move the backend" two separate, deliberate acts.
+
+### If enforcement is on
+
+At the `routes` [enforcement level](#enforcement-level) an upload also changes
+**what the gateway will accept**: a path you remove from the document stops
+being reachable the moment the revision lands, and one you add becomes
+reachable. Uploading is therefore a traffic change as well as a documentation
+change — check the diff of your `paths` before you publish, not only your
+prose. If the upload cannot be saved, the previous rules are put back, so a
+failed upload never leaves the gateway enforcing a revision the catalog does not
+show.
 
 ### A safe update routine
 
@@ -422,7 +616,10 @@ their grant was revoked or never approved. Check **Grants** for their account.
 the wrong type for this API — most often after an authentication-plugin change.
 
 **"A client says they get 502/503."** That is your upstream, not the portal.
-Check that the backend is healthy and reachable **from the gateway**.
+Check the **Backend** row on the Overview tab first: _Failing_ confirms the
+gateway agrees with them and says since when. _Unknown_ does not clear your
+backend — it usually just means this proxy has no circuit breaker — so check
+that the backend is healthy and reachable **from the gateway**.
 
 **"My rate limit is not being applied."** It attaches per consumer. Confirm the
 limit is saved in Settings, and remember a test consumer counts as its own
