@@ -53,6 +53,31 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   The Docker image now ships a `HEALTHCHECK` on it.
 - A root `npm run migrate` script that builds `shared` first, so migrations
   work on a clean clone.
+- **The catalog tells clients where to call.** A `gateway.public_url` setting
+  (env default `FERRUM_GATEWAY_PUBLIC_URL`) and derived `listen_path` /
+  `invoke_url` fields on every API object, with a "Call this API" panel and
+  the auth-header recipe on the catalog and credentials pages.
+- **Usage and backend status per API** (`GET /api/apis/:id/usage`): requests
+  by status class and method, 401/403/429 counts, interpolated latency
+  percentiles and a healthy/failing/recovering verdict, read from Edge's
+  `/metrics` and `/admin/metrics` with a 10-second cache. Cumulative since the
+  gateway process started; never a 5xx when the gateway is unreachable.
+- **Provider runtime settings** for the proxy: an HTTP method allow-list
+  (`OPTIONS` is added automatically when a CORS policy exists so preflight
+  still works), backend connect/read/write timeouts, and a circuit breaker
+  with Edge's defaults.
+- **Routes-only OpenAPI enforcement** (`spec_enforcement: "routes"`): an Edge
+  `openapi_validator` generated from the current document rejects paths and
+  methods it does not declare, and is regenerated on every spec update.
+  Request and response bodies are not validated; `docs_only` stays the
+  default.
+- `FERRUM_RATE_LIMIT_SYNC_MODE=redis` (+ `FERRUM_RATE_LIMIT_REDIS_URL`,
+  `FERRUM_RATE_LIMIT_REDIS_TLS`) stamps Redis counter sync onto every rate
+  limit Nexus writes; the operations guide warns that quotas are otherwise
+  enforced per gateway process.
+- Exact CORS origins are mirrored onto the proxy's `allowed_ws_origins`, so
+  a browser cannot open a cross-site WebSocket to an API whose CORS policy
+  would refuse it.
 
 ### Changed
 
