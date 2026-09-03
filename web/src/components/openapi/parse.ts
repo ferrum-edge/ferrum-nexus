@@ -191,6 +191,24 @@ function groupByTag(
 }
 
 /**
+ * The HTTP methods a document declares, uppercased and deduplicated.
+ *
+ * Feeds the "use the methods declared in the spec" shortcut on the publish and
+ * settings forms; a document that does not parse simply declares none. The
+ * caller decides the order — Edge's `allowed_methods` enum is the canonical
+ * one — so this returns a set-like list, not a sorted one.
+ */
+export function declaredMethods(text: string): string[] {
+  const result = parseSpecText(text);
+  if (!result.ok) return [];
+  const found = new Set<string>();
+  for (const group of result.spec.groups) {
+    for (const operation of group.operations) found.add(operation.method.toUpperCase());
+  }
+  return [...found];
+}
+
+/**
  * Parse an OpenAPI document supplied as YAML or JSON text.
  *
  * Never throws: syntax errors and structurally invalid documents both come back
