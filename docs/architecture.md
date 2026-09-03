@@ -498,8 +498,10 @@ apis row ─── proxy          name `nexus-<slug>`, listen_path `/<namespace>
               ├─ plugin_config  access_control    — only when `requestable`
               ├─ plugin_config  rate_limiting     — only when a rate limit is set
               ├─ plugin_config  cors              — only when `cors` names origins
-              └─ plugin_config  openapi_validator — only when `spec_enforcement`
-                                                    is `routes`
+              ├─ plugin_config  openapi_validator — only when `spec_enforcement`
+              │                                     is `routes`
+              └─ plugin_config  … one per `api_plugins` row — the provider
+                                  plugin palette (§5.7)
 ```
 
 The `openapi_validator` is the only config generated from the **spec** rather
@@ -560,6 +562,77 @@ appearing in the catalog for anyone but its owner, its grantees and admins.
 Retiring must never silently break an integration already in production.
 `DELETE /api/apis/:id` is the destructive path — it revokes grants, strips ACL
 groups, tears down the Edge objects and removes the rows.
+
+### 5.7 The provider plugin palette
+
+The five configs above are generated from fields on the `apis` row — they are
+part of what the API _is_. The **palette** is the layer a provider adds on top:
+a curated set of Edge plugins (`security_headers`, `ip_restriction`,
+`response_caching`, `request_deduplication`, `request_termination` and the
+rest) they can switch on and off at any time, one `api_plugins` row and one
+proxy-scoped plugin config each.
+
+**Structurally there is nothing new here.** A palette config is created,
+associated, replaced and deleted exactly like `rate_limiting` and `cors`, by
+the same code: `publishing/edge-plugins.ts` holds `mutateProxy`, `attach`,
+`associate`/`disassociate`, the undo steps and `reconcileOptionalPlugin`, and
+both `publishing/service.ts` and `plugins/service.ts` are built on it. That
+sharing is not tidiness — `PUT /proxies/{id}` is a whole-resource replace with
+no concurrency token, so a second GET-merge-PUT implementation would mean a
+second `serializePerKey` key and therefore no lock at all (§5.2).
+
+**The descriptor catalog is the single source of truth.** `PROVIDER_PLUGINS` in
+`shared/src/plugins.ts` describes each plugin once — its Edge name, its
+category, and a `PluginFieldSpec[]` whose `key` **is** the Edge config key.
+From that one declaration:
+
+- `server/src/plugins/schema.ts` compiles a zod schema, `.strict()`, so an
+  unknown key is a portal `400` rather than a gateway `400` half-way through
+  attaching;
+- `web/src/components/plugins/PluginForm.tsx` renders the form generically —
+  there is no per-plugin component, and adding a plugin is a descriptor plus
+  nothing else;
+- the docs table in the provider guide describes the same fields.
+
+Each descriptor exposes a **curated subset** of its Edge schema and leaves the
+rest at Edge's own defaults, for the same reason `cors` sends two keys out of
+eight: sending a key the portal cannot let the provider change would only
+freeze that default in place. Optional fields the provider left alone are
+omitted from the body entirely, so an absent key means "the gateway decides".
+
+Three further points of fidelity:
+
+- **`enabled: false` is a pause, not a removal.** The config and its
+  association stay; only the flag moves, so the settings survive. Nexus
+  validates the body either way, because Edge does not construct a disabled
+  plugin strictly and a bad config would otherwise fail the day it is switched
+  back on.
+- **`trigger` is the portal's slice of Edge's predicate tree.** The wire shape
+  is `{ methods?, path_prefix? }`, compiled in `plugins/service.ts` into the
+  `all`/`match` nodes Edge expects (a single condition stays a bare `match`
+  leaf). Edge **refuses** a trigger on a plugin that publishes contextless
+  initial-response-header policy, a fixed per-proxy body ceiling or contextless
+  response-trailer ownership, so each descriptor carries `supports_trigger` and
+  the route rejects the rest before writing.
+- **`request_deduplication` gets the Redis stamp.** Its idempotency records are
+  per gateway process in `local` mode, so a portal in front of N replicas lets
+  the same key execute up to N times — the same failure `rate_limiting` has,
+  stamped from the same operator setting (`FERRUM_RATE_LIMIT_SYNC_MODE`). The
+  Redis-only keys are _rejected_ outside `sync_mode: 'redis'`, so nothing is
+  sent at all in the local case.
+
+The `api_plugins` row is written last but **inside** the compensated block, so a
+store failure rolls the gateway back: a `request_termination` left running with
+no row would be an API stuck answering 503 with nothing in the UI to switch it
+off. API deletion drops the rows in the same transaction as the specs and
+grants; the gateway objects need no step of their own, because the proxy delete
+already cascades them.
+
+The auth family (`hmac_auth`, `jwks_auth`, `oauth2_introspection`, `mtls_auth`)
+and `spec_expose` are out of the palette: the first four change the credential
+model (§6) and the last needs a public spec endpoint. Both are additive — an
+auth-family plugin would arrive with a credential type, `spec_expose` with a
+route — and neither changes the machinery above.
 
 ---
 

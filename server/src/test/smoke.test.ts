@@ -728,6 +728,93 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal((await store.apiSpecs.list({ api_id: api.id })).total, 1);
     });
 
+    /* ── api plugins ──────────────────────────────────────────────────── */
+
+    it('apiPlugins: upserts one row per (api, plugin) and keeps created_at', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const api = await makeApi(owner.id);
+
+      const first = await store.apiPlugins.upsert({
+        api_id: api.id,
+        plugin_name: 'ip_restriction',
+        enabled: true,
+        config: { allow: ['203.0.113.0/24'], mode: 'allow_first' },
+        trigger: { methods: ['POST'], path_prefix: '/nexus/orders' },
+      });
+      assert.equal(first.api_id, api.id);
+      assert.equal(first.enabled, true);
+      // Structured columns cross the store boundary as parsed objects, never
+      // as the JSON text the SQL adapters keep in their `*_json` columns.
+      assert.deepEqual(first.config, { allow: ['203.0.113.0/24'], mode: 'allow_first' });
+      assert.deepEqual(first.trigger, { methods: ['POST'], path_prefix: '/nexus/orders' });
+
+      // The PUT route saves the same pair again: one row, not a conflict.
+      const replaced = await store.apiPlugins.upsert({
+        api_id: api.id,
+        plugin_name: 'ip_restriction',
+        enabled: false,
+        config: { deny: ['198.51.100.4'] },
+        trigger: null,
+      });
+      assert.equal(replaced.id, first.id, 'the pair is unique, so a save reuses the row');
+      assert.equal(replaced.created_at, first.created_at, 'created_at survives a replace');
+      assert.equal(replaced.enabled, false);
+      assert.deepEqual(replaced.config, { deny: ['198.51.100.4'] });
+      assert.equal(replaced.trigger, null);
+
+      assert.deepEqual(await store.apiPlugins.find(api.id, 'ip_restriction'), replaced);
+      assert.equal(await store.apiPlugins.find(api.id, 'compression'), null);
+      assert.equal((await store.apiPlugins.listByApi(api.id)).length, 1);
+    });
+
+    it('apiPlugins: a second plugin is a separate row, and both cascade', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const api = await makeApi(owner.id);
+      const other = await makeApi(owner.id);
+
+      await store.apiPlugins.upsert({
+        api_id: api.id,
+        plugin_name: 'correlation_id',
+        enabled: true,
+        config: {},
+        trigger: null,
+      });
+      await store.apiPlugins.upsert({
+        api_id: api.id,
+        plugin_name: 'compression',
+        enabled: true,
+        config: { algorithms: ['gzip'] },
+        trigger: null,
+      });
+      // The same plugin name on a different API is a different row.
+      await store.apiPlugins.upsert({
+        api_id: other.id,
+        plugin_name: 'compression',
+        enabled: true,
+        config: {},
+        trigger: null,
+      });
+
+      const listed = await store.apiPlugins.listByApi(api.id);
+      assert.equal(listed.length, 2);
+      assert.deepEqual([...listed].map((row) => row.plugin_name).sort(), [
+        'compression',
+        'correlation_id',
+      ]);
+
+      assert.equal(await store.apiPlugins.delete(api.id, 'compression'), true);
+      assert.equal(await store.apiPlugins.delete(api.id, 'compression'), false);
+      assert.equal((await store.apiPlugins.listByApi(api.id)).length, 1);
+
+      assert.equal(await store.apiPlugins.deleteByApi(api.id), 1);
+      assert.equal(await store.apiPlugins.deleteByApi(api.id), 0);
+      assert.equal(
+        (await store.apiPlugins.listByApi(other.id)).length,
+        1,
+        'the other API keeps its own row',
+      );
+    });
+
     /* ── access requests ──────────────────────────────────────────────── */
 
     it('accessRequests: one pending request per api/user pair', async () => {

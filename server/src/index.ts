@@ -61,6 +61,7 @@ import { createMessagingService, type MessagingService } from './messaging/servi
 import { registerAuthPlugin } from './middleware/auth-plugin.js';
 import { registerErrorHandler } from './middleware/error-handler.js';
 import { createNotificationsService, type NotificationsService } from './notifications/service.js';
+import { createApiPluginsService, type ApiPluginsService } from './plugins/service.js';
 import { createPublishingService, type PublishingService } from './publishing/service.js';
 import { accessRequestRoutes, grantRoutes } from './routes/access.js';
 import { adminRoutes } from './routes/admin.js';
@@ -93,6 +94,7 @@ export interface NexusServices {
   credentials: CredentialsService;
   publishing: PublishingService;
   usage: UsageService;
+  apiPlugins: ApiPluginsService;
   access: AccessService;
   god: GodService;
 }
@@ -280,6 +282,15 @@ export async function buildServer(
     settings,
   });
   const usage = createUsageService({ store: deps.store, edge: deps.edge, publishing });
+  // Composed after publishing: the palette reuses its owner-or-admin check, so
+  // there is one definition of "may administer this API" rather than two.
+  const apiPlugins = createApiPluginsService({
+    config,
+    store: deps.store,
+    edge: deps.edge,
+    audit,
+    publishing,
+  });
   const access = createAccessService({
     config,
     store: deps.store,
@@ -331,6 +342,7 @@ export async function buildServer(
     credentials,
     publishing,
     usage,
+    apiPlugins,
     access,
     god,
   };
@@ -452,9 +464,10 @@ export async function buildServer(
     prefix: '/api/catalog',
   });
 
-  await app.register(async (scope) => scope.register(publishingRoutes, { publishing, usage }), {
-    prefix: '/api/apis',
-  });
+  await app.register(
+    async (scope) => scope.register(publishingRoutes, { publishing, usage, apiPlugins }),
+    { prefix: '/api/apis' },
+  );
 
   await app.register(async (scope) => scope.register(accessRequestRoutes, { access }), {
     prefix: '/api/access-requests',

@@ -9,12 +9,16 @@ import type {
   ApiUsageResponse,
   CreateTestConsumerRequest,
   CreateTestConsumerResponse,
+  DeleteApiPluginResponse,
   DeleteApiResponse,
   GetApiResponse,
+  ListApiPluginsResponse,
   ListApisQuery,
   ListApisResponse,
   PublishApiRequest,
   PublishApiResponse,
+  SetApiPluginRequest,
+  SetApiPluginResponse,
   UpdateApiRequest,
   UpdateApiResponse,
   UpdateApiSpecRequest,
@@ -123,6 +127,53 @@ export function useDeleteApi(): UseMutationResult<DeleteApiResponse, Error, stri
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.apis.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.catalog.all });
+    },
+  });
+}
+
+/* ── Plugin palette ───────────────────────────────────────────────────────
+ *
+ * Only the state is fetched: which palette plugins this API has switched on.
+ * The palette itself is the static `PROVIDER_PLUGINS` catalog imported from
+ * `@ferrum-nexus/shared`, so there is no schema query.
+ */
+
+/** Palette plugins currently configured on one API. */
+export function useApiPlugins(id: string, enabled = true): UseQueryResult<ListApiPluginsResponse> {
+  return useQuery({
+    queryKey: queryKeys.apis.plugins(id),
+    queryFn: () => apisApi.listPlugins(id),
+    enabled: enabled && id.length > 0,
+  });
+}
+
+/** Create or replace one palette plugin on the gateway. */
+export function useSetApiPlugin(): UseMutationResult<
+  SetApiPluginResponse,
+  Error,
+  { id: string; name: string; body: SetApiPluginRequest }
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, name, body }: { id: string; name: string; body: SetApiPluginRequest }) =>
+      apisApi.setPlugin(id, name, body),
+    onSuccess: (_result, variables) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.apis.plugins(variables.id) });
+    },
+  });
+}
+
+/** Detach and delete one palette plugin. */
+export function useRemoveApiPlugin(): UseMutationResult<
+  DeleteApiPluginResponse,
+  Error,
+  { id: string; name: string }
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) => apisApi.removePlugin(id, name),
+    onSuccess: (_result, variables) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.apis.plugins(variables.id) });
     },
   });
 }

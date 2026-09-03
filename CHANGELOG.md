@@ -78,6 +78,17 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - Exact CORS origins are mirrored onto the proxy's `allowed_ws_origins`, so
   a browser cannot open a cross-site WebSocket to an API whose CORS policy
   would refuse it.
+- **Provider plugin palette** (`GET`/`PUT`/`DELETE /api/apis/:id/plugins/:name`
+  and a Plugins tab): providers attach curated, schema-validated Edge plugins
+  to their own API — `security_headers`, `request_size_limiting`,
+  `response_size_limiting`, `ip_restriction`, `bot_detection`,
+  `correlation_id`, `compression`, `response_caching`,
+  `request_deduplication` and `request_termination` — with an execution
+  trigger (methods, path prefix) where Edge accepts one. The descriptor
+  catalog in `shared/src/plugins.ts` is the single source of truth for the
+  forms and the validation; configs are proxy-scoped and associated on the
+  proxy like the first-class ones. Operator plugins (logging, telemetry,
+  mesh, chaos) and the auth family stay out of the palette.
 
 ### Changed
 

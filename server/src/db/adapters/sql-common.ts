@@ -390,8 +390,11 @@ export function setParts(
  *
  * @param table          Target table.
  * @param columns        Every column being inserted, in parameter order.
- * @param conflictColumn The unique column that decides insert-vs-update. Pass
- *                       it already quoted when it needs quoting.
+ * @param conflictColumn The unique column that decides insert-vs-update, or a
+ *                       comma-separated list for a composite unique key. Pass
+ *                       it already quoted when it needs quoting. MySQL matches
+ *                       on whichever unique key the insert collided with and
+ *                       ignores this argument entirely.
  * @param updateColumns  Columns to overwrite when the row already exists.
  */
 export function upsertSql(

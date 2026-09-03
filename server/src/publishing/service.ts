@@ -15,7 +15,10 @@
  *               ├─ plugin_config    access_control, only when `requestable`
  *               ├─ plugin_config    rate_limiting, only when a rate limit is set
  *               ├─ plugin_config    cors, only when a CORS policy is set
- *               └─ plugin_config    openapi_validator, only in `routes` mode
+ *               ├─ plugin_config    openapi_validator, only in `routes` mode
+ *               └─ plugin_config    one per `api_plugins` row — the provider
+ *                                   plugin palette, managed by
+ *                                   `plugins/service.ts`
  * ```
  *
  * The `openapi_validator` is the one config generated from the *spec* rather
@@ -64,6 +67,12 @@
  * therefore goes through `mutateProxy`: `GET`, change the handful of fields
  * that are actually changing, `PUT` the whole document back, serialised per
  * proxy id so two concurrent round trips cannot lose one edit.
+ *
+ * That machinery — `mutateProxy`, `attach`, `associate`/`disassociate`, the
+ * undo steps and `reconcileOptionalPlugin` — lives in
+ * [edge-plugins.ts](./edge-plugins.ts), shared with the provider plugin palette
+ * (`plugins/service.ts`) so both drive the gateway through one implementation
+ * and, crucially, one per-proxy lock.
  *
  * ## Publishing is a multi-write sequence with no transaction
  *
@@ -137,16 +146,14 @@ import type { CredentialsService } from '../credentials/service.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import type {
   EdgeCircuitBreakerConfig,
-  EdgePluginAssociation,
   EdgePluginConfig,
-  EdgePluginConfigWrite,
   EdgePluginSettings,
   EdgeProxy,
-  EdgeProxyReplace,
 } from '../ferrum-admin/types.js';
 import { conflict, forbidden, notFound, specInvalid, validationFailed } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
+import { createEdgePluginBinder } from './edge-plugins.js';
 import { presentApi, type GatewayUrlSource } from './present.js';
 import {
   assertUpstreamAllowed,
@@ -231,22 +238,6 @@ export interface PublishingServiceDeps {
  * as {@link CorsConfig} and only this module turns that into a plugin.
  */
 const CORS_PLUGIN = 'cors';
-
-/**
- * Fields a `GET /proxies/{id}` returns that the **gateway** owns, and which are
- * therefore dropped from the body of the `PUT` that follows.
- *
- * Edge's deserializer accepts all three (they carry serde defaults) but
- * overwrites them: the namespace comes from `X-Ferrum-Namespace` and the
- * timestamps from the server. Echoing them back is at best ignored, so the
- * honest thing is not to send them at all.
- */
-const SERVER_OWNED_PROXY_FIELDS = ['namespace', 'created_at', 'updated_at'] as const;
-
-/** One entry of `Proxy.plugins`. */
-function association(pluginConfigId: string): EdgePluginAssociation {
-  return { plugin_config_id: pluginConfigId };
-}
 
 /**
  * Config for an auth plugin.
@@ -508,202 +499,28 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     return api;
   }
 
+  // Every gateway write below goes through the shared binder: the GET-merge-PUT
+  // under a per-proxy lock, the create-then-associate pairing, and the undo
+  // steps all live in `edge-plugins.ts` so the palette service drives Edge
+  // through exactly the same code.
+  const binder = createEdgePluginBinder(edge);
+  const {
+    attach,
+    associate,
+    disassociate,
+    mutateProxy,
+    reconcileOptionalPlugin,
+    undoAttach,
+    undoRemoval,
+  } = binder;
+
   /** Every plugin config attached to the API's proxy, or `[]` when unpublished. */
   async function pluginsOf(api: ApiRecord): Promise<EdgePluginConfig[]> {
-    if (!api.ferrum_proxy_id) return [];
-    return edge.pluginConfigs.listByProxy(api.ferrum_proxy_id);
+    return binder.listByProxy(api.ferrum_proxy_id);
   }
 
   function findPlugin(plugins: EdgePluginConfig[], name: string): EdgePluginConfig | undefined {
-    return plugins.find((plugin) => plugin.plugin_name === name);
-  }
-
-  async function attach(
-    proxyId: string,
-    pluginName: string,
-    pluginConfig: EdgePluginSettings,
-    subject: string,
-  ): Promise<EdgePluginConfig> {
-    const body: EdgePluginConfigWrite = {
-      plugin_name: pluginName,
-      scope: 'proxy',
-      proxy_id: proxyId,
-      enabled: true,
-      config: pluginConfig,
-    };
-    return edge.pluginConfigs.create(body, subject);
-  }
-
-  /* ── Proxy writes ─────────────────────────────────────────────────────── */
-
-  /**
-   * Read one proxy, change it, and write the **whole** document back.
-   *
-   * `PUT /proxies/{id}` is a whole-resource replace with no concurrency token,
-   * so `change` receives the document the gateway just returned and returns it
-   * with the handful of fields that are actually changing overwritten —
-   * anything omitted from the body is reset to its serde default, which is how
-   * an operator's `hosts`, timeouts, backend TLS or `upstream_id` used to
-   * disappear the first time Nexus repointed a backend.
-   *
-   * Serialised on the proxy id for the same reason consumer writes are: two
-   * concurrent GET→edit→PUT round trips would silently lose one edit. The key
-   * is prefixed so it can never collide with the consumer-id keys the
-   * credentials service uses.
-   *
-   * `change` may return `null` to mean "already as it should be", which skips
-   * the write entirely. Returns the document **as it was found**, which is what
-   * an undo step needs.
-   */
-  async function mutateProxy(
-    proxyId: string,
-    change: (proxy: EdgeProxy) => EdgeProxyReplace | null,
-    subject: string,
-  ): Promise<EdgeProxy> {
-    return edge.serializePerKey(`proxy:${proxyId}`, async () => {
-      const current = await edge.proxies.get(proxyId);
-      if (!current) throw notFound('Proxy', proxyId);
-      const body = change(current);
-      if (body === null) return current;
-      for (const field of SERVER_OWNED_PROXY_FIELDS) delete body[field];
-      await edge.proxies.replace(proxyId, body, subject);
-      return current;
-    });
-  }
-
-  /** The proxy's association list, as plain plugin config ids. */
-  function associatedIds(proxy: EdgeProxy): string[] {
-    return (proxy.plugins ?? []).map((entry) => entry.plugin_config_id);
-  }
-
-  /**
-   * Make the gateway actually run these plugin configs on this proxy.
-   *
-   * Idempotent: ids already in the list are left where they are, and a write
-   * that would change nothing is skipped.
-   */
-  async function associate(proxyId: string, configIds: string[], subject: string): Promise<void> {
-    await mutateProxy(
-      proxyId,
-      (proxy) => {
-        const current = associatedIds(proxy);
-        const additions = configIds.filter((id) => !current.includes(id));
-        if (additions.length === 0) return null;
-        return { ...proxy, plugins: [...current, ...additions].map(association) };
-      },
-      subject,
-    );
-  }
-
-  /**
-   * Stop the gateway running these plugin configs on this proxy.
-   *
-   * Always paired with — and ordered *before* — deleting the config. Edge's
-   * `DELETE /plugins/config/{id}` clears the junction rows itself, so this is
-   * not strictly required, but doing it in this order means the association
-   * list never names a row that has already gone.
-   */
-  async function disassociate(
-    proxyId: string,
-    configIds: string[],
-    subject: string,
-  ): Promise<void> {
-    await mutateProxy(
-      proxyId,
-      (proxy) => {
-        const current = associatedIds(proxy);
-        const kept = current.filter((id) => !configIds.includes(id));
-        if (kept.length === current.length) return null;
-        return { ...proxy, plugins: kept.map(association) };
-      },
-      subject,
-    );
-  }
-
-  /**
-   * Undo step for "a plugin config was created for this proxy": detach it, then
-   * delete it.
-   *
-   * Registered *before* the association write, so it also cleans up a config
-   * whose association never landed — detaching an id that is not in the list is
-   * a no-op.
-   */
-  function undoAttach(proxyId: string, configId: string, subject: string): () => Promise<void> {
-    return async () => {
-      await disassociate(proxyId, [configId], subject);
-      await edge.pluginConfigs.delete(configId, subject);
-    };
-  }
-
-  /**
-   * Undo step for "an associated plugin config is being removed": put it back
-   * and re-associate it.
-   *
-   * The original row is reused when the delete never landed, so a failure
-   * between the disassociate and the delete cannot leave a second copy of the
-   * same plugin behind.
-   */
-  function undoRemoval(
-    proxyId: string,
-    config: EdgePluginConfig,
-    subject: string,
-  ): () => Promise<void> {
-    return async () => {
-      const survivor = await edge.pluginConfigs.get(config.id);
-      const id = survivor
-        ? config.id
-        : (await attach(proxyId, config.plugin_name, config.config, subject)).id;
-      await associate(proxyId, [id], subject);
-    };
-  }
-
-  /**
-   * Bring one *optional* plugin to `pluginSettings`, or remove it when that is
-   * `null`, pushing the step that undoes whatever it did onto `undo`.
-   *
-   * `rate_limiting` and `cors` are the same problem — an optional, replaceable,
-   * proxy-scoped config — so they share this. Note the asymmetry: a replace
-   * keeps the config id, so only the create and the delete touch the proxy's
-   * association list.
-   */
-  async function reconcileOptionalPlugin(
-    proxyId: string,
-    existing: EdgePluginConfig | undefined,
-    pluginName: string,
-    pluginSettings: EdgePluginSettings | null,
-    subject: string,
-    undo: (() => Promise<void>)[],
-  ): Promise<void> {
-    if (pluginSettings === null) {
-      if (!existing) return;
-      undo.push(undoRemoval(proxyId, existing, subject));
-      await disassociate(proxyId, [existing.id], subject);
-      await edge.pluginConfigs.delete(existing.id, subject);
-      return;
-    }
-
-    if (existing) {
-      const body = (config: EdgePluginSettings, enabled: boolean): EdgePluginConfigWrite => ({
-        plugin_name: pluginName,
-        scope: 'proxy',
-        proxy_id: proxyId,
-        enabled,
-        config,
-      });
-      await edge.pluginConfigs.replace(existing.id, body(pluginSettings, true), subject);
-      undo.push(async () => {
-        await edge.pluginConfigs.replace(
-          existing.id,
-          body(existing.config, existing.enabled),
-          subject,
-        );
-      });
-      return;
-    }
-
-    const attached = await attach(proxyId, pluginName, pluginSettings, subject);
-    undo.push(undoAttach(proxyId, attached.id, subject));
-    await associate(proxyId, [attached.id], subject);
+    return binder.find(plugins, name);
   }
 
   /** Unique slug, or `CONFLICT` when the provider's choice is taken. */
@@ -1406,9 +1223,16 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       }
 
       // 3. Drop the rows. The store's delete helpers are the cascade.
+      //
+      //    `api_plugins` needs no gateway step of its own: every palette plugin
+      //    is proxy-scoped, so deleting the proxy above already cascaded both
+      //    the configs and their association rows, and the sweep that follows
+      //    it covers anything a gateway left behind. Only the portal's rows are
+      //    left to remove here.
       await store.transaction(async (tx) => {
         await tx.grants.deleteByApi(api.id);
         await tx.accessRequests.deleteByApi(api.id);
+        await tx.apiPlugins.deleteByApi(api.id);
         await tx.apiSpecs.deleteByApi(api.id);
         await tx.apis.delete(api.id);
       });

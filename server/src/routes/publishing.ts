@@ -27,16 +27,21 @@ import {
   MIN_BACKEND_TIMEOUT_MS,
   type CorsConfig,
   type CreateTestConsumerResponse,
+  type DeleteApiPluginResponse,
   type DeleteApiResponse,
   type GetApiResponse,
+  type ListApiPluginsResponse,
   type ListApisResponse,
   type PublishApiResponse,
+  type SetApiPluginResponse,
   type UpdateApiResponse,
   type UpdateApiSpecResponse,
 } from '@ferrum-nexus/shared';
 
 import { clientIp, requireAuth, requireRole } from '../middleware/auth-plugin.js';
 import { parseOrThrow } from '../middleware/error-handler.js';
+import { parsePluginConfig, pluginTriggerSchema } from '../plugins/schema.js';
+import type { ApiPluginsService } from '../plugins/service.js';
 import type { PublishingService } from '../publishing/service.js';
 import type { UsageService } from '../usage/service.js';
 import {
@@ -51,6 +56,7 @@ import {
 export interface PublishingRoutesOptions {
   publishing: PublishingService;
   usage: UsageService;
+  apiPlugins: ApiPluginsService;
 }
 
 /** Character ceiling on an uploaded document; the byte check lives in `oas.ts`. */
@@ -180,12 +186,36 @@ const specBody = z.object({
 
 const testConsumerBody = z.object({ label: z.string().trim().max(120).nullish() });
 
+/**
+ * The palette route's params.
+ *
+ * `name` is only shape-checked here — whether it is a plugin at all, and which
+ * one, is the service's `descriptorFor`, so an unknown name is a `404` and a
+ * name Nexus manages from a first-class field is a `400` that says which field.
+ */
+const pluginParamsSchema = z.object({
+  id: z.string().trim().min(1).max(64),
+  name: z.string().trim().min(1).max(64),
+});
+
+/**
+ * The outer envelope of a palette save. `config` is deliberately `unknown`
+ * here: its schema is built from the plugin's descriptor once the name has
+ * resolved, so the closed key set is checked against the right plugin rather
+ * than against a union of all of them.
+ */
+const pluginBody = z.object({
+  enabled: z.boolean().optional(),
+  config: z.unknown(),
+  trigger: pluginTriggerSchema.nullish(),
+});
+
 /** `/api/apis` route plugin. */
 export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = async (
   app,
   options,
 ) => {
-  const { publishing, usage } = options;
+  const { publishing, usage, apiPlugins } = options;
   app.addHook('onRequest', requireRole('provider'));
 
   app.get('/', async (request): Promise<ListApisResponse> => {
@@ -270,6 +300,49 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
     const { id } = parseOrThrow(idParamSchema, request.params);
     const body = parseOrThrow(specBody, request.body);
     return publishing.updateSpec(user, id, body.spec, body.version, clientIp(request));
+  });
+
+  /* ── Plugin palette ───────────────────────────────────────────────────
+   *
+   * The palette itself (which plugins exist, and what each one accepts) is the
+   * static `PROVIDER_PLUGINS` catalog in `@ferrum-nexus/shared`, which the SPA
+   * already has — so these routes carry only *state*: what this API currently
+   * has switched on.
+   */
+
+  app.get('/:id/plugins', async (request): Promise<ListApiPluginsResponse> => {
+    const { user } = requireAuth(request);
+    const { id } = parseOrThrow(idParamSchema, request.params);
+    return { plugins: await apiPlugins.list(user, id) };
+  });
+
+  app.put('/:id/plugins/:name', async (request): Promise<SetApiPluginResponse> => {
+    const { user } = requireAuth(request);
+    const { id, name } = parseOrThrow(pluginParamsSchema, request.params);
+    const body = parseOrThrow(pluginBody, request.body ?? {});
+    // Resolve the plugin first: an unknown name must not be reported as a
+    // config problem, and the descriptor is what the config is validated
+    // against.
+    const descriptor = apiPlugins.descriptorFor(name);
+    const plugin = await apiPlugins.set(
+      user,
+      id,
+      descriptor.name,
+      {
+        enabled: body.enabled ?? true,
+        config: parsePluginConfig(descriptor, body.config),
+        trigger: body.trigger ?? null,
+      },
+      clientIp(request),
+    );
+    return { plugin };
+  });
+
+  app.delete('/:id/plugins/:name', async (request): Promise<DeleteApiPluginResponse> => {
+    const { user } = requireAuth(request);
+    const { id, name } = parseOrThrow(pluginParamsSchema, request.params);
+    await apiPlugins.remove(user, id, name, clientIp(request));
+    return { ok: true };
   });
 
   app.post('/:id/test-consumer', async (request, reply): Promise<CreateTestConsumerResponse> => {
