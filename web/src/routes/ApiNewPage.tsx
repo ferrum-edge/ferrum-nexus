@@ -11,6 +11,7 @@ import {
   type CorsConfig,
   type HttpMethod,
   type RateLimitConfig,
+  type SpecEnforcementLevel,
 } from '@ferrum-nexus/shared';
 import { parseCorsOrigins, slugify } from '../lib/format';
 import { usePublishApi } from '../hooks/useApis';
@@ -24,6 +25,7 @@ import {
   type TimeoutDraft,
 } from '../components/publishing/AdvancedProxySettings';
 import { SpecEditor, isSpecValid } from '../components/publishing/SpecEditor';
+import { SpecEnforcementSelect } from '../components/publishing/SpecEnforcementSelect';
 import { Button } from '../components/ui/Button';
 import { Card, CardBody, CardHeader, PageHeader } from '../components/ui/Card';
 import { Checkbox, LabeledInput, LabeledTextarea } from '../components/ui/Input';
@@ -64,6 +66,7 @@ function PublishForm(): ReactElement {
   const [methods, setMethods] = useState<HttpMethod[]>([]);
   const [timeouts, setTimeouts] = useState<TimeoutDraft>(EMPTY_TIMEOUT_DRAFT);
   const [circuitBreaker, setCircuitBreaker] = useState(false);
+  const [specEnforcement, setSpecEnforcement] = useState<SpecEnforcementLevel>('docs_only');
   const [spec, setSpec] = useState('');
   const [error, setError] = useState<string | null>(null);
 
@@ -129,6 +132,7 @@ function PublishForm(): ReactElement {
         allowed_methods: methods.length > 0 ? methods : null,
         timeouts: parsedTimeouts,
         circuit_breaker: circuitBreaker,
+        spec_enforcement: specEnforcement,
       },
       {
         onSuccess: (response) => {
@@ -293,7 +297,8 @@ function PublishForm(): ReactElement {
           title="Specification"
           description="Parsed locally before upload; the server validates it again."
         />
-        <CardBody>
+        <CardBody className="flex flex-col gap-4">
+          <SpecEnforcementSelect value={specEnforcement} onValueChange={setSpecEnforcement} />
           <SpecEditor value={spec} onChange={setSpec} />
         </CardBody>
       </Card>

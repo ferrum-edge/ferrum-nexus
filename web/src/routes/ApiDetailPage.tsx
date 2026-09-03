@@ -20,6 +20,7 @@ import {
   type HttpMethod,
   type RateLimitConfig,
   type ShowOnceSecret,
+  type SpecEnforcementLevel,
 } from '@ferrum-nexus/shared';
 import { formatDateTime, parseCorsOrigins } from '../lib/format';
 import {
@@ -55,6 +56,7 @@ import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Checkbox, LabeledInput, LabeledTextarea } from '../components/ui/Input';
 import { LabeledSelect } from '../components/ui/Select';
+import { SpecEnforcementSelect } from '../components/publishing/SpecEnforcementSelect';
 import { LoadingPanel } from '../components/ui/Spinner';
 import { StatusPill } from '../components/ui/StatusPill';
 import { Tabs } from '../components/ui/Tabs';
@@ -95,6 +97,9 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
   const [methods, setMethods] = useState<HttpMethod[]>(api.allowed_methods ?? []);
   const [timeouts, setTimeouts] = useState<TimeoutDraft>(timeoutDraftFrom(api.timeouts));
   const [circuitBreaker, setCircuitBreaker] = useState(api.circuit_breaker);
+  const [specEnforcement, setSpecEnforcement] = useState<SpecEnforcementLevel>(
+    api.spec_enforcement,
+  );
   const [deleteOpen, setDeleteOpen] = useState(false);
 
   // The current document is not on this page, so it is fetched to offer the
@@ -161,6 +166,7 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
           allowed_methods: methods.length > 0 ? methods : null,
           timeouts: parsedTimeouts,
           circuit_breaker: circuitBreaker,
+          spec_enforcement: specEnforcement,
           ...(upstreamUrl.trim() ? { upstream_url: upstreamUrl.trim() } : {}),
         },
       },
@@ -273,6 +279,11 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
                 />
               </>
             ) : null}
+            <SpecEnforcementSelect
+              className="md:col-span-2"
+              value={specEnforcement}
+              onValueChange={setSpecEnforcement}
+            />
             <LabeledTextarea
               className="md:col-span-2"
               label="CORS allowed origins"
