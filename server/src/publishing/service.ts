@@ -1132,10 +1132,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             undo,
           );
         }
-        if (
-          patch.spec_enforcement !== undefined &&
-          patch.spec_enforcement !== api.spec_enforcement
-        ) {
+        // Guarded on the proxy like every other gateway-backed field: without
+        // one there is nothing to attach the validator to, and recording a level
+        // the gateway is not enforcing would make the portal claim something
+        // untrue.
+        if (proxyId && enforcementMoved && patch.spec_enforcement !== undefined) {
           update.spec_enforcement = patch.spec_enforcement;
           changed.push('spec_enforcement');
           details.spec_enforcement = patch.spec_enforcement;
