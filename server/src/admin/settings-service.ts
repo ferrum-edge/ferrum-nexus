@@ -417,6 +417,20 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
             ? { from_address: patch.smtp.from_address }
             : {}),
         };
+        const connectionChanged =
+          (next.host ?? config.smtp.host ?? null) !== (current.host ?? config.smtp.host ?? null) ||
+          (next.port ?? config.smtp.port) !== (current.port ?? config.smtp.port) ||
+          (next.secure ?? config.smtp.secure) !== (current.secure ?? config.smtp.secure) ||
+          (next.username ?? config.smtp.user ?? null) !==
+            (current.username ?? config.smtp.user ?? null);
+        const passwordSet =
+          (await store.settings.get(SMTP_PASSWORD_SETTINGS_KEY)) !== null ||
+          config.smtp.password !== undefined;
+        if (connectionChanged && passwordSet && !patch.smtp.password) {
+          throw validationFailed(
+            'SMTP password is required when changing the SMTP connection settings',
+          );
+        }
         for (const field of ['host', 'port', 'secure', 'username', 'from_address'] as const) {
           if (patch.smtp[field] !== undefined) changed.push(`smtp.${field}`);
         }

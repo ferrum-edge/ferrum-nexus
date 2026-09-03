@@ -160,6 +160,7 @@ const COLLECTIONS = {
   settings: 'app_settings',
   emailTemplates: 'email_templates',
   verificationTokens: 'email_verification_tokens',
+  tokenIssueClaims: 'email_token_issue_claims',
 } as const;
 
 /* ── Small decoders (Mongo hands back native types already) ─────────────── */
@@ -888,6 +889,10 @@ const MONGO_MIGRATIONS: { id: string; apply: (db: Db) => Promise<void> }[] = [
         .updateMany({ purpose: { $exists: false } }, { $set: { purpose: 'email_verification' } });
       await createIndexes(db, PURPOSE_INDEXES);
     },
+  },
+  {
+    id: '006_email_token_issue_claims',
+    apply: async (): Promise<void> => undefined,
   },
 ];
 
@@ -2494,6 +2499,25 @@ class MongoStore implements NexusStore {
   /* ── verificationTokens ───────────────────────────────────────────────── */
 
   readonly verificationTokens: VerificationTokenRepo = {
+    claimIssue: async (userId, purpose, issuedAt, notBefore) => {
+      try {
+        const result = await this.col(COLLECTIONS.tokenIssueClaims).updateOne(
+          {
+            _id: `${userId}:${purpose}`,
+            $or: [{ issued_at: { $lte: notBefore } }, { issued_at: { $exists: false } }],
+          } as Filter<NexusDoc>,
+          { $set: { user_id: userId, purpose, issued_at: issuedAt } },
+          { ...this.opts, upsert: true },
+        );
+        return result.matchedCount > 0 || result.upsertedCount > 0;
+      } catch (error) {
+        // A concurrent upsert won the unique `_id` race and therefore owns
+        // this throttle window.
+        if ((error as { code?: unknown }).code === 11000) return false;
+        throw error;
+      }
+    },
+
     create: async (input) => {
       const meta = stamps(input);
       const doc: NexusDoc = {

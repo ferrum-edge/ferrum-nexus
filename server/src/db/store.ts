@@ -706,6 +706,16 @@ export interface EmailTemplateRepo {
 export interface VerificationTokenRepo {
   create(input: CreateInput<VerificationTokenRecord>): Promise<VerificationTokenRecord>;
   /**
+   * Atomically claim permission to issue a token for this user and purpose.
+   * Returns false when another request has claimed it after `notBefore`.
+   */
+  claimIssue(
+    userId: Uuid,
+    purpose: VerificationTokenPurpose,
+    issuedAt: IsoTimestamp,
+    notBefore: IsoTimestamp,
+  ): Promise<boolean>;
+  /**
    * Lookup by the hashed token, restricted to one purpose so a token minted for
    * a different flow is simply not found. Callers must still check `used_at`
    * and `expires_at`.

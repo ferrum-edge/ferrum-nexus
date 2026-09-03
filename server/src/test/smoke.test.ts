@@ -77,8 +77,15 @@ function withDatabase(url: string, database: string): string {
 
 async function sqliteTarget(): Promise<SmokeTarget> {
   const store = createStore(testConfig('sqlite'));
-  await store.init();
-  await store.migrate();
+  try {
+    await store.init();
+    await store.migrate();
+  } catch (error) {
+    // A failed setup must release the pool, or the process never exits and the
+    // failure detail is lost behind a timeout.
+    await store.close().catch(() => undefined);
+    throw error;
+  }
   return { store, teardown: () => store.close() };
 }
 
@@ -90,8 +97,15 @@ async function postgresTarget(adminUrl: string): Promise<SmokeTarget> {
   await admin.end();
 
   const store = createStore(testConfig('postgres', withDatabase(adminUrl, database)));
-  await store.init();
-  await store.migrate();
+  try {
+    await store.init();
+    await store.migrate();
+  } catch (error) {
+    // A failed setup must release the pool, or the process never exits and the
+    // failure detail is lost behind a timeout.
+    await store.close().catch(() => undefined);
+    throw error;
+  }
 
   return {
     store,
@@ -112,8 +126,15 @@ async function mysqlTarget(adminUrl: string): Promise<SmokeTarget> {
   await admin.end();
 
   const store = createStore(testConfig('mysql', withDatabase(adminUrl, database)));
-  await store.init();
-  await store.migrate();
+  try {
+    await store.init();
+    await store.migrate();
+  } catch (error) {
+    // A failed setup must release the pool, or the process never exits and the
+    // failure detail is lost behind a timeout.
+    await store.close().catch(() => undefined);
+    throw error;
+  }
 
   return {
     store,
@@ -129,8 +150,15 @@ async function mysqlTarget(adminUrl: string): Promise<SmokeTarget> {
 async function mongoTarget(baseUrl: string): Promise<SmokeTarget> {
   const database = throwawayDbName();
   const store = createStore(testConfig('mongodb', withDatabase(baseUrl, database)));
-  await store.init();
-  await store.migrate();
+  try {
+    await store.init();
+    await store.migrate();
+  } catch (error) {
+    // A failed setup must release the pool, or the process never exits and the
+    // failure detail is lost behind a timeout.
+    await store.close().catch(() => undefined);
+    throw error;
+  }
 
   return {
     store,
@@ -1478,6 +1506,28 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
     });
 
     /* ── verification tokens ──────────────────────────────────────────── */
+
+    it('verificationTokens: atomically claims one issue per throttle window', async () => {
+      const user = await makeUser({ email: 'token-claim@example.test' });
+      const first = '2026-01-01T00:00:00.000Z';
+      const cutoff = '2025-12-31T23:50:00.000Z';
+
+      const claims = await Promise.all(
+        Array.from({ length: 8 }, () =>
+          store.verificationTokens.claimIssue(user.id, 'password_reset', first, cutoff),
+        ),
+      );
+      assert.equal(claims.filter(Boolean).length, 1);
+      assert.equal(
+        await store.verificationTokens.claimIssue(
+          user.id,
+          'password_reset',
+          '2026-01-01T00:10:00.001Z',
+          first,
+        ),
+        true,
+      );
+    });
 
     it('verificationTokens: single use, then invalidation and expiry sweeps', async () => {
       const user = await makeUser();

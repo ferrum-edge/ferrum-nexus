@@ -151,6 +151,16 @@ describe('password reset', () => {
     assert.equal((await mailFor('nobody-here@example.test')).length, 0);
   });
 
+  it('queues only one message for concurrent requests to one account', async () => {
+    await harness.registerUser({ email: 'parallel-reset@example.test' });
+
+    await Promise.all(
+      Array.from({ length: 8 }, () => forgotPassword('parallel-reset@example.test')),
+    );
+
+    assert.equal((await mailFor('parallel-reset@example.test')).length, 1);
+  });
+
   it('answers a disabled account the same way, and queues nothing', async () => {
     const session = await harness.registerUser({ email: 'suspended@example.test' });
     await harness.store.users.update(session.user.id, { status: 'disabled' });
