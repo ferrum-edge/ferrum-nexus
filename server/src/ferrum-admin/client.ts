@@ -35,19 +35,25 @@ import type { EdgeCredentialType } from '@ferrum-nexus/shared';
 import type { EdgeConfig } from '../config/index.js';
 import { edgeError, edgeUnavailable, internal } from '../lib/errors.js';
 import { createAdminTokenMinter, DEFAULT_ADMIN_SUBJECT, type AdminTokenMinter } from './jwt.js';
+import { parsePrometheusText, type PrometheusSample } from './prometheus.js';
 import type {
+  EdgeBackendState,
+  EdgeCircuitBreaker,
   EdgeConsumer,
   EdgeConsumerWrite,
   EdgeCredentialEntry,
   EdgeHealth,
+  EdgeLatencyBucket,
   EdgeListQuery,
   EdgePage,
   EdgePluginConfig,
   EdgePluginConfigWrite,
   EdgeProbe,
   EdgeProxy,
+  EdgeProxyMetrics,
   EdgeProxyReplace,
   EdgeProxyWrite,
+  EdgeUnhealthyTarget,
 } from './types.js';
 
 /** Minimal logger surface, so this module does not depend on Fastify. */
@@ -222,6 +228,32 @@ export interface FerrumAdminClient {
     delete(id: string, subject?: string): Promise<void>;
   };
 
+  /**
+   * Read-only runtime telemetry for one proxy.
+   *
+   * Both calls are **best-effort diagnostics and never throw**: an unreachable
+   * gateway, a non-2xx answer or an unparseable body all resolve to a result
+   * with `available: false` and empty counters. They are rendered on a
+   * provider's overview card, and a gateway hiccup must not turn that page into
+   * an error.
+   *
+   * Both are cached in-process per proxy for {@link METRICS_CACHE_TTL_MS}. Edge
+   * caches its own rendering for 5 seconds, so polling faster than this buys
+   * nothing but load.
+   */
+  readonly metrics: {
+    /**
+     * Scrape `GET /metrics` and reduce the Prometheus exposition to this
+     * proxy's request counters and latency histogram.
+     */
+    scrapeProxy(proxyId: string): Promise<EdgeProxyMetrics>;
+    /**
+     * Read `GET /admin/metrics` and pick out this proxy's circuit breakers and
+     * unhealthy targets.
+     */
+    backendState(proxyId: string): Promise<EdgeBackendState>;
+  };
+
   /** Serialise work per consumer id — see {@link createKeyedSerializer}. */
   serializePerKey: KeyedSerializer;
 
@@ -243,6 +275,67 @@ const MAX_PLUGIN_CONFIG_SCAN_PAGES = 50;
 
 /** Longest Edge validation text echoed back to the caller. */
 const MAX_GATEWAY_MESSAGE = 500;
+
+/**
+ * How long a metrics read is reused before Edge is asked again.
+ *
+ * Edge renders both `/metrics` and `/admin/metrics` from a 5-second cache, so a
+ * shorter TTL here would only add HTTP round trips to identical bytes. Ten
+ * seconds also comfortably absorbs the SPA's 30-second refetch when several
+ * viewers watch the same API.
+ */
+export const METRICS_CACHE_TTL_MS = 10_000;
+
+/**
+ * Cap on cached proxies per metrics endpoint. Expired entries are swept on
+ * write; this bound stops a very large namespace from growing the map without
+ * limit between sweeps.
+ */
+const METRICS_CACHE_MAX_ENTRIES = 500;
+
+/** Prometheus families Nexus reads. Everything else in the body is ignored. */
+const REQUESTS_FAMILY = 'ferrum_requests_total';
+const DURATION_FAMILY = 'ferrum_request_duration_ms';
+
+/** One memoised metrics read. */
+interface CacheEntry<T> {
+  value: T;
+  expiresAt: number;
+}
+
+/** An unavailable scrape: zeroed rather than absent, so callers never branch. */
+function emptyProxyMetrics(): EdgeProxyMetrics {
+  return {
+    available: false,
+    requests: { byMethod: {}, byStatus: {}, total: 0 },
+    latency: { buckets: [], count: null, sum: null },
+  };
+}
+
+/** An unavailable backend read. */
+function emptyBackendState(): EdgeBackendState {
+  return { available: false, breakers: [], unhealthyTargets: [], uptimeSeconds: null };
+}
+
+/** A finite, non-negative sample value, or `null`. */
+function counterValue(value: number): number | null {
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/** Parse an `le` label. `+Inf` is the histogram's open-ended top bucket. */
+function parseLe(raw: string | undefined): number | null {
+  if (raw === undefined) return null;
+  if (raw === '+Inf' || raw === 'Inf') return Number.POSITIVE_INFINITY;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
+/** Read a number off an unknown JSON object, or `null`. */
+function numberAt(value: unknown, key: string): number | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const found = (value as Record<string, unknown>)[key];
+  return typeof found === 'number' && Number.isFinite(found) ? found : null;
+}
 
 /**
  * Edge statuses whose `{"error": …}` text is about the caller's own request and
@@ -406,6 +499,141 @@ export function createFerrumAdminClient(
       throw edgeError('The gateway returned an empty response where one was expected');
     }
     return result;
+  }
+
+  /**
+   * `GET` a non-JSON body (the Prometheus exposition) with the admin JWT.
+   *
+   * Returns `null` rather than throwing when nothing reached the gateway; the
+   * only caller is the metrics scrape, which must never fail a page render.
+   */
+  async function callText(
+    path: string,
+    accept: string,
+  ): Promise<{ statusCode: number; body: string } | null> {
+    const token = await minter.getToken(DEFAULT_ADMIN_SUBJECT);
+    try {
+      const response = await request(urlFor(path), {
+        method: 'GET',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'x-ferrum-namespace': namespace,
+          accept,
+        },
+        dispatcher,
+        signal: AbortSignal.timeout(config.timeoutMs),
+      });
+      return { statusCode: response.statusCode, body: await response.body.text() };
+    } catch (cause) {
+      logger.warn(
+        { path, code: (cause as NodeJS.ErrnoException).code ?? null },
+        'Ferrum Edge metrics scrape could not reach the gateway',
+      );
+      return null;
+    }
+  }
+
+  /* ── Metrics caches ───────────────────────────────────────────────────── */
+
+  const scrapeCache = new Map<string, CacheEntry<EdgeProxyMetrics>>();
+  const backendCache = new Map<string, CacheEntry<EdgeBackendState>>();
+
+  function readCache<T>(cache: Map<string, CacheEntry<T>>, key: string): T | null {
+    const entry = cache.get(key);
+    if (!entry) return null;
+    if (entry.expiresAt <= Date.now()) {
+      cache.delete(key);
+      return null;
+    }
+    return entry.value;
+  }
+
+  function writeCache<T>(cache: Map<string, CacheEntry<T>>, key: string, value: T): T {
+    const now = Date.now();
+    if (cache.size >= METRICS_CACHE_MAX_ENTRIES) {
+      for (const [existing, entry] of cache) {
+        if (entry.expiresAt <= now) cache.delete(existing);
+      }
+      // Still full of live entries: drop the oldest insertion to stay bounded.
+      if (cache.size >= METRICS_CACHE_MAX_ENTRIES) {
+        const oldest = cache.keys().next();
+        if (!oldest.done) cache.delete(oldest.value);
+      }
+    }
+    cache.set(key, { value, expiresAt: now + METRICS_CACHE_TTL_MS });
+    return value;
+  }
+
+  /**
+   * Whether a series belongs to the namespace this client speaks for.
+   *
+   * A **missing** `namespace` label counts as a match: Edge only labels series
+   * when a gateway namespace is configured, so an unlabelled exposition comes
+   * from a single-namespace gateway and there is no other tenant it could be
+   * confused with. Requiring the label would make every such deployment report
+   * zero traffic forever.
+   */
+  function namespaceMatches(label: unknown): boolean {
+    return label === undefined || label === null || label === namespace;
+  }
+
+  /** Reduce one scrape's samples to the counters and histogram for `proxyId`. */
+  function reduceProxySamples(samples: PrometheusSample[], proxyId: string): EdgeProxyMetrics {
+    const byMethod: Record<string, number> = {};
+    const byStatus: Record<string, number> = {};
+    let total = 0;
+    const buckets = new Map<number, number>();
+    let count: number | null = null;
+    let sum: number | null = null;
+
+    for (const sample of samples) {
+      const { labels } = sample;
+      if (labels.proxy_id !== proxyId) continue;
+      if (!namespaceMatches(labels.namespace)) continue;
+
+      if (sample.name === REQUESTS_FAMILY) {
+        const value = counterValue(sample.value);
+        if (value === null) continue;
+        // One (method, status) pair can appear several times — `error_class`
+        // and `grpc_status` split it further — so these accumulate.
+        if (labels.method !== undefined) {
+          byMethod[labels.method] = (byMethod[labels.method] ?? 0) + value;
+        }
+        if (labels.status_code !== undefined) {
+          byStatus[labels.status_code] = (byStatus[labels.status_code] ?? 0) + value;
+        }
+        total += value;
+        continue;
+      }
+
+      if (sample.name === `${DURATION_FAMILY}_bucket`) {
+        const le = parseLe(labels.le);
+        const value = counterValue(sample.value);
+        if (le === null || value === null) continue;
+        // Cumulative buckets: a repeated `le` should carry the same count, so
+        // keeping the larger of the two cannot understate the histogram.
+        buckets.set(le, Math.max(buckets.get(le) ?? 0, value));
+        continue;
+      }
+
+      if (sample.name === `${DURATION_FAMILY}_count`) {
+        count = counterValue(sample.value);
+        continue;
+      }
+      if (sample.name === `${DURATION_FAMILY}_sum`) {
+        sum = counterValue(sample.value);
+      }
+    }
+
+    const sorted: EdgeLatencyBucket[] = [...buckets.entries()]
+      .map(([le, bucketCount]) => ({ le, count: bucketCount }))
+      .sort((a, b) => a.le - b.le);
+
+    return {
+      available: true,
+      requests: { byMethod, byStatus, total },
+      latency: { buckets: sorted, count, sum },
+    };
   }
 
   /**
@@ -697,6 +925,97 @@ export function createFerrumAdminClient(
         await call('DELETE', `/plugins/config/${encodeURIComponent(id)}`, {
           subject,
           allow404: true,
+        });
+      },
+    },
+
+    metrics: {
+      async scrapeProxy(proxyId: string): Promise<EdgeProxyMetrics> {
+        const cached = readCache(scrapeCache, proxyId);
+        if (cached) return cached;
+
+        // `text/plain; version=0.0.4` is the exposition content type; Edge
+        // ignores the header, but asking for JSON here would be a lie.
+        const response = await callText('/metrics', 'text/plain;version=0.0.4');
+        if (!response) return writeCache(scrapeCache, proxyId, emptyProxyMetrics());
+
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          logger.warn(
+            { path: '/metrics', status: response.statusCode },
+            'Ferrum Edge metrics scrape returned a non-2xx status',
+          );
+          return writeCache(scrapeCache, proxyId, emptyProxyMetrics());
+        }
+
+        const samples = parsePrometheusText(response.body);
+        if (samples.length === 0) {
+          // A 200 that yields nothing means the body was not an exposition we
+          // recognise. Report unavailable rather than "zero requests".
+          logger.warn(
+            { path: '/metrics', bytes: response.body.length },
+            'Ferrum Edge metrics scrape produced no parseable samples',
+          );
+          return writeCache(scrapeCache, proxyId, emptyProxyMetrics());
+        }
+
+        return writeCache(scrapeCache, proxyId, reduceProxySamples(samples, proxyId));
+      },
+
+      async backendState(proxyId: string): Promise<EdgeBackendState> {
+        const cached = readCache(backendCache, proxyId);
+        if (cached) return cached;
+
+        let payload: unknown;
+        try {
+          payload = await call<unknown>('GET', '/admin/metrics');
+        } catch (error) {
+          logger.warn(
+            { path: '/admin/metrics', error: error instanceof Error ? error.message : 'unknown' },
+            'Ferrum Edge runtime metrics could not be read',
+          );
+          return writeCache(backendCache, proxyId, emptyBackendState());
+        }
+        if (typeof payload !== 'object' || payload === null) {
+          return writeCache(backendCache, proxyId, emptyBackendState());
+        }
+
+        const body = payload as Record<string, unknown>;
+        const rawBreakers = Array.isArray(body.circuit_breakers) ? body.circuit_breakers : [];
+        const breakers: EdgeCircuitBreaker[] = [];
+        for (const entry of rawBreakers) {
+          if (typeof entry !== 'object' || entry === null) continue;
+          const breaker = entry as Record<string, unknown>;
+          if (breaker.proxy_id !== proxyId) continue;
+          if (!namespaceMatches(breaker.namespace)) continue;
+          if (typeof breaker.state !== 'string') continue;
+          breakers.push(breaker as unknown as EdgeCircuitBreaker);
+        }
+
+        const healthCheck = body.health_check;
+        const rawTargets =
+          typeof healthCheck === 'object' &&
+          healthCheck !== null &&
+          Array.isArray((healthCheck as Record<string, unknown>).unhealthy_targets)
+            ? ((healthCheck as Record<string, unknown>).unhealthy_targets as unknown[])
+            : [];
+        const unhealthyTargets: EdgeUnhealthyTarget[] = [];
+        for (const entry of rawTargets) {
+          if (typeof entry !== 'object' || entry === null) continue;
+          const target = entry as Record<string, unknown>;
+          if (!namespaceMatches(target.namespace)) continue;
+          // Only `proxy_id`-keyed entries are attributable. Nexus publishes a
+          // direct backend on the proxy and never creates an Edge `upstream`,
+          // so an `upstream_id`-keyed ejection belongs to a resource an
+          // operator built by hand and cannot be pinned to this API.
+          if (target.proxy_id !== proxyId) continue;
+          unhealthyTargets.push(target as unknown as EdgeUnhealthyTarget);
+        }
+
+        return writeCache(backendCache, proxyId, {
+          available: true,
+          breakers,
+          unhealthyTargets,
+          uptimeSeconds: numberAt(body.gateway, 'uptime_seconds'),
         });
       },
     },
