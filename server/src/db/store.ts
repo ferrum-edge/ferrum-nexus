@@ -407,9 +407,22 @@ export interface SessionRepo {
   deleteExpired(now: IsoTimestamp): Promise<number>;
 }
 
+/**
+ * Creation payload for an API row.
+ *
+ * `circuit_breaker` is a non-nullable boolean, so {@link CreateInput} would
+ * make it mandatory; it is optional here instead because the column carries a
+ * `DEFAULT 0` and "the provider did not ask for a breaker" is by far the
+ * common case.
+ */
+export type CreateApiInput = Omit<CreateInput<ApiRecord>, 'circuit_breaker'> & {
+  /** Defaults to `false`, matching the column default. */
+  circuit_breaker?: boolean;
+};
+
 /** Published APIs and their Edge proxies. */
 export interface ApiRepo {
-  create(input: CreateInput<ApiRecord>): Promise<ApiRecord>;
+  create(input: CreateApiInput): Promise<ApiRecord>;
   findById(id: Uuid): Promise<ApiRecord | null>;
   /** Slugs are unique across the portal and form the gateway listen path. */
   findBySlug(slug: string): Promise<ApiRecord | null>;

@@ -117,6 +117,55 @@ export const ACCESS_CONTROL_PLUGIN = 'access_control';
 /** Name of the Edge plugin used to enforce a per-API rate limit. */
 export const RATE_LIMIT_PLUGIN = 'rate_limiting';
 
+/* ── Proxy runtime settings ─────────────────────────────────────────────── */
+
+/**
+ * HTTP methods a proxy's `allowed_methods` may name, in the order of Ferrum
+ * Edge's own enum. Anything outside this set is a `400` from the gateway.
+ */
+export const HTTP_METHODS = [
+  'GET',
+  'POST',
+  'PUT',
+  'PATCH',
+  'DELETE',
+  'HEAD',
+  'OPTIONS',
+  'TRACE',
+  'CONNECT',
+] as const;
+
+/** One entry of {@link HTTP_METHODS}. */
+export type HttpMethod = (typeof HTTP_METHODS)[number];
+
+/** Runtime type guard for {@link HttpMethod}. */
+export function isHttpMethod(value: unknown): value is HttpMethod {
+  return typeof value === 'string' && (HTTP_METHODS as readonly string[]).includes(value);
+}
+
+/**
+ * Shortest backend timeout the portal will accept, in milliseconds.
+ *
+ * Edge's own floor is 0 ("disabled") on the read and write timeouts, which is
+ * not a setting a provider should be able to choose from a portal form: a
+ * hung upstream would then hold a gateway worker indefinitely. The portal
+ * therefore exposes a positive range only, and "leave it to the gateway
+ * default" is expressed by sending no timeouts at all.
+ */
+export const MIN_BACKEND_TIMEOUT_MS = 100;
+
+/** Longest backend timeout the portal will accept, in milliseconds (5 minutes). */
+export const MAX_BACKEND_TIMEOUT_MS = 300_000;
+
+/** Edge's default TCP connect timeout, shown as the placeholder on the form. */
+export const DEFAULT_BACKEND_CONNECT_TIMEOUT_MS = 5_000;
+
+/** Edge's default backend read timeout. */
+export const DEFAULT_BACKEND_READ_TIMEOUT_MS = 30_000;
+
+/** Edge's default backend write timeout. */
+export const DEFAULT_BACKEND_WRITE_TIMEOUT_MS = 30_000;
+
 /* ── Cookies, headers, storage keys ─────────────────────────────────────── */
 
 /** HttpOnly session cookie holding the opaque session token. */

@@ -9,13 +9,14 @@
 
 import type { RegistrableRole, Role } from './roles.js';
 import type { ErrorCode } from './error-codes.js';
-import type { AuthPluginType, EmailTemplateKey } from './constants.js';
+import type { AuthPluginType, EmailTemplateKey, HttpMethod } from './constants.js';
 import type {
   AccessRequest,
   AccessRequestStatus,
   Api,
   ApiSpecSummary,
   ApiStatus,
+  ApiTimeouts,
   ApiVisibility,
   AppHealth,
   AuditLog,
@@ -332,6 +333,16 @@ export interface PublishApiRequest {
   rate_limit?: RateLimitConfig | null;
   /** Browser CORS policy; omit or send `null` for no gateway CORS headers. */
   cors?: CorsConfig | null;
+  /**
+   * HTTP methods the gateway accepts. Omit or send `null` to accept every
+   * method. `OPTIONS` is added to the list written to the gateway whenever
+   * `cors` is set, so a preflight is not rejected before the plugin runs.
+   */
+  allowed_methods?: HttpMethod[] | null;
+  /** Backend timeouts; omit or send `null` to keep the gateway defaults. */
+  timeouts?: ApiTimeouts | null;
+  /** Trip a circuit breaker on repeated backend failures. Defaults to `false`. */
+  circuit_breaker?: boolean;
 }
 
 /** `POST /api/apis` */
@@ -367,6 +378,11 @@ export interface UpdateApiRequest {
   rate_limit?: RateLimitConfig | null;
   /** Replace the CORS policy, or send `null` to remove it from the gateway. */
   cors?: CorsConfig | null;
+  /** Replace the method allow-list, or send `null` to accept every method again. */
+  allowed_methods?: HttpMethod[] | null;
+  /** Replace the backend timeouts, or send `null` to restore the gateway defaults. */
+  timeouts?: ApiTimeouts | null;
+  circuit_breaker?: boolean;
   status?: ApiStatus;
 }
 
