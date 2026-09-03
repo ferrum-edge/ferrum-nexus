@@ -208,6 +208,56 @@ function BrandingTab({ settings }: { settings: AdminSettingsResponse }): ReactEl
   );
 }
 
+/**
+ * Where the gateway's proxy listener answers.
+ *
+ * Not a secret and not an escalation path, so an ordinary `admin` may edit it —
+ * unlike the SMTP and CAPTCHA cards. Until it is set, every API in the catalog
+ * reports a null invoke URL and clients have to be told the address by hand.
+ */
+function GatewayTab({ settings }: { settings: AdminSettingsResponse }): ReactElement {
+  const update = useUpdateAdminSettings();
+  const toast = useToast();
+  const [publicUrl, setPublicUrl] = useState(settings.gateway.public_url ?? '');
+
+  return (
+    <Card>
+      <CardHeader
+        title="Gateway"
+        description="The public address of the gateway's proxy listener, shown to clients in the catalog."
+      />
+      <CardBody className="flex flex-col gap-5">
+        <LabeledInput
+          label="Public gateway URL"
+          placeholder="https://api.example.com"
+          value={publicUrl}
+          onChange={(event) => setPublicUrl(event.target.value)}
+          hint="Scheme, host and port only — no path. This is where clients send API traffic, which is not this portal’s own address. Leave it blank to fall back to FERRUM_GATEWAY_PUBLIC_URL."
+        />
+        <p className="text-sm text-fg-muted">
+          Each published API is called at this origin followed by its{' '}
+          <code className="font-mono text-xs">/&lt;namespace&gt;/&lt;slug&gt;</code> listen path.
+          While it is unset the catalog can only show the listen path.
+        </p>
+        <div>
+          <Button
+            variant="primary"
+            loading={update.isPending}
+            onClick={() =>
+              update.mutate(
+                { gateway: { public_url: publicUrl.trim() || null } },
+                { onSuccess: () => toast.success('Gateway address saved') },
+              )
+            }
+          >
+            Save gateway
+          </Button>
+        </div>
+      </CardBody>
+    </Card>
+  );
+}
+
 function CaptchaTab({ settings }: { settings: AdminSettingsResponse }): ReactElement {
   const update = useUpdateAdminSettings();
   const toast = useToast();
@@ -580,6 +630,7 @@ function SettingsTabs(): ReactElement {
       onValueChange={setTab}
       tabs={[
         { value: 'branding', label: 'Branding', content: <BrandingTab settings={settings} /> },
+        { value: 'gateway', label: 'Gateway', content: <GatewayTab settings={settings} /> },
         { value: 'captcha', label: 'CAPTCHA', content: <CaptchaTab settings={settings} /> },
         { value: 'email', label: 'Email', content: <EmailTab settings={settings} /> },
         { value: 'templates', label: 'Templates', content: <TemplatesTab /> },

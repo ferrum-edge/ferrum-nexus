@@ -3,13 +3,13 @@ import { useState, type ReactElement } from 'react';
 import {
   AUTH_PLUGIN_LABELS,
   MAX_JUSTIFICATION_LENGTH,
-  listenPathFor,
   type CatalogDetailResponse,
 } from '@ferrum-nexus/shared';
 import { formatDateTime } from '../lib/format';
 import { useCatalogApi, useCatalogSpec } from '../hooks/useCatalog';
 import { useCancelAccessRequest, useCreateAccessRequest } from '../hooks/useAccessRequests';
 import { useToast } from '../stores/toast';
+import { CallApiPanel } from '../components/catalog/CallApiPanel';
 import { OpenApiView } from '../components/openapi/OpenApiView';
 import { StartThreadDialog } from '../components/messaging/StartThreadDialog';
 import { Badge } from '../components/ui/Badge';
@@ -29,8 +29,17 @@ function Overview({ detail }: { detail: CatalogDetailResponse }): ReactElement {
       <CardBody>
         <dl>
           <DetailRow label="Description">{api.description ?? '—'}</DetailRow>
+          <DetailRow label="Invoke URL">
+            {api.invoke_url ? (
+              <code className="font-mono text-xs">{api.invoke_url}</code>
+            ) : (
+              <span className="text-fg-muted">
+                Not published — ask your administrator for the gateway address.
+              </span>
+            )}
+          </DetailRow>
           <DetailRow label="Gateway path">
-            <code className="font-mono text-xs">{listenPathFor(api.namespace, api.slug)}</code>
+            <code className="font-mono text-xs">{api.listen_path}</code>
           </DetailRow>
           <DetailRow label="Version">{api.version}</DetailRow>
           <DetailRow label="Authentication">{AUTH_PLUGIN_LABELS[api.auth_plugin]}</DetailRow>
@@ -98,6 +107,10 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
   const cancelRequest = useCancelAccessRequest();
   const toast = useToast();
 
+  // Only shown once the caller could actually make the call: an approved grant,
+  // or an API that needs no approval at all.
+  const canCall = (myGrant !== null && myGrant.status === 'active') || !api.requestable;
+
   if (api.access_state === 'owner') {
     return (
       <Card>
@@ -139,10 +152,9 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
                 <code className="font-mono text-xs">{myGrant.acl_group}</code>.
               </p>
               <p className="text-sm text-fg-muted">
-                Call{' '}
-                <code className="font-mono text-xs">{listenPathFor(api.namespace, api.slug)}</code>{' '}
-                with a credential of type{' '}
-                <Badge tone="info">{AUTH_PLUGIN_LABELS[api.auth_plugin]}</Badge>.
+                Call it with a credential of type{' '}
+                <Badge tone="info">{AUTH_PLUGIN_LABELS[api.auth_plugin]}</Badge> — the address and
+                the header are below.
               </p>
               <Link to="/credentials" className="text-sm text-accent hover:underline">
                 Manage your credentials →
@@ -218,6 +230,14 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
           ) : null}
         </CardBody>
       </Card>
+
+      {canCall ? (
+        <CallApiPanel
+          invokeUrl={api.invoke_url}
+          listenPath={api.listen_path}
+          authPlugin={api.auth_plugin}
+        />
+      ) : null}
     </div>
   );
 }

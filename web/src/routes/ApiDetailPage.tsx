@@ -6,7 +6,6 @@ import {
   MAX_CORS_ORIGINS,
   MAX_RATE_LIMIT_REQUESTS,
   aclGroupForApi,
-  listenPathFor,
   testConsumerUsername,
   type AccessRequest,
   type Api,
@@ -693,10 +692,17 @@ function ApiDetail({ apiId }: { apiId: string }): ReactElement {
                 <CardHeader title="Overview" />
                 <CardBody>
                   <dl>
+                    <DetailRow label="Invoke URL">
+                      {api.invoke_url ? (
+                        <code className="font-mono text-xs">{api.invoke_url}</code>
+                      ) : (
+                        <span className="text-fg-muted">
+                          No gateway address configured — an admin sets it in Settings → Gateway.
+                        </span>
+                      )}
+                    </DetailRow>
                     <DetailRow label="Gateway path">
-                      <code className="font-mono text-xs">
-                        {listenPathFor(api.namespace, api.slug)}
-                      </code>
+                      <code className="font-mono text-xs">{api.listen_path}</code>
                     </DetailRow>
                     <DetailRow label="Edge proxy id">
                       <code className="font-mono text-xs">{api.ferrum_proxy_id ?? '—'}</code>

@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactElement } from 'react';
 import {
   DEFAULT_PAGE_SIZE,
+  MAX_PAGE_SIZE,
   type CredentialMetadata,
   type CredentialType,
   type ShowOnceSecret,
@@ -13,10 +14,11 @@ import {
   useIssueCredential,
   useRotateCredential,
 } from '../hooks/useCredentials';
+import { useGrants } from '../hooks/useGrants';
 import { useToast } from '../stores/toast';
 import { ShowOnceSecretDialog } from '../components/credentials/ShowOnceSecretDialog';
 import { Button } from '../components/ui/Button';
-import { Card, PageHeader } from '../components/ui/Card';
+import { Card, CardHeader, PageHeader } from '../components/ui/Card';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { DataTable, type Columns } from '../components/ui/DataTable';
 import { Dialog } from '../components/ui/Dialog';
@@ -29,6 +31,52 @@ interface ShowOnceState {
   secret: ShowOnceSecret;
   consumerUsername: string;
   title: string;
+}
+
+/**
+ * The APIs this account may call, and where to call them.
+ *
+ * A credential on its own is unusable without an address, and the address is
+ * the gateway's, not this portal's — so the two belong on the same page. When
+ * no gateway origin is configured the listen path is shown instead, since that
+ * is genuinely all the portal knows.
+ */
+function MyAccessCard(): ReactElement {
+  const grants = useGrants({ mine: true, status: 'active', limit: MAX_PAGE_SIZE });
+  const items = grants.data?.items ?? [];
+
+  if (grants.isLoading || items.length === 0) return <></>;
+
+  return (
+    <Card className="mt-6">
+      <CardHeader
+        title="Your API access"
+        description="Every API your active grants cover, with the URL to send requests to."
+      />
+      <ul>
+        {items.map((grant) => (
+          <li
+            key={grant.id}
+            className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3 last:border-b-0"
+          >
+            <span className="min-w-0">
+              <span className="block truncate text-sm font-medium text-fg">
+                {grant.api?.name ?? grant.api_id}
+              </span>
+              <code className="block truncate font-mono text-xs text-fg-subtle">
+                {grant.api?.invoke_url ?? grant.api?.listen_path ?? '—'}
+              </code>
+            </span>
+            {grant.api && grant.api.invoke_url === null ? (
+              <span className="text-xs text-fg-subtle">
+                Gateway address not published — ask your administrator.
+              </span>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
 }
 
 /** Gateway credential management with show-once issue and rotation. */
@@ -135,6 +183,8 @@ export function CredentialsPage(): ReactElement {
           />
         }
       />
+
+      <MyAccessCard />
 
       <Card className="mt-4 p-4 text-sm text-fg-muted">
         Rotation appends a new credential on the gateway before retiring the old one, so callers
