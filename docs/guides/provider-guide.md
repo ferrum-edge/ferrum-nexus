@@ -195,6 +195,80 @@ empty, and there is **no** origin check on upgrades: anyone's page can open a
 socket, and only your authentication plugin stands between it and your backend.
 If your backend speaks WebSocket to browsers, list your origins.
 
+### Enforcement level
+
+By default your OpenAPI document is **documentation**. It is stored, rendered in
+the catalog and handed to clients, and the gateway does not consult it: a client
+with a key and a grant can call `/nexus/billing/anything-at-all` and the request
+reaches your backend exactly like a declared one would. That is the right
+default — it never breaks an API whose document is incomplete — but it is
+usually not what "I uploaded my OpenAPI spec" feels like it should mean.
+
+The **OpenAPI enforcement** select, next to the spec editor, offers two levels.
+
+**Documentation only (default).** The behaviour above. Nothing is enforced.
+
+**Reject requests to paths and methods not in the spec.** The portal generates
+one gateway rule per declared operation, and anything that matches none of them
+is answered `400` with an `application/problem+json` body, before your backend
+is ever contacted. Concretely, for a document declaring `GET /invoices` and
+`GET /invoices/{id}` published at `/nexus/billing`:
+
+| Request                              | Result                                   |
+| ------------------------------------ | ---------------------------------------- |
+| `GET /nexus/billing/invoices`        | forwarded                                |
+| `GET /nexus/billing/invoices/42`     | forwarded — `{id}` matches one segment   |
+| `GET /nexus/billing/invoices/42/pdf` | `400` — `{id}` never spans a `/`         |
+| `POST /nexus/billing/invoices`       | `400` — the document declares only `get` |
+| `HEAD /nexus/billing/invoices`       | `400` — see below                        |
+| `GET /nexus/billing/internal-debug`  | `400` — not in the document              |
+
+#### What it does not do
+
+**Request and response bodies are not validated.** A `POST` to a declared path
+reaches your backend whatever its body contains, even if your document declares
+a `requestBody` schema that the body violates. Enforcing schemas means
+materialising them out of the document — resolving `$ref`s, converting between
+JSON Schema drafts, handling media types and encodings — which is the gateway's
+own spec importer's job. A second implementation living in the portal would
+inevitably differ from it and start rejecting traffic the gateway itself would
+have accepted, so the portal generates only the part it can generate exactly.
+
+**`HEAD` is a separate operation.** OpenAPI treats `head` as its own path-item
+key, so a document declaring only `get` on a path does not declare `head` on it,
+and a `HEAD` request is rejected. If your backend serves `HEAD`, declare it.
+The same goes for `TRACE` and any other method your clients actually send.
+
+**Trailing slashes are literal.** A declared `/invoices` does not also allow
+`/invoices/`, and vice versa. Declare whichever spelling your clients use.
+
+#### CORS preflights
+
+A browser's `OPTIONS` preflight targets a path with no `options` operation
+behind it, so on its own it would be rejected as undeclared — and the browser
+would report a CORS failure rather than anything that points at the real cause.
+The portal handles this for you: whenever the API has a **CORS policy**, the
+generated rules skip `OPTIONS` entirely so the preflight reaches the CORS plugin
+that answers it. Adding or removing your CORS origins later regenerates the
+rules to match; you never have to declare an `options` operation yourself.
+
+An API with **no** CORS policy keeps `OPTIONS` closed, which is what you want:
+there is no preflight to serve.
+
+#### Turning it on and off
+
+Safe to change on a live API, in either direction, from the API's Settings tab.
+Switching to `routes` attaches the rules; switching back to documentation-only
+removes them and the API immediately behaves as it did before.
+
+Every spec upload regenerates the rules, so the enforced surface always matches
+the revision currently shown in the catalog — a path you delete from your
+document stops being reachable, and one you add becomes reachable, in the same
+operation. Because of that, uploading a document that declares **no** operations
+while enforcement is on is refused: the portal will not record a level it is not
+enforcing, and rules that allow nothing would reject every request. Switch back
+to documentation-only first if that is genuinely what you want.
+
 ### Advanced
 
 Three settings that go onto the gateway proxy itself rather than onto a plugin.
@@ -235,7 +309,8 @@ apis row ─── proxy          name `nexus-<slug>`, listening on /<namespace>
               ├─ plugin_config  your auth plugin
               ├─ plugin_config  access_control      — only when requestable
               ├─ plugin_config  rate_limiting       — only when a rate limit is set
-              └─ plugin_config  cors                — only when origins are listed
+              ├─ plugin_config  cors                — only when origins are listed
+              └─ plugin_config  openapi_validator   — only at the `routes` enforcement level
 ```
 
 The last step matters: on Ferrum Edge a plugin has to be both configured _and_
@@ -360,6 +435,17 @@ In practice:
 
 Set the upstream explicitly for anything production-facing. It makes "publish
 new docs" and "move the backend" two separate, deliberate acts.
+
+### If enforcement is on
+
+At the `routes` [enforcement level](#enforcement-level) an upload also changes
+**what the gateway will accept**: a path you remove from the document stops
+being reachable the moment the revision lands, and one you add becomes
+reachable. Uploading is therefore a traffic change as well as a documentation
+change — check the diff of your `paths` before you publish, not only your
+prose. If the upload cannot be saved, the previous rules are put back, so a
+failed upload never leaves the gateway enforcing a revision the catalog does not
+show.
 
 ### A safe update routine
 
