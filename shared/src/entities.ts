@@ -124,8 +124,13 @@ export interface Api {
   updated_at: IsoTimestamp;
 }
 
-/** Catalog listing row: an API plus viewer-relative access state. */
-export interface CatalogApi extends Api {
+/**
+ * Catalog listing row: an API plus viewer-relative access state.
+ *
+ * The effective gateway upstream is provider-only operational data and must
+ * never be exposed by the catalog.
+ */
+export interface CatalogApi extends Omit<Api, 'upstream_url'> {
   owner: UserSummary | null;
   /** Access state of the calling user for this API, when authenticated. */
   access_state: CatalogAccessState;

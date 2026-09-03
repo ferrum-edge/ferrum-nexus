@@ -171,6 +171,23 @@ describe('catalog visibility', () => {
       assert.equal(clientRow?.access_state, 'none');
     });
 
+    it('does not expose provider-only upstream URLs', async () => {
+      const list = await harness.authed(client, {
+        method: 'GET',
+        url: '/api/catalog?limit=200',
+      });
+      const row = list.json<CatalogListResponse>().items.find((api) => api.id === publicApi);
+      assert.ok(row);
+      assert.ok(!Object.hasOwn(row, 'upstream_url'));
+
+      const detail = await harness.authed(client, {
+        method: 'GET',
+        url: '/api/catalog/cat-public',
+      });
+      assert.equal(detail.statusCode, 200);
+      assert.ok(!Object.hasOwn(detail.json<CatalogDetailResponse>().api, 'upstream_url'));
+    });
+
     it('reflects a pending request in the access state', async () => {
       const created = await harness.authed(client, {
         method: 'POST',

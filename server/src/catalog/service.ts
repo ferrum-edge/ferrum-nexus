@@ -156,6 +156,22 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       : null;
   }
 
+  /** Strip provider-only operational fields before an API crosses the catalog boundary. */
+  function catalogApi(
+    viewer: UserRecord,
+    api: ApiRecord,
+    owner: UserRecord | undefined,
+    grant: Grant | null,
+    request: AccessRequest | null,
+  ): CatalogApi {
+    const { upstream_url: _upstreamUrl, ...publicApi } = api;
+    return {
+      ...publicApi,
+      owner: summary(owner),
+      access_state: accessState(viewer, api, grant, request),
+    };
+  }
+
   return {
     canList,
     canView,
@@ -198,16 +214,15 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       );
 
       return {
-        items: page.map((api) => ({
-          ...api,
-          owner: summary(owners.get(api.owner_user_id)),
-          access_state: accessState(
+        items: page.map((api) =>
+          catalogApi(
             viewer,
             api,
+            owners.get(api.owner_user_id),
             grants.get(api.id) ?? null,
             requests.get(api.id) ?? null,
           ),
-        })),
+        ),
         total: visible.length,
       };
     },
@@ -232,11 +247,7 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
         : null;
 
       return {
-        api: {
-          ...api,
-          owner: summary(owner ?? undefined),
-          access_state: accessState(viewer, api, grant, request),
-        },
+        api: catalogApi(viewer, api, owner ?? undefined, grant, request),
         spec,
         my_request: request,
         my_grant: grant,
