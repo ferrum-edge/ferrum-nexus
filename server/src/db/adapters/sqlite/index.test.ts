@@ -432,6 +432,68 @@ describe('sqlite store', () => {
       assert.equal(all.total, 2);
     });
 
+    it('upserts one palette plugin row per (api, plugin) and cascades on delete', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const api = await store.apis.create({
+        name: 'Palette',
+        slug: `palette-${newId().slice(0, 8)}`,
+        owner_user_id: owner.id,
+        namespace: 'nexus',
+        version: '1.0.0',
+        spec_format: 'openapi',
+        requestable: false,
+        auth_plugin: 'key_auth',
+        status: 'published',
+        visibility: 'public',
+      });
+
+      const created = await store.apiPlugins.upsert({
+        api_id: api.id,
+        plugin_name: 'response_caching',
+        enabled: true,
+        config: { ttl_seconds: 300, cacheable_status_codes: [200, 404] },
+        trigger: null,
+      });
+      // The `*_json` columns are decoded at the adapter boundary: services see
+      // real objects and real booleans, never JSON text or 0/1.
+      assert.deepEqual(created.config, { ttl_seconds: 300, cacheable_status_codes: [200, 404] });
+      assert.equal(created.enabled, true);
+      assert.equal(created.trigger, null);
+      assert.deepEqual(await store.apiPlugins.find(api.id, 'response_caching'), created);
+
+      const replaced = await store.apiPlugins.upsert({
+        api_id: api.id,
+        plugin_name: 'response_caching',
+        enabled: false,
+        config: { ttl_seconds: 60 },
+        trigger: { methods: ['GET'], path_prefix: '/nexus/palette/reports' },
+      });
+      assert.equal(replaced.id, created.id, 'ON CONFLICT updates rather than inserting a second');
+      assert.equal(replaced.created_at, created.created_at);
+      assert.equal(replaced.enabled, false);
+      assert.deepEqual(replaced.trigger, {
+        methods: ['GET'],
+        path_prefix: '/nexus/palette/reports',
+      });
+
+      await store.apiPlugins.upsert({
+        api_id: api.id,
+        plugin_name: 'correlation_id',
+        enabled: true,
+        config: {},
+        trigger: null,
+      });
+      assert.equal((await store.apiPlugins.listByApi(api.id)).length, 2);
+
+      assert.equal(await store.apiPlugins.delete(api.id, 'correlation_id'), true);
+      assert.equal(await store.apiPlugins.delete(api.id, 'correlation_id'), false);
+
+      // The FK cascade is what keeps a deleted API from leaving orphan rows,
+      // and it is exercised here rather than only through the service.
+      assert.equal(await store.apis.delete(api.id), true);
+      assert.deepEqual(await store.apiPlugins.listByApi(api.id), []);
+    });
+
     it('allows only one active grant per api/user pair', async () => {
       const owner = await makeUser({ role: 'provider' });
       const client = await makeUser();
