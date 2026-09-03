@@ -891,7 +891,7 @@ const MONGO_MIGRATIONS: { id: string; apply: (db: Db) => Promise<void> }[] = [
     },
   },
   {
-    id: '004_email_token_issue_claims',
+    id: '006_email_token_issue_claims',
     apply: async (): Promise<void> => undefined,
   },
 ];
