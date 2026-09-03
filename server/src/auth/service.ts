@@ -34,12 +34,7 @@ import {
 
 import { AuditAction, ANONYMOUS_ACTOR, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
-import type {
-  NexusStore,
-  SessionRecord,
-  UserRecord,
-  VerificationTokenPurpose,
-} from '../db/store.js';
+import type { NexusStore, SessionRecord, UserRecord } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
 import {
   conflict,
@@ -308,21 +303,6 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
     }
   }
 
-  /**
-   * True when a live token of this purpose was minted for the user inside
-   * `throttleSeconds` — i.e. a usable link is already in their inbox and
-   * sending another would only help someone flood it.
-   */
-  async function issuedRecently(
-    userId: string,
-    purpose: VerificationTokenPurpose,
-    throttleSeconds: number,
-  ): Promise<boolean> {
-    const live = await store.verificationTokens.findLatestLiveForUser(userId, purpose, nowIso());
-    if (!live) return false;
-    return Date.parse(live.created_at) > Date.now() - throttleSeconds * 1000;
-  }
-
   async function issueSession(user: UserRecord, context: RequestContext): Promise<IssuedSession> {
     const token = crypto.newSessionToken();
     const csrfToken = crypto.newSessionToken();
@@ -547,34 +527,53 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         // caller: no such address, the account is disabled, it is already
         // verified, or a link is already on its way.
         if (!record || record.status !== 'active' || record.email_verified) return;
+        const existing = await store.verificationTokens.findLatestLiveForUser(
+          record.id,
+          'email_verification',
+          nowIso(),
+        );
         if (
-          await issuedRecently(
-            record.id,
-            'email_verification',
-            VERIFICATION_RESEND_THROTTLE_SECONDS,
-          )
+          existing &&
+          Date.parse(existing.created_at) > Date.now() - VERIFICATION_RESEND_THROTTLE_SECONDS * 1000
         ) {
           return;
         }
-
         const token = crypto.newSessionToken();
-        // Supersede the link from registration (or an earlier resend): the
-        // address should only ever have one live verification token.
-        await store.verificationTokens.deleteForUser(record.id, 'email_verification');
-        const row = await store.verificationTokens.create({
-          user_id: record.id,
-          token_hash: crypto.hashToken(token),
-          purpose: 'email_verification',
-          expires_at: isoInSeconds(EMAIL_VERIFICATION_TTL_SECONDS),
+        const issuedAt = nowIso();
+        const notBefore = new Date(
+          Date.parse(issuedAt) - VERIFICATION_RESEND_THROTTLE_SECONDS * 1000,
+        ).toISOString();
+        if (
+          !(await store.verificationTokens.claimIssue(
+            record.id,
+            'email_verification',
+            issuedAt,
+            notBefore,
+          ))
+        ) {
+          return;
+        }
+        const row = await store.transaction(async (tx) => {
+          // Supersede the link from registration (or an earlier resend): the
+          // address should only ever have one live verification token.
+          await tx.verificationTokens.deleteForUser(record.id, 'email_verification');
+          const created = await tx.verificationTokens.create({
+            user_id: record.id,
+            token_hash: crypto.hashToken(token),
+            purpose: 'email_verification',
+            expires_at: isoInSeconds(EMAIL_VERIFICATION_TTL_SECONDS),
+          });
+          await audit
+            .forStore(tx)
+            .record(
+              { id: record.id, role: record.role },
+              AuditAction.AUTH_VERIFICATION_RESEND,
+              { type: 'user', id: record.id },
+              { email },
+              context.ip,
+            );
+          return created;
         });
-
-        await audit.record(
-          { id: record.id, role: record.role },
-          AuditAction.AUTH_VERIFICATION_RESEND,
-          { type: 'user', id: record.id },
-          { email },
-          context.ip,
-        );
 
         if (deps.onVerificationResend) {
           await deps.onVerificationResend({
@@ -592,27 +591,53 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         const email = rawEmail.trim().toLowerCase();
         const record = await store.users.findByEmail(email);
         if (!record || record.status !== 'active') return;
-        if (await issuedRecently(record.id, 'password_reset', PASSWORD_RESET_THROTTLE_SECONDS)) {
+        const existing = await store.verificationTokens.findLatestLiveForUser(
+          record.id,
+          'password_reset',
+          nowIso(),
+        );
+        if (
+          existing &&
+          Date.parse(existing.created_at) > Date.now() - PASSWORD_RESET_THROTTLE_SECONDS * 1000
+        ) {
           return;
         }
-
         const token = crypto.newSessionToken();
-        const row = await store.verificationTokens.create({
-          user_id: record.id,
-          token_hash: crypto.hashToken(token),
-          purpose: 'password_reset',
-          expires_at: isoInSeconds(PASSWORD_RESET_TTL_SECONDS),
-        });
+        const issuedAt = nowIso();
+        const notBefore = new Date(
+          Date.parse(issuedAt) - PASSWORD_RESET_THROTTLE_SECONDS * 1000,
+        ).toISOString();
+        if (
+          !(await store.verificationTokens.claimIssue(
+            record.id,
+            'password_reset',
+            issuedAt,
+            notBefore,
+          ))
+        ) {
+          return;
+        }
+        const row = await store.transaction(async (tx) => {
+          const created = await tx.verificationTokens.create({
+            user_id: record.id,
+            token_hash: crypto.hashToken(token),
+            purpose: 'password_reset',
+            expires_at: isoInSeconds(PASSWORD_RESET_TTL_SECONDS),
+          });
 
-        // Only the path that actually issued a link is audited, so the log
-        // distinguishes the four outcomes the response cannot.
-        await audit.record(
-          { id: record.id, role: record.role },
-          AuditAction.AUTH_PASSWORD_RESET_REQUEST,
-          { type: 'user', id: record.id },
-          { email },
-          context.ip,
-        );
+          // Only the path that actually issued a link is audited, so the log
+          // distinguishes the four outcomes the response cannot.
+          await audit
+            .forStore(tx)
+            .record(
+              { id: record.id, role: record.role },
+              AuditAction.AUTH_PASSWORD_RESET_REQUEST,
+              { type: 'user', id: record.id },
+              { email },
+              context.ip,
+            );
+          return created;
+        });
 
         if (deps.onPasswordResetRequested) {
           await deps.onPasswordResetRequested({
