@@ -1148,6 +1148,103 @@ API's auth type. The secret appears in this response and nowhere else, ever.
 
 ---
 
+## Plugin palette
+
+Three routes under `/api/apis/:id/plugins`, _provider_ and owner-or-admin like
+the rest of the publishing plugin. They carry **state only**: which curated
+Edge plugins this API has switched on, and how each is configured.
+
+The palette itself — which plugins exist, what fields each takes, and within
+what bounds — is the static `PROVIDER_PLUGINS` catalog exported from
+`@ferrum-nexus/shared`, which both the server and the SPA import. There is no
+route to fetch it, because there is nothing per-deployment about it.
+
+### The `ApiPlugin` object
+
+| Field         | Type                       | Notes                                                                                                                                                                                                                       |
+| ------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `plugin_name` | string                     | the exact Ferrum Edge plugin name, always one of `PROVIDER_PLUGINS`                                                                                                                                                         |
+| `enabled`     | boolean                    | `false` keeps the gateway config **and its association with the proxy**, but Edge does not run it — a pause, not a removal, so the settings survive                                                                         |
+| `config`      | object                     | exactly the keys that plugin's descriptor declares. Edge's config key sets are closed, so an extra key is a `400` from the gateway rather than a silently ignored field; Nexus rejects it first, as `400 VALIDATION_FAILED` |
+| `trigger`     | `ApiPluginTrigger` \| null | restrict the plugin to some methods and/or a path prefix; `null` means it runs on every request                                                                                                                             |
+| `created_at`  | ISO-8601                   | when the plugin was first switched on; survives a replace                                                                                                                                                                   |
+| `updated_at`  | ISO-8601                   | last save                                                                                                                                                                                                                   |
+
+`ApiPluginTrigger` is `{ methods?: HttpMethod[], path_prefix?: string }` — the
+portal's slice of Edge's predicate tree. At least one of the two must be
+present; both together are an AND. `path_prefix` is matched against the
+**canonical request path**, which includes the API's `listen_path`, and must
+start with `/` and contain no whitespace, percent escape, backslash or `.`/`..`
+segment — the canonical path never contains any of those, so such a prefix
+could only ever fail to match.
+
+**Not every plugin accepts a trigger.** Edge refuses one on a plugin that
+publishes contextless initial-response-header policy (`security_headers`), a
+fixed per-proxy body ceiling (`request_size_limiting`,
+`response_size_limiting`) or contextless response-trailer ownership
+(`compression`, `correlation_id`, and `response_caching` at its default
+`add_cache_status_header`). Each descriptor records this as `supports_trigger`;
+sending a trigger for one of them is `400 VALIDATION_FAILED`.
+
+### `GET /api/apis/:id/plugins`
+
+_provider_, owner-or-admin → `{ "plugins": ApiPlugin[] }`, oldest first.
+
+### `PUT /api/apis/:id/plugins/:name`
+
+_provider_, owner-or-admin → `{ "plugin": ApiPlugin }`. Creates or replaces.
+
+```json
+{
+  "enabled": true,
+  "config": { "allow": ["203.0.113.0/24"], "mode": "allow_first" },
+  "trigger": { "methods": ["POST"], "path_prefix": "/nexus/billing/invoices" }
+}
+```
+
+`enabled` defaults to `true`; `trigger` may be omitted or `null`. `config` is
+validated against the named plugin's descriptor **before any gateway write**,
+so an unknown key, an out-of-range value or a broken per-plugin invariant is a
+`400 VALIDATION_FAILED` with field-level `details` rather than a partly
+attached plugin.
+
+The gateway side is a proxy-scoped plugin config plus its entry in the proxy's
+`plugins[]` — the same mechanism as `rate_limiting` and `cors`. A replace keeps
+the config id, so the association is never touched and there is no window in
+which the plugin is missing. The `api_plugins` row is written last but inside
+the same compensated block, so a store failure rolls the gateway back rather
+than leaving a plugin running that the portal has no row for.
+
+| Status | Code                | When                                                                                                                                                                                                                                                                                                                                                                          |
+| ------ | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `400`  | `VALIDATION_FAILED` | a config key, value or invariant the plugin does not accept; a trigger on a plugin Edge cannot gate; or a plugin Nexus manages from a first-class API field (`key_auth`/`basic_auth`/`jwt_auth` → `auth_plugin`, `access_control` → `requestable`, `rate_limiting` → `rate_limit`, `cors` → `cors`, `openapi_validator` → `spec_enforcement`), whose message names that field |
+| `403`  | `FORBIDDEN`         | not the owner and not an admin                                                                                                                                                                                                                                                                                                                                                |
+| `404`  | `NOT_FOUND`         | the API, or an Edge plugin outside the palette                                                                                                                                                                                                                                                                                                                                |
+| `409`  | `CONFLICT`          | the API has no gateway proxy to attach anything to                                                                                                                                                                                                                                                                                                                            |
+
+### `DELETE /api/apis/:id/plugins/:name`
+
+_provider_, owner-or-admin → `{ "ok": true }`.
+
+Disassociates the config from the proxy, deletes it, then removes the row —
+`404 NOT_FOUND` when the API never had that plugin. A gateway config an
+operator already removed by hand is tolerated: the row still goes.
+
+Deleting the API removes every palette row with it; the gateway objects need no
+separate step, because they are proxy-scoped and the proxy delete cascades them.
+
+### What the palette does not cover
+
+The auth family (`hmac_auth`, `jwks_auth`, `oauth2_introspection`, `mtls_auth`)
+and `spec_expose` are **not** in the palette. The first four change the
+credential model — Nexus would need credential types, issue/rotate flows and
+show-once material for each — and `spec_expose` needs a canonical public spec
+endpoint. Operator plugins (logging sinks, telemetry, mesh, chaos, load
+testing) are deliberately out of scope: they are how you run the gateway, not
+how you sell an API. See [the provider guide](guides/provider-guide.md#plugins).
+
+---
+
 ## Access requests
 
 Registered under `/api/access-requests`; _session_ throughout. Who may act on a

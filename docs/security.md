@@ -221,6 +221,7 @@ the route, while "is this your API" is a property of the row.
 | Issue / rotate / revoke **own** credentials       |   ✓    |    ✓     |   ✓   |      ✓      |
 | Messaging, notifications                          |   ✓    |    ✓     |   ✓   |      ✓      |
 | Publish an API, update own API/spec               |   —    |    ✓     |   ✓   |      ✓      |
+| Configure palette plugins on **own** API          |   —    |    ✓     |   ✓   |      ✓      |
 | Create a test consumer for own API                |   —    |    ✓     |   ✓   |      ✓      |
 | Approve / deny requests on **own** APIs           |   —    |    ✓     |   ✓   |      ✓      |
 | Revoke grants on **own** APIs                     |   —    |    ✓     |   ✓   |      ✓      |
@@ -263,6 +264,37 @@ stay at `admin`.
   explicit `user_id` — and even then, only the metadata, never a secret.
 - **Catalog** answers `404`, not `403`, for an API you may not see, so it never
   confirms that an internal API exists.
+
+### The provider / operator split on gateway plugins
+
+Ferrum Edge ships around seventy-five plugins. A provider gets **ten of them**,
+plus the six Nexus already manages from fields on the API row. The line is not
+arbitrary, and it is a security boundary rather than a UX preference:
+
+- **Provider-facing** = changes how _consumers of this API_ authenticate, are
+  authorized, are shaped, are protected, or experience the contract. Blast
+  radius is one proxy the provider already owns, and the worst outcome of a
+  mistake is their own API answering `503`. These are the palette
+  (`docs/api.md` § Plugin palette).
+- **Operator-only** = how the _platform_ observes, meshes, load-tests or ships
+  logs. Log sinks name an external destination and can carry request data off
+  the box; tracing and metrics are cluster-wide; fault injection, load testing
+  and request mirroring generate or redirect traffic; mesh and SPIFFE plugins
+  are data-plane identity. None of these belong to one API, and several would
+  let a provider exfiltrate or disrupt beyond their own proxy. They are reached
+  through Foundry or `FERRUM_*` environment, never through Nexus.
+
+Two more are held back for reasons of their own rather than blast radius: the
+auth family (`hmac_auth`, `jwks_auth`, `oauth2_introspection`, `mtls_auth`)
+because it changes the credential model, and `spec_expose` because it needs a
+public spec endpoint.
+
+Every palette write is owner-or-admin (`assertCanAdminister`, the same check
+publishing uses), CSRF-protected like every other mutation, validated against a
+closed key set before any gateway call, and audited. A provider naming a plugin
+outside the palette gets `404 NOT_FOUND`; naming one Nexus manages from a
+first-class field gets `400` pointing at that field. Neither answer lets a
+provider reach a plugin they are not entitled to.
 
 ### First user and the last-super-admin guard
 
@@ -617,6 +649,8 @@ ordinary reporting.
 | `api.spec_update`      | `api`       | A new spec revision was published and made current. `details`: spec id, version, path count, OpenAPI enforcement level, `backend_updated`. At the `routes` level the revision also changes what the gateway accepts, so the level is recorded on every upload.                                                                                                                                                                                                         |
 | `api.retire`           | `api`       | An API moved to `retired`. Emitted instead of `api.update` for that transition. `details.gateway_untouched` records that the proxy and live grants were left alone.                                                                                                                                                                                                                                                                                                    |
 | `api.delete`           | `api`       | An API and its Edge objects were destroyed. `details`: slug, proxy id, `revoked_grants`.                                                                                                                                                                                                                                                                                                                                                                               |
+| `api.plugin_set`       | `api`       | A palette plugin was created or replaced on the API's proxy. `details`: `plugin_name`, `enabled`, `config_keys`, `trigger`, `replaced`. **The config keys are logged, never their values** — a plugin config can carry a Content-Security-Policy or a partner IP allow-list, and an audit row is not the place for either. The trigger is a method list and a path prefix, which are policy rather than data, so it is recorded in full.                               |
+| `api.plugin_remove`    | `api`       | A palette plugin was detached from the proxy and deleted. `details`: `plugin_name`, `label`, `was_attached` (false when an operator had already removed the gateway config by hand).                                                                                                                                                                                                                                                                                   |
 | `test_consumer.create` | `api`       | A provider created (or replaced) the disposable `nexus-test-<api_id>` consumer. `details`: consumer username/id, credential type, `replaced`.                                                                                                                                                                                                                                                                                                                          |
 
 ### Access workflow
