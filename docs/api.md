@@ -965,6 +965,78 @@ _provider_, owner-or-admin
 }
 ```
 
+Every `stats` counter is about **access requests**, not traffic:
+`total_requests` is how many access requests this API has ever received. For
+calls through the gateway, see `GET /api/apis/:id/usage` below.
+
+### `GET /api/apis/:id/usage`
+
+_provider_, owner-or-admin — a cached read-through of what Ferrum Edge already
+reports for this API's proxy. Nexus runs no metrics pipeline and stores no
+history.
+
+Two gateway endpoints back this route, both authenticated with the Nexus admin
+JWT: `GET /metrics` (Prometheus exposition — `ferrum_requests_total` and the
+`ferrum_request_duration_ms` histogram, filtered to this proxy and namespace)
+and `GET /admin/metrics` (`circuit_breakers[]` and
+`health_check.unhealthy_targets[]`). Nexus memoises both **per proxy for 10
+seconds**; Edge caches its own rendering for 5.
+
+```json
+{
+  "available": true,
+  "sampled_at": "2026-09-03T10:15:00.000Z",
+  "gateway_uptime_seconds": 86472,
+  "requests": {
+    "total": 1273,
+    "by_status_class": { "2xx": 1240, "3xx": 1, "4xx": 25, "5xx": 7 },
+    "by_status": { "200": 1200, "201": 40, "302": 1, "401": 5, "403": 2, "429": 18, "500": 7 },
+    "by_method": { "GET": 1233, "POST": 40 },
+    "rate_limited": 18,
+    "unauthorized": 5,
+    "forbidden": 2
+  },
+  "latency_ms": { "p50": 7.5, "p95": 375, "p99": 475 },
+  "backend": {
+    "status": "healthy",
+    "detail": "The gateway's circuit breaker is closed; traffic is flowing to the backend."
+  }
+}
+```
+
+`backend.since` is present only when Edge reports one (an ejected target); it is
+omitted, not `null`, otherwise. So is `gateway_uptime_seconds`.
+
+What the numbers do and do not mean:
+
+| Field                    | Meaning                                                                                                                                                                                                                                                                            |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `available`              | `false` when the gateway could not be read, or the API has no proxy. The route still answers `200` — see below                                                                                                                                                                     |
+| `requests.*`             | **cumulative since the gateway process started**. Edge exposes no per-proxy time window, so there is no "last 24h" here; a gateway restart resets every count to zero                                                                                                              |
+| `latency_ms`             | percentiles interpolated from the gateway's histogram buckets, the same way `histogram_quantile` does — accurate only to the width of the bucket a quantile lands in. A quantile in the open-ended top bucket reports the highest finite bound. `null` when the histogram is empty |
+| `gateway_uptime_seconds` | how far back the cumulative counters reach. Omitted when the gateway did not report it                                                                                                                                                                                             |
+| `backend.status`         | `healthy` (closed breaker), `failing` (open breaker, or an ejected target), `recovering` (half-open breaker), `unknown`                                                                                                                                                            |
+| `backend.since`          | when the backend started failing, present only for an ejected target — Edge attaches no timestamp to a breaker                                                                                                                                                                     |
+
+`unknown` is **not** a claim that the backend is down. Edge lists a circuit
+breaker only for a proxy that has one configured _and_ has been called, so
+`unknown` is the ordinary state for an API with no `circuit_breaker` and for one
+nothing has called yet; `detail` says which.
+
+There is deliberately **no per-consumer breakdown and no unique-consumer
+count**: `ferrum_requests_total` carries no consumer label, so neither can be
+answered honestly from the gateway.
+
+Errors: `403 FORBIDDEN` (not the owner and not an admin), `404 NOT_FOUND`. A
+gateway that is unreachable, erroring or serving an unparseable body is **not**
+an error — it answers `200` with `available: false`, zeroed counters,
+`latency_ms: null` and `backend.status: "unknown"`. A provider's overview page
+must not break because Edge is restarting.
+
+```bash
+curl -sS -b cookies.txt http://127.0.0.1:8787/api/apis/$API_ID/usage | jq .
+```
+
 ### `PATCH /api/apis/:id`
 
 _provider_, owner-or-admin — safe runtime settings only; the spec has its own

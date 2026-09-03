@@ -293,12 +293,42 @@ as you.
 | **401**       | The gateway did not recognise your credential.  | Wrong or missing header; wrong credential _type_ for this API; the credential was revoked or rotated away. |
 | **403**       | Authenticated, but not authorised for this API. | Your grant was revoked, or was never approved. Check the catalog badge.                                    |
 | **404**       | Wrong path.                                     | Check the namespace and slug, and that the path exists in the document.                                    |
-| **429**       | Rate limit.                                     | The provider set a per-consumer quota. Back off; check the rate-limit response headers.                    |
+| **429**       | Rate limit.                                     | The provider set a per-consumer quota. Back off, and watch the rate-limit headers below.                   |
 | **502 / 503** | The API's own backend is unhealthy.             | Not your credential. Message the provider.                                                                 |
 
 A useful diagnostic: **401 is about the credential, 403 is about the grant.**
 If you can call one approved API but not another, the credential is fine and
 the second grant is the problem.
+
+### Staying under a rate limit
+
+The portal does not display your remaining quota. It cannot: the budget is
+counted at the gateway, per consumer, and Nexus never sees it. What you get
+instead is better — the gateway tells you on every call.
+
+Whenever a provider sets a quota, Nexus turns on the gateway's header exposure,
+so responses carry:
+
+| Header                  | Meaning                              |
+| ----------------------- | ------------------------------------ |
+| `x-ratelimit-limit`     | Requests allowed in one window       |
+| `x-ratelimit-remaining` | How many of them you have left       |
+| `x-ratelimit-window`    | The length of the window, in seconds |
+
+The names go out lowercase; HTTP header names are case-insensitive, so most
+clients will hand them to you as `X-RateLimit-Remaining` just as happily.
+
+Two things worth knowing:
+
+- They ride on the requests the limiter **admitted**. Read `x-ratelimit-remaining`
+  as it approaches zero and slow down — do not wait for the `429` to tell you.
+  A request that never reached the rate-limit check carries no such headers at
+  all, so their absence is not a signal.
+- There is **no reset timestamp**. `x-ratelimit-window` is what you have: after a
+  `429`, backing off for at least that many seconds is the safe move.
+
+If a call has no rate-limit headers at all and never returns `429`, the API
+simply has no quota set on it.
 
 ---
 

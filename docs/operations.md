@@ -1,7 +1,8 @@
 # Operations
 
 Running Ferrum Nexus in production: configuration, databases, containers, TLS,
-backups, key rotation, the email outbox, scaling limits, and health checks.
+backups, key rotation, the email outbox, scaling limits, health checks, and
+metrics.
 
 - Architecture background: [`architecture.md`](architecture.md)
 - Security posture: [`security.md`](security.md)
@@ -616,3 +617,86 @@ provider reports an unexplained `EDGE_ERROR`.
 `SIGINT`/`SIGTERM` trigger a graceful shutdown: the outbox poller stops, the
 Edge dispatcher closes, Fastify drains, then the store closes. Give the
 container at least a few seconds of termination grace.
+
+---
+
+## 10. Metrics
+
+**Nexus is not a metrics system.** It stores no time series, runs no scraper and
+retains no history. What it does is read the gateway's own telemetry on demand
+so a provider can see it next to their API.
+
+### Nexus emits nothing; point Prometheus at Edge
+
+There is no `/metrics` endpoint on the Nexus server. Traffic metrics belong to
+the data plane, and the data plane is Ferrum Edge:
+
+- **`GET /metrics`** on the gateway — Prometheus exposition. The two families
+  that matter for per-API traffic are `ferrum_requests_total{proxy_id, method,
+status_code, grpc_status, error_class, namespace}` and the
+  `ferrum_request_duration_ms{proxy_id, le, namespace}` histogram. It also
+  carries everything else the gateway measures.
+- **`GET /admin/metrics`** on the gateway — a JSON snapshot: circuit breakers,
+  health-check state, connection pools, cache and rate-limiter counters.
+
+Both are **gated by default**. A scrape needs an admin JWT, a matching
+`FERRUM_METRICS_BEARER_TOKEN`, or a source address inside
+`FERRUM_METRICS_ALLOWED_CIDRS`. For Prometheus, prefer the bearer token or the
+CIDR allow-list over handing the scraper an admin credential:
+
+```yaml
+scrape_configs:
+  - job_name: ferrum-edge
+    scrape_interval: 15s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['ferrum-edge:9000']
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/ferrum-metrics-token
+```
+
+Correlating a dashboard back to a portal API is the `proxy_id` label: it is the
+`ferrum_proxy_id` on the Nexus `apis` row, shown as **Edge proxy id** on the API
+detail page.
+
+Grafana, alerting rules and retention all live on that side. Nothing about this
+is configured in Nexus.
+
+### What Nexus shows, and its cache
+
+`GET /api/apis/:id/usage` (the provider's **Usage** card) reads both gateway
+endpoints for one proxy and reshapes them: request counts by status class and
+method, the `429`/`401`/`403` totals, interpolated p50/p95/p99 latency, and a
+backend verdict derived from the proxy's circuit breaker and any ejected target.
+
+| Layer   | Cache                                               |
+| ------- | --------------------------------------------------- |
+| Edge    | 5 s, on its own rendering of both endpoints         |
+| Nexus   | 10 s, in-process, **per proxy**, per server process |
+| The SPA | refetches every 30 s while an API page is open      |
+
+So a figure on the card can be up to about 15 seconds behind reality, and a
+horizontally scaled Nexus keeps one cache per process — two browser tabs served
+by different instances may briefly disagree. Neither matters for a diagnostic
+read; both would matter if you tried to bill from it, which is why you should
+not.
+
+Operational consequences worth knowing:
+
+- **A scrape is one HTTP GET per proxy per 10 s**, at worst. Edge's own 5-second
+  cache absorbs the rendering cost, so the load is a request, not a computation.
+- **The route never returns 5xx for a gateway problem.** An unreachable,
+  erroring or unparseable gateway produces `200` with `available: false`. The
+  failure is logged at `warn` by the Edge client (`Ferrum Edge metrics scrape
+could not reach the gateway`, `… returned a non-2xx status`, `… produced no
+parseable samples`), so **the log is where a metrics outage shows up**, not
+  the HTTP status.
+- **Counters are cumulative since the gateway process started.** A gateway
+  restart zeroes every provider's card. This is Edge's model, not a Nexus bug;
+  the card says so, and `gateway_uptime_seconds` says how far back the numbers
+  reach.
+- **There is no per-consumer attribution anywhere in this path**, because
+  `ferrum_requests_total` carries no consumer label. If someone needs "which
+  client burned the quota", that is an Edge access-log question, not a portal
+  one.
