@@ -23,6 +23,7 @@
 
 import type {
   AccessRequestStatus,
+  ApiPluginTrigger,
   ApiStatus,
   ApiTimeouts,
   ApiVisibility,
@@ -51,6 +52,8 @@ import type {
   AccessRequestRecord,
   AccessRequestRepo,
   ApiFilter,
+  ApiPluginRecord,
+  ApiPluginRepo,
   ApiRecord,
   ApiRepo,
   ApiSpecRecord,
@@ -253,6 +256,19 @@ function mapApiSpec(row: Row): ApiSpecRecord {
     parsed_title: textOrNull(row.parsed_title),
     parsed_version: textOrNull(row.parsed_version),
     is_current: bool(row.is_current),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapApiPlugin(row: Row): ApiPluginRecord {
+  return {
+    id: text(row.id),
+    api_id: text(row.api_id),
+    plugin_name: text(row.plugin_name),
+    enabled: bool(row.enabled),
+    config: json<Record<string, unknown>>(row.config_json, {}),
+    trigger: json<ApiPluginTrigger | null>(row.trigger_json, null),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -551,6 +567,7 @@ export interface SqlRepos {
   sessions: SessionRepo;
   apis: ApiRepo;
   apiSpecs: ApiSpecRepo;
+  apiPlugins: ApiPluginRepo;
   accessRequests: AccessRequestRepo;
   grants: GrantRepo;
   credentials: CredentialRepo;
@@ -1079,6 +1096,78 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     delete: async (id) => (await execute(exec, 'DELETE FROM api_specs WHERE id = ?', [id])) > 0,
 
     deleteByApi: async (apiId) => execute(exec, 'DELETE FROM api_specs WHERE api_id = ?', [apiId]),
+  };
+
+  /* ── apiPlugins ─────────────────────────────────────────────────────── */
+
+  // The unique key is the `(api_id, plugin_name)` pair, so the conflict target
+  // is composite: PostgreSQL names both columns, MySQL matches on whichever
+  // unique key the insert collided with and ignores the list.
+  const API_PLUGIN_UPSERT = upsertSql(
+    dialect,
+    'api_plugins',
+    [
+      'id',
+      'api_id',
+      'plugin_name',
+      'enabled',
+      'config_json',
+      'trigger_json',
+      'created_at',
+      'updated_at',
+    ],
+    'api_id, plugin_name',
+    ['enabled', 'config_json', 'trigger_json', 'updated_at'],
+  );
+
+  const apiPlugins: ApiPluginRepo = {
+    listByApi: async (apiId) =>
+      (
+        await queryAll(
+          exec,
+          'SELECT * FROM api_plugins WHERE api_id = ? ORDER BY created_at ASC, plugin_name ASC',
+          [apiId],
+        )
+      ).map(mapApiPlugin),
+
+    find: async (apiId, pluginName) => {
+      const row = await queryOne(
+        exec,
+        'SELECT * FROM api_plugins WHERE api_id = ? AND plugin_name = ?',
+        [apiId, pluginName],
+      );
+      return row ? mapApiPlugin(row) : null;
+    },
+
+    upsert: async (input) => {
+      const meta = stamps({});
+      // `created_at` is not in the update list, so a replace keeps the moment
+      // the provider first switched this plugin on.
+      await mapSqlConflict('That plugin is already configured for this API', () =>
+        execute(exec, API_PLUGIN_UPSERT, [
+          meta.id,
+          input.api_id,
+          input.plugin_name,
+          encodeBool(input.enabled),
+          encodeJson(input.config) ?? '{}',
+          encodeJson(input.trigger),
+          meta.created_at,
+          meta.updated_at,
+        ]),
+      );
+      const saved = await apiPlugins.find(input.api_id, input.plugin_name);
+      if (!saved) throw new Error('apiPlugins.upsert: row vanished immediately after write');
+      return saved;
+    },
+
+    delete: async (apiId, pluginName) =>
+      (await execute(exec, 'DELETE FROM api_plugins WHERE api_id = ? AND plugin_name = ?', [
+        apiId,
+        pluginName,
+      ])) > 0,
+
+    deleteByApi: async (apiId) =>
+      execute(exec, 'DELETE FROM api_plugins WHERE api_id = ?', [apiId]),
   };
 
   /* ── accessRequests ─────────────────────────────────────────────────── */
@@ -2211,6 +2300,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     sessions,
     apis,
     apiSpecs,
+    apiPlugins,
     accessRequests,
     grants,
     credentials,
@@ -2274,6 +2364,7 @@ class SqlStore implements NexusStore {
   readonly sessions: SessionRepo;
   readonly apis: ApiRepo;
   readonly apiSpecs: ApiSpecRepo;
+  readonly apiPlugins: ApiPluginRepo;
   readonly accessRequests: AccessRequestRepo;
   readonly grants: GrantRepo;
   readonly credentials: CredentialRepo;
@@ -2311,6 +2402,7 @@ class SqlStore implements NexusStore {
     this.sessions = repos.sessions;
     this.apis = repos.apis;
     this.apiSpecs = repos.apiSpecs;
+    this.apiPlugins = repos.apiPlugins;
     this.accessRequests = repos.accessRequests;
     this.grants = repos.grants;
     this.credentials = repos.credentials;

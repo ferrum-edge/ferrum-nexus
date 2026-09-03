@@ -24,6 +24,7 @@ import BetterSqlite3, { type Database } from 'better-sqlite3';
 
 import type {
   AccessRequestStatus,
+  ApiPluginTrigger,
   ApiStatus,
   ApiTimeouts,
   ApiVisibility,
@@ -60,6 +61,8 @@ import type {
   AccessRequestRecord,
   AccessRequestRepo,
   ApiFilter,
+  ApiPluginRecord,
+  ApiPluginRepo,
   ApiRecord,
   ApiRepo,
   ApiSpecRecord,
@@ -258,6 +261,19 @@ function mapApiSpec(row: Row): ApiSpecRecord {
     parsed_title: textOrNull(row.parsed_title),
     parsed_version: textOrNull(row.parsed_version),
     is_current: bool(row.is_current),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapApiPlugin(row: Row): ApiPluginRecord {
+  return {
+    id: text(row.id),
+    api_id: text(row.api_id),
+    plugin_name: text(row.plugin_name),
+    enabled: bool(row.enabled),
+    config: json<Record<string, unknown>>(row.config_json, {}),
+    trigger: json<ApiPluginTrigger | null>(row.trigger_json, null),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -1064,6 +1080,67 @@ class SqliteStore implements NexusStore {
 
     deleteByApi: async (apiId) =>
       execute(this.db, 'DELETE FROM api_specs WHERE api_id = ?', [apiId]),
+  };
+
+  /* ── apiPlugins ───────────────────────────────────────────────────────── */
+
+  readonly apiPlugins: ApiPluginRepo = {
+    listByApi: async (apiId) =>
+      queryAll(
+        this.db,
+        'SELECT * FROM api_plugins WHERE api_id = ? ORDER BY created_at ASC, plugin_name ASC',
+        [apiId],
+      ).map(mapApiPlugin),
+
+    find: async (apiId, pluginName) => {
+      const row = queryOne(
+        this.db,
+        'SELECT * FROM api_plugins WHERE api_id = ? AND plugin_name = ?',
+        [apiId, pluginName],
+      );
+      return row ? mapApiPlugin(row) : null;
+    },
+
+    upsert: async (input) => {
+      const meta = stamps({});
+      // `ON CONFLICT … DO UPDATE` keeps the original `created_at` — the row is
+      // the plugin's history on this API, not this particular save's.
+      mapConflict('That plugin is already configured for this API', () =>
+        execute(
+          this.db,
+          `INSERT INTO api_plugins
+             (id, api_id, plugin_name, enabled, config_json, trigger_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (api_id, plugin_name) DO UPDATE SET
+             enabled = excluded.enabled,
+             config_json = excluded.config_json,
+             trigger_json = excluded.trigger_json,
+             updated_at = excluded.updated_at`,
+          [
+            meta.id,
+            input.api_id,
+            input.plugin_name,
+            encodeBool(input.enabled),
+            encodeJson(input.config) ?? '{}',
+            encodeJson(input.trigger),
+            meta.created_at,
+            meta.updated_at,
+          ],
+        ),
+      );
+      const saved = await this.apiPlugins.find(input.api_id, input.plugin_name);
+      if (!saved) throw new Error('apiPlugins.upsert: row vanished immediately after write');
+      return saved;
+    },
+
+    delete: async (apiId, pluginName) =>
+      execute(this.db, 'DELETE FROM api_plugins WHERE api_id = ? AND plugin_name = ?', [
+        apiId,
+        pluginName,
+      ]) > 0,
+
+    deleteByApi: async (apiId) =>
+      execute(this.db, 'DELETE FROM api_plugins WHERE api_id = ?', [apiId]),
   };
 
   /* ── accessRequests ───────────────────────────────────────────────────── */

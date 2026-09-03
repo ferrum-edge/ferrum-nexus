@@ -52,6 +52,7 @@ import type {
   UserStatus,
   Uuid,
 } from './entities.js';
+import type { ApiPlugin, ApiPluginTrigger } from './plugins.js';
 
 /* ── Envelopes ──────────────────────────────────────────────────────────── */
 
@@ -440,6 +441,51 @@ export interface CreateTestConsumerResponse {
   consumer_username: string;
   secret: ShowOnceSecret;
 }
+
+/* ── Plugin palette (provider) ──────────────────────────────────────────── */
+
+/**
+ * `GET /api/apis/:id/plugins` — every palette plugin currently configured on
+ * this API.
+ *
+ * Only plugins the provider switched on appear; the palette itself is a static
+ * catalog (`PROVIDER_PLUGINS`) the SPA already has, so the response carries
+ * state, not schema. Owner or admin, like every other provider-side read.
+ */
+export interface ListApiPluginsResponse {
+  plugins: ApiPlugin[];
+}
+
+/**
+ * `PUT /api/apis/:id/plugins/:name` — create or replace one palette plugin.
+ *
+ * The body is validated against the descriptor's field specs, so `config`
+ * carries **exactly** the keys that plugin declares: Edge's key sets are
+ * closed, and an extra key is a `400` from the gateway rather than a no-op.
+ */
+export interface SetApiPluginRequest {
+  /**
+   * Defaults to `true`. `false` keeps the gateway config and its association
+   * but stops Edge running it, so the provider's settings survive a temporary
+   * switch-off.
+   */
+  enabled?: boolean;
+  config: Record<string, unknown>;
+  /**
+   * Restrict the plugin to some methods and/or a path prefix. Only accepted
+   * for a descriptor with `supports_trigger: true`; `null` removes an existing
+   * one.
+   */
+  trigger?: ApiPluginTrigger | null;
+}
+
+/** `PUT /api/apis/:id/plugins/:name` */
+export interface SetApiPluginResponse {
+  plugin: ApiPlugin;
+}
+
+/** `DELETE /api/apis/:id/plugins/:name` — detaches and deletes the Edge config. */
+export type DeleteApiPluginResponse = OkResponse;
 
 /* ── Usage & backend health ─────────────────────────────────────────────── */
 
