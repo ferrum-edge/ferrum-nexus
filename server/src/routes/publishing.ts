@@ -19,6 +19,7 @@ import {
   MAX_RATE_LIMIT_REQUESTS,
   MAX_RATE_LIMIT_WINDOW_SECONDS,
   MAX_SPEC_BYTES,
+  type ApiUsageResponse,
   type CorsConfig,
   type CreateTestConsumerResponse,
   type DeleteApiResponse,
@@ -32,6 +33,7 @@ import {
 import { clientIp, requireAuth, requireRole } from '../middleware/auth-plugin.js';
 import { parseOrThrow } from '../middleware/error-handler.js';
 import type { PublishingService } from '../publishing/service.js';
+import type { UsageService } from '../usage/service.js';
 import {
   booleanQuerySchema,
   idParamSchema,
@@ -43,6 +45,7 @@ import {
 /** Services this route plugin needs. */
 export interface PublishingRoutesOptions {
   publishing: PublishingService;
+  usage: UsageService;
 }
 
 /** Character ceiling on an uploaded document; the byte check lives in `oas.ts`. */
@@ -138,7 +141,7 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
   app,
   options,
 ) => {
-  const { publishing } = options;
+  const { publishing, usage } = options;
   app.addHook('onRequest', requireRole('provider'));
 
   app.get('/', async (request): Promise<ListApisResponse> => {
@@ -181,6 +184,20 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
     const { user } = requireAuth(request);
     const { id } = parseOrThrow(idParamSchema, request.params);
     return publishing.get(user, id);
+  });
+
+  /**
+   * Read-only gateway telemetry for one API. Owner or admin, like every other
+   * provider-side read of the row.
+   *
+   * This answers `200` even when the gateway is unreachable — the body then
+   * carries `available: false`. A provider's overview page must not break
+   * because Edge is restarting.
+   */
+  app.get('/:id/usage', async (request): Promise<ApiUsageResponse> => {
+    const { user } = requireAuth(request);
+    const { id } = parseOrThrow(idParamSchema, request.params);
+    return usage.forApi(user, id);
   });
 
   app.patch('/:id', async (request): Promise<UpdateApiResponse> => {

@@ -73,6 +73,7 @@ import { messagingRoutes } from './routes/messaging.js';
 import { notificationsRoutes } from './routes/notifications.js';
 import { publishingRoutes } from './routes/publishing.js';
 import { organizationRoutes, usersRoutes } from './routes/users.js';
+import { createUsageService, type UsageService } from './usage/service.js';
 import { createUsersService, type UsersService } from './users/service.js';
 
 /** Services composed by {@link buildServer} and exposed for tests. */
@@ -91,6 +92,7 @@ export interface NexusServices {
   catalog: CatalogService;
   credentials: CredentialsService;
   publishing: PublishingService;
+  usage: UsageService;
   access: AccessService;
   god: GodService;
 }
@@ -275,6 +277,7 @@ export async function buildServer(
     notifications,
     credentials,
   });
+  const usage = createUsageService({ store: deps.store, edge: deps.edge, publishing });
   const access = createAccessService({
     config,
     store: deps.store,
@@ -324,6 +327,7 @@ export async function buildServer(
     catalog,
     credentials,
     publishing,
+    usage,
     access,
     god,
   };
@@ -445,7 +449,7 @@ export async function buildServer(
     prefix: '/api/catalog',
   });
 
-  await app.register(async (scope) => scope.register(publishingRoutes, { publishing }), {
+  await app.register(async (scope) => scope.register(publishingRoutes, { publishing, usage }), {
     prefix: '/api/apis',
   });
 
