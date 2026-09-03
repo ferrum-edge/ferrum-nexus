@@ -6,9 +6,19 @@
  *
  * - `EDGE_UNAVAILABLE` — DNS, connect, TLS, socket or timeout. Nothing reached
  *   the gateway.
- * - `EDGE_ERROR` — the gateway answered with a non-2xx status. Edge's flat
- *   `{"error": "..."}` text is **logged, never echoed to the browser**, because
- *   it can contain operator-facing configuration detail.
+ * - `EDGE_ERROR` — the gateway answered with a non-2xx status.
+ *
+ * Edge's flat `{"error": "..."}` text is always logged. Whether it is *also*
+ * echoed to the caller depends on who the message is about:
+ *
+ * - `400`, `409` and `422` are Edge validating the body Nexus just built out of
+ *   the caller's own request ("FERRUM_BASIC_AUTH_HMAC_SECRET must be set…",
+ *   "listen_path already exists in this namespace"). A provider cannot fix
+ *   those without reading them, so the text rides along in
+ *   `details.gateway_message` (trimmed to {@link MAX_GATEWAY_MESSAGE} chars).
+ * - `401`, `403` and every `5xx` stay **opaque**: those describe the gateway's
+ *   own configuration or the Nexus↔Edge trust relationship, not the caller's
+ *   request, and can name internal hosts and settings.
  *
  * A `503` carrying `applied: false` is a special case worth knowing about: the
  * write **is durable**, it just is not live yet. It surfaces as `EDGE_ERROR`
@@ -36,6 +46,7 @@ import type {
   EdgePluginConfigWrite,
   EdgeProbe,
   EdgeProxy,
+  EdgeProxyReplace,
   EdgeProxyWrite,
 } from './types.js';
 
@@ -110,7 +121,16 @@ export interface FerrumAdminClient {
   /** Namespace sent in `X-Ferrum-Namespace` on every namespace-scoped call. */
   readonly namespace: string;
 
-  /** Authenticated `GET /health` — reports `mode`, `ready`, `admin_writes_enabled`. */
+  /**
+   * Authenticated `GET /health` — reports `status`, `ready`, `mode` and
+   * `admin_writes_enabled`.
+   *
+   * Edge answers **`503` with a complete health payload** whenever it is not
+   * ready (`starting`, `draining`, `unavailable`). That is a reachable gateway
+   * reporting its own state, so the body is parsed and returned rather than
+   * classified as a failure; only a `503` that is *not* a health payload (or
+   * any other non-2xx) throws.
+   */
   health(): Promise<EdgeHealth>;
   /** Unauthenticated `GET /live`. `true` when the gateway answered `200`. */
   live(): Promise<boolean>;
@@ -177,13 +197,24 @@ export interface FerrumAdminClient {
     list(query?: EdgeListQuery): Promise<EdgePage<EdgeProxy>>;
     get(id: string): Promise<EdgeProxy | null>;
     create(body: EdgeProxyWrite, subject?: string): Promise<EdgeProxy>;
-    replace(id: string, body: EdgeProxyWrite, subject?: string): Promise<EdgeProxy>;
+    /**
+     * Whole-resource replace. The body must be a `GET` response with the
+     * changed fields overwritten — see {@link EdgeProxyReplace}.
+     */
+    replace(id: string, body: EdgeProxyReplace, subject?: string): Promise<EdgeProxy>;
     delete(id: string, subject?: string): Promise<void>;
   };
 
   readonly pluginConfigs: {
     list(query?: EdgeListQuery): Promise<EdgePage<EdgePluginConfig>>;
-    /** Every plugin config attached to one proxy (client-side filtered). */
+    /**
+     * Every plugin config attached to one proxy.
+     *
+     * `GET /plugins/config` has **no `proxy_id` filter** and clamps `limit` to
+     * Edge's `MAX_PAGE_SIZE` of 1000, so this walks every page and filters
+     * client-side. A single-page read silently truncated on any gateway
+     * carrying more than 1000 plugin configs in the namespace.
+     */
     listByProxy(proxyId: string): Promise<EdgePluginConfig[]>;
     get(id: string): Promise<EdgePluginConfig | null>;
     create(body: EdgePluginConfigWrite, subject?: string): Promise<EdgePluginConfig>;
@@ -200,6 +231,24 @@ export interface FerrumAdminClient {
 
 const MAX_CONSUMER_SCAN_PAGES = 20;
 const CONSUMER_SCAN_PAGE_SIZE = 500;
+
+/**
+ * Edge's `MAX_PAGE_SIZE` (`src/admin/mod.rs`). A larger `limit` is clamped to
+ * this, so asking for more only costs a wasted parameter.
+ */
+const EDGE_MAX_PAGE_SIZE = 1000;
+
+/** Page cap for the plugin-config scan: 50 × 1000 rows in one namespace. */
+const MAX_PLUGIN_CONFIG_SCAN_PAGES = 50;
+
+/** Longest Edge validation text echoed back to the caller. */
+const MAX_GATEWAY_MESSAGE = 500;
+
+/**
+ * Edge statuses whose `{"error": …}` text is about the caller's own request and
+ * is therefore safe — and necessary — to surface. See the module doc comment.
+ */
+const ECHOED_EDGE_STATUSES = new Set([400, 409, 422]);
 
 function buildDispatcher(config: EdgeConfig): Dispatcher {
   const isHttps = config.adminUrl.startsWith('https://');
@@ -332,6 +381,17 @@ export function createFerrumAdminClient(
     if (status === 401 || status === 403) {
       return edgeError('The gateway rejected the Nexus admin credentials', { status });
     }
+    // A validation refusal is about the body Nexus built from the caller's own
+    // request, so the provider needs the gateway's reason to act on it.
+    if (ECHOED_EDGE_STATUSES.has(status) && typeof body.error === 'string') {
+      const gatewayMessage = body.error.trim().slice(0, MAX_GATEWAY_MESSAGE);
+      if (gatewayMessage !== '') {
+        return edgeError(`The gateway rejected the request: ${gatewayMessage}`, {
+          status,
+          gateway_message: gatewayMessage,
+        });
+      }
+    }
     return edgeError('The gateway rejected the request', { status });
   }
 
@@ -348,11 +408,55 @@ export function createFerrumAdminClient(
     return result;
   }
 
+  /**
+   * Walk every page of an Edge list endpoint.
+   *
+   * `visit` returns `false` to stop early. The walk also stops on an empty or
+   * short page, once `offset + data.length` covers `pagination.total`, or after
+   * `maxPages` pages — the cap keeps a runaway `total` from turning one probe
+   * into an unbounded scan.
+   */
+  async function scanPages<T>(
+    path: string,
+    pageSize: number,
+    maxPages: number,
+    visit: (items: T[]) => boolean,
+  ): Promise<void> {
+    for (let page = 0; page < maxPages; page += 1) {
+      const offset = page * pageSize;
+      const result = await callRequired<EdgePage<T>>('GET', path, {
+        query: { limit: pageSize, offset },
+      });
+      const items = Array.isArray(result.data) ? result.data : [];
+      if (!visit(items)) return;
+      if (items.length === 0 || items.length < pageSize) return;
+      const total = result.pagination?.total ?? items.length;
+      if (offset + items.length >= total) return;
+    }
+  }
+
+  /** Whether an Edge response body is a `HealthResponse` and not an error. */
+  function isHealthBody(value: unknown): value is EdgeHealth {
+    return (
+      typeof value === 'object' &&
+      value !== null &&
+      typeof (value as { status?: unknown }).status === 'string'
+    );
+  }
+
   return {
     namespace,
 
     async health(): Promise<EdgeHealth> {
-      return callRequired<EdgeHealth>('GET', '/health');
+      // `503` + a full payload is Edge saying "reachable, not ready"; a `503`
+      // carrying anything else is a real failure and still classifies.
+      const parsed = await call<unknown>('GET', '/health', { tolerate: [503] });
+      if (isHealthBody(parsed)) return parsed;
+      logger.error(
+        { path: '/health', upstream: (parsed as { error?: unknown } | null)?.error ?? null },
+        'Ferrum Edge health endpoint returned an unrecognised body',
+      );
+      throw edgeError('The gateway health endpoint did not return a health payload');
     },
 
     async live(): Promise<boolean> {
@@ -382,6 +486,8 @@ export function createFerrumAdminClient(
         return {
           reachable: true,
           latencyMs: Date.now() - started,
+          status: typeof health.status === 'string' ? health.status : null,
+          ready: typeof health.ready === 'boolean' ? health.ready : null,
           mode: typeof health.mode === 'string' ? health.mode : null,
           adminWritesEnabled:
             typeof health.admin_writes_enabled === 'boolean' ? health.admin_writes_enabled : null,
@@ -392,6 +498,8 @@ export function createFerrumAdminClient(
         return {
           reachable: false,
           latencyMs: Date.now() - started,
+          status: null,
+          ready: null,
           mode: null,
           adminWritesEnabled: null,
           version: null,
@@ -444,18 +552,20 @@ export function createFerrumAdminClient(
       },
 
       async getByUsername(username: string): Promise<EdgeConsumer | null> {
-        for (let pageIndex = 0; pageIndex < MAX_CONSUMER_SCAN_PAGES; pageIndex += 1) {
-          const page = await callRequired<EdgePage<EdgeConsumer>>('GET', '/consumers', {
-            query: { limit: CONSUMER_SCAN_PAGE_SIZE, offset: pageIndex * CONSUMER_SCAN_PAGE_SIZE },
-          });
-          const items = Array.isArray(page.data) ? page.data : [];
-          // access_control matches usernames byte-for-byte, so this does too.
-          const match = items.find((consumer) => consumer.username === username);
-          if (match) return match;
-          const total = page.pagination?.total ?? items.length;
-          if ((pageIndex + 1) * CONSUMER_SCAN_PAGE_SIZE >= total || items.length === 0) return null;
-        }
-        return null;
+        let found: EdgeConsumer | null = null;
+        await scanPages<EdgeConsumer>(
+          '/consumers',
+          CONSUMER_SCAN_PAGE_SIZE,
+          MAX_CONSUMER_SCAN_PAGES,
+          (items) => {
+            // access_control matches usernames byte-for-byte, so this does too.
+            const match = items.find((consumer) => consumer.username === username);
+            if (!match) return true;
+            found = match;
+            return false;
+          },
+        );
+        return found;
       },
 
       async create(body: EdgeConsumerWrite, subject?: string): Promise<EdgeConsumer> {
@@ -533,7 +643,7 @@ export function createFerrumAdminClient(
       async create(body: EdgeProxyWrite, subject?: string): Promise<EdgeProxy> {
         return callRequired<EdgeProxy>('POST', '/proxies', { body, subject });
       },
-      async replace(id: string, body: EdgeProxyWrite, subject?: string): Promise<EdgeProxy> {
+      async replace(id: string, body: EdgeProxyReplace, subject?: string): Promise<EdgeProxy> {
         return callRequired<EdgeProxy>('PUT', `/proxies/${encodeURIComponent(id)}`, {
           body,
           subject,
@@ -551,11 +661,19 @@ export function createFerrumAdminClient(
         });
       },
       async listByProxy(proxyId: string): Promise<EdgePluginConfig[]> {
-        const page = await callRequired<EdgePage<EdgePluginConfig>>('GET', '/plugins/config', {
-          query: { limit: 1000 },
-        });
-        const items = Array.isArray(page.data) ? page.data : [];
-        return items.filter((config) => config.proxy_id === proxyId);
+        const attached: EdgePluginConfig[] = [];
+        await scanPages<EdgePluginConfig>(
+          '/plugins/config',
+          EDGE_MAX_PAGE_SIZE,
+          MAX_PLUGIN_CONFIG_SCAN_PAGES,
+          (items) => {
+            for (const config of items) {
+              if (config.proxy_id === proxyId) attached.push(config);
+            }
+            return true;
+          },
+        );
+        return attached;
       },
       async get(id: string): Promise<EdgePluginConfig | null> {
         return call<EdgePluginConfig>('GET', `/plugins/config/${encodeURIComponent(id)}`, {

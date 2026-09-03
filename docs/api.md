@@ -48,7 +48,9 @@ row. A mismatch is `403 CSRF_MISMATCH`.
 
 Exempt (they are reached before a session exists): `POST /api/auth/login`,
 `POST /api/auth/register`, `POST /api/auth/verify-email`,
-`GET /api/auth/captcha`. **`POST /api/auth/logout` is not exempt.**
+`POST /api/auth/resend-verification`, `POST /api/auth/forgot-password`,
+`POST /api/auth/reset-password`, `GET /api/auth/captcha`.
+**`POST /api/auth/logout` is not exempt.**
 
 ### Auth requirement column
 
@@ -110,25 +112,25 @@ booleans accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`.
 change; `details` is present only when there is structured context (per-field
 validation issues, a conflicting slug, an Edge status).
 
-| Code                 | HTTP | When                                                                                |
-| -------------------- | ---- | ----------------------------------------------------------------------------------- |
-| `VALIDATION_FAILED`  | 400  | Body, query or params failed schema validation.                                     |
-| `UNAUTHORIZED`       | 401  | No valid session, or it expired.                                                    |
-| `FORBIDDEN`          | 403  | Authenticated, but the role or ownership check failed.                              |
-| `NOT_FOUND`          | 404  | Target does not exist, or is not visible to the caller.                             |
-| `CONFLICT`           | 409  | Uniqueness or state conflict (duplicate email/slug, active grant, already decided). |
-| `CSRF_MISMATCH`      | 403  | `X-Nexus-CSRF` missing or not matching the cookie/session.                          |
-| `CAPTCHA_FAILED`     | 400  | CAPTCHA token missing, expired, or rejected by the vendor.                          |
-| `RATE_LIMITED`       | 429  | Too many requests from this identity/IP.                                            |
-| `EMAIL_NOT_VERIFIED` | 403  | Account exists but its email is unverified and verification is required.            |
-| `USER_DISABLED`      | 403  | Account has been disabled by an admin.                                              |
-| `LAST_SUPER_ADMIN`   | 409  | Refused: would remove, demote or disable the last active `super_admin`.             |
-| `SHOW_ONCE_ALREADY`  | 410  | Show-once material was already retrieved and cannot be shown again.                 |
-| `EDGE_UNAVAILABLE`   | 502  | Ferrum Edge Admin API unreachable (network error / timeout).                        |
-| `EDGE_ERROR`         | 502  | Ferrum Edge Admin API returned an error response.                                   |
-| `SPEC_INVALID`       | 400  | Uploaded OpenAPI document could not be parsed or failed validation.                 |
-| `OUTBOX_FAILURE`     | 500  | Email could not be enqueued, or exhausted its outbox retries.                       |
-| `INTERNAL`           | 500  | Unexpected server-side failure.                                                     |
+| Code                 | HTTP | When                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| -------------------- | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VALIDATION_FAILED`  | 400  | Body, query or params failed schema validation.                                                                                                                                                                                                                                                                                                                                                                               |
+| `UNAUTHORIZED`       | 401  | No valid session, or it expired.                                                                                                                                                                                                                                                                                                                                                                                              |
+| `FORBIDDEN`          | 403  | Authenticated, but the role or ownership check failed.                                                                                                                                                                                                                                                                                                                                                                        |
+| `NOT_FOUND`          | 404  | Target does not exist, or is not visible to the caller.                                                                                                                                                                                                                                                                                                                                                                       |
+| `CONFLICT`           | 409  | Uniqueness or state conflict (duplicate email/slug, active grant, already decided).                                                                                                                                                                                                                                                                                                                                           |
+| `CSRF_MISMATCH`      | 403  | `X-Nexus-CSRF` missing or not matching the cookie/session.                                                                                                                                                                                                                                                                                                                                                                    |
+| `CAPTCHA_FAILED`     | 400  | CAPTCHA token missing, expired, or rejected by the vendor.                                                                                                                                                                                                                                                                                                                                                                    |
+| `RATE_LIMITED`       | 429  | Too many requests from this identity/IP.                                                                                                                                                                                                                                                                                                                                                                                      |
+| `EMAIL_NOT_VERIFIED` | 403  | Account exists but its email is unverified and verification is required.                                                                                                                                                                                                                                                                                                                                                      |
+| `USER_DISABLED`      | 403  | Account has been disabled by an admin.                                                                                                                                                                                                                                                                                                                                                                                        |
+| `LAST_SUPER_ADMIN`   | 409  | Refused: would remove, demote or disable the last active `super_admin`.                                                                                                                                                                                                                                                                                                                                                       |
+| `SHOW_ONCE_ALREADY`  | 410  | Show-once material was already retrieved and cannot be shown again.                                                                                                                                                                                                                                                                                                                                                           |
+| `EDGE_UNAVAILABLE`   | 502  | Ferrum Edge Admin API unreachable (network error / timeout).                                                                                                                                                                                                                                                                                                                                                                  |
+| `EDGE_ERROR`         | 502  | Ferrum Edge Admin API returned an error response. On a gateway **validation** refusal (`400`, `409`, `422`) `details` is `{ status, gateway_message }`, where `gateway_message` is Edge's own text about the request, trimmed to 500 characters, and the top-level `message` repeats it. A `401`, `403` or `5xx` from the gateway stays opaque — that text is about the gateway's own configuration and only reaches the log. |
+| `SPEC_INVALID`       | 400  | Uploaded OpenAPI document could not be parsed or failed validation.                                                                                                                                                                                                                                                                                                                                                           |
+| `OUTBOX_FAILURE`     | 500  | Email could not be enqueued, or exhausted its outbox retries.                                                                                                                                                                                                                                                                                                                                                                 |
+| `INTERNAL`           | 500  | Unexpected server-side failure.                                                                                                                                                                                                                                                                                                                                                                                               |
 
 `UNAUTHORIZED`, `FORBIDDEN`, `CSRF_MISMATCH`, `USER_DISABLED` and
 `VALIDATION_FAILED` can come back from any endpoint and are not repeated in the
@@ -144,10 +146,14 @@ Public. Registered under `/api/health`.
 
 _public_ — aggregate liveness/readiness.
 
-The Edge probe never fails the endpoint: an unreachable gateway is reported as
-`edge.status = "down"` with an overall `degraded`, so a load balancer keeps the
-portal in rotation while the gateway recovers. Only a broken database makes the
-overall status `down`.
+**Status code contract:** `200` for `ok` and `degraded`, `503` for `down`.
+Container and load-balancer probes key on the code, so a gateway outage alone
+must never take the portal out of rotation — only a broken database does.
+
+The Edge probe therefore never fails the endpoint. An unreachable gateway is
+`edge.status = "down"` and a gateway that answered but reports itself unready is
+`edge.status = "not_ready"`; both leave the overall status `degraded` on a
+`200`.
 
 ```json
 {
@@ -160,24 +166,43 @@ overall status `down`.
     "status": "ok",
     "latency_ms": 7,
     "error": null,
-    "edge_version": "1.4.2",
+    "ready": true,
+    "mode": "database",
+    "admin_writes_enabled": true,
+    "edge_version": null,
     "namespace": "nexus"
   }
 }
 ```
 
-`status` is `ok` | `degraded` | `down`. `edge_version` is `null` when the
-gateway has no `/version` endpoint — take the real version from your deployment
+Overall `status` is `ok` | `degraded` | `down`; `edge.status` is `ok` |
+`not_ready` | `down`.
+
+`not_ready` exists because Edge answers `GET /health` with **`503` and a
+complete health payload** while it is `starting`, `draining` or `unavailable`.
+That is a reachable gateway reporting its own state, so Nexus parses the body
+and reports `ready: false` rather than calling the gateway unreachable.
+`ready` comes straight from that payload and is `null` when nothing answered.
+`mode` and `admin_writes_enabled` are gateway detail: they are filled in only
+for an authenticated admin, and are `null` for everyone else — the same rule
+`error` follows.
+
+`edge_version` is **always `null` against a stock gateway**: Ferrum Edge
+exposes no version endpoint at all. Take the real version from your deployment
 metadata.
 
 Because this endpoint is unauthenticated, `database.error` is never the
 driver's own message — a failing database reports the constant `"unreachable"`
 and the real text (`connect ECONNREFUSED 10.0.3.14:5432`, authentication
 failures, and so on) is written to the server log at `error` level instead.
+`edge.error` is treated the same way: an admin sees the probe's real failure,
+everyone else sees `"unreachable"`.
 
 ### `GET /api/health/edge`
 
-_public_ — the Edge half on its own, same `edge` object as above.
+_public_ — the Edge half on its own, same `edge` object as above. Always `200`;
+the gateway's state is in the body, because the portal itself is fine either
+way.
 
 ---
 
@@ -283,6 +308,73 @@ Tokens are single-use and expire after 24 hours. Errors:
 `400 VALIDATION_FAILED` (unknown or expired link), `409 CONFLICT` (already
 used).
 
+### The anti-enumeration contract
+
+The next three routes exist so a visitor can recover an account without help,
+which means they take an email address from anyone who asks. All three answer
+
+```json
+{ "ok": true }
+```
+
+with status `200` **in every case** — the address has an account, it has none,
+the account is disabled, it is already verified, or a link was already sent
+inside the throttle window. They also pay the same scrypt-sized cost whatever
+they decide, so latency does not separate the cases either. Treat the response
+as an acknowledgement that the request was accepted, never as confirmation that
+an account exists; the portal's own pages word their confirmations as
+conditionals for the same reason.
+
+What actually happened is recorded in the audit log
+(`auth.verification_resend`, `auth.password_reset_request`), which is only
+written when a link was really issued.
+
+The only errors these routes return are `400 VALIDATION_FAILED` for a malformed
+body and `429 RATE_LIMITED` from the shared `/api/auth/*` limiter.
+
+### `POST /api/auth/resend-verification`
+
+_public_, CSRF-exempt. Body `{ "email": string }` (valid address, ≤ 320 chars).
+
+Queues a fresh 24-hour verification link when the address belongs to an active,
+unverified account and no verification link was issued for it in the last 10
+minutes. A new link supersedes the previous one, which stops working
+immediately.
+
+### `POST /api/auth/forgot-password`
+
+_public_, CSRF-exempt. Body `{ "email": string }` (valid address, ≤ 320 chars).
+
+Queues a password-reset link when the address belongs to an active account and
+no reset link was issued for it in the last 10 minutes. The link points at
+`<public URL>/reset-password?token=…` and expires after one hour
+(`PASSWORD_RESET_TTL_SECONDS`).
+
+### `POST /api/auth/reset-password`
+
+_public_, CSRF-exempt.
+
+| Field          | Type   | Notes                                            |
+| -------------- | ------ | ------------------------------------------------ |
+| `token`        | string | 8–512 chars, from the emailed link.              |
+| `new_password` | string | ≥ 12 characters (`MIN_PASSWORD_LENGTH`), ≤ 1024. |
+
+```json
+{ "ok": true }
+```
+
+Redeeming a link burns it, sets the new password, marks the address verified
+(reading the mailbox is what verification ever proved), invalidates any other
+outstanding reset link for the account, and **terminates every session the
+account has** — including the caller's, whose cookies are cleared on the
+response. Sign in again afterwards.
+
+Errors: `400 VALIDATION_FAILED` for a token that is unknown, expired or already
+spent — deliberately one code and one message for all three, so a caller
+holding a guessed token learns nothing — and for a password below the minimum
+length (checked before the token is spent, so a rejected password does not
+waste the link). `403 USER_DISABLED` when the account has been disabled.
+
 ### `GET /api/auth/captcha`
 
 _public_ — widget configuration. Never carries the vendor secret.
@@ -371,8 +463,9 @@ Guards enforced in the service:
 - Only a `super_admin` may disable an `admin` or `super_admin` →
   `403 FORBIDDEN`.
 - Demoting or disabling the **last active `super_admin`** →
-  `409 LAST_SUPER_ADMIN`.
-- Disabling **your own** account → `409 CONFLICT`.
+  `409 LAST_SUPER_ADMIN`. This is checked before the self-disable rule, so it is
+  also what you get for disabling yourself while you are the last one.
+- Disabling **your own** account in any other case → `409 CONFLICT`.
 - Disabling an account deletes every session it holds.
 - `404 NOT_FOUND` when `org_id` names an organization that does not exist.
 
@@ -491,7 +584,8 @@ another user are ignored.
 ## Admin
 
 Registered under `/api/admin`. The **entire** plugin requires _admin_; the four
-`god/*` endpoints additionally require _super_admin_.
+`god/*` endpoints additionally require _super_admin_, and so do the `smtp` and
+`captcha` sections of `PUT /settings`.
 
 ### `GET /api/admin/settings`
 
@@ -528,14 +622,21 @@ report whether one is stored.
 
 ### `PUT /api/admin/settings`
 
-_admin_ — partial update; **omitted sections are untouched**, and omitted
-fields inside a supplied section keep their current value.
+_admin_, except `smtp` and `captcha` which are **_super_admin_** — partial
+update; **omitted sections are untouched**, and omitted fields inside a supplied
+section keep their current value.
+
+A body carrying an `smtp` or `captcha` section from an ordinary `admin` is
+refused with `403 FORBIDDEN` and nothing is written — not even the sections that
+would have been allowed. Mail and CAPTCHA are escalation surfaces, not
+preferences: repointing SMTP delivers every verification and password-reset link
+to the operator, and CAPTCHA is the registration brake.
 
 | Section        | Fields                                                                                                                                                                                                                                                   |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `branding`     | `portal_name` (1–120), `logo_data_url` (base64 image data URL, ≤ 512 KiB, nullable), `primary_color` / `accent_color` (CSS hex `#rgb`–`#rrggbbaa`), `default_theme` (`dark`\|`light`\|`system`), `tagline` (≤ 280, nullable), `support_email` (nullable) |
-| `captcha`      | `enabled`, `provider` (`none`\|`recaptcha`\|`hcaptcha`\|`turnstile`), `site_key` (nullable), `secret_key` — **write-only**, stored AES-256-GCM encrypted; pass `null` or `""` to clear                                                                   |
-| `smtp`         | `host`, `port` (1–65535), `secure`, `username`, `password` — **write-only**, encrypted; `null`/`""` clears — `from_address`                                                                                                                              |
+| `captcha`      | _super_admin_ — `enabled`, `provider` (`none`\|`recaptcha`\|`hcaptcha`\|`turnstile`), `site_key` (nullable), `secret_key` — **write-only**, stored AES-256-GCM encrypted; pass `null` or `""` to clear                                                   |
+| `smtp`         | _super_admin_ — `host`, `port` (1–65535), `secure`, `username`, `password` — **write-only**, encrypted; `null`/`""` clears — `from_address`                                                                                                              |
 | `registration` | `open_registration`, `require_email_verification`, `allowed_roles` (array of roles)                                                                                                                                                                      |
 
 → the same shape as `GET /api/admin/settings`. The audit row records the
@@ -686,7 +787,10 @@ Body `{ "user_id": uuid, "reason": string, "revoke_grants"?: boolean }`
 ```
 
 Disables the account and destroys every session it holds. Errors:
-`409 CONFLICT` (disabling yourself), `409 LAST_SUPER_ADMIN`.
+`409 LAST_SUPER_ADMIN` when the target is the last active super admin —
+**including when that is you**, because "promote someone else first" is the
+useful message; `409 CONFLICT` for any other attempt to disable your own
+account.
 
 #### `POST /api/admin/god/broadcast`
 
@@ -789,6 +893,14 @@ Spec documents arrive as a JSON string field, not a multipart upload — the SPA
 reads the file client-side, which keeps the CSRF story and the error shape
 identical to every other route.
 
+Two fields of the returned `Api` object describe the gateway side of a
+publication:
+
+| Field          | Type                                             | Notes                                                                                                                                                              |
+| -------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `upstream_url` | string \| null                                   | the upstream Nexus last wrote to the gateway, normalized to `scheme://host:port[/basePath]` (the port always explicit, IPv6 hosts bracketed). `null` on older rows |
+| `cors`         | `{ allowed_origins, allow_credentials }` \| null | the browser CORS policy. `null` means **no `cors` plugin at all** — the gateway adds no CORS headers, which is not the same as an empty allow-list                 |
+
 ### `GET /api/apis`
 
 _provider_ — `Paginated<Api>`.
@@ -806,26 +918,29 @@ _provider_ — `Paginated<Api>`.
 _provider_ → `201` — validates the spec, builds the Edge proxy and its plugins,
 then persists.
 
-| Field          | Type                                     | Notes                                                                                                |
-| -------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `name`         | string                                   | 1–200, required                                                                                      |
-| `slug`         | string                                   | ≤ 60, **optional** — derived from `name` when omitted; the listen path becomes `/<namespace>/<slug>` |
-| `description`  | string \| null                           | ≤ 4000; falls back to `info.description` from the spec                                               |
-| `version`      | string                                   | ≤ 60, optional — defaults to the spec's `info.version`                                               |
-| `upstream_url` | string                                   | ≤ 2000, **optional** when the document has an absolute `servers[0].url`                              |
-| `spec`         | string                                   | the OpenAPI 3.x document as JSON or YAML text, ≤ 2 MiB — required                                    |
-| `auth_plugin`  | `key_auth` \| `basic_auth` \| `jwt_auth` | required                                                                                             |
-| `requestable`  | boolean                                  | required — attaches `access_control` when true                                                       |
-| `visibility`   | `public` \| `internal`                   | required                                                                                             |
-| `rate_limit`   | `{ limit, window_seconds }` \| null      | optional; `limit` 1–10 000 000, `window_seconds` 1–86 400                                            |
+| Field          | Type                                             | Notes                                                                                                                                                                                                                     |
+| -------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`         | string                                           | 1–200, required                                                                                                                                                                                                           |
+| `slug`         | string                                           | ≤ 60, **optional** — derived from `name` when omitted; the listen path becomes `/<namespace>/<slug>`                                                                                                                      |
+| `description`  | string \| null                                   | ≤ 4000; falls back to `info.description` from the spec                                                                                                                                                                    |
+| `version`      | string                                           | ≤ 60, optional — defaults to the spec's `info.version`                                                                                                                                                                    |
+| `upstream_url` | string                                           | ≤ 2000, **optional** when the document has an absolute `servers[0].url`                                                                                                                                                   |
+| `spec`         | string                                           | the OpenAPI 3.x document as JSON or YAML text, ≤ 2 MiB — required                                                                                                                                                         |
+| `auth_plugin`  | `key_auth` \| `basic_auth` \| `jwt_auth`         | required                                                                                                                                                                                                                  |
+| `requestable`  | boolean                                          | required — attaches `access_control` when true                                                                                                                                                                            |
+| `visibility`   | `public` \| `internal`                           | required                                                                                                                                                                                                                  |
+| `rate_limit`   | `{ limit, window_seconds }` \| null              | optional; `limit` 1–1 000 000, `window_seconds` 1–86 400 — both are Edge's own ceilings                                                                                                                                   |
+| `cors`         | `{ allowed_origins, allow_credentials }` \| null | optional; `allowed_origins` is 1–64 whitespace-free strings of ≤ 255 characters, `allow_credentials` defaults to `false`. Omit it (or send `null`) and the API gets no `cors` plugin, so the gateway adds no CORS headers |
 
 ```json
 { "api": { … }, "spec": { … } }
 ```
 
 Errors: `400 SPEC_INVALID` (unparseable, Swagger 2.0, missing
-`openapi`/`info.title`/`info.version`/`paths`, oversized, or no upstream
-determinable), `409 CONFLICT` (slug taken), `502 EDGE_ERROR` /
+`openapi`/`info.title`/`info.version`/`paths`, oversized, no upstream
+determinable, or — unless `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` — an upstream
+that is a loopback, private, link-local or `.internal`/`.local` destination,
+reported with `details.reason = "private_upstream"`), `409 CONFLICT` (slug taken), `502 EDGE_ERROR` /
 `502 EDGE_UNAVAILABLE`. A failed Edge step is rolled back — the plugin configs
 and proxy are deleted — and nothing is written to the Nexus store.
 
@@ -855,28 +970,32 @@ _provider_, owner-or-admin
 _provider_, owner-or-admin — safe runtime settings only; the spec has its own
 route. Every field optional; nothing supplied returns the row unchanged.
 
-| Field                            | Effect                                                                                                                                                         |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`, `description`, `version` | metadata only                                                                                                                                                  |
-| `visibility`                     | `public` ⇄ `internal`; catalog listing only                                                                                                                    |
-| `status`                         | `published` ⇄ `retired` — **catalog state only**, the proxy and every live grant keep working                                                                  |
-| `upstream_url`                   | rewrites the Edge proxy's backend                                                                                                                              |
-| `auth_plugin`                    | deletes the old auth plugin config and attaches the new one; existing credentials of the old flavour no longer satisfy this API, and every grantee is notified |
-| `requestable`                    | attaches or deletes `access_control`. Turning it **off** opens the API to every authenticated consumer; existing grants stay on the consumers and become inert |
-| `rate_limit`                     | attaches, replaces, or (with `null`) deletes `rate_limiting`                                                                                                   |
+| Field                            | Effect                                                                                                                                                                                          |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`, `description`, `version` | metadata only                                                                                                                                                                                   |
+| `visibility`                     | `public` ⇄ `internal`; catalog listing only                                                                                                                                                     |
+| `status`                         | `published` ⇄ `retired` — **catalog state only**, the proxy and every live grant keep working                                                                                                   |
+| `upstream_url`                   | re-points the Edge proxy's backend and records the normalized form on the row; everything else on the proxy is left as it was found                                                             |
+| `auth_plugin`                    | attaches and associates the new auth plugin config before detaching and deleting the old one; existing credentials of the old flavour no longer satisfy this API, and every grantee is notified |
+| `requestable`                    | attaches or deletes `access_control`. Turning it **off** opens the API to every authenticated consumer; existing grants stay on the consumers and become inert                                  |
+| `rate_limit`                     | attaches, replaces, or (with `null`) deletes `rate_limiting`; `limit` 1–1 000 000                                                                                                               |
+| `cors`                           | attaches, replaces, or (with `null`) deletes `cors`. Omitting the field leaves the existing policy alone — only an explicit `null` removes it                                                   |
 
-→ `{ "api": Api }`. Errors: `400 SPEC_INVALID` (bad `upstream_url`),
+→ `{ "api": Api }`. Errors: `400 SPEC_INVALID` (bad or, by default, private
+`upstream_url` — see `POST /api/apis`),
 `502 EDGE_ERROR`.
 
 ### `DELETE /api/apis/:id`
 
 _provider_, owner-or-admin → `{ "ok": true }`.
 
-Destructive and ordered deliberately: plugin configs and proxy are deleted from
-Edge **first** (so nothing stays reachable-but-untracked), then the ACL group is
-stripped from every grantee's consumer, then the grants, requests, spec
-revisions and the API row are deleted in one store transaction. Grantees get a
-notification.
+Destructive and ordered deliberately: the Edge proxy is deleted **first** (so
+nothing stays reachable-but-untracked, and so the API never spends the teardown
+live with its auth plugin already gone), which cascades its plugin associations
+and proxy-scoped plugin configs; any config the cascade missed is swept up
+after. Then the ACL group is stripped from every grantee's consumer, then the
+grants, requests, spec revisions and the API row are deleted in one store
+transaction. Grantees get a notification.
 
 ### `PUT /api/apis/:id/spec`
 
@@ -892,7 +1011,9 @@ the parsed `info.version`).
 The new revision becomes current. The proxy backend is re-pointed at the
 document's `servers[0]` **only** if the proxy is still pointing where the
 _previous_ revision said it should — once a provider supplies an explicit
-upstream, the document stops being authoritative for it.
+upstream, the document stops being authoritative for it. When the backend does
+move, `upstream_url` on the row moves with it, in the same store transaction as
+the revision; when it does not, `upstream_url` is left alone.
 
 ### `POST /api/apis/:id/test-consumer`
 

@@ -112,6 +112,13 @@ API Key is the usual default: simplest for callers, and the gateway hides the
 header from your upstream. Choose JWT when callers need short-lived
 credentials they mint themselves.
 
+> **HTTP Basic needs one piece of gateway configuration.** Publishing fails
+> unless the operator has set `FERRUM_BASIC_AUTH_HMAC_SECRET` (at least 32
+> bytes) on Ferrum Edge — it is the key the gateway hashes Basic passwords
+> with, and it refuses to build the plugin without one. The publish error
+> carries the gateway's own message in `details.gateway_message`; ask an
+> operator to set it and try again.
+
 ### Requestable
 
 **Requestable on** is the normal setting. It attaches an `access_control`
@@ -142,21 +149,51 @@ publish it here.
 
 ### Rate limit
 
-Optional, and expressed as **requests per window**: a `limit` (1 – 10 000 000)
+Optional, and expressed as **requests per window**: a `limit` (1 – 1 000 000)
 and a `window_seconds` (1 – 86 400). `1000` per `60` is 1000 requests a minute.
+Both ceilings are the gateway's own, so a larger number is refused by the form
+rather than by the gateway half-way through publishing.
 
 The limit is **per consumer**, not per source IP — which is the point of a
 portal quota. One noisy client cannot exhaust everyone else's budget. Clients
 see rate-limit headers on their responses and a `429` when they exceed it.
 
+### CORS
+
+Optional, and only relevant if a **browser** calls your API directly. Server-to-
+server clients are unaffected by any of this.
+
+List the origins allowed to call you, one per line — `https://app.example.com`,
+scheme and host (and port, if it is not the default), no path. Up to 64 of them.
+Tick **Allow credentials** if those pages need to send cookies or an
+`Authorization` header cross-origin.
+
+**Leaving the box empty is a real choice, not an omission.** No origins means no
+`cors` plugin is attached at all, so the gateway adds no CORS headers and a
+browser will refuse any cross-origin call to your API. That is the right setting
+for an API only ever called from a server. Clearing the box on an API that had a
+policy removes the plugin again.
+
+Note that CORS is a browser rule, not an access control: it decides which web
+pages may read your responses, and nothing else. What actually protects the data
+is the authentication plugin and the ACL group.
+
 ### What publishing actually does
 
 ```
-apis row ─┬─ proxy          name `nexus-<slug>`, listening on /<namespace>/<slug>
-          ├─ plugin_config  your auth plugin
-          ├─ plugin_config  access_control      — only when requestable
-          └─ plugin_config  rate_limiting       — only when a rate limit is set
+apis row ─── proxy          name `nexus-<slug>`, listening on /<namespace>/<slug>
+              │
+              │ …then the proxy is told to run them
+              ├─ plugin_config  your auth plugin
+              ├─ plugin_config  access_control      — only when requestable
+              ├─ plugin_config  rate_limiting       — only when a rate limit is set
+              └─ plugin_config  cors                — only when origins are listed
 ```
+
+The last step matters: on Ferrum Edge a plugin has to be both configured _and_
+listed on the proxy before the gateway runs it, so publishing finishes by
+attaching the whole set to the proxy in one write. Nothing you configure here is
+live until that lands.
 
 If any step fails, everything created is torn back down and nothing is saved on
 either side. A failed publish leaves no debris.
@@ -172,8 +209,9 @@ API, but two of them have consequences worth reading first.
 | -------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | Name, description, version | Catalog metadata only.                                                                                                     |
 | Visibility                 | Listing only. Existing grants and calls are unaffected.                                                                    |
-| Upstream URL               | Re-points the gateway's backend. Takes effect immediately.                                                                 |
+| Upstream URL               | Re-points the gateway's backend. Takes effect immediately, and the upstream shown on the API page updates with it.         |
 | Rate limit                 | Attaches, updates, or (cleared) removes the quota.                                                                         |
+| CORS                       | Attaches, replaces, or (cleared) removes the browser CORS policy.                                                          |
 | **Requestable → off**      | ⚠️ Removes the access gate. **Every authenticated consumer can now call this API.** Existing grants stay but become inert. |
 | **Authentication plugin**  | ⚠️ Breaks every existing client until they issue a new credential.                                                         |
 

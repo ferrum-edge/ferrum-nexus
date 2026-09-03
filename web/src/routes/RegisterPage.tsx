@@ -8,6 +8,7 @@ import {
 } from '@ferrum-nexus/shared';
 import { AuthShell, FormNotice } from '../components/auth/AuthShell';
 import { CaptchaWidget } from '../components/auth/CaptchaWidget';
+import { ResendVerification } from '../components/auth/ResendVerification';
 import { Button } from '../components/ui/Button';
 import { LabeledInput } from '../components/ui/Input';
 import { LabeledSelect } from '../components/ui/Select';
@@ -79,6 +80,7 @@ export function RegisterPage(): ReactElement {
               ? 'Check your inbox for a verification link, then sign in.'
               : 'Your account is ready. You can sign in now.'}
           </FormNotice>
+          {done.verificationRequired ? <ResendVerification email={email} /> : null}
           <Link
             to="/login"
             className="inline-flex h-11 items-center justify-center rounded-md bg-accent px-4 text-sm font-medium text-accent-fg hover:bg-accent-hover"

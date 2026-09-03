@@ -23,6 +23,7 @@ import type {
   CaptchaProvider,
   CaptchaPublicConfig,
   CatalogApi,
+  CorsConfig,
   CredentialMetadata,
   CredentialType,
   EdgeHealth,
@@ -154,6 +155,48 @@ export interface VerifyEmailResponse {
   verified: boolean;
   user: User;
 }
+
+/** `POST /api/auth/resend-verification` */
+export interface ResendVerificationRequest {
+  email: string;
+}
+
+/**
+ * `POST /api/auth/resend-verification`
+ *
+ * Always `{ ok: true }`, on the same anti-enumeration contract as
+ * {@link ForgotPasswordResponse}: unknown, disabled, already-verified and
+ * throttled all look identical.
+ */
+export type ResendVerificationResponse = OkResponse;
+
+/** `POST /api/auth/forgot-password` */
+export interface ForgotPasswordRequest {
+  email: string;
+}
+
+/**
+ * `POST /api/auth/forgot-password`
+ *
+ * Always `{ ok: true }`, with the same status and body whether the address has
+ * an account, belongs to a disabled one, or was asked for again inside the
+ * resend throttle. The response is deliberately not a signal.
+ */
+export type ForgotPasswordResponse = OkResponse;
+
+/** `POST /api/auth/reset-password` */
+export interface ResetPasswordRequest {
+  token: string;
+  new_password: string;
+}
+
+/**
+ * `POST /api/auth/reset-password`
+ *
+ * On success every session of the account has been terminated, so the caller
+ * must sign in again with the new password.
+ */
+export type ResetPasswordResponse = OkResponse;
 
 /** `GET /api/auth/captcha` — public widget configuration. */
 export type CaptchaConfigResponse = CaptchaPublicConfig;
@@ -287,6 +330,8 @@ export interface PublishApiRequest {
   requestable: boolean;
   visibility: ApiVisibility;
   rate_limit?: RateLimitConfig | null;
+  /** Browser CORS policy; omit or send `null` for no gateway CORS headers. */
+  cors?: CorsConfig | null;
 }
 
 /** `POST /api/apis` */
@@ -320,6 +365,8 @@ export interface UpdateApiRequest {
   requestable?: boolean;
   visibility?: ApiVisibility;
   rate_limit?: RateLimitConfig | null;
+  /** Replace the CORS policy, or send `null` to remove it from the gateway. */
+  cors?: CorsConfig | null;
   status?: ApiStatus;
 }
 

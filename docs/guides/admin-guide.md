@@ -42,6 +42,11 @@ account _to_ `admin`/`super_admin`, or demote one _from_ those roles, or disable
 an existing administrator. An admin trying it gets a clear `403`. This is what
 keeps a single compromised admin account from escalating itself.
 
+**An admin cannot change the mail or CAPTCHA settings** either, for the same
+reason: repointing SMTP would deliver every verification and password-reset link
+to whoever did it. Branding, registration policy, email templates and mass email
+stay at `admin`.
+
 **The last active super admin is untouchable.** Demoting, disabling or removing
 the only remaining active `super_admin` is refused. The check asks "is anyone
 else left?", so it triggers exactly when it should.
@@ -50,7 +55,9 @@ else left?", so it triggers exactly when it should.
 > convenience — the situation where you notice it is one where you have already
 > lost your only administrator.
 
-You also cannot disable **your own** account, ordinary route or god mode.
+You also cannot disable **your own** account, ordinary route or god mode. If you
+are the last active super admin, the "last one left" refusal is what you see —
+promote a second super admin first.
 
 ### The first user
 
@@ -127,6 +134,10 @@ signs in), so keep it to genuinely public information.
 automated abuse. Enable it if self-service registration is open to the
 internet.
 
+> **Super admins only.** This section, like Email, is saved only for a
+> `super_admin`; an ordinary `admin` gets a permission error. It is the
+> registration brake, so turning it off is a platform-level decision.
+
 Supported providers: **Cloudflare Turnstile**, **hCaptcha**, **reCAPTCHA**.
 
 Setup, whichever you pick:
@@ -182,6 +193,12 @@ The policy never applies to the very first account.
 
 **Administration → Settings → Email.**
 
+> **Super admins only.** SMTP settings are saved only for a `super_admin`; an
+> ordinary `admin` gets a permission error. Whoever controls the relay receives
+> every verification and password-reset link the portal sends, which makes this
+> a takeover of every account, not a preference. Email templates and mass email
+> stay at `admin`.
+
 ### SMTP
 
 | Field                   | Notes                                                                                     |
@@ -213,12 +230,13 @@ SMTP host first, and ask an operator to check the outbox queue
 
 ### Email templates
 
-**Administration → Settings → Email templates.** Seven transactional templates,
+**Administration → Settings → Email templates.** Eight transactional templates,
 each with a built-in default you can override:
 
 | Key                  | Sent when                                              |
 | -------------------- | ------------------------------------------------------ |
 | `verification`       | A new account must verify its email address.           |
+| `password_reset`     | Someone asks to reset a password.                      |
 | `access_approved`    | An access request is approved.                         |
 | `access_denied`      | An access request is declined.                         |
 | `access_revoked`     | A grant is revoked.                                    |
@@ -248,6 +266,7 @@ verbatim.
 | Template             | Extra placeholders                                                    |
 | -------------------- | --------------------------------------------------------------------- |
 | `verification`       | `verification_url`, `verification_token`                              |
+| `password_reset`     | `reset_url`, `reset_token`                                            |
 | `access_approved`    | `api_name`, `api_slug`, `api_url`, `decided_by_name`, `decision_note` |
 | `access_denied`      | `api_name`, `api_slug`, `decided_by_name`, `decision_note`            |
 | `access_revoked`     | `api_name`, `api_slug`, `revoked_by_name`, `reason`                   |
@@ -259,10 +278,17 @@ The editor shows the exact list for the template you have open. Using a
 placeholder that is not on that template's list is not an error — it simply
 renders empty.
 
-Two worth handling carefully: `verification_url` is the only way a new user can
-complete sign-up, so never remove it from the `verification` template; and in
-`mass`, `body_html` is inserted **as HTML** without escaping (that is the point
-of a composer), so only administrators can author it.
+Three worth handling carefully. `verification_url` is the only way a new user
+can complete sign-up, so never remove it from the `verification` template, and
+`reset_url` is the only way anyone recovers a forgotten password — a
+`password_reset` override without it strands every user who asks. In `mass`,
+`body_html` is inserted **as HTML** without escaping (that is the point of a
+composer), so only administrators can author it.
+
+The `password_reset` default also tells the recipient that the link expires in
+an hour, that it can be used once, and that using it signs them out everywhere.
+Keep that in any rewrite: those three facts are what stop a confused user from
+filing a support ticket.
 
 ---
 

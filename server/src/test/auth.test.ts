@@ -5,8 +5,15 @@ import { CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE, type ApiErrorBody } from '@fe
 
 import { AuditAction } from '../audit/service.js';
 import { REGISTRATION_SETTINGS_KEY, SUPER_ADMIN_CLAIM_KEY } from '../auth/service.js';
+import { createCrypto } from '../lib/crypto.js';
 import { isoInSeconds } from '../lib/ids.js';
-import { buildTestApp, cookieValue, TEST_PASSWORD, type TestApp } from './helpers.js';
+import {
+  buildTestApp,
+  cookieValue,
+  TEST_PASSWORD,
+  TEST_SECRET_KEY,
+  type TestApp,
+} from './helpers.js';
 
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
@@ -298,6 +305,86 @@ describe('auth flow', () => {
   });
 });
 
+describe('sliding session expiry', () => {
+  let harness: TestApp;
+
+  before(async () => {
+    harness = await buildTestApp();
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  /** Every `Set-Cookie` on the response, keyed by cookie name. */
+  function setCookies(response: { headers: Record<string, unknown> }): Map<string, string> {
+    const raw = response.headers['set-cookie'];
+    const list = Array.isArray(raw) ? (raw as string[]) : typeof raw === 'string' ? [raw] : [];
+    return new Map(list.map((header) => [header.slice(0, header.indexOf('=')), header]));
+  }
+
+  function maxAgeOf(header: string): number | null {
+    const match = /(?:^|;\s*)Max-Age=(-?\d+)/i.exec(header);
+    return match ? Number(match[1]) : null;
+  }
+
+  /** The stored row behind a session cookie, via the same hash the server uses. */
+  async function sessionRowFor(token: string) {
+    const hash = createCrypto(TEST_SECRET_KEY).hashToken(token);
+    const row = await harness.store.sessions.findByTokenHash(hash);
+    assert.ok(row, 'the session row exists');
+    return row;
+  }
+
+  it('re-issues both cookies with a full Max-Age when it slides the row', async () => {
+    const session = await harness.registerUser({ email: 'slider@example.test' });
+    const ttl = harness.config.sessionTtlSeconds;
+    const row = await sessionRowFor(session.sessionToken);
+
+    // Less than half the TTL left, which is what makes the hook write.
+    await harness.store.sessions.touch(row.id, isoInSeconds(ttl / 4));
+
+    const response = await harness.app.inject({
+      method: 'GET',
+      url: '/api/auth/me',
+      headers: { cookie: session.cookieHeader },
+    });
+    assert.equal(response.statusCode, 200);
+
+    const cookies = setCookies(response);
+    const sessionCookie = cookies.get(SESSION_COOKIE);
+    const csrfCookie = cookies.get(CSRF_COOKIE);
+    assert.ok(sessionCookie, 'the session cookie is re-issued');
+    assert.ok(csrfCookie, 'the CSRF cookie is re-issued');
+
+    assert.equal(maxAgeOf(sessionCookie), ttl, 'the browser expiry moves with the row');
+    assert.equal(maxAgeOf(csrfCookie), ttl);
+
+    // The values must not rotate — the client keeps using the tokens it has.
+    assert.equal(cookieValue(response, SESSION_COOKIE), session.sessionToken);
+    assert.equal(cookieValue(response, CSRF_COOKIE), session.csrfToken);
+    assert.match(sessionCookie, /HttpOnly/i);
+    assert.doesNotMatch(csrfCookie, /HttpOnly/i);
+
+    const slid = await sessionRowFor(session.sessionToken);
+    assert.ok(
+      Date.parse(slid.expires_at) - Date.now() > (ttl * 1000) / 2,
+      'the row was extended too',
+    );
+  });
+
+  it('sets no cookies while more than half the TTL remains', async () => {
+    const session = await harness.registerUser({ email: 'fresh@example.test' });
+    const response = await harness.app.inject({
+      method: 'GET',
+      url: '/api/auth/me',
+      headers: { cookie: session.cookieHeader },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(setCookies(response).size, 0, 'a busy SPA is not re-stamped on every request');
+  });
+});
+
 describe('email verification', () => {
   let harness: TestApp;
   const issued: { userId: string; token: string | null }[] = [];
@@ -394,6 +481,7 @@ describe('email verification', () => {
     await harness.store.verificationTokens.create({
       user_id: user.id,
       token_hash: harness.app.nexus.crypto.hashToken(expiredToken),
+      purpose: 'email_verification',
       expires_at: isoInSeconds(-60),
     });
 

@@ -91,6 +91,7 @@ describe('email template keys', () => {
       'credential_rotated',
       'mass',
       'message_received',
+      'password_reset',
       'verification',
     ]);
   });

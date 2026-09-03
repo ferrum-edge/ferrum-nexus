@@ -77,6 +77,24 @@ export interface RateLimitConfig {
   window_seconds: number;
 }
 
+/**
+ * Per-API browser CORS policy forwarded to the Edge `cors` plugin.
+ *
+ * `null` on an {@link Api} means no `cors` plugin is attached at all, so the
+ * gateway adds no CORS headers and a browser treats the API as same-origin
+ * only. This is deliberately not "allow nothing" — an absent plugin and a
+ * plugin with an empty origin list are different things on the gateway.
+ */
+export interface CorsConfig {
+  /**
+   * Origins the gateway will echo back, e.g. `https://app.example.com`. At
+   * least one, at most {@link MAX_CORS_ORIGINS}.
+   */
+  allowed_origins: string[];
+  /** Whether the gateway sets `Access-Control-Allow-Credentials`. */
+  allow_credentials: boolean;
+}
+
 /** A published API and the Edge proxy backing it. */
 export interface Api {
   id: Uuid;
@@ -85,6 +103,12 @@ export interface Api {
   description: string | null;
   owner_user_id: Uuid;
   ferrum_proxy_id: string | null;
+  /**
+   * The upstream Nexus last wrote to the gateway, normalized to
+   * `scheme://host:port[/basePath]` (IPv6 hosts bracketed). `null` on rows
+   * published before this was recorded — read the proxy from Edge for those.
+   */
+  upstream_url: string | null;
   namespace: string;
   version: string;
   spec_format: SpecFormat;
@@ -92,6 +116,8 @@ export interface Api {
   requestable: boolean;
   auth_plugin: AuthPluginType;
   rate_limit: RateLimitConfig | null;
+  /** Browser CORS policy, or `null` when the gateway adds no CORS headers. */
+  cors: CorsConfig | null;
   status: ApiStatus;
   visibility: ApiVisibility;
   created_at: IsoTimestamp;
@@ -418,9 +444,30 @@ export interface AppHealth {
 /** Supported persistence backends. */
 export type DbDriver = 'sqlite' | 'postgres' | 'mysql' | 'mongodb';
 
+/**
+ * Coarse verdict for the gateway.
+ *
+ * `not_ready` is its own state on purpose: Edge answers `503` with a complete
+ * health payload while it is `starting`, `draining` or `unavailable`, which is
+ * a reachable gateway reporting itself unready — not an unreachable one.
+ */
+export type EdgeHealthStatus = 'ok' | 'not_ready' | 'down';
+
 /** Health of the Ferrum Edge Admin API, as reported by `GET /api/health/edge`. */
-export interface EdgeHealth extends DependencyHealth {
-  /** Edge version string when the probe succeeded. */
+export interface EdgeHealth extends Omit<DependencyHealth, 'status'> {
+  status: EdgeHealthStatus;
+  /** Edge's own readiness verdict, or `null` when it did not answer. */
+  ready: boolean | null;
+  /** Gateway operating mode (`database`, `file`, `cp`, `dp`, …), or `null`. */
+  mode: string | null;
+  /** Whether the gateway will currently accept config writes, or `null`. */
+  admin_writes_enabled: boolean | null;
+  /**
+   * Gateway version string.
+   *
+   * Always `null` against a stock gateway — Ferrum Edge exposes **no version
+   * endpoint**. Take the real version from your deployment metadata.
+   */
   edge_version: string | null;
   namespace: string;
 }

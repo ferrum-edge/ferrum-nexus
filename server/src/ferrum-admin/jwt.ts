@@ -7,6 +7,13 @@
  * `FERRUM_ADMIN_JWT_AUDIENCE` configured, so `aud` is stamped **only** when
  * Nexus is explicitly configured with one.
  *
+ * Every token also carries `ns` — the namespace Nexus operates in. A gateway
+ * started with `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true` requires the claim
+ * to authorize the `X-Ferrum-Namespace` of every namespace-scoped route and
+ * answers `403` without it; a gateway without the flag ignores it. Stamping it
+ * unconditionally is therefore free on a permissive control plane and is what
+ * makes a locked-down one work at all.
+ *
  * Tokens are cached in a small LRU keyed by every signing input (the secret is
  * hashed into the key, never stored in it) and re-minted once the remaining
  * lifetime drops below `min(60, ttl / 4)` seconds, so the token handed to
@@ -40,6 +47,13 @@ export interface SignAdminJwtOptions {
   issuer: string;
   subject: string;
   role: EdgeRole;
+  /**
+   * Namespace stamped as the `ns` claim. Required: a gateway running with
+   * `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true` rejects a namespace-scoped
+   * call whose token has no `ns`, and a claim that disagrees with
+   * `X-Ferrum-Namespace` is a `403`, so it always equals `EdgeConfig.namespace`.
+   */
+  namespace: string;
   /** Only set when the gateway configures an audience. */
   audience?: string | undefined;
   ttlSeconds: number;
@@ -52,22 +66,28 @@ export interface SignAdminJwtOptions {
 /**
  * Sign one HS256 admin token with the exact claim set Edge requires.
  *
- * `nbf` equals `iat`. No `aud` is emitted unless `audience` is supplied.
+ * `nbf` equals `iat`, `ns` is always the configured namespace, and no `aud` is
+ * emitted unless `audience` is supplied.
  */
 export async function signAdminJwt(options: SignAdminJwtOptions): Promise<string> {
-  const { secret, issuer, subject, role } = options;
+  const { secret, issuer, subject, role, namespace } = options;
   if (secret.length < MIN_SECRET_LENGTH) {
     throw internal(`Ferrum admin JWT secret must be at least ${MIN_SECRET_LENGTH} characters`);
   }
   if (issuer.trim() === '') throw internal('Ferrum admin JWT issuer must not be empty');
   if (subject.trim() === '') throw internal('Ferrum admin JWT subject must not be empty');
+  // Edge rejects a malformed `ns` claim (empty string) at authentication time
+  // whether or not namespace enforcement is on, so never mint one.
+  if (namespace.trim() === '') throw internal('Ferrum admin JWT namespace must not be empty');
   const ttl = options.ttlSeconds;
   if (!Number.isSafeInteger(ttl) || ttl < 1 || ttl > MAX_TTL_SECONDS) {
     throw internal(`Ferrum admin JWT TTL must be an integer between 1 and ${MAX_TTL_SECONDS}`);
   }
 
   const now = options.now ?? Math.floor(Date.now() / 1000);
-  let signer = new SignJWT({ role })
+  // `ns` is a plain string; Edge also accepts an array, but Nexus only ever
+  // operates in the single namespace it is configured with.
+  let signer = new SignJWT({ role, ns: namespace })
     .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
     .setIssuer(issuer)
     .setSubject(subject)
@@ -113,6 +133,7 @@ function fingerprintFor(config: EdgeConfig, subject: string, role: EdgeRole): st
         adminUrl: config.adminUrl,
         issuer: config.jwtIssuer,
         audience: config.jwtAudience ?? null,
+        namespace: config.namespace,
         ttl: config.jwtTtlSeconds,
         subject,
         role,
@@ -155,6 +176,7 @@ export function createAdminTokenMinter(config: EdgeConfig): AdminTokenMinter {
         issuer: config.jwtIssuer,
         subject,
         role,
+        namespace: config.namespace,
         audience: config.jwtAudience,
         ttlSeconds: config.jwtTtlSeconds,
         now,

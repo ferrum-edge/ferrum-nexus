@@ -25,20 +25,21 @@ the process prints every offending variable and exits non-zero. The repo-root
 
 ### Server
 
-| Variable                   | Default                                      | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| -------------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NEXUS_ENV`                | inferred from `NODE_ENV`, else `development` | `development` \| `test` \| `production`. `test` forces rate limiting off and quietens the logger.                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `NODE_ENV`                 | —                                            | Only consulted when `NEXUS_ENV` is unset, and only `production`/`test` are honoured.                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `NEXUS_HOST`               | `127.0.0.1`                                  | Bind address. Use `0.0.0.0` in a container.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `NEXUS_PORT`               | `8787`                                       | 0–65535.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `NEXUS_PUBLIC_URL`         | `http://127.0.0.1:5173`                      | Public origin of the portal. Used to build verification links, catalog/credential/thread URLs in email. Must be an absolute URL; a trailing slash is stripped.                                                                                                                                                                                                                                                                                                                                                                                           |
-| `NEXUS_TRUSTED_PROXIES`    | _(unset)_                                    | Which proxies may set `X-Forwarded-For`. Unset trusts none: `request.ip` is the socket address, which is what the auth rate limiter and every audit row key on. Accepts an integer hop count counted from the right of the header (`1`), or a comma-separated allowlist of IPs/CIDR blocks (`10.0.0.0/8,192.168.1.7`; `loopback`, `linklocal` and `uniquelocal` are also accepted). An allowlist reaches Fastify's `trustProxy` unchanged; a hop count is compiled into the equivalent predicate, because Fastify maps a bare number to "trust nothing". |
-| `NEXUS_TRUST_PROXY`        | `false`                                      | **Deprecated.** `true` is an alias for `NEXUS_TRUSTED_PROXIES=1`. It no longer affects cookies or HSTS — see `NEXUS_COOKIE_SECURE`.                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `NEXUS_COOKIE_SECURE`      | `true` unless `NEXUS_ENV=development`        | Marks `nexus_session` and `nexus_csrf` `Secure` and turns on HSTS. Set `false` only to serve the portal over plaintext `http://`.                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `NEXUS_LOG_LEVEL`          | `info`                                       | One of `fatal`, `error`, `warn`, `info`, `debug`, `trace`, `silent`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `NEXUS_SESSION_TTL`        | `43200` (12 h)                               | Session idle lifetime in seconds; 60 – 2 592 000. Sliding.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `NEXUS_RATE_LIMIT_ENABLED` | `true`                                       | Installs the 20 req/min limiter on `/api/auth/*`. Forced off when `NEXUS_ENV=test`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `NEXUS_WEB_DIST`           | _(unset)_                                    | Directory of the built SPA to serve. When unset, the server looks for `../../web/dist` relative to itself and then `./web/dist` under the CWD; if neither has an `index.html`, static serving is disabled and only the API is exposed.                                                                                                                                                                                                                                                                                                                   |
+| Variable                        | Default                                      | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NEXUS_ENV`                     | inferred from `NODE_ENV`, else `development` | `development` \| `test` \| `production`. `test` forces rate limiting off and quietens the logger.                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `NODE_ENV`                      | —                                            | Only consulted when `NEXUS_ENV` is unset, and only `production`/`test` are honoured.                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `NEXUS_HOST`                    | `127.0.0.1`                                  | Bind address. Use `0.0.0.0` in a container.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `NEXUS_PORT`                    | `8787`                                       | 0–65535.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `NEXUS_PUBLIC_URL`              | `http://127.0.0.1:5173`                      | Public origin of the portal. Used to build verification links, catalog/credential/thread URLs in email. Must be an absolute URL; a trailing slash is stripped.                                                                                                                                                                                                                                                                                                                                                                                           |
+| `NEXUS_TRUSTED_PROXIES`         | _(unset)_                                    | Which proxies may set `X-Forwarded-For`. Unset trusts none: `request.ip` is the socket address, which is what the auth rate limiter and every audit row key on. Accepts an integer hop count counted from the right of the header (`1`), or a comma-separated allowlist of IPs/CIDR blocks (`10.0.0.0/8,192.168.1.7`; `loopback`, `linklocal` and `uniquelocal` are also accepted). An allowlist reaches Fastify's `trustProxy` unchanged; a hop count is compiled into the equivalent predicate, because Fastify maps a bare number to "trust nothing". |
+| `NEXUS_TRUST_PROXY`             | `false`                                      | **Deprecated.** `true` is an alias for `NEXUS_TRUSTED_PROXIES=1`. It no longer affects cookies or HSTS — see `NEXUS_COOKIE_SECURE`.                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `NEXUS_COOKIE_SECURE`           | `true` unless `NEXUS_ENV=development`        | Marks `nexus_session` and `nexus_csrf` `Secure` and turns on HSTS. Set `false` only to serve the portal over plaintext `http://`.                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `NEXUS_LOG_LEVEL`               | `info`                                       | One of `fatal`, `error`, `warn`, `info`, `debug`, `trace`, `silent`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `NEXUS_SESSION_TTL`             | `43200` (12 h)                               | Session idle lifetime in seconds; 60 – 2 592 000. Sliding.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `NEXUS_RATE_LIMIT_ENABLED`      | `true`                                       | Installs the 20 req/min limiter on `/api/auth/*`. Forced off when `NEXUS_ENV=test`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `NEXUS_ALLOW_PRIVATE_UPSTREAMS` | `false`                                      | Whether providers may publish an API whose upstream is a loopback, RFC 1918 / CGNAT / link-local address or a `.local` / `.internal` / `.localhost` / `.home.arpa` name. A proxy is an egress path from the gateway's network, so the default refuses them with `400 SPEC_INVALID` (`details.reason = private_upstream`). Set `true` only for a portal that fronts internal services — and for local development, where the upstream is `host.docker.internal`. See [`security.md`](security.md#1-threat-model).                                         |
+| `NEXUS_WEB_DIST`                | _(unset)_                                    | Directory of the built SPA to serve. When unset, the server looks for `../../web/dist` relative to itself and then `./web/dist` under the CWD; if neither has an `index.html`, static serving is disabled and only the API is exposed.                                                                                                                                                                                                                                                                                                                   |
 
 ### Database
 
@@ -62,6 +63,37 @@ the process prints every offending variable and exits non-zero. The repo-root
 | `FERRUM_ADMIN_ALLOW_INSECURE_HTTP` | `false`                 | Permits plaintext `http://` Admin URLs on non-loopback hosts. Container-network-only deployments are the intended use.                                                                                                                    |
 | `FERRUM_ADMIN_TIMEOUT_MS`          | `5000`                  | Per-request deadline for Admin API calls, 250 – 60 000.                                                                                                                                                                                   |
 | `FERRUM_MAX_CREDENTIALS_PER_TYPE`  | `2`                     | 1 – 10. **Mirror of the gateway's own setting** — set them to the same value. Values above 1 are what make append-then-delete rotation gapless.                                                                                           |
+
+#### Set on the gateway, not on Nexus
+
+Two gateway-side variables change what Nexus can successfully publish, so they
+belong in the same checklist even though Nexus never reads them:
+
+| Variable (on Ferrum Edge)       | Notes                                                                                                                                                                                                                                                                                                     |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FERRUM_ADMIN_JWT_SECRET`       | Must equal Nexus's own value exactly. This shared secret is the whole trust relationship; a mismatch makes every Admin API call `401`.                                                                                                                                                                    |
+| `FERRUM_BASIC_AUTH_HMAC_SECRET` | At least 32 bytes. The key the gateway HMACs Basic-auth passwords with. **Required before any `basic_auth` API is published** — without it the gateway refuses to construct the plugin and the publish fails with `EDGE_ERROR`; the gateway's own message is passed through in `details.gateway_message`. |
+
+#### Multi-tenant gateways (`FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM`)
+
+Every admin JWT Nexus mints carries `ns` set to `FERRUM_NAMESPACE`, in the
+single-string form. There is nothing to configure.
+
+By default Edge treats admin tokens as **global**: `X-Ferrum-Namespace` is a
+routing selector, not an authorization boundary, and any valid token can address
+any namespace. A gateway started with
+`FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true` — the right setting for a control
+plane fronting several tenants — instead requires the token's `ns` claim to
+authorize the requested namespace on `/proxies`, `/consumers`,
+`/plugins/config` and friends, and answers `403` to a token that carries no
+`ns` at all. Because Nexus always stamps it, both configurations work with no
+change on the portal side; just make sure `FERRUM_NAMESPACE` names a namespace
+the gateway has granted this portal.
+
+A malformed claim (an empty or non-string entry) is rejected by Edge at
+authentication time whether or not the flag is on, so an empty
+`FERRUM_NAMESPACE` fails at signing time rather than producing a token the
+gateway will reject.
 
 ### Email
 
@@ -101,10 +133,15 @@ collection) and skipped on the next boot.
 For deployments that prefer a separate schema step:
 
 ```bash
-npm run migrate --workspace server
+npm run migrate                      # from the repo root
 # or, from a built image:
 node server/dist/db/migrate-cli.ts   # (tsx in dev: npx tsx src/db/migrate-cli.ts)
 ```
+
+Run the **root** script, not `npm run migrate --workspace server`: the server
+resolves `@ferrum-nexus/shared` through that workspace's `dist/`, and only the
+root script builds it first. On a clean clone the workspace-level script fails
+until you have run `npm run build --workspace shared` yourself.
 
 The CLI loads the same env, applies pending migrations, prints
 `Migrations applied (driver: postgres).` and exits. It exits non-zero on
@@ -228,9 +265,14 @@ brings up Nexus + PostgreSQL + a Ferrum Edge gateway:
 ```bash
 cp docker/docker-compose.example.yml docker-compose.yml
 export NEXUS_SECRET_KEY=$(openssl rand -hex 32)
+export NEXUS_DB_PASSWORD=$(openssl rand -hex 16)
 export FERRUM_ADMIN_JWT_SECRET=$(openssl rand -hex 32)
+export FERRUM_BASIC_AUTH_HMAC_SECRET=$(openssl rand -hex 32)
 docker compose up -d
 ```
+
+All four are required — every one of them is declared `${VAR:?...}`, so compose
+refuses to start rather than falling back to a shipped default.
 
 Portal on `http://127.0.0.1:8787`, gateway proxy listener on
 `http://127.0.0.1:8000`. Points worth understanding before adapting it:
@@ -244,8 +286,16 @@ Portal on `http://127.0.0.1:8787`, gateway proxy listener on
   is reachable only on the compose network. Publish the Admin port and that
   stops being true.
 - Postgres has a `pg_isready` healthcheck and Nexus waits on it, so the first
-  boot's migrations do not race the database.
-- The example ships a development-grade Postgres password. Change it.
+  boot's migrations do not race the database. The Postgres password comes from
+  `NEXUS_DB_PASSWORD` and is interpolated into both `POSTGRES_PASSWORD` and
+  `NEXUS_DB_URL`, so there is one value to rotate and none hard-coded.
+- A `ferrum-edge-init` one-shot container `chown`s the `ferrumdata` volume to
+  `65532:65532` before the gateway starts, and the gateway `depends_on` it with
+  `condition: service_completed_successfully`. The Edge image is distroless
+  `nonroot` and ships no `/data`, so without this a fresh named volume is
+  root-owned and SQLite cannot create its database file.
+- `FERRUM_BASIC_AUTH_HMAC_SECRET` must be set **before** anyone publishes a
+  `basic_auth` API — see the gateway env table in [§1](#ferrum-edge-integration).
 
 ---
 
@@ -555,8 +605,10 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
 Structured JSON (pino) at `NEXUS_LOG_LEVEL`. Unhandled 5xx errors log at
 `error` with the URL and the full error; sub-500 responses log at `debug` with
 `{ code, status, url }`. The Edge client logs upstream error text at `error`
-(`Ferrum Edge Admin API returned an error`) — that text is deliberately **only**
-in the log and never in the HTTP response, so this is where you look when a
+(`Ferrum Edge Admin API returned an error`). For a `400`, `409` or `422` — the
+gateway validating the caller's own request — the same text is echoed to the
+caller in `EDGE_ERROR.details.gateway_message`; for `401`/`403` and every `5xx`
+it is deliberately **only** in the log, so this is where you look when a
 provider reports an unexplained `EDGE_ERROR`.
 
 ### Shutdown

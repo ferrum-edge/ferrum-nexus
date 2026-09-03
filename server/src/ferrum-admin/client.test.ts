@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { after, afterEach, before, describe, it } from 'node:test';
+
+import { SignJWT } from 'jose';
 
 import { aclGroupForApi } from '@ferrum-nexus/shared';
 
@@ -11,6 +14,7 @@ import {
   createKeyedSerializer,
   type FerrumAdminClient,
 } from './client.js';
+import type { AdminTokenMinter } from './jwt.js';
 
 const SECRET = 'ferrum-admin-client-test-secret-0123456789';
 
@@ -56,6 +60,7 @@ describe('ferrum admin client', () => {
     assert.equal(recorded?.claims?.role, 'admin');
     assert.equal(recorded?.claims?.iss, 'ferrum-edge');
     assert.equal(recorded?.claims?.sub, 'ferrum-nexus');
+    assert.equal(recorded?.claims?.ns, 'nexus', 'the tenancy claim rides on every call');
   });
 
   it('creates, reads and replaces a consumer with redacted credentials', async () => {
@@ -202,6 +207,49 @@ describe('ferrum admin client', () => {
       );
     });
 
+    it('echoes the gateway text on a validation refusal but not on a 5xx', async () => {
+      // 400/409/422 describe the caller's own request, so the reason travels.
+      edge.queueFailure(409, { error: 'listen_path already exists in this namespace' });
+      await assert.rejects(
+        () => client.consumers.list(),
+        (error: unknown) => {
+          assert.ok(isNexusError(error));
+          assert.equal(error.code, 'EDGE_ERROR');
+          assert.match(error.message, /listen_path already exists/);
+          assert.deepEqual(error.details, {
+            status: 409,
+            gateway_message: 'listen_path already exists in this namespace',
+          });
+          return true;
+        },
+      );
+
+      // A 500 is about the gateway's own state and stays opaque.
+      edge.queueFailure(500, { error: 'internal detail nobody outside should see' });
+      await assert.rejects(
+        () => client.consumers.list(),
+        (error: unknown) => {
+          assert.ok(isNexusError(error));
+          assert.ok(!error.message.includes('nobody outside should see'));
+          assert.deepEqual(error.details, { status: 500 });
+          return true;
+        },
+      );
+    });
+
+    it('trims a runaway gateway message to 500 characters', async () => {
+      edge.queueFailure(400, { error: 'x'.repeat(2_000) });
+      await assert.rejects(
+        () => client.consumers.list(),
+        (error: unknown) => {
+          assert.ok(isNexusError(error));
+          const { gateway_message: message } = error.details as { gateway_message: string };
+          assert.equal(message.length, 500);
+          return true;
+        },
+      );
+    });
+
     it('maps a refused connection to EDGE_UNAVAILABLE', async () => {
       // Port 1 is reserved and never listening.
       const offline = createFerrumAdminClient(configFor('http://127.0.0.1:1'));
@@ -222,13 +270,56 @@ describe('ferrum admin client', () => {
   });
 
   describe('probes', () => {
+    const READY_HEALTH = {
+      status: 'ok',
+      ready: true,
+      mode: 'database',
+      admin_writes_enabled: true,
+      database: { status: 'connected', type: 'sqlite' },
+    };
+
     it('reports the gateway mode and tolerates a missing /version endpoint', async () => {
       const probe = await client.probe();
       assert.equal(probe.reachable, true);
+      assert.equal(probe.status, 'ok');
+      assert.equal(probe.ready, true);
       assert.equal(probe.mode, 'database');
       assert.equal(probe.adminWritesEnabled, true);
       assert.equal(probe.version, null, 'Edge has no /version endpoint');
       assert.equal(probe.error, null);
+    });
+
+    it('parses the 503 health payload Edge serves while it is not ready', async () => {
+      // `starting` / `draining` / `unavailable` all come back as a 503 with a
+      // complete HealthResponse. That is a reachable gateway, not a failure.
+      edge.setHealth({
+        status: 'draining',
+        ready: false,
+        mode: 'database',
+        admin_writes_enabled: false,
+      });
+      try {
+        const health = await client.health();
+        assert.equal(health.status, 'draining');
+        assert.equal(health.ready, false);
+
+        const probe = await client.probe();
+        assert.equal(probe.reachable, true, 'a 503 health payload is not "unreachable"');
+        assert.equal(probe.status, 'draining');
+        assert.equal(probe.ready, false);
+        assert.equal(probe.adminWritesEnabled, false);
+        assert.equal(probe.error, null);
+      } finally {
+        edge.setHealth(READY_HEALTH);
+      }
+    });
+
+    it('still treats a 503 that is not a health payload as a failure', async () => {
+      edge.queueFailure(503, { error: 'database unavailable' }, '/health');
+      const probe = await client.probe();
+      assert.equal(probe.reachable, false);
+      assert.equal(probe.ready, null);
+      assert.ok(probe.error);
     });
 
     it('never throws when the gateway is unreachable', async () => {
@@ -236,10 +327,254 @@ describe('ferrum admin client', () => {
       try {
         const probe = await offline.probe();
         assert.equal(probe.reachable, false);
+        assert.equal(probe.status, null);
+        assert.equal(probe.ready, null);
         assert.ok(probe.error);
       } finally {
         await offline.close();
       }
+    });
+  });
+
+  describe('namespace claim enforcement', () => {
+    /** A minter that signs whatever claims a test wants, `ns` included or not. */
+    function minterStamping(extra: Record<string, unknown>): AdminTokenMinter {
+      return {
+        async getToken(subject = 'ferrum-nexus'): Promise<string> {
+          const now = Math.floor(Date.now() / 1000);
+          return new SignJWT({ role: 'admin', ...extra })
+            .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
+            .setIssuer('ferrum-edge')
+            .setSubject(subject)
+            .setIssuedAt(now)
+            .setNotBefore(now)
+            .setExpirationTime(now + 60)
+            .setJti(randomUUID())
+            .sign(new TextEncoder().encode(SECRET));
+        },
+        clearCache(): void {},
+        size(): number {
+          return 0;
+        },
+      };
+    }
+
+    it('works against a gateway requiring the ns claim, and 403s without one', async () => {
+      const strict = createMockFerrumEdge({
+        jwtSecret: SECRET,
+        issuer: 'ferrum-edge',
+        requireNamespaceClaim: true,
+      });
+      const url = await strict.start();
+      const stamped = createFerrumAdminClient(configFor(url));
+      const unstamped = createFerrumAdminClient(configFor(url), undefined, {
+        minter: minterStamping({}),
+      });
+      const wrongTenant = createFerrumAdminClient(configFor(url), undefined, {
+        minter: minterStamping({ ns: ['nexus-staging'] }),
+      });
+
+      try {
+        // The real minter stamps `ns`, so the ordinary client just works.
+        const page = await stamped.consumers.list();
+        assert.equal(page.pagination.total, 0);
+
+        for (const [label, denied] of [
+          ['a token with no ns claim', unstamped],
+          ['a token scoped to another namespace', wrongTenant],
+        ] as const) {
+          await assert.rejects(
+            () => denied.consumers.list(),
+            (error: unknown) => {
+              assert.ok(isNexusError(error), label);
+              assert.equal(error.code, 'EDGE_ERROR');
+              assert.match(error.message, /admin credentials/);
+              return true;
+            },
+            label,
+          );
+        }
+      } finally {
+        await stamped.close();
+        await unstamped.close();
+        await wrongTenant.close();
+        await strict.stop();
+      }
+    });
+
+    it('rejects a malformed ns claim even with enforcement off', async () => {
+      const lax = createFerrumAdminClient(configFor(edge.url), undefined, {
+        // A non-string entry is a garbled tenancy claim; Edge 401s at
+        // authentication time so it can never widen access.
+        minter: minterStamping({ ns: ['nexus', 7] }),
+      });
+      try {
+        await assert.rejects(
+          () => lax.consumers.list(),
+          (error: unknown) => isNexusError(error) && error.code === 'EDGE_ERROR',
+        );
+      } finally {
+        await lax.close();
+      }
+    });
+  });
+
+  describe('plugin config validation', () => {
+    it('rejects a rate_limiting quota above the gateway ceiling', async () => {
+      await client.proxies.create({
+        id: 'rl-proxy',
+        listen_path: '/nexus/rl',
+        backend_host: 'rl.internal',
+        backend_port: 443,
+      });
+
+      await assert.rejects(
+        () =>
+          client.pluginConfigs.create({
+            plugin_name: 'rate_limiting',
+            scope: 'proxy',
+            proxy_id: 'rl-proxy',
+            enabled: true,
+            // Edge caps max_requests at 1_000_000; one digit too many is a 400.
+            config: { limits: [{ scope: 'default', window_seconds: 60, max_requests: 1_000_001 }] },
+          }),
+        (error: unknown) => {
+          assert.ok(isNexusError(error));
+          assert.equal(error.code, 'EDGE_ERROR');
+          assert.match(error.message, /max_requests/);
+          return true;
+        },
+      );
+
+      // The same rule one below the ceiling is accepted.
+      const accepted = await client.pluginConfigs.create({
+        plugin_name: 'rate_limiting',
+        scope: 'proxy',
+        proxy_id: 'rl-proxy',
+        enabled: true,
+        config: { limits: [{ scope: 'default', window_seconds: 60, max_requests: 1_000_000 }] },
+      });
+      assert.equal(accepted.plugin_name, 'rate_limiting');
+    });
+
+    it('requires a non-empty cors allowed_origins', async () => {
+      await client.proxies.create({
+        id: 'cors-proxy',
+        listen_path: '/nexus/cors',
+        backend_host: 'cors.internal',
+        backend_port: 443,
+      });
+
+      await assert.rejects(
+        () =>
+          client.pluginConfigs.create({
+            plugin_name: 'cors',
+            scope: 'proxy',
+            proxy_id: 'cors-proxy',
+            enabled: true,
+            config: { allowed_origins: [] },
+          }),
+        (error: unknown) => isNexusError(error) && /allowed_origins/.test(error.message),
+      );
+
+      const created = await client.pluginConfigs.create({
+        plugin_name: 'cors',
+        scope: 'proxy',
+        proxy_id: 'cors-proxy',
+        enabled: true,
+        config: { allowed_origins: ['https://portal.example.com'], allow_credentials: true },
+      });
+      assert.equal(created.plugin_name, 'cors');
+    });
+  });
+
+  describe('proxy plugin associations', () => {
+    it('refuses an association Edge would refuse', async () => {
+      await client.proxies.create({
+        id: 'assoc-a',
+        listen_path: '/nexus/assoc-a',
+        backend_host: 'a.internal',
+        backend_port: 443,
+      });
+      await client.proxies.create({
+        id: 'assoc-b',
+        listen_path: '/nexus/assoc-b',
+        backend_host: 'b.internal',
+        backend_port: 443,
+      });
+      const onA = await client.pluginConfigs.create({
+        id: 'cfg-on-a',
+        plugin_name: 'key_auth',
+        scope: 'proxy',
+        proxy_id: 'assoc-a',
+        enabled: true,
+        config: {},
+      });
+      await client.pluginConfigs.create({
+        id: 'cfg-global',
+        plugin_name: 'access_control',
+        scope: 'global',
+        enabled: true,
+        config: { allowed_groups: [aclGroupForApi('api-1')] },
+      });
+
+      const rejects = async (plugins: unknown, pattern: RegExp): Promise<void> => {
+        await assert.rejects(
+          () =>
+            client.proxies.replace('assoc-b', {
+              listen_path: '/nexus/assoc-b',
+              backend_host: 'b.internal',
+              backend_port: 443,
+              // @ts-expect-error `plugins` is not part of the narrow Nexus write shape
+              plugins,
+            }),
+          (error: unknown) => {
+            assert.ok(isNexusError(error));
+            assert.match(error.message, pattern);
+            return true;
+          },
+        );
+      };
+
+      await rejects([{ plugin_config_id: 'nope' }], /non-existent plugin_config/);
+      await rejects([{ plugin_config_id: 'cfg-global' }], /scope 'global'/);
+      await rejects([{ plugin_config_id: onA.id }], /targeted to proxy 'assoc-a'/);
+      await rejects(
+        [{ plugin_config_id: 'cfg-on-a' }, { plugin_config_id: 'cfg-on-a' }],
+        /more than once/,
+      );
+    });
+
+    it('separates the plugin configs Edge stores from the ones it would run', async () => {
+      await client.proxies.create({
+        id: 'eff-proxy',
+        listen_path: '/nexus/eff',
+        backend_host: 'eff.internal',
+        backend_port: 443,
+      });
+      const config = await client.pluginConfigs.create({
+        id: 'eff-key-auth',
+        plugin_name: 'key_auth',
+        scope: 'proxy',
+        proxy_id: 'eff-proxy',
+        enabled: true,
+        config: {},
+      });
+
+      // Written but never associated: live Edge would not install it.
+      assert.equal(edge.pluginsForProxy('eff-proxy').length, 1);
+      assert.deepEqual(edge.effectivePluginsForProxy('eff-proxy'), []);
+
+      await client.proxies.replace('eff-proxy', {
+        listen_path: '/nexus/eff',
+        backend_host: 'eff.internal',
+        backend_port: 443,
+        plugins: [{ plugin_config_id: config.id }],
+      });
+      assert.deepEqual(
+        edge.effectivePluginsForProxy('eff-proxy').map((entry) => entry.id),
+        ['eff-key-auth'],
+      );
     });
   });
 

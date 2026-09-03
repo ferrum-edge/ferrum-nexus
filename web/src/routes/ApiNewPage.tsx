@@ -3,11 +3,14 @@ import { useState, type FormEvent, type ReactElement } from 'react';
 import {
   AUTH_PLUGIN_LABELS,
   AUTH_PLUGIN_TYPES,
+  MAX_CORS_ORIGINS,
+  MAX_RATE_LIMIT_REQUESTS,
   type ApiVisibility,
   type AuthPluginType,
+  type CorsConfig,
   type RateLimitConfig,
 } from '@ferrum-nexus/shared';
-import { slugify } from '../lib/format';
+import { parseCorsOrigins, slugify } from '../lib/format';
 import { usePublishApi } from '../hooks/useApis';
 import { useToast } from '../stores/toast';
 import { RoleGuard } from '../components/layout/RoleGuard';
@@ -23,6 +26,12 @@ const WINDOW_OPTIONS = [
   { value: '60', label: 'per minute' },
   { value: '3600', label: 'per hour' },
 ] as const;
+
+/** Hint under the CORS origins box; the empty case is the one worth spelling out. */
+const CORS_ORIGINS_HINT =
+  `One origin per line, up to ${MAX_CORS_ORIGINS}, e.g. https://app.example.com. ` +
+  'Leave it empty and the gateway adds no CORS headers at all, so a browser can ' +
+  'only call this API from its own origin.';
 
 function PublishForm(): ReactElement {
   const navigate = useNavigate();
@@ -41,6 +50,8 @@ function PublishForm(): ReactElement {
   const [rateLimitEnabled, setRateLimitEnabled] = useState(false);
   const [rateLimitValue, setRateLimitValue] = useState('100');
   const [rateLimitWindow, setRateLimitWindow] = useState<string>('60');
+  const [corsOrigins, setCorsOrigins] = useState('');
+  const [corsCredentials, setCorsCredentials] = useState(false);
   const [spec, setSpec] = useState('');
   const [error, setError] = useState<string | null>(null);
 
@@ -54,10 +65,28 @@ function PublishForm(): ReactElement {
       return;
     }
     const parsedLimit = Number.parseInt(rateLimitValue, 10);
-    const rateLimit: RateLimitConfig | null =
-      rateLimitEnabled && Number.isFinite(parsedLimit) && parsedLimit > 0
-        ? { limit: parsedLimit, window_seconds: Number.parseInt(rateLimitWindow, 10) }
-        : null;
+    if (
+      rateLimitEnabled &&
+      (!Number.isFinite(parsedLimit) || parsedLimit < 1 || parsedLimit > MAX_RATE_LIMIT_REQUESTS)
+    ) {
+      setError(
+        `The request limit must be a whole number between 1 and ${MAX_RATE_LIMIT_REQUESTS.toLocaleString()} — the gateway rejects anything higher.`,
+      );
+      return;
+    }
+    const rateLimit: RateLimitConfig | null = rateLimitEnabled
+      ? { limit: parsedLimit, window_seconds: Number.parseInt(rateLimitWindow, 10) }
+      : null;
+
+    const origins = parseCorsOrigins(corsOrigins);
+    if (origins.length > MAX_CORS_ORIGINS) {
+      setError(`A CORS policy may list at most ${MAX_CORS_ORIGINS} origins.`);
+      return;
+    }
+    // No origins means no `cors` plugin at all, which is not the same as an
+    // empty allow-list: the gateway simply adds no CORS headers.
+    const cors: CorsConfig | null =
+      origins.length > 0 ? { allowed_origins: origins, allow_credentials: corsCredentials } : null;
 
     publish.mutate(
       {
@@ -71,6 +100,7 @@ function PublishForm(): ReactElement {
         requestable,
         visibility,
         rate_limit: rateLimit,
+        cors,
       },
       {
         onSuccess: (response) => {
@@ -179,8 +209,10 @@ function PublishForm(): ReactElement {
                 label="Requests"
                 type="number"
                 min={1}
+                max={MAX_RATE_LIMIT_REQUESTS}
                 value={rateLimitValue}
                 onChange={(event) => setRateLimitValue(event.target.value)}
+                hint={`1 – ${MAX_RATE_LIMIT_REQUESTS.toLocaleString()} per window.`}
               />
               <LabeledSelect
                 label="Window"
@@ -190,6 +222,23 @@ function PublishForm(): ReactElement {
               />
             </>
           ) : null}
+          <LabeledTextarea
+            className="md:col-span-2"
+            label="CORS allowed origins"
+            rows={3}
+            placeholder={'https://app.example.com\nhttps://admin.example.com'}
+            value={corsOrigins}
+            onChange={(event) => setCorsOrigins(event.target.value)}
+            hint={CORS_ORIGINS_HINT}
+          />
+          <div className="md:col-span-2">
+            <Checkbox
+              label="Allow credentials"
+              description="Lets browsers send cookies and Authorization headers cross-origin. Ignored when no origins are listed."
+              checked={corsCredentials}
+              onChange={(event) => setCorsCredentials(event.target.checked)}
+            />
+          </div>
         </CardBody>
       </Card>
 

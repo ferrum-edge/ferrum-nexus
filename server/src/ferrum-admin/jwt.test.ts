@@ -32,6 +32,7 @@ describe('signAdminJwt', () => {
       issuer: 'ferrum-edge',
       subject: DEFAULT_ADMIN_SUBJECT,
       role: 'admin',
+      namespace: 'nexus',
       ttlSeconds: 60,
     });
 
@@ -44,6 +45,12 @@ describe('signAdminJwt', () => {
     assert.equal(typeof claims.iat, 'number');
     assert.equal(claims.nbf, claims.iat, 'nbf equals iat');
     assert.equal(claims.exp, (claims.iat ?? 0) + 60);
+    assert.equal(
+      claims.ns,
+      'nexus',
+      'a gateway with FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true needs the ns claim',
+    );
+    assert.equal(typeof claims.ns, 'string', 'ns is stamped in the single-string form');
     assert.ok(!('aud' in claims), 'an unexpected aud is rejected by Edge, so it is never stamped');
 
     const verified = await jwtVerify(token, new TextEncoder().encode(SECRET), {
@@ -59,6 +66,7 @@ describe('signAdminJwt', () => {
       issuer: 'ferrum-edge',
       subject: 'ferrum-nexus',
       role: 'admin',
+      namespace: 'nexus',
       audience: 'ferrum-gateway',
       ttlSeconds: 60,
     });
@@ -71,6 +79,7 @@ describe('signAdminJwt', () => {
       issuer: 'ferrum-edge',
       subject: 'ferrum-nexus',
       role: 'admin' as const,
+      namespace: 'nexus',
       ttlSeconds: 60,
     };
     const first = decodeJwt(await signAdminJwt(options));
@@ -84,6 +93,7 @@ describe('signAdminJwt', () => {
       issuer: 'ferrum-edge',
       subject: 'ferrum-nexus',
       role: 'admin' as const,
+      namespace: 'nexus',
       ttlSeconds: 60,
     };
     const isConfigError = (error: unknown): boolean =>
@@ -94,6 +104,8 @@ describe('signAdminJwt', () => {
     await assert.rejects(() => signAdminJwt({ ...base, subject: '' }), isConfigError);
     await assert.rejects(() => signAdminJwt({ ...base, ttlSeconds: 0 }), isConfigError);
     await assert.rejects(() => signAdminJwt({ ...base, ttlSeconds: 7_200 }), isConfigError);
+    // Edge treats an empty `ns` entry as a malformed claim and 401s on it.
+    await assert.rejects(() => signAdminJwt({ ...base, namespace: '  ' }), isConfigError);
   });
 });
 
@@ -136,5 +148,17 @@ describe('createAdminTokenMinter', () => {
     assert.equal(minter.size(), 1);
     minter.clearCache();
     assert.equal(minter.size(), 0);
+  });
+
+  it('stamps the configured namespace and keys the cache on it', async () => {
+    const staging = createAdminTokenMinter(edgeConfig({ jwtTtlSeconds: 600 }));
+    assert.equal(decodeJwt(await staging.getToken()).ns, 'nexus');
+
+    // Two minters differing only in namespace must not share a cache entry,
+    // or one tenant's token would be handed to the other's calls.
+    const other = createAdminTokenMinter(
+      edgeConfig({ jwtTtlSeconds: 600, namespace: 'nexus-staging' }),
+    );
+    assert.equal(decodeJwt(await other.getToken()).ns, 'nexus-staging');
   });
 });

@@ -1,30 +1,34 @@
 /**
- * `/api/auth` — register, login, logout, me, verify-email, captcha config.
+ * `/api/auth` — register, login, logout, me, email verification, password
+ * recovery, captcha config.
  *
  * Routes never import service modules: everything arrives through the plugin
- * registration options. Cookie policy lives here and nowhere else.
+ * registration options. Cookie policy lives in
+ * `../middleware/session-cookies.js`, shared with the sliding-expiration hook.
  */
 
-import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 
 import {
-  CSRF_COOKIE,
   MIN_PASSWORD_LENGTH,
   REGISTRABLE_ROLES,
-  SESSION_COOKIE,
   type CaptchaConfigResponse,
+  type ForgotPasswordResponse,
   type LoginResponse,
   type LogoutResponse,
   type MeResponse,
   type RegisterResponse,
+  type ResendVerificationResponse,
+  type ResetPasswordResponse,
   type VerifyEmailResponse,
 } from '@ferrum-nexus/shared';
 
-import type { AuthService, IssuedSession } from '../auth/service.js';
+import type { AuthService } from '../auth/service.js';
 import type { CaptchaService } from '../auth/captcha.js';
 import type { NexusConfig } from '../config/index.js';
 import { requestContext, requireAuth } from '../middleware/auth-plugin.js';
+import { clearSessionCookies, setSessionCookies } from '../middleware/session-cookies.js';
 import { parseOrThrow } from '../middleware/error-handler.js';
 
 /** Services this route plugin needs. */
@@ -55,34 +59,20 @@ const verifyEmailBody = z.object({
 });
 
 /**
- * Write the session pair.
+ * Shared by `resend-verification` and `forgot-password`.
  *
- * `nexus_session` is HttpOnly (bearer-equivalent); `nexus_csrf` deliberately is
- * not, because the double-submit check needs the browser to read it. Both are
- * `SameSite=Lax`, path `/`, and `Secure` unless `NEXUS_COOKIE_SECURE=false`
- * (the default outside `NEXUS_ENV=development`).
+ * Same shape as the login body's email so a malformed address is rejected the
+ * same way in all three, rather than becoming a second thing the response can
+ * say about an address.
  */
-export function setSessionCookies(
-  reply: FastifyReply,
-  config: NexusConfig,
-  issued: IssuedSession,
-): void {
-  const base = {
-    path: '/',
-    sameSite: 'lax' as const,
-    secure: config.cookieSecure,
-    maxAge: config.sessionTtlSeconds,
-  };
-  reply.setCookie(SESSION_COOKIE, issued.token, { ...base, httpOnly: true });
-  reply.setCookie(CSRF_COOKIE, issued.csrfToken, { ...base, httpOnly: false });
-}
+const emailOnlyBody = z.object({
+  email: z.string().trim().email().max(320),
+});
 
-/** Clear the session pair on sign-out. */
-export function clearSessionCookies(reply: FastifyReply, config: NexusConfig): void {
-  const base = { path: '/', sameSite: 'lax' as const, secure: config.cookieSecure };
-  reply.clearCookie(SESSION_COOKIE, { ...base, httpOnly: true });
-  reply.clearCookie(CSRF_COOKIE, { ...base, httpOnly: false });
-}
+const resetPasswordBody = z.object({
+  token: z.string().trim().min(8).max(512),
+  new_password: z.string().min(MIN_PASSWORD_LENGTH).max(1024),
+});
 
 /** `/api/auth` route plugin. */
 export const authRoutes: FastifyPluginAsync<AuthRoutesOptions> = async (app, options) => {
@@ -135,6 +125,33 @@ export const authRoutes: FastifyPluginAsync<AuthRoutesOptions> = async (app, opt
   app.post('/verify-email', async (request): Promise<VerifyEmailResponse> => {
     const input = parseOrThrow(verifyEmailBody, request.body);
     return auth.verifyEmail(input.token, requestContext(request));
+  });
+
+  // The three routes below are anonymous and deliberately uninformative: each
+  // answers `{ ok: true }` whatever it decided to do, so neither status, body
+  // nor timing tells the caller whether the address has an account. The
+  // `/api/auth/*` rate limiter is what bounds how fast they can be asked.
+
+  app.post('/resend-verification', async (request): Promise<ResendVerificationResponse> => {
+    const input = parseOrThrow(emailOnlyBody, request.body);
+    await auth.resendVerification(input.email, requestContext(request));
+    return { ok: true };
+  });
+
+  app.post('/forgot-password', async (request): Promise<ForgotPasswordResponse> => {
+    const input = parseOrThrow(emailOnlyBody, request.body);
+    await auth.requestPasswordReset(input.email, requestContext(request));
+    return { ok: true };
+  });
+
+  app.post('/reset-password', async (request, reply): Promise<ResetPasswordResponse> => {
+    const input = parseOrThrow(resetPasswordBody, request.body);
+    await auth.resetPassword(input.token, input.new_password, requestContext(request));
+    // Every session of the account was just destroyed server-side. If this
+    // browser was holding one of them, its cookies are now dead weight that
+    // would only produce a confusing 401 on the next page.
+    clearSessionCookies(reply, config);
+    return { ok: true };
   });
 
   app.get('/captcha', async (): Promise<CaptchaConfigResponse> => captcha.getPublicConfig());

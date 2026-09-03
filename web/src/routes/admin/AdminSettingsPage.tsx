@@ -16,11 +16,13 @@ import {
   useUpdateAdminSettings,
   useUpdateEmailTemplate,
 } from '../../hooks/useAdminSettings';
+import { useAuth } from '../../stores/auth';
 import { useToast } from '../../stores/toast';
 import { RoleGuard } from '../../components/layout/RoleGuard';
 import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
 import { Card, CardBody, CardHeader, PageHeader } from '../../components/ui/Card';
+import { Icon } from '../../components/ui/Icon';
 import { Checkbox, Field, Input, LabeledInput, LabeledTextarea } from '../../components/ui/Input';
 import { LabeledSelect } from '../../components/ui/Select';
 import { LoadingPanel } from '../../components/ui/Spinner';
@@ -38,6 +40,31 @@ const CAPTCHA_PROVIDERS: ReadonlyArray<{ value: CaptchaProvider; label: string }
   { value: 'hcaptcha', label: 'hCaptcha' },
   { value: 'recaptcha', label: 'Google reCAPTCHA' },
 ];
+
+/**
+ * Shown in place of the save button on a section an ordinary `admin` may read
+ * but not write.
+ *
+ * `PUT /api/admin/settings` refuses an `smtp` or `captcha` section from anyone
+ * below `super_admin` with a 403, because both are escalation paths rather than
+ * preferences: whoever owns the SMTP relay receives every verification and
+ * password-reset link the portal sends, and whoever owns CAPTCHA owns the
+ * registration brake. The fields stay visible but disabled rather than hidden —
+ * an admin is still allowed to *read* the configuration, and needs to when
+ * diagnosing mail that is not arriving.
+ */
+function SuperAdminOnlyNotice({ what }: { what: string }): ReactElement {
+  return (
+    <p className="flex items-start gap-2 rounded-md border border-border bg-inset px-3 py-2.5 text-sm text-fg-muted">
+      <Icon name="shield" className="mt-0.5 h-4 w-4 shrink-0 text-fg-subtle" />
+      <span>
+        Only a <strong className="font-medium text-fg">super admin</strong> can change {what}. Ask
+        one to make the change — these settings can be used to take over accounts, so they sit above
+        the administrator role.
+      </span>
+    </p>
+  );
+}
 
 function BrandingTab({ settings }: { settings: AdminSettingsResponse }): ReactElement {
   const update = useUpdateAdminSettings();
@@ -184,6 +211,8 @@ function BrandingTab({ settings }: { settings: AdminSettingsResponse }): ReactEl
 function CaptchaTab({ settings }: { settings: AdminSettingsResponse }): ReactElement {
   const update = useUpdateAdminSettings();
   const toast = useToast();
+  // The CAPTCHA card below is super_admin-only; the Registration card is not.
+  const { canSuperAdmin } = useAuth();
   const [enabled, setEnabled] = useState(settings.captcha.enabled);
   const [provider, setProvider] = useState<CaptchaProvider>(settings.captcha.provider);
   const [siteKey, setSiteKey] = useState(settings.captcha.site_key ?? '');
@@ -205,18 +234,21 @@ function CaptchaTab({ settings }: { settings: AdminSettingsResponse }): ReactEle
             <Checkbox
               label="Require a CAPTCHA challenge"
               checked={enabled}
+              disabled={!canSuperAdmin}
               onChange={(event) => setEnabled(event.target.checked)}
             />
           </div>
           <LabeledSelect<CaptchaProvider>
             label="Provider"
             value={provider}
+            disabled={!canSuperAdmin}
             onValueChange={setProvider}
             options={CAPTCHA_PROVIDERS.map((option) => ({ ...option }))}
           />
           <LabeledInput
             label="Site key"
             value={siteKey}
+            disabled={!canSuperAdmin}
             onChange={(event) => setSiteKey(event.target.value)}
           />
           <LabeledInput
@@ -226,34 +258,39 @@ function CaptchaTab({ settings }: { settings: AdminSettingsResponse }): ReactEle
             autoComplete="off"
             placeholder={settings.captcha.secret_set ? '•••••••• (stored)' : 'Not set'}
             value={secretKey}
+            disabled={!canSuperAdmin}
             onChange={(event) => setSecretKey(event.target.value)}
             hint="Leave blank to keep the stored value."
           />
           <div className="md:col-span-2">
-            <Button
-              variant="primary"
-              loading={update.isPending}
-              onClick={() =>
-                update.mutate(
-                  {
-                    captcha: {
-                      enabled,
-                      provider,
-                      site_key: siteKey.trim() || null,
-                      ...(secretKey ? { secret_key: secretKey } : {}),
+            {canSuperAdmin ? (
+              <Button
+                variant="primary"
+                loading={update.isPending}
+                onClick={() =>
+                  update.mutate(
+                    {
+                      captcha: {
+                        enabled,
+                        provider,
+                        site_key: siteKey.trim() || null,
+                        ...(secretKey ? { secret_key: secretKey } : {}),
+                      },
                     },
-                  },
-                  {
-                    onSuccess: () => {
-                      setSecretKey('');
-                      toast.success('CAPTCHA settings saved');
+                    {
+                      onSuccess: () => {
+                        setSecretKey('');
+                        toast.success('CAPTCHA settings saved');
+                      },
                     },
-                  },
-                )
-              }
-            >
-              Save CAPTCHA settings
-            </Button>
+                  )
+                }
+              >
+                Save CAPTCHA settings
+              </Button>
+            ) : (
+              <SuperAdminOnlyNotice what="the CAPTCHA settings" />
+            )}
           </div>
         </CardBody>
       </Card>
@@ -308,6 +345,9 @@ function EmailTab({ settings }: { settings: AdminSettingsResponse }): ReactEleme
   const update = useUpdateAdminSettings();
   const smtpTest = useSmtpTest();
   const toast = useToast();
+  // The SMTP fields are super_admin-only. "Send test email" is not — it changes
+  // nothing, and an admin diagnosing a delivery problem needs it.
+  const { canSuperAdmin } = useAuth();
   const [host, setHost] = useState(settings.smtp.host ?? '');
   const [port, setPort] = useState(String(settings.smtp.port));
   const [secure, setSecure] = useState(settings.smtp.secure);
@@ -323,19 +363,26 @@ function EmailTab({ settings }: { settings: AdminSettingsResponse }): ReactEleme
         description="Transactional mail is queued in the outbox and sent by the worker; the password is stored encrypted."
       />
       <CardBody className="grid gap-5 md:grid-cols-2">
-        <LabeledInput label="SMTP host" value={host} onChange={(e) => setHost(e.target.value)} />
+        <LabeledInput
+          label="SMTP host"
+          value={host}
+          disabled={!canSuperAdmin}
+          onChange={(e) => setHost(e.target.value)}
+        />
         <LabeledInput
           label="Port"
           type="number"
           min={1}
           max={65535}
           value={port}
+          disabled={!canSuperAdmin}
           onChange={(event) => setPort(event.target.value)}
         />
         <LabeledInput
           label="Username"
           autoComplete="off"
           value={username}
+          disabled={!canSuperAdmin}
           onChange={(event) => setUsername(event.target.value)}
         />
         <LabeledInput
@@ -344,6 +391,7 @@ function EmailTab({ settings }: { settings: AdminSettingsResponse }): ReactEleme
           autoComplete="off"
           placeholder={settings.smtp.password_set ? '•••••••• (stored)' : 'Not set'}
           value={password}
+          disabled={!canSuperAdmin}
           onChange={(event) => setPassword(event.target.value)}
           hint="Leave blank to keep the stored value."
         />
@@ -351,43 +399,49 @@ function EmailTab({ settings }: { settings: AdminSettingsResponse }): ReactEleme
           label="From address"
           type="email"
           value={fromAddress}
+          disabled={!canSuperAdmin}
           onChange={(event) => setFromAddress(event.target.value)}
         />
         <div className="flex items-end">
           <Checkbox
             label="Use TLS (implicit)"
             checked={secure}
+            disabled={!canSuperAdmin}
             onChange={(event) => setSecure(event.target.checked)}
           />
         </div>
 
         <div className="md:col-span-2">
-          <Button
-            variant="primary"
-            loading={update.isPending}
-            onClick={() =>
-              update.mutate(
-                {
-                  smtp: {
-                    host: host.trim() || null,
-                    port: Number.parseInt(port, 10) || 587,
-                    secure,
-                    username: username.trim() || null,
-                    from_address: fromAddress.trim() || null,
-                    ...(password ? { password } : {}),
+          {canSuperAdmin ? (
+            <Button
+              variant="primary"
+              loading={update.isPending}
+              onClick={() =>
+                update.mutate(
+                  {
+                    smtp: {
+                      host: host.trim() || null,
+                      port: Number.parseInt(port, 10) || 587,
+                      secure,
+                      username: username.trim() || null,
+                      from_address: fromAddress.trim() || null,
+                      ...(password ? { password } : {}),
+                    },
                   },
-                },
-                {
-                  onSuccess: () => {
-                    setPassword('');
-                    toast.success('Email settings saved');
+                  {
+                    onSuccess: () => {
+                      setPassword('');
+                      toast.success('Email settings saved');
+                    },
                   },
-                },
-              )
-            }
-          >
-            Save email settings
-          </Button>
+                )
+              }
+            >
+              Save email settings
+            </Button>
+          ) : (
+            <SuperAdminOnlyNotice what="the SMTP settings" />
+          )}
         </div>
 
         <div className="flex flex-col gap-2 border-t border-border pt-4 md:col-span-2">

@@ -9,7 +9,14 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { isNexusError } from '../lib/errors.js';
-import { parseOpenApiSpec, parseUpstreamUrl, resolveUpstream, slugify } from './oas.js';
+import {
+  assertUpstreamAllowed,
+  isPublicUpstreamHost,
+  parseOpenApiSpec,
+  parseUpstreamUrl,
+  resolveUpstream,
+  slugify,
+} from './oas.js';
 
 /** A minimal, structurally valid operation object. */
 const OPERATION = { responses: { '200': { description: 'OK' } } };
@@ -61,8 +68,8 @@ const VALID_YAML = [
   '  version: 2.4.0',
   '  description: "  Invoices and payments.  "',
   'servers:',
-  '  - url: https://billing.internal:8443/v2',
-  '  - url: https://billing.eu.internal',
+  '  - url: https://billing.example.com:8443/v2',
+  '  - url: https://billing.example.net',
   'paths:',
   '  /invoices:',
   '    get:',
@@ -103,9 +110,9 @@ describe('OpenAPI parsing', () => {
   it('splits servers[0] into the Edge backend fields, port and base path included', () => {
     const spec = parseOpenApiSpec(VALID_YAML);
     assert.deepEqual(spec.defaultUpstream, {
-      url: 'https://billing.internal:8443/v2',
+      url: 'https://billing.example.com:8443/v2',
       scheme: 'https',
-      host: 'billing.internal',
+      host: 'billing.example.com',
       port: 8443,
       basePath: '/v2',
     });
@@ -116,7 +123,7 @@ describe('OpenAPI parsing', () => {
       JSON.stringify({
         openapi: '3.1.0',
         info: { title: 'A', version: '1' },
-        servers: [{ url: 'http://plain.internal' }],
+        servers: [{ url: 'http://plain.example.com' }],
         paths: {},
       }),
     );
@@ -130,11 +137,11 @@ describe('OpenAPI parsing', () => {
       JSON.stringify({
         openapi: '3.1.0',
         info: { title: 'A', version: '1' },
-        servers: [{ url: '/v1' }, { url: 'https://real.internal' }],
+        servers: [{ url: '/v1' }, { url: 'https://real.example.com' }],
         paths: {},
       }),
     );
-    assert.equal(spec.defaultUpstream?.host, 'real.internal');
+    assert.equal(spec.defaultUpstream?.host, 'real.example.com');
   });
 
   it('yields no upstream when every server URL is relative', () => {
@@ -265,21 +272,98 @@ describe('OpenAPI parsing', () => {
 
 describe('upstream URL parsing', () => {
   it('accepts absolute http and https URLs only', () => {
-    assert.equal(parseUpstreamUrl('https://a.internal')?.scheme, 'https');
-    assert.equal(parseUpstreamUrl('http://a.internal:9000')?.port, 9000);
-    assert.equal(parseUpstreamUrl('ftp://a.internal'), null);
+    assert.equal(parseUpstreamUrl('https://example.com')?.scheme, 'https');
+    assert.equal(parseUpstreamUrl('http://example.com:9000')?.port, 9000);
+    assert.equal(parseUpstreamUrl('ftp://example.com'), null);
     assert.equal(parseUpstreamUrl('/relative'), null);
     assert.equal(parseUpstreamUrl(''), null);
   });
 
   it('strips the brackets from an IPv6 literal, which Edge does not accept', () => {
     assert.equal(parseUpstreamUrl('https://[::1]:8443')?.host, '::1');
+    assert.equal(parseUpstreamUrl('https://[2606:4700:4700::1111]')?.host, '2606:4700:4700::1111');
   });
 
+  it('rejects embedded credentials and lower-cases the host', () => {
+    assert.equal(parseUpstreamUrl('https://user:pw@example.com'), null);
+    assert.equal(parseUpstreamUrl('https://API.Example.COM/v1')?.host, 'api.example.com');
+  });
+
+  it('parses private destinations; policy is applied separately', () => {
+    // The parser is policy-free so a pinned API can still store a document
+    // whose servers[0] is internal. `assertUpstreamAllowed` is the gate.
+    assert.equal(parseUpstreamUrl('http://10.0.0.1')?.host, '10.0.0.1');
+    assert.equal(parseUpstreamUrl('http://host.docker.internal:8081')?.port, 8081);
+  });
+});
+
+describe('upstream destination policy', () => {
+  const PRIVATE_HOSTS = [
+    '127.0.0.1',
+    '127.8.8.8',
+    '0.0.0.0',
+    '10.0.0.1',
+    '100.64.0.1',
+    '169.254.169.254',
+    '172.16.0.1',
+    '172.31.255.254',
+    '192.0.0.1',
+    '192.168.0.1',
+    '198.18.0.1',
+    '224.0.0.1',
+    '::',
+    '::1',
+    '::ffff:127.0.0.1',
+    'fc00::1',
+    'fd12::1',
+    'fe80::1',
+    'ff02::1',
+    'localhost',
+    'app.localhost',
+    'service.internal',
+    'host.docker.internal',
+    'printer.local',
+    'router.home.arpa',
+  ];
+  const PUBLIC_HOSTS = [
+    '93.184.216.34',
+    '172.32.0.1',
+    '100.128.0.1',
+    '2606:4700:4700::1111',
+    'example.com',
+    'api.internal.example.com',
+  ];
+
+  it('classifies loopback, private, link-local, multicast and internal names as private', () => {
+    for (const host of PRIVATE_HOSTS) assert.equal(isPublicUpstreamHost(host), false, host);
+    for (const host of PUBLIC_HOSTS) assert.equal(isPublicUpstreamHost(host), true, host);
+  });
+
+  it('refuses a private upstream unless the deployment allows them', () => {
+    const upstream = parseUpstreamUrl('http://169.254.169.254/latest/meta-data');
+    assert.ok(upstream);
+    const error = expectSpecInvalid(() => assertUpstreamAllowed(upstream, { allowPrivate: false }));
+    assert.match(error.message, /NEXUS_ALLOW_PRIVATE_UPSTREAMS/);
+    assert.deepEqual(error.details, {
+      field: 'upstream_url',
+      host: '169.254.169.254',
+      reason: 'private_upstream',
+    });
+    assert.doesNotThrow(() => assertUpstreamAllowed(upstream, { allowPrivate: true }));
+  });
+
+  it('always passes a public upstream', () => {
+    const upstream = parseUpstreamUrl('https://api.example.com');
+    assert.ok(upstream);
+    assert.doesNotThrow(() => assertUpstreamAllowed(upstream, { allowPrivate: false }));
+  });
+});
+
+describe('upstream resolution', () => {
   it('prefers an explicit upstream over the document', () => {
     const spec = parseOpenApiSpec(VALID_YAML);
-    const upstream = resolveUpstream(spec, 'http://override.internal:8080/base');
-    assert.equal(upstream.host, 'override.internal');
+    const upstream = resolveUpstream(spec, 'http://override.example.com:8080/base');
+    assert.equal(upstream.host, 'override.example.com');
     assert.equal(upstream.port, 8080);
     assert.equal(upstream.basePath, '/base');
   });
@@ -292,8 +376,8 @@ describe('upstream URL parsing', () => {
 
   it('falls back to the document when the explicit upstream is blank', () => {
     const spec = parseOpenApiSpec(VALID_YAML);
-    assert.equal(resolveUpstream(spec, '   ').host, 'billing.internal');
-    assert.equal(resolveUpstream(spec, null).host, 'billing.internal');
+    assert.equal(resolveUpstream(spec, '   ').host, 'billing.example.com');
+    assert.equal(resolveUpstream(spec, null).host, 'billing.example.com');
   });
 });
 

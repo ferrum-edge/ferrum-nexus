@@ -26,6 +26,7 @@ import type {
   ApiStatus,
   ApiVisibility,
   AuthPluginType,
+  CorsConfig,
   CredentialStatus,
   CredentialType,
   DbDriver,
@@ -84,6 +85,7 @@ import type {
   UserFilter,
   UserRecord,
   UserRepo,
+  VerificationTokenPurpose,
   VerificationTokenRecord,
   VerificationTokenRepo,
 } from '../store.js';
@@ -206,12 +208,14 @@ function mapApi(row: Row): ApiRecord {
     description: textOrNull(row.description),
     owner_user_id: text(row.owner_user_id),
     ferrum_proxy_id: textOrNull(row.ferrum_proxy_id),
+    upstream_url: textOrNull(row.upstream_url),
     namespace: text(row.namespace),
     version: text(row.version),
     spec_format: 'openapi',
     requestable: bool(row.requestable),
     auth_plugin: text(row.auth_plugin) as AuthPluginType,
     rate_limit: json<RateLimitConfig | null>(row.rate_limit_json, null),
+    cors: json<CorsConfig | null>(row.cors_json, null),
     status: text(row.status) as ApiStatus,
     visibility: text(row.visibility) as ApiVisibility,
     created_at: text(row.created_at),
@@ -390,6 +394,7 @@ function mapVerificationToken(row: Row): VerificationTokenRecord {
     id: text(row.id),
     user_id: text(row.user_id),
     token_hash: text(row.token_hash),
+    purpose: text(row.purpose) as VerificationTokenPurpose,
     expires_at: text(row.expires_at),
     used_at: textOrNull(row.used_at),
     created_at: text(row.created_at),
@@ -830,10 +835,10 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         execute(
           exec,
           `INSERT INTO apis
-             (id, name, slug, description, owner_user_id, ferrum_proxy_id, namespace, version,
-              spec_format, requestable, auth_plugin, rate_limit_json, status, visibility,
-              created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, name, slug, description, owner_user_id, ferrum_proxy_id, upstream_url,
+              namespace, version, spec_format, requestable, auth_plugin, rate_limit_json,
+              cors_json, status, visibility, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             meta.id,
             input.name,
@@ -841,12 +846,14 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
             input.description ?? null,
             input.owner_user_id,
             input.ferrum_proxy_id ?? null,
+            input.upstream_url ?? null,
             input.namespace,
             input.version,
             input.spec_format,
             encodeBool(input.requestable),
             input.auth_plugin,
             encodeJson(input.rate_limit ?? null),
+            encodeJson(input.cors ?? null),
             input.status,
             input.visibility,
             meta.created_at,
@@ -895,11 +902,13 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         description: patch.description,
         owner_user_id: patch.owner_user_id,
         ferrum_proxy_id: patch.ferrum_proxy_id,
+        upstream_url: patch.upstream_url,
         namespace: patch.namespace,
         version: patch.version,
         requestable: patch.requestable === undefined ? undefined : encodeBool(patch.requestable),
         auth_plugin: patch.auth_plugin,
         rate_limit_json: patch.rate_limit === undefined ? undefined : encodeJson(patch.rate_limit),
+        cors_json: patch.cors === undefined ? undefined : encodeJson(patch.cors),
         status: patch.status,
         visibility: patch.visibility,
       });
@@ -2104,12 +2113,13 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         execute(
           exec,
           `INSERT INTO email_verification_tokens
-             (id, user_id, token_hash, expires_at, used_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+             (id, user_id, token_hash, purpose, expires_at, used_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             meta.id,
             input.user_id,
             input.token_hash,
+            input.purpose,
             input.expires_at,
             input.used_at ?? null,
             meta.created_at,
@@ -2124,11 +2134,22 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return mapVerificationToken(row);
     },
 
-    findByTokenHash: async (tokenHash) => {
+    findByTokenHash: async (tokenHash, purpose) => {
       const row = await queryOne(
         exec,
-        'SELECT * FROM email_verification_tokens WHERE token_hash = ?',
-        [tokenHash],
+        'SELECT * FROM email_verification_tokens WHERE token_hash = ? AND purpose = ?',
+        [tokenHash, purpose],
+      );
+      return row ? mapVerificationToken(row) : null;
+    },
+
+    findLatestLiveForUser: async (userId, purpose, now) => {
+      const row = await queryOne(
+        exec,
+        `SELECT * FROM email_verification_tokens
+          WHERE user_id = ? AND purpose = ? AND used_at IS NULL AND expires_at > ?
+          ORDER BY created_at DESC, id DESC LIMIT 1`,
+        [userId, purpose, now],
       );
       return row ? mapVerificationToken(row) : null;
     },
@@ -2140,8 +2161,13 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         [at, nowIso(), id],
       )) > 0,
 
-    deleteForUser: async (userId) =>
-      execute(exec, 'DELETE FROM email_verification_tokens WHERE user_id = ?', [userId]),
+    deleteForUser: async (userId, purpose) =>
+      purpose === undefined
+        ? execute(exec, 'DELETE FROM email_verification_tokens WHERE user_id = ?', [userId])
+        : execute(exec, 'DELETE FROM email_verification_tokens WHERE user_id = ? AND purpose = ?', [
+            userId,
+            purpose,
+          ]),
 
     deleteExpired: async (now) =>
       execute(exec, 'DELETE FROM email_verification_tokens WHERE expires_at <= ?', [now]),

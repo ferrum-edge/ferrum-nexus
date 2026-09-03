@@ -150,10 +150,17 @@ export interface EdgePluginAssociation {
 }
 
 /**
- * Body for `POST /proxies` / `PUT /proxies/{id}`.
+ * Body for `POST /proxies` — the shape Nexus **composes** from scratch.
  *
- * Only the HTTP-family fields Nexus actually sets. `namespace`, `created_at`
- * and `updated_at` are server-owned and must not be sent.
+ * Only the HTTP-family fields Nexus actually sets — Edge's `Proxy` write shape
+ * is far wider (timeouts, backend TLS, pooling, upstreams, stream listeners).
+ * `namespace`, `created_at` and `updated_at` are *accepted* by the deserializer
+ * but server-owned: the namespace comes from `X-Ferrum-Namespace` and the
+ * timestamps from the server, so Nexus never sends them.
+ *
+ * A proxy is created before its plugin configs exist, so there is nothing to
+ * associate yet and `plugins` is deliberately absent here — see
+ * {@link EdgeProxyReplace}, which is the shape every *later* write takes.
  */
 export interface EdgeProxyWrite {
   id?: string;
@@ -167,6 +174,35 @@ export interface EdgeProxyWrite {
   backend_path?: string | null;
   strip_listen_path?: boolean;
   preserve_host_header?: boolean;
+}
+
+/**
+ * Body for `PUT /proxies/{id}` — the shape Nexus **echoes** rather than
+ * composes.
+ *
+ * `PUT` is a whole-resource replace with no concurrency token, and `Proxy`
+ * carries `deny_unknown_fields`, so the only safe body is the document
+ * `GET /proxies/{id}` just returned, with the handful of fields being changed
+ * overwritten and the server-owned ones (`namespace`, `created_at`,
+ * `updated_at`) dropped. Edge's `Proxy` is far wider than {@link EdgeProxy}
+ * models — timeouts, backend TLS, pooling, `upstream_id`, stream listeners —
+ * and every unmodelled key an operator set has to survive the round trip, so
+ * the index signature is deliberate: those values come straight off the wire
+ * and are never interpreted.
+ *
+ * **Never hand-write one.** Build it by copying a `GET` response; the
+ * publishing service's `mutateProxy` is the only intended producer.
+ */
+export interface EdgeProxyReplace {
+  /**
+   * Which plugin configs this proxy runs. A proxy-scoped config is inert until
+   * its id appears here (`plugin_cache.rs`
+   * `scoped_plugin_config_applies_to_proxy`), and an omitted or empty list
+   * detaches every one of them.
+   */
+  plugins?: EdgePluginAssociation[];
+  /** Every other field, copied verbatim from the preceding `GET`. */
+  [field: string]: unknown;
 }
 
 /* ── Plugin configs ─────────────────────────────────────────────────────── */
@@ -232,6 +268,41 @@ export interface EdgeRateLimitingConfig {
   limits: EdgeRateLimitRule[];
 }
 
+/**
+ * One `cors.allowed_origins` entry.
+ *
+ * A plain string is Edge's **native** syntax (`"*"`, an exact
+ * `scheme://host[:port]`, or a `*.suffix.com` wildcard). An object is the
+ * Istio `StringMatch` form and carries **exactly one** of `exact`/`prefix`/
+ * `regex` with literal semantics — `{ exact: '*.example.com' }` matches that
+ * one literal string, while the plain string matches every subdomain.
+ */
+export type EdgeCorsOrigin = string | { exact: string } | { prefix: string } | { regex: string };
+
+/**
+ * `cors` config — a closed key set with `allowed_origins` required and bounded
+ * at 64 entries. `preflight_continue` and `unmatched_preflights` are mutually
+ * exclusive. Nexus does not write this plugin today; the type exists so an
+ * operator-managed CORS config read back off a proxy is not `unknown`.
+ */
+export interface EdgeCorsConfig {
+  /** Required, 1–64 entries. There is no implicit wildcard. */
+  allowed_origins: EdgeCorsOrigin[];
+  /** Preflight policy only; never evaluated against an actual request. */
+  allowed_methods?: string[];
+  /** Preflight policy only; never evaluated against an actual request. */
+  allowed_headers?: string[];
+  exposed_headers?: string[];
+  /** Incompatible with wildcard/universal origins. */
+  allow_credentials?: boolean;
+  /** Preflight cache seconds; native default 86400. */
+  max_age?: number;
+  /** Pass allowed preflights to the backend. */
+  preflight_continue?: boolean;
+  /** Istio projection marker; mutually exclusive with `preflight_continue`. */
+  unmatched_preflights?: 'forward' | 'ignore';
+}
+
 /** Any plugin config body Nexus writes. */
 export type EdgePluginSettings =
   | EdgeKeyAuthConfig
@@ -239,6 +310,7 @@ export type EdgePluginSettings =
   | EdgeJwtAuthConfig
   | EdgeAccessControlConfig
   | EdgeRateLimitingConfig
+  | EdgeCorsConfig
   | Record<string, unknown>;
 
 /** A plugin config resource. */
@@ -287,9 +359,20 @@ export interface EdgeHealth {
 
 /** Result of the Nexus-side Edge probe used by `GET /api/health`. */
 export interface EdgeProbe {
+  /**
+   * Whether the gateway answered at all. A gateway that answered `503` because
+   * it is `starting`/`draining`/`unavailable` is **reachable** — read `ready`.
+   */
   reachable: boolean;
   /** Round-trip time of the probe in milliseconds. */
   latencyMs: number;
+  /**
+   * Edge's own status word (`ok`, `degraded`, `starting`, `unavailable`,
+   * `draining`), or `null` when nothing answered.
+   */
+  status: string | null;
+  /** Edge's readiness verdict, or `null` when nothing answered. */
+  ready: boolean | null;
   /** `mode` from the authenticated health payload, when it answered. */
   mode: string | null;
   /** Whether Edge will currently accept config writes. */

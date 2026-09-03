@@ -302,7 +302,9 @@ describe('gateway credentials', () => {
 
     const codes = [first.statusCode, second.statusCode].sort((a, b) => a - b);
     assert.deepEqual(codes, [200, 409], `got ${first.body} / ${second.body}`);
-    const winner = (first.statusCode === 200 ? first : second).json<RotateCredentialResponse>();
+    const winner = JSON.parse(
+      (first.statusCode === 200 ? first : second).body,
+    ) as RotateCredentialResponse;
     const loser = first.statusCode === 200 ? second : first;
     assert.equal(errorCode(loser.body), 'CONFLICT');
     assert.ok(!('secret' in JSON.parse(loser.body)), 'the loser hands out no show-once secret');

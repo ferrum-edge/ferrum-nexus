@@ -5,17 +5,40 @@
  * ## The Edge object graph behind one published API
  *
  * ```
- * apis row ─┬─ proxy            name `nexus-<slug>`, listen_path `/<ns>/<slug>`
- *           ├─ plugin_config    the auth plugin (key_auth | basic_auth | jwt_auth)
- *           ├─ plugin_config    access_control, only when `requestable`
- *           └─ plugin_config    rate_limiting, only when a rate limit is set
+ * apis row ─── proxy  name `nexus-<slug>`, listen_path `/<ns>/<slug>`
+ *               │
+ *               │  proxy.plugins[] ── the association list; this is what makes
+ *               │                     a config run at all
+ *               ├─ plugin_config    the auth plugin (key_auth | basic_auth | jwt_auth)
+ *               ├─ plugin_config    access_control, only when `requestable`
+ *               ├─ plugin_config    rate_limiting, only when a rate limit is set
+ *               └─ plugin_config    cors, only when a CORS policy is set
  * ```
+ *
+ * **A plugin config with a matching `proxy_id` is inert until the proxy's own
+ * `plugins[]` names it.** Edge decides what to run in `plugin_cache.rs`
+ * (`scoped_plugin_config_applies_to_proxy`): a proxy-scoped config applies only
+ * when it targets the proxy *and* the proxy associates it. Creating the config
+ * is therefore only half the job — every create is followed by an association
+ * write, and every removal is preceded by a disassociation.
  *
  * Nexus stores the proxy id on the `apis` row and **does not** store the plugin
  * config ids: they are looked up with `GET /plugins/config` filtered by
  * `proxy_id` whenever they need changing. That keeps the schema free of ids
  * whose lifecycle Nexus does not own, and reconciles automatically if an
  * operator ever recreates one by hand.
+ *
+ * ## Every proxy write is read-modify-write
+ *
+ * `PUT /proxies/{id}` is a whole-resource replace against a struct carrying
+ * `deny_unknown_fields`, with no concurrency token — the same shape as
+ * `PUT /consumers/{id}`. A body built only from the fields Nexus models resets
+ * everything it omits to its serde default, so an operator's `hosts`,
+ * timeouts, backend TLS, `upstream_id` — and the association list itself —
+ * would vanish the first time a provider moved an upstream. Every write
+ * therefore goes through `mutateProxy`: `GET`, change the handful of fields
+ * that are actually changing, `PUT` the whole document back, serialised per
+ * proxy id so two concurrent round trips cannot lose one edit.
  *
  * ## Publishing is a multi-write sequence with no transaction
  *
@@ -57,6 +80,7 @@ import {
   type ApiStats,
   type ApiStatus,
   type AuthPluginType,
+  type CorsConfig,
   type CreateTestConsumerResponse,
   type Paginated,
   type PublishApiRequest,
@@ -78,20 +102,25 @@ import type {
 import type { CredentialsService } from '../credentials/service.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import type {
+  EdgePluginAssociation,
   EdgePluginConfig,
   EdgePluginConfigWrite,
   EdgePluginSettings,
   EdgeProxy,
+  EdgeProxyReplace,
 } from '../ferrum-admin/types.js';
 import { conflict, forbidden, notFound, specInvalid, validationFailed } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
 import {
+  assertUpstreamAllowed,
+  formatUpstreamUrl,
   parseOpenApiSpec,
   parseUpstreamUrl,
   resolveUpstream,
   slugify,
   type SpecUpstream,
+  type UpstreamPolicy,
 } from './oas.js';
 
 /** Result of {@link PublishingService.publish} and `updateSpec`. */
@@ -164,6 +193,31 @@ export interface PublishingServiceDeps {
 /* ── Edge plugin config bodies ──────────────────────────────────────────── */
 
 /**
+ * Edge's browser-CORS plugin.
+ *
+ * Unlike `access_control` and `rate_limiting` this has no constant in `shared`:
+ * the portal never names it, because a CORS policy is expressed on the API row
+ * as {@link CorsConfig} and only this module turns that into a plugin.
+ */
+const CORS_PLUGIN = 'cors';
+
+/**
+ * Fields a `GET /proxies/{id}` returns that the **gateway** owns, and which are
+ * therefore dropped from the body of the `PUT` that follows.
+ *
+ * Edge's deserializer accepts all three (they carry serde defaults) but
+ * overwrites them: the namespace comes from `X-Ferrum-Namespace` and the
+ * timestamps from the server. Echoing them back is at best ignored, so the
+ * honest thing is not to send them at all.
+ */
+const SERVER_OWNED_PROXY_FIELDS = ['namespace', 'created_at', 'updated_at'] as const;
+
+/** One entry of `Proxy.plugins`. */
+function association(pluginConfigId: string): EdgePluginAssociation {
+  return { plugin_config_id: pluginConfigId };
+}
+
+/**
  * Config for an auth plugin.
  *
  * All three are sent as `{}`:
@@ -216,6 +270,24 @@ export function rateLimitConfig(rateLimit: RateLimitConfig): EdgePluginSettings 
   };
 }
 
+/**
+ * Config for `cors`.
+ *
+ * Exactly the two keys the portal models. Edge's `cors` accepts six more
+ * (`allowed_methods`, `allowed_headers`, `exposed_headers`, `max_age`,
+ * `preflight_continue`, `unmatched_preflights`) and every one of them has a
+ * native default that is right for a portal-published API, so sending a key
+ * Nexus cannot let the provider change would only freeze that default in place.
+ * `allowed_origins` is required — there is no implicit wildcard — which is why
+ * an API with no policy has no `cors` plugin at all rather than an empty one.
+ */
+export function corsPluginConfig(cors: CorsConfig): EdgePluginSettings {
+  return {
+    allowed_origins: [...cors.allowed_origins],
+    allow_credentials: cors.allow_credentials,
+  };
+}
+
 /** Proxy name for an API's slug — a stable, greppable marker on the gateway. */
 export function proxyNameForSlug(slug: string): string {
   return `nexus-${slug}`;
@@ -240,6 +312,9 @@ function safeDefaultUpstream(rawSpec: string): SpecUpstream | null {
 export function createPublishingService(deps: PublishingServiceDeps): PublishingService {
   const { config, store, edge, audit, notifications, credentials } = deps;
   const namespace = config.edge.namespace;
+  // Applied at every point a backend is about to be written to the gateway:
+  // publish, PATCH `upstream_url`, and a spec revision the proxy follows.
+  const upstreamPolicy: UpstreamPolicy = { allowPrivate: config.allowPrivateUpstreams };
 
   function assertCanAdminister(actor: UserRecord, api: ApiRecord): void {
     if (api.owner_user_id === actor.id) return;
@@ -277,6 +352,178 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       config: pluginConfig,
     };
     return edge.pluginConfigs.create(body, subject);
+  }
+
+  /* ── Proxy writes ─────────────────────────────────────────────────────── */
+
+  /**
+   * Read one proxy, change it, and write the **whole** document back.
+   *
+   * `PUT /proxies/{id}` is a whole-resource replace with no concurrency token,
+   * so `change` receives the document the gateway just returned and returns it
+   * with the handful of fields that are actually changing overwritten —
+   * anything omitted from the body is reset to its serde default, which is how
+   * an operator's `hosts`, timeouts, backend TLS or `upstream_id` used to
+   * disappear the first time Nexus repointed a backend.
+   *
+   * Serialised on the proxy id for the same reason consumer writes are: two
+   * concurrent GET→edit→PUT round trips would silently lose one edit. The key
+   * is prefixed so it can never collide with the consumer-id keys the
+   * credentials service uses.
+   *
+   * `change` may return `null` to mean "already as it should be", which skips
+   * the write entirely. Returns the document **as it was found**, which is what
+   * an undo step needs.
+   */
+  async function mutateProxy(
+    proxyId: string,
+    change: (proxy: EdgeProxy) => EdgeProxyReplace | null,
+    subject: string,
+  ): Promise<EdgeProxy> {
+    return edge.serializePerKey(`proxy:${proxyId}`, async () => {
+      const current = await edge.proxies.get(proxyId);
+      if (!current) throw notFound('Proxy', proxyId);
+      const body = change(current);
+      if (body === null) return current;
+      for (const field of SERVER_OWNED_PROXY_FIELDS) delete body[field];
+      await edge.proxies.replace(proxyId, body, subject);
+      return current;
+    });
+  }
+
+  /** The proxy's association list, as plain plugin config ids. */
+  function associatedIds(proxy: EdgeProxy): string[] {
+    return (proxy.plugins ?? []).map((entry) => entry.plugin_config_id);
+  }
+
+  /**
+   * Make the gateway actually run these plugin configs on this proxy.
+   *
+   * Idempotent: ids already in the list are left where they are, and a write
+   * that would change nothing is skipped.
+   */
+  async function associate(proxyId: string, configIds: string[], subject: string): Promise<void> {
+    await mutateProxy(
+      proxyId,
+      (proxy) => {
+        const current = associatedIds(proxy);
+        const additions = configIds.filter((id) => !current.includes(id));
+        if (additions.length === 0) return null;
+        return { ...proxy, plugins: [...current, ...additions].map(association) };
+      },
+      subject,
+    );
+  }
+
+  /**
+   * Stop the gateway running these plugin configs on this proxy.
+   *
+   * Always paired with — and ordered *before* — deleting the config. Edge's
+   * `DELETE /plugins/config/{id}` clears the junction rows itself, so this is
+   * not strictly required, but doing it in this order means the association
+   * list never names a row that has already gone.
+   */
+  async function disassociate(
+    proxyId: string,
+    configIds: string[],
+    subject: string,
+  ): Promise<void> {
+    await mutateProxy(
+      proxyId,
+      (proxy) => {
+        const current = associatedIds(proxy);
+        const kept = current.filter((id) => !configIds.includes(id));
+        if (kept.length === current.length) return null;
+        return { ...proxy, plugins: kept.map(association) };
+      },
+      subject,
+    );
+  }
+
+  /**
+   * Undo step for "a plugin config was created for this proxy": detach it, then
+   * delete it.
+   *
+   * Registered *before* the association write, so it also cleans up a config
+   * whose association never landed — detaching an id that is not in the list is
+   * a no-op.
+   */
+  function undoAttach(proxyId: string, configId: string, subject: string): () => Promise<void> {
+    return async () => {
+      await disassociate(proxyId, [configId], subject);
+      await edge.pluginConfigs.delete(configId, subject);
+    };
+  }
+
+  /**
+   * Undo step for "an associated plugin config is being removed": put it back
+   * and re-associate it.
+   *
+   * The original row is reused when the delete never landed, so a failure
+   * between the disassociate and the delete cannot leave a second copy of the
+   * same plugin behind.
+   */
+  function undoRemoval(
+    proxyId: string,
+    config: EdgePluginConfig,
+    subject: string,
+  ): () => Promise<void> {
+    return async () => {
+      const survivor = await edge.pluginConfigs.get(config.id);
+      const id = survivor
+        ? config.id
+        : (await attach(proxyId, config.plugin_name, config.config, subject)).id;
+      await associate(proxyId, [id], subject);
+    };
+  }
+
+  /**
+   * Bring one *optional* plugin to `settings`, or remove it when `settings` is
+   * `null`, pushing the step that undoes whatever it did onto `undo`.
+   *
+   * `rate_limiting` and `cors` are the same problem — an optional, replaceable,
+   * proxy-scoped config — so they share this. Note the asymmetry: a replace
+   * keeps the config id, so only the create and the delete touch the proxy's
+   * association list.
+   */
+  async function reconcileOptionalPlugin(
+    proxyId: string,
+    existing: EdgePluginConfig | undefined,
+    pluginName: string,
+    settings: EdgePluginSettings | null,
+    subject: string,
+    undo: (() => Promise<void>)[],
+  ): Promise<void> {
+    if (settings === null) {
+      if (!existing) return;
+      undo.push(undoRemoval(proxyId, existing, subject));
+      await disassociate(proxyId, [existing.id], subject);
+      await edge.pluginConfigs.delete(existing.id, subject);
+      return;
+    }
+
+    if (existing) {
+      const body = (config: EdgePluginSettings, enabled: boolean): EdgePluginConfigWrite => ({
+        plugin_name: pluginName,
+        scope: 'proxy',
+        proxy_id: proxyId,
+        enabled,
+        config,
+      });
+      await edge.pluginConfigs.replace(existing.id, body(settings, true), subject);
+      undo.push(async () => {
+        await edge.pluginConfigs.replace(
+          existing.id,
+          body(existing.config, existing.enabled),
+          subject,
+        );
+      });
+      return;
+    }
+
+    const attached = await attach(proxyId, pluginName, settings, subject);
+    undo.push(undoAttach(proxyId, attached.id, subject));
+    await associate(proxyId, [attached.id], subject);
   }
 
   /** Unique slug, or `CONFLICT` when the provider's choice is taken. */
@@ -343,6 +590,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
 
       const parsed = parseOpenApiSpec(input.spec);
       const upstream = resolveUpstream(parsed, input.upstream_url);
+      assertUpstreamAllowed(upstream, upstreamPolicy);
       const slug = await resolveSlug(input.slug, name);
 
       // The id is minted here because the ACL group name is derived from it and
@@ -394,6 +642,19 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           );
           created.pluginIds.push(limiter.id);
         }
+        if (input.cors) {
+          const cors = await attach(proxy.id, CORS_PLUGIN, corsPluginConfig(input.cors), owner.id);
+          created.pluginIds.push(cors.id);
+        }
+
+        // None of the above is live yet. A proxy-scoped plugin config only runs
+        // once the proxy's own `plugins[]` names it, so this single write is
+        // what turns the API from open, ungated and unlimited into what the
+        // portal says it is. Edge will not accept a config for a proxy that
+        // does not exist, so the window between creating the proxy and this
+        // call cannot be closed from here — only kept to one round trip, and
+        // rolled back below if anything in it fails.
+        await associate(proxy.id, created.pluginIds, owner.id);
 
         // The Nexus rows are written *inside* the compensated block: a store
         // failure here would otherwise leave a live, untracked proxy on the
@@ -407,12 +668,14 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             description: input.description ?? parsed.description,
             owner_user_id: owner.id,
             ferrum_proxy_id: created.proxyId ?? null,
+            upstream_url: formatUpstreamUrl(upstream),
             namespace,
             version,
             spec_format: 'openapi',
             requestable: input.requestable,
             auth_plugin: input.auth_plugin,
             rate_limit: input.rate_limit ?? null,
+            cors: input.cors ?? null,
             status: 'published',
             visibility: input.visibility,
           });
@@ -428,10 +691,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         });
       } catch (error) {
         // Undo the Edge side so the whole publish reads as if it never
-        // happened. Deleting the proxy cascades its proxy-scoped plugin
-        // configs, but the explicit deletes make the intent obvious and survive
-        // a partial cascade. The store transaction has already rolled itself
-        // back, so nothing is left on the Nexus side either.
+        // happened. Deleting the proxy cascades its association rows and its
+        // proxy-scoped plugin configs, so a half-written association list needs
+        // no separate rollback; the explicit config deletes make the intent
+        // obvious and survive a partial cascade. The store transaction has
+        // already rolled itself back, so nothing is left on the Nexus side
+        // either.
         for (const pluginId of created.pluginIds) {
           await edge.pluginConfigs.delete(pluginId, owner.id).catch(() => undefined);
         }
@@ -458,6 +723,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           requestable: input.requestable,
           visibility: input.visibility,
           rate_limit: input.rate_limit ?? null,
+          cors: input.cors ?? null,
           upstream: `${upstream.scheme}://${upstream.host}:${upstream.port}`,
           spec_paths: parsed.pathCount,
           spec_operations: parsed.operationCount,
@@ -522,33 +788,38 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               value: patch.upstream_url,
             });
           }
-          const before = await edge.proxies.get(proxyId);
-          await replaceProxyBackend(proxyId, api.slug, upstream, actor.id);
-          if (before) undo.push(() => restoreProxy(before, api.slug, actor.id));
+          assertUpstreamAllowed(upstream, upstreamPolicy);
+          const before = await replaceProxyBackend(proxyId, upstream, actor.id);
+          undo.push(restoreProxyBackend(before, actor.id));
+          // The row records where the gateway is now pointed, normalized rather
+          // than however the provider typed it.
+          update.upstream_url = formatUpstreamUrl(upstream);
           changed.push('upstream_url');
           details.upstream = `${upstream.scheme}://${upstream.host}:${upstream.port}`;
         }
 
         if (patch.auth_plugin !== undefined && patch.auth_plugin !== api.auth_plugin && proxyId) {
           const previous = findPlugin(plugins, api.auth_plugin);
-          // Attach the replacement **before** removing the incumbent. For the
-          // moment both are live the proxy accepts either credential (auth
-          // plugins run in priority order until one succeeds, §3.4), which is a
-          // vastly safer window than the one the other order opens: a live
-          // proxy fronting the provider's upstream with no authentication
-          // plugin at all.
+          // Attach *and associate* the replacement before detaching the
+          // incumbent. For the moment both are live the proxy accepts either
+          // credential (auth plugins run in priority order until one succeeds,
+          // §3.4), which is a vastly safer window than the one the other order
+          // opens: a live proxy fronting the provider's upstream with no
+          // authentication plugin the gateway actually runs. Associating is
+          // part of that — a config the proxy does not name is not "attached"
+          // in any sense the gateway cares about.
           const attached = await attach(
             proxyId,
             patch.auth_plugin,
             authPluginConfig(patch.auth_plugin),
             actor.id,
           );
-          undo.push(() => edge.pluginConfigs.delete(attached.id, actor.id));
+          undo.push(undoAttach(proxyId, attached.id, actor.id));
+          await associate(proxyId, [attached.id], actor.id);
           if (previous) {
+            undo.push(undoRemoval(proxyId, previous, actor.id));
+            await disassociate(proxyId, [previous.id], actor.id);
             await edge.pluginConfigs.delete(previous.id, actor.id);
-            undo.push(async () => {
-              await attach(proxyId, previous.plugin_name, previous.config, actor.id);
-            });
           }
           update.auth_plugin = patch.auth_plugin;
           changed.push('auth_plugin');
@@ -568,64 +839,43 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               accessControlConfig(api.id),
               actor.id,
             );
-            undo.push(() => edge.pluginConfigs.delete(attached.id, actor.id));
+            undo.push(undoAttach(proxyId, attached.id, actor.id));
+            await associate(proxyId, [attached.id], actor.id);
           } else if (!patch.requestable && acl) {
             // Dropping the gate opens the API to every authenticated consumer;
             // existing grants stay on the consumers and become inert.
+            undo.push(undoRemoval(proxyId, acl, actor.id));
+            await disassociate(proxyId, [acl.id], actor.id);
             await edge.pluginConfigs.delete(acl.id, actor.id);
-            undo.push(async () => {
-              await attach(proxyId, ACCESS_CONTROL_PLUGIN, acl.config, actor.id);
-            });
           }
           update.requestable = patch.requestable;
           changed.push('requestable');
         }
 
         if (patch.rate_limit !== undefined && proxyId) {
-          const limiter = findPlugin(plugins, RATE_LIMIT_PLUGIN);
-          if (patch.rate_limit === null) {
-            if (limiter) {
-              await edge.pluginConfigs.delete(limiter.id, actor.id);
-              undo.push(async () => {
-                await attach(proxyId, RATE_LIMIT_PLUGIN, limiter.config, actor.id);
-              });
-            }
-          } else if (limiter) {
-            await edge.pluginConfigs.replace(
-              limiter.id,
-              {
-                plugin_name: RATE_LIMIT_PLUGIN,
-                scope: 'proxy',
-                proxy_id: proxyId,
-                enabled: true,
-                config: rateLimitConfig(patch.rate_limit),
-              },
-              actor.id,
-            );
-            undo.push(async () => {
-              await edge.pluginConfigs.replace(
-                limiter.id,
-                {
-                  plugin_name: RATE_LIMIT_PLUGIN,
-                  scope: 'proxy',
-                  proxy_id: proxyId,
-                  enabled: limiter.enabled,
-                  config: limiter.config,
-                },
-                actor.id,
-              );
-            });
-          } else {
-            const attached = await attach(
-              proxyId,
-              RATE_LIMIT_PLUGIN,
-              rateLimitConfig(patch.rate_limit),
-              actor.id,
-            );
-            undo.push(() => edge.pluginConfigs.delete(attached.id, actor.id));
-          }
+          await reconcileOptionalPlugin(
+            proxyId,
+            findPlugin(plugins, RATE_LIMIT_PLUGIN),
+            RATE_LIMIT_PLUGIN,
+            patch.rate_limit === null ? null : rateLimitConfig(patch.rate_limit),
+            actor.id,
+            undo,
+          );
           update.rate_limit = patch.rate_limit;
           changed.push('rate_limit');
+        }
+
+        if (patch.cors !== undefined && proxyId) {
+          await reconcileOptionalPlugin(
+            proxyId,
+            findPlugin(plugins, CORS_PLUGIN),
+            CORS_PLUGIN,
+            patch.cors === null ? null : corsPluginConfig(patch.cors),
+            actor.id,
+            undo,
+          );
+          update.cors = patch.cors;
+          changed.push('cors');
         }
 
         if (changed.length === 0) return api;
@@ -681,6 +931,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // an explicit upstream, the document stops being authoritative for it.
       let backendUpdated = false;
       let restoreBackend: (() => Promise<void>) | null = null;
+      /** Normalized upstream the proxy now points at, when it moved. */
+      let movedTo: string | null = null;
       const nextUpstream = parsed.defaultUpstream;
       if (nextUpstream && api.ferrum_proxy_id) {
         const previousUpstream = previous ? safeDefaultUpstream(previous.raw_spec) : null;
@@ -696,9 +948,14 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           previousUpstream.port !== nextUpstream.port ||
           previousUpstream.scheme !== nextUpstream.scheme;
         if (proxy && followsSpec && moved) {
-          await replaceProxyBackend(api.ferrum_proxy_id, api.slug, nextUpstream, actor.id);
+          // Only a move the gateway would actually make is subject to the
+          // policy: a document whose `servers[0]` is private can still be
+          // stored for an API whose backend is pinned elsewhere.
+          assertUpstreamAllowed(nextUpstream, upstreamPolicy);
+          await replaceProxyBackend(api.ferrum_proxy_id, nextUpstream, actor.id);
           backendUpdated = true;
-          restoreBackend = () => restoreProxy(proxy, api.slug, actor.id);
+          movedTo = formatUpstreamUrl(nextUpstream);
+          restoreBackend = restoreProxyBackend(proxy, actor.id);
         }
       }
 
@@ -715,10 +972,17 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             is_current: true,
           });
           await tx.apiSpecs.setCurrent(api.id, revision.id);
+          // The row that records where the gateway points moves with the
+          // gateway, in the same transaction as the revision: if this rolls
+          // back, the compensation below puts the proxy back and the row never
+          // claimed the new upstream in the first place.
+          const changes: Partial<ApiRecord> = {};
+          if (nextVersion !== api.version) changes.version = nextVersion;
+          if (movedTo !== null) changes.upstream_url = movedTo;
           const row =
-            nextVersion === api.version
+            Object.keys(changes).length === 0
               ? api
-              : ((await tx.apis.update(api.id, { version: nextVersion })) ?? api);
+              : ((await tx.apis.update(api.id, changes)) ?? api);
           return { spec: revision, api: row };
         });
         spec = persisted.spec;
@@ -751,11 +1015,23 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
 
       // 1. Take the API off the gateway first: once the proxy is gone nobody can
       //    call it, so a later failure cannot leave it reachable-but-untracked.
+      //
+      //    The **proxy** goes first, before its plugin configs. Edge's
+      //    `DELETE /plugins/config/{id}` deletes the config's `proxy_plugins`
+      //    rows along with it rather than refusing while it is still
+      //    associated, so deleting the auth config first would leave a live
+      //    proxy fronting the provider's upstream with nothing authenticating
+      //    it for as long as the teardown took. Deleting the proxy cascades
+      //    both the association rows and every proxy-scoped config, so no
+      //    disassociation step is needed at all; the sweep afterwards only
+      //    exists in case a gateway ever leaves one behind, and 404s harmlessly
+      //    when the cascade did its job.
       if (api.ferrum_proxy_id) {
-        for (const plugin of await pluginsOf(api)) {
+        const attached = await pluginsOf(api);
+        await edge.proxies.delete(api.ferrum_proxy_id, actor.id);
+        for (const plugin of attached) {
           await edge.pluginConfigs.delete(plugin.id, actor.id).catch(() => undefined);
         }
-        await edge.proxies.delete(api.ferrum_proxy_id, actor.id);
       }
 
       // 2. Strip the ACL group from every grantee. The group would be inert with
@@ -868,52 +1144,58 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     },
   };
 
-  /** `PUT /proxies/{id}` with a fresh backend, preserving the routing fields. */
+  /**
+   * Point a proxy at a new backend, leaving everything else exactly as it is.
+   *
+   * Only the four `backend_*` fields are touched: `name`, `listen_path`,
+   * `hosts`, the timeouts, the TLS paths, `upstream_id` and the plugin
+   * association list all come back off the `GET` untouched. Rebuilding the
+   * document from the slug instead, as this used to, reset every one of them to
+   * a default on a whole-resource `PUT`.
+   *
+   * Returns the proxy as it was before the move, ready for
+   * {@link restoreProxyBackend}.
+   */
   async function replaceProxyBackend(
     proxyId: string,
-    slug: string,
     upstream: SpecUpstream,
     subject: string,
-  ): Promise<void> {
-    await edge.proxies.replace(
+  ): Promise<EdgeProxy> {
+    return mutateProxy(
       proxyId,
-      {
-        id: proxyId,
-        name: proxyNameForSlug(slug),
-        listen_path: listenPathFor(namespace, slug),
+      (proxy) => ({
+        ...proxy,
         backend_scheme: upstream.scheme,
         backend_host: upstream.host,
         backend_port: upstream.port,
-        ...(upstream.basePath ? { backend_path: upstream.basePath } : {}),
-        strip_listen_path: true,
-      },
+        // Explicitly `null` when the new upstream has no base path: this is a
+        // merge, so omitting the key would keep the *old* path under the new
+        // host.
+        backend_path: upstream.basePath,
+      }),
       subject,
     );
   }
 
   /**
-   * Put a proxy back the way a `GET /proxies/{id}` found it.
+   * Undo step that puts a proxy's backend back where
+   * {@link replaceProxyBackend} found it.
    *
-   * Used to compensate a backend replacement whose follow-up step failed. Only
-   * the fields Nexus ever writes are restored; `listen_path` falls back to the
-   * canonical path for the slug because `EdgeProxyWrite` requires one and an
-   * operator-blanked value would not be routable anyway.
+   * Only the backend fields are rewound, on top of a fresh read. A blanket
+   * restore of the whole captured document would also revert the plugin
+   * association changes a later step of the same PATCH made — those are undone
+   * by their own steps, in their own order.
    */
-  async function restoreProxy(proxy: EdgeProxy, slug: string, subject: string): Promise<void> {
-    await edge.proxies.replace(
-      proxy.id,
-      {
-        id: proxy.id,
-        name: proxy.name ?? proxyNameForSlug(slug),
-        listen_path: proxy.listen_path ?? listenPathFor(namespace, slug),
-        backend_scheme: proxy.backend_scheme === 'http' ? 'http' : 'https',
-        backend_host: proxy.backend_host ?? '',
-        backend_port: proxy.backend_port ?? 443,
-        ...(proxy.backend_path ? { backend_path: proxy.backend_path } : {}),
-        strip_listen_path: proxy.strip_listen_path ?? true,
-      },
-      subject,
-    );
+  function restoreProxyBackend(previous: EdgeProxy, subject: string): () => Promise<void> {
+    const backend = {
+      backend_scheme: previous.backend_scheme,
+      backend_host: previous.backend_host,
+      backend_port: previous.backend_port,
+      backend_path: previous.backend_path ?? null,
+    };
+    return async () => {
+      await mutateProxy(previous.id, (proxy) => ({ ...proxy, ...backend }), subject);
+    };
   }
 
   /** Best-effort in-app notice to everyone holding an active grant on `apiId`. */

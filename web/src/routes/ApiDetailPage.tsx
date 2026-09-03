@@ -3,6 +3,8 @@ import { useState, type FormEvent, type ReactElement } from 'react';
 import {
   AUTH_PLUGIN_LABELS,
   AUTH_PLUGIN_TYPES,
+  MAX_CORS_ORIGINS,
+  MAX_RATE_LIMIT_REQUESTS,
   aclGroupForApi,
   listenPathFor,
   testConsumerUsername,
@@ -11,11 +13,12 @@ import {
   type ApiStatus,
   type ApiVisibility,
   type AuthPluginType,
+  type CorsConfig,
   type Grant,
   type RateLimitConfig,
   type ShowOnceSecret,
 } from '@ferrum-nexus/shared';
-import { formatDateTime } from '../lib/format';
+import { formatDateTime, parseCorsOrigins } from '../lib/format';
 import {
   useApi,
   useCreateTestConsumer,
@@ -51,6 +54,12 @@ const WINDOW_OPTIONS = [
   { value: '3600', label: 'per hour' },
 ];
 
+/** Hint under the CORS origins box; the empty case is the one worth spelling out. */
+const CORS_ORIGINS_HINT =
+  `One origin per line, up to ${MAX_CORS_ORIGINS}, e.g. https://app.example.com. ` +
+  'Leave it empty and the gateway adds no CORS headers at all, so a browser can ' +
+  'only call this API from its own origin.';
+
 function SettingsTab({ api }: { api: Api }): ReactElement {
   const update = useUpdateApi();
   const remove = useDeleteApi();
@@ -70,15 +79,38 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
   const [rateLimitWindow, setRateLimitWindow] = useState(
     String(api.rate_limit?.window_seconds ?? 60),
   );
+  const [corsOrigins, setCorsOrigins] = useState(api.cors?.allowed_origins.join('\n') ?? '');
+  const [corsCredentials, setCorsCredentials] = useState(api.cors?.allow_credentials ?? false);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
     const parsedLimit = Number.parseInt(rateLimitValue, 10);
-    const rateLimit: RateLimitConfig | null =
-      rateLimitEnabled && Number.isFinite(parsedLimit) && parsedLimit > 0
-        ? { limit: parsedLimit, window_seconds: Number.parseInt(rateLimitWindow, 10) }
-        : null;
+    if (
+      rateLimitEnabled &&
+      (!Number.isFinite(parsedLimit) || parsedLimit < 1 || parsedLimit > MAX_RATE_LIMIT_REQUESTS)
+    ) {
+      toast.error(
+        'Rate limit out of range',
+        `The request limit must be a whole number between 1 and ${MAX_RATE_LIMIT_REQUESTS.toLocaleString()} — the gateway rejects anything higher.`,
+      );
+      return;
+    }
+    const rateLimit: RateLimitConfig | null = rateLimitEnabled
+      ? { limit: parsedLimit, window_seconds: Number.parseInt(rateLimitWindow, 10) }
+      : null;
+
+    const origins = parseCorsOrigins(corsOrigins);
+    if (origins.length > MAX_CORS_ORIGINS) {
+      toast.error(
+        'Too many CORS origins',
+        `A CORS policy may list at most ${MAX_CORS_ORIGINS} origins.`,
+      );
+      return;
+    }
+    // Clearing the box sends `null`, which removes the plugin from the proxy.
+    const cors: CorsConfig | null =
+      origins.length > 0 ? { allowed_origins: origins, allow_credentials: corsCredentials } : null;
 
     update.mutate(
       {
@@ -92,6 +124,7 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
           status,
           requestable,
           rate_limit: rateLimit,
+          cors,
           ...(upstreamUrl.trim() ? { upstream_url: upstreamUrl.trim() } : {}),
         },
       },
@@ -133,7 +166,16 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
               type="url"
               value={upstreamUrl}
               onChange={(event) => setUpstreamUrl(event.target.value)}
-              hint="Leave blank to keep the current upstream."
+              hint={
+                api.upstream_url ? (
+                  <>
+                    Currently <code className="font-mono">{api.upstream_url}</code>. Leave blank to
+                    keep it.
+                  </>
+                ) : (
+                  'Not recorded for this API. Leave blank to keep the current upstream.'
+                )
+              }
             />
             <LabeledSelect<AuthPluginType>
               label="Authentication"
@@ -182,8 +224,10 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
                   label="Requests"
                   type="number"
                   min={1}
+                  max={MAX_RATE_LIMIT_REQUESTS}
                   value={rateLimitValue}
                   onChange={(event) => setRateLimitValue(event.target.value)}
+                  hint={`1 – ${MAX_RATE_LIMIT_REQUESTS.toLocaleString()} per window.`}
                 />
                 <LabeledSelect
                   label="Window"
@@ -193,6 +237,23 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
                 />
               </>
             ) : null}
+            <LabeledTextarea
+              className="md:col-span-2"
+              label="CORS allowed origins"
+              rows={3}
+              placeholder={'https://app.example.com\nhttps://admin.example.com'}
+              value={corsOrigins}
+              onChange={(event) => setCorsOrigins(event.target.value)}
+              hint={CORS_ORIGINS_HINT}
+            />
+            <div className="md:col-span-2">
+              <Checkbox
+                label="Allow credentials"
+                description="Lets browsers send cookies and Authorization headers cross-origin. Ignored when no origins are listed."
+                checked={corsCredentials}
+                onChange={(event) => setCorsCredentials(event.target.checked)}
+              />
+            </div>
             <div className="md:col-span-2">
               <Button type="submit" variant="primary" loading={update.isPending}>
                 Save settings

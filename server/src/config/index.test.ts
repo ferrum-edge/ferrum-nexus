@@ -34,6 +34,7 @@ describe('loadConfig', () => {
     assert.equal(config.port, 8787);
     assert.equal(config.publicUrl, 'http://127.0.0.1:5173');
     assert.equal(config.trustedProxies, false);
+    assert.equal(config.allowPrivateUpstreams, false);
     assert.equal(config.logLevel, 'info');
     assert.equal(config.sessionTtlSeconds, 43_200);
     assert.equal(config.db.driver, 'sqlite');
@@ -175,5 +176,16 @@ describe('loadConfig', () => {
       false,
     );
     expectConfigError(baseEnv({ NEXUS_COOKIE_SECURE: 'maybe' }), 'NEXUS_COOKIE_SECURE');
+  });
+
+  it('reads NEXUS_ALLOW_PRIVATE_UPSTREAMS as a boolean', () => {
+    assert.equal(
+      loadConfig(baseEnv({ NEXUS_ALLOW_PRIVATE_UPSTREAMS: 'true' })).allowPrivateUpstreams,
+      true,
+    );
+    expectConfigError(
+      baseEnv({ NEXUS_ALLOW_PRIVATE_UPSTREAMS: 'sometimes' }),
+      'NEXUS_ALLOW_PRIVATE_UPSTREAMS must be true or false',
+    );
   });
 });

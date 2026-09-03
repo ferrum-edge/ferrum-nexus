@@ -194,12 +194,24 @@ export interface SettingRecord {
 /** An `email_templates` row. */
 export type EmailTemplateRecord = EmailTemplate;
 
+/**
+ * What an `email_verification_tokens` row entitles its holder to do.
+ *
+ * The column exists so the two flows cannot borrow each other's tokens: a
+ * 24-hour verification link must not be redeemable at `reset-password`, and a
+ * reset link must not silently verify a mailbox at `verify-email`. Every lookup
+ * takes the purpose it expects, so there is no way to forget the check.
+ */
+export type VerificationTokenPurpose = 'email_verification' | 'password_reset';
+
 /** An `email_verification_tokens` row. */
 export interface VerificationTokenRecord {
   id: Uuid;
   user_id: Uuid;
   /** HMAC-SHA-256 of the emailed token. Unique. */
   token_hash: string;
+  /** Which flow issued the token; a token is only ever accepted by that flow. */
+  purpose: VerificationTokenPurpose;
   expires_at: IsoTimestamp;
   /** Set the first time the token is redeemed; a used token is never accepted again. */
   used_at: IsoTimestamp | null;
@@ -664,15 +676,35 @@ export interface EmailTemplateRepo {
   delete(key: EmailTemplateKey): Promise<boolean>;
 }
 
-/** Single-use email verification tokens. */
+/** Single-use email tokens: verification links and password-reset links. */
 export interface VerificationTokenRepo {
   create(input: CreateInput<VerificationTokenRecord>): Promise<VerificationTokenRecord>;
-  /** Lookup by the hashed token; callers must still check `used_at` and `expires_at`. */
-  findByTokenHash(tokenHash: string): Promise<VerificationTokenRecord | null>;
+  /**
+   * Lookup by the hashed token, restricted to one purpose so a token minted for
+   * a different flow is simply not found. Callers must still check `used_at`
+   * and `expires_at`.
+   */
+  findByTokenHash(
+    tokenHash: string,
+    purpose: VerificationTokenPurpose,
+  ): Promise<VerificationTokenRecord | null>;
+  /**
+   * Newest token of `purpose` for a user that is still live — neither burned
+   * nor expired at `now`. Backs the resend throttles, which need to know
+   * whether a usable link is already sitting in the recipient's inbox.
+   */
+  findLatestLiveForUser(
+    userId: Uuid,
+    purpose: VerificationTokenPurpose,
+    now: IsoTimestamp,
+  ): Promise<VerificationTokenRecord | null>;
   /** Burn the token. Returns `false` when it was already used or absent. */
   markUsed(id: Uuid, at: IsoTimestamp): Promise<boolean>;
-  /** Invalidate outstanding tokens, e.g. when a new one is issued. */
-  deleteForUser(userId: Uuid): Promise<number>;
+  /**
+   * Invalidate outstanding tokens, e.g. when a new one is issued. Without
+   * `purpose` every token of the user is dropped, whatever it was for.
+   */
+  deleteForUser(userId: Uuid, purpose?: VerificationTokenPurpose): Promise<number>;
   deleteExpired(now: IsoTimestamp): Promise<number>;
 }
 

@@ -47,6 +47,21 @@ untrusted browser ──┬── session cookie + CSRF ──> Nexus BFF ──
 The browser is never trusted with anything the gateway would accept. It holds a
 session cookie, and that cookie is only useful against Nexus.
 
+**Upstream destinations.** A published API is an egress path: the gateway will
+forward traffic to whatever `upstream_url` (or `servers[0].url`) the provider
+supplied. A provider account is only semi-trusted — registration may be open —
+so by default Nexus refuses to point a proxy at a loopback, RFC 1918, carrier-
+grade NAT, link-local, multicast or IPv4-mapped address, or at a `.local`,
+`.internal`, `.localhost` or `.home.arpa` name. That closes the obvious SSRF
+targets (cloud metadata at `169.254.169.254`, the Admin API, databases on the
+gateway's subnet) without resolving DNS. The check runs at publish, on a
+`PATCH` of `upstream_url`, and when a spec revision would move a proxy that
+follows its document; it returns `400 SPEC_INVALID` with
+`details.reason = "private_upstream"`. A portal that legitimately fronts
+internal services sets `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` and relies on
+network egress policy instead — a public name that is later re-pointed at a
+private address is outside what a hostname check can see either way.
+
 ### Out of scope
 
 - The security of Ferrum Edge itself, and of the upstream services behind it.
@@ -70,10 +85,17 @@ session cookie, and that cookie is only useful against Nexus.
 - **Cookie flags.** `nexus_session` is `HttpOnly`, `SameSite=Lax`, `Path=/`,
   `Max-Age=NEXUS_SESSION_TTL`, and `Secure` unless `NEXUS_COOKIE_SECURE=false`
   (the default outside `NEXUS_ENV=development`). Clear it only for a plaintext
-  `http://` deployment.
+  `http://` deployment. The pair is written in exactly one place —
+  `server/src/middleware/session-cookies.ts` — shared by the auth routes, the
+  password-change re-issue and the sliding-expiry hook, so the flags cannot
+  drift between them.
 - **Sliding expiry.** Default idle lifetime 12 hours (`NEXUS_SESSION_TTL`).
   Any request extends it, but the row is only written when less than half the
-  TTL remains, so an active SPA does not issue one `UPDATE` per request.
+  TTL remains, so an active SPA does not issue one `UPDATE` per request. A
+  request that does trigger the write also gets both cookies re-issued with a
+  fresh full-TTL `Max-Age` and their **existing** values — nothing is rotated,
+  only the lifetime moves, so the browser's expiry tracks `sessions.expires_at`
+  instead of the wall-clock stamped at sign-in.
 - **Revocation is immediate.** The `onRequest` hook re-reads the user on every
   request. A session whose account is expired, deleted or no longer `active` is
   destroyed on the spot — along with **every** session for that user — so the
@@ -89,6 +111,47 @@ session cookie, and that cookie is only useful against Nexus.
 - **Sign-in does not leak which addresses exist.** A missing account still
   costs one real scrypt derivation against a decoy hash, and "no such account"
   and "wrong password" return the identical `401 UNAUTHORIZED`.
+- **Resetting a password ends every session.** Unlike a self-service change,
+  a reset assumes the account may already be in someone else's hands, so it
+  keeps nothing: `POST /api/auth/reset-password` deletes every session of the
+  account and clears the calling browser's cookies. The user signs in again.
+
+### Password recovery
+
+`POST /api/auth/forgot-password` mails a single-use link and
+`POST /api/auth/reset-password` redeems it. Both are anonymous by necessity,
+which makes them the portal's most attractive account-enumeration oracle, so
+they are built to answer nothing:
+
+- **One response for every input.** `200 { "ok": true }`, whether the address
+  has an account, has none, belongs to a disabled account, or was asked for
+  again inside the 10-minute throttle. The same holds for
+  `POST /api/auth/resend-verification`.
+- **One latency for every input.** Those branches do wildly different amounts
+  of work — one indexed `SELECT` versus a token insert, an audit row and a
+  rendered message — so the service starts a scrypt derivation before the
+  branch and awaits it after. The floor costs more than the widest branch, and
+  starting it first rather than adding it afterwards keeps the endpoint at one
+  hash rather than two.
+- **One rejection for every bad link.** Unknown, expired and already-spent all
+  return `400 VALIDATION_FAILED` with the same message, so a caller working
+  through guessed tokens learns nothing from how close it got.
+- **Tokens cannot cross flows.** `email_verification_tokens.purpose`
+  (migration `002`) marks each token `email_verification` or `password_reset`,
+  and every lookup names the purpose it expects. A 24-hour verification link is
+  therefore not spendable as a password reset, which would otherwise turn
+  one-time read access to a mailbox into account takeover a day later.
+- **A reset link is single-use and short-lived.** One hour
+  (`PASSWORD_RESET_TTL_SECONDS`), burned by a compare-and-set inside the same
+  transaction that writes the new password, so a burn cannot outlive the change
+  it was spent on. Redeeming one also deletes any other outstanding reset link
+  for that account.
+- **The audit log is where the truth is.** `auth.password_reset_request` and
+  `auth.verification_resend` are written only when a link was really issued, so
+  operators can see what the response would not say.
+- **Rate limiting still applies.** Both routes sit under the `/api/auth/*`
+  limiter (20 requests per minute per IP), which is what bounds the cost of the
+  scrypt floor.
 
 ### Password storage
 
@@ -144,33 +207,44 @@ the route, while "is this your API" is a property of the row.
 
 ### Capability matrix
 
-| Capability                                              | client | provider | admin | super_admin |
-| ------------------------------------------------------- | :----: | :------: | :---: | :---------: |
-| Register, sign in, manage own profile                   |   ✓    |    ✓     |   ✓   |      ✓      |
-| Browse catalog, read specs                              |   ✓    |    ✓     |   ✓   |      ✓      |
-| Request access, cancel own request                      |   ✓    |    ✓     |   ✓   |      ✓      |
-| Issue / rotate / revoke **own** credentials             |   ✓    |    ✓     |   ✓   |      ✓      |
-| Messaging, notifications                                |   ✓    |    ✓     |   ✓   |      ✓      |
-| Publish an API, update own API/spec                     |   —    |    ✓     |   ✓   |      ✓      |
-| Create a test consumer for own API                      |   —    |    ✓     |   ✓   |      ✓      |
-| Approve / deny requests on **own** APIs                 |   —    |    ✓     |   ✓   |      ✓      |
-| Revoke grants on **own** APIs                           |   —    |    ✓     |   ✓   |      ✓      |
-| Edit / delete **another** provider's API                |   —    |    —     |   ✓   |      ✓      |
-| Decide requests / revoke grants on **any** API          |   —    |    —     |   ✓   |      ✓      |
-| List all users; change `client` ⇄ `provider`            |   —    |    —     |   ✓   |      ✓      |
-| Manage organizations                                    |   —    |    —     |   ✓   |      ✓      |
-| List another account's credential metadata              |   —    |    —     |   ✓   |      ✓      |
-| Read/reply in the platform inbox; read any thread       |   —    |    —     |   ✓   |      ✓      |
-| Portal settings (branding, CAPTCHA, SMTP, registration) |   —    |    —     |   ✓   |      ✓      |
-| Email templates, mass email                             |   —    |    —     |   ✓   |      ✓      |
-| Read the audit log                                      |   —    |    —     |   ✓   |      ✓      |
-| Grant or revoke `admin` / `super_admin`                 |   —    |    —     | **—** |      ✓      |
-| Disable an `admin` or `super_admin`                     |   —    |    —     | **—** |      ✓      |
-| God mode (4 endpoints)                                  |   —    |    —     |   —   |      ✓      |
+| Capability                                        | client | provider | admin | super_admin |
+| ------------------------------------------------- | :----: | :------: | :---: | :---------: |
+| Register, sign in, manage own profile             |   ✓    |    ✓     |   ✓   |      ✓      |
+| Browse catalog, read specs                        |   ✓    |    ✓     |   ✓   |      ✓      |
+| Request access, cancel own request                |   ✓    |    ✓     |   ✓   |      ✓      |
+| Issue / rotate / revoke **own** credentials       |   ✓    |    ✓     |   ✓   |      ✓      |
+| Messaging, notifications                          |   ✓    |    ✓     |   ✓   |      ✓      |
+| Publish an API, update own API/spec               |   —    |    ✓     |   ✓   |      ✓      |
+| Create a test consumer for own API                |   —    |    ✓     |   ✓   |      ✓      |
+| Approve / deny requests on **own** APIs           |   —    |    ✓     |   ✓   |      ✓      |
+| Revoke grants on **own** APIs                     |   —    |    ✓     |   ✓   |      ✓      |
+| Edit / delete **another** provider's API          |   —    |    —     |   ✓   |      ✓      |
+| Decide requests / revoke grants on **any** API    |   —    |    —     |   ✓   |      ✓      |
+| List all users; change `client` ⇄ `provider`      |   —    |    —     |   ✓   |      ✓      |
+| Manage organizations                              |   —    |    —     |   ✓   |      ✓      |
+| List another account's credential metadata        |   —    |    —     |   ✓   |      ✓      |
+| Read/reply in the platform inbox; read any thread |   —    |    —     |   ✓   |      ✓      |
+| Portal settings: branding, registration policy    |   —    |    —     |   ✓   |      ✓      |
+| Email templates, mass email                       |   —    |    —     |   ✓   |      ✓      |
+| Read the audit log                                |   —    |    —     |   ✓   |      ✓      |
+| Portal settings: **SMTP and CAPTCHA**             |   —    |    —     | **—** |      ✓      |
+| Grant or revoke `admin` / `super_admin`           |   —    |    —     | **—** |      ✓      |
+| Disable an `admin` or `super_admin`               |   —    |    —     | **—** |      ✓      |
+| God mode (4 endpoints)                            |   —    |    —     |   —   |      ✓      |
 
-The two bolded gaps are the point of the `super_admin` tier: an `admin` has
+The three bolded gaps are the point of the `super_admin` tier: an `admin` has
 broad authority over content and users but **cannot escalate itself or another
-account**, and cannot switch off an administrator.
+account**, cannot switch off an administrator, and cannot take over the
+platform's mail.
+
+`smtp` and `captcha` are `super_admin`-only because they are escalation paths
+dressed as preferences. Whoever controls the SMTP host receives every
+verification and password-reset link the portal sends, which is an account
+takeover of every user; whoever controls the CAPTCHA settings can switch off
+the registration brake. `PUT /api/admin/settings` answers `403 FORBIDDEN` for
+an `admin` sending either section, and the check lives in the service, so it
+holds however `updateSettings` is reached. Branding and registration policy
+stay at `admin`.
 
 ### Scoping rules worth knowing
 
@@ -209,7 +283,9 @@ admins _excluding the target_, so it is genuinely asking "is anyone else left?".
 It is implemented twice on purpose — in `users/service.ts` for
 `PATCH /api/users/:id`, and again in `admin/god-service.ts`, because god mode
 does not route through the ordinary path. Disabling your own account is refused
-separately with `409 CONFLICT`.
+separately with `409 CONFLICT`, but the last-super-admin count is checked
+**first** on both paths: when the two rules collide, `LAST_SUPER_ADMIN` is the
+answer that says how to fix it — promote a second super admin.
 
 ### Disabling an account
 
@@ -394,6 +470,15 @@ authority. `ferrum-admin/jwt.ts` mints it and nothing else does.
 - **`aud` is omitted by default.** Edge rejects a token carrying an `aud` claim
   when it has no audience configured, so Nexus stamps one only when
   `FERRUM_ADMIN_JWT_AUDIENCE` is explicitly set.
+- **`ns` is always stamped** with `FERRUM_NAMESPACE`, in the single-string form.
+  A gateway started with `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true` treats the
+  claim as the authorization boundary for every namespace-scoped route and
+  answers `403` to a token that has no `ns`; a gateway without the flag ignores
+  it. Stamping it unconditionally costs nothing on a permissive control plane
+  and is what lets Nexus work against a locked-down one. Edge also rejects a
+  _malformed_ claim (empty or non-string entries) at authentication time
+  regardless of the flag, so an empty namespace is refused at signing time
+  rather than minted.
 - **`jti` is a fresh UUID** on every mint; `nbf` equals `iat`.
 
 Handling the secret:
@@ -411,9 +496,22 @@ Handling the secret:
 - Rotation is a coordinated restart of both processes — see
   [`operations.md`](operations.md#rotating-ferrum_admin_jwt_secret).
 
-Upstream error text from Edge is logged and **never** echoed to a browser: it
-can carry operator-facing configuration detail. Callers see only
-`EDGE_ERROR` / `EDGE_UNAVAILABLE` with a generic message.
+Upstream error text from Edge is always logged. Whether it is _also_ echoed to
+the browser depends on whose problem the message describes:
+
+- **`400`, `409` and `422` are echoed.** These are Edge validating the body
+  Nexus built out of the caller's own request —
+  `FERRUM_BASIC_AUTH_HMAC_SECRET must be set…`, `listen_path already exists in
+this namespace`. A provider cannot fix a publish they cannot read the reason
+  for, so the text rides along in `details.gateway_message` (trimmed to 500
+  characters) and is repeated in the message.
+- **`401`, `403` and every `5xx` stay opaque.** Those describe the gateway's own
+  configuration or the Nexus↔Edge trust relationship and can name internal
+  hosts and settings; callers see only `EDGE_ERROR` / `EDGE_UNAVAILABLE` with a
+  generic message and the real text goes to the log alone.
+
+The split is enforced in one place — `classify()` in `ferrum-admin/client.ts`.
+Nothing else in the codebase reads an Edge error body.
 
 ---
 
@@ -443,12 +541,15 @@ ordinary reporting.
 
 ### Authentication
 
-| Action              | Target type | Description                                                                                                                 |
-| ------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `auth.register`     | `user`      | An account was created. `details`: email, role, `first_user`, `verification_required`. The actor is the new account itself. |
-| `auth.login`        | `user`      | A successful sign-in. Failed sign-ins are **not** audited (they are rate-limited instead).                                  |
-| `auth.logout`       | `session`   | A session was destroyed by its owner.                                                                                       |
-| `auth.verify_email` | `user`      | An email-verification token was redeemed.                                                                                   |
+| Action                        | Target type | Description                                                                                                                                                                                 |
+| ----------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auth.register`               | `user`      | An account was created. `details`: email, role, `first_user`, `verification_required`. The actor is the new account itself.                                                                 |
+| `auth.login`                  | `user`      | A successful sign-in. Failed sign-ins are **not** audited (they are rate-limited instead).                                                                                                  |
+| `auth.logout`                 | `session`   | A session was destroyed by its owner.                                                                                                                                                       |
+| `auth.verify_email`           | `user`      | An email-verification token was redeemed.                                                                                                                                                   |
+| `auth.verification_resend`    | `user`      | A fresh verification link was issued and queued. Written **only** when a link was really sent, so it is what distinguishes the four outcomes the endpoint's response deliberately does not. |
+| `auth.password_reset_request` | `user`      | A password-reset link was issued and queued. Absent for an unknown address, a disabled account, or a request inside the 10-minute throttle.                                                 |
+| `auth.password_reset`         | `user`      | A reset link was redeemed: new password set, address marked verified, every session of the account terminated.                                                                              |
 
 ### Users and organizations
 
@@ -462,14 +563,14 @@ ordinary reporting.
 
 ### Publishing
 
-| Action                 | Target type | Description                                                                                                                                                                     |
-| ---------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `api.publish`          | `api`       | An API was published and its Edge proxy + plugins created. `details`: slug, listen path, proxy id, auth plugin, requestable, visibility, rate limit, upstream, spec path count. |
-| `api.update`           | `api`       | Safe runtime settings changed. `details`: `changed_fields`, plus context such as `previous_auth_plugin` and `existing_credentials_invalidated`.                                 |
-| `api.spec_update`      | `api`       | A new spec revision was published and made current. `details`: spec id, version, path count, `backend_updated`.                                                                 |
-| `api.retire`           | `api`       | An API moved to `retired`. Emitted instead of `api.update` for that transition. `details.gateway_untouched` records that the proxy and live grants were left alone.             |
-| `api.delete`           | `api`       | An API and its Edge objects were destroyed. `details`: slug, proxy id, `revoked_grants`.                                                                                        |
-| `test_consumer.create` | `api`       | A provider created (or replaced) the disposable `nexus-test-<api_id>` consumer. `details`: consumer username/id, credential type, `replaced`.                                   |
+| Action                 | Target type | Description                                                                                                                                                                                                                                               |
+| ---------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `api.publish`          | `api`       | An API was published: its Edge proxy and plugin configs created, then associated on the proxy so the gateway runs them. `details`: slug, listen path, proxy id, auth plugin, requestable, visibility, rate limit, CORS policy, upstream, spec path count. |
+| `api.update`           | `api`       | Safe runtime settings changed. `details`: `changed_fields`, plus context such as `previous_auth_plugin` and `existing_credentials_invalidated`.                                                                                                           |
+| `api.spec_update`      | `api`       | A new spec revision was published and made current. `details`: spec id, version, path count, `backend_updated`.                                                                                                                                           |
+| `api.retire`           | `api`       | An API moved to `retired`. Emitted instead of `api.update` for that transition. `details.gateway_untouched` records that the proxy and live grants were left alone.                                                                                       |
+| `api.delete`           | `api`       | An API and its Edge objects were destroyed. `details`: slug, proxy id, `revoked_grants`.                                                                                                                                                                  |
+| `test_consumer.create` | `api`       | A provider created (or replaced) the disposable `nexus-test-<api_id>` consumer. `details`: consumer username/id, credential type, `replaced`.                                                                                                             |
 
 ### Access workflow
 
@@ -552,6 +653,9 @@ Before going live:
       the same origin.
 - [ ] `NEXUS_RATE_LIMIT_ENABLED=true`; a proxy-level limit exists if you run
       more than one instance.
+- [ ] `NEXUS_ALLOW_PRIVATE_UPSTREAMS` is left at `false` unless the portal is
+      meant to front internal services, in which case gateway egress is
+      restricted at the network layer.
 - [ ] CAPTCHA configured if registration is open to the internet.
 - [ ] Registration policy reviewed: `open_registration`, `allowed_roles`,
       `require_email_verification`.

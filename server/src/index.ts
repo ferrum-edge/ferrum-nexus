@@ -22,6 +22,8 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyInstance } from 'fastify';
 
+import type { EmailTemplateKey } from '@ferrum-nexus/shared';
+
 import { createAccessService, type AccessService } from './access/service.js';
 import { createGodService, type GodService } from './admin/god-service.js';
 import { createMassEmailService, type MassEmailService } from './admin/mass-email-service.js';
@@ -32,7 +34,12 @@ import {
   type CaptchaService,
   type CaptchaTransport,
 } from './auth/captcha.js';
-import { createAuthService, type AuthService, type OnRegistered } from './auth/service.js';
+import {
+  createAuthService,
+  type AuthService,
+  type OnEmailTokenIssued,
+  type OnRegistered,
+} from './auth/service.js';
 import { createCatalogService, type CatalogService } from './catalog/service.js';
 import { loadConfig, type NexusConfig } from './config/index.js';
 import { createConsumerProvisioner } from './credentials/consumers.js';
@@ -204,6 +211,20 @@ export async function buildServer(
     audit,
     captcha,
     onRegistered: deps.onRegistered ?? defaultOnRegistered(config, email, notifications, warn),
+    onVerificationResend: emailTokenSender(config, email, warn, {
+      templateKey: 'verification',
+      keyPrefix: 'verify',
+      path: '/verify-email',
+      urlVar: 'verification_url',
+      tokenVar: 'verification_token',
+    }),
+    onPasswordResetRequested: emailTokenSender(config, email, warn, {
+      templateKey: 'password_reset',
+      keyPrefix: 'reset',
+      path: '/reset-password',
+      urlVar: 'reset_url',
+      tokenVar: 'reset_token',
+    }),
   });
   const settings = createSettingsService({ config, store: deps.store, crypto, audit, auth });
   const messaging = createMessagingService({
@@ -457,6 +478,63 @@ export async function buildServer(
   if (deps.startOutboxWorker ?? config.env !== 'test') outbox.start();
 
   return app;
+}
+
+/** How one flavour of single-use link is turned into a queued message. */
+interface EmailTokenDelivery {
+  templateKey: EmailTemplateKey;
+  /** Outbox idempotency keys are `<keyPrefix>:<token id>` — one message per token. */
+  keyPrefix: string;
+  /** SPA path the link points at, e.g. `/reset-password`. */
+  path: string;
+  /** Template variable carrying the full link. */
+  urlVar: string;
+  /** Template variable carrying the bare token, for admins who reword the mail. */
+  tokenVar: string;
+}
+
+/**
+ * Build the hook that delivers a minted link — a password reset, or a re-sent
+ * verification.
+ *
+ * The idempotency key is bound to the *token*, not the user, so a second
+ * request that mints a second token can still be delivered while one minted
+ * token stays at most one message. A queueing failure is logged and swallowed:
+ * the token is already in the database and the endpoint's whole contract is
+ * that its answer never varies, so throwing here would turn a broken outbox
+ * into precisely the signal the endpoint exists to withhold.
+ */
+function emailTokenSender(
+  config: NexusConfig,
+  email: EmailService,
+  log: (obj: Record<string, unknown>, message: string) => void,
+  delivery: EmailTokenDelivery,
+): OnEmailTokenIssued {
+  return async ({ user, token, tokenId }) => {
+    try {
+      const url = `${config.publicUrl}${delivery.path}?token=${encodeURIComponent(token)}`;
+      await email.enqueue({
+        to: user.email,
+        templateKey: delivery.templateKey,
+        idempotencyKey: `${delivery.keyPrefix}:${tokenId}`,
+        vars: {
+          recipient_name: user.display_name,
+          recipient_email: user.email,
+          [delivery.urlVar]: url,
+          [delivery.tokenVar]: token,
+        },
+      });
+    } catch (error) {
+      log(
+        {
+          user_id: user.id,
+          template: delivery.templateKey,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Could not queue a single-use link email',
+      );
+    }
+  };
 }
 
 /**
