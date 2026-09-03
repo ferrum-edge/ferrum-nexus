@@ -38,6 +38,7 @@ import {
   type CreateThreadRequest,
   type CreateThreadResponse,
   type DecideAccessRequestRequest,
+  type DeleteApiPluginResponse,
   type DeleteApiResponse,
   type DeleteCredentialResponse,
   type DenyAccessRequestResponse,
@@ -63,6 +64,7 @@ import {
   type IssueCredentialResponse,
   type ListAccessRequestsQuery,
   type ListAccessRequestsResponse,
+  type ListApiPluginsResponse,
   type ListApisQuery,
   type ListApisResponse,
   type ListAuditLogsQuery,
@@ -102,6 +104,8 @@ import {
   type RotateCredentialResponse,
   type SendMessageRequest,
   type SendMessageResponse,
+  type SetApiPluginRequest,
+  type SetApiPluginResponse,
   type SmtpTestRequest,
   type SmtpTestResponse,
   type UpdateApiRequest,
@@ -378,6 +382,25 @@ export const apisApi = {
     body: CreateTestConsumerRequest = {},
   ): Promise<CreateTestConsumerResponse> =>
     post<CreateTestConsumerResponse>(`/apis/${encodeURIComponent(id)}/test-consumer`, body),
+
+  /* ── Plugin palette ─────────────────────────────────────────────────── */
+  //
+  // Only the *state* crosses the wire: which palette plugins this API has on,
+  // and how each is configured. The palette itself — the plugins, their fields
+  // and their bounds — is the static `PROVIDER_PLUGINS` catalog the SPA imports
+  // from `@ferrum-nexus/shared`, so there is nothing to fetch for it.
+
+  listPlugins: (id: string): Promise<ListApiPluginsResponse> =>
+    get<ListApiPluginsResponse>(`/apis/${encodeURIComponent(id)}/plugins`),
+  setPlugin: (id: string, name: string, body: SetApiPluginRequest): Promise<SetApiPluginResponse> =>
+    put<SetApiPluginResponse>(
+      `/apis/${encodeURIComponent(id)}/plugins/${encodeURIComponent(name)}`,
+      body,
+    ),
+  removePlugin: (id: string, name: string): Promise<DeleteApiPluginResponse> =>
+    del<DeleteApiPluginResponse>(
+      `/apis/${encodeURIComponent(id)}/plugins/${encodeURIComponent(name)}`,
+    ),
 };
 
 /* ── Access requests & grants ───────────────────────────────────────────── */

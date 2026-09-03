@@ -337,6 +337,80 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
     'preflight_continue',
     'unmatched_preflights',
   ],
+  // ── The provider plugin palette (`shared/src/plugins.ts`) ──────────────
+  // Key sets taken from Ferrum Edge's `openapi.yaml`; every one of these
+  // schemas is `additionalProperties: false`, so a typo'd field is a 400 on a
+  // real gateway and must be one here too.
+  security_headers: [
+    'content_type_options',
+    'frame_options',
+    'referrer_policy',
+    'hsts',
+    'content_security_policy',
+    'permissions_policy',
+    'set',
+    'remove',
+    'override_existing',
+  ],
+  request_size_limiting: ['max_bytes'],
+  response_size_limiting: ['max_bytes', 'require_buffered_check'],
+  ip_restriction: ['allow', 'deny', 'mode'],
+  bot_detection: [
+    'blocked_patterns',
+    'allow_list',
+    'allow_missing_user_agent',
+    'custom_response_code',
+  ],
+  correlation_id: ['header_name', 'echo_downstream'],
+  compression: [
+    'algorithms',
+    'min_content_length',
+    'content_types',
+    'max_decompressed_request_size',
+    'remove_accept_encoding',
+    'gzip_level',
+    'brotli_quality',
+    'decompress_request',
+  ],
+  response_caching: [
+    'ttl_seconds',
+    'max_entries',
+    'max_entry_size_bytes',
+    'max_total_size_bytes',
+    'cacheable_methods',
+    'cacheable_status_codes',
+    'respect_cache_control',
+    'respect_no_cache',
+    'vary_by_headers',
+    'cache_key_include_query',
+    'cache_key_include_consumer',
+    'anonymous_caller_scope',
+    'add_cache_status_header',
+    'invalidate_on_unsafe_methods',
+  ],
+  request_deduplication: [
+    'header_name',
+    'ttl_seconds',
+    'inflight_ttl_seconds',
+    'max_entries',
+    'max_entry_size_bytes',
+    'max_total_size_bytes',
+    'applicable_methods',
+    'scope_by_consumer',
+    'anonymous_caller_scope',
+    'enforce_required',
+    'sync_mode',
+    'redis_url',
+    'redis_tls',
+    'redis_key_prefix',
+    'redis_pool_size',
+    'redis_connect_timeout_seconds',
+    'redis_health_check_interval_seconds',
+    'redis_username',
+    'redis_password',
+    'on_redis_unavailable',
+  ],
+  request_termination: ['status_code', 'content_type', 'body', 'message', 'trigger'],
   openapi_validator: [
     'enforcement_mode',
     'validate_request',
@@ -588,6 +662,290 @@ function validatePluginConfig(pluginName: string, config: unknown): string | nul
     if (problem) return problem;
   }
 
+  return palettePluginError(pluginName, config);
+}
+
+/** Redis-only `request_deduplication` keys, rejected outside `sync_mode: redis`. */
+const DEDUP_REDIS_KEYS = [
+  'redis_url',
+  'redis_tls',
+  'redis_key_prefix',
+  'redis_pool_size',
+  'redis_connect_timeout_seconds',
+  'redis_health_check_interval_seconds',
+  'redis_username',
+  'redis_password',
+  'on_redis_unavailable',
+];
+
+/**
+ * Admission rules the palette plugins carry **beyond** their closed key sets.
+ *
+ * Same principle as {@link openapiValidatorError}: only the checks Nexus can
+ * actually trip are modelled. The interesting failure is a config Nexus writes,
+ * a permissive fake accepts, and a real gateway refuses — so every rule here
+ * mirrors one documented in Edge's `openapi.yaml`.
+ */
+function palettePluginError(pluginName: string, config: Record<string, unknown>): string | null {
+  const positiveInt = (value: unknown): boolean =>
+    typeof value === 'number' && Number.isInteger(value) && value > 0;
+
+  switch (pluginName) {
+    case 'request_size_limiting':
+    case 'response_size_limiting':
+      // Required and must be greater than zero — Edge rejects plugin creation
+      // when it is missing or 0.
+      if (!positiveInt(config.max_bytes)) {
+        return `${pluginName}: 'max_bytes' is required and must be an integer greater than zero`;
+      }
+      return null;
+
+    case 'ip_restriction': {
+      // `anyOf: [{required:[allow], allow.minItems:1}, {required:[deny], …}]`
+      const allow = Array.isArray(config.allow) ? config.allow : [];
+      const deny = Array.isArray(config.deny) ? config.deny : [];
+      if (allow.length === 0 && deny.length === 0) {
+        return "ip_restriction: at least one of 'allow' or 'deny' must be non-empty";
+      }
+      if (
+        config.mode !== undefined &&
+        !['allow_first', 'deny_first'].includes(String(config.mode))
+      ) {
+        return `ip_restriction: unsupported mode '${String(config.mode)}'`;
+      }
+      return null;
+    }
+
+    case 'bot_detection': {
+      const blocked = config.blocked_patterns;
+      if (
+        Array.isArray(blocked) &&
+        blocked.length === 0 &&
+        config.allow_missing_user_agent !== false
+      ) {
+        return "bot_detection: an empty 'blocked_patterns' is only valid with 'allow_missing_user_agent: false'";
+      }
+      const code = config.custom_response_code;
+      if (
+        code !== undefined &&
+        code !== null &&
+        (typeof code !== 'number' || !Number.isInteger(code) || code < 400 || code > 599)
+      ) {
+        return "bot_detection: 'custom_response_code' must be an integer between 400 and 599";
+      }
+      return null;
+    }
+
+    case 'compression': {
+      const algorithms = config.algorithms;
+      if (algorithms === undefined) return null;
+      if (!Array.isArray(algorithms)) return "compression: 'algorithms' must be an array";
+      for (const algorithm of algorithms) {
+        if (!['gzip', 'br', 'brotli'].includes(String(algorithm))) {
+          return `compression: unsupported algorithm '${String(algorithm)}'`;
+        }
+      }
+      return null;
+    }
+
+    case 'response_caching': {
+      const methods = config.cacheable_methods;
+      if (methods !== undefined) {
+        if (!Array.isArray(methods) || methods.length === 0) {
+          return "response_caching: 'cacheable_methods' must contain at least one entry";
+        }
+        for (const method of methods) {
+          // Only bodyless retrieval methods: cache lookup runs before the
+          // request body is final, so a body-bearing method cannot be keyed.
+          if (!['GET', 'HEAD'].includes(String(method))) {
+            return `response_caching: '${String(method)}' is not a cacheable method`;
+          }
+        }
+      }
+      const statuses = config.cacheable_status_codes;
+      if (statuses !== undefined) {
+        if (!Array.isArray(statuses) || statuses.length === 0) {
+          return "response_caching: 'cacheable_status_codes' must contain at least one entry";
+        }
+        for (const status of statuses) {
+          if (
+            typeof status !== 'number' ||
+            !Number.isInteger(status) ||
+            status < 200 ||
+            status > 599 ||
+            status === 206 ||
+            status === 304
+          ) {
+            return `response_caching: '${String(status)}' is not a storable status`;
+          }
+        }
+      }
+      return null;
+    }
+
+    case 'request_deduplication': {
+      if (
+        config.sync_mode !== undefined &&
+        !['local', 'redis'].includes(String(config.sync_mode))
+      ) {
+        return `request_deduplication: unsupported sync_mode '${String(config.sync_mode)}'`;
+      }
+      const redisMode = config.sync_mode === 'redis';
+      if (redisMode && typeof config.redis_url !== 'string') {
+        return "request_deduplication: 'redis_url' is required when sync_mode is 'redis'";
+      }
+      if (!redisMode) {
+        for (const field of DEDUP_REDIS_KEYS) {
+          if (config[field] !== undefined) {
+            return `request_deduplication: '${field}' is only valid when sync_mode is 'redis'`;
+          }
+        }
+      }
+      const methods = config.applicable_methods;
+      if (methods !== undefined && (!Array.isArray(methods) || methods.length === 0)) {
+        return "request_deduplication: 'applicable_methods' must contain at least one entry";
+      }
+      return null;
+    }
+
+    case 'request_termination': {
+      const status = config.status_code;
+      if (
+        status !== undefined &&
+        (typeof status !== 'number' || !Number.isInteger(status) || status < 200 || status > 599)
+      ) {
+        return "request_termination: 'status_code' must be an integer between 200 and 599";
+      }
+      return null;
+    }
+
+    default:
+      return null;
+  }
+}
+
+/**
+ * Plugins whose per-instance execution `trigger` Edge **refuses**, with the
+ * reason it gives.
+ *
+ * A trigger can only gate a plugin whose whole effect flows through its own
+ * per-request hooks. `security_headers` re-asserts initial response headers
+ * from paths that hold no request context; the two size limits publish a fixed
+ * per-proxy body ceiling the proxy core enforces outside the hook chain; and
+ * `compression` and `correlation_id` publish contextless response-trailer
+ * ownership into the per-generation policy. Gating any of them would leave the
+ * instance half-applied, so Edge rejects the config rather than accept an
+ * ambiguous one.
+ *
+ * `response_caching` is refused too while `add_cache_status_header` is at its
+ * `true` default; the palette never offers a trigger on it, so the mock does
+ * not model the conditional half of that rule.
+ *
+ * @see Edge `docs/plugin_execution_order.md` §"Phases outside the trigger boundary"
+ */
+const PLUGIN_TRIGGER_REFUSED: Readonly<Record<string, string>> = {
+  security_headers:
+    'the plugin owns the initial response-header policy, which is re-asserted without a request context',
+  request_size_limiting:
+    'the plugin publishes a fixed per-proxy request-body ceiling that the proxy core enforces before a per-request trigger can be evaluated',
+  response_size_limiting:
+    'the plugin publishes a fixed per-proxy response-body ceiling that the proxy core enforces outside the per-request plugin hook chain',
+  compression:
+    'the plugin publishes contextless response-trailer ownership into the per-generation policy',
+  correlation_id:
+    'the plugin publishes contextless response-trailer ownership into the per-generation policy',
+};
+
+/** The four branches one `PluginTriggerNode` may set — exactly one of them. */
+const TRIGGER_NODE_BRANCHES = ['all', 'any', 'not', 'match'];
+
+/** The leaf predicates `PluginTriggerMatch` accepts — exactly one per leaf. */
+const TRIGGER_MATCH_PREDICATES = [
+  'method',
+  'path',
+  'host',
+  'sni',
+  'header',
+  'query',
+  'cookie',
+  'protocol',
+  'source_cidr',
+  'namespace',
+  'proxy_id',
+  'listen_port',
+  'consumer',
+  'auth_method',
+  'spiffe_id',
+];
+
+/**
+ * Validate a plugin config's `trigger` the way Edge's `PluginTrigger`
+ * deserializer plus its admission checks do. Returns an error message, or
+ * `null` when the trigger is acceptable.
+ *
+ * A permissive fake would be actively misleading here: a trigger Edge refuses
+ * is a `400` that leaves the plugin unattached, and a malformed predicate tree
+ * is the difference between "runs on POST /orders" and "runs on everything".
+ */
+function validatePluginTrigger(pluginName: string, trigger: unknown): string | null {
+  if (trigger === undefined || trigger === null) return null;
+
+  const refusal = PLUGIN_TRIGGER_REFUSED[pluginName];
+  if (refusal !== undefined) {
+    return `${pluginName}: a trigger is not supported — ${refusal}`;
+  }
+  if (!isRecord(trigger)) return 'trigger must be a JSON object';
+  for (const field of Object.keys(trigger)) {
+    if (field !== 'when') return `trigger: unknown field '${field}'`;
+  }
+  if (trigger.when === undefined) return "trigger: 'when' is required";
+  return triggerNodeError(trigger.when, 'trigger.when');
+}
+
+/** One node of the predicate tree; recursive for `all`/`any`/`not`. */
+function triggerNodeError(node: unknown, path: string): string | null {
+  if (!isRecord(node)) return `${path} must be a JSON object`;
+  const keys = Object.keys(node);
+  for (const key of keys) {
+    if (!TRIGGER_NODE_BRANCHES.includes(key)) return `${path}: unknown field '${key}'`;
+  }
+  // A node with zero or several branches has no defined truth value.
+  if (keys.length !== 1) return `${path} must set exactly one of all, any, not or match`;
+
+  const branch = keys[0];
+  if (branch === 'not') return triggerNodeError(node.not, `${path}.not`);
+  if (branch === 'all' || branch === 'any') {
+    const children = node[branch];
+    if (!Array.isArray(children) || children.length === 0) {
+      return `${path}.${branch} must be a non-empty array`;
+    }
+    for (const [index, child] of children.entries()) {
+      const problem = triggerNodeError(child, `${path}.${branch}[${index}]`);
+      if (problem) return problem;
+    }
+    return null;
+  }
+
+  const leaf = node.match;
+  if (!isRecord(leaf)) return `${path}.match must be a JSON object`;
+  const predicates = Object.keys(leaf);
+  for (const predicate of predicates) {
+    if (!TRIGGER_MATCH_PREDICATES.includes(predicate)) {
+      return `${path}.match: unknown predicate '${predicate}'`;
+    }
+  }
+  if (predicates.length !== 1) return `${path}.match must set exactly one predicate`;
+
+  if (leaf.method !== undefined && (!Array.isArray(leaf.method) || leaf.method.length === 0)) {
+    return `${path}.match.method must be a non-empty array`;
+  }
+  if (leaf.path !== undefined) {
+    if (!isRecord(leaf.path)) return `${path}.match.path must be a JSON object`;
+    const forms = Object.keys(leaf.path).filter((key) => key !== 'case_insensitive');
+    if (forms.length !== 1 || !['exact', 'prefix', 'regex'].includes(String(forms[0]))) {
+      return `${path}.match.path must set exactly one of exact, prefix or regex`;
+    }
+  }
   return null;
 }
 
@@ -1349,6 +1707,11 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
           const problem = validatePluginConfig(body.plugin_name, body.config);
           if (problem) return fail(res, 400, problem);
         }
+        // The trigger is checked either way: it is a property of the config
+        // resource rather than of the constructed plugin, and Edge refuses one
+        // on a plugin that cannot be gated whatever `enabled` says.
+        const triggerProblem = validatePluginTrigger(body.plugin_name, body.trigger);
+        if (triggerProblem) return fail(res, 400, triggerProblem);
         const config = {
           ...body,
           id: typeof body.id === 'string' && body.id !== '' ? body.id : randomUUID(),
@@ -1371,13 +1734,18 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     if (method === 'PUT') {
       if (!existing) return fail(res, 404, 'Plugin config not found');
       if (!isRecord(body)) return fail(res, 400, 'Request body must be a JSON object');
+      // A replace is deserialized by the same `deny_unknown_fields` struct as a
+      // create, so the closed field set applies here too.
+      for (const field of Object.keys(body)) {
+        if (!PLUGIN_CONFIG_KEYS.has(field)) return fail(res, 400, `unknown field: ${field}`);
+      }
+      const pluginName = String(body.plugin_name ?? existing.plugin_name);
       if (body.enabled !== false) {
-        const problem = validatePluginConfig(
-          String(body.plugin_name ?? existing.plugin_name),
-          body.config,
-        );
+        const problem = validatePluginConfig(pluginName, body.config);
         if (problem) return fail(res, 400, problem);
       }
+      const triggerProblem = validatePluginTrigger(pluginName, body.trigger);
+      if (triggerProblem) return fail(res, 400, triggerProblem);
       const updated = {
         ...body,
         id,
@@ -1527,6 +1895,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
           return handlePluginConfigs(res, method, segments, namespace, body, url.searchParams);
         }
         if (method === 'GET') {
+          // The plugins Nexus writes: the six first-class ones plus every
+          // member of the provider palette. Real Edge lists ~75; anything not
+          // here is one Nexus never names.
           return send(res, 200, [
             'key_auth',
             'basic_auth',
@@ -1535,6 +1906,16 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
             'cors',
             'rate_limiting',
             'openapi_validator',
+            'security_headers',
+            'request_size_limiting',
+            'response_size_limiting',
+            'ip_restriction',
+            'bot_detection',
+            'correlation_id',
+            'compression',
+            'response_caching',
+            'request_deduplication',
+            'request_termination',
           ]);
         }
         return fail(res, 404, 'Not found');

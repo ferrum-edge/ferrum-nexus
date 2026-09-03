@@ -53,6 +53,8 @@ import type {
   AccessRequest,
   AccessRequestStatus,
   Api,
+  ApiPlugin,
+  ApiPluginTrigger,
   ApiSpec,
   ApiStatus,
   ApiVisibility,
@@ -152,6 +154,20 @@ export type ApiRecord = Omit<Api, 'listen_path' | 'invoke_url'>;
 
 /** An `api_specs` row, including the raw uploaded document. */
 export type ApiSpecRecord = ApiSpec;
+
+/**
+ * An `api_plugins` row — one palette plugin as the provider configured it.
+ *
+ * The wire {@link ApiPlugin} carries no ids because the route addresses a
+ * plugin by `(api, plugin_name)`; the row needs both, plus the API it belongs
+ * to. The Ferrum plugin config id is deliberately absent: like `rate_limiting`
+ * and `cors`, the gateway object is found by `proxy_id` + `plugin_name`, so an
+ * operator who recreates one by hand reconciles automatically.
+ */
+export interface ApiPluginRecord extends ApiPlugin {
+  id: Uuid;
+  api_id: Uuid;
+}
 
 /** An `access_requests` row (without the denormalised joins the API adds). */
 export type AccessRequestRecord = Omit<AccessRequest, 'api' | 'requester'>;
@@ -463,6 +479,42 @@ export interface ApiSpecRepo {
   delete(id: Uuid): Promise<boolean>;
   /** Cascade helper for API deletion. Returns the number of revisions removed. */
   deleteByApi(apiId: Uuid): Promise<number>;
+}
+
+/**
+ * Palette plugins a provider switched on for their own API.
+ *
+ * There is no `list`/`count` pair here on purpose: the palette is small and
+ * always read whole for one API, so the repo offers `listByApi` rather than the
+ * filter+pagination shape the browsable collections use.
+ */
+export interface ApiPluginRepo {
+  /** Every configured plugin for one API, oldest first. */
+  listByApi(apiId: Uuid): Promise<ApiPluginRecord[]>;
+  /** One plugin by its `(api, plugin_name)` key. */
+  find(apiId: Uuid, pluginName: string): Promise<ApiPluginRecord | null>;
+  /**
+   * Create or replace the row for `(api_id, plugin_name)` in one statement.
+   *
+   * Upsert rather than create+update because the pair is unique and the route
+   * is a `PUT`: two tabs saving the same plugin must converge on one row rather
+   * than raise `CONFLICT` at whichever of them lost the race.
+   * `created_at` is preserved on a replace; `updated_at` always moves.
+   */
+  upsert(input: UpsertApiPluginInput): Promise<ApiPluginRecord>;
+  /** Returns `false` when the API had no row for that plugin. */
+  delete(apiId: Uuid, pluginName: string): Promise<boolean>;
+  /** Cascade helper for API deletion. Returns the number of rows removed. */
+  deleteByApi(apiId: Uuid): Promise<number>;
+}
+
+/** Payload for {@link ApiPluginRepo.upsert}. */
+export interface UpsertApiPluginInput {
+  api_id: Uuid;
+  plugin_name: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  trigger: ApiPluginTrigger | null;
 }
 
 /** Client requests for access to a requestable API. */
@@ -786,6 +838,7 @@ export interface NexusStore {
   readonly sessions: SessionRepo;
   readonly apis: ApiRepo;
   readonly apiSpecs: ApiSpecRepo;
+  readonly apiPlugins: ApiPluginRepo;
   readonly accessRequests: AccessRequestRepo;
   readonly grants: GrantRepo;
   readonly credentials: CredentialRepo;

@@ -323,6 +323,93 @@ either side. A failed publish leaves no debris.
 
 ---
 
+## Plugins
+
+**My APIs → the API → Plugins.** Everything on the Settings tab is part of what
+your API _is_ — how callers authenticate, whether they need a grant, their
+quota, browser CORS, spec enforcement. The Plugins tab is the layer on top:
+gateway behaviour you can add or take away at any time without republishing.
+
+Each card is off until you turn it on. Turning one on writes a plugin
+configuration to the gateway and attaches it to your proxy in the same
+operation, so it is live the moment the card saves. If the gateway refuses the
+change nothing is saved on either side.
+
+### What is on offer
+
+| Plugin                   | What it does                                                                                                                                        | What your consumers see                                                                                |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| **Security headers**     | Adds the browser hardening headers to every response and strips the ones that advertise your stack                                                  | Nothing changes in how the API is called                                                               |
+| **Request size limit**   | Rejects an upload over your ceiling with `413`, before a byte reaches your backend                                                                  | `413 Payload Too Large` — document the ceiling next to any upload endpoint                             |
+| **Response size limit**  | Refuses to relay a backend response over your ceiling, answering `502` instead                                                                      | `502 Bad Gateway` — paginate anything that can grow without bound                                      |
+| **IP allow / deny list** | Restricts who may call the API by source address. A deny match always beats an allow match                                                          | Callers from an unlisted address are rejected before authentication                                    |
+| **Bot filter**           | Blocks requests whose `User-Agent` matches a pattern you list                                                                                       | Legitimate SDKs should send a recognisable `User-Agent`; the allow list is checked first               |
+| **Correlation ID**       | Gives every call a stable id, forwards it to your backend and echoes it back                                                                        | They may send their own id, or read the one the gateway minted, and quote it in a support ticket       |
+| **Response compression** | Compresses responses when the caller asks for it                                                                                                    | A compressed body when they send `Accept-Encoding`; every mainstream client handles it                 |
+| **Response caching**     | Serves a repeated read from the gateway instead of your backend. Each caller keeps its own partition, so one consumer never sees another's response | `X-Cache-Status` and `Age` headers; `Cache-Control: no-cache` bypasses the cache                       |
+| **Idempotency keys**     | Makes a retried write safe: the first call with a given key runs, an identical retry replays the first response                                     | They send a unique key per operation and may safely retry; a reused key with a different body is `409` |
+| **Maintenance / sunset** | Answers with a canned response instead of calling your backend                                                                                      | The status and message you choose — `503` for a maintenance window, `410` for a retired endpoint       |
+
+The **bot filter is a coarse filter, not bot defence**: the `User-Agent` is
+client-controlled and trivially spoofed. It keeps casual scrapers off a public
+catalog API; it will not stop anyone who is trying.
+
+**Security headers: HSTS is the one to think about.** Turning it on tells
+browsers to use HTTPS for your whole domain, including every subdomain, for a
+year. Only switch it on when that is true.
+
+### Restricting a plugin to some requests
+
+Some cards offer **Only run on some requests** — a method list, a path prefix,
+or both. That is how you retire one endpoint without touching the rest: turn on
+Maintenance / sunset, choose `410`, and set the path prefix to the endpoint's
+path.
+
+The prefix is matched against the whole request path as the client sends it, so
+it starts with your gateway path (`/nexus/your-slug/…`); the placeholder in the
+box shows the right shape. It has to be a plain path — no `%` escapes, no
+backslashes, no `.` or `..` segments — because the gateway compares a
+canonicalised path that never contains any of those, so such a prefix could
+only ever silently fail to match.
+
+**Not every plugin can be restricted.** The cards without the option are ones
+the gateway applies to a whole proxy or not at all: security headers, the two
+size limits, compression, correlation IDs and response caching. Their effect is
+decided once for the proxy rather than per request, so a per-request condition
+could only be half applied — the gateway rejects it rather than pretend.
+
+### Pausing versus removing
+
+A configured card has an **Active** checkbox and a **Remove** button, and they
+are different things:
+
+- **Unchecking Active** leaves the configuration on the gateway with your
+  settings intact, but the gateway stops running it. Tick it again and you are
+  back where you were.
+- **Remove** detaches and deletes the configuration. The settings are gone.
+
+Pause is the right one for a temporary change; remove is for a decision.
+
+### What is not offered, and why
+
+**Other authentication methods** — HMAC signatures, JWKS from your own identity
+provider, OAuth 2.0 token introspection, mutual TLS. These are not extra
+plugins on top of your authentication choice; they _replace_ it, and each needs
+its own kind of credential for the portal to issue, rotate and show once. They
+belong with the authentication setting on the Settings tab, and they are not
+built yet.
+
+**Serving your spec from the gateway** (`spec_expose`) — your document is
+already served by the portal's catalog, and publishing it at a second address
+on the gateway is a routing decision rather than a plugin toggle.
+
+**Everything operators use to run the gateway** — log shipping, tracing,
+metrics, alerting, mesh, fault injection, load testing. Those are how the
+platform is run, not how your API behaves for the people calling it. Ask your
+administrator if you need something from that list.
+
+---
+
 ## Usage and backend health
 
 **My APIs → the API → Overview → Usage.** The card is a live read of what the

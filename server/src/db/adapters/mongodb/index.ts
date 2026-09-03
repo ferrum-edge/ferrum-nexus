@@ -52,10 +52,12 @@ import {
   type Filter,
   type IndexSpecification,
   type Sort,
+  type UpdateFilter,
 } from 'mongodb';
 
 import type {
   AccessRequestStatus,
+  ApiPluginTrigger,
   ApiStatus,
   ApiTimeouts,
   ApiVisibility,
@@ -96,6 +98,8 @@ import type {
   AccessRequestRecord,
   AccessRequestRepo,
   ApiFilter,
+  ApiPluginRecord,
+  ApiPluginRepo,
   ApiRecord,
   ApiRepo,
   ApiSpecRecord,
@@ -148,6 +152,7 @@ const COLLECTIONS = {
   sessions: 'sessions',
   apis: 'apis',
   apiSpecs: 'api_specs',
+  apiPlugins: 'api_plugins',
   accessRequests: 'access_requests',
   grants: 'grants',
   consumers: 'consumers',
@@ -413,6 +418,22 @@ function mapApiSpec(row: Row): ApiSpecRecord {
     parsed_title: strOrNull(row.parsed_title),
     parsed_version: strOrNull(row.parsed_version),
     is_current: flag(row.is_current),
+    created_at: str(row.created_at),
+    updated_at: str(row.updated_at),
+  };
+}
+
+function mapApiPlugin(row: Row): ApiPluginRecord {
+  return {
+    id: str(row._id),
+    api_id: str(row.api_id),
+    plugin_name: str(row.plugin_name),
+    enabled: flag(row.enabled),
+    // Mongo stores the config and the trigger as native subdocuments rather
+    // than as the JSON text the SQL adapters keep in their `*_json` columns;
+    // both sides of the store contract see the same parsed objects.
+    config: (row.config ?? {}) as Record<string, unknown>,
+    trigger: (row.trigger ?? null) as ApiPluginTrigger | null,
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
   };
@@ -718,6 +739,14 @@ const INDEXES: IndexDefinition[] = [
     partialFilterExpression: { is_current: true },
   },
   { collection: 'api_specs', name: 'ix_api_specs_api', key: { api_id: 1, created_at: 1 } },
+
+  {
+    collection: 'api_plugins',
+    name: 'ux_api_plugins_api_name',
+    key: { api_id: 1, plugin_name: 1 },
+    unique: true,
+  },
+  { collection: 'api_plugins', name: 'ix_api_plugins_api', key: { api_id: 1, created_at: 1 } },
 
   {
     collection: 'access_requests',
@@ -1546,6 +1575,75 @@ class MongoStore implements NexusStore {
 
     deleteByApi: async (apiId) =>
       (await this.col(COLLECTIONS.apiSpecs).deleteMany({ api_id: apiId }, this.opts)).deletedCount,
+  };
+
+  /* ── apiPlugins ───────────────────────────────────────────────────────── */
+
+  readonly apiPlugins: ApiPluginRepo = {
+    listByApi: async (apiId) =>
+      (
+        await this.col(COLLECTIONS.apiPlugins)
+          .find({ api_id: apiId } as Filter<NexusDoc>, this.opts)
+          .sort({ created_at: 1, plugin_name: 1 })
+          .toArray()
+      ).map((doc) => mapApiPlugin(doc as Row)),
+
+    find: async (apiId, pluginName) => {
+      const row = asRow(
+        await this.col(COLLECTIONS.apiPlugins).findOne(
+          { api_id: apiId, plugin_name: pluginName },
+          this.opts,
+        ),
+      );
+      return row ? mapApiPlugin(row) : null;
+    },
+
+    upsert: async (input) => {
+      const meta = stamps({});
+      // One `updateOne(..., { upsert: true })` against the unique
+      // `(api_id, plugin_name)` index, so two concurrent saves converge on one
+      // document. `$setOnInsert` keeps the id and the moment the provider
+      // first switched this plugin on across a replace.
+      await mapConflict('That plugin is already configured for this API', () =>
+        this.col(COLLECTIONS.apiPlugins).updateOne(
+          { api_id: input.api_id, plugin_name: input.plugin_name } as Filter<NexusDoc>,
+          {
+            $set: {
+              enabled: input.enabled,
+              config: input.config,
+              trigger: input.trigger,
+              updated_at: meta.updated_at,
+            },
+            $setOnInsert: {
+              _id: meta.id,
+              api_id: input.api_id,
+              plugin_name: input.plugin_name,
+              created_at: meta.created_at,
+            },
+          } as UpdateFilter<NexusDoc>,
+          { ...this.opts, upsert: true },
+        ),
+      );
+      const saved = await this.apiPlugins.find(input.api_id, input.plugin_name);
+      if (!saved) throw new Error('apiPlugins.upsert: row vanished immediately after write');
+      return saved;
+    },
+
+    delete: async (apiId, pluginName) =>
+      (
+        await this.col(COLLECTIONS.apiPlugins).deleteOne(
+          { api_id: apiId, plugin_name: pluginName } as Filter<NexusDoc>,
+          this.opts,
+        )
+      ).deletedCount > 0,
+
+    deleteByApi: async (apiId) =>
+      (
+        await this.col(COLLECTIONS.apiPlugins).deleteMany(
+          { api_id: apiId } as Filter<NexusDoc>,
+          this.opts,
+        )
+      ).deletedCount,
   };
 
   /* ── accessRequests ───────────────────────────────────────────────────── */

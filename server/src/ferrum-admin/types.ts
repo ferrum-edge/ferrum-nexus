@@ -425,6 +425,25 @@ export type EdgePluginSettings =
   | EdgeOpenapiValidatorConfig
   | Record<string, unknown>;
 
+/**
+ * A per-instance execution `trigger` on a plugin config.
+ *
+ * Edge accepts a full predicate tree over method, path, host, SNI, headers,
+ * query, cookies, protocol, source CIDR, listener port and post-authentication
+ * identity; a node sets exactly one of `all`, `any`, `not` or `match`, and a
+ * `match` leaf sets exactly one predicate. Nexus emits only the `all`/`match`
+ * shapes its portal-level trigger compiles to, so this type is deliberately
+ * loose about the leaf rather than modelling a grammar nothing here generates.
+ *
+ * **Not every plugin accepts one.** Edge refuses a trigger on a plugin that
+ * publishes contextless initial-response-header policy, a fixed per-proxy body
+ * ceiling, or contextless response-trailer ownership — `supports_trigger` on
+ * each palette descriptor records which is which.
+ */
+export interface EdgePluginTrigger {
+  when: Record<string, unknown>;
+}
+
 /** A plugin config resource. */
 export interface EdgePluginConfig {
   id: string;
@@ -435,6 +454,8 @@ export interface EdgePluginConfig {
   proxy_id?: string | null;
   enabled: boolean;
   priority_override?: number | null;
+  /** Absent on an instance that runs for every request on its proxy. */
+  trigger?: EdgePluginTrigger | null;
   api_spec_id?: string | null;
   created_at?: string;
   updated_at?: string;
@@ -450,6 +471,13 @@ export interface EdgePluginConfigWrite {
   proxy_id?: string | null;
   enabled: boolean;
   config: EdgePluginSettings;
+  /**
+   * Per-instance execution trigger. Omitted entirely — never sent as `null` —
+   * when the instance should run for every request: `PUT /plugins/config/{id}`
+   * is a whole-resource replace, so omitting the key is how a trigger is
+   * removed.
+   */
+  trigger?: EdgePluginTrigger;
 }
 
 /* ── Health ─────────────────────────────────────────────────────────────── */
