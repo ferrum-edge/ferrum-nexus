@@ -88,6 +88,38 @@ describe('admin settings', () => {
     assert.equal(await harness.services.email.isConfigured(), true);
   });
 
+  it('requires a fresh SMTP password when connection settings change', async () => {
+    const rejected = await harness.authed(founder, {
+      method: 'PUT',
+      url: '/api/admin/settings',
+      payload: { smtp: { host: 'attacker.example.test' } },
+    });
+    assert.equal(rejected.statusCode, 400);
+    assert.equal(errorCode(rejected.body), 'VALIDATION_FAILED');
+
+    const unchanged = await harness.services.email.resolveSettings();
+    assert.equal(unchanged.host, 'smtp.example.test');
+    assert.equal(unchanged.password, SMTP_PASSWORD);
+
+    const replacement = 'replacement-password';
+    const accepted = await harness.authed(founder, {
+      method: 'PUT',
+      url: '/api/admin/settings',
+      payload: { smtp: { host: 'smtp2.example.test', password: replacement } },
+    });
+    assert.equal(accepted.statusCode, 200);
+
+    const resolved = await harness.services.email.resolveSettings();
+    assert.equal(resolved.host, 'smtp2.example.test');
+    assert.equal(resolved.password, replacement);
+
+    await harness.authed(founder, {
+      method: 'PUT',
+      url: '/api/admin/settings',
+      payload: { smtp: { host: 'smtp.example.test', password: SMTP_PASSWORD } },
+    });
+  });
+
   it('encrypts the CAPTCHA secret and exposes only the site key publicly', async () => {
     const response = await harness.authed(founder, {
       method: 'PUT',
