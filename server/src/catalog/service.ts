@@ -159,6 +159,25 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       : null;
   }
 
+  /** Strip provider-only operational fields before an API crosses the catalog boundary. */
+  function catalogApi(
+    viewer: UserRecord,
+    api: ApiRecord,
+    owner: UserRecord | undefined,
+    grant: Grant | null,
+    request: AccessRequest | null,
+    gatewayUrl: string | null,
+  ): CatalogApi {
+    // The catalog is what *consumers* see: the invoke URL is theirs to know,
+    // the provider's backend address is not.
+    const { upstream_url: _upstreamUrl, ...publicApi } = presentApi(api, gatewayUrl);
+    return {
+      ...publicApi,
+      owner: summary(owner),
+      access_state: accessState(viewer, api, grant, request),
+    };
+  }
+
   return {
     canList,
     canView,
@@ -204,16 +223,16 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       const gatewayUrl = await settings.getGatewayPublicUrl();
 
       return {
-        items: page.map((api) => ({
-          ...presentApi(api, gatewayUrl),
-          owner: summary(owners.get(api.owner_user_id)),
-          access_state: accessState(
+        items: page.map((api) =>
+          catalogApi(
             viewer,
             api,
+            owners.get(api.owner_user_id),
             grants.get(api.id) ?? null,
             requests.get(api.id) ?? null,
+            gatewayUrl,
           ),
-        })),
+        ),
         total: visible.length,
       };
     },
@@ -238,11 +257,14 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
         : null;
 
       return {
-        api: {
-          ...presentApi(api, await settings.getGatewayPublicUrl()),
-          owner: summary(owner ?? undefined),
-          access_state: accessState(viewer, api, grant, request),
-        },
+        api: catalogApi(
+          viewer,
+          api,
+          owner ?? undefined,
+          grant,
+          request,
+          await settings.getGatewayPublicUrl(),
+        ),
         spec,
         my_request: request,
         my_grant: grant,
