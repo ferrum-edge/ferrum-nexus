@@ -21,6 +21,7 @@ function edgeConfig(overrides: Partial<EdgeConfig> = {}): EdgeConfig {
     allowInsecureHttp: false,
     timeoutMs: 5_000,
     maxCredentialsPerType: 2,
+    rateLimit: { syncMode: 'local', redisUrl: undefined, redisTls: false },
     ...overrides,
   };
 }
