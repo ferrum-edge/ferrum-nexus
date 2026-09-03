@@ -233,6 +233,7 @@ export async function buildServer(
     notifications,
     email,
     audit,
+    settings,
     log: warn,
   });
   const massEmail = createMassEmailService({ store: deps.store, email, audit });
@@ -245,7 +246,7 @@ export async function buildServer(
     store: deps.store,
     edge: deps.edge,
   });
-  const catalog = createCatalogService({ store: deps.store });
+  const catalog = createCatalogService({ store: deps.store, settings });
   const credentials = createCredentialsService({
     config,
     store: deps.store,
@@ -274,6 +275,7 @@ export async function buildServer(
     audit,
     notifications,
     credentials,
+    settings,
   });
   const access = createAccessService({
     config,
@@ -282,6 +284,7 @@ export async function buildServer(
     notifications,
     email,
     provisioner,
+    settings,
     log: warn,
   });
   const god = createGodService({

@@ -50,6 +50,7 @@ import type { EmailService } from '../email/service.js';
 import { forbidden, notFound, validationFailed } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
+import { presentApiSummary, type GatewayUrlSource } from '../publishing/present.js';
 
 /** Characters of the newest message shown in list previews and emails. */
 export const MESSAGE_PREVIEW_LENGTH = 160;
@@ -98,6 +99,8 @@ export interface MessagingServiceDeps {
   notifications: NotificationsService;
   email: EmailService;
   audit: AuditService;
+  /** Resolves the gateway origin a thread's embedded API summary carries. */
+  settings: GatewayUrlSource;
   log?: (obj: Record<string, unknown>, message: string) => void;
 }
 
@@ -134,7 +137,7 @@ export function isPlatformThread(thread: ThreadRecord): boolean {
 
 /** Build the messaging service. */
 export function createMessagingService(deps: MessagingServiceDeps): MessagingService {
-  const { config, store, notifications, email, audit } = deps;
+  const { config, store, notifications, email, audit, settings } = deps;
 
   function threadUrl(threadId: Uuid): string {
     return `${config.publicUrl}/messages/${threadId}`;
@@ -168,6 +171,8 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
       ]),
     );
 
+    const gatewayUrl = await settings.getGatewayPublicUrl();
+
     return Promise.all(
       threads.map(async (thread) => {
         const participants: UserSummary[] = [];
@@ -177,13 +182,7 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
         }
         const api = thread.api_id ? apis.get(thread.api_id) : undefined;
         const apiSummary: ApiSummary | undefined = api
-          ? {
-              id: api.id,
-              name: api.name,
-              slug: api.slug,
-              version: api.version,
-              owner_user_id: api.owner_user_id,
-            }
+          ? presentApiSummary(api, gatewayUrl)
           : undefined;
         const latest = await store.messages.findLatestByThread(thread.id);
         return {

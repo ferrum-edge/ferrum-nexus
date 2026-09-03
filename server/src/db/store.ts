@@ -139,8 +139,15 @@ export interface SessionRecord {
   updated_at: IsoTimestamp;
 }
 
-/** An `apis` row. */
-export type ApiRecord = Api;
+/**
+ * An `apis` row.
+ *
+ * `listen_path` and `invoke_url` are on the wire {@link Api} but not here:
+ * both are derived at presentation time from the namespace, the slug and the
+ * operator's gateway origin (see `publishing/present.ts`). Storing them would
+ * leave every row stale the moment the gateway moves.
+ */
+export type ApiRecord = Omit<Api, 'listen_path' | 'invoke_url'>;
 
 /** An `api_specs` row, including the raw uploaded document. */
 export type ApiSpecRecord = ApiSpec;

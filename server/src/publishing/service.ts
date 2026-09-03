@@ -112,6 +112,7 @@ import type {
 import { conflict, forbidden, notFound, specInvalid, validationFailed } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
+import { presentApi, type GatewayUrlSource } from './present.js';
 import {
   assertUpstreamAllowed,
   formatUpstreamUrl,
@@ -140,25 +141,16 @@ export interface ApiListFilter {
 /** Publishing operations. All of them are provider-or-above. */
 export interface PublishingService {
   /** APIs the caller may administer: their own, or every API for an admin. */
-  list(
-    actor: UserRecord,
-    filter?: ApiListFilter,
-    options?: ListOptions,
-  ): Promise<Paginated<ApiRecord>>;
+  list(actor: UserRecord, filter?: ApiListFilter, options?: ListOptions): Promise<Paginated<Api>>;
   /** One API with its current spec metadata and request/grant counters. */
   get(
     actor: UserRecord,
     apiId: Uuid,
-  ): Promise<{ api: ApiRecord; spec: ApiSpecSummary | null; stats: ApiStats }>;
+  ): Promise<{ api: Api; spec: ApiSpecSummary | null; stats: ApiStats }>;
   /** Validate the spec, build the Edge objects, then persist the rows. */
   publish(owner: UserRecord, input: PublishApiRequest, ip?: string | null): Promise<PublishResult>;
   /** Change safe runtime settings; reconciles the Edge plugin configs. */
-  update(
-    actor: UserRecord,
-    apiId: Uuid,
-    patch: UpdateApiRequest,
-    ip?: string | null,
-  ): Promise<ApiRecord>;
+  update(actor: UserRecord, apiId: Uuid, patch: UpdateApiRequest, ip?: string | null): Promise<Api>;
   /** Store a new spec revision and make it current. */
   updateSpec(
     actor: UserRecord,
@@ -188,6 +180,8 @@ export interface PublishingServiceDeps {
   audit: AuditService;
   notifications: NotificationsService;
   credentials: CredentialsService;
+  /** Resolves the gateway origin each returned API's `invoke_url` is built from. */
+  settings: GatewayUrlSource;
 }
 
 /* ── Edge plugin config bodies ──────────────────────────────────────────── */
@@ -310,7 +304,7 @@ function safeDefaultUpstream(rawSpec: string): SpecUpstream | null {
 
 /** Build the publishing service. */
 export function createPublishingService(deps: PublishingServiceDeps): PublishingService {
-  const { config, store, edge, audit, notifications, credentials } = deps;
+  const { config, store, edge, audit, notifications, credentials, settings } = deps;
   const namespace = config.edge.namespace;
   // Applied at every point a backend is about to be written to the gateway:
   // publish, PATCH `upstream_url`, and a spec revision the proxy follows.
@@ -478,7 +472,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   }
 
   /**
-   * Bring one *optional* plugin to `settings`, or remove it when `settings` is
+   * Bring one *optional* plugin to `pluginSettings`, or remove it when that is
    * `null`, pushing the step that undoes whatever it did onto `undo`.
    *
    * `rate_limiting` and `cors` are the same problem — an optional, replaceable,
@@ -490,11 +484,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     proxyId: string,
     existing: EdgePluginConfig | undefined,
     pluginName: string,
-    settings: EdgePluginSettings | null,
+    pluginSettings: EdgePluginSettings | null,
     subject: string,
     undo: (() => Promise<void>)[],
   ): Promise<void> {
-    if (settings === null) {
+    if (pluginSettings === null) {
       if (!existing) return;
       undo.push(undoRemoval(proxyId, existing, subject));
       await disassociate(proxyId, [existing.id], subject);
@@ -510,7 +504,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         enabled,
         config,
       });
-      await edge.pluginConfigs.replace(existing.id, body(settings, true), subject);
+      await edge.pluginConfigs.replace(existing.id, body(pluginSettings, true), subject);
       undo.push(async () => {
         await edge.pluginConfigs.replace(
           existing.id,
@@ -521,7 +515,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       return;
     }
 
-    const attached = await attach(proxyId, pluginName, settings, subject);
+    const attached = await attach(proxyId, pluginName, pluginSettings, subject);
     undo.push(undoAttach(proxyId, attached.id, subject));
     await associate(proxyId, [attached.id], subject);
   }
@@ -556,7 +550,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   return {
     assertCanAdminister,
 
-    async list(actor, filter = {}, options): Promise<Paginated<ApiRecord>> {
+    async list(actor, filter = {}, options): Promise<Paginated<Api>> {
       const isAdmin = roleAtLeast(actor.role, 'admin');
       // A provider only ever sees their own APIs; `mine` is the admin's opt-in.
       const owner = !isAdmin || filter.mine ? actor.id : filter.owner_user_id;
@@ -565,7 +559,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         ...(filter.status !== undefined ? { status: filter.status } : {}),
         ...(filter.q !== undefined ? { q: filter.q } : {}),
       };
-      return store.apis.list(storeFilter, options);
+      const [page, gatewayUrl] = await Promise.all([
+        store.apis.list(storeFilter, options),
+        settings.getGatewayPublicUrl(),
+      ]);
+      return { ...page, items: page.items.map((row) => presentApi(row, gatewayUrl)) };
     },
 
     async get(actor, apiId) {
@@ -578,7 +576,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         store.accessRequests.count({ api_id: api.id }),
       ]);
       return {
-        api,
+        api: presentApi(api, await settings.getGatewayPublicUrl()),
         spec: spec ? specSummary(spec) : null,
         stats: { pending_requests: pending, active_grants: active, total_requests: total },
       };
@@ -731,10 +729,13 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         ip,
       );
 
-      return { api, spec: specSummary(spec) };
+      return {
+        api: presentApi(api, await settings.getGatewayPublicUrl()),
+        spec: specSummary(spec),
+      };
     },
 
-    async update(actor, apiId, patch, ip = null): Promise<ApiRecord> {
+    async update(actor, apiId, patch, ip = null): Promise<Api> {
       const api = await loadApi(apiId);
       assertCanAdminister(actor, api);
 
@@ -878,7 +879,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           changed.push('cors');
         }
 
-        if (changed.length === 0) return api;
+        // A no-op PATCH still answers with the API as the wire describes it.
+        if (changed.length === 0) return presentApi(api, await settings.getGatewayPublicUrl());
 
         const persisted = await store.apis.update(api.id, update);
         if (!persisted) throw notFound('API', apiId);
@@ -908,7 +910,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         );
       }
 
-      return updated;
+      return presentApi(updated, await settings.getGatewayPublicUrl());
     },
 
     async updateSpec(actor, apiId, specText, version, ip = null): Promise<PublishResult> {
@@ -1006,7 +1008,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         ip,
       );
 
-      return { api: updated, spec: specSummary(spec) };
+      return {
+        api: presentApi(updated, await settings.getGatewayPublicUrl()),
+        spec: specSummary(spec),
+      };
     },
 
     async remove(actor, apiId, ip = null): Promise<{ revoked_grants: number }> {
