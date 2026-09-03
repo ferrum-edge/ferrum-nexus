@@ -2139,6 +2139,24 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
   /* ── verificationTokens ─────────────────────────────────────────────── */
 
   const verificationTokens: VerificationTokenRepo = {
+    claimIssue: async (userId, purpose, issuedAt, notBefore) => {
+      const insertSql =
+        exec.dialect === 'pg'
+          ? `INSERT INTO email_token_issue_claims (user_id, purpose, issued_at)
+             VALUES (?, ?, ?) ON CONFLICT (user_id, purpose) DO NOTHING`
+          : `INSERT IGNORE INTO email_token_issue_claims (user_id, purpose, issued_at)
+             VALUES (?, ?, ?)`;
+      if ((await execute(exec, insertSql, [userId, purpose, issuedAt])) > 0) return true;
+      return (
+        (await execute(
+          exec,
+          `UPDATE email_token_issue_claims SET issued_at = ?
+           WHERE user_id = ? AND purpose = ? AND issued_at <= ?`,
+          [issuedAt, userId, purpose, notBefore],
+        )) > 0
+      );
+    },
+
     create: async (input) => {
       const meta = stamps(input);
       await mapSqlConflict('Verification token collision', () =>

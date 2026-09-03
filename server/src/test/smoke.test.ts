@@ -1479,6 +1479,28 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
 
     /* ── verification tokens ──────────────────────────────────────────── */
 
+    it('verificationTokens: atomically claims one issue per throttle window', async () => {
+      const user = await makeUser({ email: 'token-claim@example.test' });
+      const first = '2026-01-01T00:00:00.000Z';
+      const cutoff = '2025-12-31T23:50:00.000Z';
+
+      const claims = await Promise.all(
+        Array.from({ length: 8 }, () =>
+          store.verificationTokens.claimIssue(user.id, 'password_reset', first, cutoff),
+        ),
+      );
+      assert.equal(claims.filter(Boolean).length, 1);
+      assert.equal(
+        await store.verificationTokens.claimIssue(
+          user.id,
+          'password_reset',
+          '2026-01-01T00:10:00.001Z',
+          first,
+        ),
+        true,
+      );
+    });
+
     it('verificationTokens: single use, then invalidation and expiry sweeps', async () => {
       const user = await makeUser();
       const tokenHash = `token-${newId()}`;

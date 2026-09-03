@@ -2070,6 +2070,24 @@ class SqliteStore implements NexusStore {
   /* ── verificationTokens ───────────────────────────────────────────────── */
 
   readonly verificationTokens: VerificationTokenRepo = {
+    claimIssue: async (userId, purpose, issuedAt, notBefore) => {
+      const inserted = execute(
+        this.db,
+        `INSERT OR IGNORE INTO email_token_issue_claims (user_id, purpose, issued_at)
+         VALUES (?, ?, ?)`,
+        [userId, purpose, issuedAt],
+      );
+      if (inserted > 0) return true;
+      return (
+        execute(
+          this.db,
+          `UPDATE email_token_issue_claims SET issued_at = ?
+           WHERE user_id = ? AND purpose = ? AND issued_at <= ?`,
+          [issuedAt, userId, purpose, notBefore],
+        ) > 0
+      );
+    },
+
     create: async (input) => {
       const meta = stamps(input);
       mapConflict('Verification token collision', () =>
