@@ -97,6 +97,9 @@ const updateSettingsBody = z.object({
       allowed_roles: z.array(z.enum(ROLE_ORDER)).max(4).optional(),
     })
     .optional(),
+  // Only length is checked here; the settings service owns the origin rule and
+  // the normalisation, so a caller cannot store a path or a credential pair.
+  gateway: z.object({ public_url: z.string().trim().max(2048).nullish() }).optional(),
 });
 
 const smtpTestBody = z.object({ to_email: z.string().trim().email().max(320).optional() });

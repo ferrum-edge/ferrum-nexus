@@ -1,12 +1,13 @@
 /**
  * Typed reader/writer for the `app_settings` groups an admin can edit.
  *
- * Four groups live here, each under its own key so a partial update never
- * rewrites an unrelated section:
+ * Each group lives under its own key so a partial update never rewrites an
+ * unrelated section:
  *
  * | key               | contents                                   | encrypted |
  * | ----------------- | ------------------------------------------ | --------- |
  * | `branding`        | portal name, logo data URL, colours, theme | no        |
+ * | `gateway`         | public origin of the proxy listener        | no        |
  * | `captcha`         | enabled/provider/site key                  | no        |
  * | `captcha.secret_key` | vendor secret                           | **yes**   |
  * | `smtp`            | host/port/secure/username/from             | no        |
@@ -21,8 +22,9 @@
  *    `admin.settings_update` with the list of touched keys and nothing else, so
  *    the audit log can be read by anyone allowed to read audit logs.
  * 3. **`smtp` and `captcha` are `super_admin`-only** (see
- *    {@link PRIVILEGED_SETTINGS_SECTIONS}); `branding` and `registration` are
- *    editable by any `admin`.
+ *    {@link PRIVILEGED_SETTINGS_SECTIONS}); `branding`, `gateway` and
+ *    `registration` are editable by any `admin` — a public gateway address is
+ *    published information, not a secret.
  */
 
 import {
@@ -34,6 +36,7 @@ import {
   type CaptchaProvider,
   type EmailTemplate,
   type EmailTemplateKey,
+  type GatewaySettings,
   type RegistrationSettings,
   type Role,
   type SmtpSettings,
@@ -48,7 +51,8 @@ import type { NexusConfig } from '../config/index.js';
 import type { NexusStore } from '../db/store.js';
 import { DEFAULT_EMAIL_TEMPLATES, TEMPLATE_VARIABLES } from '../email/templates.js';
 import type { NexusCrypto } from '../lib/crypto.js';
-import { forbidden } from '../lib/errors.js';
+import { forbidden, validationFailed } from '../lib/errors.js';
+import { GATEWAY_PUBLIC_URL_RULE, normalizeGatewayPublicUrl } from '../lib/gateway-url.js';
 import { newId, nowIso } from '../lib/ids.js';
 
 /**
@@ -63,6 +67,20 @@ export const PRIVILEGED_SETTINGS_SECTIONS = ['smtp', 'captcha'] as const;
 
 /** `app_settings` key holding the public branding block. */
 export const BRANDING_SETTINGS_KEY = 'branding';
+
+/** `app_settings` key holding the gateway's public proxy-listener origin. */
+export const GATEWAY_SETTINGS_KEY = 'gateway';
+
+/**
+ * How long {@link SettingsService.getGatewayPublicUrl} may serve a cached
+ * answer.
+ *
+ * Every catalog row needs the origin, so an uncached read would be one store
+ * round-trip per API on every list. The window is short, and a write through
+ * this service drops the entry immediately, so the only staleness possible is
+ * from another process editing the row.
+ */
+const GATEWAY_URL_CACHE_MS = 5_000;
 
 /** `app_settings` key holding the non-secret SMTP configuration. */
 export const SMTP_SETTINGS_KEY = 'smtp';
@@ -128,6 +146,18 @@ export async function readBranding(store: NexusStore): Promise<BrandingSettings>
   };
 }
 
+/**
+ * The stored gateway origin, or `null` when an admin has never set one.
+ *
+ * Already-normalised on the way in, but re-normalised here so a value written
+ * by an older build (or by hand) cannot produce a malformed `invoke_url`.
+ */
+export async function readStoredGatewayPublicUrl(store: NexusStore): Promise<string | null> {
+  const row = await store.settings.get(GATEWAY_SETTINGS_KEY);
+  const stored = str(asRecord(row?.value).public_url);
+  return stored === null ? null : normalizeGatewayPublicUrl(stored);
+}
+
 /** The stored SMTP overrides; every field is `null` when unset. */
 export async function readStoredSmtp(store: NexusStore): Promise<StoredSmtpSettings> {
   const row = await store.settings.get(SMTP_SETTINGS_KEY);
@@ -175,6 +205,12 @@ export interface SettingsService {
   ): Promise<AdminSettingsResponse>;
   /** Public branding block, with defaults applied. */
   getBranding(): Promise<BrandingSettings>;
+  /**
+   * Public origin of the gateway's proxy listener: the stored
+   * `gateway.public_url` when set, else `FERRUM_GATEWAY_PUBLIC_URL`, else
+   * `null`. Cached for a few seconds — a catalog page asks once per row.
+   */
+  getGatewayPublicUrl(): Promise<string | null>;
   /** The stored template for a key, or the built-in default. */
   getEmailTemplate(key: EmailTemplateKey): Promise<{
     template: EmailTemplate;
@@ -204,6 +240,25 @@ export interface SettingsServiceDeps {
 /** Build the settings service. */
 export function createSettingsService(deps: SettingsServiceDeps): SettingsService {
   const { config, store, crypto, audit, auth } = deps;
+
+  /** Memoised gateway origin; dropped the moment a write changes it. */
+  let gatewayUrlCache: { value: string | null; expires: number } | null = null;
+
+  async function resolveGatewayPublicUrl(): Promise<string | null> {
+    return (await readStoredGatewayPublicUrl(store)) ?? config.edge.gatewayPublicUrl ?? null;
+  }
+
+  async function getGatewayPublicUrl(): Promise<string | null> {
+    const now = Date.now();
+    if (gatewayUrlCache !== null && gatewayUrlCache.expires > now) return gatewayUrlCache.value;
+    const value = await resolveGatewayPublicUrl();
+    gatewayUrlCache = { value, expires: now + GATEWAY_URL_CACHE_MS };
+    return value;
+  }
+
+  async function readGateway(): Promise<GatewaySettings> {
+    return { public_url: await getGatewayPublicUrl() };
+  }
 
   async function readCaptcha(): Promise<CaptchaAdminSettings> {
     const row = await store.settings.get(CAPTCHA_SETTINGS_KEY);
@@ -242,6 +297,7 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
       captcha: await readCaptcha(),
       smtp: await readSmtp(),
       registration,
+      gateway: await readGateway(),
     };
   }
 
@@ -264,6 +320,8 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
   return {
     getBranding: async () => readBranding(store),
 
+    getGatewayPublicUrl,
+
     getAdminSettings: snapshot,
 
     async updateSettings(actor, patch, ip = null): Promise<AdminSettingsResponse> {
@@ -275,6 +333,22 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
       for (const section of PRIVILEGED_SETTINGS_SECTIONS) {
         if (patch[section] !== undefined && !roleAtLeast(actor.role ?? 'client', 'super_admin')) {
           throw forbidden(`Only a super admin can change the ${section} settings`);
+        }
+      }
+
+      // Validated before the first write, like the privilege check above, so a
+      // malformed gateway URL does not leave a half-applied patch behind.
+      // `undefined` means "not in this patch"; `null` means "clear it".
+      let nextGatewayUrl: string | null | undefined;
+      if (patch.gateway && patch.gateway.public_url !== undefined) {
+        const raw = patch.gateway.public_url;
+        if (raw === null || raw.trim() === '') {
+          nextGatewayUrl = null;
+        } else {
+          nextGatewayUrl = normalizeGatewayPublicUrl(raw);
+          if (nextGatewayUrl === null) {
+            throw validationFailed(`gateway.public_url ${GATEWAY_PUBLIC_URL_RULE}`);
+          }
         }
       }
 
@@ -290,6 +364,17 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
           changed.push(`branding.${field}`);
         }
         await store.settings.set(BRANDING_SETTINGS_KEY, next, false);
+      }
+
+      // Not privileged: a gateway address is what the catalog exists to
+      // publish. Normalised above rather than only in the route schema, so the
+      // stored value is an origin no matter who calls the service.
+      if (nextGatewayUrl !== undefined) {
+        await store.settings.set(GATEWAY_SETTINGS_KEY, { public_url: nextGatewayUrl }, false);
+        // The cached origin is now wrong; the next read re-resolves, which also
+        // picks the env default back up when the override was cleared.
+        gatewayUrlCache = null;
+        changed.push('gateway.public_url');
       }
 
       if (patch.captcha) {
