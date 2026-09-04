@@ -29,7 +29,7 @@ function configFor(url: string, overrides: Partial<EdgeConfig> = {}): EdgeConfig
 }
 
 /**
- * A fresh client per test, because the metrics reads are memoised per proxy for
+ * A fresh client per test, because the metrics reads are memoised globally for
  * ten seconds and every test would otherwise inherit the previous one's cache.
  * The caching behaviour itself is asserted explicitly further down.
  */
@@ -147,19 +147,29 @@ describe('ferrum admin metrics', () => {
       }
     });
 
-    it('memoises the scrape per proxy', async () => {
+    it('coalesces concurrent scrapes and reuses the global result across proxies', async () => {
       edge.recordRequests('proxy-a', { method: 'GET', status: 200, count: 1 });
       const cached = freshClient();
 
-      const first = await cached.metrics.scrapeProxy('proxy-a');
-      const second = await cached.metrics.scrapeProxy('proxy-a');
+      const [first, second] = await Promise.all([
+        cached.metrics.scrapeProxy('proxy-a'),
+        cached.metrics.scrapeProxy('proxy-a'),
+      ]);
 
       assert.deepEqual(first, second);
       assert.equal(edge.callsTo('GET', '/metrics').length, 1);
 
-      // A different proxy is a different cache entry, so it does scrape again.
+      // Edge returns all proxies in one document, so another proxy reuses it.
       await cached.metrics.scrapeProxy('proxy-b');
-      assert.equal(edge.callsTo('GET', '/metrics').length, 2);
+      assert.equal(edge.callsTo('GET', '/metrics').length, 1);
+    });
+
+    it('rejects an oversized metrics response without buffering it indefinitely', async () => {
+      edge.queueFailure(200, 'x'.repeat(2 * 1024 * 1024 + 1), '/metrics');
+
+      const metrics = await freshClient().metrics.scrapeProxy('proxy-a');
+
+      assert.equal(metrics.available, false);
     });
   });
 
@@ -225,12 +235,14 @@ describe('ferrum admin metrics', () => {
       }
     });
 
-    it('memoises the read per proxy', async () => {
+    it('coalesces concurrent reads and reuses the global result across proxies', async () => {
       edge.setBackendState('proxy-a', { breaker: 'closed' });
       const cached = freshClient();
 
-      await cached.metrics.backendState('proxy-a');
-      await cached.metrics.backendState('proxy-a');
+      await Promise.all([
+        cached.metrics.backendState('proxy-a'),
+        cached.metrics.backendState('proxy-b'),
+      ]);
 
       assert.equal(edge.callsTo('GET', '/admin/metrics').length, 1);
     });
