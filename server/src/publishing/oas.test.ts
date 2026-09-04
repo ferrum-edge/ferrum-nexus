@@ -16,6 +16,8 @@ import {
   parseUpstreamUrl,
   resolveUpstream,
   slugify,
+  type ResolvedAddress,
+  type UpstreamResolver,
 } from './oas.js';
 
 /** A minimal, structurally valid operation object. */
@@ -46,6 +48,36 @@ function specWithOperations(count: number): string {
     info: { title: 'Generated', version: '1.0.0' },
     paths,
   });
+}
+
+/** A resolver that answers `addresses` for any hostname. */
+function resolvesTo(addresses: ResolvedAddress[]): UpstreamResolver {
+  return async () => addresses;
+}
+
+/**
+ * A resolver that must never be called.
+ *
+ * The policy is expected to answer from the literal/suffix checks or from the
+ * `allowPrivate` opt-out before it reaches DNS; calling this proves it did not.
+ */
+const neverResolve: UpstreamResolver = () => {
+  throw new Error('the resolver must not be consulted here');
+};
+
+/** {@link expectSpecInvalid} for the async policy check. */
+async function expectSpecInvalidAsync(
+  fn: () => Promise<unknown>,
+): Promise<{ message: string; details: unknown }> {
+  try {
+    await fn();
+  } catch (error) {
+    assert.ok(isNexusError(error), `expected a NexusError, got ${String(error)}`);
+    assert.equal(error.code, 'SPEC_INVALID');
+    assert.equal(error.statusCode, 400);
+    return { message: error.message, details: error.details };
+  }
+  throw new assert.AssertionError({ message: 'expected the call to throw SPEC_INVALID' });
 }
 
 /** Assert that `fn` throws `SPEC_INVALID`, returning the error for inspection. */
@@ -370,23 +402,176 @@ describe('upstream destination policy', () => {
     for (const host of PUBLIC_HOSTS) assert.equal(isPublicUpstreamHost(host), true, host);
   });
 
-  it('refuses a private upstream unless the deployment allows them', () => {
+  it('refuses a private upstream unless the deployment allows them', async () => {
     const upstream = parseUpstreamUrl('http://169.254.169.254/latest/meta-data');
     assert.ok(upstream);
-    const error = expectSpecInvalid(() => assertUpstreamAllowed(upstream, { allowPrivate: false }));
+    const error = await expectSpecInvalidAsync(() =>
+      assertUpstreamAllowed(upstream, { allowPrivate: false, resolve: neverResolve }),
+    );
     assert.match(error.message, /NEXUS_ALLOW_PRIVATE_UPSTREAMS/);
     assert.deepEqual(error.details, {
       field: 'upstream_url',
       host: '169.254.169.254',
       reason: 'private_upstream',
     });
-    assert.doesNotThrow(() => assertUpstreamAllowed(upstream, { allowPrivate: true }));
+    await assertUpstreamAllowed(upstream, { allowPrivate: true, resolve: neverResolve });
   });
 
-  it('always passes a public upstream', () => {
+  it('always passes a public upstream', async () => {
     const upstream = parseUpstreamUrl('https://api.example.com');
     assert.ok(upstream);
-    assert.doesNotThrow(() => assertUpstreamAllowed(upstream, { allowPrivate: false }));
+    await assertUpstreamAllowed(upstream, {
+      allowPrivate: false,
+      resolve: resolvesTo([{ address: '93.184.216.34', family: 4 }]),
+    });
+  });
+});
+
+describe('upstream destination policy — DNS resolution', () => {
+  /** `assertUpstreamAllowed` against a canned answer for `api.example.com`. */
+  async function check(
+    answers: ResolvedAddress[],
+    host = 'https://api.example.com',
+  ): Promise<void> {
+    const upstream = parseUpstreamUrl(host);
+    assert.ok(upstream);
+    await assertUpstreamAllowed(upstream, { allowPrivate: false, resolve: resolvesTo(answers) });
+  }
+
+  /** The `SPEC_INVALID` `check` throws for `answers`. */
+  async function refusal(
+    answers: ResolvedAddress[],
+  ): Promise<{ message: string; details: unknown }> {
+    return expectSpecInvalidAsync(() => check(answers));
+  }
+
+  it('refuses a name whose A record is loopback — the nip.io bypass', async () => {
+    const error = await refusal([{ address: '127.0.0.1', family: 4 }]);
+    assert.deepEqual(error.details, {
+      field: 'upstream_url',
+      host: 'api.example.com',
+      reason: 'private_upstream',
+      resolved: ['127.0.0.1'],
+    });
+    assert.match(error.message, /127\.0\.0\.1/);
+    assert.match(error.message, /NEXUS_ALLOW_PRIVATE_UPSTREAMS/);
+  });
+
+  it('refuses RFC 1918 and cloud-metadata answers', async () => {
+    for (const address of ['10.0.0.5', '169.254.169.254', '192.168.1.10', '172.16.4.4']) {
+      const error = await refusal([{ address, family: 4 }]);
+      assert.deepEqual(
+        (error.details as { resolved: string[] }).resolved,
+        [address],
+        `${address} must be refused`,
+      );
+    }
+  });
+
+  it('refuses IPv6 unique-local, link-local and IPv4-mapped answers', async () => {
+    for (const address of ['fd00::1', 'fe80::1', '::ffff:10.0.0.1']) {
+      const error = await refusal([{ address, family: 6 }]);
+      assert.deepEqual(
+        (error.details as { resolved: string[] }).resolved,
+        [address],
+        `${address} must be refused`,
+      );
+    }
+  });
+
+  it('accepts an IPv4-mapped answer whose IPv4 address is public', async () => {
+    await check([{ address: '::ffff:93.184.216.34', family: 6 }]);
+  });
+
+  it('refuses a mixed answer set: one private address is enough', async () => {
+    const error = await refusal([
+      { address: '93.184.216.34', family: 4 },
+      { address: '192.168.1.10', family: 4 },
+    ]);
+    assert.deepEqual((error.details as { resolved: string[] }).resolved, [
+      '93.184.216.34',
+      '192.168.1.10',
+    ]);
+  });
+
+  it('refuses an empty answer set as unresolvable', async () => {
+    const error = await refusal([]);
+    assert.deepEqual(error.details, {
+      field: 'upstream_url',
+      host: 'api.example.com',
+      reason: 'unresolvable_upstream',
+    });
+  });
+
+  it('refuses when the lookup fails (NXDOMAIN) — fail closed', async () => {
+    const upstream = parseUpstreamUrl('https://api.example.com');
+    assert.ok(upstream);
+    const error = await expectSpecInvalidAsync(() =>
+      assertUpstreamAllowed(upstream, {
+        allowPrivate: false,
+        resolve: () => Promise.reject(Object.assign(new Error('nope'), { code: 'ENOTFOUND' })),
+      }),
+    );
+    assert.deepEqual(error.details, {
+      field: 'upstream_url',
+      host: 'api.example.com',
+      reason: 'unresolvable_upstream',
+    });
+  });
+
+  it('refuses when the resolver times out — fail closed', async () => {
+    const upstream = parseUpstreamUrl('https://api.example.com');
+    assert.ok(upstream);
+    const error = await expectSpecInvalidAsync(() =>
+      assertUpstreamAllowed(upstream, {
+        allowPrivate: false,
+        resolve: () => Promise.reject(Object.assign(new Error('timeout'), { code: 'ETIMEOUT' })),
+      }),
+    );
+    assert.equal((error.details as { reason: string }).reason, 'unresolvable_upstream');
+  });
+
+  it('accepts a name whose every answer is public', async () => {
+    await check([
+      { address: '93.184.216.34', family: 4 },
+      { address: '2606:4700:4700::1111', family: 6 },
+    ]);
+  });
+
+  it('never resolves when the deployment allows private upstreams', async () => {
+    const upstream = parseUpstreamUrl('http://internal-service.example.com:8080');
+    assert.ok(upstream);
+    await assertUpstreamAllowed(upstream, { allowPrivate: true, resolve: neverResolve });
+  });
+
+  it('never resolves an IP literal: it is already the destination', async () => {
+    const publicLiteral = parseUpstreamUrl('https://93.184.216.34');
+    assert.ok(publicLiteral);
+    await assertUpstreamAllowed(publicLiteral, { allowPrivate: false, resolve: neverResolve });
+
+    const v6 = parseUpstreamUrl('https://[2606:4700:4700::1111]');
+    assert.ok(v6);
+    await assertUpstreamAllowed(v6, { allowPrivate: false, resolve: neverResolve });
+
+    // And a private literal is still refused without asking DNS anything.
+    const privateLiteral = parseUpstreamUrl('http://10.0.0.5');
+    assert.ok(privateLiteral);
+    await expectSpecInvalidAsync(() =>
+      assertUpstreamAllowed(privateLiteral, { allowPrivate: false, resolve: neverResolve }),
+    );
+  });
+
+  it('never resolves a denylisted name suffix', async () => {
+    const upstream = parseUpstreamUrl('http://host.docker.internal:8081');
+    assert.ok(upstream);
+    const error = await expectSpecInvalidAsync(() =>
+      assertUpstreamAllowed(upstream, { allowPrivate: false, resolve: neverResolve }),
+    );
+    assert.deepEqual(error.details, {
+      field: 'upstream_url',
+      host: 'host.docker.internal',
+      reason: 'private_upstream',
+    });
   });
 });
 

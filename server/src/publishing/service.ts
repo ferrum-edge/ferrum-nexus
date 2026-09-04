@@ -191,6 +191,7 @@ import {
   type SpecPath,
   type SpecUpstream,
   type UpstreamPolicy,
+  type UpstreamResolver,
 } from './oas.js';
 import { handOwnedPlugins, routesSpecDocument, submittableProxyBody } from './spec-document.js';
 
@@ -252,6 +253,15 @@ export interface PublishingServiceDeps {
   credentials: CredentialsService;
   /** Resolves the gateway origin each returned API's `invoke_url` is built from. */
   settings: GatewayUrlSource;
+  /**
+   * Resolves an upstream hostname to its addresses.
+   *
+   * Injected rather than imported so the private-destination policy can be
+   * driven from a fake in tests: without it every publish test would hit real
+   * DNS, and the answers for the names those tests use are not ours to depend
+   * on.
+   */
+  upstreamResolver: UpstreamResolver;
 }
 
 /* ── Edge plugin config bodies ──────────────────────────────────────────── */
@@ -541,7 +551,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   const namespace = config.edge.namespace;
   // Applied at every point a backend is about to be written to the gateway:
   // publish, PATCH `upstream_url`, and a spec revision the proxy follows.
-  const upstreamPolicy: UpstreamPolicy = { allowPrivate: config.allowPrivateUpstreams };
+  const upstreamPolicy: UpstreamPolicy = {
+    allowPrivate: config.allowPrivateUpstreams,
+    resolve: deps.upstreamResolver,
+  };
 
   function assertCanAdminister(actor: UserRecord, api: ApiRecord): void {
     if (api.owner_user_id === actor.id) return;
@@ -647,7 +660,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
 
       const parsed = parseOpenApiSpec(input.spec);
       const upstream = resolveUpstream(parsed, input.upstream_url);
-      assertUpstreamAllowed(upstream, upstreamPolicy);
+      await assertUpstreamAllowed(upstream, upstreamPolicy);
       const slug = await resolveSlug(input.slug, name);
 
       // The id is minted here because the ACL group name is derived from it and
@@ -892,7 +905,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               value: patch.upstream_url,
             });
           }
-          assertUpstreamAllowed(upstream, upstreamPolicy);
+          await assertUpstreamAllowed(upstream, upstreamPolicy);
           const before = await replaceProxyBackend(proxyId, upstream, actor.id);
           undo.push(restoreProxyBackend(before, actor.id));
           // The row records where the gateway is now pointed, normalized rather
@@ -1185,7 +1198,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               // Only a move the gateway would actually make is subject to the
               // policy: a document whose `servers[0]` is private can still be
               // stored for an API whose backend is pinned elsewhere.
-              assertUpstreamAllowed(nextUpstream, upstreamPolicy);
+              await assertUpstreamAllowed(nextUpstream, upstreamPolicy);
               backend = nextUpstream;
             }
           }

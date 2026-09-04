@@ -140,7 +140,16 @@ per-endpoint notes below.
 
 ## Health
 
-Public. Registered under `/api/health`.
+Public. Registered under `/api/health`. **Rate-limited** to 120 requests per
+minute per IP across the prefix when `NEXUS_RATE_LIMIT_ENABLED=true` (the
+default; always off under `NEXUS_ENV=test`) — `429 RATE_LIMITED` beyond that.
+
+The database and gateway probes behind these routes are **cached for
+`NEXUS_HEALTH_CACHE_MS`** (default 5 s) and concurrent callers share one
+in-flight probe, so a burst produces a single database query and a single Admin
+API call. A failing probe is cached for the same window. `checked_at` reports
+when the probes ran, not when the request arrived. See
+[`operations.md`](operations.md#9-health-checks).
 
 ### `GET /api/health`
 
@@ -983,7 +992,11 @@ Errors: `400 SPEC_INVALID` (unparseable, Swagger 2.0, missing
 `openapi`/`info.title`/`info.version`/`paths`, oversized, no upstream
 determinable, or — unless `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` — an upstream
 that is a loopback, private, link-local or `.internal`/`.local` destination,
-reported with `details.reason = "private_upstream"`), `409 CONFLICT` (slug taken), `502 EDGE_ERROR` /
+reported with `details.reason = "private_upstream"`. The host is **resolved**
+as well as pattern-matched, so a name whose A/AAAA records point at a private
+address is refused the same way, with the answers in `details.resolved`; a name
+that cannot be resolved at all is refused with
+`details.reason = "unresolvable_upstream"`), `409 CONFLICT` (slug taken), `502 EDGE_ERROR` /
 `502 EDGE_UNAVAILABLE`. A failed Edge step is rolled back — the plugin configs
 and proxy are deleted — and nothing is written to the Nexus store.
 

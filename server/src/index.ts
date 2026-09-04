@@ -63,6 +63,7 @@ import { registerAuthPlugin } from './middleware/auth-plugin.js';
 import { registerErrorHandler } from './middleware/error-handler.js';
 import { createNotificationsService, type NotificationsService } from './notifications/service.js';
 import { createApiPluginsService, type ApiPluginsService } from './plugins/service.js';
+import { createUpstreamResolver, type UpstreamResolver } from './publishing/oas.js';
 import { createPublishingService, type PublishingService } from './publishing/service.js';
 import { accessRequestRoutes, grantRoutes } from './routes/access.js';
 import { adminRoutes } from './routes/admin.js';
@@ -131,6 +132,12 @@ export interface BuildServerDeps {
   /** Replace the SMTP transport used by the outbox worker and the SMTP test. */
   mailTransportFactory?: MailTransportFactory;
   /**
+   * Resolve an upstream hostname to its addresses for the private-destination
+   * policy. Defaults to {@link createUpstreamResolver}; tests inject a fake so
+   * publishing never depends on a real DNS answer.
+   */
+  upstreamResolver?: UpstreamResolver;
+  /**
    * Start the outbox poller. Defaults to `false` under `NEXUS_ENV=test`, where
    * tests drive `services.outbox.tick()` themselves, and `true` elsewhere.
    */
@@ -141,6 +148,20 @@ export interface BuildServerDeps {
 
 /** Rate limit applied to `/api/auth/*` when `config.rateLimitEnabled` is true. */
 export const AUTH_RATE_LIMIT = { max: 20, timeWindow: '1 minute' } as const;
+
+/**
+ * Rate limit applied to `/api/health*` when `config.rateLimitEnabled` is true.
+ *
+ * The health routes are unauthenticated and each one costs a database query and
+ * an authenticated Admin API call, so they need a ceiling of their own — the
+ * `/api/auth` limiter never covered them. 120/minute per client IP is roughly
+ * one probe every half second, which is far above what a load balancer, a
+ * container liveness probe and a monitoring scraper need between them, and far
+ * below what an anonymous flood wants. The `NEXUS_HEALTH_CACHE_MS` cache in
+ * `routes/health.ts` is what keeps the traffic *under* this ceiling from
+ * reaching the dependencies; this is the ceiling itself.
+ */
+export const HEALTH_RATE_LIMIT = { max: 120, timeWindow: '1 minute' } as const;
 
 /**
  * Translate `config.trustedProxies` into a value Fastify accepts.
@@ -281,6 +302,7 @@ export async function buildServer(
     notifications,
     credentials,
     settings,
+    upstreamResolver: deps.upstreamResolver ?? createUpstreamResolver(),
   });
   const usage = createUsageService({ store: deps.store, edge: deps.edge, publishing });
   // Composed after publishing: the palette reuses its owner-or-admin check, so
@@ -418,6 +440,12 @@ export async function buildServer(
    */
   await app.register(
     async (scope) => {
+      // Scoped to this child instance, like the `/api/auth` limiter: a probe
+      // flood must not consume the budget of the rest of the API, and vice
+      // versa.
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { ...HEALTH_RATE_LIMIT });
+      }
       await scope.register(healthRoutes, { config, store: deps.store, edge: deps.edge });
     },
     { prefix: '/api/health' },

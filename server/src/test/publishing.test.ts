@@ -17,6 +17,7 @@ import {
   SAMPLE_SPEC_JSON,
   SAMPLE_SPEC_YAML,
   buildTestApp,
+  fakeUpstreamResolver,
   specWithServer,
   type TestApp,
   type TestSession,
@@ -2724,5 +2725,121 @@ describe('publishing with Redis-synced rate limits', () => {
       redis_url: 'redis://cache.example.com:6379/2',
       redis_tls: true,
     });
+  });
+});
+
+describe('publishing — an upstream name that resolves to a private address', () => {
+  // GHSA-m4qx-h386-j5jp: the suffix denylist never sees `127.0.0.1.nip.io`, and
+  // an attacker-controlled record can point anywhere. The policy resolves the
+  // name, so all three places a backend reaches the gateway must refuse it.
+  const REBIND = 'rebind.example.com';
+  let harness: TestApp;
+  let provider: TestSession;
+
+  before(async () => {
+    harness = await buildTestApp({
+      deps: {
+        upstreamResolver: fakeUpstreamResolver({
+          [REBIND]: [{ address: '127.0.0.1', family: 4 }],
+        }),
+      },
+    });
+    await harness.registerUser({ email: 'dns-founder@example.test' });
+    provider = await harness.registerUser({
+      email: 'dns-provider@example.test',
+      role: 'provider',
+    });
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  /** Assert a 400 `SPEC_INVALID` naming the resolved private address. */
+  function assertRefused(response: { statusCode: number; body: string }): void {
+    assert.equal(response.statusCode, 400, response.body);
+    const body = JSON.parse(response.body) as ApiErrorBody;
+    assert.equal(body.error.code, 'SPEC_INVALID');
+    assert.deepEqual(body.error.details, {
+      field: 'upstream_url',
+      host: REBIND,
+      reason: 'private_upstream',
+      resolved: ['127.0.0.1'],
+    });
+  }
+
+  it('refuses the publish and leaves the gateway untouched', async () => {
+    harness.edge.reset();
+    const response = await harness.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: publishPayload({ slug: 'dns-publish', upstream_url: `http://${REBIND}:9000` }),
+    });
+    assertRefused(response);
+    assert.equal(harness.edge.proxies.size, 0, 'nothing reached the gateway');
+    assert.equal(await harness.store.apis.findBySlug('dns-publish'), null);
+  });
+
+  it('refuses a PATCH that repoints the proxy at it', async () => {
+    harness.edge.reset();
+    const published = await harness.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: publishPayload({
+        slug: 'dns-patch',
+        spec: specWithServer('https://good.example.com:8443'),
+      }),
+    });
+    assert.equal(published.statusCode, 201, published.body);
+    const api = published.json<PublishApiResponse>().api;
+    const proxyKey = `nexus/${String(api.ferrum_proxy_id)}`;
+    const before = harness.edge.proxies.get(proxyKey);
+
+    const response = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${api.id}`,
+      payload: { upstream_url: `http://${REBIND}:9000` },
+    });
+    assertRefused(response);
+    assert.deepEqual(harness.edge.proxies.get(proxyKey), before, 'the backend did not move');
+    assert.equal(
+      (await harness.store.apis.findById(api.id))?.upstream_url,
+      'https://good.example.com:8443',
+    );
+  });
+
+  it('refuses a spec revision whose servers[0] moves the backend to it', async () => {
+    harness.edge.reset();
+    const published = await harness.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: publishPayload({
+        slug: 'dns-spec',
+        spec: specWithServer('https://good.example.com:8443'),
+      }),
+    });
+    assert.equal(published.statusCode, 201, published.body);
+    const api = published.json<PublishApiResponse>().api;
+    const proxyKey = `nexus/${String(api.ferrum_proxy_id)}`;
+    const before = harness.edge.proxies.get(proxyKey);
+
+    const response = await harness.authed(provider, {
+      method: 'PUT',
+      url: `/api/apis/${api.id}/spec`,
+      payload: { spec: specWithServer(`http://${REBIND}:9000`, '3.0.0') },
+    });
+    assertRefused(response);
+    assert.deepEqual(harness.edge.proxies.get(proxyKey), before, 'the backend did not move');
+  });
+
+  it('still publishes a name that resolves publicly', async () => {
+    harness.edge.reset();
+    const response = await harness.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: publishPayload({ slug: 'dns-ok', upstream_url: 'http://elsewhere.example.com:80' }),
+    });
+    assert.equal(response.statusCode, 201, response.body);
+    assert.equal(harness.edge.proxyByName('nexus-dns-ok')?.backend_host, 'elsewhere.example.com');
   });
 });
