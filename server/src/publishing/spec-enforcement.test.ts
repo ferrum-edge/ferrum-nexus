@@ -11,7 +11,6 @@ interface Generated {
   validate_response: boolean;
   fail_on_unknown_operation: boolean;
   operations: { method: string; path_template: string; path_regex: string }[];
-  bypass?: { methods?: string[] };
 }
 
 function generate(
@@ -167,17 +166,31 @@ describe('validatorConfigFor', () => {
     );
   });
 
-  it('bypasses OPTIONS only when the API has a CORS policy', () => {
+  it('adds OPTIONS only for declared paths when the API has a CORS policy', () => {
     const withCors = generate([{ path: '/invoices', methods: ['GET'] }], '/nexus/billing', true);
     assert.ok(withCors);
-    assert.deepEqual(withCors.bypass, { methods: ['OPTIONS'] });
+    assert.deepEqual(
+      withCors.operations.map((operation) => `${operation.method} ${operation.path_template}`),
+      ['GET /nexus/billing/invoices', 'OPTIONS /nexus/billing/invoices'],
+    );
+    assert.equal('bypass' in withCors, false);
+    assert.equal(
+      withCors.operations.some(
+        (operation) =>
+          operation.method === 'OPTIONS' && matches(operation.path_regex, '/nexus/billing/admin'),
+      ),
+      false,
+    );
 
     const withoutCors = generate([{ path: '/invoices', methods: ['GET'] }]);
     assert.ok(withoutCors);
-    assert.equal('bypass' in withoutCors, false);
+    assert.deepEqual(
+      withoutCors.operations.map((operation) => operation.method),
+      ['GET'],
+    );
   });
 
-  it('keeps a declared OPTIONS operation alongside the CORS bypass', () => {
+  it('does not duplicate a declared OPTIONS operation for CORS', () => {
     const config = generate(
       [{ path: '/invoices', methods: ['GET', 'OPTIONS'] }],
       '/nexus/billing',
@@ -185,7 +198,10 @@ describe('validatorConfigFor', () => {
     );
     assert.ok(config);
     assert.equal(config.operations.length, 2);
-    assert.deepEqual(config.bypass, { methods: ['OPTIONS'] });
+    assert.deepEqual(
+      config.operations.map((operation) => operation.method),
+      ['GET', 'OPTIONS'],
+    );
   });
 
   it('returns null when the document declares nothing to enforce', () => {

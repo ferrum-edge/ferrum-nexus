@@ -23,9 +23,10 @@
  *
  * The `openapi_validator` is the one config generated from the *spec* rather
  * than from a setting on the row, so it is regenerated whenever either input
- * moves: a new spec revision, and a CORS change (which decides whether the
- * `OPTIONS` preflight is bypassed). See `spec-enforcement.ts` for what the
- * generated config does and — just as importantly — does not enforce.
+ * moves: a new spec revision, and a CORS change (which decides whether
+ * path-scoped `OPTIONS` operations are generated). See `spec-enforcement.ts`
+ * for what the generated config does and — just as importantly — does not
+ * enforce.
  *
  * ## Two settings are not free-standing
  *
@@ -923,9 +924,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // The validator config is generated from three inputs; this PATCH can
         // move two of them. The level decides whether the plugin exists at all,
         // and the CORS policy decides whether the browser's `OPTIONS` preflight
-        // is bypassed — without that bypass, adding CORS to a `routes` API would
-        // make every preflight a `400`. The third input is the document, which
-        // `updateSpec` owns.
+        // is declared for each documented path. Without those operations,
+        // adding CORS to a `routes` API would make every preflight a `400`. The
+        // third input is the document, which `updateSpec` owns.
         const nextEnforcement = patch.spec_enforcement ?? api.spec_enforcement;
         const enforcementMoved =
           patch.spec_enforcement !== undefined && patch.spec_enforcement !== api.spec_enforcement;

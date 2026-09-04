@@ -72,11 +72,9 @@ export interface ValidatorConfigOptions {
    *
    * A browser preflight is an `OPTIONS` to the *same* path with no declared
    * operation behind it, and `fail_on_unknown_operation` would reject it with
-   * `400` before the `cors` plugin ever answered. Edge evaluates `bypass`
-   * ahead of the unknown-operation check in `before_proxy`, so listing
-   * `OPTIONS` there is what keeps CORS working — and it is only added when
-   * there is a CORS policy to keep working, so an API without one still has
-   * its `OPTIONS` surface closed.
+   * `400` before the `cors` plugin ever answered. A synthetic `OPTIONS`
+   * operation for each declared path lets those preflights reach CORS without
+   * opening undeclared paths through a method-wide validator bypass.
    */
   hasCors: boolean;
 }
@@ -160,6 +158,13 @@ export function validatorConfigFor(
         path_regex: `^${escapeRegex(listenPath)}${pathTemplateRegex(item.path)}$`,
       });
     }
+    if (options.hasCors && !item.methods.includes('OPTIONS')) {
+      operations.push({
+        method: 'OPTIONS',
+        path_template: `${listenPath}${item.path}`,
+        path_regex: `^${escapeRegex(listenPath)}${pathTemplateRegex(item.path)}$`,
+      });
+    }
   }
   if (operations.length === 0) return null;
 
@@ -173,6 +178,5 @@ export function validatorConfigFor(
     validate_response: false,
     fail_on_unknown_operation: true,
     operations,
-    ...(options.hasCors ? { bypass: { methods: ['OPTIONS'] } } : {}),
   };
 }
