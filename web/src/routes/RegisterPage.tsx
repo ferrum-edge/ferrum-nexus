@@ -12,7 +12,7 @@ import { ResendVerification } from '../components/auth/ResendVerification';
 import { Button } from '../components/ui/Button';
 import { LabeledInput } from '../components/ui/Input';
 import { LabeledSelect } from '../components/ui/Select';
-import { useCaptchaConfig } from '../hooks/useBranding';
+import { useBranding, useCaptchaConfig } from '../hooks/useBranding';
 import { ApiError } from '../lib/api';
 import { useAuth } from '../stores/auth';
 
@@ -25,6 +25,9 @@ const ROLE_DESCRIPTIONS: Readonly<Record<RegistrableRole, string>> = {
 export function RegisterPage(): ReactElement {
   const { status, register } = useAuth();
   const { data: captcha } = useCaptchaConfig();
+  // True only while the portal has no accounts: this registration elects its
+  // super_admin, so it has to carry the operator's bootstrap token.
+  const bootstrapRequired = useBranding().data?.bootstrap_required === true;
   const navigate = useNavigate();
 
   const [displayName, setDisplayName] = useState('');
@@ -33,6 +36,7 @@ export function RegisterPage(): ReactElement {
   const [company, setCompany] = useState('');
   const [phone, setPhone] = useState('');
   const [role, setRole] = useState<RegistrableRole>('client');
+  const [bootstrapToken, setBootstrapToken] = useState('');
   const [captchaToken, setCaptchaToken] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -62,6 +66,7 @@ export function RegisterPage(): ReactElement {
         company: company.trim() || null,
         phone: phone.trim() || null,
         ...(captchaToken ? { captcha_token: captchaToken } : {}),
+        ...(bootstrapRequired ? { bootstrap_token: bootstrapToken.trim() } : {}),
       });
       setDone({ verificationRequired: response.email_verification_required });
     } catch (caught) {
@@ -107,6 +112,22 @@ export function RegisterPage(): ReactElement {
     >
       <form className="flex flex-col gap-4" onSubmit={(event) => void submit(event)}>
         {error ? <FormNotice>{error}</FormNotice> : null}
+
+        {bootstrapRequired ? (
+          <>
+            <FormNotice tone="warning">
+              This portal has no accounts yet, so this registration becomes its super-admin.
+            </FormNotice>
+            <LabeledInput
+              label="Bootstrap token"
+              autoComplete="off"
+              required
+              hint="Printed in the server log at startup, or the value of NEXUS_BOOTSTRAP_TOKEN."
+              value={bootstrapToken}
+              onChange={(event) => setBootstrapToken(event.target.value)}
+            />
+          </>
+        ) : null}
 
         <LabeledInput
           label="Display name"
