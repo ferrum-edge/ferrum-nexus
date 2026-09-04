@@ -67,6 +67,8 @@ import type {
   EmailOutboxEntry,
   EmailTemplate,
   EmailTemplateKey,
+  GatewayTeardownJobStatus,
+  GatewayTeardownState,
   Grant,
   GrantStatus,
   IsoTimestamp,
@@ -194,6 +196,20 @@ export type NotificationRecord = Notification;
 export interface EmailOutboxRecord extends EmailOutboxEntry {
   body_html: string;
   body_text: string;
+}
+
+/**
+ * A `gateway_teardown_jobs` row — one outstanding credential revocation.
+ *
+ * At most one row exists per user (`user_id` is unique), so the table is a
+ * per-account state rather than a queue of duplicate work.
+ */
+export interface GatewayTeardownJobRecord extends GatewayTeardownState {
+  id: Uuid;
+  user_id: Uuid;
+  /** The admin who disabled the account, or `null` once that account is gone. */
+  requested_by: Uuid | null;
+  created_at: IsoTimestamp;
 }
 
 /** An `audit_logs` row (append-only; without the joined actor summary). */
@@ -337,6 +353,11 @@ export interface NotificationFilter {
 export interface EmailOutboxFilter {
   status?: EmailOutboxEntry['status'];
   to_email?: string;
+}
+
+/** Filters for `gatewayTeardownJobs.list`. */
+export interface GatewayTeardownJobFilter {
+  status?: GatewayTeardownJobStatus;
 }
 
 /** Filters for `auditLogs.list`. */
@@ -707,6 +728,56 @@ export interface EmailOutboxRepo {
   list(filter: EmailOutboxFilter, options?: ListOptions): Promise<Paginated<EmailOutboxRecord>>;
 }
 
+/**
+ * Durable gateway revocations for disabled accounts.
+ *
+ * The row is written in the same transaction as `users.status = 'disabled'`, so
+ * an account can never be disabled without the revocation being owed. The
+ * teardown worker drains it with the same claim/backoff protocol as the email
+ * outbox, but with no terminal failure state: retries continue for as long as
+ * the account is disabled, because a credential that still authenticates is
+ * not something to give up on.
+ */
+export interface GatewayTeardownJobRepo {
+  /**
+   * Queue (or re-queue) the revocation owed for `userId`.
+   *
+   * `user_id` is unique, so an account already carrying a job has that row
+   * reset to `pending` with `attempts = 0` and `next_attempt_at = now` instead
+   * of gaining a second one. Re-disabling an account therefore re-drives the
+   * outstanding work rather than duplicating it.
+   */
+  upsertPending(
+    userId: Uuid,
+    requestedBy: Uuid | null,
+    now: IsoTimestamp,
+  ): Promise<GatewayTeardownJobRecord>;
+  findByUser(userId: Uuid): Promise<GatewayTeardownJobRecord | null>;
+  list(
+    filter: GatewayTeardownJobFilter,
+    options?: ListOptions,
+  ): Promise<Paginated<GatewayTeardownJobRecord>>;
+  /**
+   * Atomically claim up to `limit` rows that are `pending` with
+   * `next_attempt_at <= now`, flipping them to `sending` and incrementing
+   * `attempts`. Two concurrent workers never claim the same row — the same
+   * contract as {@link EmailOutboxRepo.claimDue}.
+   */
+  claimDue(now: IsoTimestamp, limit: number): Promise<GatewayTeardownJobRecord[]>;
+  /** Edge confirmed the revocation: `status = 'done'`, `completed_at = at`. */
+  markDone(id: Uuid, at: IsoTimestamp): Promise<void>;
+  /** The attempt failed: back to `pending` with a backoff stamp and the reason. */
+  reschedule(id: Uuid, nextAttemptAt: IsoTimestamp, lastError: string): Promise<void>;
+  /** Return `sending` rows stuck since before `olderThan` to `pending` (crash recovery). */
+  releaseStale(olderThan: IsoTimestamp): Promise<number>;
+  /**
+   * Drop the job for a user — the account was re-enabled (or deleted), so the
+   * revocation must not land on a live gateway identity. `false` when there was
+   * nothing queued.
+   */
+  deleteByUser(userId: Uuid): Promise<boolean>;
+}
+
 /** Append-only audit trail. */
 export interface AuditLogRepo {
   /** Append one record. There is no update or delete. */
@@ -847,6 +918,7 @@ export interface NexusStore {
   readonly messages: MessageRepo;
   readonly notifications: NotificationRepo;
   readonly emailOutbox: EmailOutboxRepo;
+  readonly gatewayTeardownJobs: GatewayTeardownJobRepo;
   readonly auditLogs: AuditLogRepo;
   readonly settings: SettingRepo;
   readonly emailTemplates: EmailTemplateRepo;

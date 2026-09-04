@@ -393,6 +393,41 @@ export interface Notification {
   updated_at: IsoTimestamp;
 }
 
+/* ── Gateway teardown ───────────────────────────────────────────────────── */
+
+/**
+ * What disabling an account managed to do to its gateway identity.
+ *
+ * There is no terminal failure here on purpose. Revoking a disabled account's
+ * Edge credentials is a security operation, and reporting it complete while it
+ * has not happened is exactly the bug this state machine exists to prevent —
+ * so an Edge outage yields `pending`, which means "queued and being retried",
+ * not "gave up".
+ */
+export type GatewayTeardownOutcome =
+  /** Groups and credentials are gone from the gateway. */
+  | 'ok'
+  /** The account never had an Edge consumer, so there was nothing to strip. */
+  | 'no_consumer'
+  /** Edge refused or was unreachable; the durable job retries until it lands. */
+  | 'pending';
+
+/** Lifecycle of one durable gateway-revocation job. */
+export type GatewayTeardownJobStatus = 'pending' | 'sending' | 'done';
+
+/** The outstanding revocation work for one disabled account (admin visibility). */
+export interface GatewayTeardownState {
+  status: GatewayTeardownJobStatus;
+  /** Attempts made so far, including the one the disable request itself ran. */
+  attempts: number;
+  /** Why the last attempt failed, or `null` before the first failure. */
+  last_error: string | null;
+  next_attempt_at: IsoTimestamp | null;
+  updated_at: IsoTimestamp;
+  /** When the gateway confirmed the revocation; `null` while it is outstanding. */
+  completed_at: IsoTimestamp | null;
+}
+
 /* ── Email ──────────────────────────────────────────────────────────────── */
 
 /** Delivery state of a queued email. */
