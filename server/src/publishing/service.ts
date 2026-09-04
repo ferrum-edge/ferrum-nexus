@@ -99,6 +99,15 @@
  * (`plugins/service.ts`) so both drive the gateway through one implementation
  * and, crucially, one per-proxy lock.
  *
+ * **`PUT /api-specs/{id}` is a proxy write too.** It re-inserts the proxy from
+ * the submitted `x-ferrum-proxy`, so it has the same lost-update shape as
+ * `PUT /proxies/{id}` while wearing a different URL: the read that builds the
+ * body, the replace and any compensation all have to happen under the *same*
+ * `proxy:<id>` key, or a runtime `PATCH` landing in between is silently
+ * discarded. Callers that need to compose several calls that way take the key
+ * once with `binder.withProxy` and use the `…Locked` helpers inside — neither
+ * the in-process queue nor the `edge_leases` row is re-entrant.
+ *
  * ## Publishing is a multi-write sequence with no transaction
  *
  * Edge has no cross-resource transaction, so `publish` creates the proxy, then
@@ -1305,119 +1314,157 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       let backendUpdated = false;
       /** Normalized upstream the proxy now points at, when it moved. */
       let movedTo: string | null = null;
-      const undo: (() => Promise<void>)[] = [];
-      let spec: ApiSpecRecord;
-      let updated: ApiRecord;
-      try {
-        if (proxyId) {
-          // One read serves both decisions below: whether the backend follows
-          // the document, and — in `routes` mode — the `x-ferrum-proxy` body,
-          // which has to be the whole current document or the replace resets
-          // every field it omits.
-          const proxy = await edge.proxies.get(proxyId);
-          if (!proxy) throw notFound('Proxy', proxyId);
 
-          // Follow the spec's `servers[0]` only while the proxy is still
-          // pointing where the *previous* revision said it should. Once a
-          // provider supplies an explicit upstream, the document stops being
-          // authoritative for it.
-          const nextUpstream = parsed.defaultUpstream;
-          let backend: SpecUpstream | null = null;
-          if (nextUpstream) {
-            const previousUpstream = previous ? safeDefaultUpstream(previous.raw_spec) : null;
-            const followsSpec =
-              previousUpstream !== null &&
-              proxy.backend_host === previousUpstream.host &&
-              proxy.backend_port === previousUpstream.port;
-            const moved =
-              previousUpstream === null ||
-              previousUpstream.host !== nextUpstream.host ||
-              previousUpstream.port !== nextUpstream.port ||
-              previousUpstream.scheme !== nextUpstream.scheme;
-            if (followsSpec && moved) {
-              // Only a move the gateway would actually make is subject to the
-              // policy: a document whose `servers[0]` is private can still be
-              // stored for an API whose backend is pinned elsewhere.
-              await assertUpstreamAllowed(nextUpstream, upstreamPolicy);
-              backend = nextUpstream;
+      /**
+       * Move the gateway, then persist the revision, compensating the gateway
+       * if the persistence fails.
+       *
+       * Run under the caller's `proxy:<id>` lease whenever the API has a proxy,
+       * because in `routes` mode this *is* a proxy rewrite: `PUT /api-specs`
+       * re-inserts the proxy from the submitted `x-ferrum-proxy`, so a body
+       * built from a read outside the lease silently discards whatever a
+       * concurrent runtime `PATCH` wrote in between — a method restriction, the
+       * timeouts, the WebSocket origins or the backend. Holding the lease
+       * across the store transaction as well is what stops a *rollback* landing
+       * on top of a later spec revision that succeeded: no other writer can
+       * have interleaved. Everything inside therefore uses the `…Locked`
+       * helpers — the serializer is not re-entrant.
+       */
+      const apply = async (): Promise<{ spec: ApiSpecRecord; api: ApiRecord }> => {
+        const undo: (() => Promise<void>)[] = [];
+        try {
+          if (proxyId) {
+            // One read serves both decisions below: whether the backend follows
+            // the document, and — in `routes` mode — the `x-ferrum-proxy` body,
+            // which has to be the whole current document or the replace resets
+            // every field it omits.
+            const proxy = await edge.proxies.get(proxyId);
+            if (!proxy) throw notFound('Proxy', proxyId);
+
+            // Follow the spec's `servers[0]` only while the proxy is still
+            // pointing where the *previous* revision said it should. Once a
+            // provider supplies an explicit upstream, the document stops being
+            // authoritative for it.
+            const nextUpstream = parsed.defaultUpstream;
+            let backend: SpecUpstream | null = null;
+            if (nextUpstream) {
+              const previousUpstream = previous ? safeDefaultUpstream(previous.raw_spec) : null;
+              const followsSpec =
+                previousUpstream !== null &&
+                proxy.backend_host === previousUpstream.host &&
+                proxy.backend_port === previousUpstream.port;
+              const moved =
+                previousUpstream === null ||
+                previousUpstream.host !== nextUpstream.host ||
+                previousUpstream.port !== nextUpstream.port ||
+                previousUpstream.scheme !== nextUpstream.scheme;
+              if (followsSpec && moved) {
+                // Only a move the gateway would actually make is subject to the
+                // policy: a document whose `servers[0]` is private can still be
+                // stored for an API whose backend is pinned elsewhere.
+                await assertUpstreamAllowed(nextUpstream, upstreamPolicy);
+                backend = nextUpstream;
+              }
+            }
+
+            if (api.spec_enforcement === 'routes') {
+              // One call moves both things a revision can move. `PUT /api-specs`
+              // regenerates the operation table *and* re-inserts the proxy from
+              // the submitted `x-ferrum-proxy`, so the backend rides along in the
+              // same write rather than in a separate `PUT /proxies/{id}` that
+              // this call would immediately overwrite. Hand-owned plugin configs
+              // and their associations are untouched by it, so there is no window
+              // in which the API is unauthenticated.
+              const listenPath = listenPathFor(api.namespace, api.slug);
+              const build = (
+                document: Record<string, unknown>,
+                proxyBody: Record<string, unknown>,
+              ): Record<string, unknown> =>
+                routesSpecDocument(document, { listenPath, proxy: proxyBody });
+
+              const specId = await specIdForProxy(proxyId);
+              // Captured before the write: the compensation has to put back the
+              // revision the catalog still shows, on the backend it was still
+              // pointed at. A first revision that somehow has no predecessor
+              // restores to the new document, which is the best available answer
+              // and never leaves the proxy without a spec.
+              const restoreDocument = previous
+                ? safeSpecDocument(previous.raw_spec)
+                : parsed.document;
+              const restoreBackend = proxyBackendFields(proxy);
+              await edge.apiSpecs.replace(
+                specId,
+                build(parsed.document, {
+                  ...submittableProxyBody(proxy),
+                  ...(backend ? backendFields(backend) : {}),
+                }),
+                actor.id,
+              );
+              undo.push(async () => {
+                // Re-read rather than replay the captured body: only the
+                // document and the backend are being rewound, exactly as
+                // `restoreProxyBackend` is narrow, so nothing else this
+                // operation left on the proxy is reverted with them.
+                const fresh = await edge.proxies.get(proxyId);
+                if (!fresh) throw notFound('Proxy', proxyId);
+                await edge.apiSpecs.replace(
+                  specId,
+                  build(restoreDocument, {
+                    ...submittableProxyBody(fresh),
+                    ...(backend ? restoreBackend : {}),
+                  }),
+                  actor.id,
+                );
+              });
+            } else if (backend) {
+              const before = await replaceProxyBackendLocked(proxyId, backend, actor.id);
+              undo.push(restoreProxyBackendLocked(before, actor.id));
+            }
+
+            if (backend) {
+              backendUpdated = true;
+              movedTo = formatUpstreamUrl(backend);
             }
           }
 
-          if (api.spec_enforcement === 'routes') {
-            // One call moves both things a revision can move. `PUT /api-specs`
-            // regenerates the operation table *and* re-inserts the proxy from
-            // the submitted `x-ferrum-proxy`, so the backend rides along in the
-            // same write rather than in a separate `PUT /proxies/{id}` that
-            // this call would immediately overwrite. Hand-owned plugin configs
-            // and their associations are untouched by it, so there is no window
-            // in which the API is unauthenticated.
-            const listenPath = listenPathFor(api.namespace, api.slug);
-            const current = submittableProxyBody(proxy);
-            const build = (
-              document: Record<string, unknown>,
-              upstream: SpecUpstream | null,
-            ): Record<string, unknown> =>
-              routesSpecDocument(document, {
-                listenPath,
-                proxy: { ...current, ...(upstream ? backendFields(upstream) : {}) },
-              });
-
-            const specId = await specIdForProxy(proxyId);
-            // Captured before the write: the compensation has to put back the
-            // revision the catalog still shows, on the backend it was still
-            // pointed at. A first revision that somehow has no predecessor
-            // restores to the new document, which is the best available answer
-            // and never leaves the proxy without a spec.
-            const restore = build(
-              previous ? safeSpecDocument(previous.raw_spec) : parsed.document,
-              null,
-            );
-            await edge.apiSpecs.replace(specId, build(parsed.document, backend), actor.id);
-            undo.push(async () => {
-              await edge.apiSpecs.replace(specId, restore, actor.id);
+          return await store.transaction(async (tx) => {
+            const revision = await tx.apiSpecs.create({
+              api_id: api.id,
+              version: nextVersion,
+              raw_spec: parsed.raw,
+              parsed_title: parsed.title,
+              parsed_version: parsed.version,
+              is_current: true,
             });
-          } else if (backend) {
-            const before = await replaceProxyBackend(proxyId, backend, actor.id);
-            undo.push(restoreProxyBackend(before, actor.id));
-          }
-
-          if (backend) {
-            backendUpdated = true;
-            movedTo = formatUpstreamUrl(backend);
-          }
-        }
-
-        const persisted = await store.transaction(async (tx) => {
-          const revision = await tx.apiSpecs.create({
-            api_id: api.id,
-            version: nextVersion,
-            raw_spec: parsed.raw,
-            parsed_title: parsed.title,
-            parsed_version: parsed.version,
-            is_current: true,
+            await tx.apiSpecs.setCurrent(api.id, revision.id);
+            // The row that records where the gateway points moves with the
+            // gateway, in the same transaction as the revision: if this rolls
+            // back, the compensation below puts the proxy back and the row never
+            // claimed the new upstream in the first place.
+            const changes: Partial<ApiRecord> = {};
+            if (nextVersion !== api.version) changes.version = nextVersion;
+            if (movedTo !== null) changes.upstream_url = movedTo;
+            const row =
+              Object.keys(changes).length === 0
+                ? api
+                : ((await tx.apis.update(api.id, changes)) ?? api);
+            return { spec: revision, api: row };
           });
-          await tx.apiSpecs.setCurrent(api.id, revision.id);
-          // The row that records where the gateway points moves with the
-          // gateway, in the same transaction as the revision: if this rolls
-          // back, the compensation below puts the proxy back and the row never
-          // claimed the new upstream in the first place.
-          const changes: Partial<ApiRecord> = {};
-          if (nextVersion !== api.version) changes.version = nextVersion;
-          if (movedTo !== null) changes.upstream_url = movedTo;
-          const row =
-            Object.keys(changes).length === 0
-              ? api
-              : ((await tx.apis.update(api.id, changes)) ?? api);
-          return { spec: revision, api: row };
-        });
-        spec = persisted.spec;
-        updated = persisted.api;
-      } catch (error) {
-        for (const step of undo.reverse()) {
-          await step().catch(() => undefined);
+        } catch (error) {
+          for (const step of undo.reverse()) {
+            await step().catch(() => undefined);
+          }
+          // A compensated failure leaves the row where it was, so the audit
+          // details must not claim a move that has just been rewound.
+          backendUpdated = false;
+          movedTo = null;
+          throw error;
         }
-        throw error;
-      }
+      };
+
+      const persisted = proxyId ? await binder.withProxy(proxyId, apply) : await apply();
+      const spec = persisted.spec;
+      const updated = persisted.api;
 
       await audit.record(
         { id: actor.id, role: actor.role },
@@ -1667,19 +1714,25 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       return;
     }
     const id = specId ?? (await specIdForProxy(proxyId));
-    // A fresh read for the same reason `mutateProxy` takes one: the replace is
-    // whole-resource, so anything the body omits — an operator's `hosts`, the
-    // timeouts and method list written at create — reverts to its default.
-    const proxy = await edge.proxies.get(proxyId);
-    if (!proxy) throw notFound('Proxy', proxyId);
-    await edge.apiSpecs.replace(
-      id,
-      routesSpecDocument(document, {
-        listenPath,
-        proxy: { ...submittableProxyBody(proxy), listen_path: listenPath },
-      }),
-      subject,
-    );
+    // Under the canonical proxy lease, like the `docs_only` branch above takes
+    // through `mutateProxy`: the read and the replace are a read-modify-write
+    // of the whole proxy document, so a concurrent rewrite landing between them
+    // would be dropped by the re-insert.
+    await binder.withProxy(proxyId, async () => {
+      // A fresh read for the same reason `mutateProxy` takes one: the replace is
+      // whole-resource, so anything the body omits — an operator's `hosts`, the
+      // timeouts and method list written at create — reverts to its default.
+      const proxy = await edge.proxies.get(proxyId);
+      if (!proxy) throw notFound('Proxy', proxyId);
+      await edge.apiSpecs.replace(
+        id,
+        routesSpecDocument(document, {
+          listenPath,
+          proxy: { ...submittableProxyBody(proxy), listen_path: listenPath },
+        }),
+        subject,
+      );
+    });
   }
 
   /**
@@ -1773,7 +1826,30 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     upstream: SpecUpstream,
     subject: string,
   ): Promise<EdgeProxy> {
-    return mutateProxy(proxyId, (proxy) => ({ ...proxy, ...backendFields(upstream) }), subject);
+    return binder.withProxy(proxyId, () => replaceProxyBackendLocked(proxyId, upstream, subject));
+  }
+
+  /** {@link replaceProxyBackend} for a caller already holding the proxy lease. */
+  async function replaceProxyBackendLocked(
+    proxyId: string,
+    upstream: SpecUpstream,
+    subject: string,
+  ): Promise<EdgeProxy> {
+    return binder.mutateProxyLocked(
+      proxyId,
+      (proxy) => ({ ...proxy, ...backendFields(upstream) }),
+      subject,
+    );
+  }
+
+  /** The four `backend_*` fields exactly as a proxy currently carries them. */
+  function proxyBackendFields(proxy: EdgeProxy): Record<string, unknown> {
+    return {
+      backend_scheme: proxy.backend_scheme,
+      backend_host: proxy.backend_host,
+      backend_port: proxy.backend_port,
+      backend_path: proxy.backend_path ?? null,
+    };
   }
 
   /**
@@ -1811,14 +1887,17 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   }
 
   function restoreProxyBackend(previous: EdgeProxy, subject: string): () => Promise<void> {
-    const backend = {
-      backend_scheme: previous.backend_scheme,
-      backend_host: previous.backend_host,
-      backend_port: previous.backend_port,
-      backend_path: previous.backend_path ?? null,
-    };
+    const restore = restoreProxyBackendLocked(previous, subject);
     return async () => {
-      await mutateProxy(previous.id, (proxy) => ({ ...proxy, ...backend }), subject);
+      await binder.withProxy(previous.id, restore);
+    };
+  }
+
+  /** {@link restoreProxyBackend} for a caller already holding the proxy lease. */
+  function restoreProxyBackendLocked(previous: EdgeProxy, subject: string): () => Promise<void> {
+    const backend = proxyBackendFields(previous);
+    return async () => {
+      await binder.mutateProxyLocked(previous.id, (proxy) => ({ ...proxy, ...backend }), subject);
     };
   }
 
