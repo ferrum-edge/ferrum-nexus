@@ -304,6 +304,40 @@ platform has to be bootstrappable. Every later registration gets only the
 registrable role it asked for, subject to `open_registration` and
 `allowed_roles`.
 
+#### The bootstrap token
+
+Because that first registration hands out `super_admin`, it is not a public
+operation: while the `users` table is empty, `POST /api/auth/register` requires
+`bootstrap_token` and refuses everything else with `403 FORBIDDEN`.
+
+- **What it protects.** The founding account, and therefore user and role
+  administration, SMTP and CAPTCHA settings, god mode, the audit log, and the
+  Nexus→Edge control-plane capabilities those reach. Without the token, a fresh
+  deployment that is reachable before its operator has finished setting it up
+  hands all of that to whoever connects first.
+- **Where it comes from.** `NEXUS_BOOTSTRAP_TOKEN` (16+ characters, validated
+  at startup), or — when that is unset — a 32-byte random value generated per
+  process and printed at `warn`, and only while the portal is still empty. A
+  token supplied through the environment is never logged. See
+  [`operations.md`](operations.md#first-run-and-the-bootstrap-token).
+- **How it is checked.** SHA-256 digests compared with `timingSafeEqual`, so
+  neither the outcome's timing nor its cost varies with how much of the token
+  the caller guessed correctly. The check runs **before** the password is
+  hashed and before any row is written: a failed attempt creates no user, mints
+  no session and does not touch the election key, so guessing cannot wear the
+  bootstrap capability down.
+- **Public self-registration can never elect a founder.** The two rules
+  compose: the token decides who may stand for the election, the atomic claim
+  below decides which of them wins. A server built with no configured token has
+  no value that can match, so it refuses every registration against an empty
+  portal rather than falling open.
+- **After bootstrap the field is inert.** Registration number two is an
+  ordinary `client`/`provider` whether or not it replays the token, since the
+  claim key is already taken and is never released.
+- `GET /api/branding` publishes `bootstrap_required` (the user table is empty)
+  so the sign-up form knows to ask for the token. That flag is the only public
+  signal; the token itself is never exposed over the API.
+
 "First" is decided by an **atomic claim**, not by counting rows. Registration
 creates the account with the role that was requested and then inserts the
 `bootstrap.super_admin_claimed` key with `settings.insertIfAbsent`; only the
@@ -742,6 +776,10 @@ Before going live:
 - [ ] `NEXUS_ALLOW_PRIVATE_UPSTREAMS` is left at `false` unless the portal is
       meant to front internal services, in which case gateway egress is
       restricted at the network layer.
+- [ ] `NEXUS_BOOTSTRAP_TOKEN` set from a secret manager before the portal is
+      first reachable — required if more than one instance runs, since a
+      generated token is per process. The portal is not published on a public
+      interface until the founding `super_admin` exists.
 - [ ] CAPTCHA configured if registration is open to the internet.
 - [ ] Registration policy reviewed: `open_registration`, `allowed_roles`,
       `require_email_verification`.

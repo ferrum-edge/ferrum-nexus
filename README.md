@@ -67,8 +67,21 @@ npm run migrate   # builds shared, then applies migrations
 npm run dev
 ```
 
-Open <http://127.0.0.1:5173>. Register the first user — they become the
-initial `super_admin`. The backend serves on `http://127.0.0.1:8787`.
+Open <http://127.0.0.1:5173>. The backend serves on `http://127.0.0.1:8787`.
+
+The first user to register becomes the initial `super_admin`, so that one
+registration has to prove it comes from you: while the portal has no accounts
+the sign-up form asks for a **bootstrap token**. Set `NEXUS_BOOTSTRAP_TOKEN`
+yourself, or leave it blank and copy the token the server prints at startup:
+
+```
+FIRST-RUN BOOTSTRAP: this portal has no accounts yet.
+...
+    2f6c1b…  ← paste this into the form's "Bootstrap token" field
+```
+
+The generated token lives for the life of that process and differs per
+instance, so pin `NEXUS_BOOTSTRAP_TOKEN` for anything running more than one.
 
 ## Database
 
@@ -92,12 +105,17 @@ NEXUS_DB_DRIVER=mongodb     # NEXUS_DB_URL=mongodb+srv://...
 docker build -t ferrum-nexus -f docker/Dockerfile .
 # FERRUM_ADMIN_JWT_SECRET must match the gateway's own value, and both
 # secrets must be at least 32 characters or the server refuses to start.
-docker run --rm -p 8787:8787 \
+# The container binds 0.0.0.0, so publish the port on loopback (as below)
+# rather than `-p 8787:8787`, which would offer it on every host interface.
+docker run --rm -p 127.0.0.1:8787:8787 \
   -e NEXUS_SECRET_KEY=$(openssl rand -hex 32) \
   -e FERRUM_ADMIN_URL=http://host.docker.internal:9000 \
   -e FERRUM_ADMIN_JWT_SECRET="$FERRUM_ADMIN_JWT_SECRET" \
   ferrum-nexus
 ```
+
+The bootstrap token is printed to the container log
+(`docker logs`); pass `-e NEXUS_BOOTSTRAP_TOKEN=…` to choose it instead.
 
 For a full stack alongside Postgres and a Ferrum Edge instance, copy
 [`docker/docker-compose.example.yml`](docker/docker-compose.example.yml) and

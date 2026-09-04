@@ -216,15 +216,16 @@ always off under `NEXUS_ENV=test`). Exceeding it is `429 RATE_LIMITED`.
 
 _public_ → `201`
 
-| Field           | Type                       | Notes                                                                     |
-| --------------- | -------------------------- | ------------------------------------------------------------------------- |
-| `email`         | string                     | Valid address, ≤ 320 chars. Stored lowercased; unique case-insensitively. |
-| `password`      | string                     | ≥ 12 characters (`MIN_PASSWORD_LENGTH`), ≤ 1024.                          |
-| `display_name`  | string                     | 1–200 chars.                                                              |
-| `role`          | `"client"` \| `"provider"` | Ignored for the very first account.                                       |
-| `company`       | string \| null             | optional, ≤ 200                                                           |
-| `phone`         | string \| null             | optional, ≤ 64                                                            |
-| `captcha_token` | string                     | optional, required when CAPTCHA is enabled                                |
+| Field             | Type                       | Notes                                                                     |
+| ----------------- | -------------------------- | ------------------------------------------------------------------------- |
+| `email`           | string                     | Valid address, ≤ 320 chars. Stored lowercased; unique case-insensitively. |
+| `password`        | string                     | ≥ 12 characters (`MIN_PASSWORD_LENGTH`), ≤ 1024.                          |
+| `display_name`    | string                     | 1–200 chars.                                                              |
+| `role`            | `"client"` \| `"provider"` | Ignored for the very first account.                                       |
+| `company`         | string \| null             | optional, ≤ 200                                                           |
+| `phone`           | string \| null             | optional, ≤ 64                                                            |
+| `captcha_token`   | string                     | optional, required when CAPTCHA is enabled                                |
+| `bootstrap_token` | string                     | **Required while the portal has no accounts**; ignored afterwards.        |
 
 ```json
 { "user": { "id": "…", "email": "…", "role": "client", … }, "email_verification_required": false }
@@ -233,10 +234,16 @@ _public_ → `201`
 - **The first account ever created becomes `super_admin`** and is
   auto-verified, whatever `role` it asked for; the registration policy
   (`open_registration`, `allowed_roles`) is bypassed for it.
+- **That first registration must carry `bootstrap_token`** — the server's
+  `NEXUS_BOOTSTRAP_TOKEN`, or the per-process token printed in its startup log.
+  Without a matching value the request is refused with `403 FORBIDDEN` and
+  nothing is created. `GET /api/branding` reports `bootstrap_required` so a
+  client knows when to ask for it. Once any account exists the field is ignored.
 - When verification is not required, the response also sets the session
   cookies and the user is signed in.
-- Errors: `409 CONFLICT` (email taken), `403 FORBIDDEN` (registration closed,
-  or that role is not in `allowed_roles`), `400 CAPTCHA_FAILED`.
+- Errors: `409 CONFLICT` (email taken), `403 FORBIDDEN` (missing or wrong
+  `bootstrap_token` on an empty portal, registration closed, or that role is
+  not in `allowed_roles`), `400 CAPTCHA_FAILED`.
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8787/api/auth/register \
@@ -401,9 +408,15 @@ before a session exists.
   "default_theme": "dark",
   "tagline": "APIs for partners",
   "support_email": "api-support@acme.example",
-  "captcha": { "enabled": false, "provider": "none", "site_key": null }
+  "captcha": { "enabled": false, "provider": "none", "site_key": null },
+  "bootstrap_required": false
 }
 ```
+
+`bootstrap_required` is `true` only while the portal has no accounts at all: the
+next registration elects the founding `super_admin` and must therefore send
+`bootstrap_token`. The flag says that the portal is empty and nothing else — the
+token is never public.
 
 ---
 
