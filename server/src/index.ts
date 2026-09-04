@@ -42,6 +42,7 @@ import {
   type OnRegistered,
 } from './auth/service.js';
 import { createCatalogService, type CatalogService } from './catalog/service.js';
+import { environmentWithEnvFile } from './config/env-file.js';
 import { loadConfig, type NexusConfig } from './config/index.js';
 import { createConsumerProvisioner } from './credentials/consumers.js';
 import { createCredentialsService, type CredentialsService } from './credentials/service.js';
@@ -705,7 +706,9 @@ function logGeneratedBootstrapToken(app: FastifyInstance, token: string): void {
 
 /** Boot the server from `process.env` and listen. */
 export async function main(): Promise<void> {
-  const loaded = loadConfig(process.env);
+  // The documented quickstart edits a root `.env`; exported variables win.
+  const { env, file: envFile } = environmentWithEnvFile();
+  const loaded = loadConfig(env);
   // With no `NEXUS_BOOTSTRAP_TOKEN` the portal still gets one, generated per
   // process, so a fresh deployment is never bootstrappable by whoever reaches
   // the port first — only by whoever can read the log.
@@ -728,6 +731,7 @@ export async function main(): Promise<void> {
     store,
     edge: createFerrumAdmin(config, undefined, store.leases),
   });
+  if (envFile !== null) app.log.info({ file: envFile }, 'Loaded environment file');
   if (generatedBootstrapToken !== null && emptyPortal) {
     logGeneratedBootstrapToken(app, generatedBootstrapToken);
   }

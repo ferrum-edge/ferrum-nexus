@@ -12,10 +12,20 @@ metrics.
 
 ## 1. Environment variables
 
-`server/src/config/index.ts` is the **only** reader of `process.env`. It
+`server/src/config/index.ts` is the **only** reader of the environment. It
 validates everything with zod at startup and refuses to boot half-configured:
 the process prints every offending variable and exits non-zero. The repo-root
 [`.env.example`](../.env.example) mirrors this table.
+
+**Where the environment comes from.** The server (`npm run dev`, `npm start`)
+and the migration CLI (`npm run migrate`) read a `.env` file if one exists in
+the working directory or its parent — the workspace scripts run from
+`server/`, so the documented repo-root `.env` is found either way — and layer
+the real environment **over** it: a variable exported in the shell, set by a
+container runtime or injected by an orchestrator always wins, and a deployed
+image with no `.env` behaves exactly as if the feature did not exist. The
+path of the file that was read is logged once at startup; its contents never
+are. A relative `NEXUS_SQLITE_PATH` resolves from `server/`.
 
 ### Required
 
