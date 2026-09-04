@@ -218,3 +218,13 @@ fails without the fix.
   mutating `/api/apis/*` routes carry a 30 req/min per-account limiter. An
   open-registration provider could previously create proxies, plugin
   configs, slugs and 2 MiB documents without limit.
+- **Messaging is bounded per account.** `POST /api/threads` and
+  `POST /api/threads/:id/messages` carry per-account limiters (10 and 30 per
+  minute), a rolling 24-hour budget (`NEXUS_MAX_MESSAGES_PER_USER_PER_DAY`,
+  default 200, refused with `429 QUOTA_EXCEEDED` before any row is written),
+  and the `message_received` email is coalesced to one per recipient per
+  thread per 10 minutes through the outbox idempotency key — the default
+  template now announces activity instead of quoting a message. One
+  self-registered account could previously mail-bomb every administrator
+  and grow the message, audit, notification and outbox tables without limit.
+  Migration `010_message_sender_index` adds the index the budget check runs on.
