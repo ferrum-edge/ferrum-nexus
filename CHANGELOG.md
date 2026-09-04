@@ -195,6 +195,22 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   a same-host pin with a different path is left alone. Base-path-only changes
   previously reported success while the gateway kept the old path.
 
+- **Workers recover abandoned claims on every tick**, not only at start, and
+  claim one row at a time with a per-row budget (60 s; SMTP timeouts are now
+  pinned so a hung send cannot outlive the 5-minute stale threshold). A crash
+  followed by a quick restart no longer strands gateway teardowns or
+  transactional mail, and a store failure mid-batch leaves the rest workable.
+- **The last-super-admin rule holds across instances.** Every transition that
+  can shrink the active super-admin set (demotion, disable, god-mode disable)
+  runs under a store-level lease (`users:super-admins`) taken outside the
+  transaction, so two instances can no longer each demote the other.
+- **SQLite no longer mistakes an unrelated caller for a nested transaction.**
+  Nesting is tracked with `AsyncLocalStorage`; an independent transaction
+  started while another body is awaiting queues behind it instead of joining
+  it and losing its writes to the other's rollback. The remaining hazard, a
+  bare root-store write issued while a body is open, is documented on the
+  store contract.
+
 ### Security
 
 The rewrite was reviewed twice — once by an adversarial pass over the whole
