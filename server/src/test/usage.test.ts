@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { after, before, beforeEach, describe, it } from 'node:test';
+import { afterEach, beforeEach, describe, it } from 'node:test';
 
 import type { ApiErrorBody, ApiUsageResponse, PublishApiResponse } from '@ferrum-nexus/shared';
 
@@ -46,7 +46,7 @@ describe('api usage', () => {
     return response.json<ApiUsageResponse>();
   }
 
-  before(async () => {
+  beforeEach(async () => {
     harness = await buildTestApp();
     founder = await harness.registerUser({ email: 'usage-founder@example.test' });
     provider = await harness.registerUser({
@@ -60,12 +60,8 @@ describe('api usage', () => {
     client = await harness.registerUser({ email: 'usage-client@example.test', role: 'client' });
   });
 
-  after(async () => {
+  afterEach(async () => {
     await harness.close();
-  });
-
-  beforeEach(() => {
-    harness.edge.reset();
   });
 
   describe('counters', () => {

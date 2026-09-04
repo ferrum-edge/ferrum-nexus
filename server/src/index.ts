@@ -465,7 +465,12 @@ export async function buildServer(
   });
 
   await app.register(
-    async (scope) => scope.register(publishingRoutes, { publishing, usage, apiPlugins }),
+    async (scope) => {
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { global: false });
+      }
+      await scope.register(publishingRoutes, { publishing, usage, apiPlugins });
+    },
     { prefix: '/api/apis' },
   );
 

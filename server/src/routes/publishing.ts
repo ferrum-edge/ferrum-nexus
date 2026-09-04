@@ -272,11 +272,15 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
    * carries `available: false`. A provider's overview page must not break
    * because Edge is restarting.
    */
-  app.get('/:id/usage', async (request): Promise<ApiUsageResponse> => {
-    const { user } = requireAuth(request);
-    const { id } = parseOrThrow(idParamSchema, request.params);
-    return usage.forApi(user, id);
-  });
+  app.get(
+    '/:id/usage',
+    { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } },
+    async (request): Promise<ApiUsageResponse> => {
+      const { user } = requireAuth(request);
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      return usage.forApi(user, id);
+    },
+  );
 
   app.patch('/:id', async (request): Promise<UpdateApiResponse> => {
     const { user } = requireAuth(request);

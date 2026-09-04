@@ -120,6 +120,8 @@ interface CallOptions {
   tolerate?: number[];
   /** Override the JWT `sub` claim so Edge's audit log names the acting user. */
   subject?: string;
+  /** Refuse to buffer a response larger than this many bytes. */
+  maxResponseBytes?: number;
 }
 
 /** Typed client for the subset of the Ferrum Edge Admin API that Nexus uses. */
@@ -286,12 +288,8 @@ const MAX_GATEWAY_MESSAGE = 500;
  */
 export const METRICS_CACHE_TTL_MS = 10_000;
 
-/**
- * Cap on cached proxies per metrics endpoint. Expired entries are swept on
- * write; this bound stops a very large namespace from growing the map without
- * limit between sweeps.
- */
-const METRICS_CACHE_MAX_ENTRIES = 500;
+/** Hard ceiling for either gateway-wide telemetry document. */
+export const METRICS_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
 
 /** Prometheus families Nexus reads. Everything else in the body is ignored. */
 const REQUESTS_FAMILY = 'ferrum_requests_total';
@@ -301,6 +299,17 @@ const DURATION_FAMILY = 'ferrum_request_duration_ms';
 interface CacheEntry<T> {
   value: T;
   expiresAt: number;
+}
+
+async function readBoundedBody(body: AsyncIterable<Uint8Array>, maxBytes: number): Promise<string> {
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  for await (const chunk of body) {
+    bytes += chunk.byteLength;
+    if (bytes > maxBytes) throw new Error(`response exceeded ${maxBytes} bytes`);
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 /** An unavailable scrape: zeroed rather than absent, so callers never branch. */
@@ -426,7 +435,9 @@ export function createFerrumAdminClient(
         signal: AbortSignal.timeout(config.timeoutMs),
       });
       statusCode = response.statusCode;
-      raw = await response.body.text();
+      raw = options.maxResponseBytes
+        ? await readBoundedBody(response.body, options.maxResponseBytes)
+        : await response.body.text();
     } catch (cause) {
       logger.error(
         { method, path, code: (cause as NodeJS.ErrnoException).code ?? null },
@@ -523,7 +534,10 @@ export function createFerrumAdminClient(
         dispatcher,
         signal: AbortSignal.timeout(config.timeoutMs),
       });
-      return { statusCode: response.statusCode, body: await response.body.text() };
+      return {
+        statusCode: response.statusCode,
+        body: await readBoundedBody(response.body, METRICS_RESPONSE_MAX_BYTES),
+      };
     } catch (cause) {
       logger.warn(
         { path, code: (cause as NodeJS.ErrnoException).code ?? null },
@@ -535,33 +549,13 @@ export function createFerrumAdminClient(
 
   /* ── Metrics caches ───────────────────────────────────────────────────── */
 
-  const scrapeCache = new Map<string, CacheEntry<EdgeProxyMetrics>>();
-  const backendCache = new Map<string, CacheEntry<EdgeBackendState>>();
+  let scrapeCache: CacheEntry<PrometheusSample[] | null> | null = null;
+  let scrapePending: Promise<PrometheusSample[] | null> | null = null;
+  let backendCache: CacheEntry<unknown> | null = null;
+  let backendPending: Promise<unknown> | null = null;
 
-  function readCache<T>(cache: Map<string, CacheEntry<T>>, key: string): T | null {
-    const entry = cache.get(key);
-    if (!entry) return null;
-    if (entry.expiresAt <= Date.now()) {
-      cache.delete(key);
-      return null;
-    }
-    return entry.value;
-  }
-
-  function writeCache<T>(cache: Map<string, CacheEntry<T>>, key: string, value: T): T {
-    const now = Date.now();
-    if (cache.size >= METRICS_CACHE_MAX_ENTRIES) {
-      for (const [existing, entry] of cache) {
-        if (entry.expiresAt <= now) cache.delete(existing);
-      }
-      // Still full of live entries: drop the oldest insertion to stay bounded.
-      if (cache.size >= METRICS_CACHE_MAX_ENTRIES) {
-        const oldest = cache.keys().next();
-        if (!oldest.done) cache.delete(oldest.value);
-      }
-    }
-    cache.set(key, { value, expiresAt: now + METRICS_CACHE_TTL_MS });
-    return value;
+  function readGlobalCache<T>(cache: CacheEntry<T> | null): T | undefined {
+    return cache && cache.expiresAt > Date.now() ? cache.value : undefined;
   }
 
   /**
@@ -931,52 +925,53 @@ export function createFerrumAdminClient(
 
     metrics: {
       async scrapeProxy(proxyId: string): Promise<EdgeProxyMetrics> {
-        const cached = readCache(scrapeCache, proxyId);
-        if (cached) return cached;
-
-        // `text/plain; version=0.0.4` is the exposition content type; Edge
-        // ignores the header, but asking for JSON here would be a lie.
-        const response = await callText('/metrics', 'text/plain;version=0.0.4');
-        if (!response) return writeCache(scrapeCache, proxyId, emptyProxyMetrics());
-
-        if (response.statusCode < 200 || response.statusCode >= 300) {
-          logger.warn(
-            { path: '/metrics', status: response.statusCode },
-            'Ferrum Edge metrics scrape returned a non-2xx status',
-          );
-          return writeCache(scrapeCache, proxyId, emptyProxyMetrics());
+        let samples = readGlobalCache(scrapeCache);
+        if (samples === undefined) {
+          scrapePending ??= (async () => {
+            const response = await callText('/metrics', 'text/plain;version=0.0.4');
+            let parsed: PrometheusSample[] | null = null;
+            if (response && response.statusCode >= 200 && response.statusCode < 300) {
+              parsed = parsePrometheusText(response.body);
+              if (parsed.length === 0) parsed = null;
+            }
+            scrapeCache = { value: parsed, expiresAt: Date.now() + METRICS_CACHE_TTL_MS };
+            return parsed;
+          })().finally(() => {
+            scrapePending = null;
+          });
+          samples = await scrapePending;
         }
-
-        const samples = parsePrometheusText(response.body);
-        if (samples.length === 0) {
-          // A 200 that yields nothing means the body was not an exposition we
-          // recognise. Report unavailable rather than "zero requests".
-          logger.warn(
-            { path: '/metrics', bytes: response.body.length },
-            'Ferrum Edge metrics scrape produced no parseable samples',
-          );
-          return writeCache(scrapeCache, proxyId, emptyProxyMetrics());
-        }
-
-        return writeCache(scrapeCache, proxyId, reduceProxySamples(samples, proxyId));
+        return samples ? reduceProxySamples(samples, proxyId) : emptyProxyMetrics();
       },
 
       async backendState(proxyId: string): Promise<EdgeBackendState> {
-        const cached = readCache(backendCache, proxyId);
-        if (cached) return cached;
-
-        let payload: unknown;
-        try {
-          payload = await call<unknown>('GET', '/admin/metrics');
-        } catch (error) {
-          logger.warn(
-            { path: '/admin/metrics', error: error instanceof Error ? error.message : 'unknown' },
-            'Ferrum Edge runtime metrics could not be read',
-          );
-          return writeCache(backendCache, proxyId, emptyBackendState());
+        let payload = readGlobalCache(backendCache);
+        if (payload === undefined) {
+          backendPending ??= call<unknown>('GET', '/admin/metrics', {
+            maxResponseBytes: METRICS_RESPONSE_MAX_BYTES,
+          })
+            .then((value) => {
+              backendCache = { value, expiresAt: Date.now() + METRICS_CACHE_TTL_MS };
+              return value;
+            })
+            .catch((error: unknown) => {
+              logger.warn(
+                {
+                  path: '/admin/metrics',
+                  error: error instanceof Error ? error.message : 'unknown',
+                },
+                'Ferrum Edge runtime metrics could not be read',
+              );
+              backendCache = { value: null, expiresAt: Date.now() + METRICS_CACHE_TTL_MS };
+              return null;
+            })
+            .finally(() => {
+              backendPending = null;
+            });
+          payload = await backendPending;
         }
         if (typeof payload !== 'object' || payload === null) {
-          return writeCache(backendCache, proxyId, emptyBackendState());
+          return emptyBackendState();
         }
 
         const body = payload as Record<string, unknown>;
@@ -1011,12 +1006,12 @@ export function createFerrumAdminClient(
           unhealthyTargets.push(target as unknown as EdgeUnhealthyTarget);
         }
 
-        return writeCache(backendCache, proxyId, {
+        return {
           available: true,
           breakers,
           unhealthyTargets,
           uptimeSeconds: numberAt(body.gateway, 'uptime_seconds'),
-        });
+        };
       },
     },
 
