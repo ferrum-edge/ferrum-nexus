@@ -751,6 +751,31 @@ was written, so retrying is safe and is the correct advice. Seeing this
 routinely means something is holding a gateway resource for tens of seconds —
 look for a slow or hanging Edge Admin API rather than for a Nexus bug.
 
+### The same table guards the last super admin
+
+`edge_leases` is not only for gateway resources. One database invariant needs
+the same treatment, for the same reason: **the last active `super_admin`**.
+
+The rule is a count of the _other_ active super admins followed by a write to
+one account. A database transaction makes those two steps atomic against other
+work on the same connection pool, and that is enough for one process — but a
+multi-instance deployment has one pool per instance, and two of them counted
+one another's administrator and both demoted. The portal was then left with no
+account able to restore the role, recoverable only by editing the database.
+
+So every transition that can _shrink_ the set — a role change away from
+`super_admin`, a `status: "disabled"`, and god mode's `disable-user` — runs
+under one shared key, `users:super-admins`, taken before the transaction opens.
+The loser waits, re-counts after the winner committed, and gets the ordinary
+`409 LAST_SUPER_ADMIN` with nothing written. Promotions and re-enables take no
+lock; they only ever grow the set.
+
+Operationally this behaves like any other lease: same TTL, same 30-second wait,
+same crash recovery. Contention is a single key portal-wide, so a `CONFLICT`
+carrying _"Another administrator change is in flight right now"_ means two
+admins edited administrator accounts within the same instant — rare, and safe
+to retry.
+
 ### Supported topologies
 
 **Several Nexus instances over one shared database are supported**, including
