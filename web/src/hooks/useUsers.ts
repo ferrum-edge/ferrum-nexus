@@ -8,10 +8,12 @@ import {
 import type {
   CreateOrganizationRequest,
   CreateOrganizationResponse,
+  GetUserResponse,
   ListOrganizationsQuery,
   ListOrganizationsResponse,
   ListUsersQuery,
   ListUsersResponse,
+  RetryGatewayTeardownResponse,
   UpdateMeRequest,
   UpdateMeResponse,
   UpdateUserRequest,
@@ -29,6 +31,35 @@ export function useUsers(
     queryKey: queryKeys.users.list(query),
     queryFn: () => usersApi.list(query),
     enabled,
+  });
+}
+
+/**
+ * Admin account detail, which carries any outstanding gateway revocation.
+ *
+ * Fetched lazily — the users table only asks for it when the portal-wide
+ * pending count says there is something to show.
+ */
+export function useUser(id: string, enabled = true): UseQueryResult<GetUserResponse> {
+  return useQuery({
+    queryKey: queryKeys.users.detail(id),
+    queryFn: () => usersApi.get(id),
+    enabled,
+  });
+}
+
+/** Admin: re-run a disabled account's gateway revocation now. */
+export function useRetryGatewayTeardown(): UseMutationResult<
+  RetryGatewayTeardownResponse,
+  Error,
+  string
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => usersApi.retryGatewayTeardown(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.users.all });
+    },
   });
 }
 
