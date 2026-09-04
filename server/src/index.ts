@@ -59,6 +59,10 @@ import { createOutboxWorker, type OutboxWorker } from './email/outbox-worker.js'
 import { createFerrumAdmin, type FerrumAdminClient } from './ferrum-admin/index.js';
 import { createCrypto, type NexusCrypto } from './lib/crypto.js';
 import { isNexusError } from './lib/errors.js';
+import {
+  createKeyedSerializer,
+  SUPER_ADMIN_LOCK_CONFLICT_MESSAGE,
+} from './lib/keyed-serializer.js';
 import { buildLoggerOptions, type LoggerOptions } from './lib/logger.js';
 import { createMessagingService, type MessagingService } from './messaging/service.js';
 import { registerAuthPlugin } from './middleware/auth-plugin.js';
@@ -229,6 +233,25 @@ export async function buildServer(
    */
   const warn = (obj: Record<string, unknown>, message: string): void => app.log.warn(obj, message);
 
+  /**
+   * Store-level cross-instance locks, over the same `leases` table the Edge
+   * client uses for consumer and proxy replaces.
+   *
+   * A database transaction only orders writes made through one store object,
+   * and a multi-instance deployment has one per process — which is how two
+   * Nexus instances against one PostgreSQL each counted the *other* active
+   * super admin and both demoted. Invariants that span rows rather than
+   * belonging to one of them are taken under a key here instead.
+   *
+   * The owner defaults to a fresh id per serializer, so each process contends
+   * for the lease independently — which is exactly what makes it testable with
+   * two apps over one store.
+   */
+  const locks = createKeyedSerializer({
+    leases: deps.store.leases,
+    conflictMessage: SUPER_ADMIN_LOCK_CONFLICT_MESSAGE,
+  });
+
   const audit = createAuditService(deps.store);
   const captcha = createCaptchaService({
     store: deps.store,
@@ -306,6 +329,7 @@ export async function buildServer(
     notifications,
     auth,
     credentials,
+    locks,
     log: warn,
   });
   const publishing = createPublishingService({
@@ -348,6 +372,7 @@ export async function buildServer(
     access,
     publishing,
     credentials,
+    locks,
     log: warn,
   });
 

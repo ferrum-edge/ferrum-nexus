@@ -1,9 +1,13 @@
 /**
  * The outbox worker — the only thing in Nexus that actually talks to SMTP.
  *
- * It polls `email_outbox` every {@link OUTBOX_POLL_INTERVAL_MS}, claims a batch
- * of due rows (an atomic `pending → sending` flip that also increments
- * `attempts`, so two workers never claim the same row), and delivers them:
+ * It polls `email_outbox` every {@link OUTBOX_POLL_INTERVAL_MS}. Each tick
+ * first returns rows a crashed worker left `sending` for more than
+ * {@link OUTBOX_STALE_AFTER_MS} to `pending` — recovery belongs to whichever
+ * worker is running, not to the next process boot — and then claims up to
+ * {@link OUTBOX_BATCH_SIZE} due rows one at a time (an atomic `pending →
+ * sending` flip that also increments `attempts`, so two workers never claim the
+ * same row), and delivers them:
  *
  * - success → `markSent`;
  * - failure with retries left → `reschedule` at `30s · 2^attempts` plus jitter;
@@ -55,8 +59,30 @@ export const OUTBOX_BASE_BACKOFF_MS = 30_000;
 /** Upper bound on a single backoff, so a long outage still retries hourly. */
 export const OUTBOX_MAX_BACKOFF_MS = 60 * 60_000;
 
-/** A `sending` row untouched for this long is assumed to be a crashed worker's. */
+/**
+ * A `sending` row untouched for this long is assumed to be a crashed worker's
+ * and is released back to `pending`.
+ *
+ * Five minutes against a per-message ceiling of {@link OUTBOX_SEND_BUDGET_MS},
+ * and rows are claimed one at a time, so a row a live worker is actually
+ * delivering is never anywhere near it.
+ */
 export const OUTBOX_STALE_AFTER_MS = 5 * 60_000;
+
+/**
+ * How long one delivery attempt can legitimately take.
+ *
+ * `createSmtpTransport` pins nodemailer's three timeouts — 10 s to connect,
+ * 10 s for the greeting, 30 s of socket inactivity — so a single `send` cannot
+ * run past ~50 seconds however badly the relay behaves. (Nodemailer's own
+ * defaults are 2 min / 30 s / 10 min, which would put a hung message well past
+ * {@link OUTBOX_STALE_AFTER_MS} and let a second worker deliver a duplicate of
+ * a message still in flight.)
+ *
+ * Nothing enforces this number; it exists to be compared against the stale
+ * threshold, which must stay comfortably above it.
+ */
+export const OUTBOX_SEND_BUDGET_MS = 60_000;
 
 /**
  * Prefix written to `last_error` when SMTP accepted a message but the
@@ -71,6 +97,8 @@ export const OUTBOX_DELIVERED_UNACKNOWLEDGED = 'delivered-unacknowledged';
 
 /** What one {@link OutboxWorker.tick} did. */
 export interface OutboxTickResult {
+  /** `sending` rows older than the stale threshold returned to `pending`. */
+  released: number;
   /** Rows claimed from the queue. */
   claimed: number;
   sent: number;
@@ -78,22 +106,25 @@ export interface OutboxTickResult {
   failed: number;
   /** Delivered by SMTP, but the `markSent` write did not land. */
   unacknowledged: number;
-  /** True when the tick did nothing because SMTP is not configured. */
+  /** Rows whose handling threw; recovered by a later tick's stale sweep. */
+  abandoned: number;
+  /** True when the tick delivered nothing because SMTP is not configured. */
   skipped: boolean;
 }
 
-const EMPTY_TICK: OutboxTickResult = {
+const EMPTY_TICK: Omit<OutboxTickResult, 'released'> = {
   claimed: 0,
   sent: 0,
   rescheduled: 0,
   failed: 0,
   unacknowledged: 0,
+  abandoned: 0,
   skipped: true,
 };
 
 /** The background email sender. */
 export interface OutboxWorker {
-  /** Release stale claims and begin polling. Idempotent. */
+  /** Begin polling. Idempotent. */
   start(): void;
   /** Stop polling and wait for an in-flight tick. Idempotent. */
   stop(): Promise<void>;
@@ -224,29 +255,76 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
     }
   }
 
+  /**
+   * Return rows a crashed worker left `sending` to the queue.
+   *
+   * Runs on **every** tick, before anything is claimed — and before the SMTP
+   * check, so a backlog stranded while the settings were being fixed is
+   * recovered too. A sweep that only happens at `start()` recovers nothing from
+   * the ordinary crash: the rows are younger than the threshold when that one
+   * sweep runs, and no later tick ever looks at them again. It is one indexed
+   * `UPDATE … WHERE status = 'sending' AND updated_at <= ?` per poll.
+   */
+  async function releaseStale(result: OutboxTickResult): Promise<void> {
+    const staleBefore = new Date(now().getTime() - OUTBOX_STALE_AFTER_MS).toISOString();
+    result.released = await store.emailOutbox.releaseStale(staleBefore);
+    if (result.released > 0) log({ released: result.released }, 'Released stale outbox claims');
+  }
+
   async function runTick(): Promise<OutboxTickResult> {
     const result: OutboxTickResult = {
+      released: 0,
       claimed: 0,
       sent: 0,
       rescheduled: 0,
       failed: 0,
       unacknowledged: 0,
+      abandoned: 0,
       skipped: false,
     };
+    try {
+      await releaseStale(result);
+    } catch (error) {
+      // Recovery failing must not stop this tick from delivering.
+      log(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Could not release stale outbox claims',
+      );
+    }
+
     let transport: MailTransport | null = null;
     try {
       transport = await transportFactory();
-      if (!transport) return { ...EMPTY_TICK };
+      if (!transport) return { ...EMPTY_TICK, released: result.released };
 
-      const entries = await store.emailOutbox.claimDue(now().toISOString(), batchSize);
-      result.claimed = entries.length;
-      for (const entry of entries) {
-        await deliver(transport, result, entry);
+      // Claimed one at a time rather than as a batch: the last row of a batch
+      // sits `sending` for as long as every row before it takes, which would
+      // put the stale threshold at batch size × OUTBOX_SEND_BUDGET_MS. Claiming
+      // singly keeps a claim's lifetime equal to one delivery's.
+      for (let taken = 0; taken < batchSize; taken += 1) {
+        const [entry] = await store.emailOutbox.claimDue(now().toISOString(), 1);
+        if (!entry) break;
+        result.claimed += 1;
+        try {
+          await deliver(transport, result, entry);
+        } catch (error) {
+          // One row's bookkeeping write failed after the claim. It stays
+          // `sending` and the stale sweep re-queues it; the rest of the backlog
+          // must not be stranded behind it.
+          result.abandoned += 1;
+          log(
+            {
+              id: entry.id,
+              attempts: entry.attempts,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            'Outbox message was abandoned mid-flight; it is recovered by the stale sweep',
+          );
+        }
       }
       return result;
     } catch (error) {
       // A failure here is the store or the transport factory, not one message.
-      // Claimed rows (if any) are recovered by `releaseStale` on the next start.
       log({ error: error instanceof Error ? error.message : String(error) }, 'Outbox tick failed');
       return result;
     } finally {
@@ -275,19 +353,8 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
 
     start(): void {
       if (timer !== null) return;
-      const staleBefore = new Date(now().getTime() - OUTBOX_STALE_AFTER_MS).toISOString();
-      void store.emailOutbox
-        .releaseStale(staleBefore)
-        .then((released) => {
-          if (released > 0) log({ released }, 'Released stale outbox claims');
-        })
-        .catch((error: unknown) => {
-          log(
-            { error: error instanceof Error ? error.message : String(error) },
-            'Could not release stale outbox claims',
-          );
-        });
-
+      // No separate startup sweep: the first tick does one, and so does every
+      // tick after it.
       timer = setInterval(() => void tick(), pollIntervalMs);
       // Do not hold the event loop open just for the poller.
       timer.unref?.();

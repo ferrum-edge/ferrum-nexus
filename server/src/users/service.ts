@@ -16,7 +16,14 @@
  *    the one **inside the transaction that performs the update** — a count made
  *    outside one is advisory, because two administrators demoting each other
  *    simultaneously each pass it and the portal is left with no super admin at
- *    all.
+ *    all. And because a transaction only serialises the count against writes
+ *    made through *that* store, every transition that can shrink the set runs
+ *    inside the `SUPER_ADMIN_LOCK_KEY` section of the store-level lock — a
+ *    database lease, so two Nexus instances against one PostgreSQL take turns
+ *    the same way two requests in one process do. The lock is taken **outside**
+ *    the transaction: the lease repository runs statements of its own, and on
+ *    SQLite (one connection, bodies drained by a queue) waiting for a lease from
+ *    inside a body blocks the very transaction that would release it.
  *
  * Disabling an account also deletes its sessions, so the next request from an
  * open browser tab is a 401 rather than a working page — **and** strips its
@@ -66,6 +73,7 @@ import type {
 import type { NexusCrypto } from '../lib/crypto.js';
 import { conflict, forbidden, lastSuperAdmin, notFound, validationFailed } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
+import { SUPER_ADMIN_LOCK_KEY, type KeyedSerializer } from '../lib/keyed-serializer.js';
 import type { NotificationsService } from '../notifications/service.js';
 
 /** Result of {@link UsersService.updateMe}. */
@@ -190,6 +198,16 @@ export interface UsersServiceDeps {
   auth: AuthService;
   /** Strips the gateway identity of an account being disabled. */
   credentials: Pick<CredentialsService, 'disableGatewayAccess'>;
+  /**
+   * Store-level cross-instance lock, built in the composition root from
+   * `store.leases`. Every transition that can shrink the active `super_admin`
+   * set runs under {@link SUPER_ADMIN_LOCK_KEY}.
+   *
+   * Optional so a unit test can construct the service without one; a process
+   * that omits it is back to relying on its own transaction queue, which is
+   * correct only for a single instance.
+   */
+  locks?: KeyedSerializer;
   /** Records a gateway teardown that failed; the disable still goes through. */
   log?: (obj: Record<string, unknown>, message: string) => void;
 }
@@ -214,6 +232,9 @@ export function toTeardownState(job: GatewayTeardownJobRecord): GatewayTeardownS
 /** Build the users service. */
 export function createUsersService(deps: UsersServiceDeps): UsersService {
   const { store, crypto, audit, notifications, auth, credentials } = deps;
+  // Without a lock the service is exactly as safe as it was: the store's own
+  // transaction serialisation, which is enough for one instance.
+  const locks: KeyedSerializer = deps.locks ?? ((_key, fn) => fn());
 
   return {
     getMe: (user) => toPublicUser(user),
@@ -413,32 +434,45 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
       // the winner committed and sees the invariant it would break; the
       // conditional update is the second line of defence, refusing a target
       // whose role or status moved underneath this call at all.
+      //
+      // That serialisation is per store object, though, and a multi-instance
+      // deployment has one per process: two Nexus instances against one
+      // PostgreSQL each opened their own transaction, each counted the *other*
+      // super admin, and both committed. So the whole count-then-write also runs
+      // inside `SUPER_ADMIN_LOCK_KEY`, a lease every instance contends for —
+      // taken outside the transaction, because the lease repository issues
+      // statements of its own.
       const guardsLastSuperAdmin =
         target.role === 'super_admin' &&
         ((roleChanged && target.status === 'active') || update.status === 'disabled');
 
-      const result = await store.transaction(async (tx) => {
-        if (guardsLastSuperAdmin && (await tx.users.countActiveSuperAdmins(target.id)) === 0) {
-          throw lastSuperAdmin();
-        }
-        const row = await tx.users.updateIfMatches(
-          target.id,
-          { role: target.role, status: target.status },
-          update,
-        );
-        if (!row) return { row: null, jobId: null };
-        // The revocation the disable owes is committed *with* the disable, so
-        // the two can never disagree: there is no window in which the account
-        // is off and nothing remembers that its gateway credentials are live.
-        if (update.status === 'disabled') {
-          const job = await tx.gatewayTeardownJobs.upsertPending(target.id, actor.id, nowIso());
-          return { row, jobId: job.id };
-        }
-        // Re-enabling cancels any queued revocation — a retry must never strip
-        // the credentials of an account that is live again.
-        if (update.status === 'active') await tx.gatewayTeardownJobs.deleteByUser(target.id);
-        return { row, jobId: null };
-      });
+      const transition = async (): Promise<{ row: UserRecord | null; jobId: Uuid | null }> =>
+        store.transaction(async (tx) => {
+          if (guardsLastSuperAdmin && (await tx.users.countActiveSuperAdmins(target.id)) === 0) {
+            throw lastSuperAdmin();
+          }
+          const row = await tx.users.updateIfMatches(
+            target.id,
+            { role: target.role, status: target.status },
+            update,
+          );
+          if (!row) return { row: null, jobId: null };
+          // The revocation the disable owes is committed *with* the disable, so
+          // the two can never disagree: there is no window in which the account
+          // is off and nothing remembers that its gateway credentials are live.
+          if (update.status === 'disabled') {
+            const job = await tx.gatewayTeardownJobs.upsertPending(target.id, actor.id, nowIso());
+            return { row, jobId: job.id };
+          }
+          // Re-enabling cancels any queued revocation — a retry must never strip
+          // the credentials of an account that is live again.
+          if (update.status === 'active') await tx.gatewayTeardownJobs.deleteByUser(target.id);
+          return { row, jobId: null };
+        });
+
+      const result = guardsLastSuperAdmin
+        ? await locks(SUPER_ADMIN_LOCK_KEY, transition)
+        : await transition();
       const updated = result.row;
       if (!updated) {
         if (!(await store.users.findById(target.id))) throw notFound('User', targetId);

@@ -1057,5 +1057,6 @@ Before going live:
 - [ ] `GET /api/health` wired to your monitor, treating `degraded` as healthy.
 - [ ] If you run more than one Nexus instance, they share one PostgreSQL, MySQL
       or MongoDB database — the `edge_leases` table in it is what stops two
-      instances losing each other's ACL-group and proxy-plugin writes
+      instances losing each other's ACL-group and proxy-plugin writes, and what
+      stops two of them demoting the last two `super_admin` accounts at once
       ([`operations.md`](operations.md#8-scaling)). SQLite is single-instance.
