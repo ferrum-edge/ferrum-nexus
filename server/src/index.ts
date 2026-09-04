@@ -617,7 +617,13 @@ export async function main(): Promise<void> {
   await store.init();
   await store.migrate();
 
-  const app = await buildServer(config, { store, edge: createFerrumAdmin(config) });
+  // The store is built first because the Edge client borrows its lease table:
+  // that is what makes consumer and proxy read-modify-writes exclusive across
+  // every Nexus instance, not just within this process.
+  const app = await buildServer(config, {
+    store,
+    edge: createFerrumAdmin(config, undefined, store.leases),
+  });
   // Best-effort: the namespace is also created implicitly by the first write.
   void app.nexus.edge.ensureNamespace('Managed by Ferrum Nexus');
 
