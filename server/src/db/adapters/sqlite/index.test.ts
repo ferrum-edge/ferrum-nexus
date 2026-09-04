@@ -872,6 +872,126 @@ describe('sqlite store', () => {
       });
       assert.ok(await store.users.findByEmail(email));
     });
+
+    it('joins a nested call issued after the outer body has awaited', async () => {
+      const email = `tx-nested-async-${newId()}@example.test`;
+      await store.transaction(async (tx) => {
+        await new Promise((resolve) => setImmediate(resolve));
+        await tx.transaction(async (inner) => {
+          await inner.users.create({
+            email,
+            password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+            display_name: 'Nested after await',
+            role: 'client',
+            status: 'active',
+            email_verified: false,
+          });
+        });
+      });
+      assert.ok(await store.users.findByEmail(email));
+    });
+
+    it('queues an unrelated caller that arrives while a body is awaiting', async () => {
+      const rolledBack = `tx-unrelated-a-${newId()}@example.test`;
+      const survives = `tx-unrelated-b-${newId()}@example.test`;
+      let release = (): void => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let aBodyStarted = (): void => {};
+      const started = new Promise<void>((resolve) => {
+        aBodyStarted = resolve;
+      });
+
+      const a = store.transaction(async (tx) => {
+        await tx.users.create({
+          email: rolledBack,
+          password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+          display_name: 'Rolled back',
+          role: 'client',
+          status: 'active',
+          email_verified: false,
+        });
+        aBodyStarted();
+        await gate;
+        throw new Error('a rolls back');
+      });
+      // A is now suspended mid-body with `BEGIN` held. B is a completely
+      // independent caller, not a nested one.
+      await started;
+
+      let bSettled = false;
+      const b = store
+        .transaction(async (tx) => {
+          await tx.users.create({
+            email: survives,
+            password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+            display_name: 'Independent',
+            role: 'client',
+            status: 'active',
+            email_verified: false,
+          });
+        })
+        .then(() => {
+          bSettled = true;
+        });
+      await new Promise((resolve) => setImmediate(resolve));
+      // B must wait for A rather than joining it and sharing its fate.
+      assert.equal(bSettled, false);
+
+      release();
+      await assert.rejects(() => a, /a rolls back/);
+      await b;
+
+      assert.equal(await store.users.findByEmail(rolledBack), null);
+      assert.ok(await store.users.findByEmail(survives), 'B committed and must survive');
+    });
+
+    it('keeps draining the queue after a body throws', async () => {
+      const email = `tx-after-failure-${newId()}@example.test`;
+      const failing = store.transaction(async () => {
+        await new Promise((resolve) => setImmediate(resolve));
+        throw new Error('queue head failed');
+      });
+      const following = store.transaction(async (tx) => {
+        await tx.users.create({
+          email,
+          password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+          display_name: 'After a failure',
+          role: 'client',
+          status: 'active',
+          email_verified: false,
+        });
+      });
+      await assert.rejects(() => failing, /queue head failed/);
+      await following;
+      assert.ok(await store.users.findByEmail(email));
+    });
+
+    it('documents that a root write during an open body shares its fate', async () => {
+      // One connection, a synchronous driver: a bare repository call issued
+      // from outside the transaction context while `BEGIN` is held executes
+      // inside that transaction. This is the hazard the queue cannot cover, and
+      // the reason service code never mixes the two. Asserted so the behaviour
+      // is a decision rather than a surprise.
+      const email = `tx-root-write-${newId()}@example.test`;
+      await assert.rejects(
+        () =>
+          store.transaction(async () => {
+            await store.users.create({
+              email,
+              password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+              display_name: 'Root write',
+              role: 'client',
+              status: 'active',
+              email_verified: false,
+            });
+            throw new Error('outer rolls back');
+          }),
+        /outer rolls back/,
+      );
+      assert.equal(await store.users.findByEmail(email), null);
+    });
   });
 
   describe('health', () => {

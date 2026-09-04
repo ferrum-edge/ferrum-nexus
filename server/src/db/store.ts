@@ -951,6 +951,14 @@ export interface NexusStore {
    * Run `fn` inside one transaction. Commits on resolve, rolls back on reject.
    * The store handed to `fn` is scoped to the transaction — use it, not the
    * outer store, for every statement inside the body.
+   *
+   * A `transaction()` call made *from inside* a body joins that transaction
+   * rather than starting a second one. An independent call made while a body is
+   * merely suspended on an `await` is not nested: it waits for the running
+   * transaction and then gets one of its own. Statements issued through the
+   * *outer* store while a body is open are undefined behaviour and adapter
+   * specific — on SQLite they run inside the open transaction and share its
+   * fate, because there is one connection.
    */
   transaction<T>(fn: (tx: NexusStore) => Promise<T>): Promise<T>;
 

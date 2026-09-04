@@ -15,8 +15,31 @@
  * `ROLLBACK` on reject. A nested `transaction()` call from inside a body joins
  * the running transaction instead of starting a new one. The other adapters
  * must present the same contract using their native transaction primitive.
+ *
+ * **"Nested" means *this* async context, not "some transaction is open".**
+ * Nesting is detected with an {@link AsyncLocalStorage} whose value is the
+ * running transaction's token: a `transaction()` call whose own async context
+ * carries the active token is a nested call and joins; one that carries nothing
+ * is an independent caller and queues, exactly like the SQL adapters'
+ * transaction-scoped store. The store used to track nesting with a single
+ * counter, which made *any* caller arriving while a body was awaiting look
+ * nested — its writes then committed as far as it could tell and vanished when
+ * the unrelated transaction rolled back.
+ *
+ * **Root-store statements issued while a transaction is open still land inside
+ * it.** There is one connection and better-sqlite3 is synchronous, so a
+ * `store.users.create(...)` issued from outside the transaction context between
+ * two `await`s of an open body executes on that connection while its `BEGIN` is
+ * live: it commits with the body, or rolls back with it. The queue removes the
+ * common case (an independent `store.transaction(...)`); a bare repository call
+ * cannot be queued without making every read block on the writer. Service code
+ * therefore does its work either wholly inside a transaction body or wholly
+ * outside one, and a transaction body never awaits anything that lets an
+ * unrelated request's bare writes run — which is what the request-scoped store
+ * handed to `fn` is for.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
@@ -540,7 +563,24 @@ class SqliteStore implements NexusStore {
   /** Serialises `transaction` bodies; see the module docblock. */
   private queue: Promise<unknown> = Promise.resolve();
 
-  private depth = 0;
+  /**
+   * Carries the running transaction's token into everything its body awaits.
+   *
+   * This is how a genuinely nested `transaction()` call is told apart from an
+   * independent caller that merely happened to arrive while a body was
+   * suspended: the nested one runs inside the body's async context and sees the
+   * token, the independent one does not.
+   */
+  private readonly txContext = new AsyncLocalStorage<symbol>();
+
+  /**
+   * Token of the transaction currently holding `BEGIN`, or `null`.
+   *
+   * Compared against {@link txContext} so that a stray continuation left over
+   * from a *finished* transaction — work a body started with `void` and never
+   * awaited — cannot be mistaken for a nested call inside a later one.
+   */
+  private activeTx: symbol | null = null;
 
   private closed = false;
 
@@ -581,15 +621,20 @@ class SqliteStore implements NexusStore {
   }
 
   transaction<T>(fn: (tx: NexusStore) => Promise<T>): Promise<T> {
-    if (this.depth > 0) {
-      // Already inside a transaction body — join it rather than nesting.
+    const inherited = this.txContext.getStore();
+    if (inherited !== undefined && inherited === this.activeTx) {
+      // This call is running inside the body of the transaction that currently
+      // holds `BEGIN` — a genuine nested call, so join it. A caller that merely
+      // arrived while that body was awaiting carries no token and falls through
+      // to the queue below.
       return fn(this);
     }
+    const token = Symbol('sqlite-tx');
     const run = async (): Promise<T> => {
       this.db.exec('BEGIN IMMEDIATE');
-      this.depth += 1;
+      this.activeTx = token;
       try {
-        const result = await fn(this);
+        const result = await this.txContext.run(token, () => fn(this));
         this.db.exec('COMMIT');
         return result;
       } catch (error) {
@@ -600,7 +645,7 @@ class SqliteStore implements NexusStore {
         }
         throw error;
       } finally {
-        this.depth -= 1;
+        this.activeTx = null;
       }
     };
     const result = this.queue.then(run, run);
