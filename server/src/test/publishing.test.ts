@@ -2275,6 +2275,15 @@ describe('publishing', () => {
         'openapi_validator',
         'rate_limiting',
       ]);
+      const routesCreate = harness.edge.callsTo('POST', '/api-specs').at(-1)?.body as Record<
+        string,
+        unknown
+      >;
+      assert.deepEqual(
+        (routesCreate['x-ferrum-proxy'] as Record<string, unknown>).allowed_methods,
+        [],
+        'the replacement is closed while its security plugins are restored',
+      );
 
       const off = await harness.authed(provider, {
         method: 'PATCH',
@@ -2295,6 +2304,15 @@ describe('publishing', () => {
         'key_auth',
         'rate_limiting',
       ]);
+      const docsCreate = harness.edge.callsTo('POST', '/proxies').at(-1)?.body as Record<
+        string,
+        unknown
+      >;
+      assert.deepEqual(
+        docsCreate.allowed_methods,
+        [],
+        'the plain replacement is closed while its security plugins are restored',
+      );
     });
 
     it('carries a palette plugin across a mode conversion', async () => {

@@ -174,6 +174,7 @@ import type {
   EdgePluginConfig,
   EdgePluginSettings,
   EdgeProxy,
+  EdgeProxyReplace,
   EdgeProxyWrite,
 } from '../ferrum-admin/types.js';
 import { conflict, forbidden, notFound, specInvalid, validationFailed } from '../lib/errors.js';
@@ -1512,20 +1513,36 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     const listenPath = listenPathFor(api.namespace, api.slug);
 
     const rebuild = async (level: SpecEnforcementLevel): Promise<void> => {
+      // An empty method allow-list makes the replacement return 405 before
+      // plugins (or the upstream) run. Keep it closed until every carried
+      // config exists and is associated; creating it with the real method
+      // list would expose the backend between these Admin API round trips.
+      const closedBody = { ...body, allowed_methods: [] };
       if (level === 'routes') {
-        await createSpecOwnedProxy(document, listenPath, body, subject);
+        await createSpecOwnedProxy(document, listenPath, closedBody, subject);
       } else {
         // A document read off the wire, not one composed here: `EdgeProxyWrite`
         // models only the narrow subset Nexus sets, and every unmodelled key an
         // operator added has to survive the rebuild.
-        await edge.proxies.create(body as unknown as EdgeProxyWrite, subject);
+        await edge.proxies.create(closedBody as unknown as EdgeProxyWrite, subject);
       }
       await binder.restorePlugins(proxyId, carried, subject);
+      await binder.mutateProxy(
+        proxyId,
+        (proxy) => {
+          const opened: EdgeProxyReplace = { ...proxy };
+          if ('allowed_methods' in body) opened.allowed_methods = body.allowed_methods;
+          else delete opened.allowed_methods;
+          return opened;
+        },
+        subject,
+      );
     };
 
     // Deleting the proxy cascades its plugin configs and, when it was
     // spec-owned, the spec and generated validator too — so the recreate starts
-    // from nothing whichever direction it runs in.
+    // from nothing whichever direction it runs in. The replacement remains
+    // fail-closed until `rebuild` restores its policies and original methods.
     await edge.proxies.delete(proxyId, subject);
     await rebuild(target);
 
