@@ -59,6 +59,7 @@ import type {
   ApiRepo,
   ApiSpecRecord,
   ApiSpecRepo,
+  ApiViewerFilter,
   AuditLogFilter,
   AuditLogRecord,
   AuditLogRepo,
@@ -477,6 +478,33 @@ function userWhere(filter: UserFilter): SqlWhereBuilder {
   return builder;
 }
 
+/**
+ * `owner OR granted OR openly listed` — {@link ApiViewerFilter} as one
+ * parenthesised disjunction, so it ANDs cleanly with the other filters.
+ *
+ * Every granted id costs one placeholder. Both servers cap a statement's
+ * parameters (PostgreSQL at 65 535, MySQL likewise), and the list is bounded by
+ * how many grants one account holds, so a portal would need tens of thousands
+ * of grants on a single account to approach it. An empty grant or visibility
+ * list drops its disjunct rather than emitting `IN ()`, which is a syntax
+ * error on both servers.
+ */
+function apiViewerCondition(viewer: ApiViewerFilter): { sql: string; params: SqlParam[] } {
+  const parts = ['owner_user_id = ?'];
+  const params: SqlParam[] = [viewer.owner_user_id];
+  const granted = [...new Set(viewer.granted_api_ids)];
+  if (granted.length > 0) {
+    parts.push(`id IN (${placeholders(granted.length)})`);
+    params.push(...granted);
+  }
+  const visibilities = [...new Set(viewer.open_visibilities)];
+  if (visibilities.length > 0) {
+    parts.push(`(status = ? AND visibility IN (${placeholders(visibilities.length)}))`);
+    params.push(viewer.open_status, ...visibilities);
+  }
+  return { sql: `(${parts.join(' OR ')})`, params };
+}
+
 function apiWhere(filter: ApiFilter): SqlWhereBuilder {
   const builder = new SqlWhereBuilder()
     .add(filter.owner_user_id, 'owner_user_id = ?', filter.owner_user_id ?? null)
@@ -487,6 +515,10 @@ function apiWhere(filter: ApiFilter): SqlWhereBuilder {
     builder.always('requestable = ?', encodeBool(filter.requestable));
   }
   if (filter.ids !== undefined) builder.addIn('id', filter.ids);
+  if (filter.visible_to !== undefined) {
+    const viewer = apiViewerCondition(filter.visible_to);
+    builder.always(viewer.sql, ...viewer.params);
+  }
   return builder;
 }
 

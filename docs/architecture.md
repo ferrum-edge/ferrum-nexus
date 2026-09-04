@@ -936,11 +936,14 @@ coerced once in `routes/common.ts` (`limit`/`offset` clamped to
 `[1, MAX_PAGE_SIZE]`, query booleans normalised) rather than in each handler.
 
 List endpoints share one envelope, `{ items, total }`, where `total` ignores
-`limit`/`offset`. Two endpoints scan a bounded page and filter in memory
-instead of pushing the predicate into SQL — the catalog (visibility depends on
-per-row grants) and the admin thread list (the platform inbox has no
-`ThreadFilter` predicate). Both are capped at `MAX_PAGE_SIZE` rows and both are
-human-sized surfaces by construction.
+`limit`/`offset`. Every predicate that decides what a caller may see is pushed
+into the query rather than applied to an already-fetched page — the catalog's
+"mine, or granted to me, or published and public" rule travels as
+`ApiFilter.visible_to` and is evaluated by the database, so `offset` reaches
+past the first page and `total` counts the whole permitted set. One endpoint
+still scans a bounded page and filters in memory: the admin thread list, whose
+platform inbox has no `ThreadFilter` predicate. It is capped at `MAX_PAGE_SIZE`
+rows and is a human-sized surface by construction.
 
 Full reference: [`api.md`](api.md).
 

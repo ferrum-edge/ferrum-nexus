@@ -105,6 +105,7 @@ import type {
   ApiRepo,
   ApiSpecRecord,
   ApiSpecRepo,
+  ApiViewerFilter,
   AuditLogFilter,
   AuditLogRecord,
   AuditLogRepo,
@@ -643,7 +644,26 @@ function userFilter(filter: UserFilter): Filter<NexusDoc> {
   return query as Filter<NexusDoc>;
 }
 
+/**
+ * `owner OR granted OR openly listed` — {@link ApiViewerFilter} as one `$or`.
+ *
+ * It is nested under `$and` by the caller rather than assigned to `query.$or`,
+ * because the `q` search already claims that key and a document must satisfy
+ * both.
+ */
+function apiViewerCondition(viewer: ApiViewerFilter): Record<string, unknown> {
+  const parts: Record<string, unknown>[] = [{ owner_user_id: viewer.owner_user_id }];
+  const granted = [...new Set(viewer.granted_api_ids)];
+  if (granted.length > 0) parts.push({ _id: { $in: granted } });
+  const visibilities = [...new Set(viewer.open_visibilities)];
+  if (visibilities.length > 0) {
+    parts.push({ status: viewer.open_status, visibility: { $in: visibilities } });
+  }
+  return { $or: parts };
+}
+
 function apiFilter(filter: ApiFilter): Filter<NexusDoc> {
+  const conditions: Record<string, unknown>[] = [];
   const query: Record<string, unknown> = {};
   if (filter.owner_user_id !== undefined) query.owner_user_id = filter.owner_user_id;
   if (filter.status !== undefined) query.status = filter.status;
@@ -652,8 +672,10 @@ function apiFilter(filter: ApiFilter): Filter<NexusDoc> {
   if (filter.ids !== undefined) query._id = { $in: filter.ids };
   if (filter.q !== undefined && filter.q.trim() !== '') {
     const match = containsInsensitive(filter.q.trim());
-    query.$or = [{ name: match }, { slug: match }, { description: match }];
+    conditions.push({ $or: [{ name: match }, { slug: match }, { description: match }] });
   }
+  if (filter.visible_to !== undefined) conditions.push(apiViewerCondition(filter.visible_to));
+  if (conditions.length > 0) query.$and = conditions;
   return query as Filter<NexusDoc>;
 }
 

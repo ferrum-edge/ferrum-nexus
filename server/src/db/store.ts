@@ -275,6 +275,36 @@ export interface UserFilter {
   email_verified?: boolean;
 }
 
+/**
+ * One viewer's browse rule, as a disjunction the database can evaluate.
+ *
+ * A row passes when **any** of the three holds: the viewer owns it, the viewer
+ * holds a listed grant on it, or it is openly listed (`open_status` plus one of
+ * `open_visibilities`). The catalog service is the only caller; it exists so
+ * that the "may I see this?" test happens inside the query rather than over a
+ * page already fetched, which is the difference between paginating the rows a
+ * viewer may browse and paginating a prefix of the table.
+ *
+ * It composes with the rest of {@link ApiFilter} by `AND`: a caller filtering
+ * `visibility=internal` still sees only rows this clause admits.
+ */
+export interface ApiViewerFilter {
+  /** Rows owned by this user pass whatever their status or visibility. */
+  owner_user_id: Uuid;
+  /**
+   * Rows the viewer holds a grant on, which pass whatever their status.
+   *
+   * Bounded by the viewer's own grants, and every id becomes one bound
+   * parameter — the reason it is a caller-supplied list rather than a join is
+   * that MongoDB has no cross-collection `find` filter.
+   */
+  granted_api_ids: readonly Uuid[];
+  /** Any other row must carry this status… */
+  open_status: ApiStatus;
+  /** …and one of these visibilities. An empty list admits none of them. */
+  open_visibilities: readonly ApiVisibility[];
+}
+
 /** Filters for `apis.list`. */
 export interface ApiFilter {
   owner_user_id?: Uuid;
@@ -284,6 +314,8 @@ export interface ApiFilter {
   /** Case-insensitive substring match on name, slug or description. */
   q?: string;
   ids?: Uuid[];
+  /** Restrict to rows one viewer may browse. Omit for an unrestricted read. */
+  visible_to?: ApiViewerFilter;
 }
 
 /** Filters for `apiSpecs.list`. */

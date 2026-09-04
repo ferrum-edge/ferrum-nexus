@@ -44,7 +44,6 @@
  */
 
 import {
-  MAX_PAGE_SIZE,
   clampPageSize,
   roleAtLeast,
   type AccessRequest,
@@ -60,7 +59,14 @@ import {
   type Uuid,
 } from '@ferrum-nexus/shared';
 
-import type { ApiFilter, ApiRecord, ListOptions, NexusStore, UserRecord } from '../db/store.js';
+import type {
+  ApiFilter,
+  ApiRecord,
+  ApiViewerFilter,
+  ListOptions,
+  NexusStore,
+  UserRecord,
+} from '../db/store.js';
 import { notFound } from '../lib/errors.js';
 import { presentApi, type GatewayUrlSource } from '../publishing/present.js';
 
@@ -183,27 +189,42 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
     canView,
 
     async list(viewer, filter = {}, options): Promise<Paginated<CatalogApi>> {
+      // The caller's grants are needed either way — they decide the access
+      // badge on every row — so handing their ids to the query costs nothing.
+      const grants = new Map(
+        (await store.grants.listActiveByUser(viewer.id)).map((grant) => [grant.api_id, grant]),
+      );
+
+      // `canList` as a query predicate, so the caller's offset/limit reach the
+      // database instead of slicing an already-truncated scan. Filtering in
+      // memory after one bounded read made every row past the first page
+      // unreachable and reported the truncated remainder as `total`.
+      //
+      // An admin sees every row, so no clause is added at all; everyone else
+      // gets "mine, or granted to me, or published and public" — the exact
+      // three branches `canList` tests, with `retired` excluded for outsiders
+      // because the status half of the openly-listed disjunct fails it.
+      const visibleTo: ApiViewerFilter | undefined = roleAtLeast(viewer.role, 'admin')
+        ? undefined
+        : {
+            owner_user_id: viewer.id,
+            granted_api_ids: [...grants.keys()],
+            open_status: 'published',
+            open_visibilities: ['public'],
+          };
+
       const storeFilter: ApiFilter = {
         ...(filter.q !== undefined ? { q: filter.q } : {}),
         ...(filter.requestable !== undefined ? { requestable: filter.requestable } : {}),
         ...(filter.visibility !== undefined ? { visibility: filter.visibility } : {}),
         ...(filter.owner_user_id !== undefined ? { owner_user_id: filter.owner_user_id } : {}),
+        ...(visibleTo ? { visible_to: visibleTo } : {}),
       };
-
-      // Status and visibility are *not* pushed into the query: an owner, an
-      // admin and a grantee each see rows an ordinary client does not, and that
-      // depends on per-row grants. Scan one bounded page, apply `canList`, then
-      // slice — a portal catalog is human-sized by construction, and the scan
-      // is capped at `MAX_PAGE_SIZE` rows regardless.
-      const scan = await store.apis.list(storeFilter, { limit: MAX_PAGE_SIZE, offset: 0 });
-      const grants = new Map(
-        (await store.grants.listActiveByUser(viewer.id)).map((grant) => [grant.api_id, grant]),
-      );
-      const visible = scan.items.filter((api) => canList(viewer, api, grants.has(api.id)));
 
       const limit = clampPageSize(options?.limit);
       const offset = Math.max(0, options?.offset ?? 0);
-      const page = visible.slice(offset, offset + limit);
+      const found = await store.apis.list(storeFilter, { limit, offset });
+      const page = found.items;
 
       const owners = new Map(
         (await store.users.findManyByIds([...new Set(page.map((api) => api.owner_user_id))])).map(
@@ -233,7 +254,7 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
             gatewayUrl,
           ),
         ),
-        total: visible.length,
+        total: found.total,
       };
     },
 

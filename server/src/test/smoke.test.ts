@@ -663,6 +663,99 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(bare?.spec_enforcement, 'docs_only');
     });
 
+    it('apis: visible_to paginates and counts the rows one viewer may browse', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const stranger = await makeUser();
+      const marker = newId().slice(0, 8);
+
+      async function seed(
+        ownerId: string,
+        overrides: {
+          status?: 'published' | 'retired';
+          visibility?: 'public' | 'internal';
+          name?: string;
+        },
+      ): Promise<string> {
+        const api = await store.apis.create({
+          name: overrides.name ?? `Viewer ${marker}`,
+          slug: `viewer-${marker}-${newId().slice(0, 8)}`,
+          owner_user_id: ownerId,
+          namespace: 'nexus',
+          version: '1.0.0',
+          spec_format: 'openapi',
+          requestable: true,
+          auth_plugin: 'key_auth',
+          status: overrides.status ?? 'published',
+          visibility: overrides.visibility ?? 'public',
+        });
+        return api.id;
+      }
+
+      const openApi = await seed(owner.id, {});
+      const unlisted = await seed(owner.id, { visibility: 'internal' });
+      const retired = await seed(owner.id, { status: 'retired' });
+      const granted = await seed(owner.id, { visibility: 'internal' });
+      const ownedByStranger = await seed(stranger.id, {
+        visibility: 'internal',
+        name: `Own ${marker}`,
+      });
+
+      const clause = {
+        owner_user_id: stranger.id,
+        granted_api_ids: [granted],
+        open_status: 'published' as const,
+        open_visibilities: ['public' as const],
+      };
+      // Scope every read to this test's own rows: the suite shares one database.
+      const mine = { q: marker, visible_to: clause };
+
+      const listed = await store.apis.list(mine, { limit: 50 });
+      assert.deepEqual(
+        new Set(listed.items.map((api) => api.id)),
+        new Set([openApi, granted, ownedByStranger]),
+        'owned, granted and published-public rows pass; internal and retired do not',
+      );
+      assert.equal(listed.total, 3, 'total counts the filtered set, not the table');
+      assert.equal(await store.apis.count(mine), 3, 'count applies the same clause');
+      for (const hidden of [unlisted, retired]) {
+        assert.ok(!listed.items.some((api) => api.id === hidden));
+      }
+
+      // The clause narrows a page rather than being applied after it: one row
+      // per page, walked to the end, yields each permitted row exactly once.
+      const walked: string[] = [];
+      for (let offset = 0; offset < 4; offset += 1) {
+        const step = await store.apis.list(mine, { limit: 1, offset });
+        assert.equal(step.total, 3, 'every page reports the same filtered total');
+        walked.push(...step.items.map((api) => api.id));
+      }
+      assert.equal(walked.length, 3, 'paging past the end returns nothing extra');
+      assert.equal(new Set(walked).size, 3, 'no row is served twice');
+
+      // …and it ANDs with the other filters rather than widening them.
+      assert.equal(
+        (await store.apis.list({ ...mine, visibility: 'internal' })).total,
+        2,
+        'a visibility filter still cannot reveal a row the viewer may not browse',
+      );
+      assert.equal(
+        (await store.apis.list({ ...mine, q: `Own ${marker}` })).total,
+        1,
+        'search composes with the viewer clause',
+      );
+      assert.equal(
+        (await store.apis.list({ ...mine, visible_to: { ...clause, granted_api_ids: [] } })).total,
+        2,
+        'an empty grant list drops its disjunct instead of matching everything',
+      );
+      assert.equal(
+        (await store.apis.list({ ...mine, visible_to: { ...clause, open_visibilities: [] } }))
+          .total,
+        2,
+        'an empty visibility list leaves only owned and granted rows',
+      );
+    });
+
     it('apiSpecs: keeps exactly one current revision per API', async () => {
       const owner = await makeUser({ role: 'provider' });
       const api = await makeApi(owner.id);

@@ -68,6 +68,7 @@ import type {
   ApiRepo,
   ApiSpecRecord,
   ApiSpecRepo,
+  ApiViewerFilter,
   AuditLogFilter,
   AuditLogRecord,
   AuditLogRepo,
@@ -2431,6 +2432,29 @@ function userWhere(filter: UserFilter): WhereBuilder {
   return builder;
 }
 
+/**
+ * `owner OR granted OR openly listed` — {@link ApiViewerFilter} as one
+ * parenthesised disjunction, so it ANDs cleanly with the other filters.
+ *
+ * An empty grant list or visibility list simply drops its disjunct rather than
+ * emitting `IN ()`, which is a syntax error.
+ */
+function apiViewerCondition(viewer: ApiViewerFilter): { sql: string; params: Param[] } {
+  const parts = ['owner_user_id = ?'];
+  const params: Param[] = [viewer.owner_user_id];
+  const granted = [...new Set(viewer.granted_api_ids)];
+  if (granted.length > 0) {
+    parts.push(`id IN (${granted.map(() => '?').join(', ')})`);
+    params.push(...granted);
+  }
+  const visibilities = [...new Set(viewer.open_visibilities)];
+  if (visibilities.length > 0) {
+    parts.push(`(status = ? AND visibility IN (${visibilities.map(() => '?').join(', ')}))`);
+    params.push(viewer.open_status, ...visibilities);
+  }
+  return { sql: `(${parts.join(' OR ')})`, params };
+}
+
 function apiWhere(filter: ApiFilter): WhereBuilder {
   const builder = new WhereBuilder()
     .add(filter.owner_user_id, 'owner_user_id = ?', filter.owner_user_id ?? null)
@@ -2441,6 +2465,10 @@ function apiWhere(filter: ApiFilter): WhereBuilder {
     builder.always('requestable = ?', encodeBool(filter.requestable));
   }
   if (filter.ids !== undefined) builder.addIn('id', filter.ids);
+  if (filter.visible_to !== undefined) {
+    const viewer = apiViewerCondition(filter.visible_to);
+    builder.always(viewer.sql, ...viewer.params);
+  }
   return builder;
 }
 
