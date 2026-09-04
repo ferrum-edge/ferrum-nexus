@@ -15,6 +15,10 @@
  *   authentication before the disable must be refused when it reaches the front
  *   of the queue afterwards, and removed by the teardown when it gets there
  *   first.
+ * - **A failed rotation leaves a consistent mirror.** The delete is the
+ *   destructive step, so the row it retires is revoked the moment Edge confirms
+ *   it — never after a later step that can still fail. Whatever survives a
+ *   failed rotation is still revocable.
  */
 
 import assert from 'node:assert/strict';
@@ -508,5 +512,208 @@ describe('credential lifecycle across identities', () => {
     } finally {
       await solo.close();
     }
+  });
+
+  /* ── #62 — a failed rotation leaves a consistent mirror ───────────────── */
+
+  for (const type of ['keyauth', 'basicauth', 'jwt'] as CredentialType[]) {
+    it(`leaves the survivor revocable after a failed ${type} rotation at the cap`, async () => {
+      const client = await harness.registerUser({
+        email: `lifecycle-rot-${type}@example.test`,
+        role: 'client',
+      });
+      const first = await issue(client, type);
+      const second = await issue(client, type);
+
+      // At the cap the old entry is deleted to make room; the append that was
+      // supposed to replace it fails.
+      harness.edge.queueFailure(503, { error: 'down' }, '/credentials/', 'POST');
+      const rotated = await harness.authed(client, {
+        method: 'POST',
+        url: `/api/credentials/${first.credential.id}/rotate`,
+        payload: {},
+      });
+      assert.equal(rotated.statusCode, 502, rotated.body);
+      assert.equal(errorCode(rotated.body), 'EDGE_ERROR');
+      assert.match(rotated.body, /previous credential was removed/i);
+
+      assert.equal(
+        (await harness.store.credentials.findById(first.credential.id))?.status,
+        'revoked',
+        'the entry Edge deleted is revoked in the mirror',
+      );
+      const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(client.user.id));
+      const live = await harness.store.credentials.list(
+        { user_id: client.user.id, status: 'active', credential_type: type },
+        { limit: 50 },
+      );
+      assert.deepEqual(
+        live.items.map((row) => row.id),
+        [second.credential.id],
+        'exactly the surviving credential is still active',
+      );
+      if (type !== 'basicauth') {
+        assert.equal(consumer?.credentials[type]?.length, live.items.length, 'mirror matches Edge');
+      }
+
+      // The point of the invariant: incident response can still pull the key.
+      const revoked = await harness.authed(client, {
+        method: 'DELETE',
+        url: `/api/credentials/${second.credential.id}`,
+      });
+      assert.equal(revoked.statusCode, 200, revoked.body);
+      assert.equal(
+        harness.edge.consumerByUsername(consumerUsernameForUser(client.user.id))?.credentials[type]
+          ?.length ?? 0,
+        0,
+      );
+    });
+  }
+
+  it('leaves a retryable state after a failed rotation at a cap of one', async () => {
+    const capped = await buildTestApp({ env: { FERRUM_MAX_CREDENTIALS_PER_TYPE: '1' } });
+    try {
+      await capped.registerUser({ email: 'cap1-founder@example.test' });
+      const client = await capped.registerUser({
+        email: 'cap1-client@example.test',
+        role: 'client',
+      });
+      const issued = await capped.authed(client, {
+        method: 'POST',
+        url: '/api/credentials',
+        payload: { credential_type: 'keyauth' },
+      });
+      assert.equal(issued.statusCode, 201, issued.body);
+      const credentialId = issued.json<IssueCredentialResponse>().credential.id;
+
+      capped.edge.queueFailure(503, { error: 'down' }, '/credentials/', 'POST');
+      const rotated = await capped.authed(client, {
+        method: 'POST',
+        url: `/api/credentials/${credentialId}/rotate`,
+        payload: {},
+      });
+      assert.equal(rotated.statusCode, 502, rotated.body);
+      assert.equal((await capped.store.credentials.findById(credentialId))?.status, 'revoked');
+
+      // With the mirror consistent the account is not wedged: the cap is free
+      // again, so a fresh issue works rather than 409-ing on a phantom row.
+      const reissued = await capped.authed(client, {
+        method: 'POST',
+        url: '/api/credentials',
+        payload: { credential_type: 'keyauth' },
+      });
+      assert.equal(reissued.statusCode, 201, reissued.body);
+      assert.equal(
+        capped.edge.consumerByUsername(consumerUsernameForUser(client.user.id))?.credentials.keyauth
+          ?.length,
+        1,
+      );
+    } finally {
+      await capped.close();
+    }
+  });
+
+  it('retries a rotation that failed at the cap once the gateway recovers', async () => {
+    const client = await harness.registerUser({
+      email: 'lifecycle-rot-retry@example.test',
+      role: 'client',
+    });
+    const first = await issue(client, 'keyauth');
+    const second = await issue(client, 'keyauth');
+
+    harness.edge.queueFailure(503, { error: 'down' }, '/credentials/', 'POST');
+    const failed = await harness.authed(client, {
+      method: 'POST',
+      url: `/api/credentials/${first.credential.id}/rotate`,
+      payload: {},
+    });
+    assert.equal(failed.statusCode, 502, failed.body);
+
+    // The first credential is gone for good — rotating it again is a conflict,
+    // not a reconciliation error — and the survivor rotates normally.
+    const again = await harness.authed(client, {
+      method: 'POST',
+      url: `/api/credentials/${first.credential.id}/rotate`,
+      payload: {},
+    });
+    assert.equal(again.statusCode, 409, again.body);
+
+    const survivor = await harness.authed(client, {
+      method: 'POST',
+      url: `/api/credentials/${second.credential.id}/rotate`,
+      payload: {},
+    });
+    assert.equal(survivor.statusCode, 200, survivor.body);
+    assert.equal(
+      harness.edge.consumerByUsername(consumerUsernameForUser(client.user.id))?.credentials.keyauth
+        ?.length,
+      1,
+    );
+  });
+
+  it('removes an appended key whose metadata row could not be written', async () => {
+    const client = await harness.registerUser({
+      email: 'lifecycle-meta@example.test',
+      role: 'client',
+    });
+    const issued = await issue(client, 'keyauth');
+    const username = consumerUsernameForUser(client.user.id);
+
+    // Below the cap, so the append comes first: Edge accepts it and the row
+    // insert then fails, leaving a live secret nobody could ever revoke.
+    const real = harness.store.credentials.create.bind(harness.store.credentials);
+    harness.store.credentials.create = async () => {
+      harness.store.credentials.create = real;
+      throw new Error('metadata insert failed');
+    };
+    const rotated = await harness.authed(client, {
+      method: 'POST',
+      url: `/api/credentials/${issued.credential.id}/rotate`,
+      payload: {},
+    });
+    harness.store.credentials.create = real;
+    assert.ok(rotated.statusCode >= 500, rotated.body);
+
+    const keys = harness.edge.consumerByUsername(username)?.credentials.keyauth ?? [];
+    assert.equal(keys.length, 1, 'the orphaned append was compensated');
+    assert.equal(
+      String((keys[0] as { key?: string }).key).slice(-4),
+      issued.credential.last4,
+      'the original is untouched',
+    );
+    assert.equal(
+      (await harness.store.credentials.findById(issued.credential.id))?.status,
+      'active',
+      'and it is still revocable',
+    );
+    const revoked = await harness.authed(client, {
+      method: 'DELETE',
+      url: `/api/credentials/${issued.credential.id}`,
+    });
+    assert.equal(revoked.statusCode, 200, revoked.body);
+  });
+
+  it('removes an appended key whose metadata row failed during an issue', async () => {
+    const client = await harness.registerUser({
+      email: 'lifecycle-meta-issue@example.test',
+      role: 'client',
+    });
+    await issue(client, 'keyauth');
+    const username = consumerUsernameForUser(client.user.id);
+
+    const real = harness.store.credentials.create.bind(harness.store.credentials);
+    harness.store.credentials.create = async () => {
+      harness.store.credentials.create = real;
+      throw new Error('metadata insert failed');
+    };
+    const second = await harness.authed(client, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth' },
+    });
+    harness.store.credentials.create = real;
+    assert.ok(second.statusCode >= 500, second.body);
+
+    assert.equal(harness.edge.consumerByUsername(username)?.credentials.keyauth?.length, 1);
   });
 });

@@ -51,6 +51,25 @@
  * had just appended with it. A target that is no longer live at all resolves
  * to `not-live` and never to `whole-type`.
  *
+ * ## The mirror is written the instant Edge confirms, never later
+ *
+ * A rotation touches two systems and there is no transaction spanning them, so
+ * the only defence is ordering: **no Nexus row may describe a gateway state
+ * that a later step could still fail to reach.**
+ *
+ * - Below the cap, rotation appends first and both secrets are briefly live;
+ *   the old row is revoked only after its entry is actually gone.
+ * - **At** the cap there is no room to append, so the old entry is deleted
+ *   first — and its row is revoked immediately, before the append is even
+ *   attempted. Deferring it to the end (as this used to) left two `active` rows
+ *   against one Edge entry whenever the append failed, and every later
+ *   operation on the *surviving* credential — including the revoke an incident
+ *   response needs — then died on {@link resolveCredentialIndex}'s length
+ *   check. The failed rotation now reports plainly that the old credential is
+ *   gone and a new one must be issued.
+ * - An append Edge accepted whose metadata row cannot be written is deleted
+ *   again, because a live secret with no row is one nobody can see or revoke.
+ *
  * ## The target is loaded twice, and the second read is the one that counts
  *
  * `rotate` and `revoke` resolve the credential once outside the per-consumer
@@ -123,9 +142,17 @@ export const CREDENTIAL_TYPES = [
 /** Statuses that still occupy a slot in the Edge credentials array. */
 const LIVE_STATUSES = new Set(['active', 'retiring']);
 
-/** Raised whenever the Nexus mirror and the live Edge array disagree. */
+/**
+ * Raised whenever the Nexus mirror and the live Edge array disagree.
+ *
+ * Nothing in the credential paths can produce this any more — every failure
+ * mode leaves the mirror matching Edge — so reaching it means the consumer was
+ * edited outside Nexus. The message names the fix because the operator holding
+ * the 502 is the one who has to apply it; the full procedure is
+ * `operations.md` §12, "The credential mirror".
+ */
 const RECONCILE_MESSAGE =
-  'The gateway credential list does not match the portal; ask an administrator to reconcile this consumer before rotating or revoking';
+  'The gateway credential list does not match the portal. An administrator must reconcile this consumer — revoke the portal’s remaining credentials for it and issue new ones, or delete the entries added to the gateway by hand — before it can be rotated or revoked';
 
 /** Generated plaintext plus the Edge entry that carries it. */
 interface GeneratedCredential {
@@ -432,36 +459,62 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     return credential;
   }
 
+  /**
+   * Append one entry to a consumer and mirror it, or leave neither behind.
+   *
+   * The two writes are on different systems, so there is no transaction to put
+   * them in. What there is instead is a compensation: an entry Edge accepted
+   * whose row could not be written is a live secret nobody in the portal can
+   * see, name or revoke, so it is deleted again before the failure propagates.
+   * `appendIndex` is where `POST` will have put it — Edge appends, so that is
+   * the array length before the call.
+   */
   async function appendCredential(input: {
-    user: UserRecord;
+    /** The account the row is attributed to and that the secret belongs to. */
+    ownerId: Uuid;
+    /** Who Edge records as the subject of the write — an admin, when acting. */
+    actorId: Uuid;
     consumerId: string;
     consumerUsername: string;
     type: CredentialType;
     label: string | null;
     rotatedFromId?: Uuid | null;
+    /** Index the appended entry occupies, for the compensating delete. */
+    appendIndex?: number;
   }): Promise<{ credential: CredentialRecord; secret: ShowOnceSecret }> {
     const generated = generateCredential(input.type, input.consumerUsername);
     await edge.consumers.addCredential(
       input.consumerId,
       input.type,
       generated.entry,
-      input.user.id,
+      input.actorId,
     );
-    const credential = await store.credentials.create({
-      user_id: input.user.id,
-      ferrum_consumer_id: input.consumerId,
-      credential_type: input.type,
-      // Edge assigns credential entries no id of their own; the addressable
-      // resource is the per-type collection, and position is tracked by row
-      // order (see the module docblock).
-      ferrum_credential_id: `${input.consumerId}/credentials/${input.type}`,
-      fingerprint: crypto.fingerprint(generated.material),
-      last4: last4(generated.material),
-      label: input.label,
-      status: 'active',
-      rotated_from_id: input.rotatedFromId ?? null,
-    });
-    return { credential, secret: generated.secret };
+    try {
+      const credential = await store.credentials.create({
+        user_id: input.ownerId,
+        ferrum_consumer_id: input.consumerId,
+        credential_type: input.type,
+        // Edge assigns credential entries no id of their own; the addressable
+        // resource is the per-type collection, and position is tracked by row
+        // order (see the module docblock).
+        ferrum_credential_id: `${input.consumerId}/credentials/${input.type}`,
+        fingerprint: crypto.fingerprint(generated.material),
+        last4: last4(generated.material),
+        label: input.label,
+        status: 'active',
+        rotated_from_id: input.rotatedFromId ?? null,
+      });
+      return { credential, secret: generated.secret };
+    } catch (error) {
+      if (input.appendIndex !== undefined) {
+        // Best effort: the store failure is the one worth reporting, and a
+        // failed compensation leaves an orphan the reconciliation guard names.
+        await edge.consumers
+          .deleteCredentialAt(input.consumerId, input.type, input.appendIndex, input.actorId)
+          .catch(() => undefined);
+      }
+      throw error;
+    }
   }
 
   async function issueForConsumer(
@@ -472,21 +525,21 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     }
     return edge.serializePerKey(input.consumerId, async () => {
       await assertOwnerActive(input.user.id);
-      if (input.skipCap !== true) {
-        const rows = await liveRows(input.consumerId, input.credentialType);
-        if (rows.length >= cap) {
-          throw conflict(
-            `You already hold ${rows.length} live ${input.credentialType} credentials (the gateway allows ${cap}); revoke or rotate one first`,
-            { credential_type: input.credentialType, limit: cap },
-          );
-        }
+      const rows = await liveRows(input.consumerId, input.credentialType);
+      if (input.skipCap !== true && rows.length >= cap) {
+        throw conflict(
+          `You already hold ${rows.length} live ${input.credentialType} credentials (the gateway allows ${cap}); revoke or rotate one first`,
+          { credential_type: input.credentialType, limit: cap },
+        );
       }
       return appendCredential({
-        user: input.user,
+        ownerId: input.user.id,
+        actorId: input.user.id,
         consumerId: input.consumerId,
         consumerUsername: input.consumerUsername,
         type: input.credentialType,
         label: input.label ?? null,
+        appendIndex: rows.length,
       });
     });
   }
@@ -682,24 +735,48 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         // no working credential of this type, which is unavoidable at the cap.
         const appendFirst = length < cap;
 
+        let previous = current;
         if (!appendFirst) {
           await removeAt(consumerId, type, position, user.id);
+          // Immediately, not at the end. The delete is the destructive step and
+          // Edge has confirmed it; deferring the row until the append also
+          // succeeds is what left two `active` rows against one Edge entry
+          // after a failed append, and `resolveCredentialIndex` then refused
+          // every later operation on the *surviving* credential — including the
+          // revoke an incident response needs.
+          previous = (await store.credentials.update(current.id, { status: 'revoked' })) ?? current;
         }
+
         const created = await appendCredential({
-          user,
+          ownerId: user.id,
+          actorId: user.id,
           consumerId,
           consumerUsername: consumer.username,
           type,
           label: label ?? current.label,
           rotatedFromId: current.id,
+          appendIndex: appendFirst ? length : length - 1,
+        }).catch((error: unknown) => {
+          if (appendFirst) throw error;
+          // At the cap the old secret is already gone and cannot be recreated —
+          // it was show-once. Say so plainly rather than leaving the caller to
+          // assume nothing happened and keep using a key that no longer exists.
+          throw edgeError(
+            'The previous credential was removed from the gateway but its replacement could not be created; issue a new credential',
+            {
+              credential_type: type,
+              revoked_credential_id: current.id,
+              cause: error instanceof Error ? error.message : String(error),
+            },
+          );
         });
+
         if (appendFirst) {
           // `POST` appends, so the old entry's index is unchanged by the append.
           await removeAt(consumerId, type, position, user.id);
+          previous = (await store.credentials.update(current.id, { status: 'revoked' })) ?? current;
         }
 
-        const previous =
-          (await store.credentials.update(current.id, { status: 'revoked' })) ?? current;
         return { created, previous };
       });
 
