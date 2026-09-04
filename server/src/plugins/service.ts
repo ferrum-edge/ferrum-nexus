@@ -240,37 +240,55 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
       }
 
       const target = await loadTarget(actor, apiId);
-      const existing = binder.find(await binder.listByProxy(target.proxyId), pluginName);
       const trigger = edgeTriggerFor(input.trigger);
-
-      const undo: (() => Promise<void>)[] = [];
-      let saved: ApiPluginRecord;
-      try {
-        await binder.reconcileOptionalPlugin(
-          target.proxyId,
-          existing,
-          pluginName,
-          gatewaySettings(descriptor, input.config),
-          actor.id,
-          undo,
-          { enabled: input.enabled, trigger },
-        );
-        // Written last but inside the compensated block, like every other
-        // gateway-then-store sequence in the portal: a store failure must not
-        // leave a live plugin nothing in the UI can reach.
-        saved = await store.apiPlugins.upsert({
-          api_id: target.apiId,
-          plugin_name: pluginName,
-          enabled: input.enabled,
-          config: input.config,
-          trigger: input.trigger,
-        });
-      } catch (error) {
-        for (const step of undo.reverse()) {
-          await step().catch(() => undefined);
-        }
-        throw error;
-      }
+      const { saved, replaced } = await edge.serializePerKey(
+        `proxy-plugin:${target.proxyId}:${pluginName}`,
+        async () => {
+          const matches = (await binder.listByProxy(target.proxyId)).filter(
+            (plugin) => plugin.plugin_name === pluginName,
+          );
+          const [existing, ...duplicates] = matches;
+          const undo: (() => Promise<void>)[] = [];
+          try {
+            await binder.reconcileOptionalPlugin(
+              target.proxyId,
+              existing,
+              pluginName,
+              gatewaySettings(descriptor, input.config),
+              actor.id,
+              undo,
+              { enabled: input.enabled, trigger },
+            );
+            // Older concurrent writers may already have left duplicate configs.
+            // Remove every extra while holding the same name-level lock.
+            for (const duplicate of duplicates) {
+              await binder.reconcileOptionalPlugin(
+                target.proxyId,
+                duplicate,
+                pluginName,
+                null,
+                actor.id,
+                undo,
+              );
+            }
+            // Written last but inside the compensated block, like every other
+            // gateway-then-store sequence in the portal.
+            const row = await store.apiPlugins.upsert({
+              api_id: target.apiId,
+              plugin_name: pluginName,
+              enabled: input.enabled,
+              config: input.config,
+              trigger: input.trigger,
+            });
+            return { saved: row, replaced: existing !== undefined };
+          } catch (error) {
+            for (const step of undo.reverse()) {
+              await step().catch(() => undefined);
+            }
+            throw error;
+          }
+        },
+      );
 
       await audit.record(
         { id: actor.id, role: actor.role },
@@ -283,7 +301,7 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
           // allow-list, and an audit row is not the place for either.
           config_keys: Object.keys(input.config).sort(),
           trigger: input.trigger,
-          replaced: existing !== undefined,
+          replaced,
         },
         ip,
       );
@@ -294,36 +312,45 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
     async remove(actor, apiId, pluginName, ip = null) {
       const descriptor = descriptorFor(pluginName);
       const target = await loadTarget(actor, apiId);
-      const row = await store.apiPlugins.find(target.apiId, pluginName);
-      if (!row) throw notFound('Plugin', `${apiId}/${pluginName}`);
+      const wasAttached = await edge.serializePerKey(
+        `proxy-plugin:${target.proxyId}:${pluginName}`,
+        async () => {
+          const row = await store.apiPlugins.find(target.apiId, pluginName);
+          if (!row) throw notFound('Plugin', `${apiId}/${pluginName}`);
 
-      // Tolerant of a gateway config an operator already removed by hand:
-      // `reconcileOptionalPlugin` treats an absent `existing` as nothing to do,
-      // and the row still goes.
-      const existing = binder.find(await binder.listByProxy(target.proxyId), pluginName);
-      const undo: (() => Promise<void>)[] = [];
-      try {
-        await binder.reconcileOptionalPlugin(
-          target.proxyId,
-          existing,
-          pluginName,
-          null,
-          actor.id,
-          undo,
-        );
-        await store.apiPlugins.delete(target.apiId, pluginName);
-      } catch (error) {
-        for (const step of undo.reverse()) {
-          await step().catch(() => undefined);
-        }
-        throw error;
-      }
+          // Tolerant of configs an operator already removed by hand, while also
+          // cleaning up every duplicate a historical concurrent save left behind.
+          const matches = (await binder.listByProxy(target.proxyId)).filter(
+            (plugin) => plugin.plugin_name === pluginName,
+          );
+          const undo: (() => Promise<void>)[] = [];
+          try {
+            for (const existing of matches) {
+              await binder.reconcileOptionalPlugin(
+                target.proxyId,
+                existing,
+                pluginName,
+                null,
+                actor.id,
+                undo,
+              );
+            }
+            await store.apiPlugins.delete(target.apiId, pluginName);
+            return matches.length > 0;
+          } catch (error) {
+            for (const step of undo.reverse()) {
+              await step().catch(() => undefined);
+            }
+            throw error;
+          }
+        },
+      );
 
       await audit.record(
         { id: actor.id, role: actor.role },
         AuditAction.API_PLUGIN_REMOVE,
         { type: 'api', id: target.apiId },
-        { plugin_name: pluginName, label: descriptor.label, was_attached: existing !== undefined },
+        { plugin_name: pluginName, label: descriptor.label, was_attached: wasAttached },
         ip,
       );
     },

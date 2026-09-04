@@ -655,6 +655,35 @@ describe('provider plugin palette', () => {
   /* ── Compensation and teardown ─────────────────────────────────────────── */
 
   describe('compensation', () => {
+    it('serializes concurrent saves so deletion cannot leave a hidden config', async () => {
+      const responses = await Promise.all([
+        setPlugin('request_termination', { config: { status_code: 503 } }),
+        setPlugin('request_termination', { config: { status_code: 410 } }),
+      ]);
+      assert.deepEqual(
+        responses.map((response) => response.statusCode),
+        [200, 200],
+      );
+      assert.equal(
+        harness.edge
+          .pluginsForProxy(proxyId)
+          .filter((plugin) => plugin.plugin_name === 'request_termination').length,
+        1,
+      );
+
+      const removed = await harness.authed(provider, {
+        method: 'DELETE',
+        url: `/api/apis/${apiId}/plugins/request_termination`,
+      });
+      assert.equal(removed.statusCode, 200);
+      assert.equal(
+        harness.edge
+          .pluginsForProxy(proxyId)
+          .filter((plugin) => plugin.plugin_name === 'request_termination').length,
+        0,
+      );
+    });
+
     it('undoes the gateway write when the store row cannot be saved', async () => {
       failNextUpsert(harness, 'database unavailable');
       const response = await setPlugin('request_termination', { config: { status_code: 503 } });
