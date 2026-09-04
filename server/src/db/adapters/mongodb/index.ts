@@ -893,6 +893,15 @@ const INDEXES: IndexDefinition[] = [
   },
 ];
 
+/** Indexes added by `010_message_sender_index`. */
+const SENDER_INDEXES: IndexDefinition[] = [
+  {
+    collection: 'messages',
+    name: 'ix_messages_sender',
+    key: { sender_user_id: 1, created_at: 1 },
+  },
+];
+
 /** Indexes added by `003_verification_token_purpose`. */
 const PURPOSE_INDEXES: IndexDefinition[] = [
   {
@@ -964,6 +973,10 @@ const MONGO_MIGRATIONS: { id: string; apply: (db: Db) => Promise<void> }[] = [
     // reset rather than a queue of duplicate revocations; the collection itself
     // is created on the first insert.
     apply: (db: Db): Promise<void> => createIndexes(db, TEARDOWN_JOB_INDEXES),
+  },
+  {
+    id: '010_message_sender_index',
+    apply: (db: Db): Promise<void> => createIndexes(db, SENDER_INDEXES),
   },
 ];
 
@@ -2245,6 +2258,12 @@ class MongoStore implements NexusStore {
 
     countByThread: async (threadId) =>
       this.col(COLLECTIONS.messages).countDocuments({ thread_id: threadId }, this.opts),
+
+    countBySenderSince: async (senderUserId, sinceIso) =>
+      this.col(COLLECTIONS.messages).countDocuments(
+        { sender_user_id: senderUserId, created_at: { $gte: sinceIso } },
+        this.opts,
+      ),
 
     deleteByThread: async (threadId) =>
       (await this.col(COLLECTIONS.messages).deleteMany({ thread_id: threadId }, this.opts))

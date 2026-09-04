@@ -1817,6 +1817,13 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     countByThread: async (threadId) =>
       queryCount(exec, 'SELECT COUNT(*) AS cnt FROM messages WHERE thread_id = ?', [threadId]),
 
+    countBySenderSince: async (senderUserId, sinceIso) =>
+      queryCount(
+        exec,
+        'SELECT COUNT(*) AS cnt FROM messages WHERE sender_user_id = ? AND created_at >= ?',
+        [senderUserId, sinceIso],
+      ),
+
     deleteByThread: async (threadId) =>
       execute(exec, 'DELETE FROM messages WHERE thread_id = ?', [threadId]),
   };

@@ -561,11 +561,18 @@ recognisable:
 
 ### Rate limiting
 
-`@fastify/rate-limit` is registered on the `/api/auth/*` child instance only:
-**20 requests per minute per IP**, covering register, login, logout, me,
-verify-email and captcha config. Exceeding it is `429 RATE_LIMITED`. It is
-scoped to that prefix so the credential-guessing surface is protected without
-throttling normal portal use.
+`@fastify/rate-limit` is registered on two child instances.
+
+`/api/auth/*` takes **20 requests per minute per IP**, covering register, login,
+logout, me, verify-email and captcha config. Exceeding it is
+`429 RATE_LIMITED`. It is scoped to that prefix so the credential-guessing
+surface is protected without throttling normal portal use.
+
+`/api/threads` takes a limiter registered `global: false`, so only the two write
+routes carry one: **10 thread creations and 30 replies per minute**, keyed on
+the **authenticated account** (`userOrIpKey`, falling back to `request.ip` when
+there is no session) rather than the address. See
+[Messaging abuse resistance](#messaging-abuse-resistance).
 
 Controlled by `NEXUS_RATE_LIMIT_ENABLED` (default `true`); forced off under
 `NEXUS_ENV=test`. The store is in-memory and therefore **per process** — with
@@ -615,6 +622,49 @@ ceilings rather than billing boundaries.
 Neither control replaces the registration policy. A portal that does not want
 strangers allocating gateway resources at all should take `provider` out of
 `allowed_roles` and promote vetted accounts, or close registration entirely.
+
+### Messaging abuse resistance
+
+Registration is open by default, so **an authenticated account is not a trusted
+one**. Messaging is the highest-amplification authenticated surface in the
+portal: one `POST` durably writes a message row and an audit row, and a
+_platform_ thread (`recipient_user_id: null`) fans an in-app notification and a
+rendered email out to every active `admin` and `super_admin`. Left unbounded,
+one low-privilege account could mail-bomb every administrator, exhaust the SMTP
+quota, and grow four tables without limit (GHSA-gwqc-w33p-5wx5).
+
+Three independent bounds close that, and none of them relies on the others:
+
+1. **Per-account burst limits** — 10 thread creations and 30 replies per minute.
+   Keying on the account rather than the IP is the load-bearing choice: an
+   IP-keyed limiter puts a whole office behind one NAT into a single bucket
+   while still letting one attacker with a handful of addresses through. The key
+   generator reads `request.currentUser`, which the auth plugin's root-instance
+   `onRequest` hook has already resolved by the time a scope-level limiter runs.
+2. **A rolling 24-hour per-account budget** — `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY`
+   (default 200, `0` disables). Checked **before any row is written**, so a
+   refusal costs one indexed `COUNT` and leaves no message, audit, notification
+   or outbox row. It counts the _sender_, so direct and platform threads draw on
+   one allowance and a new conversation is not a fresh one. Exceeding it is
+   `429 QUOTA_EXCEEDED` with `details: { limit, window, setting }`. Admins and
+   super admins are subject to it too — carving out a role would put the whole
+   budget one privilege escalation away.
+3. **Email coalescing** — the `message_received` mail is enqueued with the
+   idempotency key `message_received:<thread>:<recipient>:<bucket>`, where
+   `bucket` is a 10-minute slice of wall-clock time. The outbox's unique index
+   on `idempotency_key` turns every later message in the same window into a
+   no-op, so a reply storm costs one mail per recipient per thread per window
+   however many messages it contains. The default template therefore announces
+   _activity_ and links to the thread rather than quoting a body it cannot
+   promise to keep delivering.
+
+Two limits on this, stated plainly: the per-minute counters are **in-process**,
+so N instances enforce N × those numbers (the daily budget, which counts durable
+rows, is exact on any number of instances); and the budget's read-then-write is
+not one atomic step, so two concurrent sends can both observe the same count and
+land at `limit + 1`. That race is bounded by the per-minute limiter and costs one
+row, which is the wrong order of magnitude to matter for a resource-exhaustion
+control.
 
 ### Consumer quotas are per gateway process
 

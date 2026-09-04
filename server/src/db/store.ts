@@ -669,6 +669,16 @@ export interface MessageRepo {
   /** Newest message of a thread, for list previews. */
   findLatestByThread(threadId: Uuid): Promise<MessageRecord | null>;
   countByThread(threadId: Uuid): Promise<number>;
+  /**
+   * How many messages `senderUserId` has posted since `sinceIso`, across every
+   * thread — the per-account messaging budget.
+   *
+   * The boundary is **inclusive**: a row whose `created_at` equals `sinceIso`
+   * counts. `created_at` is an ISO-8601 UTC string in a text column, so every
+   * adapter compares it lexicographically, which for this fixed format is the
+   * same ordering as by instant.
+   */
+  countBySenderSince(senderUserId: Uuid, sinceIso: IsoTimestamp): Promise<number>;
   /** Cascade helper for thread deletion. */
   deleteByThread(threadId: Uuid): Promise<number>;
 }

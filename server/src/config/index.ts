@@ -178,7 +178,7 @@ export interface NexusConfig {
   bootstrapToken: string | undefined;
   /** Session idle lifetime in seconds (sliding). */
   sessionTtlSeconds: number;
-  /** Whether the `/api/auth/*`, `/api/health` and `/api/apis/*` rate limiters are installed. Off under `NEXUS_ENV=test`. */
+  /** Whether the `/api/auth/*`, `/api/health`, `/api/apis/*` and `/api/threads/*` rate limiters are installed. Off under `NEXUS_ENV=test`. */
   rateLimitEnabled: boolean;
   /**
    * How long `GET /api/health` reuses a dependency probe
@@ -207,6 +207,17 @@ export interface NexusConfig {
    * default of 50.
    */
   maxApisPerOwner: number;
+  /**
+   * How many portal messages one account may post in a rolling 24 hours
+   * (`NEXUS_MAX_MESSAGES_PER_USER_PER_DAY`). `0` disables the budget.
+   *
+   * The per-minute limiters bound a burst; this bounds the day, because every
+   * message durably costs a message row, an audit row and — for a platform
+   * thread — a notification row per administrator. Admins are subject to it
+   * too: an account that needs more than a few hundred messages a day is an
+   * integration, not a person.
+   */
+  maxMessagesPerUserPerDay: number;
   /**
    * Whether a provider may publish an API whose upstream is a loopback, private,
    * link-local or internal destination (`NEXUS_ALLOW_PRIVATE_UPSTREAMS`).
@@ -322,6 +333,7 @@ const envSchema = z.object({
   NEXUS_RATE_LIMIT_ENABLED: boolish(true),
   NEXUS_HEALTH_CACHE_MS: intish(5_000, 0, 60_000),
   NEXUS_MAX_APIS_PER_OWNER: intish(DEFAULT_MAX_APIS_PER_OWNER, 0, 100_000),
+  NEXUS_MAX_MESSAGES_PER_USER_PER_DAY: intish(200, 0, 1_000_000),
   NEXUS_ALLOW_PRIVATE_UPSTREAMS: boolish(false),
   NEXUS_WEB_DIST: optionalString(),
 
@@ -513,6 +525,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     rateLimitEnabled: nodeEnv === 'test' ? false : raw.NEXUS_RATE_LIMIT_ENABLED,
     healthCacheMs: raw.NEXUS_HEALTH_CACHE_MS,
     maxApisPerOwner: raw.NEXUS_MAX_APIS_PER_OWNER,
+    maxMessagesPerUserPerDay: raw.NEXUS_MAX_MESSAGES_PER_USER_PER_DAY,
     allowPrivateUpstreams: raw.NEXUS_ALLOW_PRIVATE_UPSTREAMS,
     webDistPath: raw.NEXUS_WEB_DIST,
     db: {
