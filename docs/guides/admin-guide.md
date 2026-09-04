@@ -83,15 +83,25 @@ Setting status to **disabled**:
 - **destroys every session the account holds**, so open browser tabs get a
   `401` on their next request rather than a working page;
 - blocks sign-in with `403 USER_DISABLED`;
-- leaves their **grants and gateway credentials intact**.
+- **revokes every gateway identity the account holds** — its ACL groups and
+  every credential of every type on `nexus-user-<id>`, plus each provider test
+  consumer (`nexus-test-<api_id>`) it created, which is deleted outright;
+- leaves their **grants** in place, so re-enabling restores the access they had
+  been approved for.
 
-That last point matters. A disabled user cannot use the _portal_, but their API
-keys keep working against the _gateway_, because those are two different
-systems. If you are disabling someone because of a security incident, use
-**god mode → Disable user with "revoke grants"**, which does both.
+The gateway half is not best-effort. If Edge is unreachable the account is still
+disabled and the response says `gateway_teardown: "pending"` — the revocation is
+queued and retried until it lands, and the user list shows the backlog. Treat a
+`pending` teardown as an incident that is still open: those keys keep
+authenticating until it clears. **Administration → Users** exposes a retry
+button per account.
+
+Use **god mode → Disable user with "revoke grants"** when you also want the
+approvals themselves torn down rather than preserved for a re-enable.
 
 Re-enabling is just setting the status back to active; they sign in again
-normally.
+normally, and any queued revocation is cancelled. Their credentials are _not_
+restored — a revoked key is gone, and they issue a new one.
 
 ---
 
