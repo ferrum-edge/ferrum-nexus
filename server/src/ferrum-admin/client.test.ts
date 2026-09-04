@@ -15,6 +15,7 @@ import {
   type FerrumAdminClient,
 } from './client.js';
 import type { AdminTokenMinter } from './jwt.js';
+import type { EdgeApiSpecDocument } from './types.js';
 
 const SECRET = 'ferrum-admin-client-test-secret-0123456789';
 
@@ -487,6 +488,198 @@ describe('ferrum admin client', () => {
         config: { allowed_origins: ['https://portal.example.com'], allow_credentials: true },
       });
       assert.equal(created.plugin_name, 'cors');
+    });
+  });
+
+  describe('api specs', () => {
+    /** A document the importer will accept, owning `proxyId`. */
+    function specDocument(
+      proxyId: string,
+      listenPath: string,
+      paths: string[],
+    ): EdgeApiSpecDocument {
+      return {
+        openapi: '3.1.0',
+        info: { title: 'Spec API', version: '1.0.0' },
+        servers: [{ url: listenPath }],
+        paths: Object.fromEntries(
+          paths.map((path) => [path, { get: { responses: { '200': { description: 'OK' } } } }]),
+        ),
+        'x-ferrum-proxy': {
+          id: proxyId,
+          name: `nexus-${proxyId}`,
+          listen_path: listenPath,
+          backend_host: 'spec.internal',
+          backend_port: 443,
+          backend_scheme: 'https',
+        },
+        'x-ferrum-validate': {
+          mode: 'block',
+          request: { enabled: false },
+          response: { enabled: false },
+          fail_on_unknown_operation: true,
+        },
+      };
+    }
+
+    it('creates the proxy and its generated validator in one call', async () => {
+      const ref = await client.apiSpecs.create(
+        specDocument('spec-proxy', '/nexus/spec', ['/invoices', '/invoices/{id}']),
+      );
+
+      assert.equal(ref.proxy_id, 'spec-proxy');
+      assert.ok(ref.id);
+
+      // The proxy carries the ownership stamp that admission looks for, and the
+      // validator is already associated — neither is a separate call.
+      const proxy = await client.proxies.get('spec-proxy');
+      assert.equal(proxy?.api_spec_id, ref.id);
+      const validator = edge.pluginForProxy('spec-proxy', 'openapi_validator');
+      assert.ok(validator);
+      assert.deepEqual(
+        edge.effectivePluginsForProxy('spec-proxy').map((plugin) => plugin.plugin_name),
+        ['openapi_validator'],
+      );
+      // Operation matchers carry the `servers[0]` pathname, which is why Nexus
+      // rewrites `servers` to the listen path before submitting.
+      assert.deepEqual((validator.config as { operations: unknown[] }).operations, [
+        {
+          method: 'GET',
+          path_template: '/nexus/spec/invoices',
+          path_regex: '^/nexus/spec/invoices$',
+        },
+        {
+          method: 'GET',
+          path_template: '/nexus/spec/invoices/{id}',
+          path_regex: '^/nexus/spec/invoices/[^/]+$',
+        },
+      ]);
+    });
+
+    it('refuses a hand-built openapi_validator on a proxy with no spec', async () => {
+      // Edge's `validate_openapi_validator_precondition`: the operation table is
+      // the gateway's to generate. This is issue #49 in one assertion.
+      await client.proxies.create({
+        id: 'plain-proxy',
+        listen_path: '/nexus/plain',
+        backend_host: 'plain.internal',
+        backend_port: 443,
+      });
+
+      await assert.rejects(
+        () =>
+          client.pluginConfigs.create({
+            plugin_name: 'openapi_validator',
+            scope: 'proxy',
+            proxy_id: 'plain-proxy',
+            enabled: true,
+            config: {
+              fail_on_unknown_operation: true,
+              operations: [
+                {
+                  method: 'GET',
+                  path_template: '/nexus/plain/invoices',
+                  path_regex: '^/nexus/plain/invoices$',
+                },
+              ],
+            },
+          }),
+        (error: unknown) =>
+          isNexusError(error) &&
+          /openapi_validator requires a proxy with an attached api_spec/.test(error.message),
+      );
+    });
+
+    it('regenerates the validator on a replace and leaves hand-owned plugins alone', async () => {
+      const ref = await client.apiSpecs.create(
+        specDocument('replace-proxy', '/nexus/replace', ['/invoices']),
+      );
+      const generated = String(edge.pluginForProxy('replace-proxy', 'openapi_validator')?.id);
+      const auth = await client.pluginConfigs.create({
+        plugin_name: 'key_auth',
+        scope: 'proxy',
+        proxy_id: 'replace-proxy',
+        enabled: true,
+        config: {},
+      });
+      const current = await client.proxies.get('replace-proxy');
+      assert.ok(current);
+      await client.proxies.replace('replace-proxy', {
+        ...current,
+        plugins: [{ plugin_config_id: generated }, { plugin_config_id: auth.id }],
+      });
+
+      await client.apiSpecs.replace(
+        ref.id,
+        specDocument('replace-proxy', '/nexus/replace', ['/invoices', '/payments']),
+      );
+
+      // A new validator row, regenerated from the new document and re-associated.
+      const validator = edge.pluginForProxy('replace-proxy', 'openapi_validator');
+      assert.notEqual(String(validator?.id), generated);
+      assert.deepEqual(
+        (validator?.config as { operations: { path_template: string }[] }).operations.map(
+          (operation) => operation.path_template,
+        ),
+        ['/nexus/replace/invoices', '/nexus/replace/payments'],
+      );
+      // The hand-owned auth plugin is untouched: the API is never open across a
+      // spec replace.
+      assert.ok(await client.pluginConfigs.get(auth.id));
+      assert.deepEqual(
+        edge
+          .effectivePluginsForProxy('replace-proxy')
+          .map((plugin) => String(plugin.plugin_name))
+          .sort(),
+        ['key_auth', 'openapi_validator'],
+      );
+    });
+
+    it('finds the spec behind a proxy, and nothing behind one without', async () => {
+      const ref = await client.apiSpecs.create(
+        specDocument('found-proxy', '/nexus/found', ['/invoices']),
+      );
+      await client.proxies.create({
+        id: 'unowned-proxy',
+        listen_path: '/nexus/unowned',
+        backend_host: 'unowned.internal',
+        backend_port: 443,
+      });
+
+      // `/api-specs` pages with its own `items` envelope rather than the
+      // `data` + `pagination` shape every other list route uses.
+      assert.equal((await client.apiSpecs.findByProxy('found-proxy'))?.id, ref.id);
+      assert.equal(await client.apiSpecs.findByProxy('unowned-proxy'), null);
+    });
+
+    it('refuses a second spec for a listen path that already exists', async () => {
+      await client.apiSpecs.create(specDocument('first-proxy', '/nexus/taken', ['/invoices']));
+
+      await assert.rejects(
+        () => client.apiSpecs.create(specDocument('second-proxy', '/nexus/taken', ['/invoices'])),
+        (error: unknown) => isNexusError(error) && /listen_path/.test(error.message),
+      );
+    });
+
+    it('cascades both ways between a spec and its proxy', async () => {
+      const ref = await client.apiSpecs.create(
+        specDocument('cascade-proxy', '/nexus/cascade', ['/invoices']),
+      );
+
+      // Deleting the proxy takes the spec and the generated validator with it —
+      // which is what makes a proxy delete a complete rollback.
+      await client.proxies.delete('cascade-proxy');
+      assert.equal(await client.apiSpecs.findByProxy('cascade-proxy'), null);
+      assert.equal(edge.pluginsForProxy('cascade-proxy').length, 0);
+
+      const second = await client.apiSpecs.create(
+        specDocument('cascade-proxy', '/nexus/cascade', ['/invoices']),
+      );
+      assert.notEqual(second.id, ref.id);
+
+      // And the other direction.
+      await client.apiSpecs.delete(second.id);
+      assert.equal(await client.proxies.get('cascade-proxy'), null);
     });
   });
 
