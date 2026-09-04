@@ -204,3 +204,17 @@ fails without the fix.
   retry (`POST /api/users/:id/gateway-teardown/retry`), and re-enabling
   cancels the job. A disabled user's API key used to stay valid for good
   whenever the Admin API was unreachable at the moment of disable.
+- **A new proxy is never reachable before its security plugins are on it.**
+  Publishing (and a `docs_only` ↔ `routes` conversion) creates the proxy on an
+  unguessable staging listen path (`/<namespace>/.staging/<random>`), attaches
+  and associates the auth, ACL, rate-limit and CORS configs there, and moves
+  it to `/<namespace>/<slug>` as the last gateway write — a whole-resource
+  `PUT /proxies/{id}` for a hand-owned proxy, `PUT /api-specs/{id}` for a
+  spec-owned one. Until now the real path was live, unauthenticated and
+  unlimited for the round trips between proxy creation and the association.
+- **Publishing is bounded per account.** `NEXUS_MAX_APIS_PER_OWNER`
+  (default 50, `0` = unlimited) caps how many APIs one account may own,
+  refused with `429 QUOTA_EXCEEDED` before the first gateway call; the
+  mutating `/api/apis/*` routes carry a 30 req/min per-account limiter. An
+  open-registration provider could previously create proxies, plugin
+  configs, slugs and 2 MiB documents without limit.
