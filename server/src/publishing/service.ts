@@ -113,6 +113,26 @@
  * in the safe direction and is documented at the call site: an API stays
  * reachable and authenticated rather than becoming open or orphaned.
  *
+ * ## The listen path moves last
+ *
+ * That sequence used to have one window it could not compensate for. Edge
+ * serves a proxy the instant it is created, and the plugin configs attached
+ * afterwards are inert until the association write — so the deterministic
+ * `/<namespace>/<slug>` was live, open and unlimited for a handful of round
+ * trips, and rollback could delete the proxy but not un-forward the requests.
+ * Reordering does not help: Edge refuses a plugin config for a proxy that does
+ * not exist, and `allowed_methods` must be `null` or a *non-empty* array, so
+ * there is no deny-all proxy to create first.
+ *
+ * So the *path* moves instead. Every proxy Nexus creates is created on an
+ * unguessable `/<namespace>/.staging/<128 bits>`
+ * ({@link stagingListenPath}), gets its plugin configs attached and associated
+ * there, and is moved onto the real path by
+ * {@link cutOverToListenPath} as the **last gateway write** before the store
+ * transaction. The final path is either a `404` or fully gated — never open.
+ * The `spec_enforcement` conversion, which deletes and recreates the proxy,
+ * takes the same detour for the same reason.
+ *
  * ## Retirement versus deletion
  *
  * `status: 'retired'` is a *catalog* state, not a gateway state: the proxy and
@@ -126,6 +146,7 @@
  * @see ref-edge-admin.md §3 (proxies), §7 (access_control), §8 (plugin configs)
  */
 
+import { randomBytes } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
 import {
@@ -470,6 +491,41 @@ export function proxyNameForSlug(slug: string): string {
 }
 
 /**
+ * The path segment every staging listen path sits under. A slug can never
+ * start with `.` ({@link slugify} strips it), so `/<namespace>/.staging/…`
+ * cannot collide with any API's real path — present or future.
+ */
+export const STAGING_PATH_SEGMENT = '.staging';
+
+/**
+ * A one-shot listen path for a proxy that is not finished yet.
+ *
+ * Edge serves a proxy from the moment `POST /proxies` — or the spec importer —
+ * returns, and a proxy-scoped plugin config is inert until the proxy's own
+ * `plugins[]` names it. So between "the proxy exists" and "its auth, ACL, rate
+ * limit and CORS are associated" the route is live, open and unlimited, and
+ * that window cannot be closed by ordering the calls differently: Edge refuses
+ * a plugin config for a proxy that does not exist yet, and `allowed_methods`
+ * must be `null` or a *non-empty* array, so there is no deny-all to create it
+ * with either.
+ *
+ * What *is* available is where the proxy is served. Every proxy Nexus creates
+ * is therefore created here, on a path no client can guess, and moved to its
+ * deterministic `/<namespace>/<slug>` as the **last** gateway write of the
+ * operation — by which point every security plugin is already associated. The
+ * final path is either unserved or fully gated; it is never open.
+ *
+ * 128 bits from `crypto.randomBytes`, which is what makes "no client can guess
+ * it" a claim rather than a hope. Each call returns a fresh path: a staging
+ * proxy left behind by a crash is never reused, only deleted.
+ *
+ * @example stagingListenPath('nexus') // '/nexus/.staging/9f2c…'
+ */
+export function stagingListenPath(namespace: string): string {
+  return `/${namespace}/${STAGING_PATH_SEGMENT}/${randomBytes(16).toString('hex')}`;
+}
+
+/**
  * The four proxy fields a backend move writes.
  *
  * `backend_path` is explicitly `null` when the new upstream has no base path:
@@ -670,9 +726,14 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // proxy that would then have to be rolled back.
       assertRoutesEnforceable(specEnforcement, parsed.paths);
 
+      // Where the proxy is *born*. It stays here until every security plugin
+      // is attached and associated, and the move to `listenPath` is the last
+      // gateway write below — see {@link stagingListenPath}.
+      const stagingPath = stagingListenPath(namespace);
+
       const proxyBody = {
         name: proxyNameForSlug(slug),
-        listen_path: listenPath,
+        listen_path: stagingPath,
         backend_scheme: upstream.scheme,
         backend_host: upstream.host,
         backend_port: upstream.port,
@@ -688,7 +749,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         allowed_ws_origins: wsOriginsFor(cors),
       };
 
-      const created: { proxyId?: string; pluginIds: string[] } = { pluginIds: [] };
+      const created: { proxyId?: string; specId?: string; pluginIds: string[] } = {
+        pluginIds: [],
+      };
       let persisted: { api: ApiRecord; spec: ApiSpecRecord };
       try {
         // In `routes` mode the proxy is created *by the spec importer* — Edge
@@ -696,16 +759,21 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // rather than left to the gateway so `ferrum_proxy_id` stays a plain
         // proxy id whatever the mode, and so the rollback below has something
         // to delete even if the response never arrives.
-        const proxy =
-          specEnforcement === 'routes'
-            ? await createSpecOwnedProxy(
-                parsed.document,
-                listenPath,
-                { id: newId(), ...proxyBody },
-                owner.id,
-              )
-            : await edge.proxies.create(proxyBody, owner.id);
-        created.proxyId = proxy.id;
+        if (specEnforcement === 'routes') {
+          const ref = await createSpecOwnedProxy(
+            parsed.document,
+            stagingPath,
+            { id: newId(), ...proxyBody },
+            owner.id,
+          );
+          created.proxyId = ref.id;
+          // Kept so the cutover below does not have to look the spec up again
+          // — one fewer round trip in the window the staging path exists.
+          created.specId = ref.specId;
+        } else {
+          created.proxyId = (await edge.proxies.create(proxyBody, owner.id)).id;
+        }
+        const proxy = { id: created.proxyId };
 
         const auth = await attach(
           proxy.id,
@@ -740,12 +808,24 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
 
         // None of the above is live yet. A proxy-scoped plugin config only runs
         // once the proxy's own `plugins[]` names it, so this single write is
-        // what turns the API from open, ungated and unlimited into what the
-        // portal says it is. Edge will not accept a config for a proxy that
-        // does not exist, so the window between creating the proxy and this
-        // call cannot be closed from here — only kept to one round trip, and
-        // rolled back below if anything in it fails.
+        // what turns the proxy from open, ungated and unlimited into what the
+        // portal says it is. Everything so far — including this — happened on
+        // the unguessable staging path; the deterministic one is still a 404.
         await associate(proxy.id, created.pluginIds, owner.id);
+
+        // …and only now does the API appear where clients will look for it.
+        // The last gateway write of the publish, so the final listen path is
+        // never served by a proxy that is missing a plugin. A failure here
+        // rolls back like any other step: the staging proxy is deleted and the
+        // final path was never taken.
+        await cutOverToListenPath(
+          proxy.id,
+          specEnforcement,
+          listenPath,
+          parsed.document,
+          created.specId ?? null,
+          owner.id,
+        );
 
         // The Nexus rows are written *inside* the compensated block: a store
         // failure here would otherwise leave a live, untracked proxy on the
@@ -1450,18 +1530,75 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * The response names the proxy it created; `proxyBody.id` is the fallback for
    * a gateway that answers without echoing it, and the two always agree because
    * Edge takes the id from the submitted `x-ferrum-proxy`.
+   *
+   * The spec id comes back too, because the caller's next move is always the
+   * cutover `PUT /api-specs/{id}` and looking it up again would add a round
+   * trip to the window in which the proxy is still on its staging path. A
+   * gateway that answers without one falls back to
+   * {@link specIdForProxy} — `GET /api-specs?proxy_id=…`.
    */
   async function createSpecOwnedProxy(
     document: Record<string, unknown>,
     listenPath: string,
     proxyBody: Record<string, unknown> & { id: string },
     subject: string,
-  ): Promise<{ id: string }> {
+  ): Promise<{ id: string; specId: string }> {
     const ref = await edge.apiSpecs.create(
       routesSpecDocument(document, { listenPath, proxy: proxyBody }),
       subject,
     );
-    return { id: ref.proxy_id || proxyBody.id };
+    const id = ref.proxy_id || proxyBody.id;
+    return { id, specId: ref.id || (await specIdForProxy(id)) };
+  }
+
+  /**
+   * Move a finished proxy from its staging path onto the deterministic
+   * `/<namespace>/<slug>` clients will use.
+   *
+   * This is the write that makes an API reachable, and it is deliberately the
+   * **last** gateway call of every operation that builds a proxy — publish and
+   * the `spec_enforcement` conversion both. Until it lands the final path is a
+   * `404`; after it lands the proxy already carries every plugin the portal
+   * promised. There is no ordering in which it is briefly open.
+   *
+   * Two shapes, because a spec-owned proxy has two sources of truth for its
+   * path and they have to move together:
+   *
+   * - `docs_only` — a GET-merge-PUT under the per-proxy lock, exactly like
+   *   every other proxy write;
+   * - `routes` — a `PUT /api-specs/{id}` re-inserting the proxy from
+   *   `x-ferrum-proxy` with the new path, and `servers[0]` rewritten to match,
+   *   because Edge prefixes every generated operation matcher with it. Sending
+   *   only one of the two would leave the validator rejecting every request as
+   *   an unknown operation. Hand-owned plugin configs and their associations
+   *   survive the re-insert; the validator is regenerated for the new path.
+   */
+  async function cutOverToListenPath(
+    proxyId: string,
+    level: SpecEnforcementLevel,
+    listenPath: string,
+    document: Record<string, unknown>,
+    specId: string | null,
+    subject: string,
+  ): Promise<void> {
+    if (level !== 'routes') {
+      await mutateProxy(proxyId, (proxy) => ({ ...proxy, listen_path: listenPath }), subject);
+      return;
+    }
+    const id = specId ?? (await specIdForProxy(proxyId));
+    // A fresh read for the same reason `mutateProxy` takes one: the replace is
+    // whole-resource, so anything the body omits — an operator's `hosts`, the
+    // timeouts and method list written at create — reverts to its default.
+    const proxy = await edge.proxies.get(proxyId);
+    if (!proxy) throw notFound('Proxy', proxyId);
+    await edge.apiSpecs.replace(
+      id,
+      routesSpecDocument(document, {
+        listenPath,
+        proxy: { ...submittableProxyBody(proxy), listen_path: listenPath },
+      }),
+      subject,
+    );
   }
 
   /**
@@ -1511,16 +1648,31 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     const body = { ...submittableProxyBody(before), id: proxyId };
     const listenPath = listenPathFor(api.namespace, api.slug);
 
+    /**
+     * Build the proxy back in `level`, **on a fresh staging path**, put its
+     * plugins back, and only then move it onto `listenPath`.
+     *
+     * The staging detour is what keeps the rebuild fail-closed. A recreate
+     * straight onto the real path would serve the API unauthenticated for the
+     * round trips it takes to restore the plugins — the same window publishing
+     * used to have, on an API that already has consumers. This way the real
+     * path answers `404` for the whole rebuild instead, which is the failure
+     * direction a portal is allowed to choose.
+     */
     const rebuild = async (level: SpecEnforcementLevel): Promise<void> => {
+      const stagingPath = stagingListenPath(api.namespace);
+      const staged = { ...body, listen_path: stagingPath };
+      let specId: string | null = null;
       if (level === 'routes') {
-        await createSpecOwnedProxy(document, listenPath, body, subject);
+        specId = (await createSpecOwnedProxy(document, stagingPath, staged, subject)).specId;
       } else {
         // A document read off the wire, not one composed here: `EdgeProxyWrite`
         // models only the narrow subset Nexus sets, and every unmodelled key an
         // operator added has to survive the rebuild.
-        await edge.proxies.create(body as unknown as EdgeProxyWrite, subject);
+        await edge.proxies.create(staged as unknown as EdgeProxyWrite, subject);
       }
       await binder.restorePlugins(proxyId, carried, subject);
+      await cutOverToListenPath(proxyId, level, listenPath, document, specId, subject);
     };
 
     // Deleting the proxy cascades its plugin configs and, when it was

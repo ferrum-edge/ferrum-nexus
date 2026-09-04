@@ -411,7 +411,51 @@ expect, including CAPTCHA failing closed — is in
 
 ---
 
-## 7. Rate limiting and CAPTCHA
+## 7. Exposure and abuse controls
+
+### A published proxy is never briefly open
+
+Ferrum Edge serves a proxy from the moment `POST /proxies` (or the API-spec
+importer) returns, and a proxy-scoped plugin config is **inert** until the
+proxy's own `plugins[]` names it. Creating a proxy directly at its final
+`/<namespace>/<slug>` therefore made the route live, unauthenticated, ungated
+and unlimited for the round trips it took to attach and associate the auth, ACL,
+rate-limit and CORS plugins. Rollback deletes the proxy but cannot un-forward a
+request it already served (GHSA-gxvf-jj3q-x4fc).
+
+The sequence cannot be reordered out of the problem: Edge refuses a plugin
+config naming a proxy that does not exist, and `allowed_methods` must be `null`
+or a **non-empty** array, so there is no deny-all proxy to create first.
+
+So the listen path moves last. Every proxy Nexus creates is created on
+`/<namespace>/.staging/<32 hex>` — 128 bits from `crypto.randomBytes`, under a
+segment no slug can produce, so it neither collides nor can be guessed. All the
+plugin configs are attached and associated there, and the move onto the real
+path is the **final gateway write** before the Nexus rows are committed. The
+deterministic path is either a `404` or fully gated; there is no instant at
+which it is served by a proxy missing a plugin.
+
+The `spec_enforcement` conversion — which has to delete and recreate the proxy,
+because Edge can neither attach nor detach an `api_spec` in place — takes the
+same detour, as does its rollback. An API being converted answers `404` for the
+rebuild instead of answering unauthenticated.
+
+**Operational consequence.** Two crash windows remain, both narrow and both
+recognisable:
+
+- a crash **between the cutover and the store write** can orphan a finished,
+  fully gated proxy at the real path with no `apis` row behind it. This is the
+  same class of orphan the sequence has always had, and it is fail-_closed_: the
+  proxy enforces its auth plugin, and no Nexus grant references it. Find it by
+  listing proxies named `nexus-<slug>` whose slug has no `apis` row;
+- a crash **before the cutover** leaves a proxy on a staging path. Nothing
+  routes to it (no client can derive the path), but it consumes a proxy slot.
+  Find these with `GET /proxies` filtered to `listen_path` starting
+  `/<namespace>/.staging/`; every such proxy is abandoned by definition, because
+  a staging path is minted fresh per operation and never stored, so an operator
+  or a reconciliation job can delete them unconditionally. A proxy still on a
+  staging path is never one a live publish is using once the request that
+  created it has returned.
 
 ### Rate limiting
 

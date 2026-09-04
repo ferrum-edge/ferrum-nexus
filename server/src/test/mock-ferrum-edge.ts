@@ -28,6 +28,15 @@
  *   `DELETE /{type}` removes the type, `DELETE /{type}/{index}` removes one
  *   entry (§5.3–5.4).
  * - Flat `{"error": "..."}` error bodies (§1.7).
+ * - `listen_path` uniqueness per namespace, checked on `POST /proxies`,
+ *   `PUT /proxies/{id}` and both `/api-specs` writes — and **excluding the
+ *   proxy being written**, which is what lets a whole-resource replace *move* a
+ *   proxy from one path to another. Real Edge does the same, at admission
+ *   (`check_listen_path_unique(…, existing_proxy_id)`) and again inside the
+ *   write transaction (`ensure_proxy_route_unique_tx`, `AND id != ?`). That is
+ *   the write the staged publish depends on: a proxy is built on
+ *   `/<ns>/.staging/<hex>` and cut over to its real path once every plugin is
+ *   associated.
  * - API specs: `POST`/`PUT /api-specs` create the proxy from `x-ferrum-proxy`,
  *   stamp `api_spec_id` on it, and generate an associated `openapi_validator`
  *   whose operation table is built from the document's paths prefixed by the
@@ -206,6 +215,15 @@ export interface MockFerrumEdge {
   consumerByUsername(username: string, namespace?: string): StoredConsumer | undefined;
   /** The stored proxy with this `name` (`nexus-<slug>`), or `undefined`. */
   proxyByName(name: string, namespace?: string): Record<string, unknown> | undefined;
+  /**
+   * The proxy currently answering on `listenPath`, or `undefined`.
+   *
+   * This is the "would a client reach anything here?" question, and it is what
+   * the staged-cutover tests assert: while a publish is in flight the real
+   * `/<namespace>/<slug>` must be served by nothing at all, and after a failed
+   * one it must stay that way.
+   */
+  proxyServing(listenPath: string, namespace?: string): Record<string, unknown> | undefined;
   /**
    * Every plugin config whose `proxy_id` names this proxy, in creation order.
    *
@@ -1732,6 +1750,27 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     return errors.length === 0 ? null : `Invalid proxy plugin associations: ${errors.join('; ')}`;
   }
 
+  /**
+   * Whether another proxy in `namespace` already serves `listenPath`.
+   *
+   * `exceptProxyId` is the proxy a `PUT` is replacing (or re-inserting from a
+   * spec): a whole-resource write must not conflict with the row it is
+   * overwriting, which is what makes the staged cutover onto the real listen
+   * path — and every ordinary settings `PUT` — legal.
+   */
+  function listenPathTaken(
+    namespace: string,
+    listenPath: unknown,
+    exceptProxyId?: string,
+  ): boolean {
+    return [...proxies.values()].some(
+      (proxy) =>
+        proxy.namespace === namespace &&
+        proxy.listen_path === listenPath &&
+        String(proxy.id) !== exceptProxyId,
+    );
+  }
+
   function handleProxies(
     res: ServerResponse,
     method: string,
@@ -1759,10 +1798,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         }
         const settingsProblem = validateProxySettings(body);
         if (settingsProblem) return fail(res, 400, settingsProblem);
-        const duplicate = [...proxies.values()].some(
-          (proxy) => proxy.namespace === namespace && proxy.listen_path === body.listen_path,
-        );
-        if (duplicate) return fail(res, 409, 'listen_path already exists in this namespace');
+        if (listenPathTaken(namespace, body.listen_path)) {
+          return fail(res, 409, 'listen_path already exists in this namespace');
+        }
         const newId = typeof body.id === 'string' && body.id !== '' ? body.id : randomUUID();
         const associationProblem = proxyAssociationError(newId, namespace, body.plugins);
         if (associationProblem) return fail(res, 400, associationProblem);
@@ -1794,6 +1832,13 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       if (associationProblem) return fail(res, 400, associationProblem);
       const settingsProblem = validateProxySettings(body);
       if (settingsProblem) return fail(res, 400, settingsProblem);
+      // A whole-resource replace may move the proxy — that is how the staged
+      // publish cuts a finished proxy over from its `.staging/…` path onto the
+      // real one. The uniqueness check therefore excludes the proxy being
+      // replaced, or every no-op `PUT` would collide with itself.
+      if (listenPathTaken(namespace, body.listen_path, id)) {
+        return fail(res, 409, 'listen_path already exists in this namespace');
+      }
       const updated = {
         ...body,
         id,
@@ -2003,11 +2048,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       if (proxies.has(key(namespace, proxyId))) {
         return fail(res, 409, `Proxy '${proxyId}' already exists in this namespace`);
       }
-      if (
-        [...proxies.values()].some(
-          (proxy) => proxy.namespace === namespace && proxy.listen_path === proxyBody.listen_path,
-        )
-      ) {
+      if (listenPathTaken(namespace, proxyBody.listen_path)) {
         return fail(res, 409, 'listen_path already exists in this namespace');
       }
       if (specForProxy(namespace, proxyId)) {
@@ -2046,6 +2087,15 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       const proxyBody = checked.proxy;
       if (typeof proxyBody.id === 'string' && proxyBody.id !== existing.proxy_id) {
         return fail(res, 409, 'x-ferrum-proxy.id may not move an existing spec to another proxy');
+      }
+      if (typeof proxyBody.listen_path !== 'string' || !proxyBody.listen_path.startsWith('/')) {
+        return fail(res, 400, "listen_path must start with '/', '~' (regex), or '=/' (exact)");
+      }
+      // The re-insert honours a *changed* `listen_path` — that is how a staged
+      // spec-owned proxy is cut over onto the real path — so the uniqueness
+      // check applies here too, excluding the proxy being re-inserted.
+      if (listenPathTaken(namespace, proxyBody.listen_path, existing.proxy_id)) {
+        return fail(res, 409, 'listen_path already exists in this namespace');
       }
       const proxy = proxies.get(key(namespace, existing.proxy_id));
       existing.document = document;
@@ -2495,6 +2545,12 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     proxyByName(name, namespace = 'nexus'): Record<string, unknown> | undefined {
       return [...proxies.values()].find(
         (proxy) => proxy.namespace === namespace && proxy.name === name,
+      );
+    },
+
+    proxyServing(listenPath, namespace = 'nexus'): Record<string, unknown> | undefined {
+      return [...proxies.values()].find(
+        (proxy) => proxy.namespace === namespace && proxy.listen_path === listenPath,
       );
     },
 

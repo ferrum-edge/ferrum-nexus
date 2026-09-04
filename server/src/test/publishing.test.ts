@@ -221,6 +221,13 @@ describe('publishing', () => {
       const writes = harness.edge.callsTo('POST', '/proxies');
       assert.equal(writes[0]?.namespace, 'nexus');
       assert.equal(writes[0]?.claims?.role, 'admin');
+      // …and the proxy was *created* on a staging path, not this one. The
+      // deterministic path is taken by the last write of the publish, once
+      // every plugin above is associated — see the staged-cutover suite.
+      assert.match(
+        String((writes[0]?.body as Record<string, unknown>).listen_path),
+        /^\/nexus\/\.staging\/[0-9a-f]{32}$/,
+      );
 
       const audit = await harness.auditRows('api.publish');
       const row = audit.find((entry) => entry.target_id === body.api.id);
@@ -2074,6 +2081,22 @@ describe('publishing', () => {
       assert.equal(harness.edge.callsTo('POST', '/proxies').length, 0);
       assert.equal(harness.edge.callsTo('POST', '/api-specs').length, 1);
 
+      // The import lands on a staging path; the cutover `PUT /api-specs/{id}`
+      // moves both `servers[0]` and `x-ferrum-proxy.listen_path` onto the real
+      // one once the plugins are associated. Everything asserted below is the
+      // document as it stands *after* that move.
+      const imported = harness.edge.callsTo('POST', '/api-specs')[0]?.body as Record<
+        string,
+        unknown
+      >;
+      assert.match(
+        String((imported['x-ferrum-proxy'] as Record<string, unknown>).listen_path),
+        /^\/nexus\/\.staging\/[0-9a-f]{32}$/,
+      );
+      assert.deepEqual(imported.servers, [
+        { url: String((imported['x-ferrum-proxy'] as Record<string, unknown>).listen_path) },
+      ]);
+
       const document = submittedDocument(proxyId);
       // `servers` is the load-bearing rewrite. Edge builds each operation
       // matcher from the Paths key prefixed by this pathname, so leaving the
@@ -2344,6 +2367,9 @@ describe('publishing', () => {
       const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
       const specId = harness.edge.apiSpecForProxy(proxyId)?.id;
       const validatorId = String(harness.edge.pluginForProxy(proxyId, 'openapi_validator')?.id);
+      // The publish already replaced the spec once, to cut the proxy over from
+      // its staging path onto `/nexus/enf-cors-patch`.
+      const specWrites = harness.edge.callsTo('PUT', '/api-specs').length;
 
       const added = await harness.authed(provider, {
         method: 'PATCH',
@@ -2357,7 +2383,7 @@ describe('publishing', () => {
       // The operation table comes from the document alone now, so a CORS change
       // has nothing to regenerate — and re-importing the spec to discover that
       // would churn the validator for no reason.
-      assert.equal(harness.edge.callsTo('PUT', '/api-specs').length, 0);
+      assert.equal(harness.edge.callsTo('PUT', '/api-specs').length, specWrites);
       assert.equal(harness.edge.apiSpecForProxy(proxyId)?.id, specId);
       assert.equal(
         String(harness.edge.pluginForProxy(proxyId, 'openapi_validator')?.id),
@@ -2500,8 +2526,10 @@ describe('publishing', () => {
       });
       const apiId = published.json<PublishApiResponse>().api.id;
       const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
-      // The publish already wrote the proxy once, to associate its plugins.
+      // The publish already wrote the proxy once, to associate its plugins, and
+      // replaced the spec once, to cut it over from its staging path.
       const proxyWrites = harness.edge.callsTo('PUT', `/proxies/${proxyId}`).length;
+      const specWrites = harness.edge.callsTo('PUT', '/api-specs').length;
 
       const updated = await harness.authed(provider, {
         method: 'PUT',
@@ -2512,7 +2540,7 @@ describe('publishing', () => {
 
       // One call, not a spec replace plus a proxy `PUT` the replace would then
       // undo — the replace re-inserts the proxy from `x-ferrum-proxy` anyway.
-      assert.equal(harness.edge.callsTo('PUT', '/api-specs').length, 1);
+      assert.equal(harness.edge.callsTo('PUT', '/api-specs').length, specWrites + 1);
       assert.equal(harness.edge.callsTo('PUT', `/proxies/${proxyId}`).length, proxyWrites);
       const proxy = storedProxy(harness, proxyId);
       assert.equal(proxy.backend_host, 'moved.example.com');
@@ -2658,6 +2686,386 @@ describe('publishing', () => {
             (error as Error).message,
           ),
       );
+    });
+  });
+
+  /* ── The staged listen-path cutover ───────────────────────────────────
+   *
+   * GHSA-gxvf-jj3q-x4fc: Edge serves a proxy the instant it exists, and the
+   * plugin configs attached afterwards are inert until the association write,
+   * so `/<namespace>/<slug>` used to be live, open and unlimited for the
+   * round trips in between. The fix is not an ordering change — Edge refuses a
+   * plugin config for a proxy that does not exist, and `allowed_methods` must
+   * be non-empty, so there is no deny-all proxy to create first. Instead every
+   * proxy is built on an unguessable staging path and *moved* onto the real one
+   * as the last gateway write.
+   *
+   * These tests assert that property directly against the transcript, and the
+   * failure ones assert the thing that actually matters: the deterministic path
+   * is never taken by a proxy that is not finished.
+   */
+  describe('staged listen-path cutover', () => {
+    /** `/nexus/.staging/<128 bits of hex>` — see `stagingListenPath`. */
+    const STAGING_PATH = /^\/nexus\/\.staging\/[0-9a-f]{32}$/;
+
+    /** One recorded gateway write that put a proxy on a listen path. */
+    interface PathWrite {
+      /** Index in `harness.edge.requests`, so writes can be ordered. */
+      at: number;
+      /** `METHOD /path`, for readable assertion failures. */
+      call: string;
+      listenPath: string;
+    }
+
+    /**
+     * Every recorded write that decides where a proxy is served, in order.
+     *
+     * Four calls can: `POST /proxies`, `PUT /proxies/{id}` (a whole-resource
+     * replace, so the association write carries a listen path too), and both
+     * `/api-specs` writes, which re-insert the proxy from `x-ferrum-proxy`.
+     */
+    function listenPathWrites(from = 0): PathWrite[] {
+      const writes: PathWrite[] = [];
+      harness.edge.requests.forEach((request, at) => {
+        if (at < from) return;
+        if (request.method !== 'POST' && request.method !== 'PUT') return;
+        const body = request.body;
+        if (typeof body !== 'object' || body === null) return;
+        const fields = body as Record<string, unknown>;
+        const proxy = request.path.startsWith('/api-specs') ? fields['x-ferrum-proxy'] : fields;
+        if (typeof proxy !== 'object' || proxy === null) return;
+        const listenPath = (proxy as Record<string, unknown>).listen_path;
+        if (typeof listenPath !== 'string') return;
+        writes.push({ at, call: `${request.method} ${request.path}`, listenPath });
+      });
+      return writes;
+    }
+
+    /**
+     * Assert the staged sequence: exactly one write put a proxy on `finalPath`,
+     * it was the **last** of the listen-path writes, and every earlier one was
+     * on a staging path.
+     *
+     * @returns the cutover write, so a caller can check which call it was and
+     * that nothing at all followed it.
+     */
+    function assertStagedCutover(finalPath: string, from = 0): PathWrite {
+      const writes = listenPathWrites(from);
+      assert.ok(writes.length >= 2, 'expected a staged create and a cutover');
+      const onFinal = writes.filter((write) => write.listenPath === finalPath);
+      assert.equal(onFinal.length, 1, `expected exactly one write onto ${finalPath}`);
+      const cutover = onFinal[0] as PathWrite;
+      assert.equal(
+        cutover.at,
+        (writes[writes.length - 1] as PathWrite).at,
+        'the move onto the real path must be the last listen-path write',
+      );
+      for (const write of writes) {
+        if (write.at === cutover.at) continue;
+        assert.match(write.listenPath, STAGING_PATH, `${write.call} must be on a staging path`);
+      }
+      return cutover;
+    }
+
+    /** Indexes of every `POST /plugins/config` in the transcript. */
+    function pluginCreateIndexes(from = 0): number[] {
+      return harness.edge.requests
+        .map((request, at) => ({ request, at }))
+        .filter(
+          ({ request, at }) =>
+            at >= from && request.method === 'POST' && request.path === '/plugins/config',
+        )
+        .map(({ at }) => at);
+    }
+
+    beforeEach(() => {
+      harness.edge.reset();
+    });
+
+    it('publishes a docs_only API on a staging path and moves it last', async () => {
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'stage-docs',
+          rate_limit: { limit: 60, window_seconds: 60 },
+          cors: { allowed_origins: ['https://app.example.com'], allow_credentials: false },
+        }),
+      });
+      assert.equal(response.statusCode, 201, response.body);
+      const proxyId = String(response.json<PublishApiResponse>().api.ferrum_proxy_id);
+      const finalPath = '/nexus/stage-docs';
+
+      const writes = listenPathWrites();
+      assert.equal(writes[0]?.call, 'POST /proxies');
+      assert.match(String(writes[0]?.listenPath), STAGING_PATH);
+
+      const cutover = assertStagedCutover(finalPath);
+      assert.equal(cutover.call, `PUT /proxies/${proxyId}`);
+      // Nothing at all followed it — not another proxy write, not a plugin.
+      assert.equal(cutover.at, harness.edge.requests.length - 1);
+      // Every plugin config was created while the proxy was still staged, and
+      // so was the association write that made them run.
+      for (const at of pluginCreateIndexes()) assert.ok(at < cutover.at);
+      const association = writes.find(
+        (write) => write.call === `PUT /proxies/${proxyId}` && write.at < cutover.at,
+      );
+      assert.ok(association, 'expected the association write to precede the cutover');
+
+      // End state: the real path, fully gated, and the staging path gone.
+      assert.equal(String(harness.edge.proxyServing(finalPath)?.id), proxyId);
+      assert.equal(harness.edge.proxyServing(String(writes[0]?.listenPath)), undefined);
+      assert.deepEqual(effectiveNames(harness, proxyId), [
+        'access_control',
+        'cors',
+        'key_auth',
+        'rate_limiting',
+      ]);
+      assert.deepEqual(associatedIds(harness, proxyId), writtenIds(harness, proxyId));
+    });
+
+    it('publishes a routes API on a staging path and moves it with the spec', async () => {
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'stage-routes', spec_enforcement: 'routes' }),
+      });
+      assert.equal(response.statusCode, 201, response.body);
+      const proxyId = String(response.json<PublishApiResponse>().api.ferrum_proxy_id);
+      const finalPath = '/nexus/stage-routes';
+      const specId = String(harness.edge.apiSpecForProxy(proxyId)?.id);
+
+      const writes = listenPathWrites();
+      assert.equal(writes[0]?.call, 'POST /api-specs');
+      assert.match(String(writes[0]?.listenPath), STAGING_PATH);
+
+      const cutover = assertStagedCutover(finalPath);
+      assert.equal(cutover.call, `PUT /api-specs/${specId}`);
+      assert.equal(cutover.at, harness.edge.requests.length - 1);
+      for (const at of pluginCreateIndexes()) assert.ok(at < cutover.at);
+
+      // The importer prefixes every generated matcher with `servers[0]`, so the
+      // rewrite has to move in the same write or the validator would reject
+      // every request on the new path as an unknown operation.
+      const document = harness.edge.apiSpecForProxy(proxyId)?.document ?? {};
+      assert.deepEqual(document.servers, [{ url: finalPath }]);
+      const operations = harness.edge.pluginForProxy(proxyId, 'openapi_validator')?.config as
+        { operations?: { method: string; path_template: string }[] } | undefined;
+      assert.deepEqual(
+        (operations?.operations ?? []).map((entry) => `${entry.method} ${entry.path_template}`),
+        ['GET /nexus/stage-routes/invoices', 'GET /nexus/stage-routes/invoices/{id}'],
+      );
+      assert.equal(String(harness.edge.proxyServing(finalPath)?.id), proxyId);
+      assert.equal(harness.edge.proxyServing(String(writes[0]?.listenPath)), undefined);
+      // The spec kept its id across the move, and the hand-owned plugins kept
+      // their associations alongside the regenerated validator.
+      assert.equal(harness.edge.callsTo('POST', '/api-specs').length, 1);
+      assert.deepEqual(effectiveNames(harness, proxyId), [
+        'access_control',
+        'key_auth',
+        'openapi_validator',
+      ]);
+      assert.deepEqual(associatedIds(harness, proxyId), writtenIds(harness, proxyId));
+    });
+
+    /**
+     * Every failure mode has the same acceptance criterion: whatever went
+     * wrong, no proxy is left on the deterministic path, and the staging proxy
+     * is gone too.
+     */
+    function assertNothingLeftBehind(slug: string): void {
+      assert.equal(
+        harness.edge.proxyServing(`/nexus/${slug}`),
+        undefined,
+        'the real listen path must not be served by anything',
+      );
+      assert.equal(harness.edge.proxyByName(`nexus-${slug}`), undefined);
+      assert.equal(harness.edge.proxies.size, 0, 'the staging proxy must be deleted');
+      assert.equal(harness.edge.apiSpecs.size, 0);
+    }
+
+    it('takes the real path for nothing when a plugin config is rejected', async () => {
+      harness.edge.queueFailure(400, { error: 'key_auth: bad config' }, '/plugins/config', 'POST');
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'stage-fail-plugin' }),
+      });
+      assert.equal(response.statusCode, 502, response.body);
+      // The transcript never even names the real path: the publish died before
+      // the cutover, so nothing was ever asked to serve it.
+      assert.equal(
+        listenPathWrites().filter((write) => write.listenPath === '/nexus/stage-fail-plugin')
+          .length,
+        0,
+      );
+      assertNothingLeftBehind('stage-fail-plugin');
+    });
+
+    it('takes the real path for nothing when the association write fails', async () => {
+      // The association is the second `PUT /proxies/{id}` — there is no earlier
+      // one — so a queued `PUT` failure lands on exactly it.
+      harness.edge.queueFailure(500, { error: 'config_rejected' }, '/proxies/', 'PUT');
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'stage-fail-assoc' }),
+      });
+      assert.equal(response.statusCode, 502, response.body);
+      assert.equal(
+        listenPathWrites().filter((write) => write.listenPath === '/nexus/stage-fail-assoc').length,
+        0,
+      );
+      assertNothingLeftBehind('stage-fail-assoc');
+    });
+
+    it('takes the real path for nothing when the cutover itself is refused', async () => {
+      // A real 409: Edge rejects a listen path another proxy already serves, and
+      // the mock's uniqueness check — which excludes the proxy being written —
+      // does the same. This is the one failure that happens *during* the write
+      // that would have opened the path.
+      harness.edge.proxies.set('nexus/squatter', {
+        id: 'squatter',
+        name: 'operator-owned',
+        namespace: 'nexus',
+        listen_path: '/nexus/stage-fail-cutover',
+        backend_scheme: 'https',
+        backend_host: 'elsewhere.example.com',
+        backend_port: 443,
+      });
+
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'stage-fail-cutover' }),
+      });
+      assert.equal(response.statusCode, 502, response.body);
+
+      // The cutover was attempted and refused, so the path still belongs to the
+      // proxy that already had it — and the staging proxy is gone.
+      assert.equal(
+        listenPathWrites().filter((write) => write.listenPath === '/nexus/stage-fail-cutover')
+          .length,
+        1,
+      );
+      assert.equal(String(harness.edge.proxyServing('/nexus/stage-fail-cutover')?.id), 'squatter');
+      assert.equal(harness.edge.proxyByName('nexus-stage-fail-cutover'), undefined);
+      assert.equal(harness.edge.proxies.size, 1);
+
+      // And nothing landed on the Nexus side either, so the slug is still free.
+      harness.edge.proxies.delete('nexus/squatter');
+      const retry = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'stage-fail-cutover' }),
+      });
+      assert.equal(retry.statusCode, 201, retry.body);
+    });
+
+    it('takes the real path for nothing when a routes cutover fails', async () => {
+      harness.edge.queueFailure(500, { error: 'spec rejected' }, '/api-specs/', 'PUT');
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'stage-fail-spec', spec_enforcement: 'routes' }),
+      });
+      assert.equal(response.statusCode, 502, response.body);
+      assertNothingLeftBehind('stage-fail-spec');
+    });
+
+    it('stages the rebuild when the enforcement level moves in either direction', async () => {
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'stage-switch' }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
+      const finalPath = '/nexus/stage-switch';
+
+      for (const level of ['routes', 'docs_only'] as const) {
+        const from = harness.edge.requests.length;
+        const patched = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${apiId}`,
+          payload: { spec_enforcement: level },
+        });
+        assert.equal(patched.statusCode, 200, patched.body);
+
+        // The conversion deletes and recreates the proxy; the recreate lands on
+        // a fresh staging path, so the real one answers 404 for the whole
+        // rebuild rather than answering *open*.
+        const cutover = assertStagedCutover(finalPath, from);
+        assert.equal(cutover.at, harness.edge.requests.length - 1);
+        for (const at of pluginCreateIndexes(from)) assert.ok(at < cutover.at);
+        assert.equal(String(harness.edge.proxyServing(finalPath)?.id), proxyId);
+        assert.deepEqual(associatedIds(harness, proxyId), writtenIds(harness, proxyId));
+      }
+
+      assert.deepEqual(effectiveNames(harness, proxyId), ['access_control', 'key_auth']);
+    });
+
+    it('stages the undo when a later step of the conversion PATCH fails', async () => {
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'stage-undo' }),
+      });
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
+      const finalPath = '/nexus/stage-undo';
+      const before = associatedIds(harness, proxyId);
+
+      const from = harness.edge.requests.length;
+      failNextApiUpdate(harness, 'store offline');
+      const response = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { spec_enforcement: 'routes' },
+      });
+      assert.equal(response.statusCode, 500, response.body);
+
+      // Two rebuilds — into `routes`, then back — and *both* of them staged.
+      // The last write of the whole PATCH is the undo's cutover.
+      const writes = listenPathWrites(from);
+      const onFinal = writes.filter((write) => write.listenPath === finalPath);
+      assert.equal(onFinal.length, 2, 'each rebuild ends with one move onto the real path');
+      assert.equal((onFinal[1] as PathWrite).at, harness.edge.requests.length - 1);
+      for (const write of writes) {
+        if (onFinal.some((entry) => entry.at === write.at)) continue;
+        assert.match(write.listenPath, STAGING_PATH, `${write.call} must be on a staging path`);
+      }
+
+      // Back exactly where it started: docs_only, no spec, same associations.
+      assert.equal(harness.edge.apiSpecForProxy(proxyId), undefined);
+      assert.equal(String(harness.edge.proxyServing(finalPath)?.id), proxyId);
+      assert.deepEqual(associatedIds(harness, proxyId), before);
+      assert.deepEqual(effectiveNames(harness, proxyId), ['access_control', 'key_auth']);
+    });
+
+    it('shows the provider the real path, never the staging one', async () => {
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'stage-invoke' }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const api = published.json<PublishApiResponse>().api;
+      assert.equal(api.listen_path, '/nexus/stage-invoke');
+      // `invoke_url`, when the deployment has a gateway URL configured, is the
+      // real path too — a staging path must never escape into the portal.
+      if (api.invoke_url !== null) assert.match(api.invoke_url, /\/nexus\/stage-invoke$/);
+
+      const detail = await harness.authed(provider, {
+        method: 'GET',
+        url: `/api/apis/${api.id}`,
+      });
+      assert.equal(detail.json<GetApiResponse>().api.listen_path, '/nexus/stage-invoke');
+
+      const audit = await harness.auditRows('api.publish');
+      const row = audit.find((entry) => entry.target_id === api.id);
+      assert.equal(row?.details.listen_path, '/nexus/stage-invoke');
     });
   });
 });
