@@ -176,3 +176,63 @@ fails without the fix.
 - **Password changes end every other session**, and the public health
   endpoint no longer discloses database or gateway internals to anonymous
   callers.
+- **The founding registration needs a bootstrap token.** While the portal
+  has no accounts, `POST /api/auth/register` refuses everything that does not
+  carry `bootstrap_token`: `NEXUS_BOOTSTRAP_TOKEN`, or the per-process value
+  the server prints at startup. A fresh deployment reachable before its
+  operator registered used to hand `super_admin` to whoever connected first.
+  `GET /api/branding` reports `bootstrap_required` so the sign-up form asks
+  for it, and the single-container quickstarts now publish on loopback.
+- **Upstream hostnames are resolved before they are accepted.** With
+  `NEXUS_ALLOW_PRIVATE_UPSTREAMS=false` the private-upstream guard used to
+  judge only IP literals and a short suffix list, so `127.0.0.1.nip.io` or
+  any attacker-controlled record turned the gateway into an internal SSRF
+  path. Every publish, upstream change and spec-following move now resolves
+  A and AAAA and refuses a name if any answer is non-public or the lookup
+  fails (`details.reason = unresolvable_upstream`). Names re-pointed after
+  publish are screened by Edge's own `FERRUM_BACKEND_ALLOW_IPS=public`.
+- **Health probes are cached and rate limited.** `GET /api/health` and
+  `GET /api/health/edge` reuse one database probe and one gateway probe per
+  `NEXUS_HEALTH_CACHE_MS` (default 5 s) with concurrent callers coalesced,
+  and sit behind a 120 req/min per-IP limiter, so anonymous traffic can no
+  longer be amplified into unbounded Admin API and database work.
+- **Gateway revocation on account disable is durable.** Disabling an
+  account enqueues a `gateway_teardown_jobs` row in the same transaction as
+  the status change; a worker retries the Edge teardown with backoff until it
+  succeeds, the disable response reports `gateway_teardown: "pending"`
+  instead of a swallowed `failed`, admins see the pending state and can
+  retry (`POST /api/users/:id/gateway-teardown/retry`), and re-enabling
+  cancels the job. A disabled user's API key used to stay valid for good
+  whenever the Admin API was unreachable at the moment of disable.
+- **A new proxy is never reachable before its security plugins are on it.**
+  Publishing (and a `docs_only` ↔ `routes` conversion) creates the proxy on an
+  unguessable staging listen path (`/<namespace>/.staging/<random>`), attaches
+  and associates the auth, ACL, rate-limit and CORS configs there, and moves
+  it to `/<namespace>/<slug>` as the last gateway write — a whole-resource
+  `PUT /proxies/{id}` for a hand-owned proxy, `PUT /api-specs/{id}` for a
+  spec-owned one. Until now the real path was live, unauthenticated and
+  unlimited for the round trips between proxy creation and the association.
+- **Publishing is bounded per account.** `NEXUS_MAX_APIS_PER_OWNER`
+  (default 50, `0` = unlimited) caps how many APIs one account may own,
+  refused with `429 QUOTA_EXCEEDED` before the first gateway call; the
+  mutating `/api/apis/*` routes carry a 30 req/min per-account limiter. An
+  open-registration provider could previously create proxies, plugin
+  configs, slugs and 2 MiB documents without limit.
+- **Messaging is bounded per account.** `POST /api/threads` and
+  `POST /api/threads/:id/messages` carry per-account limiters (10 and 30 per
+  minute), a rolling 24-hour budget (`NEXUS_MAX_MESSAGES_PER_USER_PER_DAY`,
+  default 200, refused with `429 QUOTA_EXCEEDED` before any row is written),
+  and the `message_received` email is coalesced to one per recipient per
+  thread per 10 minutes through the outbox idempotency key — the default
+  template now announces activity instead of quoting a message. One
+  self-registered account could previously mail-bomb every administrator
+  and grow the message, audit, notification and outbox tables without limit.
+  Migration `010_message_sender_index` adds the index the budget check runs on.
+- **Gateway writes are exclusive across Nexus instances.** Every consumer
+  and proxy read-modify-write now holds a database lease (`edge_leases`,
+  migration `009`, 60 s TTL, renewed while held, up to 30 s wait, then
+  `409 CONFLICT`) in addition to the in-process queue, so two instances over
+  one database can no longer restore a revoked ACL group or drop a proxy's
+  auth association by overwriting each other's whole-resource `PUT`. The
+  single-writer topology in the operations guide is no longer required;
+  proxy delete-and-recreate paths remain outside the lease and say so.

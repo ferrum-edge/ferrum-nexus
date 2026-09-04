@@ -34,6 +34,7 @@ import type {
   DbDriver,
   EmailOutboxStatus,
   EmailTemplateKey,
+  GatewayTeardownJobStatus,
   GrantStatus,
   HttpMethod,
   IsoTimestamp,
@@ -71,9 +72,12 @@ import type {
   EmailOutboxRepo,
   EmailTemplateRecord,
   EmailTemplateRepo,
+  GatewayTeardownJobRecord,
+  GatewayTeardownJobRepo,
   GrantFilter,
   GrantRecord,
   GrantRepo,
+  LeaseRepo,
   MessageRecord,
   MessageRepo,
   NexusStore,
@@ -390,6 +394,21 @@ function mapOutbox(row: Row): EmailOutboxRecord {
   };
 }
 
+function mapTeardownJob(row: Row): GatewayTeardownJobRecord {
+  return {
+    id: text(row.id),
+    user_id: text(row.user_id),
+    status: text(row.status) as GatewayTeardownJobStatus,
+    attempts: int(row.attempts),
+    next_attempt_at: textOrNull(row.next_attempt_at),
+    last_error: textOrNull(row.last_error),
+    requested_by: textOrNull(row.requested_by),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+    completed_at: textOrNull(row.completed_at),
+  };
+}
+
 function mapAuditLog(row: Row): AuditLogRecord {
   return {
     id: text(row.id),
@@ -576,10 +595,12 @@ export interface SqlRepos {
   messages: MessageRepo;
   notifications: NotificationRepo;
   emailOutbox: EmailOutboxRepo;
+  gatewayTeardownJobs: GatewayTeardownJobRepo;
   auditLogs: AuditLogRepo;
   settings: SettingRepo;
   emailTemplates: EmailTemplateRepo;
   verificationTokens: VerificationTokenRepo;
+  leases: LeaseRepo;
 }
 
 /**
@@ -1798,6 +1819,13 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     countByThread: async (threadId) =>
       queryCount(exec, 'SELECT COUNT(*) AS cnt FROM messages WHERE thread_id = ?', [threadId]),
 
+    countBySenderSince: async (senderUserId, sinceIso) =>
+      queryCount(
+        exec,
+        'SELECT COUNT(*) AS cnt FROM messages WHERE sender_user_id = ? AND created_at >= ?',
+        [senderUserId, sinceIso],
+      ),
+
     deleteByThread: async (threadId) =>
       execute(exec, 'DELETE FROM messages WHERE thread_id = ?', [threadId]),
   };
@@ -2047,6 +2075,135 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       );
       return { items: rows.map(mapOutbox), total };
     },
+  };
+
+  /* ── gatewayTeardownJobs ────────────────────────────────────────────── */
+
+  const gatewayTeardownJobs: GatewayTeardownJobRepo = {
+    upsertPending: async (userId, requestedBy, now) => {
+      // The conflict target is `user_id`, not the primary key: an account that
+      // already owes a revocation has that row reset to `pending` rather than
+      // gaining a second one.
+      await execute(
+        exec,
+        upsertSql(
+          dialect,
+          'gateway_teardown_jobs',
+          [
+            'id',
+            'user_id',
+            'status',
+            'attempts',
+            'next_attempt_at',
+            'last_error',
+            'requested_by',
+            'created_at',
+            'updated_at',
+            'completed_at',
+          ],
+          'user_id',
+          [
+            'status',
+            'attempts',
+            'next_attempt_at',
+            'last_error',
+            'requested_by',
+            'updated_at',
+            'completed_at',
+          ],
+        ),
+        [newId(), userId, 'pending', 0, now, null, requestedBy, now, now, null],
+      );
+      const job = await gatewayTeardownJobs.findByUser(userId);
+      if (!job) {
+        throw new Error('gatewayTeardownJobs.upsertPending: row vanished immediately after upsert');
+      }
+      return job;
+    },
+
+    findByUser: async (userId) => {
+      const row = await queryOne(exec, 'SELECT * FROM gateway_teardown_jobs WHERE user_id = ?', [
+        userId,
+      ]);
+      return row ? mapTeardownJob(row) : null;
+    },
+
+    list: async (filter, options) => {
+      const where = new SqlWhereBuilder()
+        .add(filter.status, 'status = ?', filter.status ?? null)
+        .build();
+      const { limit, offset } = page(options);
+      const total = await queryCount(
+        exec,
+        `SELECT COUNT(*) AS cnt FROM gateway_teardown_jobs${where.sql}`,
+        where.params,
+      );
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM gateway_teardown_jobs${where.sql}
+         ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
+      );
+      return { items: rows.map(mapTeardownJob), total };
+    },
+
+    claimDue: async (now, limit) =>
+      inTransaction(async (tx) => {
+        const ids = (
+          await queryAll(
+            tx,
+            `SELECT id FROM gateway_teardown_jobs
+             WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+             ORDER BY ${nullsFirstAsc('next_attempt_at')}, created_at ASC
+             LIMIT ?${FOR_UPDATE_SKIP_LOCKED}`,
+            [now, Math.max(1, Math.floor(limit))],
+          )
+        ).map((row) => text(row.id));
+        if (ids.length === 0) return [];
+        await execute(
+          tx,
+          `UPDATE gateway_teardown_jobs
+           SET status = 'sending', attempts = attempts + 1, updated_at = ?
+           WHERE id IN (${placeholders(ids.length)}) AND status = 'pending'`,
+          [nowIso(), ...ids],
+        );
+        const rows = await queryAll(
+          tx,
+          `SELECT * FROM gateway_teardown_jobs WHERE id IN (${placeholders(ids.length)})`,
+          ids,
+        );
+        return rows.map(mapTeardownJob);
+      }),
+
+    markDone: async (id, at) => {
+      await execute(
+        exec,
+        `UPDATE gateway_teardown_jobs
+         SET status = 'done', next_attempt_at = NULL, last_error = NULL, completed_at = ?,
+             updated_at = ? WHERE id = ?`,
+        [at, at, id],
+      );
+    },
+
+    reschedule: async (id, nextAttemptAt, lastError) => {
+      await execute(
+        exec,
+        `UPDATE gateway_teardown_jobs
+         SET status = 'pending', next_attempt_at = ?, last_error = ?, updated_at = ? WHERE id = ?`,
+        [nextAttemptAt, lastError, nowIso(), id],
+      );
+    },
+
+    releaseStale: async (olderThan) =>
+      execute(
+        exec,
+        `UPDATE gateway_teardown_jobs SET status = 'pending', next_attempt_at = ?, updated_at = ?
+         WHERE status = 'sending' AND updated_at <= ?`,
+        [nowIso(), nowIso(), olderThan],
+      ),
+
+    deleteByUser: async (userId) =>
+      (await execute(exec, 'DELETE FROM gateway_teardown_jobs WHERE user_id = ?', [userId])) > 0,
   };
 
   /* ── auditLogs ──────────────────────────────────────────────────────── */
@@ -2312,6 +2469,70 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       execute(exec, 'DELETE FROM email_verification_tokens WHERE expires_at <= ?', [now]),
   };
 
+  /* ── leases ─────────────────────────────────────────────────────────── */
+
+  const leases: LeaseRepo = {
+    acquire: async (key, owner, expiresAt, now) => {
+      const stamp = nowIso();
+      if (dialect === 'pg') {
+        // One statement, so "is it free?" and the claim cannot be split by
+        // another writer. `DO UPDATE … WHERE` skips the update — and reports
+        // zero rows — while the current holder's lease is still live.
+        return (
+          (await execute(
+            exec,
+            `INSERT INTO edge_leases ("key", owner, expires_at, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT ("key") DO UPDATE
+               SET owner = EXCLUDED.owner,
+                   expires_at = EXCLUDED.expires_at,
+                   updated_at = EXCLUDED.updated_at
+               WHERE edge_leases.expires_at <= ?`,
+            [key, owner, expiresAt, stamp, stamp, now],
+          )) > 0
+        );
+      }
+      // MySQL cannot do this in one statement. `mysql2` connects with the
+      // CLIENT_FOUND_ROWS flag, under which an `ON DUPLICATE KEY UPDATE` that
+      // leaves a live lease exactly as it was still reports one affected row —
+      // the flag makes "found" and "changed" indistinguishable, so a
+      // conditional upsert would claim every lease. Two statements whose counts
+      // cannot lie instead: `INSERT IGNORE` reports a row only when the key was
+      // free, and the UPDATE can only match an expired row, which it always
+      // changes. A release landing between the two reads as a refusal, and the
+      // caller simply polls again.
+      const inserted = await execute(
+        exec,
+        'INSERT IGNORE INTO edge_leases ("key", owner, expires_at, created_at, updated_at) ' +
+          'VALUES (?, ?, ?, ?, ?)',
+        [key, owner, expiresAt, stamp, stamp],
+      );
+      if (inserted > 0) return true;
+      return (
+        (await execute(
+          exec,
+          'UPDATE edge_leases SET owner = ?, expires_at = ?, updated_at = ? ' +
+            'WHERE "key" = ? AND expires_at <= ?',
+          [owner, expiresAt, stamp, key, now],
+        )) > 0
+      );
+    },
+
+    release: async (key, owner) =>
+      (await execute(exec, 'DELETE FROM edge_leases WHERE "key" = ? AND owner = ?', [key, owner])) >
+      0,
+
+    renew: async (key, owner, expiresAt) =>
+      (await execute(
+        exec,
+        'UPDATE edge_leases SET expires_at = ?, updated_at = ? WHERE "key" = ? AND owner = ?',
+        [expiresAt, nowIso(), key, owner],
+      )) > 0,
+
+    deleteExpired: async (now) =>
+      execute(exec, 'DELETE FROM edge_leases WHERE expires_at <= ?', [now]),
+  };
+
   return {
     users,
     organizations,
@@ -2327,10 +2548,12 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     messages,
     notifications,
     emailOutbox,
+    gatewayTeardownJobs,
     auditLogs,
     settings,
     emailTemplates,
     verificationTokens,
+    leases,
   };
 }
 
@@ -2391,10 +2614,12 @@ class SqlStore implements NexusStore {
   readonly messages: MessageRepo;
   readonly notifications: NotificationRepo;
   readonly emailOutbox: EmailOutboxRepo;
+  readonly gatewayTeardownJobs: GatewayTeardownJobRepo;
   readonly auditLogs: AuditLogRepo;
   readonly settings: SettingRepo;
   readonly emailTemplates: EmailTemplateRepo;
   readonly verificationTokens: VerificationTokenRepo;
+  readonly leases: LeaseRepo;
 
   private readonly backend: SqlStoreBackend;
 
@@ -2429,10 +2654,12 @@ class SqlStore implements NexusStore {
     this.messages = repos.messages;
     this.notifications = repos.notifications;
     this.emailOutbox = repos.emailOutbox;
+    this.gatewayTeardownJobs = repos.gatewayTeardownJobs;
     this.auditLogs = repos.auditLogs;
     this.settings = repos.settings;
     this.emailTemplates = repos.emailTemplates;
     this.verificationTokens = repos.verificationTokens;
+    this.leases = repos.leases;
   }
 
   init(): Promise<void> {

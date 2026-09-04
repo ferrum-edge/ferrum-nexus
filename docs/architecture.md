@@ -77,31 +77,31 @@ docs/      this tree
 
 ### `server/src`
 
-| Path                                           | Responsibility                                                                                         |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `index.ts`                                     | Composition root: `buildServer(config, deps)` + `main()`. No business logic.                           |
-| `config/index.ts`                              | The **only** reader of `process.env`. zod-validated into `NexusConfig`.                                |
-| `lib/`                                         | `crypto.ts` (all cryptography), `errors.ts` (`NexusError` + helpers), `ids.ts`, `logger.ts`.           |
-| `db/store.ts`                                  | The `NexusStore` interface: 17 repositories plus `init`/`migrate`/`close`/`healthCheck`/`transaction`. |
-| `db/adapters/{sqlite,postgres,mysql,mongodb}/` | The four implementations.                                                                              |
-| `db/adapters/sql-common.ts`, `sql-repos.ts`    | Dialect shims and the repo bodies shared by PG + MySQL.                                                |
-| `db/migrations/`                               | `NNN_name.sql` (SQLite), `.pg.sql`, `.mysql.sql`. Mongo builds collections and indexes in code.        |
-| `ferrum-admin/`                                | The **only** module that knows the Edge HTTP shape: `client.ts`, `jwt.ts`, `types.ts`.                 |
-| `middleware/auth-plugin.ts`                    | Session resolution, sliding expiry, CSRF double-submit, RBAC guards.                                   |
-| `middleware/error-handler.ts`                  | The single place an exception becomes an HTTP response.                                                |
-| `audit/service.ts`                             | The only writer of `audit_logs`, plus the `AuditAction` catalog.                                       |
-| `auth/`                                        | `service.ts` (register/login/logout/verify), `captcha.ts`.                                             |
-| `users/service.ts`                             | Profile self-service, admin user management, organizations.                                            |
-| `catalog/service.ts`                           | Browse and read permissions; `canList` vs `canView`.                                                   |
-| `publishing/`                                  | `service.ts` (Edge proxy + plugin lifecycle), `oas.ts` (pure spec parsing).                            |
-| `access/service.ts`                            | request → approve/deny → grant → revoke, and the ACL-group writes.                                     |
-| `credentials/`                                 | `service.ts` (show-once issue/rotate/revoke), `consumers.ts` (the provisioner).                        |
-| `messaging/service.ts`                         | 1:1 threads and the platform inbox.                                                                    |
-| `notifications/service.ts`                     | The header bell. Courtesy channel only — never the record.                                             |
-| `email/`                                       | `service.ts` (render + enqueue), `outbox-worker.ts` (the only SMTP caller), `templates.ts`.            |
-| `admin/`                                       | `settings-service.ts`, `mass-email-service.ts`, `god-service.ts`.                                      |
-| `routes/`                                      | One plugin per domain. Routes validate shapes and delegate; they never import a service module.        |
-| `test/`                                        | `helpers.ts` boots the real app on in-memory SQLite; `mock-ferrum-edge.ts` is a real HTTP server.      |
+| Path                                           | Responsibility                                                                                                                                  |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `index.ts`                                     | Composition root: `buildServer(config, deps)` + `main()`. No business logic.                                                                    |
+| `config/index.ts`                              | The **only** reader of `process.env`. zod-validated into `NexusConfig`.                                                                         |
+| `lib/`                                         | `crypto.ts` (all cryptography), `errors.ts` (`NexusError` + helpers), `ids.ts`, `logger.ts`.                                                    |
+| `db/store.ts`                                  | The `NexusStore` interface: 17 repositories plus `init`/`migrate`/`close`/`healthCheck`/`transaction`.                                          |
+| `db/adapters/{sqlite,postgres,mysql,mongodb}/` | The four implementations.                                                                                                                       |
+| `db/adapters/sql-common.ts`, `sql-repos.ts`    | Dialect shims and the repo bodies shared by PG + MySQL.                                                                                         |
+| `db/migrations/`                               | `NNN_name.sql` (SQLite), `.pg.sql`, `.mysql.sql`. Mongo builds collections and indexes in code.                                                 |
+| `ferrum-admin/`                                | The **only** module that knows the Edge HTTP shape: `client.ts`, `jwt.ts`, `types.ts`.                                                          |
+| `middleware/auth-plugin.ts`                    | Session resolution, sliding expiry, CSRF double-submit, RBAC guards.                                                                            |
+| `middleware/error-handler.ts`                  | The single place an exception becomes an HTTP response.                                                                                         |
+| `audit/service.ts`                             | The only writer of `audit_logs`, plus the `AuditAction` catalog.                                                                                |
+| `auth/`                                        | `service.ts` (register/login/logout/verify), `captcha.ts`.                                                                                      |
+| `users/service.ts`                             | Profile self-service, admin user management, organizations.                                                                                     |
+| `catalog/service.ts`                           | Browse and read permissions; `canList` vs `canView`.                                                                                            |
+| `publishing/`                                  | `service.ts` (Edge proxy + plugin lifecycle), `oas.ts` (pure spec parsing).                                                                     |
+| `access/service.ts`                            | request → approve/deny → grant → revoke, and the ACL-group writes.                                                                              |
+| `credentials/`                                 | `service.ts` (show-once issue/rotate/revoke), `consumers.ts` (the provisioner), `teardown-worker.ts` (retries a disabled account's revocation). |
+| `messaging/service.ts`                         | 1:1 threads and the platform inbox.                                                                                                             |
+| `notifications/service.ts`                     | The header bell. Courtesy channel only — never the record.                                                                                      |
+| `email/`                                       | `service.ts` (render + enqueue), `outbox-worker.ts` (the only SMTP caller), `templates.ts`.                                                     |
+| `admin/`                                       | `settings-service.ts`, `mass-email-service.ts`, `god-service.ts`.                                                                               |
+| `routes/`                                      | One plugin per domain. Routes validate shapes and delegate; they never import a service module.                                                 |
+| `test/`                                        | `helpers.ts` boots the real app on in-memory SQLite; `mock-ferrum-edge.ts` is a real HTTP server.                                               |
 
 ### `web/src`
 
@@ -152,7 +152,11 @@ Why this shape:
 
 Ordering inside the block is dependency order: audit → captcha → email →
 notifications → auth → settings → users → messaging → massEmail → provisioner
-→ catalog → credentials → publishing → access → god → outbox.
+→ catalog → credentials → publishing → access → god → outbox → teardown.
+
+Two background pollers hang off the end of that list and are stopped on
+`onClose`: the email outbox worker (§7) and the gateway teardown worker (§7.1).
+Both are off under `NEXUS_ENV=test`, where tests drive `tick()` themselves.
 
 ---
 
@@ -221,9 +225,10 @@ repo would make the reference implementation worse to read.
 One collection per logical table, same names as the SQL migrations
 (`users`, `apis`, `api_specs`, `access_requests`, `grants`, `consumers`,
 `credential_metadata`, `message_threads`, `messages`, `notifications`,
-`email_outbox`, `audit_logs`, `app_settings`, `email_templates`,
-`email_verification_tokens`, `organizations`, `sessions`). Four documented
-physical differences:
+`email_outbox`, `gateway_teardown_jobs`, `audit_logs`, `app_settings`,
+`email_templates`, `email_verification_tokens`, `email_token_issue_claims`,
+`edge_leases`, `organizations`, `sessions`). Four documented physical
+differences:
 
 1. `_id` holds the string UUID; the mappers are the only place `_id` and `id`
    meet. For `app_settings`, `_id` _is_ the setting key.
@@ -322,22 +327,39 @@ Nexus lost a grant it believes it made, and the user gets a 403 from the
 gateway on an API the portal shows as approved.
 
 The fix is `edge.serializePerKey(consumerId, fn)` — an in-process promise queue
-keyed by consumer id. Independent consumers still run concurrently; the same
-consumer never has two in-flight mutations. **Every** consumer write goes
-through it: ACL-group changes (via `ConsumerProvisioner.mutateAclGroups`),
-credential appends, and credential deletes. A rotation also re-reads the
-consumer _inside_ the serialised block, so the array length it checks and the
-index it deletes cannot drift apart.
+keyed by consumer id, **plus a row in the `edge_leases` table** taken inside
+that queue. Independent consumers still run concurrently; the same consumer
+never has two in-flight mutations, in this process or any other. **Every**
+consumer write goes through it: ACL-group changes (via
+`ConsumerProvisioner.mutateAclGroups`), credential appends, and credential
+deletes. A rotation also re-reads the consumer _inside_ the serialised block, so
+the array length it checks and the index it deletes cannot drift apart.
 
 There is a second reason the body must be built from a fresh `GET`: omitting
 `keyauth` or `jwt` from a `PUT` body **deletes those credentials**. The
 provisioner always echoes `current.credentials` back, redacted placeholders and
 all.
 
-> **Multi-instance caveat.** This serialises within one Node process. A
-> horizontally scaled Nexus needs sticky routing per consumer or an external
-> lock; until then, run one writer. See
-> [`operations.md`](operations.md#8-scaling).
+**Across instances.** The queue alone only ever ordered one Node process, so
+two Nexus instances over one database had two queues — which is no lock, and is
+how a revoked ACL group could be restored by an approval that had merely read
+stale state. `createKeyedSerializer` therefore also takes a lease from
+`edge_leases` (`store.leases`) for the same key before running the section, and
+releases it in a `finally`. One row per resource, an owner id and an expiry:
+60-second TTL renewed at half of it, a 30-second wait for a contended key, and a
+`409 CONFLICT` telling the user to retry if that wait runs out. A crashed holder
+blocks the key only until its lease expires. See
+[`operations.md`](operations.md#8-scaling) for the operational picture.
+
+Keys must be canonical for the lock to mean anything: a consumer is always keyed
+by its **Ferrum consumer id**, a proxy always by `proxy:<id>`. Two wrappers key
+on something else on purpose and nest a canonical key inside — `test-consumer:
+<username>` in `publishing/service.ts` (a distinct Edge consumer whose id is not
+stable across replacements) and `proxy-plugin:<proxy>:<name>` in
+`plugins/service.ts` (so two different palette plugins on one API still save
+concurrently). Both always take the outer key first, never the reverse; neither
+the queue nor the lease is re-entrant, so nesting the _same_ key would
+deadlock.
 
 **Proxy writes are read-modify-write too.** `PUT /proxies/{id}` has exactly the
 same shape as `PUT /consumers/{id}` — a whole-resource replace against a struct
@@ -349,7 +371,10 @@ default. So the publishing service routes every proxy write through
 `mutateProxy`: `GET /proxies/{id}`, overwrite the handful of fields that are
 actually changing, `PUT` the whole document back minus the server-owned
 `namespace` / `created_at` / `updated_at`, all inside
-`serializePerKey('proxy:<id>', …)`.
+`serializePerKey('proxy:<id>', …)` — and therefore under the same cross-instance
+lease consumer writes get. Without it, an auth-method change and a plugin change
+on different instances could leave the proxy running the plugin and no
+authentication at all.
 
 ### 5.3 The plugin naming trap
 
@@ -484,6 +509,46 @@ proxy-scoped config the explicit deletes missed) if any step fails, before
 rethrowing. The Nexus rows are written last, so a failed publish leaves nothing
 behind on either side.
 
+#### The listen path is written last
+
+Every one of those writes happens on a **staging listen path**, and the move
+onto the real one is the final gateway call.
+
+Edge serves a proxy from the instant it exists, and a proxy-scoped plugin config
+is inert until the proxy's own `plugins[]` names it. Creating the proxy at
+`/<namespace>/<slug>` therefore made the API live, open and unlimited for the
+round trips it took to attach and associate its auth, ACL, rate-limit and CORS
+plugins — and rollback can delete a proxy but cannot un-forward requests it
+already served (GHSA-gxvf-jj3q-x4fc). Reordering does not help: Edge refuses a
+plugin config for a proxy that does not exist yet, and `allowed_methods` must be
+`null` or a **non-empty** array, so there is no deny-all proxy to build first.
+
+So the _path_ moves instead. `stagingListenPath()` mints
+`/<namespace>/.staging/<32 hex>` from 16 bytes of `crypto.randomBytes` — a slug
+can never begin with `.`, so it cannot collide with any API's real path, and 128
+bits of entropy is what makes "unguessable" a claim rather than a hope.
+
+| #   | `docs_only`                                         | `routes`                                    |
+| --- | --------------------------------------------------- | ------------------------------------------- |
+| 1   | `POST /proxies` at the **staging** path             | `POST /api-specs` at the **staging** path   |
+| 2   | `POST /plugins/config` × N                          | `POST /plugins/config` × N                  |
+| 3   | `PUT /proxies/{id}` — the association write         | `PUT /proxies/{id}` — the association write |
+| 4   | `PUT /proxies/{id}` — **cutover** to `/<ns>/<slug>` | `PUT /api-specs/{id}` — **cutover**         |
+
+Step 4 is `cutOverToListenPath`. For a spec-owned proxy both `servers[0].url`
+and `x-ferrum-proxy.listen_path` move in the same write, because Edge prefixes
+every generated operation matcher with the former — sending one without the
+other would leave the validator rejecting every request on the new path as an
+unknown operation. Edge accepts the move: `PUT /api-specs/{id}` updates the
+proxy row in place (same id, same `created_at`) and its uniqueness check
+excludes the proxy being written, at admission and again inside the write
+transaction.
+
+The real path is therefore either a `404` or fully gated. It is never open. The
+`spec_enforcement` conversion, which deletes and recreates the proxy, takes the
+same detour — and so does its undo step — so an API that already has consumers
+answers `404` for the rebuild rather than answering unauthenticated.
+
 ```
 apis row ─── proxy          name `nexus-<slug>`, listen_path `/<namespace>/<slug>`
               │             allowed_methods, backend_{connect,read,write}_timeout_ms,
@@ -543,10 +608,11 @@ transaction, then tags both with the spec's id. Three consequences:
 3. **changing the level rebuilds the proxy.** Edge cannot attach a spec to an
    existing proxy, cannot detach one without deleting it, and refuses a spec
    naming a proxy id that already exists — so the conversion deletes the proxy
-   and builds it back under the same id, carrying the whole proxy document and
-   every hand-owned plugin config across _with their original ids_. The API
-   answers `404` for the round trips in between; the audit row says
-   `proxy_rebuilt: true`.
+   and builds it back under the same id — **on a fresh staging path** — carrying
+   the whole proxy document and every hand-owned plugin config across _with
+   their original ids_, and only then cuts it over. The API answers `404` for
+   the round trips in between rather than answering unauthenticated; the audit
+   row says `proxy_rebuilt: true`.
 
 A CORS policy does not enter into any of this. `cors` runs at priority 100 and
 `openapi_validator` at 2960, and `preflight_continue` defaults to `false`, so a
@@ -573,10 +639,10 @@ read-modify-write with one undo step. A PATCH that does not name a setting does
 not write it at all, so timeouts an operator tuned by hand on the proxy survive
 a provider changing something else.
 
-The single association write is also why the proxy is briefly live with no
-plugins: Edge refuses a plugin config whose `proxy_id` does not exist yet, so
-the window cannot be closed from the Nexus side, only kept to one round trip
-and rolled back if anything in it fails.
+The single association write is what turns a stored plugin config into one the
+gateway runs. It happens while the proxy is still on its staging path, so the
+interval in which the proxy exists with no plugins is not observable at
+`/<namespace>/<slug>` — see "The listen path is written last" above.
 
 A `PATCH` maintains the association through every plugin change, each with a
 matching undo step. The orderings are chosen so the gateway is never _less_
@@ -783,6 +849,35 @@ default-second, never a mix. `{{placeholder}}` values are HTML-escaped in
 `body_html`; subject and `body_text` are plain text and interpolated verbatim.
 Only variables explicitly named in `rawHtmlVars` (the mass-email body) skip
 escaping.
+
+### 7.1 Gateway teardown jobs
+
+The same queue shape, for a different reason. Disabling an account owes Ferrum
+Edge a revocation — every ACL group off the consumer, every credential deleted —
+and that write cannot commit with the database one. So the disable writes a
+`gateway_teardown_jobs` row **inside the transaction that sets
+`status = 'disabled'`**, runs the revocation immediately, and hands a failure to
+`credentials/teardown-worker.ts` instead of swallowing it.
+
+```
+disable(tx) ──> gateway_teardown_jobs(pending) ──claim──> sending ──┬─> done
+                                                                    └─> reschedule (pending, backoff)
+                                                                        └─ retried until it lands
+```
+
+- One row per account: `user_id` is unique, so re-disabling resets the
+  outstanding job rather than queueing a second revocation.
+- Backoff is `10s · 2^attempts`, capped at five minutes, plus jitter.
+- **There is no `failed` state.** The outbox gives up after five attempts because
+  an undeliverable email is a message nobody reads; a credential that still
+  authenticates is the opposite, so retries continue for as long as the account
+  is disabled. Re-enabling an account deletes its job, and the worker drops any
+  job whose account is no longer disabled.
+- Success writes a `user.gateway_teardown_complete` audit row with the system as
+  actor. `POST /api/users/:id/gateway-teardown/retry` is the operator handle.
+
+See [`security.md`](security.md#disabling-an-account) for why the disable is
+allowed to commit ahead of the revocation at all.
 
 ---
 

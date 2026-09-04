@@ -122,6 +122,7 @@ validation issues, a conflicting slug, an Edge status).
 | `CSRF_MISMATCH`      | 403  | `X-Nexus-CSRF` missing or not matching the cookie/session.                                                                                                                                                                                                                                                                                                                                                                    |
 | `CAPTCHA_FAILED`     | 400  | CAPTCHA token missing, expired, or rejected by the vendor.                                                                                                                                                                                                                                                                                                                                                                    |
 | `RATE_LIMITED`       | 429  | Too many requests from this identity/IP.                                                                                                                                                                                                                                                                                                                                                                                      |
+| `QUOTA_EXCEEDED`     | 429  | A configured per-account allowance is already fully used. `details` is `{ limit, setting, … }` naming the environment variable an operator would raise — `{ limit, current, setting }` for a standing ceiling such as the API quota, `{ limit, window, setting }` for a period budget such as the daily message budget. Distinct from `RATE_LIMITED`, which is about request frequency and clears on its own.                 |
 | `EMAIL_NOT_VERIFIED` | 403  | Account exists but its email is unverified and verification is required.                                                                                                                                                                                                                                                                                                                                                      |
 | `USER_DISABLED`      | 403  | Account has been disabled by an admin.                                                                                                                                                                                                                                                                                                                                                                                        |
 | `LAST_SUPER_ADMIN`   | 409  | Refused: would remove, demote or disable the last active `super_admin`.                                                                                                                                                                                                                                                                                                                                                       |
@@ -140,7 +141,16 @@ per-endpoint notes below.
 
 ## Health
 
-Public. Registered under `/api/health`.
+Public. Registered under `/api/health`. **Rate-limited** to 120 requests per
+minute per IP across the prefix when `NEXUS_RATE_LIMIT_ENABLED=true` (the
+default; always off under `NEXUS_ENV=test`) — `429 RATE_LIMITED` beyond that.
+
+The database and gateway probes behind these routes are **cached for
+`NEXUS_HEALTH_CACHE_MS`** (default 5 s) and concurrent callers share one
+in-flight probe, so a burst produces a single database query and a single Admin
+API call. A failing probe is cached for the same window. `checked_at` reports
+when the probes ran, not when the request arrived. See
+[`operations.md`](operations.md#9-health-checks).
 
 ### `GET /api/health`
 
@@ -216,15 +226,16 @@ always off under `NEXUS_ENV=test`). Exceeding it is `429 RATE_LIMITED`.
 
 _public_ → `201`
 
-| Field           | Type                       | Notes                                                                     |
-| --------------- | -------------------------- | ------------------------------------------------------------------------- |
-| `email`         | string                     | Valid address, ≤ 320 chars. Stored lowercased; unique case-insensitively. |
-| `password`      | string                     | ≥ 12 characters (`MIN_PASSWORD_LENGTH`), ≤ 1024.                          |
-| `display_name`  | string                     | 1–200 chars.                                                              |
-| `role`          | `"client"` \| `"provider"` | Ignored for the very first account.                                       |
-| `company`       | string \| null             | optional, ≤ 200                                                           |
-| `phone`         | string \| null             | optional, ≤ 64                                                            |
-| `captcha_token` | string                     | optional, required when CAPTCHA is enabled                                |
+| Field             | Type                       | Notes                                                                     |
+| ----------------- | -------------------------- | ------------------------------------------------------------------------- |
+| `email`           | string                     | Valid address, ≤ 320 chars. Stored lowercased; unique case-insensitively. |
+| `password`        | string                     | ≥ 12 characters (`MIN_PASSWORD_LENGTH`), ≤ 1024.                          |
+| `display_name`    | string                     | 1–200 chars.                                                              |
+| `role`            | `"client"` \| `"provider"` | Ignored for the very first account.                                       |
+| `company`         | string \| null             | optional, ≤ 200                                                           |
+| `phone`           | string \| null             | optional, ≤ 64                                                            |
+| `captcha_token`   | string                     | optional, required when CAPTCHA is enabled                                |
+| `bootstrap_token` | string                     | **Required while the portal has no accounts**; ignored afterwards.        |
 
 ```json
 { "user": { "id": "…", "email": "…", "role": "client", … }, "email_verification_required": false }
@@ -233,10 +244,16 @@ _public_ → `201`
 - **The first account ever created becomes `super_admin`** and is
   auto-verified, whatever `role` it asked for; the registration policy
   (`open_registration`, `allowed_roles`) is bypassed for it.
+- **That first registration must carry `bootstrap_token`** — the server's
+  `NEXUS_BOOTSTRAP_TOKEN`, or the per-process token printed in its startup log.
+  Without a matching value the request is refused with `403 FORBIDDEN` and
+  nothing is created. `GET /api/branding` reports `bootstrap_required` so a
+  client knows when to ask for it. Once any account exists the field is ignored.
 - When verification is not required, the response also sets the session
   cookies and the user is signed in.
-- Errors: `409 CONFLICT` (email taken), `403 FORBIDDEN` (registration closed,
-  or that role is not in `allowed_roles`), `400 CAPTCHA_FAILED`.
+- Errors: `409 CONFLICT` (email taken), `403 FORBIDDEN` (missing or wrong
+  `bootstrap_token` on an empty portal, registration closed, or that role is
+  not in `allowed_roles`), `400 CAPTCHA_FAILED`.
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8787/api/auth/register \
@@ -401,9 +418,15 @@ before a session exists.
   "default_theme": "dark",
   "tagline": "APIs for partners",
   "support_email": "api-support@acme.example",
-  "captcha": { "enabled": false, "provider": "none", "site_key": null }
+  "captcha": { "enabled": false, "provider": "none", "site_key": null },
+  "bootstrap_required": false
 }
 ```
+
+`bootstrap_required` is `true` only while the portal has no accounts at all: the
+next registration elects the founding `super_admin` and must therefore send
+`bootstrap_token`. The flag says that the portal is empty and nothing else — the
+token is never public.
 
 ---
 
@@ -432,7 +455,10 @@ organization.
 
 ### `GET /api/users`
 
-_admin_ — `Paginated<User>`.
+_admin_ — `Paginated<User>` plus `pending_gateway_teardowns`: the portal-wide
+count of disabled accounts whose gateway credentials have **not** been revoked
+yet. Anything above zero means the teardown worker is still retrying against
+Edge.
 
 | Query             | Type                                                        |
 | ----------------- | ----------------------------------------------------------- |
@@ -441,6 +467,24 @@ _admin_ — `Paginated<User>`.
 | `org_id`          | uuid                                                        |
 | `q`               | substring match on email or display name (case-insensitive) |
 | `limit`, `offset` | pagination                                                  |
+
+### `GET /api/users/:id`
+
+_admin_ → `{ "user": User, "gateway_teardown": GatewayTeardownState | null }`.
+
+`gateway_teardown` is the account's outstanding (or completed) gateway
+revocation, and is `null` for an account that never had one:
+
+```json
+{
+  "status": "pending",
+  "attempts": 3,
+  "last_error": "Ferrum Edge returned 500",
+  "next_attempt_at": "2026-09-04T09:12:00.000Z",
+  "updated_at": "2026-09-04T09:11:20.000Z",
+  "completed_at": null
+}
+```
 
 ### `PATCH /api/users/:id`
 
@@ -453,7 +497,12 @@ _admin_ — role, status, organization and display name.
 | `org_id`       | uuid \| null           |
 | `display_name` | string, 1–200          |
 
-→ `{ "user": User }`.
+→ `{ "user": User, "gateway_teardown"?: "ok" | "no_consumer" | "pending" }`.
+
+`gateway_teardown` is present **only when this request disabled the account**.
+`pending` means the portal account is off but its Ferrum Edge credentials are
+still live and the teardown worker is retrying — the security operation is not
+complete. There is no `failed` value: a failure is a retry, not an outcome.
 
 Guards enforced in the service:
 
@@ -466,8 +515,23 @@ Guards enforced in the service:
   `409 LAST_SUPER_ADMIN`. This is checked before the self-disable rule, so it is
   also what you get for disabling yourself while you are the last one.
 - Disabling **your own** account in any other case → `409 CONFLICT`.
-- Disabling an account deletes every session it holds.
+- Disabling an account deletes every session it holds, and queues the gateway
+  revocation as durable work inside the same transaction.
+- Re-enabling an account (`status: "active"`) cancels any queued revocation, so
+  a retry can never strip a live account's credentials.
 - `404 NOT_FOUND` when `org_id` names an organization that does not exist.
+
+### `POST /api/users/:id/gateway-teardown/retry`
+
+_admin_ — re-run a disabled account's gateway revocation immediately, instead of
+waiting for the worker's backoff. Idempotent; audited as
+`user.gateway_teardown_retry`.
+
+→ `{ "gateway_teardown": "ok" | "no_consumer" | "pending", "job": GatewayTeardownState | null }`
+
+- `409 CONFLICT` when the account is not `disabled` — an active account's
+  consumer is supposed to work.
+- `404 NOT_FOUND` when the account does not exist.
 
 ---
 
@@ -496,6 +560,21 @@ _admin_ → `{ "organization": Organization }`. Body: optional `name`,
 Portal messaging. Registered under `/api/threads`; every endpoint needs a
 _session_. Who may read or post in a given thread is decided by the messaging
 service.
+
+**The two write routes are bounded.** Reads are not limited; `POST /api/threads`
+takes 10 requests per minute and `POST /api/threads/:id/messages` takes 30, both
+counted **per account** (not per IP) and both active only when
+`NEXUS_RATE_LIMIT_ENABLED=true` (the default; always off under
+`NEXUS_ENV=test`). Exceeding either is `429 RATE_LIMITED`. Independently, one
+account may post `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY` messages (default 200,
+`0` disables) in a rolling 24 hours across _every_ thread, direct and platform
+alike; exceeding that is `429 QUOTA_EXCEEDED`. A refusal from either bound
+writes no message, audit, notification or email row.
+
+Recipients get at most one `message_received` email per thread per 10 minutes
+however many messages arrive, so the mail announces new activity and links to
+the thread rather than quoting one message. In-app notifications stay one per
+message.
 
 A thread has two seats. A **1:1 thread** pairs a client (`participant_a`) with a
 provider (`participant_b`), optionally about one API. A **platform thread** has
@@ -535,7 +614,10 @@ _session_ → `201`
 ```
 
 Errors: `400 VALIDATION_FAILED` (empty subject/body, or messaging yourself),
-`404 NOT_FOUND` (unknown or disabled recipient, unknown API).
+`404 NOT_FOUND` (unknown or disabled recipient, unknown API),
+`429 RATE_LIMITED` (more than 10 a minute from this account),
+`429 QUOTA_EXCEEDED` (the account's rolling 24-hour message budget is spent —
+`details` carries `{ limit, window: "24h", setting: "NEXUS_MAX_MESSAGES_PER_USER_PER_DAY" }`).
 
 ### `GET /api/threads/:id`
 
@@ -547,6 +629,12 @@ message carrying a `sender` summary. Participants always; admins for oversight.
 
 _session_ → `201 { "message": Message }`. Body `{ "body": string }` (1–10 000).
 Participants may post; an admin may post into any _platform_ thread.
+
+Errors: `400 VALIDATION_FAILED` (empty body), `403 FORBIDDEN` (not a
+participant), `404 NOT_FOUND` (unknown thread), `429 RATE_LIMITED` (more than 30
+a minute from this account), `429 QUOTA_EXCEEDED` (the account's rolling
+24-hour message budget is spent — it is the same budget `POST /api/threads`
+draws on).
 
 ---
 
@@ -788,10 +876,18 @@ reviewer wants.
 Body `{ "user_id": uuid, "reason": string, "revoke_grants"?: boolean }`
 
 ```json
-{ "user": { … }, "revoked_grants": 3, "terminated_sessions": 2 }
+{
+  "user": { … },
+  "revoked_grants": 3,
+  "terminated_sessions": 2,
+  "gateway_teardown": "ok"
+}
 ```
 
-Disables the account and destroys every session it holds. Errors:
+Disables the account and destroys every session it holds. `gateway_teardown`
+carries the same `"ok" | "no_consumer" | "pending"` values as
+`PATCH /api/users/:id`, and `pending` means the same thing here: the gateway
+credentials are still live and the revocation is queued for retry. Errors:
 `409 LAST_SUPER_ADMIN` when the target is the last active super admin —
 **including when that is you**, because "promote someone else first" is the
 useful message; `409 CONFLICT` for any other attempt to disable your own
@@ -898,6 +994,29 @@ Spec documents arrive as a JSON string field, not a multipart upload — the SPA
 reads the file client-side, which keeps the CSRF story and the error shape
 identical to every other route.
 
+**Two `429`s apply to the mutating routes here** — `POST /`, `PUT /:id/spec`,
+`PATCH /:id`, `DELETE /:id`, `PUT|DELETE /:id/plugins/:name` and
+`POST /:id/test-consumer`:
+
+- `429 RATE_LIMITED` — more than **30 of them per minute** from one account
+  (falling back to the IP for an anonymous caller). Installed when
+  `NEXUS_RATE_LIMIT_ENABLED=true`, which is the default outside
+  `NEXUS_ENV=test`. Reads are not limited, apart from `GET /:id/usage`, which
+  keeps its own 30/min limit because it scrapes the gateway.
+- `429 QUOTA_EXCEEDED` — on `POST /` only, when the account already owns
+  `NEXUS_MAX_APIS_PER_OWNER` APIs (default 50; `0` disables the ceiling). The
+  body carries `details: { limit, current, setting }`. The check runs before the
+  first gateway write, so a refused publish creates nothing. Deleting an API
+  frees a slot immediately; retiring one does not, because a retired API keeps
+  its proxy and plugins on the gateway.
+
+**A new proxy is never briefly open.** Every proxy is created on an unguessable
+staging listen path, gets its auth, ACL, rate-limit and CORS plugins attached
+and associated there, and is moved to `listen_path` as the last gateway write of
+the request. Until then `listen_path` answers `404` — never an unauthenticated
+`200`. The same is true while `spec_enforcement` is being switched, which
+rebuilds the proxy.
+
 Several fields of the returned `Api` object describe the gateway side of a
 publication. `listen_path` and `invoke_url` are **derived, not stored**: they
 are recomputed on every read from the namespace, the slug and the operator's
@@ -970,9 +1089,18 @@ Errors: `400 SPEC_INVALID` (unparseable, Swagger 2.0, missing
 `openapi`/`info.title`/`info.version`/`paths`, oversized, no upstream
 determinable, or — unless `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` — an upstream
 that is a loopback, private, link-local or `.internal`/`.local` destination,
-reported with `details.reason = "private_upstream"`), `409 CONFLICT` (slug taken), `502 EDGE_ERROR` /
-`502 EDGE_UNAVAILABLE`. A failed Edge step is rolled back — the plugin configs
-and proxy are deleted — and nothing is written to the Nexus store.
+reported with `details.reason = "private_upstream"`. The host is **resolved**
+as well as pattern-matched, so a name whose A/AAAA records point at a private
+address is refused the same way, with the answers in `details.resolved`; a name
+that cannot be resolved at all is refused with
+`details.reason = "unresolvable_upstream"`), `409 CONFLICT` (slug taken),
+`429 QUOTA_EXCEEDED` (the account already owns `NEXUS_MAX_APIS_PER_OWNER` APIs;
+`details` is `{ limit, current, setting }`), `429 RATE_LIMITED`, `502 EDGE_ERROR` /
+`502 EDGE_UNAVAILABLE`. The quota is checked before the first gateway call. A
+failed Edge step is rolled back — the plugin configs and proxy are deleted — and
+nothing is written to the Nexus store; because the proxy is still on its staging
+path when anything before the final cutover fails, `listen_path` was never
+served at all.
 
 ```bash
 SPEC=$(jq -Rs . < billing-openapi.yaml)

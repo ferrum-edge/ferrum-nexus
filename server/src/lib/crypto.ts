@@ -112,6 +112,22 @@ export function constantTimeEqual(a: Buffer | string, b: Buffer | string): boole
   return timingSafeEqual(ab, bb);
 }
 
+/**
+ * Constant-time equality for two secrets whose lengths are themselves secret.
+ *
+ * {@link constantTimeEqual} compares the bytes, so a length mismatch takes a
+ * different branch. Comparing the SHA-256 digests instead makes both operands
+ * a fixed 32 bytes, so an attacker probing with candidates of varying length
+ * learns nothing about the expected one. Used for the bootstrap token, where
+ * the presented value is entirely attacker-chosen.
+ */
+export function secretEquals(presented: string, expected: string): boolean {
+  return timingSafeEqual(
+    createHash('sha256').update(presented, 'utf8').digest(),
+    createHash('sha256').update(expected, 'utf8').digest(),
+  );
+}
+
 /* ── Fingerprints and random material ───────────────────────────────────── */
 
 /** Lowercase hex SHA-256 of `value` — used as the credential fingerprint. */

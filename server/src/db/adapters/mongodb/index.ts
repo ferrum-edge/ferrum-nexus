@@ -68,6 +68,7 @@ import type {
   DbDriver,
   EmailOutboxStatus,
   EmailTemplateKey,
+  GatewayTeardownJobStatus,
   GrantStatus,
   HttpMethod,
   IsoTimestamp,
@@ -117,9 +118,13 @@ import type {
   EmailOutboxRepo,
   EmailTemplateRecord,
   EmailTemplateRepo,
+  GatewayTeardownJobFilter,
+  GatewayTeardownJobRecord,
+  GatewayTeardownJobRepo,
   GrantFilter,
   GrantRecord,
   GrantRepo,
+  LeaseRepo,
   ListOptions,
   MessageRecord,
   MessageRepo,
@@ -161,11 +166,13 @@ const COLLECTIONS = {
   messages: 'messages',
   notifications: 'notifications',
   emailOutbox: 'email_outbox',
+  gatewayTeardownJobs: 'gateway_teardown_jobs',
   auditLogs: 'audit_logs',
   settings: 'app_settings',
   emailTemplates: 'email_templates',
   verificationTokens: 'email_verification_tokens',
   tokenIssueClaims: 'email_token_issue_claims',
+  leases: 'edge_leases',
 } as const;
 
 /* ── Small decoders (Mongo hands back native types already) ─────────────── */
@@ -555,6 +562,21 @@ function mapOutbox(row: Row): EmailOutboxRecord {
   };
 }
 
+function mapTeardownJob(row: Row): GatewayTeardownJobRecord {
+  return {
+    id: str(row._id),
+    user_id: str(row.user_id),
+    status: str(row.status) as GatewayTeardownJobStatus,
+    attempts: num(row.attempts),
+    next_attempt_at: strOrNull(row.next_attempt_at),
+    last_error: strOrNull(row.last_error),
+    requested_by: strOrNull(row.requested_by),
+    created_at: str(row.created_at),
+    updated_at: str(row.updated_at),
+    completed_at: strOrNull(row.completed_at),
+  };
+}
+
 function mapAuditLog(row: Row): AuditLogRecord {
   return {
     id: str(row._id),
@@ -873,6 +895,15 @@ const INDEXES: IndexDefinition[] = [
   },
 ];
 
+/** Indexes added by `010_message_sender_index`. */
+const SENDER_INDEXES: IndexDefinition[] = [
+  {
+    collection: 'messages',
+    name: 'ix_messages_sender',
+    key: { sender_user_id: 1, created_at: 1 },
+  },
+];
+
 /** Indexes added by `003_verification_token_purpose`. */
 const PURPOSE_INDEXES: IndexDefinition[] = [
   {
@@ -880,6 +911,30 @@ const PURPOSE_INDEXES: IndexDefinition[] = [
     name: 'ix_verification_tokens_user_purpose',
     key: { user_id: 1, purpose: 1 },
   },
+];
+
+/** Indexes added by `008_gateway_teardown_jobs`. */
+const TEARDOWN_JOB_INDEXES: IndexDefinition[] = [
+  {
+    collection: 'gateway_teardown_jobs',
+    name: 'ux_gateway_teardown_jobs_user',
+    key: { user_id: 1 },
+    unique: true,
+  },
+  {
+    collection: 'gateway_teardown_jobs',
+    name: 'ix_gateway_teardown_jobs_due',
+    key: { status: 1, next_attempt_at: 1 },
+  },
+];
+
+/** Indexes added by `009_edge_leases`. */
+const LEASE_INDEXES: IndexDefinition[] = [
+  // `_id` already carries the key, so this is the redundant-but-explicit
+  // counterpart of the SQL primary key; the expiry index backs the
+  // housekeeping sweep.
+  { collection: 'edge_leases', name: 'ux_edge_leases_key', key: { key: 1 }, unique: true },
+  { collection: 'edge_leases', name: 'ix_edge_leases_expires', key: { expires_at: 1 } },
 ];
 
 /** Create one batch of {@link IndexDefinition}s. */
@@ -922,6 +977,21 @@ const MONGO_MIGRATIONS: { id: string; apply: (db: Db) => Promise<void> }[] = [
   {
     id: '006_email_token_issue_claims',
     apply: async (): Promise<void> => undefined,
+  },
+  {
+    id: '008_gateway_teardown_jobs',
+    // The unique index on `user_id` is what makes `upsertPending` a per-account
+    // reset rather than a queue of duplicate revocations; the collection itself
+    // is created on the first insert.
+    apply: (db: Db): Promise<void> => createIndexes(db, TEARDOWN_JOB_INDEXES),
+  },
+  {
+    id: '009_edge_leases',
+    apply: (db: Db): Promise<void> => createIndexes(db, LEASE_INDEXES),
+  },
+  {
+    id: '010_message_sender_index',
+    apply: (db: Db): Promise<void> => createIndexes(db, SENDER_INDEXES),
   },
 ];
 
@@ -2204,6 +2274,12 @@ class MongoStore implements NexusStore {
     countByThread: async (threadId) =>
       this.col(COLLECTIONS.messages).countDocuments({ thread_id: threadId }, this.opts),
 
+    countBySenderSince: async (senderUserId, sinceIso) =>
+      this.col(COLLECTIONS.messages).countDocuments(
+        { sender_user_id: senderUserId, created_at: { $gte: sinceIso } },
+        this.opts,
+      ),
+
     deleteByThread: async (threadId) =>
       (await this.col(COLLECTIONS.messages).deleteMany({ thread_id: threadId }, this.opts))
         .deletedCount,
@@ -2450,6 +2526,134 @@ class MongoStore implements NexusStore {
     },
   };
 
+  /* ── gatewayTeardownJobs ──────────────────────────────────────────────── */
+
+  readonly gatewayTeardownJobs: GatewayTeardownJobRepo = {
+    upsertPending: async (userId, requestedBy, now) => {
+      // Keyed on `user_id` (unique), so a second disable resets the account's
+      // outstanding revocation instead of queueing another one. `_id` and
+      // `created_at` only land on the insert.
+      const doc = await this.col(COLLECTIONS.gatewayTeardownJobs).findOneAndUpdate(
+        { user_id: userId } as Filter<NexusDoc>,
+        {
+          $set: {
+            status: 'pending',
+            attempts: 0,
+            next_attempt_at: now,
+            last_error: null,
+            requested_by: requestedBy,
+            updated_at: now,
+            completed_at: null,
+          },
+          $setOnInsert: { _id: newId(), user_id: userId, created_at: now },
+        } as UpdateFilter<NexusDoc>,
+        { ...this.opts, upsert: true, returnDocument: 'after' },
+      );
+      const row = asRow(doc);
+      if (!row) {
+        throw new Error('gatewayTeardownJobs.upsertPending: row vanished immediately after upsert');
+      }
+      return mapTeardownJob(row);
+    },
+
+    findByUser: async (userId) => {
+      const row = asRow(
+        await this.col(COLLECTIONS.gatewayTeardownJobs).findOne({ user_id: userId }, this.opts),
+      );
+      return row ? mapTeardownJob(row) : null;
+    },
+
+    list: async (filter, options) => {
+      const query: Record<string, unknown> = {};
+      if (filter.status !== undefined) query.status = filter.status;
+      return this.paginate(
+        COLLECTIONS.gatewayTeardownJobs,
+        query as Filter<NexusDoc>,
+        NEWEST_FIRST,
+        options,
+        mapTeardownJob,
+      );
+    },
+
+    claimDue: async (now, limit) => {
+      // `findOneAndUpdate` is atomic on its own, so the claim needs no
+      // transaction — the same argument as the outbox claim.
+      const wanted = Math.max(1, Math.floor(limit));
+      const claimed: GatewayTeardownJobRecord[] = [];
+      for (let i = 0; i < wanted; i += 1) {
+        const doc = await this.col(COLLECTIONS.gatewayTeardownJobs).findOneAndUpdate(
+          {
+            status: 'pending',
+            $or: [{ next_attempt_at: null }, { next_attempt_at: { $lte: now } }],
+          } as Filter<NexusDoc>,
+          [
+            {
+              $set: {
+                status: 'sending',
+                updated_at: nowIso(),
+                attempts: { $add: [{ $ifNull: ['$attempts', 0] }, 1] },
+              },
+            },
+          ],
+          { ...this.opts, sort: OUTBOX_CLAIM_ORDER, returnDocument: 'after' },
+        );
+        const row = asRow(doc);
+        if (!row) break;
+        claimed.push(mapTeardownJob(row));
+      }
+      return claimed;
+    },
+
+    markDone: async (id, at) => {
+      await this.col(COLLECTIONS.gatewayTeardownJobs).updateOne(
+        { _id: id },
+        {
+          $set: {
+            status: 'done',
+            next_attempt_at: null,
+            last_error: null,
+            completed_at: at,
+            updated_at: at,
+          },
+        },
+        this.opts,
+      );
+    },
+
+    reschedule: async (id, nextAttemptAt, lastError) => {
+      await this.col(COLLECTIONS.gatewayTeardownJobs).updateOne(
+        { _id: id },
+        {
+          $set: {
+            status: 'pending',
+            next_attempt_at: nextAttemptAt,
+            last_error: lastError,
+            updated_at: nowIso(),
+          },
+        },
+        this.opts,
+      );
+    },
+
+    releaseStale: async (olderThan) => {
+      const at = nowIso();
+      const result = await this.col(COLLECTIONS.gatewayTeardownJobs).updateMany(
+        { status: 'sending', updated_at: { $lte: olderThan } } as Filter<NexusDoc>,
+        { $set: { status: 'pending', next_attempt_at: at, updated_at: at } },
+        this.opts,
+      );
+      return result.modifiedCount;
+    },
+
+    deleteByUser: async (userId) => {
+      const result = await this.col(COLLECTIONS.gatewayTeardownJobs).deleteOne(
+        { user_id: userId } as Filter<NexusDoc>,
+        this.opts,
+      );
+      return result.deletedCount > 0;
+    },
+  };
+
   /* ── auditLogs ────────────────────────────────────────────────────────── */
 
   readonly auditLogs: AuditLogRepo = {
@@ -2679,6 +2883,59 @@ class MongoStore implements NexusStore {
     deleteExpired: async (now) =>
       (
         await this.col(COLLECTIONS.verificationTokens).deleteMany(
+          { expires_at: { $lte: now } } as Filter<NexusDoc>,
+          this.opts,
+        )
+      ).deletedCount,
+  };
+
+  /* ── leases ───────────────────────────────────────────────────────────── */
+
+  readonly leases: LeaseRepo = {
+    acquire: async (key, owner, expiresAt, now) => {
+      const stamp = nowIso();
+      try {
+        // The filter is the free-or-expired test and the upsert is the claim,
+        // in one atomic command. When the lease is live the filter matches
+        // nothing, so Mongo tries to *insert* — and collides with the `_id` of
+        // the row already there, which is the refusal.
+        const result = await this.col(COLLECTIONS.leases).updateOne(
+          { _id: key, expires_at: { $lte: now } } as Filter<NexusDoc>,
+          {
+            $set: { key, owner, expires_at: expiresAt, updated_at: stamp },
+            $setOnInsert: { created_at: stamp },
+          },
+          { ...this.opts, upsert: true },
+        );
+        return result.matchedCount > 0 || result.upsertedCount > 0;
+      } catch (error) {
+        // A live lease, or a concurrent upsert that won the `_id` race: either
+        // way somebody else holds it.
+        if ((error as { code?: unknown }).code === 11000) return false;
+        throw error;
+      }
+    },
+
+    release: async (key, owner) =>
+      (
+        await this.col(COLLECTIONS.leases).deleteOne(
+          { _id: key, owner } as Filter<NexusDoc>,
+          this.opts,
+        )
+      ).deletedCount > 0,
+
+    renew: async (key, owner, expiresAt) =>
+      (
+        await this.col(COLLECTIONS.leases).updateOne(
+          { _id: key, owner } as Filter<NexusDoc>,
+          { $set: { expires_at: expiresAt, updated_at: nowIso() } },
+          this.opts,
+        )
+      ).matchedCount > 0,
+
+    deleteExpired: async (now) =>
+      (
+        await this.col(COLLECTIONS.leases).deleteMany(
           { expires_at: { $lte: now } } as Filter<NexusDoc>,
           this.opts,
         )

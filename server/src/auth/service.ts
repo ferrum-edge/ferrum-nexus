@@ -9,6 +9,10 @@
  *   they asked for (`client` or `provider`) and nothing more. "First" is
  *   decided by an atomic claim on {@link SUPER_ADMIN_CLAIM_KEY}, not by
  *   counting users — see {@link AuthService.register}.
+ * - **That first registration must present the bootstrap token**
+ *   (`NEXUS_BOOTSTRAP_TOKEN`, or the per-process value printed at startup).
+ *   Public self-registration can therefore never elect a founder: the atomic
+ *   claim decides *which* candidate wins, the token decides who may stand.
  * - Passwords are scrypt-hashed; verification is constant-time and a missing
  *   account still costs one hash so sign-in does not leak which emails exist.
  * - The two "email me a link" endpoints — {@link AuthService.requestPasswordReset}
@@ -36,6 +40,7 @@ import { AuditAction, ANONYMOUS_ACTOR, type AuditService } from '../audit/servic
 import type { NexusConfig } from '../config/index.js';
 import type { NexusStore, SessionRecord, UserRecord } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
+import { secretEquals } from '../lib/crypto.js';
 import {
   conflict,
   emailNotVerified,
@@ -127,6 +132,8 @@ export interface RegisterInput {
   company?: string | null;
   phone?: string | null;
   captcha_token?: string | undefined;
+  /** Out-of-band bootstrap secret; required only while the portal is empty. */
+  bootstrap_token?: string | undefined;
 }
 
 /** Result of {@link AuthService.register}. */
@@ -228,6 +235,14 @@ export interface AuthService {
   issueSession(user: UserRecord, context: RequestContext): Promise<IssuedSession>;
   /** Current registration policy, with defaults applied. */
   getRegistrationPolicy(): Promise<RegistrationPolicy>;
+  /**
+   * True while the portal has no accounts, i.e. the next registration is the
+   * bootstrap one and must carry a valid `bootstrap_token`.
+   *
+   * Published on `GET /api/branding` so the sign-up form can ask for the token
+   * up front. It is a hint, not a gate — {@link AuthService.register} decides.
+   */
+  bootstrapRequired(): Promise<boolean>;
 }
 
 /** Dependencies of {@link createAuthService}. */
@@ -303,6 +318,29 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
     }
   }
 
+  /**
+   * Gate the bootstrap registration on the out-of-band token.
+   *
+   * The founder election is the one place where an anonymous request can hand
+   * itself `super_admin`, so on an empty portal "who is allowed to win" has to
+   * be answered before "who won". The expected value is
+   * {@link NexusConfig.bootstrapToken}: `NEXUS_BOOTSTRAP_TOKEN`, or the
+   * per-process token the entry point generates and logs. An unset token means
+   * no value can match — a server built without one simply cannot be
+   * bootstrapped over HTTP, which is the safe direction to fail in.
+   */
+  function requireBootstrapToken(presented: string | undefined): void {
+    const expected = config.bootstrapToken;
+    if (expected !== undefined && presented !== undefined && secretEquals(presented, expected)) {
+      return;
+    }
+    throw forbidden(
+      'This portal has no accounts yet, so the first registration becomes its super_admin ' +
+        'and must include the bootstrap token printed in the server log at startup ' +
+        '(or the configured NEXUS_BOOTSTRAP_TOKEN)',
+    );
+  }
+
   async function issueSession(user: UserRecord, context: RequestContext): Promise<IssuedSession> {
     const token = crypto.newSessionToken();
     const csrfToken = crypto.newSessionToken();
@@ -321,6 +359,10 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
   return {
     getRegistrationPolicy,
     issueSession,
+
+    async bootstrapRequired(): Promise<boolean> {
+      return (await store.users.count()) === 0;
+    },
 
     async register(input, context): Promise<RegisterResult> {
       const policy = await getRegistrationPolicy();
@@ -341,7 +383,13 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
       // is *not* what makes anyone a super_admin. An empty user table also
       // implies the default policy, since editing it needs an admin account.
       const emptyPortal = (await store.users.count()) === 0;
-      if (!emptyPortal) {
+      if (emptyPortal) {
+        // The founder is elected here, so this registration has to prove it
+        // comes from whoever runs the server. Checked before the password is
+        // hashed and before any row is written: a caller without the token
+        // leaves no trace beyond the audit-free 403 it gets back.
+        requireBootstrapToken(input.bootstrap_token);
+      } else {
         if (!policy.open_registration) {
           throw forbidden('Self-service registration is currently closed');
         }

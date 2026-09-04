@@ -67,6 +67,8 @@ import type {
   EmailOutboxEntry,
   EmailTemplate,
   EmailTemplateKey,
+  GatewayTeardownJobStatus,
+  GatewayTeardownState,
   Grant,
   GrantStatus,
   IsoTimestamp,
@@ -194,6 +196,20 @@ export type NotificationRecord = Notification;
 export interface EmailOutboxRecord extends EmailOutboxEntry {
   body_html: string;
   body_text: string;
+}
+
+/**
+ * A `gateway_teardown_jobs` row — one outstanding credential revocation.
+ *
+ * At most one row exists per user (`user_id` is unique), so the table is a
+ * per-account state rather than a queue of duplicate work.
+ */
+export interface GatewayTeardownJobRecord extends GatewayTeardownState {
+  id: Uuid;
+  user_id: Uuid;
+  /** The admin who disabled the account, or `null` once that account is gone. */
+  requested_by: Uuid | null;
+  created_at: IsoTimestamp;
 }
 
 /** An `audit_logs` row (append-only; without the joined actor summary). */
@@ -337,6 +353,11 @@ export interface NotificationFilter {
 export interface EmailOutboxFilter {
   status?: EmailOutboxEntry['status'];
   to_email?: string;
+}
+
+/** Filters for `gatewayTeardownJobs.list`. */
+export interface GatewayTeardownJobFilter {
+  status?: GatewayTeardownJobStatus;
 }
 
 /** Filters for `auditLogs.list`. */
@@ -648,6 +669,16 @@ export interface MessageRepo {
   /** Newest message of a thread, for list previews. */
   findLatestByThread(threadId: Uuid): Promise<MessageRecord | null>;
   countByThread(threadId: Uuid): Promise<number>;
+  /**
+   * How many messages `senderUserId` has posted since `sinceIso`, across every
+   * thread — the per-account messaging budget.
+   *
+   * The boundary is **inclusive**: a row whose `created_at` equals `sinceIso`
+   * counts. `created_at` is an ISO-8601 UTC string in a text column, so every
+   * adapter compares it lexicographically, which for this fixed format is the
+   * same ordering as by instant.
+   */
+  countBySenderSince(senderUserId: Uuid, sinceIso: IsoTimestamp): Promise<number>;
   /** Cascade helper for thread deletion. */
   deleteByThread(threadId: Uuid): Promise<number>;
 }
@@ -705,6 +736,56 @@ export interface EmailOutboxRepo {
   /** Return `sending` rows stuck since before `olderThan` to `pending` (crash recovery). */
   releaseStale(olderThan: IsoTimestamp): Promise<number>;
   list(filter: EmailOutboxFilter, options?: ListOptions): Promise<Paginated<EmailOutboxRecord>>;
+}
+
+/**
+ * Durable gateway revocations for disabled accounts.
+ *
+ * The row is written in the same transaction as `users.status = 'disabled'`, so
+ * an account can never be disabled without the revocation being owed. The
+ * teardown worker drains it with the same claim/backoff protocol as the email
+ * outbox, but with no terminal failure state: retries continue for as long as
+ * the account is disabled, because a credential that still authenticates is
+ * not something to give up on.
+ */
+export interface GatewayTeardownJobRepo {
+  /**
+   * Queue (or re-queue) the revocation owed for `userId`.
+   *
+   * `user_id` is unique, so an account already carrying a job has that row
+   * reset to `pending` with `attempts = 0` and `next_attempt_at = now` instead
+   * of gaining a second one. Re-disabling an account therefore re-drives the
+   * outstanding work rather than duplicating it.
+   */
+  upsertPending(
+    userId: Uuid,
+    requestedBy: Uuid | null,
+    now: IsoTimestamp,
+  ): Promise<GatewayTeardownJobRecord>;
+  findByUser(userId: Uuid): Promise<GatewayTeardownJobRecord | null>;
+  list(
+    filter: GatewayTeardownJobFilter,
+    options?: ListOptions,
+  ): Promise<Paginated<GatewayTeardownJobRecord>>;
+  /**
+   * Atomically claim up to `limit` rows that are `pending` with
+   * `next_attempt_at <= now`, flipping them to `sending` and incrementing
+   * `attempts`. Two concurrent workers never claim the same row — the same
+   * contract as {@link EmailOutboxRepo.claimDue}.
+   */
+  claimDue(now: IsoTimestamp, limit: number): Promise<GatewayTeardownJobRecord[]>;
+  /** Edge confirmed the revocation: `status = 'done'`, `completed_at = at`. */
+  markDone(id: Uuid, at: IsoTimestamp): Promise<void>;
+  /** The attempt failed: back to `pending` with a backoff stamp and the reason. */
+  reschedule(id: Uuid, nextAttemptAt: IsoTimestamp, lastError: string): Promise<void>;
+  /** Return `sending` rows stuck since before `olderThan` to `pending` (crash recovery). */
+  releaseStale(olderThan: IsoTimestamp): Promise<number>;
+  /**
+   * Drop the job for a user — the account was re-enabled (or deleted), so the
+   * revocation must not land on a live gateway identity. `false` when there was
+   * nothing queued.
+   */
+  deleteByUser(userId: Uuid): Promise<boolean>;
 }
 
 /** Append-only audit trail. */
@@ -796,6 +877,46 @@ export interface VerificationTokenRepo {
   deleteExpired(now: IsoTimestamp): Promise<number>;
 }
 
+/**
+ * Expiring, single-holder leases over Ferrum Edge resources.
+ *
+ * Edge replaces consumers and proxies whole, with no ETag or version token, so
+ * every mutation is a GET-edit-PUT that must not interleave with another. The
+ * in-process queue in `ferrum-admin/client.ts` orders one Node process; this
+ * repository is what orders *all* of them, which is what stops a revoke on one
+ * instance being overwritten by a stale approval on another.
+ *
+ * `key` is the canonical lock key for one Edge resource — a Ferrum consumer id,
+ * or `proxy:<id>` — and `owner` a per-process random id. Expiry rather than an
+ * explicit unlock is what makes a crashed holder recoverable: nothing has to
+ * notice the crash, the lease simply becomes takeable.
+ *
+ * Every method is a single atomic statement on every adapter. Callers must not
+ * read-then-write around one.
+ */
+export interface LeaseRepo {
+  /**
+   * Take the lease for `key` until `expiresAt`, as `owner`.
+   *
+   * Succeeds when no row exists, or when the existing row expired at or before
+   * `now`; a live lease held by anyone (including `owner` itself) is refused.
+   * Exactly one of any number of concurrent callers gets `true`.
+   */
+  acquire(key: string, owner: string, expiresAt: IsoTimestamp, now: IsoTimestamp): Promise<boolean>;
+  /**
+   * Drop the lease. Returns `false` when `owner` no longer holds it — the lease
+   * expired and somebody else took it — in which case the row is left alone.
+   */
+  release(key: string, owner: string): Promise<boolean>;
+  /**
+   * Push the expiry out while the critical section is still running. Returns
+   * `false` when `owner` has already lost the lease.
+   */
+  renew(key: string, owner: string, expiresAt: IsoTimestamp): Promise<boolean>;
+  /** Housekeeping sweep of leases nobody can hold any more. */
+  deleteExpired(now: IsoTimestamp): Promise<number>;
+}
+
 /* ── The store ──────────────────────────────────────────────────────────── */
 
 /** Result of {@link NexusStore.healthCheck}. */
@@ -847,8 +968,10 @@ export interface NexusStore {
   readonly messages: MessageRepo;
   readonly notifications: NotificationRepo;
   readonly emailOutbox: EmailOutboxRepo;
+  readonly gatewayTeardownJobs: GatewayTeardownJobRepo;
   readonly auditLogs: AuditLogRepo;
   readonly settings: SettingRepo;
   readonly emailTemplates: EmailTemplateRepo;
   readonly verificationTokens: VerificationTokenRepo;
+  readonly leases: LeaseRepo;
 }

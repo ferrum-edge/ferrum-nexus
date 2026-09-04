@@ -209,21 +209,26 @@ export const DEFAULT_EMAIL_TEMPLATES: Readonly<Record<EmailTemplateKey, EmailTem
       '{{reason}}\n',
   },
 
+  // Deliberately announces *activity*, not one message's text. At most one of
+  // these is sent per recipient per thread per coalescing window (see
+  // `COALESCE_WINDOW_MS` in `messaging/service.ts`), so quoting a body would
+  // promise a transcript the mail cannot keep: every later message in the same
+  // window sends nothing. The link is the transcript.
   message_received: {
-    subject: 'New message from {{sender_name}}: {{thread_subject}}',
+    subject: 'New activity from {{sender_name}}: {{thread_subject}}',
     body_html: htmlDocument(
       '<p>Hello {{recipient_name}},</p>' +
-        '<p>{{sender_name}} sent you a message about ' +
-        '<strong>{{thread_subject}}</strong>.</p>' +
-        '<blockquote style="margin:16px 0;padding:8px 16px;border-left:3px solid #d1d5db">' +
-        '{{message_preview}}</blockquote>' +
-        '<p><a href="{{thread_url}}">Read and reply in {{portal_name}}</a></p>',
+        '<p>{{sender_name}} posted in <strong>{{thread_subject}}</strong>.</p>' +
+        '<p><a href="{{thread_url}}">Read and reply in {{portal_name}}</a></p>' +
+        '<p>This is one notice for the conversation — open the thread to see ' +
+        'everything that has been posted since you last looked.</p>',
     ),
     body_text:
       'Hello {{recipient_name}},\n\n' +
-      '{{sender_name}} sent you a message about {{thread_subject}}.\n\n' +
-      '{{message_preview}}\n\n' +
-      'Read and reply: {{thread_url}}\n',
+      '{{sender_name}} posted in {{thread_subject}}.\n\n' +
+      'Read and reply: {{thread_url}}\n\n' +
+      'This is one notice for the conversation — open the thread to see ' +
+      'everything that has been posted since you last looked.\n',
   },
 
   mass: {

@@ -1239,6 +1239,74 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(await store.threads.delete(thread.id), true);
     });
 
+    it('messages: countBySenderSince bounds the per-account budget', async () => {
+      const sender = await makeUser();
+      const bystander = await makeUser();
+      const thread = await store.threads.create({
+        subject: `Budget ${newId().slice(0, 6)}`,
+        created_by: sender.id,
+        participant_a: sender.id,
+        participant_b: bystander.id,
+      });
+
+      const boundary = isoInSeconds(-3_600);
+      // One row *at* the boundary, one after it, one comfortably before it.
+      await store.messages.create({
+        thread_id: thread.id,
+        sender_user_id: sender.id,
+        body: 'On the boundary',
+        created_at: boundary,
+      });
+      await store.messages.create({
+        thread_id: thread.id,
+        sender_user_id: sender.id,
+        body: 'Inside',
+        created_at: isoInSeconds(-60),
+      });
+      await store.messages.create({
+        thread_id: thread.id,
+        sender_user_id: sender.id,
+        body: 'Long ago',
+        created_at: isoInSeconds(-7_200),
+      });
+      // Someone else's message in the same thread must not be charged to us.
+      await store.messages.create({
+        thread_id: thread.id,
+        sender_user_id: bystander.id,
+        body: 'Not yours',
+        created_at: isoInSeconds(-60),
+      });
+
+      assert.equal(
+        await store.messages.countBySenderSince(sender.id, boundary),
+        2,
+        'the boundary is inclusive: created_at == since counts',
+      );
+      assert.equal(
+        await store.messages.countBySenderSince(sender.id, isoInSeconds(-3_599)),
+        1,
+        'one second later excludes the boundary row',
+      );
+      assert.equal(
+        await store.messages.countBySenderSince(sender.id, isoInSeconds(-86_400)),
+        3,
+        'a day-wide window sees every row this sender wrote',
+      );
+      assert.equal(
+        await store.messages.countBySenderSince(bystander.id, isoInSeconds(-86_400)),
+        1,
+        'the count is per sender, across every thread — never per thread',
+      );
+      assert.equal(
+        await store.messages.countBySenderSince(sender.id, isoInSeconds(60)),
+        0,
+        'a window that has not started yet counts nothing',
+      );
+
+      await store.messages.deleteByThread(thread.id);
+      await store.threads.delete(thread.id);
+    });
+
     it('threads: participant_user_id matches the seats, never the creator', async () => {
       const admin = await makeUser({ role: 'super_admin' });
       const recipient = await makeUser();
@@ -1429,6 +1497,105 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       const released = await store.emailOutbox.releaseStale(isoInSeconds(60));
       assert.ok(released >= 1);
       assert.equal((await store.emailOutbox.findById(mine?.id ?? ''))?.status, 'pending');
+    });
+
+    /* ── gateway teardown jobs ────────────────────────────────────────── */
+
+    it('gatewayTeardownJobs: one row per user, reset rather than duplicated', async () => {
+      const user = await makeUser();
+      const admin = await makeUser({ role: 'admin' });
+
+      const first = await store.gatewayTeardownJobs.upsertPending(user.id, admin.id, nowIso());
+      assert.equal(first.user_id, user.id);
+      assert.equal(first.status, 'pending');
+      assert.equal(first.attempts, 0);
+      assert.equal(first.requested_by, admin.id);
+      assert.equal(first.last_error, null);
+      assert.equal(first.completed_at, null);
+      assert.deepEqual(await store.gatewayTeardownJobs.findByUser(user.id), first);
+
+      // Move it out of `pending` and then re-disable: the row must come back to
+      // the start rather than a second job appearing for the same account.
+      await store.gatewayTeardownJobs.reschedule(first.id, isoInSeconds(600), 'edge unreachable');
+      const rescheduled = await store.gatewayTeardownJobs.findByUser(user.id);
+      assert.equal(rescheduled?.last_error, 'edge unreachable');
+
+      const second = await store.gatewayTeardownJobs.upsertPending(user.id, null, nowIso());
+      assert.equal(second.id, first.id, 'the same row is reused');
+      assert.equal(second.status, 'pending');
+      assert.equal(second.attempts, 0);
+      assert.equal(second.last_error, null);
+      assert.equal(second.requested_by, null);
+
+      assert.equal(await store.gatewayTeardownJobs.deleteByUser(user.id), true);
+      assert.equal(await store.gatewayTeardownJobs.findByUser(user.id), null);
+      assert.equal(await store.gatewayTeardownJobs.deleteByUser(user.id), false);
+    });
+
+    it('gatewayTeardownJobs: claims a due job exactly once, then completes it', async () => {
+      const user = await makeUser();
+      const job = await store.gatewayTeardownJobs.upsertPending(user.id, null, nowIso());
+
+      const claimed = await store.gatewayTeardownJobs.claimDue(nowIso(), 50);
+      const mine = claimed.filter((row) => row.user_id === user.id);
+      assert.equal(mine.length, 1);
+      assert.equal(mine[0]?.status, 'sending');
+      assert.equal(mine[0]?.attempts, 1, 'claiming increments the attempt counter');
+
+      const again = await store.gatewayTeardownJobs.claimDue(nowIso(), 50);
+      assert.equal(
+        again.filter((row) => row.user_id === user.id).length,
+        0,
+        'a claimed job is never handed out twice',
+      );
+
+      // A failure is a retry, not a terminal state: the row goes back to
+      // `pending` with the reason and a backoff stamp.
+      await store.gatewayTeardownJobs.reschedule(job.id, isoInSeconds(-1), 'edge 500');
+      const retryable = await store.gatewayTeardownJobs.findByUser(user.id);
+      assert.equal(retryable?.status, 'pending');
+      assert.equal(retryable?.last_error, 'edge 500');
+      assert.ok((retryable?.next_attempt_at ?? '') < nowIso(), 'the job is due again');
+
+      const reclaimed = await store.gatewayTeardownJobs.claimDue(nowIso(), 50);
+      assert.equal(
+        reclaimed.find((row) => row.id === job.id)?.attempts,
+        2,
+        'the backoff reschedule makes the job claimable again',
+      );
+
+      const at = nowIso();
+      await store.gatewayTeardownJobs.markDone(job.id, at);
+      const done = await store.gatewayTeardownJobs.findByUser(user.id);
+      assert.equal(done?.status, 'done');
+      assert.equal(done?.next_attempt_at, null);
+      assert.equal(done?.last_error, null);
+      assert.equal(done?.completed_at, at);
+      assert.equal(done?.updated_at, at);
+
+      assert.ok((await store.gatewayTeardownJobs.list({ status: 'done' })).total >= 1);
+      assert.equal(
+        (await store.gatewayTeardownJobs.list({ status: 'done' })).items.some(
+          (row) => row.id === job.id,
+        ),
+        true,
+      );
+    });
+
+    it('gatewayTeardownJobs: releaseStale returns stuck claims to pending', async () => {
+      const user = await makeUser();
+      await store.gatewayTeardownJobs.upsertPending(user.id, null, nowIso());
+      const claimed = await store.gatewayTeardownJobs.claimDue(nowIso(), 50);
+      const mine = claimed.find((row) => row.user_id === user.id);
+      assert.equal(mine?.status, 'sending');
+
+      const released = await store.gatewayTeardownJobs.releaseStale(isoInSeconds(60));
+      assert.ok(released >= 1);
+      assert.equal((await store.gatewayTeardownJobs.findByUser(user.id))?.status, 'pending');
+
+      const pending = await store.gatewayTeardownJobs.list({ status: 'pending' });
+      assert.ok(pending.items.some((row) => row.user_id === user.id));
+      assert.ok(pending.total >= 1);
     });
 
     /* ── audit logs ───────────────────────────────────────────────────── */
@@ -1727,6 +1894,80 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         'a purpose-scoped sweep leaves the other flow alone',
       );
       assert.equal(await store.verificationTokens.deleteForUser(user.id), 1);
+    });
+
+    /* ── leases ───────────────────────────────────────────────────────── */
+
+    it('leases: one holder at a time, taken over only after expiry', async () => {
+      const key = `consumer-${newId()}`;
+      const past = '2020-01-01T00:00:00.000Z';
+      const future = isoInSeconds(600);
+      const now = nowIso();
+
+      assert.equal(await store.leases.acquire(key, 'instance-a', future, now), true);
+      assert.equal(
+        await store.leases.acquire(key, 'instance-b', future, now),
+        false,
+        'a live lease is refused, whoever asks',
+      );
+      assert.equal(
+        await store.leases.acquire(key, 'instance-a', future, now),
+        false,
+        'and refused to the holder too — the lock is not re-entrant',
+      );
+
+      // Rewrite the row to one that expired in the past, the way a crashed
+      // holder leaves it, and prove the next caller inherits it.
+      assert.equal(await store.leases.renew(key, 'instance-a', past), true);
+      assert.equal(await store.leases.acquire(key, 'instance-b', future, now), true);
+      assert.equal(
+        await store.leases.release(key, 'instance-a'),
+        false,
+        'the previous owner can no longer release what it lost',
+      );
+      assert.equal(
+        await store.leases.acquire(key, 'instance-c', future, now),
+        false,
+        'the row survived the non-owner release',
+      );
+
+      assert.equal(await store.leases.release(key, 'instance-b'), true);
+      assert.equal(
+        await store.leases.acquire(key, 'instance-c', future, now),
+        true,
+        'a released lease is free immediately, without waiting for expiry',
+      );
+      assert.equal(await store.leases.release(key, 'instance-c'), true);
+    });
+
+    it('leases: renewal and the expiry sweep', async () => {
+      const key = `proxy-${newId()}`;
+      const now = nowIso();
+      assert.equal(await store.leases.acquire(key, 'holder', isoInSeconds(600), now), true);
+      assert.equal(
+        await store.leases.renew(key, 'someone-else', isoInSeconds(600)),
+        false,
+        'only the owner may extend a lease',
+      );
+      assert.equal(await store.leases.renew(key, 'holder', isoInSeconds(1200)), true);
+      assert.equal(await store.leases.deleteExpired(now), 0, 'a live lease is not swept');
+
+      assert.equal(await store.leases.renew(key, 'holder', '2020-01-01T00:00:00.000Z'), true);
+      assert.equal(await store.leases.deleteExpired(nowIso()), 1);
+      assert.equal(await store.leases.renew(key, 'holder', isoInSeconds(600)), false);
+    });
+
+    it('leases: exactly one of ten concurrent acquires wins the key', async () => {
+      const key = `race-${newId()}`;
+      const now = nowIso();
+      const expiresAt = isoInSeconds(600);
+
+      const results = await Promise.all(
+        Array.from({ length: 10 }, (_unused, index) =>
+          store.leases.acquire(key, `instance-${index}`, expiresAt, now),
+        ),
+      );
+      assert.equal(results.filter(Boolean).length, 1);
     });
 
     /* ── transactions ─────────────────────────────────────────────────── */

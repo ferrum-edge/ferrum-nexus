@@ -24,6 +24,7 @@ import type { EmailOutboxRecord, NexusStore } from '../db/store.js';
 import type { MailTransport, MailTransportFactory, OutboundMail } from '../email/service.js';
 import type { OutboxTickResult } from '../email/outbox-worker.js';
 import { createFerrumAdminClient, type FerrumAdminClient } from '../ferrum-admin/index.js';
+import type { ResolvedAddress, UpstreamResolver } from '../publishing/oas.js';
 import { buildServer, type BuildServerDeps, type NexusServices } from '../index.js';
 import { createMockFerrumEdge, type MockFerrumEdge } from './mock-ferrum-edge.js';
 
@@ -34,6 +35,16 @@ export const TEST_EDGE_JWT_SECRET = 'test-ferrum-admin-jwt-secret-0123456789';
 
 /** Default password used by {@link TestApp.registerUser}. */
 export const TEST_PASSWORD = 'correct-horse-battery-staple';
+
+/**
+ * `NEXUS_BOOTSTRAP_TOKEN` every harness is built with.
+ *
+ * Only the very first registration against a harness needs it; the server
+ * ignores the field once any account exists, so {@link TestApp.registerUser}
+ * sends it unconditionally and a test that injects `POST /api/auth/register`
+ * by hand only has to include it when it is creating the founder.
+ */
+export const TEST_BOOTSTRAP_TOKEN = 'test-bootstrap-token-0123456789abcdef';
 
 /* ── OpenAPI fixtures ───────────────────────────────────────────────────── */
 
@@ -74,6 +85,43 @@ export const SAMPLE_SPEC_JSON = JSON.stringify(
   2,
 );
 
+/* ── Upstream DNS ───────────────────────────────────────────────────────── */
+
+/**
+ * The address every hostname resolves to under {@link buildTestApp}.
+ *
+ * The private-upstream policy resolves the name it is about to publish, and the
+ * fixtures point at `billing.example.com`, `api.example.com` and friends —
+ * names whose real records are not ours to depend on, and which a sandboxed
+ * test run cannot look up at all. The harness therefore injects a resolver that
+ * answers this public address for anything, and a test that cares about the
+ * policy passes its own through `deps.upstreamResolver`.
+ */
+export const TEST_PUBLIC_ADDRESS = '93.184.216.34';
+
+/** A resolver answering {@link TEST_PUBLIC_ADDRESS} for every hostname. */
+export function publicUpstreamResolver(): UpstreamResolver {
+  return async () => [{ address: TEST_PUBLIC_ADDRESS, family: 4 }];
+}
+
+/**
+ * A resolver answering `answers[host]`, falling back to a public address.
+ *
+ * `null` as an answer rejects, which is how a test drives the
+ * `unresolvable_upstream` branch.
+ */
+export function fakeUpstreamResolver(
+  answers: Record<string, ResolvedAddress[] | null>,
+): UpstreamResolver {
+  return async (host) => {
+    const answer = answers[host];
+    if (answer === undefined) return [{ address: TEST_PUBLIC_ADDRESS, family: 4 }];
+    if (answer === null)
+      throw Object.assign(new Error(`no record for ${host}`), { code: 'ENOTFOUND' });
+    return answer;
+  };
+}
+
 /** Build a spec whose `servers[0].url` is `url` — used by the spec-update tests. */
 export function specWithServer(url: string, version = '1.0.0'): string {
   return JSON.stringify({
@@ -90,6 +138,17 @@ export interface BuildTestAppOptions {
   env?: EnvRecord;
   /** Override injected server dependencies (e.g. `onRegistered`). */
   deps?: Partial<Omit<BuildServerDeps, 'store' | 'edge'>>;
+  /**
+   * Share one already-migrated store with another app, which is how the
+   * two-instance race tests model two Nexus processes over one database.
+   * `close()` leaves a shared store open — the owner closes it.
+   */
+  store?: NexusStore;
+  /**
+   * Share one already-started mock gateway, for the same reason. `close()`
+   * leaves a shared mock running.
+   */
+  edge?: MockFerrumEdge;
 }
 
 /** An authenticated identity produced by the register/login helpers. */
@@ -177,6 +236,7 @@ export interface RegisterPayload {
   company?: string | null;
   phone?: string | null;
   captcha_token?: string;
+  bootstrap_token?: string;
 }
 
 let userCounter = 0;
@@ -205,32 +265,51 @@ function sessionFrom(response: LightMyRequestResponse, user: User): TestSession 
 
 /** Boot a full test application. Always `await close()` in an `after` hook. */
 export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<TestApp> {
-  const edge = createMockFerrumEdge({ jwtSecret: TEST_EDGE_JWT_SECRET, issuer: 'ferrum-edge' });
-  const edgeUrl = await edge.start();
+  const sharedEdge = options.edge !== undefined;
+  const edge =
+    options.edge ??
+    createMockFerrumEdge({ jwtSecret: TEST_EDGE_JWT_SECRET, issuer: 'ferrum-edge' });
+  const edgeUrl = sharedEdge ? edge.url : await edge.start();
 
   const config = loadConfig({
     NEXUS_ENV: 'test',
     NEXUS_LOG_LEVEL: 'silent',
     NEXUS_SECRET_KEY: TEST_SECRET_KEY,
+    NEXUS_BOOTSTRAP_TOKEN: TEST_BOOTSTRAP_TOKEN,
+    // The health probes are uncached by default here: several tests flip the
+    // database or the gateway between two requests and expect the second one
+    // to see the new state. Tests that exercise the cache set their own value.
+    NEXUS_HEALTH_CACHE_MS: '0',
     NEXUS_SQLITE_PATH: ':memory:',
     NEXUS_DB_DRIVER: 'sqlite',
     FERRUM_ADMIN_URL: edgeUrl,
     FERRUM_ADMIN_JWT_SECRET: TEST_EDGE_JWT_SECRET,
     FERRUM_NAMESPACE: 'nexus',
+    // Off by default, the way `NEXUS_RATE_LIMIT_ENABLED` is: most suites share
+    // one provider account across dozens of publishes, and a production ceiling
+    // silently turning half a suite into `429`s would be a confusing way to
+    // discover it. The quota tests set a small limit explicitly.
+    NEXUS_MAX_APIS_PER_OWNER: '0',
     ...options.env,
   });
 
-  const store = createStore(config);
-  await store.init();
-  await store.migrate();
+  const sharedStore = options.store !== undefined;
+  const store = options.store ?? createStore(config);
+  if (!sharedStore) {
+    await store.init();
+    await store.migrate();
+  }
 
-  const edgeClient = createFerrumAdminClient(config.edge);
+  // The real composition root passes `store.leases`, so the whole suite runs
+  // through the cross-instance path rather than the in-process queue alone.
+  const edgeClient = createFerrumAdminClient(config.edge, undefined, { leases: store.leases });
   const { mailbox, factory } = createTestMailbox();
   const app = await buildServer(config, {
     store,
     edge: edgeClient,
     serveStatic: false,
     mailTransportFactory: factory,
+    upstreamResolver: publicUpstreamResolver(),
     ...options.deps,
   });
 
@@ -266,6 +345,9 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
         password: TEST_PASSWORD,
         display_name: `User ${userCounter}`,
         role: 'client',
+        // Ignored unless this is the portal's first account, in which case it
+        // is what allows the founder to be elected at all.
+        bootstrap_token: TEST_BOOTSTRAP_TOKEN,
         ...overrides,
       };
       const response = await app.inject({
@@ -304,8 +386,10 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
 
     async close(): Promise<void> {
       await app.close();
-      await store.close();
-      await edge.stop();
+      // A store or mock the caller supplied belongs to the caller; closing it
+      // here would pull it out from under the app that is sharing it.
+      if (!sharedStore) await store.close();
+      if (!sharedEdge) await edge.stop();
     },
   };
 

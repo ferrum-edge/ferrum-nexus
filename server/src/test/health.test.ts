@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 
-import type { AppHealth, EdgeHealth } from '@ferrum-nexus/shared';
+import type { ApiErrorBody, AppHealth, EdgeHealth } from '@ferrum-nexus/shared';
 
 import { OPAQUE_ERROR } from '../routes/health.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
@@ -200,5 +201,155 @@ describe('health endpoints', () => {
     const response = await harness.app.inject({ method: 'GET', url: '/api/health/edge' });
     assert.equal(response.statusCode, 200);
     assert.equal(response.json<EdgeHealth>().status, 'down');
+  });
+});
+
+describe('health probe caching', () => {
+  // GHSA-wqg6-cqxx-p952: both routes are unauthenticated, and every request
+  // used to mint a fresh database query and a signed Admin API call. The cache
+  // plus the shared in-flight promise is what bounds that to one probe per
+  // window however hard the endpoint is hit.
+
+  /** Edge health probes the mock actually served. */
+  function edgeProbes(harness: TestApp): number {
+    return harness.edge.callsTo('GET', '/health').length;
+  }
+
+  it('collapses 50 concurrent /api/health/edge requests into one gateway probe', async () => {
+    const harness = await buildTestApp({ env: { NEXUS_HEALTH_CACHE_MS: '5000' } });
+    try {
+      harness.edge.reset();
+      const responses = await Promise.all(
+        Array.from({ length: 50 }, () =>
+          harness.app.inject({ method: 'GET', url: '/api/health/edge' }),
+        ),
+      );
+      for (const response of responses) {
+        assert.equal(response.statusCode, 200);
+        assert.equal(response.json<EdgeHealth>().status, 'ok');
+      }
+      assert.equal(edgeProbes(harness), 1, 'concurrent callers must share one probe');
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('collapses a burst of /api/health the same way', async () => {
+    const harness = await buildTestApp({ env: { NEXUS_HEALTH_CACHE_MS: '5000' } });
+    try {
+      harness.edge.reset();
+      const responses = await Promise.all(
+        Array.from({ length: 50 }, () => harness.app.inject({ method: 'GET', url: '/api/health' })),
+      );
+      for (const response of responses) assert.equal(response.statusCode, 200);
+      assert.equal(edgeProbes(harness), 1, 'the root endpoint probes the gateway once too');
+
+      // And a later sequential request inside the window adds nothing.
+      await harness.app.inject({ method: 'GET', url: '/api/health' });
+      assert.equal(edgeProbes(harness), 1, 'a request inside the TTL is served from the cache');
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('probes again once the TTL has passed', async () => {
+    const harness = await buildTestApp({ env: { NEXUS_HEALTH_CACHE_MS: '80' } });
+    try {
+      harness.edge.reset();
+      const first = await harness.app.inject({ method: 'GET', url: '/api/health' });
+      assert.equal(edgeProbes(harness), 1);
+      const checkedAt = first.json<AppHealth>().checked_at;
+
+      await delay(120);
+      const second = await harness.app.inject({ method: 'GET', url: '/api/health' });
+      assert.equal(edgeProbes(harness), 2, 'the cache expires');
+      assert.notEqual(
+        second.json<AppHealth>().checked_at,
+        checkedAt,
+        'checked_at reports when the probe ran, not when the request arrived',
+      );
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('probes on every request when the cache is disabled', async () => {
+    const harness = await buildTestApp({ env: { NEXUS_HEALTH_CACHE_MS: '0' } });
+    try {
+      harness.edge.reset();
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await harness.app.inject({ method: 'GET', url: '/api/health/edge' });
+      }
+      assert.equal(edgeProbes(harness), 3, 'NEXUS_HEALTH_CACHE_MS=0 keeps the old behaviour');
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('keeps the admin-only detail rules on a cached probe', async () => {
+    const harness = await buildTestApp({ env: { NEXUS_HEALTH_CACHE_MS: '5000' } });
+    try {
+      const admin = await harness.registerUser({ email: 'health-admin@example.test' });
+      harness.edge.setHealth({
+        status: 'starting',
+        ready: false,
+        mode: 'database',
+        admin_writes_enabled: false,
+      });
+      harness.edge.reset();
+
+      // The admin goes first, so the anonymous caller is answered from a cache
+      // entry that was filled while an admin was looking at it.
+      const detailed = await harness.authed(admin, { method: 'GET', url: '/api/health/edge' });
+      assert.equal(detailed.json<EdgeHealth>().mode, 'database');
+
+      const anonymous = await harness.app.inject({ method: 'GET', url: '/api/health/edge' });
+      assert.equal(edgeProbes(harness), 1, 'both callers shared the probe');
+      assert.equal(anonymous.json<EdgeHealth>().mode, null, 'the rendering is still per caller');
+      assert.equal(anonymous.json<EdgeHealth>().admin_writes_enabled, null);
+      assert.equal(anonymous.json<EdgeHealth>().status, 'not_ready');
+    } finally {
+      await harness.close();
+    }
+  });
+});
+
+describe('health rate limiting', () => {
+  let harness: TestApp;
+
+  before(async () => {
+    // The limiter is forced off under NEXUS_ENV=test, so this app runs as a
+    // development one with it explicitly on.
+    harness = await buildTestApp({
+      env: {
+        NEXUS_ENV: 'development',
+        NEXUS_RATE_LIMIT_ENABLED: 'true',
+        NEXUS_HEALTH_CACHE_MS: '5000',
+        NEXUS_LOG_LEVEL: 'silent',
+      },
+      deps: { startOutboxWorker: false },
+    });
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  it('answers 429 RATE_LIMITED once a client exceeds the health budget', async () => {
+    const statuses: number[] = [];
+    let limited: string | null = null;
+    for (let attempt = 0; attempt < 130; attempt += 1) {
+      const response = await harness.app.inject({ method: 'GET', url: '/api/health/edge' });
+      statuses.push(response.statusCode);
+      if (response.statusCode === 429 && limited === null) limited = response.body;
+    }
+
+    assert.equal(
+      statuses.filter((status) => status === 200).length,
+      120,
+      `the limit is 120/minute: ${statuses.filter((status) => status === 200).length} passed`,
+    );
+    assert.ok(limited, 'the limiter must engage');
+    assert.equal((JSON.parse(limited) as ApiErrorBody).error.code, 'RATE_LIMITED');
   });
 });

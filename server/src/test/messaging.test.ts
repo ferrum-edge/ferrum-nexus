@@ -69,7 +69,11 @@ describe('messaging', () => {
     );
     assert.equal(queued.length, 1);
     assert.ok(queued[0]?.subject.includes('Rate limit on the billing API'));
-    assert.ok(queued[0]?.body_text.includes('Could we raise the burst limit?'));
+    // The mail announces activity and links to the thread; it deliberately does
+    // not quote the body, because it is coalesced — later messages in the same
+    // window send no mail at all, so a quoted transcript would be a lie.
+    assert.ok(!queued[0]?.body_text.includes('Could we raise the burst limit?'));
+    assert.ok(queued[0]?.body_text.includes(`/messages/${threadId}`));
   });
 
   it('continues the existing conversation instead of opening a duplicate', async () => {

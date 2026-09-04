@@ -39,6 +39,7 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { clientIp, requireAuth, requireRole } from '../middleware/auth-plugin.js';
+import { userOrIpKey } from '../middleware/rate-limit-keys.js';
 import { parseOrThrow } from '../middleware/error-handler.js';
 import { parsePluginConfig, pluginTriggerSchema } from '../plugins/schema.js';
 import type { ApiPluginsService } from '../plugins/service.js';
@@ -61,6 +62,33 @@ export interface PublishingRoutesOptions {
 
 /** Character ceiling on an uploaded document; the byte check lives in `oas.ts`. */
 const specField = z.string().min(1).max(MAX_SPEC_BYTES);
+
+/**
+ * The route config every **mutating** route here shares.
+ *
+ * Each of them costs several Ferrum Edge round trips, and a publish or a spec
+ * replace also stores a document of up to `MAX_SPEC_BYTES`. None of it was
+ * bounded before (GHSA-g32g-g9q4-q5wr): a self-registered provider could hold
+ * the publishing endpoints open in a loop until the gateway or the database ran
+ * out. 30 a minute is an order of magnitude above what the SPA produces — one
+ * request per form save — and an order of magnitude below what a script needs
+ * to matter.
+ *
+ * Keyed **per account** ({@link userOrIpKey}), not per IP. Behind a session the
+ * account is the thing worth bounding: an IP bucket punishes a whole office
+ * behind one NAT and lets a single account multiply its allowance by rotating
+ * source addresses. The generator falls back to the IP for a request with no
+ * session, which on this scope only happens if the role guard is ever relaxed.
+ *
+ * The limiter is only installed when `config.rateLimitEnabled` — the composition
+ * root registers `@fastify/rate-limit` on this scope with `global: false`, so
+ * without it these configs are inert and the reads stay unlimited either way.
+ * The quota in `publishing/service.ts` is the other half: this bounds the
+ * *rate*, the quota bounds the *total*.
+ */
+const MUTATION_RATE_LIMIT = {
+  rateLimit: { max: 30, timeWindow: '1 minute', keyGenerator: userOrIpKey },
+} as const;
 
 const rateLimitSchema = z
   .object({
@@ -234,29 +262,33 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
     );
   });
 
-  app.post('/', async (request, reply): Promise<PublishApiResponse> => {
-    const { user } = requireAuth(request);
-    const input = parseOrThrow(publishBody, request.body);
-    const result = await publishing.publish(
-      user,
-      {
-        ...input,
-        slug: input.slug ?? '',
-        version: input.version ?? '',
-        upstream_url: input.upstream_url ?? '',
-        description: input.description ?? null,
-        rate_limit: input.rate_limit ?? null,
-        cors: corsOrNull(input.cors),
-        allowed_methods: input.allowed_methods ?? null,
-        timeouts: input.timeouts ?? null,
-        circuit_breaker: input.circuit_breaker ?? false,
-        spec_enforcement: input.spec_enforcement ?? DEFAULT_SPEC_ENFORCEMENT,
-      },
-      clientIp(request),
-    );
-    reply.status(201);
-    return result;
-  });
+  app.post(
+    '/',
+    { config: MUTATION_RATE_LIMIT },
+    async (request, reply): Promise<PublishApiResponse> => {
+      const { user } = requireAuth(request);
+      const input = parseOrThrow(publishBody, request.body);
+      const result = await publishing.publish(
+        user,
+        {
+          ...input,
+          slug: input.slug ?? '',
+          version: input.version ?? '',
+          upstream_url: input.upstream_url ?? '',
+          description: input.description ?? null,
+          rate_limit: input.rate_limit ?? null,
+          cors: corsOrNull(input.cors),
+          allowed_methods: input.allowed_methods ?? null,
+          timeouts: input.timeouts ?? null,
+          circuit_breaker: input.circuit_breaker ?? false,
+          spec_enforcement: input.spec_enforcement ?? DEFAULT_SPEC_ENFORCEMENT,
+        },
+        clientIp(request),
+      );
+      reply.status(201);
+      return result;
+    },
+  );
 
   app.get('/:id', async (request): Promise<GetApiResponse> => {
     const { user } = requireAuth(request);
@@ -282,29 +314,44 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
     },
   );
 
-  app.patch('/:id', async (request): Promise<UpdateApiResponse> => {
-    const { user } = requireAuth(request);
-    const { id } = parseOrThrow(idParamSchema, request.params);
-    const patch = parseOrThrow(updateBody, request.body);
-    // `undefined` means "leave the setting alone"; `null` means "remove it" —
-    // for the proxy fields, "back to the gateway default".
-    const body = { ...patch, cors: patch.cors === undefined ? undefined : corsOrNull(patch.cors) };
-    return { api: await publishing.update(user, id, body, clientIp(request)) };
-  });
+  app.patch(
+    '/:id',
+    { config: MUTATION_RATE_LIMIT },
+    async (request): Promise<UpdateApiResponse> => {
+      const { user } = requireAuth(request);
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      const patch = parseOrThrow(updateBody, request.body);
+      // `undefined` means "leave the setting alone"; `null` means "remove it" —
+      // for the proxy fields, "back to the gateway default".
+      const body = {
+        ...patch,
+        cors: patch.cors === undefined ? undefined : corsOrNull(patch.cors),
+      };
+      return { api: await publishing.update(user, id, body, clientIp(request)) };
+    },
+  );
 
-  app.delete('/:id', async (request): Promise<DeleteApiResponse> => {
-    const { user } = requireAuth(request);
-    const { id } = parseOrThrow(idParamSchema, request.params);
-    await publishing.remove(user, id, clientIp(request));
-    return { ok: true };
-  });
+  app.delete(
+    '/:id',
+    { config: MUTATION_RATE_LIMIT },
+    async (request): Promise<DeleteApiResponse> => {
+      const { user } = requireAuth(request);
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      await publishing.remove(user, id, clientIp(request));
+      return { ok: true };
+    },
+  );
 
-  app.put('/:id/spec', async (request): Promise<UpdateApiSpecResponse> => {
-    const { user } = requireAuth(request);
-    const { id } = parseOrThrow(idParamSchema, request.params);
-    const body = parseOrThrow(specBody, request.body);
-    return publishing.updateSpec(user, id, body.spec, body.version, clientIp(request));
-  });
+  app.put(
+    '/:id/spec',
+    { config: MUTATION_RATE_LIMIT },
+    async (request): Promise<UpdateApiSpecResponse> => {
+      const { user } = requireAuth(request);
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      const body = parseOrThrow(specBody, request.body);
+      return publishing.updateSpec(user, id, body.spec, body.version, clientIp(request));
+    },
+  );
 
   /* ── Plugin palette ───────────────────────────────────────────────────
    *
@@ -320,46 +367,58 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
     return { plugins: await apiPlugins.list(user, id) };
   });
 
-  app.put('/:id/plugins/:name', async (request): Promise<SetApiPluginResponse> => {
-    const { user } = requireAuth(request);
-    const { id, name } = parseOrThrow(pluginParamsSchema, request.params);
-    const body = parseOrThrow(pluginBody, request.body ?? {});
-    // Resolve the plugin first: an unknown name must not be reported as a
-    // config problem, and the descriptor is what the config is validated
-    // against.
-    const descriptor = apiPlugins.descriptorFor(name);
-    const plugin = await apiPlugins.set(
-      user,
-      id,
-      descriptor.name,
-      {
-        enabled: body.enabled ?? true,
-        config: parsePluginConfig(descriptor, body.config),
-        trigger: body.trigger ?? null,
-      },
-      clientIp(request),
-    );
-    return { plugin };
-  });
+  app.put(
+    '/:id/plugins/:name',
+    { config: MUTATION_RATE_LIMIT },
+    async (request): Promise<SetApiPluginResponse> => {
+      const { user } = requireAuth(request);
+      const { id, name } = parseOrThrow(pluginParamsSchema, request.params);
+      const body = parseOrThrow(pluginBody, request.body ?? {});
+      // Resolve the plugin first: an unknown name must not be reported as a
+      // config problem, and the descriptor is what the config is validated
+      // against.
+      const descriptor = apiPlugins.descriptorFor(name);
+      const plugin = await apiPlugins.set(
+        user,
+        id,
+        descriptor.name,
+        {
+          enabled: body.enabled ?? true,
+          config: parsePluginConfig(descriptor, body.config),
+          trigger: body.trigger ?? null,
+        },
+        clientIp(request),
+      );
+      return { plugin };
+    },
+  );
 
-  app.delete('/:id/plugins/:name', async (request): Promise<DeleteApiPluginResponse> => {
-    const { user } = requireAuth(request);
-    const { id, name } = parseOrThrow(pluginParamsSchema, request.params);
-    await apiPlugins.remove(user, id, name, clientIp(request));
-    return { ok: true };
-  });
+  app.delete(
+    '/:id/plugins/:name',
+    { config: MUTATION_RATE_LIMIT },
+    async (request): Promise<DeleteApiPluginResponse> => {
+      const { user } = requireAuth(request);
+      const { id, name } = parseOrThrow(pluginParamsSchema, request.params);
+      await apiPlugins.remove(user, id, name, clientIp(request));
+      return { ok: true };
+    },
+  );
 
-  app.post('/:id/test-consumer', async (request, reply): Promise<CreateTestConsumerResponse> => {
-    const { user } = requireAuth(request);
-    const { id } = parseOrThrow(idParamSchema, request.params);
-    const body = parseOrThrow(testConsumerBody, request.body ?? {});
-    const result = await publishing.createTestConsumer(
-      user,
-      id,
-      body.label ?? null,
-      clientIp(request),
-    );
-    reply.status(201);
-    return result;
-  });
+  app.post(
+    '/:id/test-consumer',
+    { config: MUTATION_RATE_LIMIT },
+    async (request, reply): Promise<CreateTestConsumerResponse> => {
+      const { user } = requireAuth(request);
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      const body = parseOrThrow(testConsumerBody, request.body ?? {});
+      const result = await publishing.createTestConsumer(
+        user,
+        id,
+        body.label ?? null,
+        clientIp(request),
+      );
+      reply.status(201);
+      return result;
+    },
+  );
 };

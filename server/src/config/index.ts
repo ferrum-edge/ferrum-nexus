@@ -8,8 +8,8 @@
  * Every variable documented in the repo-root `.env.example` is covered here
  * with the same default. A handful of extra variables exist for testing and
  * container deployment (`NEXUS_ENV`, `NEXUS_RATE_LIMIT_ENABLED`,
- * `NEXUS_WEB_DIST`, `NEXUS_ALLOW_PRIVATE_UPSTREAMS`, `FERRUM_ADMIN_TIMEOUT_MS`,
- * `FERRUM_MAX_CREDENTIALS_PER_TYPE`);
+ * `NEXUS_HEALTH_CACHE_MS`, `NEXUS_WEB_DIST`, `NEXUS_ALLOW_PRIVATE_UPSTREAMS`,
+ * `FERRUM_ADMIN_TIMEOUT_MS`, `FERRUM_MAX_CREDENTIALS_PER_TYPE`);
  * they are all optional and default to production-safe values.
  */
 
@@ -41,6 +41,17 @@ export type NodeEnv = 'development' | 'test' | 'production';
  * passed to `proxy-addr` unchanged.
  */
 export type TrustedProxies = false | number | string[];
+
+/**
+ * Default ceiling on APIs owned by one account (`NEXUS_MAX_APIS_PER_OWNER`).
+ *
+ * High enough that no honest provider meets it — a team publishing fifty
+ * distinct APIs from one portal account is already unusual — and low enough
+ * that a scripted account cannot exhaust the gateway or the database before an
+ * operator notices. `0` turns the ceiling off for a closed deployment where
+ * every provider is vetted.
+ */
+export const DEFAULT_MAX_APIS_PER_OWNER = 50;
 
 /** Aliases `proxy-addr` understands in place of a literal CIDR. */
 const PROXY_KEYWORDS = ['loopback', 'linklocal', 'uniquelocal'] as const;
@@ -155,10 +166,58 @@ export interface NexusConfig {
   logLevel: LogLevel;
   /** Master secret; every other key is HKDF-derived from it. */
   secretKey: string;
+  /**
+   * Secret the first-ever registration must present to become the founding
+   * `super_admin` (`NEXUS_BOOTSTRAP_TOKEN`).
+   *
+   * `undefined` means the variable is unset, in which case the entry point
+   * generates one per process and prints it — see `main()` in `../index.ts`.
+   * A server built with this still `undefined` refuses every registration
+   * against an empty portal, because there is no token that could match.
+   */
+  bootstrapToken: string | undefined;
   /** Session idle lifetime in seconds (sliding). */
   sessionTtlSeconds: number;
-  /** Whether the `/api/auth/*` rate limiter is installed. Off under `NEXUS_ENV=test`. */
+  /** Whether the `/api/auth/*`, `/api/health`, `/api/apis/*` and `/api/threads/*` rate limiters are installed. Off under `NEXUS_ENV=test`. */
   rateLimitEnabled: boolean;
+  /**
+   * How long `GET /api/health` reuses a dependency probe
+   * (`NEXUS_HEALTH_CACHE_MS`).
+   *
+   * The endpoints are unauthenticated, and each one used to turn a cheap public
+   * request into a database query and an authenticated Admin API call. Within
+   * this window the database and gateway probes are each taken once and shared,
+   * including a failing one — a probe keys on the status code, and a few
+   * seconds of lag is cheaper than letting anonymous traffic drive the
+   * control plane.
+   *
+   * `0` disables the cache: every request probes, which is what the tests that
+   * flip dependency state between requests rely on.
+   */
+  healthCacheMs: number;
+  /**
+   * How many APIs one account may own at a time (`NEXUS_MAX_APIS_PER_OWNER`).
+   * `0` disables the ceiling.
+   *
+   * Registration may be open, so a `provider` is only semi-trusted, and each
+   * publish stores a document of up to `MAX_SPEC_BYTES` and allocates a proxy,
+   * several plugin configs and a slug on the gateway. Without a ceiling one
+   * account can exhaust all of it (GHSA-g32g-g9q4-q5wr). Aggregate spec storage
+   * per account is therefore bounded by `MAX_SPEC_BYTES × this` — 100 MB at the
+   * default of 50.
+   */
+  maxApisPerOwner: number;
+  /**
+   * How many portal messages one account may post in a rolling 24 hours
+   * (`NEXUS_MAX_MESSAGES_PER_USER_PER_DAY`). `0` disables the budget.
+   *
+   * The per-minute limiters bound a burst; this bounds the day, because every
+   * message durably costs a message row, an audit row and — for a platform
+   * thread — a notification row per administrator. Admins are subject to it
+   * too: an account that needs more than a few hundred messages a day is an
+   * integration, not a person.
+   */
+  maxMessagesPerUserPerDay: number;
   /**
    * Whether a provider may publish an API whose upstream is a loopback, private,
    * link-local or internal destination (`NEXUS_ALLOW_PRIVATE_UPSTREAMS`).
@@ -248,6 +307,8 @@ const envSchema = z.object({
     .string({ required_error: 'is required' })
     .min(32, 'must be at least 32 characters (generate with `openssl rand -hex 32`)'),
 
+  NEXUS_BOOTSTRAP_TOKEN: optionalString(),
+
   NEXUS_HOST: stringish('127.0.0.1'),
   NEXUS_PORT: intish(8787, 0, 65_535),
   NEXUS_PUBLIC_URL: stringish('http://127.0.0.1:5173'),
@@ -270,6 +331,9 @@ const envSchema = z.object({
     }),
   NEXUS_SESSION_TTL: intish(DEFAULT_SESSION_TTL_SECONDS, 60, 60 * 60 * 24 * 30),
   NEXUS_RATE_LIMIT_ENABLED: boolish(true),
+  NEXUS_HEALTH_CACHE_MS: intish(5_000, 0, 60_000),
+  NEXUS_MAX_APIS_PER_OWNER: intish(DEFAULT_MAX_APIS_PER_OWNER, 0, 100_000),
+  NEXUS_MAX_MESSAGES_PER_USER_PER_DAY: intish(200, 0, 1_000_000),
   NEXUS_ALLOW_PRIVATE_UPSTREAMS: boolish(false),
   NEXUS_WEB_DIST: optionalString(),
 
@@ -324,6 +388,9 @@ const envSchema = z.object({
 });
 
 const NAMESPACE_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+
+/** Shortest `NEXUS_BOOTSTRAP_TOKEN` accepted; the generated one is 64 hex chars. */
+export const MIN_BOOTSTRAP_TOKEN_LENGTH = 16;
 
 /**
  * Validate an environment record into a {@link NexusConfig}.
@@ -426,6 +493,17 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     );
   }
 
+  // ── Bootstrap token ──────────────────────────────────────────────────────
+  // Optional, but a short one is worse than none: it looks configured while
+  // being guessable, and what it guards is the founding super_admin.
+  const bootstrapToken = raw.NEXUS_BOOTSTRAP_TOKEN;
+  if (bootstrapToken !== undefined && bootstrapToken.length < MIN_BOOTSTRAP_TOKEN_LENGTH) {
+    problems.push(
+      `NEXUS_BOOTSTRAP_TOKEN must be at least ${MIN_BOOTSTRAP_TOKEN_LENGTH} characters ` +
+        '(generate with `openssl rand -hex 32`), or be left unset so the server generates one',
+    );
+  }
+
   // ── Non-sqlite drivers need a connection URL ─────────────────────────────
   if (raw.NEXUS_DB_DRIVER !== 'sqlite' && raw.NEXUS_DB_URL === '') {
     problems.push(`NEXUS_DB_URL is required when NEXUS_DB_DRIVER=${raw.NEXUS_DB_DRIVER}`);
@@ -442,8 +520,12 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     cookieSecure,
     logLevel: raw.NEXUS_LOG_LEVEL,
     secretKey: raw.NEXUS_SECRET_KEY,
+    bootstrapToken,
     sessionTtlSeconds: raw.NEXUS_SESSION_TTL,
     rateLimitEnabled: nodeEnv === 'test' ? false : raw.NEXUS_RATE_LIMIT_ENABLED,
+    healthCacheMs: raw.NEXUS_HEALTH_CACHE_MS,
+    maxApisPerOwner: raw.NEXUS_MAX_APIS_PER_OWNER,
+    maxMessagesPerUserPerDay: raw.NEXUS_MAX_MESSAGES_PER_USER_PER_DAY,
     allowPrivateUpstreams: raw.NEXUS_ALLOW_PRIVATE_UPSTREAMS,
     webDistPath: raw.NEXUS_WEB_DIST,
     db: {

@@ -241,6 +241,12 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
 
       const target = await loadTarget(actor, apiId);
       const trigger = edgeTriggerFor(input.trigger);
+      // Keyed by proxy *and* plugin name so two different palette plugins on
+      // one API still save concurrently. The reconcile steps inside nest the
+      // canonical `proxy:<id>` key through `binder.mutateProxy`; that is a
+      // different key, so queue and lease both grant it, and the order is
+      // always name-then-proxy — never the reverse, which would invert the
+      // lock order against another caller.
       const { saved, replaced } = await edge.serializePerKey(
         `proxy-plugin:${target.proxyId}:${pluginName}`,
         async () => {
@@ -312,6 +318,7 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
     async remove(actor, apiId, pluginName, ip = null) {
       const descriptor = descriptorFor(pluginName);
       const target = await loadTarget(actor, apiId);
+      // Same key, same nesting contract as `set` above.
       const wasAttached = await edge.serializePerKey(
         `proxy-plugin:${target.proxyId}:${pluginName}`,
         async () => {

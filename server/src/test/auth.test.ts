@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 
+import type { LightMyRequestResponse } from 'fastify';
+
 import { CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE, type ApiErrorBody } from '@ferrum-nexus/shared';
 
 import { AuditAction } from '../audit/service.js';
@@ -10,6 +12,7 @@ import { isoInSeconds } from '../lib/ids.js';
 import {
   buildTestApp,
   cookieValue,
+  TEST_BOOTSTRAP_TOKEN,
   TEST_PASSWORD,
   TEST_SECRET_KEY,
   type TestApp,
@@ -40,6 +43,7 @@ describe('auth flow', () => {
         display_name: 'Founder',
         // A client role is requested; the bootstrap rule overrides it.
         role: 'client',
+        bootstrap_token: TEST_BOOTSTRAP_TOKEN,
       },
     });
 
@@ -557,6 +561,107 @@ describe('registration policy', () => {
   });
 });
 
+describe('bootstrap token', () => {
+  let harness: TestApp;
+
+  /** `POST /api/auth/register` with whatever bootstrap field the case needs. */
+  function register(
+    email: string,
+    payload: Record<string, unknown> = {},
+  ): Promise<LightMyRequestResponse> {
+    return harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      payload: {
+        email,
+        password: TEST_PASSWORD,
+        display_name: 'Candidate',
+        role: 'client',
+        ...payload,
+      },
+    });
+  }
+
+  async function brandingRequiresBootstrap(): Promise<boolean> {
+    const response = await harness.app.inject({ method: 'GET', url: '/api/branding' });
+    assert.equal(response.statusCode, 200);
+    return response.json<{ bootstrap_required: boolean }>().bootstrap_required;
+  }
+
+  before(async () => {
+    harness = await buildTestApp();
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  it('advertises that the empty portal needs bootstrapping', async () => {
+    assert.equal(await brandingRequiresBootstrap(), true);
+  });
+
+  it('refuses the first registration with no token, writing nothing', async () => {
+    const response = await register('drive-by@example.test');
+
+    assert.equal(response.statusCode, 403);
+    assert.equal(errorCode(response.body), 'FORBIDDEN');
+    assert.match(response.body, /bootstrap token/);
+    assert.equal(cookieValue(response, SESSION_COOKIE), undefined, 'no session is issued');
+
+    // The refusal is total: no account, and the election is still unclaimed,
+    // so the real operator can still bootstrap afterwards.
+    assert.equal(await harness.store.users.count(), 0);
+    assert.equal(await harness.store.users.findByEmail('drive-by@example.test'), null);
+    assert.equal(await harness.store.settings.get(SUPER_ADMIN_CLAIM_KEY), null);
+  });
+
+  it('refuses a wrong token', async () => {
+    const wrong = await register('guesser@example.test', {
+      bootstrap_token: `${TEST_BOOTSTRAP_TOKEN}x`,
+    });
+    assert.equal(wrong.statusCode, 403);
+    assert.equal(errorCode(wrong.body), 'FORBIDDEN');
+
+    // A prefix of the real token is no closer than any other wrong value.
+    const truncated = await register('guesser2@example.test', {
+      bootstrap_token: TEST_BOOTSTRAP_TOKEN.slice(0, -1),
+    });
+    assert.equal(truncated.statusCode, 403);
+    assert.equal(await harness.store.users.count(), 0);
+  });
+
+  it('accepts the right token and elects a verified super_admin', async () => {
+    const response = await register('operator@example.test', {
+      bootstrap_token: TEST_BOOTSTRAP_TOKEN,
+    });
+
+    assert.equal(response.statusCode, 201, response.body);
+    const user = response.json<{ user: { role: string; email_verified: boolean } }>().user;
+    assert.equal(user.role, 'super_admin');
+    assert.equal(user.email_verified, true);
+    assert.ok(cookieValue(response, SESSION_COOKIE), 'the founder lands signed in');
+    assert.ok(cookieValue(response, CSRF_COOKIE));
+    assert.equal(await brandingRequiresBootstrap(), false, 'the portal is no longer empty');
+  });
+
+  it('ignores the field once the portal has an account', async () => {
+    const plain = await register('joiner@example.test');
+    assert.equal(plain.statusCode, 201, plain.body);
+    assert.equal(plain.json<{ user: { role: string } }>().user.role, 'client');
+
+    // Replaying the operator's token buys nothing: the claim is already spent
+    // and the token only ever gated the empty-portal path.
+    const replay = await register('replayer@example.test', {
+      bootstrap_token: TEST_BOOTSTRAP_TOKEN,
+    });
+    assert.equal(replay.statusCode, 201, replay.body);
+    assert.equal(replay.json<{ user: { role: string } }>().user.role, 'client');
+
+    const admins = await harness.store.users.list({ role: 'super_admin' });
+    assert.equal(admins.total, 1);
+  });
+});
+
 describe('bootstrap super_admin election', () => {
   let harness: TestApp;
 
@@ -572,20 +677,46 @@ describe('bootstrap super_admin election', () => {
     // Every one of these reads an empty `users` table and then awaits ~100 ms
     // of scrypt before inserting, so all six are inside the old
     // count()-then-create window at the same time.
-    const responses = await Promise.all(
-      Array.from({ length: 6 }, (_unused, index) =>
-        harness.app.inject({
-          method: 'POST',
-          url: '/api/auth/register',
-          payload: {
-            email: `racer${index}@example.test`,
-            password: TEST_PASSWORD,
-            display_name: `Racer ${index}`,
-            role: 'client',
-          },
-        }),
-      ),
+    // Three uncredentialed callers ride along inside the same window. Building
+    // both arrays before the first await is what puts all nine in flight at
+    // once; the gatecrashers must bounce whichever of the six wins.
+    const inFlight = Array.from({ length: 6 }, (_unused, index) =>
+      harness.app.inject({
+        method: 'POST',
+        url: '/api/auth/register',
+        payload: {
+          email: `racer${index}@example.test`,
+          password: TEST_PASSWORD,
+          display_name: `Racer ${index}`,
+          role: 'client',
+          // Every racer holds the operator's token, so the token is not what
+          // separates them — the atomic claim is.
+          bootstrap_token: TEST_BOOTSTRAP_TOKEN,
+        },
+      }),
     );
+    const gatecrashing = Array.from({ length: 3 }, (_unused, index) =>
+      harness.app.inject({
+        method: 'POST',
+        url: '/api/auth/register',
+        payload: {
+          email: `gatecrasher${index}@example.test`,
+          password: TEST_PASSWORD,
+          display_name: `Gatecrasher ${index}`,
+          role: 'client',
+          ...(index === 0 ? {} : { bootstrap_token: `wrong-token-${index}-padded-out` }),
+        },
+      }),
+    );
+    const [responses, gatecrashers] = await Promise.all([
+      Promise.all(inFlight),
+      Promise.all(gatecrashing),
+    ]);
+
+    for (const response of gatecrashers) {
+      assert.equal(response.statusCode, 403, response.body);
+      assert.equal(errorCode(response.body), 'FORBIDDEN');
+    }
 
     for (const response of responses) assert.equal(response.statusCode, 201, response.body);
     const users = responses.map(

@@ -51,6 +51,7 @@ import {
   type GetEmailTemplateResponse,
   type GetMeUserResponse,
   type GetThreadResponse,
+  type GetUserResponse,
   type GodBroadcastRequest,
   type GodBroadcastResponse,
   type GodDeleteApiRequest,
@@ -98,6 +99,7 @@ import {
   type ResendVerificationResponse,
   type ResetPasswordRequest,
   type ResetPasswordResponse,
+  type RetryGatewayTeardownResponse,
   type RevokeGrantRequest,
   type RevokeGrantResponse,
   type RotateCredentialRequest,
@@ -337,8 +339,12 @@ export const usersApi = {
     patch<UpdateMeResponse>('/users/me', body),
   list: (query: ListUsersQuery = {}): Promise<ListUsersResponse> =>
     get<ListUsersResponse>('/users', { ...query }),
+  get: (id: string): Promise<GetUserResponse> =>
+    get<GetUserResponse>(`/users/${encodeURIComponent(id)}`),
   update: (id: string, body: UpdateUserRequest): Promise<UpdateUserResponse> =>
     patch<UpdateUserResponse>(`/users/${encodeURIComponent(id)}`, body),
+  retryGatewayTeardown: (id: string): Promise<RetryGatewayTeardownResponse> =>
+    post<RetryGatewayTeardownResponse>(`/users/${encodeURIComponent(id)}/gateway-teardown/retry`),
 };
 
 export const organizationsApi = {

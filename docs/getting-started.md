@@ -129,6 +129,11 @@ NEXUS_ENV=development
 # this is set — the walkthrough's `host.docker.internal` upstream is one of
 # them. Leave it unset (the default) anywhere the catalog is not fully trusted.
 NEXUS_ALLOW_PRIVATE_UPSTREAMS=true
+
+# Secret the very first registration must present to claim `super_admin`.
+# Pinning it here means the walkthrough can paste one known value; leave it
+# unset and the server generates one per process and prints it at startup.
+NEXUS_BOOTSTRAP_TOKEN=walkthrough-bootstrap-token
 ```
 
 Then:
@@ -164,9 +169,31 @@ API. Check `FERRUM_ADMIN_URL`, that the secret matches on both sides, and that
 
 **The first account ever registered becomes `super_admin`**, regardless of the
 role it asks for, and is automatically email-verified. That is how the platform
-bootstraps.
+bootstraps — and why that one registration has to prove it comes from whoever
+runs the server: it must carry the **bootstrap token**.
 
-In the browser: open <http://127.0.0.1:5173>, click **Register**, fill the form.
+Where the token comes from:
+
+- `NEXUS_BOOTSTRAP_TOKEN`, if you set it — as the step above does.
+- Otherwise the server generates one per process and prints it at startup,
+  but only while the user table is empty:
+
+  ```
+  FIRST-RUN BOOTSTRAP: this portal has no accounts yet.
+  …
+      2f6c1b0e…      ← the token
+  ```
+
+  It changes on every restart, and each instance prints its own, so pin
+  `NEXUS_BOOTSTRAP_TOKEN` for anything running more than one process.
+
+A registration against an empty portal without the right token is refused with
+`403 FORBIDDEN` and creates nothing, so the token cannot be worn down by
+guessing at it. Once any account exists the field is ignored entirely: replaying
+it later just produces an ordinary `client`.
+
+In the browser: open <http://127.0.0.1:5173>, click **Register**, fill the form
+— it asks for the bootstrap token while the portal is empty.
 
 Or with curl:
 
@@ -174,7 +201,8 @@ Or with curl:
 curl -sS -c admin.txt -X POST http://127.0.0.1:8787/api/auth/register \
   -H 'content-type: application/json' \
   -d '{"email":"root@example.com","password":"correct-horse-battery-staple",
-       "display_name":"Root","role":"provider"}' | jq '.user.role'
+       "display_name":"Root","role":"provider",
+       "bootstrap_token":"walkthrough-bootstrap-token"}' | jq '.user.role'
 ```
 
 ```

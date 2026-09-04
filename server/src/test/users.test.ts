@@ -226,7 +226,7 @@ describe('users and organizations', () => {
     assert.equal(details?.revoked_credentials, 1);
   });
 
-  it('disables the account even when the gateway teardown fails', async () => {
+  it('leaves the gateway teardown pending when the gateway refuses it', async () => {
     const target = await harness.registerUser({ email: 'gateway-flaky@example.test' });
     const issued = await harness.authed(target, {
       method: 'POST',
@@ -243,12 +243,19 @@ describe('users and organizations', () => {
       payload: { status: 'disabled' },
     });
     assert.equal(disabled.statusCode, 200, 'an unreachable gateway must not leave the account on');
-    assert.equal(disabled.json<{ user: User }>().user.status, 'disabled');
+    const body = disabled.json<{ user: User; gateway_teardown?: string }>();
+    assert.equal(body.user.status, 'disabled');
+    // Not `failed`: the revocation is owed, queued and retried — reporting the
+    // security operation complete is the bug this replaced.
+    assert.equal(body.gateway_teardown, 'pending');
 
     const audited = (await harness.auditRows('user.disable')).find(
       (entry) => entry.target_id === target.user.id,
     );
-    assert.equal((audited?.details as { gateway_teardown?: string }).gateway_teardown, 'failed');
+    assert.equal((audited?.details as { gateway_teardown?: string }).gateway_teardown, 'pending');
+
+    const job = await harness.store.gatewayTeardownJobs.findByUser(target.user.id);
+    assert.equal(job?.status, 'pending', 'the revocation survives as durable work');
   });
 
   it('ends every other session when the caller changes their password', async () => {

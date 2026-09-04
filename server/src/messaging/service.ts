@@ -22,6 +22,24 @@
  * Every posted message writes an audit row, notifies the counterparty in-app,
  * and enqueues a `message_received` email. Notification/email failures are
  * never allowed to fail the send — the message is already durable by then.
+ *
+ * ## Abuse controls
+ *
+ * A message is cheap to send and permanently expensive to hold: one row here,
+ * one audit row, and — for a platform thread — a notification row and a queued
+ * email **per active administrator**. Three bounds keep an authenticated
+ * account from turning that fan-out into a mail bomb or an unbounded write:
+ *
+ * 1. **Per-minute limiters** on the routes (composed in `index.ts`), keyed per
+ *    account rather than per IP.
+ * 2. **A rolling 24-hour budget** enforced here, *before any row is written*,
+ *    so a refusal leaves no message, audit, notification or outbox row behind.
+ *    Direct and platform threads draw on one budget by construction: it counts
+ *    the sender, not the thread.
+ * 3. **Email coalescing** — at most one `message_received` mail per recipient
+ *    per thread per {@link COALESCE_WINDOW_MS}, via the outbox's idempotency
+ *    key. In-app notifications stay one per message; they are cheap, and the
+ *    first two bounds already cap how many there can be.
  */
 
 import {
@@ -47,13 +65,29 @@ import type {
   UserRecord,
 } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
-import { forbidden, notFound, validationFailed } from '../lib/errors.js';
+import { NexusError, forbidden, notFound, validationFailed } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
 import { presentApiSummary, type GatewayUrlSource } from '../publishing/present.js';
 
 /** Characters of the newest message shown in list previews and emails. */
 export const MESSAGE_PREVIEW_LENGTH = 160;
+
+/** Width of the rolling per-account message budget, in milliseconds. */
+export const MESSAGE_BUDGET_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** Human label for {@link MESSAGE_BUDGET_WINDOW_MS}, echoed in the error details. */
+export const MESSAGE_BUDGET_WINDOW_LABEL = '24h';
+
+/**
+ * How long one `message_received` email covers.
+ *
+ * A recipient gets at most one mail per thread per window however many messages
+ * land in it, so a reply storm costs one notification row each and one email.
+ * Ten minutes is short enough that a real conversation still pages someone
+ * promptly and long enough that a flood collapses to a single message.
+ */
+export const COALESCE_WINDOW_MS = 10 * 60 * 1000;
 
 /** Input for {@link MessagingService.createThread}. */
 export interface CreateThreadInput {
@@ -224,6 +258,10 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
   ): Promise<void> {
     const recipients = await recipientsFor(thread, sender.id);
     const body = preview(message.body);
+    // One bucket per {@link COALESCE_WINDOW_MS}; the outbox's unique
+    // `idempotency_key` turns every later message in the same bucket into a
+    // no-op enqueue, so N messages cost one mail per recipient per thread.
+    const bucket = Math.floor(Date.now() / COALESCE_WINDOW_MS);
     for (const recipient of recipients) {
       try {
         await notifications.notify(
@@ -236,6 +274,7 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
         await email.enqueue({
           to: recipient.email,
           templateKey: 'message_received',
+          idempotencyKey: `message_received:${thread.id}:${recipient.id}:${bucket}`,
           vars: {
             recipient_name: recipient.display_name,
             recipient_email: recipient.email,
@@ -257,6 +296,31 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
         );
       }
     }
+  }
+
+  /**
+   * Refuse the send when the sender has spent their rolling 24-hour budget.
+   *
+   * Called first in both write paths, before the thread is resolved or any row
+   * is written, so a refusal costs exactly one COUNT and leaves nothing behind.
+   * `0` means the operator turned the budget off.
+   */
+  async function assertWithinBudget(senderUserId: Uuid): Promise<void> {
+    const limit = config.maxMessagesPerUserPerDay;
+    if (limit <= 0) return;
+    const since = new Date(Date.now() - MESSAGE_BUDGET_WINDOW_MS).toISOString();
+    const used = await store.messages.countBySenderSince(senderUserId, since);
+    if (used < limit) return;
+    throw new NexusError(
+      'QUOTA_EXCEEDED',
+      `You have reached the limit of ${limit} messages per ${MESSAGE_BUDGET_WINDOW_LABEL}. ` +
+        'Wait for the oldest of them to age out, or ask an administrator to raise the limit.',
+      {
+        limit,
+        window: MESSAGE_BUDGET_WINDOW_LABEL,
+        setting: 'NEXUS_MAX_MESSAGES_PER_USER_PER_DAY',
+      },
+    );
   }
 
   async function loadThread(threadId: Uuid): Promise<ThreadRecord> {
@@ -289,6 +353,7 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
       const body = input.body.trim();
       if (subject === '') throw validationFailed('A subject is required');
       if (body === '') throw validationFailed('A message body is required');
+      await assertWithinBudget(input.actor.id);
 
       let counterpart: UserRecord | null = null;
       if (input.recipientUserId) {
@@ -413,6 +478,7 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
     async sendMessage(user, threadId, body, ip = null): Promise<Message> {
       const trimmed = body.trim();
       if (trimmed === '') throw validationFailed('A message body is required');
+      await assertWithinBudget(user.id);
       const thread = await loadThread(threadId);
       assertCanPost(user, thread);
 

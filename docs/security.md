@@ -50,17 +50,48 @@ session cookie, and that cookie is only useful against Nexus.
 **Upstream destinations.** A published API is an egress path: the gateway will
 forward traffic to whatever `upstream_url` (or `servers[0].url`) the provider
 supplied. A provider account is only semi-trusted — registration may be open —
-so by default Nexus refuses to point a proxy at a loopback, RFC 1918, carrier-
-grade NAT, link-local, multicast or IPv4-mapped address, or at a `.local`,
-`.internal`, `.localhost` or `.home.arpa` name. That closes the obvious SSRF
-targets (cloud metadata at `169.254.169.254`, the Admin API, databases on the
-gateway's subnet) without resolving DNS. The check runs at publish, on a
-`PATCH` of `upstream_url`, and when a spec revision would move a proxy that
-follows its document; it returns `400 SPEC_INVALID` with
-`details.reason = "private_upstream"`. A portal that legitimately fronts
-internal services sets `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` and relies on
-network egress policy instead — a public name that is later re-pointed at a
-private address is outside what a hostname check can see either way.
+so by default Nexus refuses to point a proxy anywhere but a public destination.
+Three checks run, in that order:
+
+1. **Name suffixes.** `.local`, `.internal`, `.localhost` and `.home.arpa`, and
+   the bare name `localhost`, are refused outright.
+2. **IP literals.** A loopback, RFC 1918, carrier-grade NAT, link-local,
+   multicast, unspecified or IPv4-mapped literal is refused. A literal _is_ the
+   destination, so nothing further is looked up.
+3. **Resolved addresses.** Any other hostname is resolved (A **and** AAAA,
+   ~5 s, 2 tries) and **every** address it answers with must be public. One
+   private answer refuses the whole set, an IPv4-mapped answer is judged as the
+   IPv4 address it carries, and an empty answer set, an `NXDOMAIN`, a `SERVFAIL`
+   or a timeout all refuse as well — the lookup **fails closed**, because none
+   of those outcomes shows the destination to be public.
+
+Step 3 is what closes `127.0.0.1.nip.io` and any attacker-controlled record
+pointing into RFC 1918 space: a hostname on no denylist still reaches loopback
+when its A record says so. Steps 1 and 2 stay in front of it because they cost
+nothing and answer most cases. The whole check runs at publish, on a `PATCH` of
+`upstream_url`, and when a spec revision would move a proxy that follows its
+document; it returns `400 SPEC_INVALID` with `details.reason` of
+`"private_upstream"` (with the offending `resolved` addresses, when the refusal
+came from DNS) or `"unresolvable_upstream"`.
+
+A portal that legitimately fronts internal services sets
+`NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`, which skips all three checks — no lookup
+is made — and relies on network egress policy instead.
+
+**Residual risk: the check is time-of-check, not time-of-use.** Nexus resolves
+the name once, when the backend is written; Edge resolves it again on every
+proxied request. A name that answers publicly at publish time and privately
+afterwards — DNS rebinding, a record the provider controls and re-points, a
+short TTL — is not something the portal can see. Nexus does not pin the
+validated address, because the proxy stores a hostname and re-pinning it would
+break every legitimate backend that moves.
+
+The mitigation is layered rather than portal-side: **Ferrum Edge screens the
+address it actually connects to**, with `FERRUM_BACKEND_ALLOW_IPS=public` on
+the gateway. Nexus's check keeps the obvious attempt from ever being stored and
+gives the provider an immediate, explanatory `400`; Edge's egress mode is what
+holds when the record changes underneath it. Run both. A deployment that cannot
+set the gateway mode should restrict gateway egress at the network layer.
 
 ### Out of scope
 
@@ -304,6 +335,40 @@ platform has to be bootstrappable. Every later registration gets only the
 registrable role it asked for, subject to `open_registration` and
 `allowed_roles`.
 
+#### The bootstrap token
+
+Because that first registration hands out `super_admin`, it is not a public
+operation: while the `users` table is empty, `POST /api/auth/register` requires
+`bootstrap_token` and refuses everything else with `403 FORBIDDEN`.
+
+- **What it protects.** The founding account, and therefore user and role
+  administration, SMTP and CAPTCHA settings, god mode, the audit log, and the
+  Nexus→Edge control-plane capabilities those reach. Without the token, a fresh
+  deployment that is reachable before its operator has finished setting it up
+  hands all of that to whoever connects first.
+- **Where it comes from.** `NEXUS_BOOTSTRAP_TOKEN` (16+ characters, validated
+  at startup), or — when that is unset — a 32-byte random value generated per
+  process and printed at `warn`, and only while the portal is still empty. A
+  token supplied through the environment is never logged. See
+  [`operations.md`](operations.md#first-run-and-the-bootstrap-token).
+- **How it is checked.** SHA-256 digests compared with `timingSafeEqual`, so
+  neither the outcome's timing nor its cost varies with how much of the token
+  the caller guessed correctly. The check runs **before** the password is
+  hashed and before any row is written: a failed attempt creates no user, mints
+  no session and does not touch the election key, so guessing cannot wear the
+  bootstrap capability down.
+- **Public self-registration can never elect a founder.** The two rules
+  compose: the token decides who may stand for the election, the atomic claim
+  below decides which of them wins. A server built with no configured token has
+  no value that can match, so it refuses every registration against an empty
+  portal rather than falling open.
+- **After bootstrap the field is inert.** Registration number two is an
+  ordinary `client`/`provider` whether or not it replays the token, since the
+  claim key is already taken and is never released.
+- `GET /api/branding` publishes `bootstrap_required` (the user table is empty)
+  so the sign-up form knows to ask for the token. That flag is the only public
+  signal; the token itself is never exposed over the API.
+
 "First" is decided by an **atomic claim**, not by counting rows. Registration
 creates the account with the role that was requested and then inserts the
 `bootstrap.super_admin_claimed` key with `settings.insertIfAbsent`; only the
@@ -341,10 +406,54 @@ is what the gateway authenticates, and it has no idea a portal session ever
 existed. `basicauth` is deleted explicitly because it never appears in a read
 projection, so a group rewrite cannot see it.
 
-The teardown is best-effort by design: if Edge is unreachable the account is
-still disabled and the failure is logged and recorded in the audit row
-(`gateway_teardown: "failed"`) for an operator to finish by hand. An account
-left enabled because the gateway was down would be strictly worse.
+All three gateway steps run inside one critical section keyed on the Ferrum
+consumer id — an in-process queue plus an `edge_leases` row — so a concurrent
+approval on another Nexus instance cannot read the pre-teardown group list and
+write it back afterwards. Edge replaces consumers whole, with no version token,
+so without that lock a revoked account could be re-authorised by a write that
+was merely stale; see [`operations.md` §8](operations.md#8-scaling).
+
+#### The gateway half is durable work, not a side effect
+
+An account left enabled because the gateway was down would be strictly worse
+than a disabled account whose consumer still needs cleaning up, so (1) commits
+whether or not Edge answers. What must **not** happen is the second half being
+quietly dropped: a disabled account's API key authenticates directly to Edge
+with no portal session behind it, so a swallowed failure leaves the credential
+working indefinitely and reports the disable as finished.
+
+So steps (2) and (3) are owed by a `gateway_teardown_jobs` row written **inside
+the same transaction** as `users.status = 'disabled'`. There is one row per
+account (`user_id` is unique), and it carries `status`
+(`pending` → `sending` → `done`), `attempts`, `next_attempt_at`, `last_error`
+and the admin who asked (`requested_by`).
+
+- The revocation runs immediately, as before. On success the job is `done` and
+  the response and audit row say `gateway_teardown: "ok"` (or `"no_consumer"`).
+- On failure the job stays `pending`, the response and audit row say
+  `gateway_teardown: "pending"`, and the failure is logged at `warn`. There is
+  no `"failed"` outcome any more — a failure is a retry, not a result. **Do not
+  read `pending` as "done"**: the credentials are still live.
+- `credentials/teardown-worker.ts` polls every 5 seconds, claims due jobs
+  atomically, and retries with an exponential backoff capped at 5 minutes. It
+  retries **indefinitely** while the account is disabled — unlike the email
+  outbox there is no give-up state, because giving up would leave a live
+  credential and call it settled. Success writes
+  `user.gateway_teardown_complete` with what was revoked.
+- **Re-enabling an account deletes its job**, and the worker drops any job whose
+  account is no longer disabled, so a retry can never strip a live account's
+  credentials.
+- Admins see the state on `GET /api/users/:id`
+  (`gateway_teardown: { status, attempts, last_error, next_attempt_at, … }`),
+  the portal-wide backlog as `pending_gateway_teardowns` on `GET /api/users`,
+  and can re-drive one immediately with
+  `POST /api/users/:id/gateway-teardown/retry` (audited as
+  `user.gateway_teardown_retry`).
+
+**Alert on the `warn` line** `Gateway revocation for a disabled account failed;
+it stays queued for retry` and on a non-zero `pending_gateway_teardowns` that
+does not fall back to zero — both mean disabled accounts still hold working
+gateway credentials.
 
 ---
 
@@ -411,15 +520,66 @@ expect, including CAPTCHA failing closed — is in
 
 ---
 
-## 7. Rate limiting and CAPTCHA
+## 7. Exposure and abuse controls
+
+### A published proxy is never briefly open
+
+Ferrum Edge serves a proxy from the moment `POST /proxies` (or the API-spec
+importer) returns, and a proxy-scoped plugin config is **inert** until the
+proxy's own `plugins[]` names it. Creating a proxy directly at its final
+`/<namespace>/<slug>` therefore made the route live, unauthenticated, ungated
+and unlimited for the round trips it took to attach and associate the auth, ACL,
+rate-limit and CORS plugins. Rollback deletes the proxy but cannot un-forward a
+request it already served (GHSA-gxvf-jj3q-x4fc).
+
+The sequence cannot be reordered out of the problem: Edge refuses a plugin
+config naming a proxy that does not exist, and `allowed_methods` must be `null`
+or a **non-empty** array, so there is no deny-all proxy to create first.
+
+So the listen path moves last. Every proxy Nexus creates is created on
+`/<namespace>/.staging/<32 hex>` — 128 bits from `crypto.randomBytes`, under a
+segment no slug can produce, so it neither collides nor can be guessed. All the
+plugin configs are attached and associated there, and the move onto the real
+path is the **final gateway write** before the Nexus rows are committed. The
+deterministic path is either a `404` or fully gated; there is no instant at
+which it is served by a proxy missing a plugin.
+
+The `spec_enforcement` conversion — which has to delete and recreate the proxy,
+because Edge can neither attach nor detach an `api_spec` in place — takes the
+same detour, as does its rollback. An API being converted answers `404` for the
+rebuild instead of answering unauthenticated.
+
+**Operational consequence.** Two crash windows remain, both narrow and both
+recognisable:
+
+- a crash **between the cutover and the store write** can orphan a finished,
+  fully gated proxy at the real path with no `apis` row behind it. This is the
+  same class of orphan the sequence has always had, and it is fail-_closed_: the
+  proxy enforces its auth plugin, and no Nexus grant references it. Find it by
+  listing proxies named `nexus-<slug>` whose slug has no `apis` row;
+- a crash **before the cutover** leaves a proxy on a staging path. Nothing
+  routes to it (no client can derive the path), but it consumes a proxy slot.
+  Find these with `GET /proxies` filtered to `listen_path` starting
+  `/<namespace>/.staging/`; every such proxy is abandoned by definition, because
+  a staging path is minted fresh per operation and never stored, so an operator
+  or a reconciliation job can delete them unconditionally. A proxy still on a
+  staging path is never one a live publish is using once the request that
+  created it has returned.
 
 ### Rate limiting
 
-`@fastify/rate-limit` is registered on the `/api/auth/*` child instance only:
-**20 requests per minute per IP**, covering register, login, logout, me,
-verify-email and captcha config. Exceeding it is `429 RATE_LIMITED`. It is
-scoped to that prefix so the credential-guessing surface is protected without
-throttling normal portal use.
+`@fastify/rate-limit` is registered on two child instances.
+
+`/api/auth/*` takes **20 requests per minute per IP**, covering register, login,
+logout, me, verify-email and captcha config. Exceeding it is
+`429 RATE_LIMITED`. It is scoped to that prefix so the credential-guessing
+surface is protected without throttling normal portal use.
+
+`/api/threads` takes a limiter registered `global: false`, so only the two write
+routes carry one: **10 thread creations and 30 replies per minute**, keyed on
+the **authenticated account** (`userOrIpKey`, falling back to `request.ip` when
+there is no session) rather than the address. See
+[Messaging abuse resistance](#messaging-abuse-resistance).
 
 Controlled by `NEXUS_RATE_LIMIT_ENABLED` (default `true`); forced off under
 `NEXUS_ENV=test`. The store is in-memory and therefore **per process** — with
@@ -429,6 +589,89 @@ proxy if you run more than one. The limiter keys on `request.ip`, which honours
 (unset — trust nothing — by default). Trusting an unfiltered header would let a
 client rotate the limiter's key once per request _and_ forge the IP recorded in
 the audit log, so the allowlist/hop-count form is the only one accepted.
+
+### Publishing is bounded per account
+
+Provider registration is open by default, and one `POST /api/apis` stores an
+OpenAPI document of up to `MAX_SPEC_BYTES`, allocates a gateway proxy, creates
+and associates several plugin configs, reserves a slug and a listen path, and
+writes audit rows. `POST /:id/test-consumer` additionally creates a gateway
+consumer and a credential. None of it was bounded: a single self-registered
+provider could fill the database, exhaust Edge's proxy and plugin capacity, and
+saturate the Admin API simply by looping (GHSA-g32g-g9q4-q5wr).
+
+Two controls, bounding different things:
+
+- **`NEXUS_MAX_APIS_PER_OWNER`** (default `50`, `0` = unlimited) caps how many
+  APIs one account may own **at a time**. A publish past it is refused with
+  `429 QUOTA_EXCEEDED` before the first gateway write, carrying
+  `details: { limit, current, setting }`. It bounds aggregate spec storage per
+  account at `MAX_SPEC_BYTES × limit`. Deleting an API frees a slot; retiring
+  one does not, because a retired API keeps its gateway objects. Admins are not
+  exempt — an exemption is a bypass, and the case worth defending against is an
+  admin account that has been taken over.
+- **A 30/minute per-account rate limit** on the mutating `/api/apis/*` routes
+  (`POST /`, `PUT /:id/spec`, `PATCH /:id`, `DELETE /:id`,
+  `PUT|DELETE /:id/plugins/:name`, `POST /:id/test-consumer`), answering
+  `429 RATE_LIMITED`, installed when `NEXUS_RATE_LIMIT_ENABLED=true`. Keyed on
+  the account rather than the address for the same reason the auth limiter is
+  keyed on the address rather than a header: the key has to be the thing the
+  attacker cannot cheaply rotate. Reads are unlimited apart from
+  `GET /:id/usage`, which scrapes the gateway and keeps its own limit.
+
+The quota's check-and-create runs under an in-process per-owner lock, so a
+concurrent burst from one account cannot oversubscribe it. Across N instances
+the overshoot is bounded by N − 1 rather than by the burst size; the limiter's
+store is likewise per process, so the effective allowance is N × 30/min. Both
+are documented in [`operations.md`](operations.md#abuse-controls), and both are
+ceilings rather than billing boundaries.
+
+Neither control replaces the registration policy. A portal that does not want
+strangers allocating gateway resources at all should take `provider` out of
+`allowed_roles` and promote vetted accounts, or close registration entirely.
+
+### Messaging abuse resistance
+
+Registration is open by default, so **an authenticated account is not a trusted
+one**. Messaging is the highest-amplification authenticated surface in the
+portal: one `POST` durably writes a message row and an audit row, and a
+_platform_ thread (`recipient_user_id: null`) fans an in-app notification and a
+rendered email out to every active `admin` and `super_admin`. Left unbounded,
+one low-privilege account could mail-bomb every administrator, exhaust the SMTP
+quota, and grow four tables without limit (GHSA-gwqc-w33p-5wx5).
+
+Three independent bounds close that, and none of them relies on the others:
+
+1. **Per-account burst limits** — 10 thread creations and 30 replies per minute.
+   Keying on the account rather than the IP is the load-bearing choice: an
+   IP-keyed limiter puts a whole office behind one NAT into a single bucket
+   while still letting one attacker with a handful of addresses through. The key
+   generator reads `request.currentUser`, which the auth plugin's root-instance
+   `onRequest` hook has already resolved by the time a scope-level limiter runs.
+2. **A rolling 24-hour per-account budget** — `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY`
+   (default 200, `0` disables). Checked **before any row is written**, so a
+   refusal costs one indexed `COUNT` and leaves no message, audit, notification
+   or outbox row. It counts the _sender_, so direct and platform threads draw on
+   one allowance and a new conversation is not a fresh one. Exceeding it is
+   `429 QUOTA_EXCEEDED` with `details: { limit, window, setting }`. Admins and
+   super admins are subject to it too — carving out a role would put the whole
+   budget one privilege escalation away.
+3. **Email coalescing** — the `message_received` mail is enqueued with the
+   idempotency key `message_received:<thread>:<recipient>:<bucket>`, where
+   `bucket` is a 10-minute slice of wall-clock time. The outbox's unique index
+   on `idempotency_key` turns every later message in the same window into a
+   no-op, so a reply storm costs one mail per recipient per thread per window
+   however many messages it contains. The default template therefore announces
+   _activity_ and links to the thread rather than quoting a body it cannot
+   promise to keep delivering.
+
+Two limits on this, stated plainly: the per-minute counters are **in-process**,
+so N instances enforce N × those numbers (the daily budget, which counts durable
+rows, is exact on any number of instances); and the budget's read-then-write is
+not one atomic step, so two concurrent sends can both observe the same count and
+land at `limit + 1`. That race is bounded by the per-minute limiter and costs one
+row, which is the wrong order of magnitude to matter for a resource-exhaustion
+control.
 
 ### Consumer quotas are per gateway process
 
@@ -632,13 +875,15 @@ ordinary reporting.
 
 ### Users and organizations
 
-| Action             | Target type    | Description                                                                                                                                                                                                                                                                                                           |
-| ------------------ | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `user.update`      | `user`         | A profile or account field changed without a role/status change. `details.self` distinguishes self-service from an admin edit; `changed_fields` lists what moved (`password` appears as a field name, never a value). A self-service password change also ends every other session, counted in `terminated_sessions`. |
-| `user.role_change` | `user`         | An admin changed an account's role. `details`: `from_role`, `to_role`.                                                                                                                                                                                                                                                |
-| `user.disable`     | `user`         | An admin disabled (or re-enabled) an account via the ordinary route. `details`: `from_status`, `to_status`, `terminated_sessions`, plus the gateway teardown: `gateway_teardown` (`ok` / `no_consumer` / `failed`), `gateway_consumer_id`, `revoked_credentials`, `removed_acl_groups`, `gateway_error`.              |
-| `org.create`       | `organization` | An organization was created. `details`: name.                                                                                                                                                                                                                                                                         |
-| `org.update`       | `organization` | An organization was edited. `details`: `changed_fields`.                                                                                                                                                                                                                                                              |
+| Action                           | Target type    | Description                                                                                                                                                                                                                                                                                                                                                                                            |
+| -------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `user.update`                    | `user`         | A profile or account field changed without a role/status change. `details.self` distinguishes self-service from an admin edit; `changed_fields` lists what moved (`password` appears as a field name, never a value). A self-service password change also ends every other session, counted in `terminated_sessions`.                                                                                  |
+| `user.role_change`               | `user`         | An admin changed an account's role. `details`: `from_role`, `to_role`.                                                                                                                                                                                                                                                                                                                                 |
+| `user.disable`                   | `user`         | An admin disabled (or re-enabled) an account via the ordinary route. `details`: `from_status`, `to_status`, `terminated_sessions`, plus the gateway teardown: `gateway_teardown` (`ok` / `no_consumer` / `pending`), `gateway_consumer_id`, `revoked_credentials`, `removed_acl_groups`, `gateway_error`. `pending` means the revocation is queued and being retried — the credentials are still live. |
+| `user.gateway_teardown_complete` | `user`         | The teardown worker finished a revocation a disable had left pending. Written by the system, so `actor_user_id` is `null`. `details`: `attempts`, `gateway_teardown`, `gateway_consumer_id`, `revoked_credentials`, `removed_acl_groups`.                                                                                                                                                              |
+| `user.gateway_teardown_retry`    | `user`         | An admin re-ran a pending gateway revocation by hand via `POST /api/users/:id/gateway-teardown/retry`. `details`: `attempts` so far, plus the same teardown fields.                                                                                                                                                                                                                                    |
+| `org.create`                     | `organization` | An organization was created. `details`: name.                                                                                                                                                                                                                                                                                                                                                          |
+| `org.update`                     | `organization` | An organization was edited. `details`: `changed_fields`.                                                                                                                                                                                                                                                                                                                                               |
 
 ### Publishing
 
@@ -742,6 +987,16 @@ Before going live:
 - [ ] `NEXUS_ALLOW_PRIVATE_UPSTREAMS` is left at `false` unless the portal is
       meant to front internal services, in which case gateway egress is
       restricted at the network layer.
+- [ ] `NEXUS_BOOTSTRAP_TOKEN` set from a secret manager before the portal is
+      first reachable — required if more than one instance runs, since a
+      generated token is per process. The portal is not published on a public
+      interface until the founding `super_admin` exists.
+- [ ] The Nexus process can resolve public DNS — with
+      `NEXUS_ALLOW_PRIVATE_UPSTREAMS=false` a name that cannot be resolved is
+      refused, so a portal with no resolver publishes nothing.
+- [ ] Ferrum Edge runs with `FERRUM_BACKEND_ALLOW_IPS=public` (or equivalent
+      network egress policy), which is the layer that survives a backend name
+      being re-pointed after publish.
 - [ ] CAPTCHA configured if registration is open to the internet.
 - [ ] Registration policy reviewed: `open_registration`, `allowed_roles`,
       `require_email_verification`.
@@ -752,5 +1007,7 @@ Before going live:
 - [ ] Backups running and a restore rehearsed, for both the Nexus database and
       the Ferrum Edge state.
 - [ ] `GET /api/health` wired to your monitor, treating `degraded` as healthy.
-- [ ] Exactly one instance performing consumer mutations
-      ([`operations.md`](operations.md#8-scaling)).
+- [ ] If you run more than one Nexus instance, they share one PostgreSQL, MySQL
+      or MongoDB database — the `edge_leases` table in it is what stops two
+      instances losing each other's ACL-group and proxy-plugin writes
+      ([`operations.md`](operations.md#8-scaling)). SQLite is single-instance.

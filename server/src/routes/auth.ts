@@ -46,6 +46,9 @@ const registerBody = z.object({
   company: z.string().trim().max(200).nullish(),
   phone: z.string().trim().max(64).nullish(),
   captcha_token: z.string().max(4096).optional(),
+  // Required by the service while the portal is empty; the shape is not the
+  // place to say so, since "is the portal empty" is not a property of the body.
+  bootstrap_token: z.string().max(512).optional(),
 });
 
 const loginBody = z.object({
@@ -89,6 +92,7 @@ export const authRoutes: FastifyPluginAsync<AuthRoutesOptions> = async (app, opt
         company: input.company ?? null,
         phone: input.phone ?? null,
         captcha_token: input.captcha_token,
+        bootstrap_token: input.bootstrap_token,
       },
       requestContext(request),
     );

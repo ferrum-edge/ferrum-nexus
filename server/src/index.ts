@@ -13,6 +13,7 @@
  * No route file ever imports a service module directly.
  */
 
+import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -44,6 +45,7 @@ import { createCatalogService, type CatalogService } from './catalog/service.js'
 import { loadConfig, type NexusConfig } from './config/index.js';
 import { createConsumerProvisioner } from './credentials/consumers.js';
 import { createCredentialsService, type CredentialsService } from './credentials/service.js';
+import { createTeardownWorker, type TeardownWorker } from './credentials/teardown-worker.js';
 import { createStore } from './db/index.js';
 import type { NexusStore } from './db/store.js';
 import {
@@ -59,9 +61,11 @@ import { isNexusError } from './lib/errors.js';
 import { buildLoggerOptions, type LoggerOptions } from './lib/logger.js';
 import { createMessagingService, type MessagingService } from './messaging/service.js';
 import { registerAuthPlugin } from './middleware/auth-plugin.js';
+import { userOrIpKey } from './middleware/rate-limit-keys.js';
 import { registerErrorHandler } from './middleware/error-handler.js';
 import { createNotificationsService, type NotificationsService } from './notifications/service.js';
 import { createApiPluginsService, type ApiPluginsService } from './plugins/service.js';
+import { createUpstreamResolver, type UpstreamResolver } from './publishing/oas.js';
 import { createPublishingService, type PublishingService } from './publishing/service.js';
 import { accessRequestRoutes, grantRoutes } from './routes/access.js';
 import { adminRoutes } from './routes/admin.js';
@@ -85,6 +89,11 @@ export interface NexusServices {
   email: EmailService;
   /** Background sender; `tick()` runs one cycle deterministically in tests. */
   outbox: OutboxWorker;
+  /**
+   * Background gateway-revocation retrier for disabled accounts; `tick()` runs
+   * one cycle deterministically in tests.
+   */
+  teardown: TeardownWorker;
   notifications: NotificationsService;
   settings: SettingsService;
   users: UsersService;
@@ -130,16 +139,42 @@ export interface BuildServerDeps {
   /** Replace the SMTP transport used by the outbox worker and the SMTP test. */
   mailTransportFactory?: MailTransportFactory;
   /**
+   * Resolve an upstream hostname to its addresses for the private-destination
+   * policy. Defaults to {@link createUpstreamResolver}; tests inject a fake so
+   * publishing never depends on a real DNS answer.
+   */
+  upstreamResolver?: UpstreamResolver;
+  /**
    * Start the outbox poller. Defaults to `false` under `NEXUS_ENV=test`, where
    * tests drive `services.outbox.tick()` themselves, and `true` elsewhere.
    */
   startOutboxWorker?: boolean;
+  /**
+   * Start the gateway teardown poller. Same default as
+   * {@link BuildServerDeps.startOutboxWorker}: tests drive
+   * `services.teardown.tick()` themselves.
+   */
+  startTeardownWorker?: boolean;
   /** Serve the built SPA. Defaults to "yes when the dist directory exists". */
   serveStatic?: boolean;
 }
 
 /** Rate limit applied to `/api/auth/*` when `config.rateLimitEnabled` is true. */
 export const AUTH_RATE_LIMIT = { max: 20, timeWindow: '1 minute' } as const;
+
+/**
+ * Rate limit applied to `/api/health*` when `config.rateLimitEnabled` is true.
+ *
+ * The health routes are unauthenticated and each one costs a database query and
+ * an authenticated Admin API call, so they need a ceiling of their own — the
+ * `/api/auth` limiter never covered them. 120/minute per client IP is roughly
+ * one probe every half second, which is far above what a load balancer, a
+ * container liveness probe and a monitoring scraper need between them, and far
+ * below what an anonymous flood wants. The `NEXUS_HEALTH_CACHE_MS` cache in
+ * `routes/health.ts` is what keeps the traffic *under* this ceiling from
+ * reaching the dependencies; this is the ceiling itself.
+ */
+export const HEALTH_RATE_LIMIT = { max: 120, timeWindow: '1 minute' } as const;
 
 /**
  * Translate `config.trustedProxies` into a value Fastify accepts.
@@ -280,6 +315,7 @@ export async function buildServer(
     notifications,
     credentials,
     settings,
+    upstreamResolver: deps.upstreamResolver ?? createUpstreamResolver(),
   });
   const usage = createUsageService({ store: deps.store, edge: deps.edge, publishing });
   // Composed after publishing: the palette reuses its owner-or-admin check, so
@@ -327,12 +363,23 @@ export async function buildServer(
       }),
   });
 
+  // Retries the gateway revocation a disable owes when Edge refused it. Without
+  // it a failed teardown would leave a disabled account's API key working
+  // forever — see `credentials/teardown-worker.ts`.
+  const teardown = createTeardownWorker({
+    store: deps.store,
+    credentials,
+    audit,
+    log: warn,
+  });
+
   const services: NexusServices = {
     audit,
     captcha,
     auth,
     email,
     outbox,
+    teardown,
     notifications,
     settings,
     users,
@@ -417,6 +464,12 @@ export async function buildServer(
    */
   await app.register(
     async (scope) => {
+      // Scoped to this child instance, like the `/api/auth` limiter: a probe
+      // flood must not consume the budget of the rest of the API, and vice
+      // versa.
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { ...HEALTH_RATE_LIMIT });
+      }
       await scope.register(healthRoutes, { config, store: deps.store, edge: deps.edge });
     },
     { prefix: '/api/health' },
@@ -434,7 +487,7 @@ export async function buildServer(
     { prefix: '/api/auth' },
   );
 
-  await app.register(async (scope) => scope.register(brandingRoutes, { settings, captcha }), {
+  await app.register(async (scope) => scope.register(brandingRoutes, { settings, captcha, auth }), {
     prefix: '/api/branding',
   });
 
@@ -446,9 +499,19 @@ export async function buildServer(
     prefix: '/api/organizations',
   });
 
-  await app.register(async (scope) => scope.register(messagingRoutes, { messaging }), {
-    prefix: '/api/threads',
-  });
+  await app.register(
+    async (scope) => {
+      // `global: false` so only the two write routes carry a limit — listing
+      // and reading a thread are as cheap as any other GET. The key generator
+      // buckets per account (see `userOrIpKey`), which is what makes this an
+      // abuse control rather than a shared-NAT outage.
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
+      }
+      await scope.register(messagingRoutes, { messaging });
+    },
+    { prefix: '/api/threads' },
+  );
 
   await app.register(
     async (scope) => scope.register(notificationsRoutes, { notifications, audit }),
@@ -494,13 +557,16 @@ export async function buildServer(
 
   app.addHook('onClose', async () => {
     await outbox.stop();
+    await teardown.stop();
     await deps.edge.close();
   });
 
   await app.ready();
 
-  // Tests drive `services.outbox.tick()` by hand so no timer ever fires mid-assert.
+  // Tests drive `services.outbox.tick()` and `services.teardown.tick()` by hand
+  // so no timer ever fires mid-assert.
   if (deps.startOutboxWorker ?? config.env !== 'test') outbox.start();
+  if (deps.startTeardownWorker ?? config.env !== 'test') teardown.start();
 
   return app;
 }
@@ -610,14 +676,61 @@ function defaultOnRegistered(
 
 /* ── Entry point ────────────────────────────────────────────────────────── */
 
+/**
+ * Announce the first-run bootstrap token on an empty portal.
+ *
+ * Only ever called for a *generated* token: one that came from
+ * `NEXUS_BOOTSTRAP_TOKEN` is the operator's own secret and is never echoed to
+ * the log. The message is deliberately loud — it is the only place this value
+ * is ever shown, and without it nobody can create the portal's first account.
+ */
+function logGeneratedBootstrapToken(app: FastifyInstance, token: string): void {
+  app.log.warn(
+    '\n' +
+      '='.repeat(76) +
+      '\n' +
+      'FIRST-RUN BOOTSTRAP: this portal has no accounts yet.\n' +
+      '\n' +
+      'The first registration becomes the portal super_admin, so it must send\n' +
+      'this bootstrap token as `bootstrap_token` (the sign-up form asks for it):\n' +
+      '\n' +
+      `    ${token}\n` +
+      '\n' +
+      'It was generated for this process only: it changes on every restart and\n' +
+      'differs between instances. Set NEXUS_BOOTSTRAP_TOKEN to pin one value\n' +
+      'across restarts and across a multi-instance deployment.\n' +
+      '='.repeat(76),
+  );
+}
+
 /** Boot the server from `process.env` and listen. */
 export async function main(): Promise<void> {
-  const config = loadConfig(process.env);
+  const loaded = loadConfig(process.env);
+  // With no `NEXUS_BOOTSTRAP_TOKEN` the portal still gets one, generated per
+  // process, so a fresh deployment is never bootstrappable by whoever reaches
+  // the port first — only by whoever can read the log.
+  const generatedBootstrapToken =
+    loaded.bootstrapToken === undefined ? randomBytes(32).toString('hex') : null;
+  const config: NexusConfig =
+    generatedBootstrapToken === null
+      ? loaded
+      : { ...loaded, bootstrapToken: generatedBootstrapToken };
+
   const store = createStore(config);
   await store.init();
   await store.migrate();
+  const emptyPortal = (await store.users.count()) === 0;
 
-  const app = await buildServer(config, { store, edge: createFerrumAdmin(config) });
+  // The store is built first because the Edge client borrows its lease table:
+  // that is what makes consumer and proxy read-modify-writes exclusive across
+  // every Nexus instance, not just within this process.
+  const app = await buildServer(config, {
+    store,
+    edge: createFerrumAdmin(config, undefined, store.leases),
+  });
+  if (generatedBootstrapToken !== null && emptyPortal) {
+    logGeneratedBootstrapToken(app, generatedBootstrapToken);
+  }
   // Best-effort: the namespace is also created implicitly by the first write.
   void app.nexus.edge.ensureNamespace('Managed by Ferrum Nexus');
 

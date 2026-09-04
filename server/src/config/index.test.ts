@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { loadConfig, type EnvRecord } from './index.js';
+import { DEFAULT_MAX_APIS_PER_OWNER, loadConfig, type EnvRecord } from './index.js';
 import { isNexusError } from '../lib/errors.js';
 
 const SECRET = 'a'.repeat(40);
@@ -97,6 +97,28 @@ describe('loadConfig', () => {
     expectConfigError(baseEnv({ FERRUM_ADMIN_JWT_SECRET: 'too-short' }), 'at least 32 characters');
   });
 
+  it('leaves NEXUS_BOOTSTRAP_TOKEN unset by default and accepts a long one', () => {
+    assert.equal(loadConfig(baseEnv()).bootstrapToken, undefined);
+    assert.equal(
+      loadConfig(baseEnv({ NEXUS_BOOTSTRAP_TOKEN: '   ' })).bootstrapToken,
+      undefined,
+      'blank means unset, so the entry point generates one',
+    );
+    assert.equal(
+      loadConfig(baseEnv({ NEXUS_BOOTSTRAP_TOKEN: 'b'.repeat(64) })).bootstrapToken,
+      'b'.repeat(64),
+    );
+  });
+
+  it('rejects a short NEXUS_BOOTSTRAP_TOKEN', () => {
+    // A guessable token is worse than none: it looks configured while leaving
+    // the founding super_admin election open to anyone who can reach the port.
+    expectConfigError(
+      baseEnv({ NEXUS_BOOTSTRAP_TOKEN: 'sekret' }),
+      'NEXUS_BOOTSTRAP_TOKEN must be at least 16 characters',
+    );
+  });
+
   it('allows plaintext http for loopback admin URLs', () => {
     for (const url of ['http://127.0.0.1:9000', 'http://localhost:9000', 'http://[::1]:9000']) {
       const config = loadConfig(baseEnv({ FERRUM_ADMIN_URL: url }));
@@ -142,6 +164,20 @@ describe('loadConfig', () => {
   it('disables rate limiting in the test environment', () => {
     assert.equal(loadConfig(baseEnv({ NEXUS_ENV: 'test' })).rateLimitEnabled, false);
     assert.equal(loadConfig(baseEnv({ NEXUS_ENV: 'production' })).rateLimitEnabled, true);
+  });
+
+  it('reads the per-owner API quota, defaulting to 50 and honouring 0 as unlimited', () => {
+    assert.equal(loadConfig(baseEnv()).maxApisPerOwner, DEFAULT_MAX_APIS_PER_OWNER);
+    assert.equal(loadConfig(baseEnv({ NEXUS_MAX_APIS_PER_OWNER: '5' })).maxApisPerOwner, 5);
+    // `0` is a meaningful value here, not "absent" — it turns the ceiling off —
+    // so it must survive the blank-is-default coercion every other variable has.
+    assert.equal(loadConfig(baseEnv({ NEXUS_MAX_APIS_PER_OWNER: '0' })).maxApisPerOwner, 0);
+    assert.equal(
+      loadConfig(baseEnv({ NEXUS_MAX_APIS_PER_OWNER: '  ' })).maxApisPerOwner,
+      DEFAULT_MAX_APIS_PER_OWNER,
+    );
+    expectConfigError(baseEnv({ NEXUS_MAX_APIS_PER_OWNER: '-1' }), 'NEXUS_MAX_APIS_PER_OWNER');
+    expectConfigError(baseEnv({ NEXUS_MAX_APIS_PER_OWNER: '2.5' }), 'NEXUS_MAX_APIS_PER_OWNER');
   });
 
   it('treats blank optional variables as unset', () => {
