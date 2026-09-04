@@ -3,7 +3,11 @@ import { after, afterEach, before, describe, it } from 'node:test';
 
 import type { EdgeConfig } from '../config/index.js';
 import { createMockFerrumEdge, type MockFerrumEdge } from '../test/mock-ferrum-edge.js';
-import { createFerrumAdminClient, type FerrumAdminClient } from './client.js';
+import {
+  createFerrumAdminClient,
+  METRICS_RESPONSE_MAX_BYTES,
+  type FerrumAdminClient,
+} from './client.js';
 
 const SECRET = 'ferrum-admin-metrics-test-secret-0123456789';
 
@@ -165,7 +169,10 @@ describe('ferrum admin metrics', () => {
     });
 
     it('rejects an oversized metrics response without buffering it indefinitely', async () => {
-      edge.queueFailure(200, 'x'.repeat(2 * 1024 * 1024 + 1), '/metrics');
+      // Sized off the constant, so raising the ceiling keeps this exercising
+      // the bound rather than quietly becoming a test of a 2 MiB body that now
+      // fits.
+      edge.queueFailure(200, 'x'.repeat(METRICS_RESPONSE_MAX_BYTES + 1), '/metrics');
 
       const metrics = await freshClient().metrics.scrapeProxy('proxy-a');
 

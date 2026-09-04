@@ -37,6 +37,10 @@ import { edgeError, edgeUnavailable, internal } from '../lib/errors.js';
 import { createAdminTokenMinter, DEFAULT_ADMIN_SUBJECT, type AdminTokenMinter } from './jwt.js';
 import { parsePrometheusText, type PrometheusSample } from './prometheus.js';
 import type {
+  EdgeApiSpecDocument,
+  EdgeApiSpecPage,
+  EdgeApiSpecRef,
+  EdgeApiSpecSummary,
   EdgeBackendState,
   EdgeCircuitBreaker,
   EdgeConsumer,
@@ -231,6 +235,52 @@ export interface FerrumAdminClient {
   };
 
   /**
+   * The API-spec importer — Edge's *only* route to an `openapi_validator`.
+   *
+   * A proxy submitted this way is **spec-owned**: Edge stamps `api_spec_id` on
+   * it, generates the validator from the document's operation table and
+   * associates it, all in one transaction. Admission then refuses a hand-built
+   * `openapi_validator` on any proxy without that stamp, which is why
+   * `routes` enforcement cannot be expressed as a plugin config Nexus composes
+   * itself (issue #49).
+   *
+   * Ownership is one spec per proxy (`UNIQUE(namespace, proxy_id)`) and the
+   * cascade runs both ways: deleting the spec deletes the proxy, and deleting
+   * the proxy deletes the spec.
+   */
+  readonly apiSpecs: {
+    /**
+     * Submit a document; Edge creates the proxy named by `x-ferrum-proxy.id`
+     * and the plugins the extensions describe.
+     *
+     * Conflicts on an existing proxy id, an existing listen path, or a proxy
+     * that already has a spec, so converting a hand-owned proxy to a
+     * spec-owned one means deleting it first.
+     */
+    create(document: EdgeApiSpecDocument, subject?: string): Promise<EdgeApiSpecRef>;
+    /**
+     * Replace the document. Edge re-inserts the proxy **from the submitted
+     * `x-ferrum-proxy`** and regenerates the spec-owned plugins; hand-owned
+     * plugin configs and their associations survive untouched.
+     *
+     * Because the proxy is re-inserted rather than merged, the body must be
+     * built from a fresh `proxies.get()` or every field it omits reverts.
+     */
+    replace(id: string, document: EdgeApiSpecDocument, subject?: string): Promise<EdgeApiSpecRef>;
+    /**
+     * The spec that owns `proxyId`, or `null`.
+     *
+     * Reads `GET /api-specs?proxy_id=…` rather than
+     * `GET /api-specs/by-proxy/{id}`, which returns the raw *document* and not
+     * the id Nexus needs. Same reasoning as the plugin configs: Nexus stores no
+     * Edge spec id and looks it up from the proxy whenever one is needed.
+     */
+    findByProxy(proxyId: string): Promise<EdgeApiSpecSummary | null>;
+    /** Delete the spec — and, by cascade, its proxy and every plugin on it. */
+    delete(id: string, subject?: string): Promise<void>;
+  };
+
+  /**
    * Read-only runtime telemetry for one proxy.
    *
    * Both calls are **best-effort diagnostics and never throw**: an unreachable
@@ -288,8 +338,12 @@ const MAX_GATEWAY_MESSAGE = 500;
  */
 export const METRICS_CACHE_TTL_MS = 10_000;
 
-/** Hard ceiling for either gateway-wide telemetry document. */
-export const METRICS_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
+/**
+ * Hard ceiling for either gateway-wide telemetry document. Both are
+ * *gateway-wide* rather than per-proxy, so a mid-size gateway's exposition
+ * passes 2 MiB and every usage card would read "unavailable" for good.
+ */
+export const METRICS_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
 
 /** Prometheus families Nexus reads. Everything else in the body is ignored. */
 const REQUESTS_FAMILY = 'ferrum_requests_total';
@@ -920,6 +974,33 @@ export function createFerrumAdminClient(
           subject,
           allow404: true,
         });
+      },
+    },
+
+    apiSpecs: {
+      async create(document: EdgeApiSpecDocument, subject?: string): Promise<EdgeApiSpecRef> {
+        return callRequired<EdgeApiSpecRef>('POST', '/api-specs', { body: document, subject });
+      },
+      async replace(
+        id: string,
+        document: EdgeApiSpecDocument,
+        subject?: string,
+      ): Promise<EdgeApiSpecRef> {
+        return callRequired<EdgeApiSpecRef>('PUT', `/api-specs/${encodeURIComponent(id)}`, {
+          body: document,
+          subject,
+        });
+      },
+      async findByProxy(proxyId: string): Promise<EdgeApiSpecSummary | null> {
+        // `(namespace, proxy_id)` is unique, so one page of one is the whole
+        // answer; the filter is applied by the gateway rather than here.
+        const page = await callRequired<EdgeApiSpecPage>('GET', '/api-specs', {
+          query: { proxy_id: proxyId, limit: 1 },
+        });
+        return (Array.isArray(page.items) ? page.items[0] : undefined) ?? null;
+      },
+      async delete(id: string, subject?: string): Promise<void> {
+        await call('DELETE', `/api-specs/${encodeURIComponent(id)}`, { subject, allow404: true });
       },
     },
 
