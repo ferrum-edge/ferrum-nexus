@@ -147,6 +147,23 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - **The Compose example builds from the repository root** it is copied to;
   its previous `context: ..` pointed at the parent directory.
 
+- **Disabling an account now tears down every gateway identity it holds**,
+  including provider test consumers (`nexus-test-<apiId>`), whose key and
+  approval group previously stayed live behind a `gateway_teardown: "ok"`.
+- **A credential mutation re-checks the owner inside the consumer lock**, so
+  an issue, rotation, test-consumer issuance or approval that was in flight
+  when the account was disabled is refused (or removed by the teardown that
+  follows it) instead of minting a live key for a disabled account.
+- **Rotation at the per-type cap can no longer leave the portal disagreeing
+  with the gateway.** The retired row is revoked the moment Edge confirms the
+  delete; a failed append answers `502` saying the previous credential was
+  removed and a new one must be issued, and a failed metadata insert deletes
+  the key it just appended. `docs/operations.md` gains the reconciliation
+  procedure the mismatch error now points at.
+- **An admin-rotated credential keeps its owner.** The replacement used to be
+  assigned to the administrator, so the client could neither see nor revoke
+  it; the admin is now the audit actor only.
+
 ### Security
 
 The rewrite was reviewed twice — once by an adversarial pass over the whole
