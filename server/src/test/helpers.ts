@@ -90,6 +90,17 @@ export interface BuildTestAppOptions {
   env?: EnvRecord;
   /** Override injected server dependencies (e.g. `onRegistered`). */
   deps?: Partial<Omit<BuildServerDeps, 'store' | 'edge'>>;
+  /**
+   * Share one already-migrated store with another app, which is how the
+   * two-instance race tests model two Nexus processes over one database.
+   * `close()` leaves a shared store open — the owner closes it.
+   */
+  store?: NexusStore;
+  /**
+   * Share one already-started mock gateway, for the same reason. `close()`
+   * leaves a shared mock running.
+   */
+  edge?: MockFerrumEdge;
 }
 
 /** An authenticated identity produced by the register/login helpers. */
@@ -205,8 +216,11 @@ function sessionFrom(response: LightMyRequestResponse, user: User): TestSession 
 
 /** Boot a full test application. Always `await close()` in an `after` hook. */
 export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<TestApp> {
-  const edge = createMockFerrumEdge({ jwtSecret: TEST_EDGE_JWT_SECRET, issuer: 'ferrum-edge' });
-  const edgeUrl = await edge.start();
+  const sharedEdge = options.edge !== undefined;
+  const edge =
+    options.edge ??
+    createMockFerrumEdge({ jwtSecret: TEST_EDGE_JWT_SECRET, issuer: 'ferrum-edge' });
+  const edgeUrl = sharedEdge ? edge.url : await edge.start();
 
   const config = loadConfig({
     NEXUS_ENV: 'test',
@@ -220,11 +234,16 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
     ...options.env,
   });
 
-  const store = createStore(config);
-  await store.init();
-  await store.migrate();
+  const sharedStore = options.store !== undefined;
+  const store = options.store ?? createStore(config);
+  if (!sharedStore) {
+    await store.init();
+    await store.migrate();
+  }
 
-  const edgeClient = createFerrumAdminClient(config.edge);
+  // The real composition root passes `store.leases`, so the whole suite runs
+  // through the cross-instance path rather than the in-process queue alone.
+  const edgeClient = createFerrumAdminClient(config.edge, undefined, { leases: store.leases });
   const { mailbox, factory } = createTestMailbox();
   const app = await buildServer(config, {
     store,
@@ -304,8 +323,10 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
 
     async close(): Promise<void> {
       await app.close();
-      await store.close();
-      await edge.stop();
+      // A store or mock the caller supplied belongs to the caller; closing it
+      // here would pull it out from under the app that is sharing it.
+      if (!sharedStore) await store.close();
+      if (!sharedEdge) await edge.stop();
     },
   };
 
