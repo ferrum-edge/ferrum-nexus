@@ -1573,13 +1573,21 @@ credential's label.
 Append-then-delete: the replacement is created on Edge first so both secrets
 are live across the hand-off, then the old entry is deleted. **When the account
 is already at the per-type cap there is no room to append**, so the old entry is
-deleted first and there is a brief window with no working credential of that
-type.
+deleted first — and marked `revoked` the moment Edge confirms it — leaving a
+brief window with no working credential of that type. If the append then fails,
+the response says so plainly (`502 EDGE_ERROR`, _the previous credential was
+removed … issue a new credential_); everything still live stays revocable.
 
-Errors: `403 FORBIDDEN` (someone else's credential), `409 CONFLICT` (already
-revoked), `502 EDGE_ERROR` — including the case where the gateway's credential
-list no longer matches the portal's view, which is refused rather than guessed
-at.
+An **admin may rotate another account's credential**, and doing so does not
+transfer it: the replacement keeps the original `user_id` and consumer, the
+owner keeps seeing and revoking it, and the admin appears only as the actor on
+the audit row and as the subject of the Edge write. The notification and email
+go to the owner.
+
+Errors: `403 FORBIDDEN` (someone else's credential), `403 USER_DISABLED` (the
+owner's account was disabled), `409 CONFLICT` (already revoked), `502
+EDGE_ERROR` — including the case where the gateway's credential list no longer
+matches the portal's view, which is refused rather than guessed at.
 
 ### `DELETE /api/credentials/:id`
 

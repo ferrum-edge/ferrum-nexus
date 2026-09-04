@@ -950,11 +950,11 @@ ordinary reporting.
 
 ### Credentials
 
-| Action              | Target type  | Description                                                                                                                    |
-| ------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| `credential.issue`  | `credential` | A gateway credential was minted. `details`: credential type, consumer id, `last4`.                                             |
-| `credential.rotate` | `credential` | Append-then-delete rotation. Target is the **new** credential; `details`: type, consumer id, `rotated_from`, `previous_last4`. |
-| `credential.revoke` | `credential` | A credential was deleted from Edge and marked revoked. `details`: type, consumer id, `last4`.                                  |
+| Action              | Target type  | Description                                                                                                                                                                                                                                                               |
+| ------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `credential.issue`  | `credential` | A gateway credential was minted. `details`: credential type, consumer id, `last4`.                                                                                                                                                                                        |
+| `credential.rotate` | `credential` | Append-then-delete rotation. Target is the **new** credential; `details`: type, consumer id, `rotated_from`, `previous_last4`, plus `owner_user_id` when an admin rotated somebody else's credential — the replacement stays with its owner, the admin is only the actor. |
+| `credential.revoke` | `credential` | A credential was deleted from Edge and marked revoked. `details`: type, consumer id, `last4`.                                                                                                                                                                             |
 
 ### Messaging and notifications
 

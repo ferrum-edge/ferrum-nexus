@@ -19,6 +19,8 @@
  *   destructive step, so the row it retires is revoked the moment Edge confirms
  *   it — never after a later step that can still fail. Whatever survives a
  *   failed rotation is still revocable.
+ * - **An admin rotating somebody's credential does not take it over.** The
+ *   replacement keeps its owner and its consumer; the admin is only the actor.
  */
 
 import assert from 'node:assert/strict';
@@ -33,6 +35,7 @@ import {
   type CredentialType,
   type IssueCredentialResponse,
   type ListCredentialsResponse,
+  type ListNotificationsResponse,
   type PublishApiResponse,
   type RotateCredentialResponse,
   type UpdateUserResponse,
@@ -715,5 +718,135 @@ describe('credential lifecycle across identities', () => {
     assert.ok(second.statusCode >= 500, second.body);
 
     assert.equal(harness.edge.consumerByUsername(username)?.credentials.keyauth?.length, 1);
+  });
+
+  /* ── #65 — an admin rotation keeps the owner ──────────────────────────── */
+
+  for (const actorName of ['admin', 'super_admin'] as const) {
+    for (const type of ['keyauth', 'basicauth', 'jwt'] as CredentialType[]) {
+      it(`keeps the owner when a ${actorName} rotates a ${type} credential`, async () => {
+        const owner = await harness.registerUser({
+          email: `lifecycle-owner-${actorName}-${type}@example.test`,
+          role: 'client',
+        });
+        const stranger = await harness.registerUser({
+          email: `lifecycle-stranger-${actorName}-${type}@example.test`,
+          role: 'client',
+        });
+        const issued = await issue(owner, type);
+        const actor = actorName === 'admin' ? admin : founder;
+
+        const rotated = await harness.authed(actor, {
+          method: 'POST',
+          url: `/api/credentials/${issued.credential.id}/rotate`,
+          payload: {},
+        });
+        assert.equal(rotated.statusCode, 200, rotated.body);
+        const replacement = rotated.json<RotateCredentialResponse>().credential;
+        assert.equal(replacement.user_id, owner.user.id, 'the replacement keeps its owner');
+        assert.equal(
+          replacement.ferrum_consumer_id,
+          issued.credential.ferrum_consumer_id,
+          'and its consumer',
+        );
+
+        // The owner sees it, and can revoke it.
+        const listed = await harness.authed(owner, { method: 'GET', url: '/api/credentials' });
+        assert.equal(listed.statusCode, 200, listed.body);
+        assert.ok(
+          listed
+            .json<ListCredentialsResponse>()
+            .items.some((row) => row.id === replacement.id && row.status === 'active'),
+        );
+
+        const outsider = await harness.authed(stranger, {
+          method: 'DELETE',
+          url: `/api/credentials/${replacement.id}`,
+        });
+        assert.equal(outsider.statusCode, 403, outsider.body);
+        assert.equal(errorCode(outsider.body), 'FORBIDDEN');
+
+        const revoked = await harness.authed(owner, {
+          method: 'DELETE',
+          url: `/api/credentials/${replacement.id}`,
+        });
+        assert.equal(revoked.statusCode, 200, revoked.body);
+      });
+    }
+  }
+
+  it('records the admin as the actor and the owner as the subject', async () => {
+    const owner = await harness.registerUser({
+      email: 'lifecycle-attribution@example.test',
+      role: 'client',
+    });
+    const issued = await issue(owner, 'keyauth');
+
+    const rotated = await harness.authed(admin, {
+      method: 'POST',
+      url: `/api/credentials/${issued.credential.id}/rotate`,
+      payload: {},
+    });
+    assert.equal(rotated.statusCode, 200, rotated.body);
+    const replacement = rotated.json<RotateCredentialResponse>().credential;
+
+    const row = (await harness.auditRows('credential.rotate')).find(
+      (entry) => entry.target_id === replacement.id,
+    );
+    assert.equal(row?.actor_user_id, admin.user.id, 'the admin is the actor');
+    assert.equal(row?.details.owner_user_id, owner.user.id, 'the owner is named');
+
+    // Edge attributes the write to the admin who made it: the JWT it was sent
+    // with carries the admin's id as `sub`.
+    const write = [...harness.edge.requests]
+      .reverse()
+      .find(
+        (request) => request.method === 'POST' && request.path.includes('/credentials/keyauth'),
+      );
+    assert.equal(write?.claims?.sub, admin.user.id);
+
+    // The notification and the email go to the owner, not the admin.
+    const notified = await harness.authed(owner, { method: 'GET', url: '/api/notifications' });
+    assert.equal(notified.statusCode, 200, notified.body);
+    assert.ok(
+      notified
+        .json<ListNotificationsResponse>()
+        .items.some((item) => item.type === 'credential_rotated'),
+    );
+    assert.ok(
+      (await harness.outbox()).some((mail) => mail.to_email === owner.user.email),
+      'the owner was mailed about their own credential',
+    );
+  });
+
+  it('keeps the provider as owner when an admin rotates a test credential', async () => {
+    const provider = await harness.registerUser({
+      email: 'lifecycle-testrot@example.test',
+      role: 'provider',
+    });
+    const api = await publish(provider, 'lifecycle-testrot');
+    const created = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/apis/${api.id}/test-consumer`,
+      payload: {},
+    });
+    assert.equal(created.statusCode, 201, created.body);
+    const credential = created.json<CreateTestConsumerResponse>().credential;
+
+    const rotated = await harness.authed(admin, {
+      method: 'POST',
+      url: `/api/credentials/${credential.id}/rotate`,
+      payload: {},
+    });
+    assert.equal(rotated.statusCode, 200, rotated.body);
+    const replacement = rotated.json<RotateCredentialResponse>().credential;
+    assert.equal(replacement.user_id, provider.user.id);
+    assert.equal(replacement.ferrum_consumer_id, credential.ferrum_consumer_id);
+
+    const revoked = await harness.authed(provider, {
+      method: 'DELETE',
+      url: `/api/credentials/${replacement.id}`,
+    });
+    assert.equal(revoked.statusCode, 200, revoked.body);
   });
 });

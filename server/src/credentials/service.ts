@@ -748,7 +748,14 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         }
 
         const created = await appendCredential({
-          ownerId: user.id,
+          // The replacement belongs to whoever the credential belonged to. An
+          // admin may rotate somebody else's key — `loadOwned` allows it — but
+          // rotating is not taking: attributing the row to the admin would put
+          // the replacement on a consumer the owner cannot list it against, and
+          // the owner's own `DELETE` of it would come back 403.
+          ownerId: current.user_id,
+          // The admin is still the actor: theirs is the id Edge records as the
+          // write's subject, and the one the Nexus audit row names.
           actorId: user.id,
           consumerId,
           consumerUsername: consumer.username,
@@ -789,6 +796,9 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           consumer_id: consumerId,
           rotated_from: target.id,
           previous_last4: target.last4,
+          // Only when they differ: an admin acting on somebody else's
+          // credential is the case worth being able to find in the log.
+          ...(target.user_id === user.id ? {} : { owner_user_id: target.user_id }),
         },
         ip,
       );
