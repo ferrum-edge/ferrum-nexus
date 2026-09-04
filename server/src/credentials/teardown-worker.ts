@@ -27,7 +27,10 @@
  *   {@link TEARDOWN_MAX_BACKOFF_MS}, and a `warn` line naming the user, the
  *   attempt count and the error. That line is the one to alert on;
  * - **the account is no longer disabled, or no longer exists** → the job is
- *   dropped. A revocation must never land on a re-enabled account.
+ *   dropped. A revocation must never land on a re-enabled account. That is
+ *   checked at claim time *and* again after an attempt that failed, because the
+ *   re-enable can land mid-attempt — `disableGatewayAccess` refuses from inside
+ *   the per-consumer lock, and there is nothing to retry.
  *
  * ## Why there is no `failed` state
  *
@@ -153,6 +156,17 @@ export function createTeardownWorker(deps: TeardownWorkerDeps): TeardownWorker {
     });
 
     if (attempt.outcome === 'pending') {
+      // The claim-time check above is not the last word: a re-enable can land
+      // while the attempt is in flight, and `disableGatewayAccess` refuses in
+      // that case from inside the per-consumer lock it holds. Rescheduling
+      // would only queue another refusal, so re-read and drop the job instead.
+      const settled = await store.users.findById(job.user_id);
+      if (!settled || settled.status !== 'disabled') {
+        await store.gatewayTeardownJobs.deleteByUser(job.user_id);
+        result.cancelled += 1;
+        return;
+      }
+
       const nextAt = new Date(now().getTime() + teardownBackoffMs(job.attempts, random));
       await store.gatewayTeardownJobs.reschedule(
         job.id,

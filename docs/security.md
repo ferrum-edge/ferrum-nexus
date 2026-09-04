@@ -393,12 +393,14 @@ answer that says how to fix it — promote a second super admin.
 ### Disabling an account
 
 Both paths — `PATCH /api/users/:id` with `status: "disabled"` and
-`POST /api/admin/god/disable-user` — do three things, not one:
+`POST /api/admin/god/disable-user` — do four things, not one:
 
 1. delete every session, so an open tab gets a `401`;
 2. strip every ACL group from the account's Ferrum consumer;
 3. delete **every credential of every type** on that consumer and mark the
-   matching `credential_metadata` rows `revoked`.
+   matching `credential_metadata` rows `revoked`;
+4. delete every **other** Edge consumer the account still holds live credential
+   material on, and revoke those rows too.
 
 (2) alone is not enough. An API published with `requestable: false` carries no
 `access_control` plugin, so an empty group list stops nothing; the credential
@@ -406,12 +408,48 @@ is what the gateway authenticates, and it has no idea a portal session ever
 existed. `basicauth` is deleted explicitly because it never appears in a read
 projection, so a group rewrite cannot see it.
 
-All three gateway steps run inside one critical section keyed on the Ferrum
-consumer id — an in-process queue plus an `edge_leases` row — so a concurrent
-approval on another Nexus instance cannot read the pre-teardown group list and
-write it back afterwards. Edge replaces consumers whole, with no version token,
-so without that lock a revoked account could be re-authorised by a write that
-was merely stale; see [`operations.md` §8](operations.md#8-scaling).
+(4) exists because `nexus-user-<id>` is not the account's only gateway
+identity. A provider's **test consumer** (`nexus-test-<api_id>`, created by
+`POST /api/apis/:id/test-consumer`) is a separate Edge consumer holding its own
+show-once credential — attributed in `credential_metadata` to the provider or
+admin who asked for it — and carrying the API's `nexus:api:<id>:approved`
+group. Stripping only the canonical consumer would leave that key authenticating
+and that group in place, which is offboarding that did not happen. A test
+consumer is disposable by definition, so it is deleted outright rather than
+emptied; whoever needs one next recreates it.
+
+Every gateway step for one identity runs inside a critical section keyed on
+_that_ consumer's Ferrum id — an in-process queue plus an `edge_leases` row —
+so a concurrent approval or credential issue on another Nexus instance cannot
+read the pre-teardown state and write it back afterwards. Edge replaces
+consumers whole, with no version token, so without that lock a revoked account
+could be re-authorised by a write that was merely stale; see
+[`operations.md` §8](operations.md#8-scaling). Identities are torn down one at a
+time, and the teardown reports success only when **all** of them are clean: a
+failure on any one leaves the durable job `pending`. Because the identity list
+is enumerated from _live_ credential rows, a retry skips whatever an earlier
+attempt already finished.
+
+#### The lock orders writes; it does not authorise them
+
+A request that passed authentication a moment before the disable is still a
+valid request object when it reaches the front of the consumer queue. So every
+path that _extends_ gateway access reloads the account **inside** the critical
+section, after the lock is held and before any Edge write, and refuses a
+non-`active` owner with `403 USER_DISABLED`: credential issue, rotation
+(checking the credential's **owner**, not the acting admin), test-consumer
+issuance, and the approval that adds `nexus:api:<id>:approved`. Removing a
+group never needs the check.
+
+Because the teardown takes the same per-consumer key, only two orders exist and
+both are safe: the append wins the lock and the teardown behind it deletes what
+it appended, or the teardown wins and the append is refused.
+
+The mirror of that rule protects a **re-enable**: `status: "active"` deletes the
+pending job, and `disableGatewayAccess` re-reads the account inside the lock and
+refuses (`409 CONFLICT`) if it is no longer disabled, so a worker that claimed a
+job just before the re-enable cannot strip a live account. The worker drops such
+a job rather than rescheduling it.
 
 #### The gateway half is durable work, not a side effect
 
@@ -422,7 +460,7 @@ quietly dropped: a disabled account's API key authenticates directly to Edge
 with no portal session behind it, so a swallowed failure leaves the credential
 working indefinitely and reports the disable as finished.
 
-So steps (2) and (3) are owed by a `gateway_teardown_jobs` row written **inside
+So steps (2) through (4) are owed by a `gateway_teardown_jobs` row written **inside
 the same transaction** as `users.status = 'disabled'`. There is one row per
 account (`user_id` is unique), and it carries `status`
 (`pending` → `sending` → `done`), `attempts`, `next_attempt_at`, `last_error`
@@ -912,11 +950,11 @@ ordinary reporting.
 
 ### Credentials
 
-| Action              | Target type  | Description                                                                                                                    |
-| ------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| `credential.issue`  | `credential` | A gateway credential was minted. `details`: credential type, consumer id, `last4`.                                             |
-| `credential.rotate` | `credential` | Append-then-delete rotation. Target is the **new** credential; `details`: type, consumer id, `rotated_from`, `previous_last4`. |
-| `credential.revoke` | `credential` | A credential was deleted from Edge and marked revoked. `details`: type, consumer id, `last4`.                                  |
+| Action              | Target type  | Description                                                                                                                                                                                                                                                               |
+| ------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `credential.issue`  | `credential` | A gateway credential was minted. `details`: credential type, consumer id, `last4`.                                                                                                                                                                                        |
+| `credential.rotate` | `credential` | Append-then-delete rotation. Target is the **new** credential; `details`: type, consumer id, `rotated_from`, `previous_last4`, plus `owner_user_id` when an admin rotated somebody else's credential — the replacement stays with its owner, the admin is only the actor. |
+| `credential.revoke` | `credential` | A credential was deleted from Edge and marked revoked. `details`: type, consumer id, `last4`.                                                                                                                                                                             |
 
 ### Messaging and notifications
 

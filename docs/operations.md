@@ -1,8 +1,8 @@
 # Operations
 
 Running Ferrum Nexus in production: configuration, databases, containers, TLS,
-backups, key rotation, the email outbox, scaling limits, health checks, and
-metrics.
+backups, key rotation, the email outbox, scaling limits, health checks, metrics,
+and the credential mirror.
 
 - Architecture background: [`architecture.md`](architecture.md)
 - Security posture: [`security.md`](security.md)
@@ -1055,3 +1055,61 @@ runs it immediately, returning `gateway_teardown: "ok"` when Edge accepted and
 button next to the _Gateway revocation pending_ badge on the admin **Users**
 page. Do not edit the table by hand — the endpoint is idempotent and writes the
 audit trail.
+
+---
+
+## 12. The credential mirror
+
+Edge gives credential entries **no id**, and every read redacts the material, so
+there is nothing on the wire that identifies one entry. What identifies it is
+its position: `POST` appends, `DELETE /consumers/{id}/credentials/{type}/{i}`
+removes by 0-based index, and Nexus writes one `credential_metadata` row per
+append. The non-revoked rows for a `(consumer, type)` pair, oldest first, are a
+**mirror** of the Edge array, and a row's position in that list is its index.
+
+Every destructive call cross-checks that mirror against the live array length
+read in the same critical section. Nexus itself can no longer break the
+agreement — a rotation revokes the row it retired the moment Edge confirms the
+delete, and an append whose row cannot be written is deleted again — so a
+mismatch means the consumer was edited **outside Nexus**.
+
+### What a drifted consumer looks like
+
+Rotate or revoke returns `502 EDGE_ERROR`:
+
+> The gateway credential list does not match the portal. An administrator must
+> reconcile this consumer …
+
+with `details: { expected, actual }` — `expected` is the number of live portal
+rows, `actual` the length of the Edge array. The one case that is not an error
+is a single live row: a revoke then degrades to deleting the whole credential
+type, which is what a revoke asked for anyway.
+
+### Reconciling one
+
+Decide which side is right, and make the other match it. Edge is the side that
+authenticates, so the safe default is to **empty the type and re-issue**:
+
+```sql
+-- 1. what the portal thinks is live for this consumer
+SELECT id, credential_type, last4, status, created_at
+  FROM credential_metadata
+  WHERE ferrum_consumer_id = '<edge consumer id>' AND status <> 'revoked'
+  ORDER BY created_at;
+```
+
+1. Revoke each live row through the portal (**Administration → Users → the
+   account → Credentials**) if the call succeeds — with one row left it degrades
+   to a whole-type delete and clears both sides at once.
+2. If it does not, delete the type on the gateway
+   (`DELETE /consumers/{id}/credentials/{type}` on the Edge Admin API) and then
+   mark the rows `revoked`. Never leave a row `active` for an entry that is
+   gone: it will drift again on the next operation.
+3. Tell the account holder to issue new credentials. The old secrets were
+   show-once and cannot be recovered from either side.
+
+A failed rotation **at the cap** is not drift and needs none of this. The old
+entry is deleted before the replacement is appended (there is no room for both),
+so if the append fails the response says so plainly — _the previous credential
+was removed … issue a new credential_ — the retired row is already `revoked`,
+and everything still live remains revocable.
