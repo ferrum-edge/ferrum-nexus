@@ -720,6 +720,11 @@ function validateProxySettings(body: Record<string, unknown>): string | null {
   const methods = body.allowed_methods;
   if (methods !== undefined && methods !== null) {
     if (!Array.isArray(methods)) return 'allowed_methods must be an array of HTTP methods or null';
+    // Edge's rule (`src/config/types.rs`): `null` means allow all, and the only
+    // other legal value is a non-empty list — `[]` is not a deny-all, it is a 400.
+    if (methods.length === 0) {
+      return 'allowed_methods must be null (allow all) or a non-empty array';
+    }
     for (const method of methods) {
       if (typeof method !== 'string' || !PROXY_HTTP_METHODS.has(method)) {
         return `allowed_methods: unknown HTTP method '${String(method)}'`;
