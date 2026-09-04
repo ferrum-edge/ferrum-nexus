@@ -621,9 +621,43 @@ Errors: `400 VALIDATION_FAILED` (empty subject/body, or messaging yourself),
 
 ### `GET /api/threads/:id`
 
-_session_ — the thread plus its full message list (`MessageThreadDetail`), each
-message carrying a `sender` summary. Participants always; admins for oversight.
-`403 FORBIDDEN` otherwise.
+_session_ — the thread plus its **most recent** window of messages
+(`MessageThreadDetail`), each message carrying a `sender` summary. Participants
+always; admins for oversight. `403 FORBIDDEN` otherwise.
+
+| Query    | Type | Notes                                                  |
+| -------- | ---- | ------------------------------------------------------ |
+| `limit`  | int  | window size, 1–`MAX_PAGE_SIZE` (200), default 25       |
+| `before` | uuid | a message id: return only messages older than that one |
+
+```json
+{
+  "id": "…", "subject": "…", "participants": [ … ],
+  "messages": {
+    "items": [ … ],
+    "total": 208,
+    "has_more": true,
+    "next_before": "5e933aed-…"
+  }
+}
+```
+
+`messages.items` is ordered **oldest-first**, ready to render top to bottom, but
+the window itself is taken from the newest end of the conversation — which is
+what keeps a freshly posted reply visible however long the history behind it.
+`total` counts the whole thread; `has_more` says whether anything precedes
+`items[0]`, and `next_before` is the cursor that fetches it. There is no
+`offset`: a conversation grows at the end the reader is anchored to, so an
+offset into it slides under every reply.
+
+### `GET /api/threads/:id/messages`
+
+_session_ — one window of the same transcript, without re-sending the thread:
+the "load older messages" call. Same `limit`/`before` query and the same
+`MessagePage` body as `messages` above; the same read rule and `403 FORBIDDEN`.
+
+Errors: `400 VALIDATION_FAILED` (a `before` id that is not part of this thread),
+`403 FORBIDDEN` (not a participant), `404 NOT_FOUND` (unknown thread).
 
 ### `POST /api/threads/:id/messages`
 
@@ -1255,12 +1289,19 @@ the parsed `info.version`).
 { "api": { … }, "spec": { … } }
 ```
 
-The new revision becomes current. The proxy backend is re-pointed at the
-document's `servers[0]` **only** if the proxy is still pointing where the
-_previous_ revision said it should — once a provider supplies an explicit
-upstream, the document stops being authoritative for it. When the backend does
-move, `upstream_url` on the row moves with it, in the same store transaction as
-the revision; when it does not, `upstream_url` is left alone.
+The new revision becomes current, and the API's oldest revisions past
+`NEXUS_SPEC_HISTORY_LIMIT` (default 10, on top of the current one) are pruned in
+the same transaction.
+
+The proxy backend is re-pointed at the document's `servers[0]` **only** when the
+row's `upstream_url` still equals the normalized `servers[0]` of the _previous_
+current revision. Both sides are normalized the same way — explicit port, no
+trailing slash — and the comparison covers scheme, host, port **and base path**,
+so a document moving `/v2` to `/v3` on the same host moves the backend, while an
+`upstream_url` that differs from the previous document in any of those four is a
+pin the upload leaves alone. When the backend does move, `upstream_url` on the
+row moves with it, in the same store transaction as the revision; when it does
+not, `upstream_url` is left alone.
 
 An API in `routes` mode has its document re-submitted to the gateway, which
 regenerates the operation table from it. That single call also carries the
@@ -1573,13 +1614,21 @@ credential's label.
 Append-then-delete: the replacement is created on Edge first so both secrets
 are live across the hand-off, then the old entry is deleted. **When the account
 is already at the per-type cap there is no room to append**, so the old entry is
-deleted first and there is a brief window with no working credential of that
-type.
+deleted first — and marked `revoked` the moment Edge confirms it — leaving a
+brief window with no working credential of that type. If the append then fails,
+the response says so plainly (`502 EDGE_ERROR`, _the previous credential was
+removed … issue a new credential_); everything still live stays revocable.
 
-Errors: `403 FORBIDDEN` (someone else's credential), `409 CONFLICT` (already
-revoked), `502 EDGE_ERROR` — including the case where the gateway's credential
-list no longer matches the portal's view, which is refused rather than guessed
-at.
+An **admin may rotate another account's credential**, and doing so does not
+transfer it: the replacement keeps the original `user_id` and consumer, the
+owner keeps seeing and revoking it, and the admin appears only as the actor on
+the audit row and as the subject of the Edge write. The notification and email
+go to the owner.
+
+Errors: `403 FORBIDDEN` (someone else's credential), `403 USER_DISABLED` (the
+owner's account was disabled), `409 CONFLICT` (already revoked), `502
+EDGE_ERROR` — including the case where the gateway's credential list no longer
+matches the portal's view, which is refused rather than guessed at.
 
 ### `DELETE /api/credentials/:id`
 

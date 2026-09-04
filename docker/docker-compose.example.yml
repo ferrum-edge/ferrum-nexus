@@ -23,7 +23,9 @@
 services:
   nexus:
     build:
-      context: ..
+      # Relative to this file's directory: the recipe above copies it to the
+      # repository root, so the build context is the repository itself.
+      context: .
       dockerfile: docker/Dockerfile
     ports:
       - '127.0.0.1:8787:8787'

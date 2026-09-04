@@ -41,6 +41,7 @@ import type { NexusStore, UserRecord } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
 import { conflict, lastSuperAdmin, notFound, validationFailed } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
+import { SUPER_ADMIN_LOCK_KEY, type KeyedSerializer } from '../lib/keyed-serializer.js';
 import type { NotificationsService } from '../notifications/service.js';
 import type { PublishingService } from '../publishing/service.js';
 import { escapeHtml, MASS_RAW_HTML_VARS } from '../email/templates.js';
@@ -91,12 +92,20 @@ export interface GodServiceDeps {
   publishing: PublishingService;
   /** Strips the gateway identity of an account being disabled. */
   credentials: Pick<CredentialsService, 'disableGatewayAccess'>;
+  /**
+   * The same store-level lock `users.updateUser` takes. God mode repeats the
+   * last-super-admin rule, so it has to contend for the same key — otherwise an
+   * ordinary demotion on one instance and a god-mode disable on another still
+   * race each other.
+   */
+  locks?: KeyedSerializer;
   log?: (obj: Record<string, unknown>, message: string) => void;
 }
 
 /** Build the god-mode service. */
 export function createGodService(deps: GodServiceDeps): GodService {
   const { store, audit, notifications, email, massEmail, access, publishing, credentials } = deps;
+  const locks: KeyedSerializer = deps.locks ?? ((_key, fn) => fn());
 
   function requireReason(reason: string): string {
     const trimmed = reason.trim();
@@ -192,26 +201,34 @@ export function createGodService(deps: GodServiceDeps): GodService {
       // super admin. Bodies are serialised, so the loser re-counts after the
       // winner committed; the conditional update also refuses a target whose
       // role or status changed since it was read.
-      const outcome = await store.transaction(async (tx) => {
-        // The revocation this disable owes is queued in the same transaction as
-        // the status flip, so the account can never be off while nothing
-        // remembers its gateway credentials are still live.
-        const job = await tx.gatewayTeardownJobs.upsertPending(target.id, actor.id, nowIso());
-        if (target.status === 'disabled') return { row: target, jobId: job.id };
-        if (
-          target.role === 'super_admin' &&
-          target.status === 'active' &&
-          (await tx.users.countActiveSuperAdmins(target.id)) === 0
-        ) {
-          throw lastSuperAdmin();
-        }
-        const row = await tx.users.updateIfMatches(
-          target.id,
-          { role: target.role, status: target.status },
-          { status: 'disabled' },
-        );
-        return { row, jobId: job.id };
-      });
+      //
+      // And, exactly as there, that serialisation only covers one store object.
+      // Disabling an active super admin therefore also runs under the shared
+      // `SUPER_ADMIN_LOCK_KEY` lease, which is what puts a god-mode disable on
+      // one instance in line behind an ordinary demotion on another. The lease
+      // is taken outside the transaction — see `users/service.ts`.
+      const guardsLastSuperAdmin = target.role === 'super_admin' && target.status === 'active';
+      const transition = async (): Promise<{ row: UserRecord | null; jobId: Uuid }> =>
+        store.transaction(async (tx) => {
+          // The revocation this disable owes is queued in the same transaction
+          // as the status flip, so the account can never be off while nothing
+          // remembers its gateway credentials are still live.
+          const job = await tx.gatewayTeardownJobs.upsertPending(target.id, actor.id, nowIso());
+          if (target.status === 'disabled') return { row: target, jobId: job.id };
+          if (guardsLastSuperAdmin && (await tx.users.countActiveSuperAdmins(target.id)) === 0) {
+            throw lastSuperAdmin();
+          }
+          const row = await tx.users.updateIfMatches(
+            target.id,
+            { role: target.role, status: target.status },
+            { status: 'disabled' },
+          );
+          return { row, jobId: job.id };
+        });
+
+      const outcome = guardsLastSuperAdmin
+        ? await locks(SUPER_ADMIN_LOCK_KEY, transition)
+        : await transition();
       const updated = outcome.row;
       if (!updated) {
         if (!(await store.users.findById(target.id))) throw notFound('User', userId);

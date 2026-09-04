@@ -73,8 +73,30 @@ export interface EdgePluginBinder {
   listByProxy(proxyId: string | null | undefined): Promise<EdgePluginConfig[]>;
   /** The first config for `pluginName` in a list from {@link listByProxy}. */
   find(plugins: EdgePluginConfig[], pluginName: string): EdgePluginConfig | undefined;
+  /**
+   * Run `fn` holding the **canonical** `proxy:<id>` lease.
+   *
+   * For a caller that has to compose several gateway calls into one atomic
+   * rewrite — the `routes` spec revision reads the proxy, submits it back
+   * inside `x-ferrum-proxy` and may have to compensate, and all three have to
+   * see the same document. Everything inside must use the `…Locked` variants:
+   * neither the in-process queue nor the `edge_leases` row is re-entrant, so
+   * taking the same key twice deadlocks until the outer wait times out.
+   */
+  withProxy<T>(proxyId: string, fn: () => Promise<T>): Promise<T>;
   /** Read one proxy, change it, write the **whole** document back. */
   mutateProxy(
+    proxyId: string,
+    change: (proxy: EdgeProxy) => EdgeProxyReplace | null,
+    subject: string,
+  ): Promise<EdgeProxy>;
+  /**
+   * {@link EdgePluginBinder.mutateProxy} without taking the lease.
+   *
+   * Only for callers already inside {@link EdgePluginBinder.withProxy} for the
+   * same proxy id.
+   */
+  mutateProxyLocked(
     proxyId: string,
     change: (proxy: EdgeProxy) => EdgeProxyReplace | null,
     subject: string,
@@ -174,16 +196,22 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
      * the write entirely. Returns the document **as it was found**, which is
      * what an undo step needs.
      */
+    async withProxy(proxyId, fn) {
+      return edge.serializePerKey(`proxy:${proxyId}`, fn);
+    },
+
     async mutateProxy(proxyId, change, subject) {
-      return edge.serializePerKey(`proxy:${proxyId}`, async () => {
-        const current = await edge.proxies.get(proxyId);
-        if (!current) throw notFound('Proxy', proxyId);
-        const body = change(current);
-        if (body === null) return current;
-        for (const field of SERVER_OWNED_PROXY_FIELDS) delete body[field];
-        await edge.proxies.replace(proxyId, body, subject);
-        return current;
-      });
+      return binder.withProxy(proxyId, () => binder.mutateProxyLocked(proxyId, change, subject));
+    },
+
+    async mutateProxyLocked(proxyId, change, subject) {
+      const current = await edge.proxies.get(proxyId);
+      if (!current) throw notFound('Proxy', proxyId);
+      const body = change(current);
+      if (body === null) return current;
+      for (const field of SERVER_OWNED_PROXY_FIELDS) delete body[field];
+      await edge.proxies.replace(proxyId, body, subject);
+      return current;
     },
 
     async attach(proxyId, pluginName, pluginConfig, subject, options) {

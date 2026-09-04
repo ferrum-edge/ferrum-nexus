@@ -287,6 +287,10 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       consumer.ferrum_consumer_id,
       (groups) => (present ? withGroup(groups, group) : withoutGroup(groups, group)),
       user.id,
+      // Only the *grant* re-checks the account: an approval that passed its
+      // authorisation before the grantee was disabled would otherwise hand a
+      // stripped consumer its group back. Removing one is always safe.
+      present ? { requireActiveUser: user.id } : {},
     );
     return group;
   }

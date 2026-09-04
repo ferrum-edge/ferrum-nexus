@@ -8,14 +8,16 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 
+import { MAX_PAGE_SIZE } from '@ferrum-nexus/shared';
 import type {
   CreateThreadResponse,
   GetThreadResponse,
+  ListThreadMessagesResponse,
   ListThreadsResponse,
   SendMessageResponse,
 } from '@ferrum-nexus/shared';
 
-import type { MessagingService } from '../messaging/service.js';
+import type { MessagePageOptions, MessagingService } from '../messaging/service.js';
 import { clientIp, requireAuth, requireAuthHook } from '../middleware/auth-plugin.js';
 import { parseOrThrow } from '../middleware/error-handler.js';
 import { idParamSchema, listOptions, listQuerySchema } from './common.js';
@@ -64,6 +66,26 @@ const sendMessageBody = z.object({
   body: z.string().trim().min(1).max(MAX_MESSAGE_LENGTH),
 });
 
+/**
+ * `?limit=&before=` on the two transcript reads.
+ *
+ * There is no `offset`: a conversation grows at the end a reader is anchored
+ * to, so an offset into it slides under every reply. `before` is the id of a
+ * message already in hand, which does not.
+ */
+const messagePageQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(MAX_PAGE_SIZE).optional(),
+  before: z.string().trim().min(1).max(64).optional(),
+});
+
+/** Turn the parsed query into the messaging service's page options. */
+function messagePageOptions(query: z.infer<typeof messagePageQuery>): MessagePageOptions {
+  return {
+    ...(query.limit !== undefined ? { limit: query.limit } : {}),
+    ...(query.before !== undefined ? { before: query.before } : {}),
+  };
+}
+
 /** `/api/threads` route plugin. */
 export const messagingRoutes: FastifyPluginAsync<MessagingRoutesOptions> = async (app, options) => {
   const { messaging } = options;
@@ -97,7 +119,15 @@ export const messagingRoutes: FastifyPluginAsync<MessagingRoutesOptions> = async
   app.get('/:id', async (request): Promise<GetThreadResponse> => {
     const { user } = requireAuth(request);
     const { id } = parseOrThrow(idParamSchema, request.params);
-    return messaging.getThread(user, id);
+    const query = parseOrThrow(messagePageQuery, request.query);
+    return messaging.getThread(user, id, messagePageOptions(query));
+  });
+
+  app.get('/:id/messages', async (request): Promise<ListThreadMessagesResponse> => {
+    const { user } = requireAuth(request);
+    const { id } = parseOrThrow(idParamSchema, request.params);
+    const query = parseOrThrow(messagePageQuery, request.query);
+    return messaging.listMessages(user, id, messagePageOptions(query));
   });
 
   app.post(

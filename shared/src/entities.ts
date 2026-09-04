@@ -361,9 +361,33 @@ export interface Message {
   sender?: UserSummary;
 }
 
-/** A thread together with its full message list. */
+/**
+ * One window of a conversation's messages.
+ *
+ * A conversation has no natural end, so the transcript is served a page at a
+ * time from the **newest** end — that is what a reader wants to see first, and
+ * it is what keeps a reply visible however long the history behind it has
+ * grown. `items` is nonetheless ordered oldest-first, ready to render top to
+ * bottom; walking backwards through the history means following `next_before`,
+ * not incrementing an offset that shifts under you every time somebody replies.
+ */
+export interface MessagePage {
+  /** The window, oldest message first. */
+  items: Message[];
+  /** Messages in the whole thread, however few this window holds. */
+  total: number;
+  /** Whether messages older than `items[0]` exist. */
+  has_more: boolean;
+  /**
+   * Pass back as `before` to fetch the next older window. `null` once the
+   * window reaches the start of the conversation.
+   */
+  next_before: Uuid | null;
+}
+
+/** A thread together with its most recent page of messages. */
 export interface MessageThreadDetail extends MessageThread {
-  messages: Message[];
+  messages: MessagePage;
 }
 
 /* ── Notifications ──────────────────────────────────────────────────────── */

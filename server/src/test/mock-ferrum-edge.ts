@@ -162,6 +162,14 @@ interface QueuedFailure {
    * immediately before the `POST`/`DELETE` under test.
    */
   method?: string;
+  /**
+   * Matching requests to let through before failing one.
+   *
+   * Needed where one operation makes the *same* call twice and only the second
+   * is under test: the enforcement conversion associates the restored plugins
+   * with a `PUT /proxies/{id}` and then cuts the proxy over with another.
+   */
+  skip: number;
 }
 
 /** The running mock. */
@@ -185,9 +193,16 @@ export interface MockFerrumEdge {
    * Make the next matching request fail with `status` and `body`.
    *
    * Narrow with `pathContains` and, when a path is both read and written in one
-   * operation, `method`.
+   * operation, `method`. `skip` lets that many matching requests through first,
+   * for an operation that makes the same call twice.
    */
-  queueFailure(status: number, body?: unknown, pathContains?: string, method?: string): void;
+  queueFailure(
+    status: number,
+    body?: unknown,
+    pathContains?: string,
+    method?: string,
+    skip?: number,
+  ): void;
   /**
    * Hold the next request whose path contains `pathContains` for `ms` *before*
    * it is handled, then forget the entry.
@@ -2421,8 +2436,12 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         (entry.method === undefined || entry.method === method),
     );
     if (failure) {
-      failures.splice(failures.indexOf(failure), 1);
-      return send(res, failure.status, failure.body ?? { error: 'Injected failure' });
+      if (failure.skip > 0) {
+        failure.skip -= 1;
+      } else {
+        failures.splice(failures.indexOf(failure), 1);
+        return send(res, failure.status, failure.body ?? { error: 'Injected failure' });
+      }
     }
 
     switch (segments[0]) {
@@ -2538,10 +2557,17 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       health = payload;
     },
 
-    queueFailure(status: number, body?: unknown, pathContains?: string, method?: string): void {
+    queueFailure(
+      status: number,
+      body?: unknown,
+      pathContains?: string,
+      method?: string,
+      skip = 0,
+    ): void {
       failures.push({
         status,
         body: body ?? { error: 'Injected failure' },
+        skip,
         ...(pathContains === undefined ? {} : { pathContains }),
         ...(method === undefined ? {} : { method }),
       });
