@@ -208,11 +208,11 @@ The **OpenAPI enforcement** select, next to the spec editor, offers two levels.
 
 **Documentation only (default).** The behaviour above. Nothing is enforced.
 
-**Reject requests to paths and methods not in the spec.** The portal generates
-one gateway rule per declared operation, and anything that matches none of them
-is answered `400` with an `application/problem+json` body, before your backend
-is ever contacted. Concretely, for a document declaring `GET /invoices` and
-`GET /invoices/{id}` published at `/nexus/billing`:
+**Reject requests to paths and methods not in the spec.** The portal hands your
+document to the gateway, which builds one rule per declared operation; anything
+matching none of them is answered `400` with an `application/problem+json` body,
+before your backend is ever contacted. Concretely, for a document declaring
+`GET /invoices` and `GET /invoices/{id}` published at `/nexus/billing`:
 
 | Request                              | Result                                   |
 | ------------------------------------ | ---------------------------------------- |
@@ -242,32 +242,43 @@ The same goes for `TRACE` and any other method your clients actually send.
 **Trailing slashes are literal.** A declared `/invoices` does not also allow
 `/invoices/`, and vice versa. Declare whichever spelling your clients use.
 
+**Your `servers` entry is not part of the matched path.** The rules are built
+against the path clients actually send — `/nexus/billing/invoices`, listen path
+included — and the portal rewrites the document's server base to your listen
+path before handing it over so they line up. Your own `servers[0]` keeps doing
+its other job: naming the upstream the gateway forwards to.
+
 #### CORS preflights
 
-A browser's `OPTIONS` preflight targets a path with no `options` operation
-behind it, so on its own it would be rejected as undeclared — and the browser
-would report a CORS failure rather than anything that points at the real cause.
-The portal handles this for you: whenever the API has a **CORS policy**, the
-generated rules skip `OPTIONS` entirely so the preflight reaches the CORS plugin
-that answers it. Adding or removing your CORS origins later regenerates the
-rules to match; you never have to declare an `options` operation yourself.
-
-An API with **no** CORS policy keeps `OPTIONS` closed, which is what you want:
-there is no preflight to serve.
+Nothing to do. A browser's `OPTIONS` preflight targets a path with no `options`
+operation behind it, but the gateway's CORS plugin runs well before the
+route check and answers the preflight itself, so it never reaches the rules.
+You do not have to declare an `options` operation, and adding or removing your
+CORS origins later does not disturb the enforced surface.
 
 #### Turning it on and off
 
-Safe to change on a live API, in either direction, from the API's Settings tab.
-Switching to `routes` attaches the rules; switching back to documentation-only
-removes them and the API immediately behaves as it did before.
+Both directions are available from the API's Settings tab, and the change is
+complete when the request returns.
 
-Every spec upload regenerates the rules, so the enforced surface always matches
-the revision currently shown in the catalog — a path you delete from your
-document stops being reachable, and one you add becomes reachable, in the same
-operation. Because of that, uploading a document that declares **no** operations
-while enforcement is on is refused: the portal will not record a level it is not
-enforcing, and rules that allow nothing would reject every request. Switch back
-to documentation-only first if that is genuinely what you want.
+**Switching between the two levels briefly interrupts the API.** The gateway can
+only attach the enforcement rules to a route it builds from your document, and
+only detach them by rebuilding the route without it — so the portal recreates
+the route in place. Your settings, your plugins, your credentials and your
+clients' grants all come through unchanged, and the URL never moves, but for a
+second or so the API answers `404`. Nothing else in the portal does this: spec
+uploads, CORS changes and every other setting are applied in place while the API
+keeps serving. Prefer a quiet moment for the switch, the way you would for a
+deploy.
+
+Every spec upload regenerates the rules — in place, without the interruption —
+so the enforced surface always matches the revision currently shown in the
+catalog: a path you delete from your document stops being reachable, and one you
+add becomes reachable, in the same operation. Because of that, uploading a
+document that declares **no** operations while enforcement is on is refused: the
+portal will not record a level it is not enforcing, and rules that allow nothing
+would reject every request. Switch back to documentation-only first if that is
+genuinely what you want.
 
 ### Advanced
 
@@ -310,13 +321,19 @@ apis row ─── proxy          name `nexus-<slug>`, listening on /<namespace>
               ├─ plugin_config  access_control      — only when requestable
               ├─ plugin_config  rate_limiting       — only when a rate limit is set
               ├─ plugin_config  cors                — only when origins are listed
-              └─ plugin_config  openapi_validator   — only at the `routes` enforcement level
+              └─ plugin_config  openapi_validator   — only at the `routes` enforcement level,
+                                                      and built by the gateway from your document
 ```
 
 The last step matters: on Ferrum Edge a plugin has to be both configured _and_
 listed on the proxy before the gateway runs it, so publishing finishes by
 attaching the whole set to the proxy in one write. Nothing you configure here is
 live until that lands.
+
+At the `routes` enforcement level the route itself is created _from_ your
+document rather than alongside it — the gateway will only build the enforcement
+rules for a route it owns. That is invisible day to day; the one place it shows
+is [switching levels](#turning-it-on-and-off).
 
 If any step fails, everything created is torn back down and nothing is saved on
 either side. A failed publish leaves no debris.
@@ -533,6 +550,11 @@ change — check the diff of your `paths` before you publish, not only your
 prose. If the upload cannot be saved, the previous rules are put back, so a
 failed upload never leaves the gateway enforcing a revision the catalog does not
 show.
+
+An upload is applied in place: your API keeps serving throughout, and its
+authentication is never off for an instant. The interruption described under
+[Turning it on and off](#turning-it-on-and-off) applies only to _changing the
+level_, not to uploading a new revision at a level you are already on.
 
 ### A safe update routine
 

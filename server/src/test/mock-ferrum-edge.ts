@@ -28,12 +28,25 @@
  *   `DELETE /{type}` removes the type, `DELETE /{type}/{index}` removes one
  *   entry (§5.3–5.4).
  * - Flat `{"error": "..."}` error bodies (§1.7).
+ * - API specs: `POST`/`PUT /api-specs` create the proxy from `x-ferrum-proxy`,
+ *   stamp `api_spec_id` on it, and generate an associated `openapi_validator`
+ *   whose operation table is built from the document's paths prefixed by the
+ *   `servers[]` pathnames — plus the admission rule that makes issue #49 fail
+ *   here as loudly as it does on a real gateway: a hand-built
+ *   `openapi_validator` on a proxy with no attached spec is a `400`.
+ *
+ *   Faithful about the **operation table**, which is what `routes` enforcement
+ *   is. Real Edge additionally materializes request/response schemas into each
+ *   generated operation (`responses: { "200": {…} }` and friends) after
+ *   resolving `$ref`s; reproducing that here would be reimplementing the
+ *   gateway's extractor, so generated operations carry only `method`,
+ *   `path_template` and `path_regex`.
  *
  * Every request is recorded in {@link MockFerrumEdge.requests} for assertions.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 
 import { jwtVerify } from 'jose';
@@ -58,6 +71,20 @@ export interface StoredConsumer {
   custom_id: string | null;
   credentials: Record<string, Record<string, unknown>[]>;
   acl_groups: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** An API spec as the mock stores it. */
+export interface StoredApiSpec {
+  id: string;
+  namespace: string;
+  /** The proxy this spec owns; unique per namespace. */
+  proxy_id: string;
+  /** The submitted document, verbatim. */
+  document: Record<string, unknown>;
+  spec_version: string;
+  content_hash: string;
   created_at: string;
   updated_at: string;
 }
@@ -148,6 +175,8 @@ export interface MockFerrumEdge {
   readonly proxies: Map<string, Record<string, unknown>>;
   /** Direct access to stored plugin configs, keyed `<namespace>/<id>`. */
   readonly pluginConfigs: Map<string, Record<string, unknown>>;
+  /** Direct access to stored API specs, keyed `<namespace>/<id>`. */
+  readonly apiSpecs: Map<string, StoredApiSpec>;
   /** Seed a consumer directly, bypassing the HTTP surface. */
   seedConsumer(
     consumer: Partial<StoredConsumer> & { username: string; namespace?: string },
@@ -196,6 +225,13 @@ export interface MockFerrumEdge {
    * `plugin_name` shadows.
    */
   effectivePluginsForProxy(proxyId: string, namespace?: string): Record<string, unknown>[];
+  /**
+   * The spec that owns a proxy, or `undefined`.
+   *
+   * `spec.document` is the exact body Nexus submitted, so a test can assert the
+   * `servers` rewrite and the `x-ferrum-*` extensions character for character.
+   */
+  apiSpecForProxy(proxyId: string, namespace?: string): StoredApiSpec | undefined;
   /** The single plugin config of `pluginName` on a proxy, or `undefined`. */
   pluginForProxy(
     proxyId: string,
@@ -495,6 +531,124 @@ const PLUGIN_CONFIG_KEYS = new Set([
 ]);
 
 const CONSUMER_KEYS = new Set(['id', 'username', 'custom_id', 'credentials', 'acl_groups']);
+
+/* ── API specs ──────────────────────────────────────────────────────────── */
+
+/**
+ * The closed key set of the `x-ferrum-validate` object form
+ * (`docs/api_specs.md`). `operations` is deliberately *not* in it: it is always
+ * regenerated from the document, and Edge rejects a document that tries to
+ * supply one — which is exactly the mistake issue #49 was built on.
+ */
+const FERRUM_VALIDATE_KEYS = new Set([
+  'mode',
+  'request',
+  'response',
+  'validate_request',
+  'validate_response',
+  'bypass',
+  'fail_on_unknown_operation',
+  'fail_on_missing_response_schema',
+  'max_body_bytes',
+  'error_response',
+  'error_truncate_chars',
+]);
+
+/** The OpenAPI HTTP-method keys the importer enumerates on a path item. */
+const OPENAPI_METHOD_KEYS = [
+  'get',
+  'put',
+  'post',
+  'delete',
+  'options',
+  'head',
+  'patch',
+  'trace',
+] as const;
+
+/**
+ * Escape a literal the way Rust's `regex::escape` does — the crate's meta
+ * characters, which include the reserved-but-inert `#`, `&`, `-` and `~`. `/`
+ * is not one of them. Edge's own extractor (`path_template_to_regex` in
+ * `admin/api_specs/extractor.rs`) calls the same function.
+ */
+function escapeRegex(literal: string): string {
+  return literal.replace(/[\\.+*?()|[\]{}^$#&\-~]/g, '\\$&');
+}
+
+/** A path template as a regex body, with `{param}` widened to `[^/]+`. */
+function pathTemplateRegex(template: string): string {
+  return template
+    .split(/(\{[^{}/]+\})/)
+    .map((part) => (/^\{[^{}/]+\}$/.test(part) ? '[^/]+' : escapeRegex(part)))
+    .join('');
+}
+
+/**
+ * The effective path prefixes contributed by `servers[]`.
+ *
+ * Only the *pathname* of each server URL counts — scheme, authority, query and
+ * fragment are dropped — and distinct pathnames each emit their own matcher, in
+ * document order. No `servers` at all leaves the Paths keys unprefixed, which
+ * is the trap Nexus avoids by rewriting `servers` to the listen path: a
+ * document left with its upstream there generates `^/invoices$` and nothing
+ * arriving at `/nexus/<slug>/invoices` can ever match it.
+ */
+function serverBases(servers: unknown): string[] {
+  if (!Array.isArray(servers) || servers.length === 0) return [''];
+  const bases: string[] = [];
+  for (const entry of servers) {
+    if (!isRecord(entry) || typeof entry.url !== 'string') continue;
+    const { pathname } = new URL(entry.url, 'http://spec.invalid');
+    const base = pathname === '/' ? '' : pathname.replace(/\/$/, '');
+    if (!bases.includes(base)) bases.push(base);
+  }
+  return bases.length === 0 ? [''] : bases;
+}
+
+/** The operation table Edge's importer generates from a document. */
+function generateOperations(document: Record<string, unknown>): Record<string, unknown>[] {
+  const paths = isRecord(document.paths) ? document.paths : {};
+  const bases = serverBases(document.servers);
+  const operations: Record<string, unknown>[] = [];
+  for (const [template, item] of Object.entries(paths)) {
+    if (!isRecord(item)) continue;
+    for (const method of OPENAPI_METHOD_KEYS) {
+      if (item[method] === undefined) continue;
+      for (const base of bases) {
+        operations.push({
+          method: method.toUpperCase(),
+          path_template: `${base}${template}`,
+          path_regex: `^${escapeRegex(base)}${pathTemplateRegex(template)}$`,
+        });
+      }
+    }
+  }
+  return operations;
+}
+
+/**
+ * The `openapi_validator` config Edge generates for `x-ferrum-validate`.
+ *
+ * The object form's `mode` / `request.enabled` / `response.enabled` are
+ * projected onto the plugin's own `enforcement_mode` / `validate_request` /
+ * `validate_response` keys, which is the rename a caller has to get right.
+ */
+function generateValidatorConfig(
+  document: Record<string, unknown>,
+  validate: Record<string, unknown>,
+): Record<string, unknown> {
+  const request = isRecord(validate.request) ? validate.request : {};
+  const response = isRecord(validate.response) ? validate.response : {};
+  return {
+    enforcement_mode: validate.mode ?? 'block',
+    validate_request: validate.validate_request ?? request.enabled ?? true,
+    validate_response: validate.validate_response ?? response.enabled ?? true,
+    fail_on_unknown_operation: validate.fail_on_unknown_operation ?? true,
+    ...(validate.bypass === undefined ? {} : { bypass: validate.bypass }),
+    operations: generateOperations(document),
+  };
+}
 
 /** `Proxy.allowed_methods` entries, from the openapi enum. */
 const PROXY_HTTP_METHODS = new Set([
@@ -1059,6 +1213,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   const consumers = new Map<string, StoredConsumer>();
   const proxies = new Map<string, Record<string, unknown>>();
   const pluginConfigs = new Map<string, Record<string, unknown>>();
+  const apiSpecs = new Map<string, StoredApiSpec>();
   const namespaces = new Map<string, { name: string; description: string | null }>();
   const requests: RecordedRequest[] = [];
   const failures: QueuedFailure[] = [];
@@ -1643,6 +1798,10 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         ...body,
         id,
         namespace,
+        // Server-owned like the timestamps: only the spec importer sets or
+        // clears the ownership tag, so a replace can neither adopt a proxy into
+        // a spec nor orphan one out of it.
+        ...(existing.api_spec_id == null ? {} : { api_spec_id: existing.api_spec_id }),
         created_at: existing.created_at,
         updated_at: nowIso(),
       };
@@ -1651,14 +1810,306 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     }
     if (method === 'DELETE') {
       if (!existing) return fail(res, 404, 'Proxy not found');
-      proxies.delete(key(namespace, id));
-      for (const [configKey, config] of pluginConfigs) {
-        if (config.namespace === namespace && config.proxy_id === id)
-          pluginConfigs.delete(configKey);
-      }
+      // Cascades the plugin configs *and* the spec that owns the proxy, which
+      // is what makes deleting the proxy a complete rollback for a `routes`
+      // publish.
+      deleteProxyCascade(namespace, id);
       return send(res, 204);
     }
     return fail(res, 405, 'Method not allowed');
+  }
+
+  /* ── API specs ──────────────────────────────────────────────────────────
+   * A spec owns exactly one proxy and every resource it generated. Both
+   * cascades are real: deleting the spec deletes the proxy, and deleting the
+   * proxy deletes the spec.
+   */
+
+  /** The spec that owns `proxyId`, or `undefined`. */
+  function specForProxy(namespace: string, proxyId: string): StoredApiSpec | undefined {
+    return [...apiSpecs.values()].find(
+      (spec) => spec.namespace === namespace && spec.proxy_id === proxyId,
+    );
+  }
+
+  /** Whether `proxyId` carries an attached spec — the `openapi_validator` gate. */
+  function proxyHasSpec(namespace: string, proxyId: string): boolean {
+    return proxies.get(key(namespace, proxyId))?.api_spec_id != null;
+  }
+
+  /** Every plugin config the spec generated, by its ownership tag. */
+  function specOwnedConfigs(namespace: string, specId: string): Record<string, unknown>[] {
+    return [...pluginConfigs.values()].filter(
+      (config) => config.namespace === namespace && config.api_spec_id === specId,
+    );
+  }
+
+  /** Add ids to a proxy's association list, skipping ones already there. */
+  function associateOnProxy(proxy: Record<string, unknown>, ids: string[]): void {
+    const current = (Array.isArray(proxy.plugins) ? proxy.plugins : []).filter(isRecord);
+    const present = new Set(current.map((entry) => String(entry.plugin_config_id)));
+    proxy.plugins = [
+      ...current,
+      ...ids.filter((id) => !present.has(id)).map((id) => ({ plugin_config_id: id })),
+    ];
+  }
+
+  /**
+   * The structural checks `POST` and `PUT /api-specs` share, returning the
+   * `x-ferrum-proxy` body once the document passes.
+   */
+  function apiSpecProblem(
+    body: unknown,
+  ): { error: string; status: number } | { proxy: Record<string, unknown> } {
+    if (!isRecord(body)) return { error: 'Request body must be a JSON object', status: 400 };
+    if (body['x-ferrum-consumers'] !== undefined) {
+      return { error: 'x-ferrum-consumers is not allowed in spec documents', status: 400 };
+    }
+    const proxy = body['x-ferrum-proxy'];
+    if (!isRecord(proxy)) {
+      return { error: 'Spec document must contain an x-ferrum-proxy object', status: 400 };
+    }
+    if (proxy.api_spec_id !== undefined) {
+      return { error: 'api_spec_id is server-managed and must be omitted', status: 422 };
+    }
+    for (const field of Object.keys(proxy)) {
+      if (!PROXY_KEYS.has(field)) return { error: `unknown field: ${field}`, status: 400 };
+    }
+    const validate = body['x-ferrum-validate'];
+    if (isRecord(validate)) {
+      for (const field of Object.keys(validate)) {
+        if (!FERRUM_VALIDATE_KEYS.has(field)) {
+          return { error: `unknown x-ferrum-validate field: ${field}`, status: 400 };
+        }
+      }
+    }
+    const settingsProblem = validateProxySettings(proxy);
+    if (settingsProblem) return { error: settingsProblem, status: 400 };
+    return { proxy };
+  }
+
+  /**
+   * Insert (or re-insert) the proxy a spec owns and regenerate its plugins.
+   *
+   * Hand-owned plugin configs and their associations are untouched by a
+   * replace: the association list is rebuilt from the ones that survive, plus
+   * the freshly generated validator.
+   */
+  function applySpecDocument(
+    namespace: string,
+    specId: string,
+    proxyId: string,
+    document: Record<string, unknown>,
+    proxyBody: Record<string, unknown>,
+    createdAt: string,
+  ): void {
+    const survivors = [...pluginConfigs.values()]
+      .filter(
+        (config) =>
+          config.namespace === namespace &&
+          config.proxy_id === proxyId &&
+          config.api_spec_id !== specId,
+      )
+      .map((config) => String(config.id));
+    for (const [configKey, config] of pluginConfigs) {
+      if (config.namespace === namespace && config.api_spec_id === specId) {
+        pluginConfigs.delete(configKey);
+      }
+    }
+
+    const proxy: Record<string, unknown> = {
+      ...proxyBody,
+      id: proxyId,
+      namespace,
+      strip_listen_path: proxyBody.strip_listen_path ?? true,
+      api_spec_id: specId,
+      plugins: [],
+      created_at: createdAt,
+      updated_at: nowIso(),
+    };
+    proxies.set(key(namespace, proxyId), proxy);
+
+    const generated: string[] = [];
+    const validate = document['x-ferrum-validate'];
+    if (validate === true || isRecord(validate)) {
+      const config = {
+        id: randomUUID(),
+        plugin_name: 'openapi_validator',
+        namespace,
+        config: generateValidatorConfig(document, isRecord(validate) ? validate : {}),
+        scope: 'proxy',
+        proxy_id: proxyId,
+        enabled: true,
+        api_spec_id: specId,
+        created_at: nowIso(),
+        updated_at: nowIso(),
+      };
+      pluginConfigs.set(key(namespace, config.id), config);
+      generated.push(config.id);
+    }
+    associateOnProxy(proxy, [...generated, ...survivors]);
+  }
+
+  function handleApiSpecs(
+    res: ServerResponse,
+    method: string,
+    segments: string[],
+    namespace: string,
+    body: unknown,
+    query: URLSearchParams,
+  ): void {
+    const [, first, second] = segments;
+
+    if (first === 'by-proxy') {
+      if (second === undefined) return fail(res, 404, 'Not found');
+      if (method !== 'GET') return fail(res, 405, 'Method not allowed');
+      const spec = specForProxy(namespace, second);
+      return spec ? send(res, 200, spec.document) : fail(res, 404, 'API spec not found');
+    }
+
+    if (first === undefined) {
+      if (method === 'GET') {
+        // `/api-specs` pages with its own flat envelope — `items` and the
+        // counters beside it — rather than the `data` + `pagination` shape
+        // every other list route uses.
+        const proxyFilter = query.get('proxy_id');
+        const items = [...apiSpecs.values()]
+          .filter((spec) => spec.namespace === namespace)
+          .filter((spec) => proxyFilter === null || spec.proxy_id === proxyFilter)
+          .map((spec) => summariseSpec(spec));
+        const limit = Number(query.get('limit') ?? 50) || 50;
+        const offset = Number(query.get('offset') ?? 0) || 0;
+        const page = items.slice(offset, offset + limit);
+        return send(res, 200, {
+          items: page,
+          limit,
+          offset,
+          next_offset: offset + page.length < items.length ? offset + page.length : null,
+          total: items.length,
+        });
+      }
+      if (method !== 'POST') return fail(res, 405, 'Method not allowed');
+
+      const checked = apiSpecProblem(body);
+      if ('error' in checked) return fail(res, checked.status, checked.error);
+      const document = body as Record<string, unknown>;
+      const proxyBody = checked.proxy;
+
+      if (typeof proxyBody.listen_path !== 'string' || !proxyBody.listen_path.startsWith('/')) {
+        return fail(res, 400, "listen_path must start with '/', '~' (regex), or '=/' (exact)");
+      }
+      const proxyId =
+        typeof proxyBody.id === 'string' && proxyBody.id !== '' ? proxyBody.id : randomUUID();
+      if (proxies.has(key(namespace, proxyId))) {
+        return fail(res, 409, `Proxy '${proxyId}' already exists in this namespace`);
+      }
+      if (
+        [...proxies.values()].some(
+          (proxy) => proxy.namespace === namespace && proxy.listen_path === proxyBody.listen_path,
+        )
+      ) {
+        return fail(res, 409, 'listen_path already exists in this namespace');
+      }
+      if (specForProxy(namespace, proxyId)) {
+        return fail(res, 409, `A spec already exists for proxy '${proxyId}'`);
+      }
+
+      const spec: StoredApiSpec = {
+        id: randomUUID(),
+        namespace,
+        proxy_id: proxyId,
+        document,
+        spec_version: typeof document.openapi === 'string' ? document.openapi : '3.1.0',
+        content_hash: createHash('sha256').update(JSON.stringify(document)).digest('hex'),
+        created_at: nowIso(),
+        updated_at: nowIso(),
+      };
+      apiSpecs.set(key(namespace, spec.id), spec);
+      applySpecDocument(namespace, spec.id, proxyId, document, proxyBody, spec.created_at);
+      return send(res, 201, {
+        id: spec.id,
+        proxy_id: proxyId,
+        spec_version: spec.spec_version,
+        content_hash: spec.content_hash,
+      });
+    }
+
+    const existing = apiSpecs.get(key(namespace, first));
+    if (method === 'GET') {
+      return existing ? send(res, 200, existing.document) : fail(res, 404, 'API spec not found');
+    }
+    if (method === 'PUT') {
+      if (!existing) return fail(res, 404, 'API spec not found');
+      const checked = apiSpecProblem(body);
+      if ('error' in checked) return fail(res, checked.status, checked.error);
+      const document = body as Record<string, unknown>;
+      const proxyBody = checked.proxy;
+      if (typeof proxyBody.id === 'string' && proxyBody.id !== existing.proxy_id) {
+        return fail(res, 409, 'x-ferrum-proxy.id may not move an existing spec to another proxy');
+      }
+      const proxy = proxies.get(key(namespace, existing.proxy_id));
+      existing.document = document;
+      existing.spec_version = typeof document.openapi === 'string' ? document.openapi : '3.1.0';
+      existing.content_hash = createHash('sha256').update(JSON.stringify(document)).digest('hex');
+      existing.updated_at = nowIso();
+      // The proxy is **re-inserted** from the submitted `x-ferrum-proxy`, not
+      // merged into: anything the body omits is gone.
+      applySpecDocument(
+        namespace,
+        existing.id,
+        existing.proxy_id,
+        document,
+        proxyBody,
+        typeof proxy?.created_at === 'string' ? proxy.created_at : nowIso(),
+      );
+      return send(res, 200, {
+        id: existing.id,
+        proxy_id: existing.proxy_id,
+        spec_version: existing.spec_version,
+        content_hash: existing.content_hash,
+      });
+    }
+    if (method === 'DELETE') {
+      if (!existing) return fail(res, 404, 'API spec not found');
+      apiSpecs.delete(key(namespace, first));
+      deleteProxyCascade(namespace, existing.proxy_id);
+      return send(res, 204);
+    }
+    return fail(res, 405, 'Method not allowed');
+  }
+
+  /** `GET /api-specs` metadata; the document itself is never in a list. */
+  function summariseSpec(spec: StoredApiSpec): Record<string, unknown> {
+    const info = isRecord(spec.document.info) ? spec.document.info : {};
+    return {
+      id: spec.id,
+      proxy_id: spec.proxy_id,
+      namespace: spec.namespace,
+      spec_version: spec.spec_version,
+      spec_format: 'json',
+      title: typeof info.title === 'string' ? info.title : null,
+      info_version: typeof info.version === 'string' ? info.version : null,
+      operation_count: generateOperations(spec.document).length,
+      content_hash: spec.content_hash,
+      created_at: spec.created_at,
+      updated_at: spec.updated_at,
+    };
+  }
+
+  /**
+   * Remove a proxy, every plugin config scoped to it, and the spec that owns
+   * it. Both directions of the cascade land here so they cannot drift apart.
+   */
+  function deleteProxyCascade(namespace: string, proxyId: string): void {
+    proxies.delete(key(namespace, proxyId));
+    for (const [configKey, config] of pluginConfigs) {
+      if (config.namespace === namespace && config.proxy_id === proxyId) {
+        pluginConfigs.delete(configKey);
+      }
+    }
+    for (const [specKey, spec] of apiSpecs) {
+      if (spec.namespace === namespace && spec.proxy_id === proxyId) apiSpecs.delete(specKey);
+    }
   }
 
   function handlePluginConfigs(
@@ -1700,6 +2151,17 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
             400,
             `PluginConfig references non-existent proxy_id '${String(body.proxy_id)}'`,
           );
+        }
+        // Edge's `validate_openapi_validator_precondition` (`admin/crud.rs`):
+        // the validator's operation table is the gateway's to generate from an
+        // imported document, so a hand-built one has nowhere to come from. This
+        // is the rule the mock used to be missing — the reason a `routes` API
+        // was green in CI and broken on every real gateway (issue #49).
+        if (
+          body.plugin_name === 'openapi_validator' &&
+          !proxyHasSpec(namespace, String(body.proxy_id))
+        ) {
+          return fail(res, 400, 'openapi_validator requires a proxy with an attached api_spec');
         }
         // Edge constructs an `enabled: true` plugin strictly and rejects a bad
         // config with a 400 *before* storing it.
@@ -1746,10 +2208,18 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
       const triggerProblem = validatePluginTrigger(pluginName, body.trigger);
       if (triggerProblem) return fail(res, 400, triggerProblem);
+      if (
+        pluginName === 'openapi_validator' &&
+        !proxyHasSpec(namespace, String(body.proxy_id ?? existing.proxy_id))
+      ) {
+        return fail(res, 400, 'openapi_validator requires a proxy with an attached api_spec');
+      }
       const updated = {
         ...body,
         id,
         namespace,
+        // Server-owned: a replace cannot claim or disclaim spec ownership.
+        ...(existing.api_spec_id == null ? {} : { api_spec_id: existing.api_spec_id }),
         created_at: existing.created_at,
         updated_at: nowIso(),
       };
@@ -1843,7 +2313,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     // Namespace-scoped surfaces are selected by `X-Ferrum-Namespace`; the
     // `/namespaces/{name}` registry routes are selected by the name in the path.
     const scopedNamespace =
-      segments[0] === 'consumers' || segments[0] === 'proxies'
+      segments[0] === 'consumers' || segments[0] === 'proxies' || segments[0] === 'api-specs'
         ? namespace
         : segments[0] === 'plugins' && segments[1] === 'config'
           ? namespace
@@ -1890,6 +2360,8 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         return handleConsumers(res, method, segments, namespace, body, url.searchParams);
       case 'proxies':
         return handleProxies(res, method, segments, namespace, body, url.searchParams);
+      case 'api-specs':
+        return handleApiSpecs(res, method, segments, namespace, body, url.searchParams);
       case 'plugins':
         if (segments[1] === 'config') {
           return handlePluginConfigs(res, method, segments, namespace, body, url.searchParams);
@@ -1932,6 +2404,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     consumers,
     proxies,
     pluginConfigs,
+    apiSpecs,
 
     async start(): Promise<string> {
       if (server) return baseUrl;
@@ -1960,6 +2433,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       consumers.clear();
       proxies.clear();
       pluginConfigs.clear();
+      apiSpecs.clear();
       namespaces.clear();
       requests.length = 0;
       failures.length = 0;
@@ -2061,6 +2535,10 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
           !scoped.some((candidate) => candidate.plugin_name === config.plugin_name),
       );
       return [...globals, ...scoped];
+    },
+
+    apiSpecForProxy(proxyId, namespace = 'nexus'): StoredApiSpec | undefined {
+      return specForProxy(namespace, proxyId);
     },
 
     pluginForProxy(proxyId, pluginName, namespace = 'nexus'): Record<string, unknown> | undefined {

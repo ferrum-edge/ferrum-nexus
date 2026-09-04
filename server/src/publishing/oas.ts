@@ -115,6 +115,18 @@ export interface ParsedSpec {
   contentType: 'application/json' | 'application/yaml';
   /** The document as uploaded, with only surrounding whitespace trimmed. */
   raw: string;
+  /**
+   * The parsed document itself — the object {@link ParsedSpec.raw} decoded to,
+   * whether it arrived as JSON or as YAML.
+   *
+   * `routes` enforcement submits the document *back* to Edge's spec importer
+   * with a rewritten `servers` and the Ferrum extensions stamped on, and doing
+   * that from the object rather than from the text is what lets a YAML upload
+   * be submitted as JSON without a second parser. Nothing else reads it; the
+   * catalog and every diff still work from {@link ParsedSpec.raw}, which is the
+   * provider's own bytes.
+   */
+  document: Record<string, unknown>;
 }
 
 /** Byte length of a UTF-8 string. */
@@ -361,6 +373,7 @@ export function parseOpenApiSpec(text: string): ParsedSpec {
     paths: readPaths(paths),
     contentType,
     raw,
+    document: value,
   };
 }
 

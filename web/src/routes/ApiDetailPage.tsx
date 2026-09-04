@@ -294,6 +294,7 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
               className="md:col-span-2"
               value={specEnforcement}
               onValueChange={setSpecEnforcement}
+              publishedLevel={api.spec_enforcement}
             />
             <LabeledTextarea
               className="md:col-span-2"

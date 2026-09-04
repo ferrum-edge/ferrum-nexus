@@ -2001,15 +2001,24 @@ describe('publishing', () => {
       });
     });
   });
-
   /**
    * Issue #38: the uploaded document used to be catalog metadata only, so a
-   * request to a path the spec never declared proxied straight through. The
-   * `routes` level attaches an `openapi_validator` that closes that gap — for
-   * paths and methods, and explicitly not for bodies.
+   * request to a path the spec never declared proxied straight through. Issue
+   * #49: the fix attached a hand-built `openapi_validator`, which every real
+   * gateway refuses — Edge generates that plugin from an imported document or
+   * not at all. A `routes` API's proxy is therefore created by the spec
+   * importer, and these tests assert the document Nexus submits rather than a
+   * plugin body it composes.
    */
   describe('OpenAPI enforcement', () => {
-    /** The validator config the gateway currently holds for a proxy. */
+    /** The document Nexus submitted to `POST`/`PUT /api-specs` for a proxy. */
+    function submittedDocument(proxyId: string): Record<string, unknown> {
+      const spec = harness.edge.apiSpecForProxy(proxyId);
+      assert.ok(spec, `expected proxy ${proxyId} to be owned by an api_spec`);
+      return spec.document;
+    }
+
+    /** The validator config the gateway generated for a proxy. */
     function validatorConfig(proxyId: string): Record<string, unknown> | undefined {
       return harness.edge.pluginForProxy(proxyId, 'openapi_validator')?.config as
         Record<string, unknown> | undefined;
@@ -2031,7 +2040,7 @@ describe('publishing', () => {
       harness.edge.reset();
     });
 
-    it('writes no validator at all in the default docs_only mode', async () => {
+    it('writes no validator and imports no spec in the default docs_only mode', async () => {
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -2043,10 +2052,13 @@ describe('publishing', () => {
 
       const proxyId = String(api.ferrum_proxy_id);
       assert.equal(harness.edge.pluginForProxy(proxyId, 'openapi_validator'), undefined);
+      assert.equal(harness.edge.apiSpecForProxy(proxyId), undefined);
+      assert.equal(storedProxy(harness, proxyId).api_spec_id, undefined);
       assert.deepEqual(effectiveNames(harness, proxyId), ['access_control', 'key_auth']);
+      assert.equal(harness.edge.callsTo('POST', '/api-specs').length, 0);
     });
 
-    it('attaches, associates and populates the validator when routes is asked for', async () => {
+    it('creates the proxy through the spec importer when routes is asked for', async () => {
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -2057,10 +2069,38 @@ describe('publishing', () => {
       assert.equal(api.spec_enforcement, 'routes');
 
       const proxyId = String(api.ferrum_proxy_id);
+      // No `POST /proxies` at all: the proxy came out of the spec import, which
+      // is the only way Edge will let the validator exist.
+      assert.equal(harness.edge.callsTo('POST', '/proxies').length, 0);
+      assert.equal(harness.edge.callsTo('POST', '/api-specs').length, 1);
 
-      // The exact body Edge receives. `validate_request`/`validate_response`
-      // are the boundary of this feature, so they are asserted as values
-      // rather than left to a subset match.
+      const document = submittedDocument(proxyId);
+      // `servers` is the load-bearing rewrite. Edge builds each operation
+      // matcher from the Paths key prefixed by this pathname, so leaving the
+      // provider's upstream here would generate `^/invoices$` and every request
+      // arriving at `/nexus/enf-routes/invoices` would be an unknown operation.
+      assert.deepEqual(document.servers, [{ url: '/nexus/enf-routes' }]);
+      assert.deepEqual(document['x-ferrum-validate'], {
+        mode: 'block',
+        request: { enabled: false },
+        response: { enabled: false },
+        fail_on_unknown_operation: true,
+      });
+      assert.deepEqual(document['x-ferrum-proxy'], {
+        id: proxyId,
+        name: 'nexus-enf-routes',
+        listen_path: '/nexus/enf-routes',
+        backend_scheme: 'https',
+        backend_host: 'billing.example.com',
+        backend_port: 8443,
+        backend_path: '/v2',
+        strip_listen_path: true,
+        allowed_ws_origins: [],
+      });
+      // The provider's own document rides through untouched.
+      assert.deepEqual(Object.keys(document.paths as object), ['/invoices', '/invoices/{id}']);
+
+      // What the gateway generated from it, listen path and all.
       assert.deepEqual(validatorConfig(proxyId), {
         enforcement_mode: 'block',
         validate_request: false,
@@ -2082,19 +2122,62 @@ describe('publishing', () => {
         ],
       });
 
-      // A config the proxy does not name is inert, so "it exists" is not the
-      // claim that matters.
+      // The proxy carries the ownership stamp, and the generated validator is
+      // associated alongside the plugins Nexus attached by hand.
+      assert.ok(storedProxy(harness, proxyId).api_spec_id);
       assert.deepEqual(effectiveNames(harness, proxyId), [
         'access_control',
         'key_auth',
         'openapi_validator',
       ]);
-      const validatorId = String(harness.edge.pluginForProxy(proxyId, 'openapi_validator')?.id);
-      assert.ok(associatedIds(harness, proxyId).includes(validatorId));
       assert.deepEqual(associatedIds(harness, proxyId), writtenIds(harness, proxyId));
     });
 
-    it('allows OPTIONS only on declared paths when the API also has a CORS policy', async () => {
+    it('strips Ferrum extensions the provider wrote into their own document', async () => {
+      // A document is input, not configuration. One shipping its own
+      // `x-ferrum-proxy` would otherwise repoint the backend, and
+      // `x-ferrum-consumers` — which Edge rejects outright — would fail the
+      // upload for a reason no provider could act on.
+      const hostile = JSON.stringify({
+        openapi: '3.1.0',
+        info: { title: 'Hostile API', version: '1.0.0' },
+        servers: [{ url: 'https://billing.example.com:8443/v2' }],
+        'x-ferrum-proxy': { id: 'attacker-proxy', backend_host: 'evil.example.com' },
+        'x-ferrum-consumers': [{ username: 'attacker' }],
+        'x-ferrum-validate': { fail_on_unknown_operation: false },
+        paths: { '/invoices': { get: { responses: { '200': { description: 'OK' } } } } },
+      });
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'enf-hostile',
+          spec: hostile,
+          spec_enforcement: 'routes',
+        }),
+      });
+      assert.equal(response.statusCode, 201, response.body);
+      const proxyId = String(response.json<PublishApiResponse>().api.ferrum_proxy_id);
+
+      const document = submittedDocument(proxyId);
+      assert.equal(document['x-ferrum-consumers'], undefined);
+      assert.equal(
+        (document['x-ferrum-proxy'] as Record<string, unknown>).backend_host,
+        'billing.example.com',
+      );
+      assert.equal(
+        (document['x-ferrum-validate'] as Record<string, unknown>).fail_on_unknown_operation,
+        true,
+      );
+      assert.equal(storedProxy(harness, proxyId).backend_host, 'billing.example.com');
+    });
+
+    it('declares no OPTIONS operations for an API with a CORS policy', async () => {
+      // `cors` runs at priority 100 and `openapi_validator` at 2960, and
+      // `preflight_continue` defaults to false, so the preflight is answered
+      // and short-circuited long before the unknown-operation check. Synthetic
+      // `OPTIONS` operations — and a method-wide bypass, which would also have
+      // opened *undeclared* paths — are both unnecessary.
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -2109,10 +2192,11 @@ describe('publishing', () => {
       assert.deepEqual(operationLabels(proxyId), [
         'GET /nexus/enf-cors/invoices',
         'GET /nexus/enf-cors/invoices/{id}',
-        'OPTIONS /nexus/enf-cors/invoices',
-        'OPTIONS /nexus/enf-cors/invoices/{id}',
       ]);
       assert.equal('bypass' in (validatorConfig(proxyId) ?? {}), false);
+      // The preflight still has to survive the method allow-list, which Edge
+      // checks before any plugin runs.
+      assert.ok(effectiveNames(harness, proxyId).includes('cors'));
     });
 
     it('refuses routes for a document that declares no operations', async () => {
@@ -2127,12 +2211,13 @@ describe('publishing', () => {
         url: '/api/apis',
         payload: publishPayload({ slug: 'enf-empty', spec: empty, spec_enforcement: 'routes' }),
       });
-      // Edge refuses an empty `operations` array, so the alternatives are a row
-      // claiming enforcement that is not happening or a proxy that rejects
-      // everything. Refusing is the honest third option.
+      // Edge would generate an empty operation table with
+      // `fail_on_unknown_operation: true` — a proxy that rejects *every*
+      // request. Refusing up front is the honest third option.
       assert.equal(response.statusCode, 400, response.body);
       assert.equal(errorCode(response.body), 'SPEC_INVALID');
       assert.equal(harness.edge.proxyByName('nexus-enf-empty'), undefined);
+      assert.equal(harness.edge.callsTo('POST', '/api-specs').length, 0);
     });
 
     it('rejects an enforcement level outside the enum', async () => {
@@ -2145,15 +2230,22 @@ describe('publishing', () => {
       assert.equal(errorCode(response.body), 'VALIDATION_FAILED');
     });
 
-    it('attaches on PATCH to routes and detaches again on PATCH to docs_only', async () => {
+    it('rebuilds the proxy under the same id when the level moves either way', async () => {
       const published = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
-        payload: publishPayload({ slug: 'enf-toggle' }),
+        payload: publishPayload({
+          slug: 'enf-toggle',
+          rate_limit: { limit: 100, window_seconds: 60 },
+        }),
       });
       assert.equal(published.statusCode, 201, published.body);
       const apiId = published.json<PublishApiResponse>().api.id;
       const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
+      // Operator-set fields no part of Nexus's write shape: they only survive a
+      // rebuild if the recreate echoes the whole proxy document.
+      enrichProxy(harness, proxyId);
+      const pluginIdsBefore = writtenIds(harness, proxyId);
       assert.equal(harness.edge.pluginForProxy(proxyId, 'openapi_validator'), undefined);
 
       const on = await harness.authed(provider, {
@@ -2167,12 +2259,21 @@ describe('publishing', () => {
         'GET /nexus/enf-toggle/invoices',
         'GET /nexus/enf-toggle/invoices/{id}',
       ]);
-      const validatorId = String(harness.edge.pluginForProxy(proxyId, 'openapi_validator')?.id);
-      assert.ok(associatedIds(harness, proxyId).includes(validatorId));
+      // Same proxy id, same hand-owned plugin config ids: everything holding
+      // one of those still resolves after the rebuild.
+      assert.ok(storedProxy(harness, proxyId).api_spec_id);
+      assertEnrichmentSurvived(harness, proxyId);
+      assert.deepEqual(
+        writtenIds(harness, proxyId)
+          .filter((id) => pluginIdsBefore.includes(id))
+          .sort(),
+        pluginIdsBefore,
+      );
       assert.deepEqual(effectiveNames(harness, proxyId), [
         'access_control',
         'key_auth',
         'openapi_validator',
+        'rate_limiting',
       ]);
 
       const off = await harness.authed(provider, {
@@ -2182,12 +2283,57 @@ describe('publishing', () => {
       });
       assert.equal(off.statusCode, 200, off.body);
       assert.equal(off.json<UpdateApiResponse>().api.spec_enforcement, 'docs_only');
+      // The spec, its stamp and the validator all go; everything else stays.
+      assert.equal(harness.edge.apiSpecForProxy(proxyId), undefined);
+      assert.equal(storedProxy(harness, proxyId).api_spec_id, undefined);
       assert.equal(harness.edge.pluginForProxy(proxyId, 'openapi_validator'), undefined);
-      assert.ok(!associatedIds(harness, proxyId).includes(validatorId));
+      assertEnrichmentSurvived(harness, proxyId);
+      assert.deepEqual(writtenIds(harness, proxyId), pluginIdsBefore);
       assert.deepEqual(associatedIds(harness, proxyId), writtenIds(harness, proxyId));
+      assert.deepEqual(effectiveNames(harness, proxyId), [
+        'access_control',
+        'key_auth',
+        'rate_limiting',
+      ]);
     });
 
-    it('refreshes path-scoped OPTIONS operations when CORS arrives and leaves', async () => {
+    it('carries a palette plugin across a mode conversion', async () => {
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'enf-palette' }),
+      });
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
+
+      const added = await harness.authed(provider, {
+        method: 'PUT',
+        url: `/api/apis/${apiId}/plugins/security_headers`,
+        payload: { enabled: true, config: {} },
+      });
+      assert.equal(added.statusCode, 200, added.body);
+      const paletteId = String(harness.edge.pluginForProxy(proxyId, 'security_headers')?.id);
+
+      const on = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { spec_enforcement: 'routes' },
+      });
+      assert.equal(on.statusCode, 200, on.body);
+
+      // The palette row is the portal's record of it; the gateway has to still
+      // be running the same config, under the same id the row's lookup finds.
+      assert.equal(String(harness.edge.pluginForProxy(proxyId, 'security_headers')?.id), paletteId);
+      assert.ok(effectiveNames(harness, proxyId).includes('security_headers'));
+      const listed = await harness.authed(provider, {
+        method: 'GET',
+        url: `/api/apis/${apiId}/plugins`,
+      });
+      assert.equal(listed.statusCode, 200, listed.body);
+      assert.match(listed.body, /security_headers/);
+    });
+
+    it('leaves the spec untouched when a CORS change lands on a routes API', async () => {
       const published = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -2196,7 +2342,7 @@ describe('publishing', () => {
       assert.equal(published.statusCode, 201, published.body);
       const apiId = published.json<PublishApiResponse>().api.id;
       const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
-      assert.equal('bypass' in (validatorConfig(proxyId) ?? {}), false);
+      const specId = harness.edge.apiSpecForProxy(proxyId)?.id;
       const validatorId = String(harness.edge.pluginForProxy(proxyId, 'openapi_validator')?.id);
 
       const added = await harness.authed(provider, {
@@ -2207,33 +2353,25 @@ describe('publishing', () => {
         },
       });
       assert.equal(added.statusCode, 200, added.body);
-      assert.deepEqual(operationLabels(proxyId), [
-        'GET /nexus/enf-cors-patch/invoices',
-        'GET /nexus/enf-cors-patch/invoices/{id}',
-        'OPTIONS /nexus/enf-cors-patch/invoices',
-        'OPTIONS /nexus/enf-cors-patch/invoices/{id}',
-      ]);
-      assert.equal('bypass' in (validatorConfig(proxyId) ?? {}), false);
-      // Rewritten in place, so the association list never had to change.
+
+      // The operation table comes from the document alone now, so a CORS change
+      // has nothing to regenerate — and re-importing the spec to discover that
+      // would churn the validator for no reason.
+      assert.equal(harness.edge.callsTo('PUT', '/api-specs').length, 0);
+      assert.equal(harness.edge.apiSpecForProxy(proxyId)?.id, specId);
       assert.equal(
         String(harness.edge.pluginForProxy(proxyId, 'openapi_validator')?.id),
         validatorId,
       );
-
-      const removed = await harness.authed(provider, {
-        method: 'PATCH',
-        url: `/api/apis/${apiId}`,
-        payload: { cors: null },
-      });
-      assert.equal(removed.statusCode, 200, removed.body);
-      assert.equal('bypass' in (validatorConfig(proxyId) ?? {}), false);
       assert.deepEqual(operationLabels(proxyId), [
         'GET /nexus/enf-cors-patch/invoices',
         'GET /nexus/enf-cors-patch/invoices/{id}',
       ]);
-      assert.equal(
-        String(harness.edge.pluginForProxy(proxyId, 'openapi_validator')?.id),
-        validatorId,
+      // `OPTIONS` still has to reach the `cors` plugin, which Edge checks on the
+      // proxy before any plugin runs.
+      assert.ok(
+        (storedProxy(harness, proxyId).allowed_methods as string[] | null)?.includes('OPTIONS') ??
+          true,
       );
     });
 
@@ -2255,9 +2393,10 @@ describe('publishing', () => {
       });
       assert.equal(patched.statusCode, 200, patched.body);
       assert.equal(harness.edge.pluginForProxy(proxyId, 'openapi_validator'), undefined);
+      assert.equal(harness.edge.apiSpecForProxy(proxyId), undefined);
     });
 
-    it('undoes the attach when a later step of the PATCH fails', async () => {
+    it('undoes the conversion when a later step of the PATCH fails', async () => {
       const published = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -2275,10 +2414,13 @@ describe('publishing', () => {
       });
       assert.equal(response.statusCode, 500, response.body);
 
-      // Neither the config nor the association survives a PATCH that did not
-      // commit; the row still says docs_only, and the two agree.
+      // The rebuild has to be rolled back the same way the plugin attach used
+      // to be: no spec, no validator, the same association list, and a row that
+      // still says docs_only.
+      assert.equal(harness.edge.apiSpecForProxy(proxyId), undefined);
       assert.equal(harness.edge.pluginForProxy(proxyId, 'openapi_validator'), undefined);
       assert.deepEqual(associatedIds(harness, proxyId), before);
+      assert.deepEqual(effectiveNames(harness, proxyId), ['access_control', 'key_auth']);
       const reread = await harness.authed(provider, { method: 'GET', url: `/api/apis/${apiId}` });
       assert.equal(reread.json<GetApiResponse>().api.spec_enforcement, 'docs_only');
     });
@@ -2292,7 +2434,9 @@ describe('publishing', () => {
       assert.equal(published.statusCode, 201, published.body);
       const apiId = published.json<PublishApiResponse>().api.id;
       const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
-      const validatorId = String(harness.edge.pluginForProxy(proxyId, 'openapi_validator')?.id);
+      const specId = harness.edge.apiSpecForProxy(proxyId)?.id;
+      const authId = String(harness.edge.pluginForProxy(proxyId, 'key_auth')?.id);
+      enrichProxy(harness, proxyId);
       assert.deepEqual(operationLabels(proxyId), [
         'GET /nexus/enf-spec/invoices',
         'GET /nexus/enf-spec/invoices/{id}',
@@ -2324,16 +2468,59 @@ describe('publishing', () => {
         'GET /nexus/enf-spec/payments',
         'POST /nexus/enf-spec/payments',
       ]);
-      // Replaced in place: same id, same association, exactly one config.
-      assert.equal(
-        String(harness.edge.pluginForProxy(proxyId, 'openapi_validator')?.id),
-        validatorId,
-      );
+      assert.deepEqual(submittedDocument(proxyId).servers, [{ url: '/nexus/enf-spec' }]);
+      // The spec keeps its id; the validator it owns is regenerated, so that one
+      // does not — and there is still exactly one of it.
+      assert.equal(harness.edge.apiSpecForProxy(proxyId)?.id, specId);
       assert.equal(
         harness.edge
           .pluginsForProxy(proxyId)
           .filter((plugin) => plugin.plugin_name === 'openapi_validator').length,
         1,
+      );
+      // A replace re-inserts the proxy from `x-ferrum-proxy`, so everything on
+      // it has to have been echoed back — including what an operator set.
+      assertEnrichmentSurvived(harness, proxyId);
+      // Hand-owned plugins are not the spec's to touch: the API is never
+      // unauthenticated across the replace.
+      assert.equal(String(harness.edge.pluginForProxy(proxyId, 'key_auth')?.id), authId);
+      assert.deepEqual(effectiveNames(harness, proxyId), [
+        'access_control',
+        'key_auth',
+        'openapi_validator',
+      ]);
+      assert.deepEqual(associatedIds(harness, proxyId), writtenIds(harness, proxyId));
+    });
+
+    it('moves the backend in the same write that regenerates the table', async () => {
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'enf-move', spec_enforcement: 'routes' }),
+      });
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
+      // The publish already wrote the proxy once, to associate its plugins.
+      const proxyWrites = harness.edge.callsTo('PUT', `/proxies/${proxyId}`).length;
+
+      const updated = await harness.authed(provider, {
+        method: 'PUT',
+        url: `/api/apis/${apiId}/spec`,
+        payload: { spec: specWithServer('https://moved.example.com:9443/v3', '4.0.0') },
+      });
+      assert.equal(updated.statusCode, 200, updated.body);
+
+      // One call, not a spec replace plus a proxy `PUT` the replace would then
+      // undo — the replace re-inserts the proxy from `x-ferrum-proxy` anyway.
+      assert.equal(harness.edge.callsTo('PUT', '/api-specs').length, 1);
+      assert.equal(harness.edge.callsTo('PUT', `/proxies/${proxyId}`).length, proxyWrites);
+      const proxy = storedProxy(harness, proxyId);
+      assert.equal(proxy.backend_host, 'moved.example.com');
+      assert.equal(proxy.backend_port, 9443);
+      assert.equal(proxy.backend_path, '/v3');
+      assert.equal(
+        (submittedDocument(proxyId)['x-ferrum-proxy'] as Record<string, unknown>).backend_host,
+        'moved.example.com',
       );
     });
 
@@ -2353,9 +2540,11 @@ describe('publishing', () => {
       });
       assert.equal(updated.statusCode, 200, updated.body);
       assert.equal(harness.edge.pluginForProxy(proxyId, 'openapi_validator'), undefined);
+      assert.equal(harness.edge.apiSpecForProxy(proxyId), undefined);
+      assert.equal(harness.edge.callsTo('PUT', '/api-specs').length, 0);
     });
 
-    it('restores the previous operation table when the revision cannot be persisted', async () => {
+    it('restores the previous document when the revision cannot be persisted', async () => {
       const published = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -2372,22 +2561,29 @@ describe('publishing', () => {
           spec: JSON.stringify({
             openapi: '3.1.0',
             info: { title: 'Billing API', version: '9.9.9' },
-            servers: [{ url: 'https://billing.example.com:8443/v2' }],
+            servers: [{ url: 'https://elsewhere.example.com:9443/v9' }],
             paths: { '/payments': { get: { responses: { '200': { description: 'OK' } } } } },
           }),
         },
       });
       assert.equal(response.statusCode, 500, response.body);
 
-      // The gateway moved first, so the compensation has to put the table back:
-      // otherwise the proxy would enforce a revision the catalog never adopted.
+      // The gateway moved first, so the compensation has to put the document
+      // back: otherwise the proxy would enforce — and forward to — a revision
+      // the catalog never adopted.
       assert.deepEqual(operationLabels(proxyId), [
         'GET /nexus/enf-spec-undo/invoices',
         'GET /nexus/enf-spec-undo/invoices/{id}',
       ]);
+      assert.equal(storedProxy(harness, proxyId).backend_host, 'billing.example.com');
+      assert.deepEqual(effectiveNames(harness, proxyId), [
+        'access_control',
+        'key_auth',
+        'openapi_validator',
+      ]);
     });
 
-    it('takes the validator down with the API', async () => {
+    it('takes the spec and its validator down with the API', async () => {
       const published = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -2396,6 +2592,7 @@ describe('publishing', () => {
       const apiId = published.json<PublishApiResponse>().api.id;
       const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
       assert.ok(harness.edge.pluginForProxy(proxyId, 'openapi_validator'));
+      assert.ok(harness.edge.apiSpecForProxy(proxyId));
 
       const removed = await harness.authed(provider, {
         method: 'DELETE',
@@ -2403,6 +2600,64 @@ describe('publishing', () => {
       });
       assert.equal(removed.statusCode, 200, removed.body);
       assert.equal(harness.edge.pluginsForProxy(proxyId).length, 0);
+      assert.equal(harness.edge.apiSpecForProxy(proxyId), undefined);
+      assert.equal(harness.edge.proxies.get(`nexus/${proxyId}`), undefined);
+    });
+
+    it('rolls the spec back when a later publish step fails', async () => {
+      failNextTransaction(harness, 'store offline');
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'enf-publish-undo', spec_enforcement: 'routes' }),
+      });
+      assert.equal(response.statusCode, 500, response.body);
+
+      // Deleting the proxy cascades the spec and the validator it generated, so
+      // a failed `routes` publish leaves nothing at all behind.
+      assert.equal(harness.edge.proxyByName('nexus-enf-publish-undo'), undefined);
+      assert.equal(harness.edge.apiSpecs.size, 0);
+      assert.equal(harness.edge.pluginConfigs.size, 0);
+    });
+
+    it('refuses a hand-built openapi_validator on a proxy with no attached spec', async () => {
+      // The regression guard for issue #49. Nexus no longer writes one, so this
+      // drives the gateway surface directly: if the mock ever accepts an inline
+      // operations table again, CI would go green on a shape every real gateway
+      // rejects.
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'enf-admission' }),
+      });
+      const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
+
+      await assert.rejects(
+        () =>
+          harness.edgeClient.pluginConfigs.create({
+            plugin_name: 'openapi_validator',
+            scope: 'proxy',
+            proxy_id: proxyId,
+            enabled: true,
+            config: {
+              enforcement_mode: 'block',
+              validate_request: false,
+              validate_response: false,
+              fail_on_unknown_operation: true,
+              operations: [
+                {
+                  method: 'GET',
+                  path_template: '/nexus/enf-admission/invoices',
+                  path_regex: '^/nexus/enf\\-admission/invoices$',
+                },
+              ],
+            },
+          }),
+        (error: unknown) =>
+          /openapi_validator requires a proxy with an attached api_spec/.test(
+            (error as Error).message,
+          ),
+      );
     });
   });
 });

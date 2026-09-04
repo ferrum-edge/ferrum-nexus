@@ -386,15 +386,12 @@ Plugin configs are closed key sets; a typo is a 400. What Nexus sends:
   `exposed_headers`, `max_age`, `preflight_continue`, `unmatched_preflights`);
   each has a native default that suits a portal-published API, and sending a key
   a provider cannot change would only freeze that default in place.
-- **`openapi_validator`** — `enforcement_mode: 'block'`,
-  `fail_on_unknown_operation: true`, `validate_request: false`,
-  `validate_response: false`, and an `operations` table with one entry per
-  declared (path, method). Bodies are deliberately not validated: that needs the
-  schemas materialised out of the document, which is Edge's own spec importer's
-  job. `bypass: { methods: ['OPTIONS'] }` is added only when the API has a CORS
-  policy, because Edge evaluates `bypass` **before** the unknown-operation check
-  and a preflight matches no declared operation. Every other published key is
-  omitted so the gateway's own defaults stay in force.
+- **`openapi_validator`** — **Nexus never writes one.** Edge refuses a
+  hand-built `openapi_validator` on a proxy with no attached `api_spec`
+  (`validate_openapi_validator_precondition` in `admin/crud.rs`), and only its
+  spec importer sets that stamp. `routes` enforcement therefore submits the
+  _document_ and lets the gateway generate the plugin — see
+  [Spec-owned proxies](#spec-owned-proxies) below.
 
 Plugins attach as `{ plugin_name, scope: 'proxy', proxy_id, enabled, config }`
 — **and then have to be associated.** A proxy-scoped plugin config is inert
@@ -499,16 +496,64 @@ apis row ─── proxy          name `nexus-<slug>`, listen_path `/<namespace>
               ├─ plugin_config  rate_limiting     — only when a rate limit is set
               ├─ plugin_config  cors              — only when `cors` names origins
               ├─ plugin_config  openapi_validator — only when `spec_enforcement`
-              │                                     is `routes`
+              │                                     is `routes`; generated and
+              │                                     owned by Edge, not by Nexus
               └─ plugin_config  … one per `api_plugins` row — the provider
                                   plugin palette (§5.7)
 ```
 
-The `openapi_validator` is the only config generated from the **spec** rather
-than from a setting on the row, so it is regenerated on a spec revision as well
-as on a level change — and on a CORS change, which decides whether the browser's
-`OPTIONS` preflight is bypassed, because Edge evaluates `bypass` before the
-unknown-operation check and a preflight matches no declared operation.
+### Spec-owned proxies
+
+Every plugin above is one Nexus composes and attaches — except the
+`openapi_validator`, which it cannot. Edge admission refuses one on a proxy that
+carries no `api_spec_id`, and that field is set by exactly one thing: the API-spec
+importer. So an API at the `routes` level does not get its proxy from
+`POST /proxies` at all. The whole proxy is created by `POST /api-specs`, from a
+document Nexus builds out of the provider's own (`publishing/spec-document.ts`):
+
+- **`servers` is replaced** with `[{ url: <listen_path> }]`. Edge's extractor
+  builds each generated operation matcher from the Paths key prefixed by the
+  pathname of `servers[0]`, so a document left with the provider's upstream
+  there generates `^/invoices$` — and every request arriving at
+  `/nexus/<slug>/invoices` is rejected as an unknown operation, including the
+  declared ones. The provider's `servers[0]` stays authoritative for the
+  _backend_ fields; only the submitted copy is rewritten.
+- **`x-ferrum-proxy`** carries the proxy body, including a Nexus-minted `id` so
+  `ferrum_proxy_id` is a plain proxy id whatever the mode.
+- **`x-ferrum-validate`** is `{ mode: 'block', request: { enabled: false },
+response: { enabled: false }, fail_on_unknown_operation: true }` — a closed
+  key set on Edge's side, where a misspelling is a `400` rather than a silently
+  weaker policy. Bodies are deliberately not validated: that needs the schemas
+  materialised out of the document, and a portal cannot know whether a
+  provider's `$ref`ed schemas are meant as enforcement or as documentation.
+- **every root `x-ferrum-*` key the provider wrote is stripped.** A document is
+  input, not configuration.
+
+Edge creates the proxy, generates the validator and associates it in one
+transaction, then tags both with the spec's id. Three consequences:
+
+1. a **spec revision** is a `PUT /api-specs/{id}`. That re-inserts the proxy
+   from the submitted `x-ferrum-proxy`, so the body must be built from a fresh
+   `GET /proxies/{id}` — and the backend move rides along in the same call
+   rather than in a proxy write the import would overwrite. Hand-owned plugin
+   configs and their associations survive it untouched;
+2. `PUT /proxies/{id}` still works on a spec-owned proxy and preserves both the
+   stamp and the association list, so every runtime-settings PATCH keeps going
+   through `mutateProxy` unchanged;
+3. **changing the level rebuilds the proxy.** Edge cannot attach a spec to an
+   existing proxy, cannot detach one without deleting it, and refuses a spec
+   naming a proxy id that already exists — so the conversion deletes the proxy
+   and builds it back under the same id, carrying the whole proxy document and
+   every hand-owned plugin config across _with their original ids_. The API
+   answers `404` for the round trips in between; the audit row says
+   `proxy_rebuilt: true`.
+
+A CORS policy does not enter into any of this. `cors` runs at priority 100 and
+`openapi_validator` at 2960, and `preflight_continue` defaults to `false`, so a
+browser preflight is answered `204` and short-circuited well before the
+unknown-operation check. No synthetic `OPTIONS` operation is generated, and no
+method-wide bypass is set — a bypass would have opened _undeclared_ paths to
+`OPTIONS` too.
 
 The four fields on the proxy itself are settings, not plugins, and two of them
 are **partly derived from the CORS policy** because Edge evaluates them before —

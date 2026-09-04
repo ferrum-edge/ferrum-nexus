@@ -22,9 +22,30 @@ const LEVEL_DESCRIPTIONS: Readonly<Record<SpecEnforcementLevel, string>> = {
   routes: 'The gateway answers 400 for an undeclared path or method.',
 };
 
+const BODY_CAVEAT =
+  'Request and response bodies are not validated at either level — only the path and method are checked.';
+
+/**
+ * What a provider is told before they change the level on a **live** API.
+ *
+ * The gateway builds the enforcement rules only for a route it created from the
+ * document, and drops them only by rebuilding the route without it, so moving
+ * between the levels recreates the route and the API answers `404` for a moment
+ * (see the provider guide). Nothing else on this form does that, so a provider
+ * who is not told would reasonably read it as another in-place setting.
+ */
+const REBUILD_WARNING =
+  'Changing this rebuilds the API’s gateway route, so it is briefly unreachable — a second or so — while the change lands. Settings, plugins and client access all survive it.';
+
 export interface SpecEnforcementSelectProps {
   value: SpecEnforcementLevel;
   onValueChange: (value: SpecEnforcementLevel) => void;
+  /**
+   * The level the API is published at, when it is already published. Passing it
+   * turns on the interruption warning as soon as `value` moves away from it;
+   * the publish form omits it, because there is nothing live to interrupt.
+   */
+  publishedLevel?: SpecEnforcementLevel;
   className?: string;
 }
 
@@ -32,8 +53,10 @@ export interface SpecEnforcementSelectProps {
 export function SpecEnforcementSelect({
   value,
   onValueChange,
+  publishedLevel,
   className,
 }: SpecEnforcementSelectProps): ReactElement {
+  const willRebuild = publishedLevel !== undefined && publishedLevel !== value;
   return (
     <LabeledSelect<SpecEnforcementLevel>
       className={className}
@@ -45,7 +68,18 @@ export function SpecEnforcementSelect({
         label: LEVEL_LABELS[level],
         description: LEVEL_DESCRIPTIONS[level],
       }))}
-      hint="Request and response bodies are not validated at either level — only the path and method are checked."
+      hint={
+        willRebuild ? (
+          <>
+            {BODY_CAVEAT}
+            <strong className="mt-1 block font-medium text-amber-700 dark:text-amber-500">
+              {REBUILD_WARNING}
+            </strong>
+          </>
+        ) : (
+          BODY_CAVEAT
+        )
+      }
     />
   );
 }

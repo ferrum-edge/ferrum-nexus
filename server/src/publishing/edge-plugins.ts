@@ -91,6 +91,20 @@ export interface EdgePluginBinder {
   associate(proxyId: string, configIds: string[], subject: string): Promise<void>;
   /** Stop the gateway running these configs on this proxy. Idempotent. */
   disassociate(proxyId: string, configIds: string[], subject: string): Promise<void>;
+  /**
+   * Put a set of plugin configs back onto a proxy that was just recreated,
+   * **keeping their ids**, and associate them.
+   *
+   * Used by the `spec_enforcement` conversion, which has to delete and recreate
+   * the proxy to move it between hand-owned and spec-owned (see
+   * `service.ts`). Reusing the ids is what makes that rebuild invisible to
+   * everything else: the undo steps a PATCH already pushed, and any config id
+   * another request read a moment ago, still address a live row. `enabled`,
+   * `trigger` and `priority_override` are carried across too — a restore that
+   * quietly re-enabled a switched-off plugin, dropped its trigger, or reset its
+   * priority would change what the gateway runs.
+   */
+  restorePlugins(proxyId: string, configs: EdgePluginConfig[], subject: string): Promise<void>;
   /** Undo step for "a config was created here": detach it, then delete it. */
   undoAttach(proxyId: string, configId: string, subject: string): () => Promise<void>;
   /** Undo step for "an associated config was removed": put it back, re-associate. */
@@ -209,6 +223,33 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
         },
         subject,
       );
+    },
+
+    async restorePlugins(proxyId, configs, subject) {
+      const ids: string[] = [];
+      for (const config of configs) {
+        await edge.pluginConfigs.create(
+          {
+            id: config.id,
+            plugin_name: config.plugin_name,
+            scope: config.scope,
+            proxy_id: proxyId,
+            enabled: config.enabled,
+            config: config.config,
+            ...(config.priority_override == null
+              ? {}
+              : { priority_override: config.priority_override }),
+            ...(config.trigger ? { trigger: config.trigger } : {}),
+          },
+          subject,
+        );
+        ids.push(config.id);
+      }
+      // One association write for the whole set, for the same reason `publish`
+      // makes one: until the proxy names them these configs are inert, and the
+      // window in which the API is live but ungated should be one round trip
+      // rather than one per plugin.
+      if (ids.length > 0) await binder.associate(proxyId, ids, subject);
     },
 
     /**

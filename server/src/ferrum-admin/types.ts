@@ -386,11 +386,12 @@ export interface EdgeOpenapiValidatorOperation {
 /**
  * `openapi_validator` config — a closed key set at every level.
  *
- * Nexus generates only the routes-level subset: the operation table plus
- * `fail_on_unknown_operation`, with body validation switched off. The
- * remaining published fields (`request_content_types`, `max_body_bytes`,
- * `schema_draft`, `error_response`, …) are omitted so the gateway's own
- * defaults stay in force.
+ * **Nexus never writes one.** Edge refuses a hand-built `openapi_validator` on
+ * a proxy with no attached `api_spec` (`validate_openapi_validator_precondition`
+ * in `admin/crud.rs`), so the only way a portal gets one is to let the gateway
+ * generate it from a submitted document — see `spec-document.ts`. This type
+ * describes what comes *back* out of Edge, which is what the publishing tests
+ * assert the generated table against.
  */
 export interface EdgeOpenapiValidatorConfig {
   /** `block` rejects, `log_only` records, `disabled` skips. Native default `block`. */
@@ -472,12 +473,83 @@ export interface EdgePluginConfigWrite {
   enabled: boolean;
   config: EdgePluginSettings;
   /**
+   * Execution priority override. Nexus never *chooses* one — the plugin
+   * ordering is the gateway's — but a proxy rebuild has to carry an operator's
+   * across, so it is omitted rather than sent as `null` when there is none.
+   */
+  priority_override?: number;
+  /**
    * Per-instance execution trigger. Omitted entirely — never sent as `null` —
    * when the instance should run for every request: `PUT /plugins/config/{id}`
    * is a whole-resource replace, so omitting the key is how a trigger is
    * removed.
    */
   trigger?: EdgePluginTrigger;
+}
+
+/* ── API specs ──────────────────────────────────────────────────────────── */
+
+/**
+ * An OpenAPI document submitted to `POST`/`PUT /api-specs`.
+ *
+ * The provider's own document, with `servers` rewritten to the listen path and
+ * the `x-ferrum-proxy` / `x-ferrum-validate` extensions stamped on — Edge
+ * creates the proxy and generates the `openapi_validator` from it in one
+ * transaction. Deliberately untyped past the root: the body is whatever the
+ * provider uploaded, and Nexus is not a spec linter.
+ *
+ * @see server/src/publishing/spec-document.ts, which is the only producer.
+ */
+export type EdgeApiSpecDocument = Record<string, unknown>;
+
+/** `201`/`200` body of `POST`/`PUT /api-specs`. */
+export interface EdgeApiSpecRef {
+  /** UUID of the spec — new on create, unchanged on replace. */
+  id: string;
+  /** The proxy this spec owns. Echoes the submitted `x-ferrum-proxy.id`. */
+  proxy_id: string;
+  /** `openapi` version string detected in the document. */
+  spec_version?: string;
+  /** Lowercase hex SHA-256 of the stored bytes. */
+  content_hash?: string;
+}
+
+/**
+ * One row of `GET /api-specs` — metadata only; the document is not included.
+ *
+ * Nexus reads exactly one field off it, `id`, which is how it finds the spec
+ * behind a proxy without storing an id whose lifecycle it does not own. The
+ * rest is here because the wire carries it.
+ */
+export interface EdgeApiSpecSummary {
+  id: string;
+  proxy_id: string;
+  namespace?: string;
+  spec_version?: string;
+  spec_format?: 'json' | 'yaml';
+  title?: string | null;
+  info_version?: string | null;
+  operation_count?: number;
+  content_hash?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/**
+ * `GET /api-specs` — a **different** envelope from every other list endpoint.
+ *
+ * The rest of the Admin API pages with {@link EdgePage}'s `data` +
+ * `pagination`; `/api-specs` is flat, with `items` and the counters alongside
+ * it. Not a Nexus modelling choice — it is what the gateway sends
+ * (`ApiSpecListResponse` in `openapi.yaml`), and reading `data` off it silently
+ * yields nothing.
+ */
+export interface EdgeApiSpecPage {
+  items: EdgeApiSpecSummary[];
+  limit?: number;
+  offset?: number;
+  next_offset?: number | null;
+  total?: number;
 }
 
 /* ── Health ─────────────────────────────────────────────────────────────── */
