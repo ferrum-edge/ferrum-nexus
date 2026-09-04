@@ -528,26 +528,43 @@ type, so nothing else breaks.
 
 **My APIs → the API → Spec → Upload new revision.**
 
-Each upload is a new revision and becomes the current one; older revisions are
-retained. The version label defaults to the document's `info.version` — set it
-explicitly if your catalog version differs.
+Each upload is a new revision and becomes the current one. A bounded number of
+older revisions is retained — ten by default, `NEXUS_SPEC_HISTORY_LIMIT` on your
+portal — and anything past that is removed as each new revision lands. The
+version label defaults to the document's `info.version` — set it explicitly if
+your catalog version differs.
 
 ### The upstream-following rule
 
-Uploading a spec **can** move the gateway's backend, but only when the proxy is
-still pointing exactly where the _previous_ revision said it should. As soon as
-you set an explicit upstream, the document stops being authoritative for it and
-later uploads leave the backend alone.
+Uploading a spec **can** move the gateway's backend. The rule is exact:
+
+> Your API follows its document while the upstream the portal records for it is
+> still the `servers[0].url` of the **previous** revision. Then a new revision
+> moves the backend whenever any part of that URL changes — scheme, host, port
+> **or base path**. If the recorded upstream is anything else, it is pinned and
+> uploads never touch it.
+
+The comparison is of the whole normalized URL, so `https://api.example.com/v2`
+and `https://api.example.com:443/v2/` are the same upstream, and moving
+`/v2` to `/v3` on the same host **is** a move.
 
 In practice:
 
 - If you have never set an explicit upstream, changing `servers[0].url` and
-  re-uploading **moves your traffic**. That is usually what you want, and
-  occasionally a nasty surprise.
-- If you set the upstream explicitly, spec uploads are documentation-only.
+  re-uploading **moves your traffic** — including a base-path-only change. That
+  is usually what you want, and occasionally a nasty surprise.
+- If you set the upstream explicitly, spec uploads are documentation-only, even
+  when your pin names the same host and port as the document.
+- Setting the upstream back to exactly what the current document says makes the
+  API follow it again — "pinned" is not a flag you have to clear, it is simply
+  "the recorded upstream is not the document's".
 
 Set the upstream explicitly for anything production-facing. It makes "publish
 new docs" and "move the backend" two separate, deliberate acts.
+
+A move that cannot be saved is undone: the gateway's backend, the upstream the
+portal shows and the current revision always agree, both when the upload
+succeeds and when it fails.
 
 ### If enforcement is on
 

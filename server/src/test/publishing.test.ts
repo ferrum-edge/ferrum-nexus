@@ -3603,6 +3603,192 @@ describe('per-owner API quota', () => {
 });
 
 /**
+ * Whether a spec revision repoints the proxy.
+ *
+ * An API follows its document while its recorded `upstream_url` is still the
+ * normalized `servers[0]` of the *previous* revision; anything else is a pin
+ * the provider chose, and a document that moves must not overrule it. The
+ * comparison is the whole normalized upstream — scheme, host, port and base
+ * path — because a document that moves `/v2` to `/v3` on the same host moves
+ * the backend just as surely as one that changes hosts.
+ */
+describe('spec upstream following', () => {
+  let harness: TestApp;
+  let provider: TestSession;
+
+  before(async () => {
+    harness = await buildTestApp();
+    await harness.registerUser({ email: 'follow-founder@example.test' });
+    provider = await harness.registerUser({
+      email: 'follow-provider@example.test',
+      role: 'provider',
+    });
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  /** The proxy's backend, in the same normalized form the `apis` row stores. */
+  function gatewayBackend(proxyId: string): string {
+    const proxy = harness.edge.proxies.get(`nexus/${proxyId}`);
+    assert.ok(proxy, `expected proxy ${proxyId} to exist`);
+    const path = proxy.backend_path ?? '';
+    return `${String(proxy.backend_scheme)}://${String(proxy.backend_host)}:${String(
+      proxy.backend_port,
+    )}${String(path)}`;
+  }
+
+  async function publishFollowing(
+    slug: string,
+    enforcement: 'docs_only' | 'routes',
+    server: string,
+    pin?: string,
+  ): Promise<{ apiId: string; proxyId: string }> {
+    const response = await harness.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: publishPayload({
+        slug,
+        spec: specWithServer(server),
+        spec_enforcement: enforcement,
+        ...(pin === undefined ? {} : { upstream_url: pin }),
+      }),
+    });
+    assert.equal(response.statusCode, 201, response.body);
+    const api = response.json<PublishApiResponse>().api;
+    return { apiId: api.id, proxyId: String(api.ferrum_proxy_id) };
+  }
+
+  async function revise(apiId: string, server: string, version = '2.0.0'): Promise<number> {
+    const response = await harness.authed(provider, {
+      method: 'PUT',
+      url: `/api/apis/${apiId}/spec`,
+      payload: { spec: specWithServer(server, version) },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    return response.statusCode;
+  }
+
+  /** Publish at `from`, upload a revision at `to`, assert the backend moved. */
+  async function assertMoves(
+    slug: string,
+    enforcement: 'docs_only' | 'routes',
+    from: string,
+    to: string,
+    expected: string,
+  ): Promise<void> {
+    const { apiId, proxyId } = await publishFollowing(slug, enforcement, from);
+    await revise(apiId, to);
+    assert.equal(gatewayBackend(proxyId), expected, 'the gateway followed the document');
+    assert.equal(
+      (await harness.store.apis.findById(apiId))?.upstream_url,
+      expected,
+      'the recorded upstream followed the gateway',
+    );
+  }
+
+  for (const enforcement of ['docs_only', 'routes'] as const) {
+    it(`follows a base-path-only change in ${enforcement} mode`, async () => {
+      await assertMoves(
+        `follow-path-${enforcement}`,
+        enforcement,
+        'https://billing.example.com:8443/v2',
+        'https://billing.example.com:8443/v3',
+        'https://billing.example.com:8443/v3',
+      );
+    });
+
+    it(`follows a scheme-only change in ${enforcement} mode`, async () => {
+      await assertMoves(
+        `follow-scheme-${enforcement}`,
+        enforcement,
+        'http://billing.example.com:8443/v2',
+        'https://billing.example.com:8443/v2',
+        'https://billing.example.com:8443/v2',
+      );
+    });
+
+    it(`follows a host change in ${enforcement} mode`, async () => {
+      await assertMoves(
+        `follow-host-${enforcement}`,
+        enforcement,
+        'https://one.example.com:8443/v2',
+        'https://two.example.com:8443/v2',
+        'https://two.example.com:8443/v2',
+      );
+    });
+
+    it(`follows a port change in ${enforcement} mode`, async () => {
+      await assertMoves(
+        `follow-port-${enforcement}`,
+        enforcement,
+        'https://billing.example.com:8443/v2',
+        'https://billing.example.com:9443/v2',
+        'https://billing.example.com:9443/v2',
+      );
+    });
+
+    it(`leaves a same-host pin alone in ${enforcement} mode`, async () => {
+      // The pin differs from the document only in its base path, which is
+      // exactly the shape a host-and-port comparison mistook for "following".
+      const { apiId, proxyId } = await publishFollowing(
+        `follow-pinned-${enforcement}`,
+        enforcement,
+        'https://billing.example.com:8443/v2',
+        'https://billing.example.com:8443/pinned',
+      );
+      assert.equal(gatewayBackend(proxyId), 'https://billing.example.com:8443/pinned');
+
+      await revise(apiId, 'https://billing.example.com:8443/v3');
+      assert.equal(
+        gatewayBackend(proxyId),
+        'https://billing.example.com:8443/pinned',
+        'a pinned backend ignores the document',
+      );
+      assert.equal(
+        (await harness.store.apis.findById(apiId))?.upstream_url,
+        'https://billing.example.com:8443/pinned',
+      );
+
+      // And it stays pinned across a second revision, so the rule is a property
+      // of the row rather than of one comparison.
+      await revise(apiId, 'https://billing.example.com:8443/v4', '3.0.0');
+      assert.equal(gatewayBackend(proxyId), 'https://billing.example.com:8443/pinned');
+    });
+
+    it(`keeps the gateway, the row and the document in step on rollback in ${enforcement} mode`, async () => {
+      const slug = `follow-rollback-${enforcement}`;
+      const { apiId, proxyId } = await publishFollowing(
+        slug,
+        enforcement,
+        'https://billing.example.com:8443/v2',
+      );
+
+      failNextTransaction(harness, 'database is gone');
+      const failed = await harness.authed(provider, {
+        method: 'PUT',
+        url: `/api/apis/${apiId}/spec`,
+        payload: { spec: specWithServer('https://billing.example.com:8443/v3', '2.0.0') },
+      });
+      assert.notEqual(failed.statusCode, 200);
+
+      assert.equal(gatewayBackend(proxyId), 'https://billing.example.com:8443/v2');
+      assert.equal(
+        (await harness.store.apis.findById(apiId))?.upstream_url,
+        'https://billing.example.com:8443/v2',
+      );
+      const current = await harness.store.apiSpecs.findCurrentByApi(apiId);
+      assert.match(String(current?.raw_spec), /billing\.example\.com:8443\/v2/);
+
+      // The next revision still follows: the rollback did not pin anything.
+      await revise(apiId, 'https://billing.example.com:8443/v3');
+      assert.equal(gatewayBackend(proxyId), 'https://billing.example.com:8443/v3');
+    });
+  }
+});
+
+/**
  * The API-count quota bounds proxies and slugs; on its own it bounds no
  * storage, because every `PUT /api/apis/:id/spec` used to keep another
  * `MAX_SPEC_BYTES` document for ever. One API revised in a loop was therefore

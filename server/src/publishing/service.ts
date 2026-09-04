@@ -225,6 +225,7 @@ import {
   parseUpstreamUrl,
   resolveUpstream,
   slugify,
+  type ParsedSpec,
   type SpecPath,
   type SpecUpstream,
   type UpstreamPolicy,
@@ -589,6 +590,20 @@ function safeDefaultUpstream(rawSpec: string): SpecUpstream | null {
 }
 
 /**
+ * A stored `upstream_url` in the canonical form {@link formatUpstreamUrl}
+ * produces, or `null` when there is none or it cannot be parsed.
+ *
+ * Every comparison against a spec's `servers[0]` goes through this, so a row
+ * written before the port was always made explicit still compares equal to the
+ * document it was taken from.
+ */
+function normalizedUpstream(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const parsed = parseUpstreamUrl(raw);
+  return parsed ? formatUpstreamUrl(parsed) : null;
+}
+
+/**
  * Declared paths of an already-stored revision, or `[]` when it can no longer
  * be parsed — the same tolerance {@link safeDefaultUpstream} applies, for the
  * same reason.
@@ -724,6 +739,48 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         'Delete an API you no longer publish, or ask an administrator to raise the limit.',
       { limit, current, setting: 'NEXUS_MAX_APIS_PER_OWNER' },
     );
+  }
+
+  /**
+   * The upstream a new revision should move the proxy to, or `null` to leave
+   * the backend exactly where it is.
+   *
+   * **An API follows its document while its recorded `upstream_url` is still
+   * the normalized `servers[0]` of the previous current revision.** That is the
+   * whole rule, and it is deliberately a comparison of *rows* rather than of
+   * the live proxy: the `apis` row is what the portal shows and what the
+   * provider set, and reading intent off the gateway means an operator's
+   * hand-edit silently changes whether the next upload repoints anything.
+   *
+   * Both sides go through {@link parseUpstreamUrl} and
+   * {@link formatUpstreamUrl}, so `https://host/v2` and `https://host:443/v2/`
+   * compare equal, and the comparison covers the **whole** upstream. Comparing
+   * only host and port got both halves wrong: a document moving `/v2` to `/v3`
+   * on the same host did not move the backend at all, and an explicit pin that
+   * happened to name the same host and port was mistaken for spec-following and
+   * could be overruled by the next upload.
+   *
+   * A first revision with no predecessor never moves anything: there is no
+   * previous server to have been following.
+   */
+  async function followedUpstream(
+    api: ApiRecord,
+    previous: ApiSpecRecord | null,
+    parsed: ParsedSpec,
+  ): Promise<SpecUpstream | null> {
+    const next = parsed.defaultUpstream;
+    if (!next) return null;
+    const previousUpstream = previous ? safeDefaultUpstream(previous.raw_spec) : null;
+    if (!previousUpstream) return null;
+    const followed = formatUpstreamUrl(previousUpstream);
+    if (normalizedUpstream(api.upstream_url) !== followed) return null;
+    // Scheme, host, port and base path, all four, in one comparison.
+    if (formatUpstreamUrl(next) === followed) return null;
+    // Only a move the gateway would actually make is subject to the policy: a
+    // document whose `servers[0]` is private can still be stored for an API
+    // whose backend is pinned elsewhere.
+    await assertUpstreamAllowed(next, upstreamPolicy);
+    return next;
   }
 
   function specSummary(record: ApiSpecRecord): ApiSpecSummary {
@@ -1334,6 +1391,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       let movedTo: string | null = null;
       /** Historical revisions `NEXUS_SPEC_HISTORY_LIMIT` dropped for this one. */
       let pruned = 0;
+      // Decided from the rows rather than from the gateway, and *before* the
+      // proxy lease is taken so the DNS lookup the upstream policy needs is not
+      // held under it.
+      const backend = proxyId ? await followedUpstream(api, previous, parsed) : null;
 
       /**
        * Move the gateway, then persist the revision, compensating the gateway
@@ -1354,38 +1415,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         const undo: (() => Promise<void>)[] = [];
         try {
           if (proxyId) {
-            // One read serves both decisions below: whether the backend follows
-            // the document, and — in `routes` mode — the `x-ferrum-proxy` body,
-            // which has to be the whole current document or the replace resets
-            // every field it omits.
+            // In `routes` mode the `x-ferrum-proxy` body has to be the whole
+            // current document or the replace resets every field it omits; in
+            // `docs_only` mode this is the existence check the revision would
+            // otherwise skip when the document does not move the backend.
             const proxy = await edge.proxies.get(proxyId);
             if (!proxy) throw notFound('Proxy', proxyId);
-
-            // Follow the spec's `servers[0]` only while the proxy is still
-            // pointing where the *previous* revision said it should. Once a
-            // provider supplies an explicit upstream, the document stops being
-            // authoritative for it.
-            const nextUpstream = parsed.defaultUpstream;
-            let backend: SpecUpstream | null = null;
-            if (nextUpstream) {
-              const previousUpstream = previous ? safeDefaultUpstream(previous.raw_spec) : null;
-              const followsSpec =
-                previousUpstream !== null &&
-                proxy.backend_host === previousUpstream.host &&
-                proxy.backend_port === previousUpstream.port;
-              const moved =
-                previousUpstream === null ||
-                previousUpstream.host !== nextUpstream.host ||
-                previousUpstream.port !== nextUpstream.port ||
-                previousUpstream.scheme !== nextUpstream.scheme;
-              if (followsSpec && moved) {
-                // Only a move the gateway would actually make is subject to the
-                // policy: a document whose `servers[0]` is private can still be
-                // stored for an API whose backend is pinned elsewhere.
-                await assertUpstreamAllowed(nextUpstream, upstreamPolicy);
-                backend = nextUpstream;
-              }
-            }
 
             if (api.spec_enforcement === 'routes') {
               // One call moves both things a revision can move. `PUT /api-specs`
