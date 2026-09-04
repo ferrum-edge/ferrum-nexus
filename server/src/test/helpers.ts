@@ -250,6 +250,10 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
     NEXUS_ENV: 'test',
     NEXUS_LOG_LEVEL: 'silent',
     NEXUS_SECRET_KEY: TEST_SECRET_KEY,
+    // The health probes are uncached by default here: several tests flip the
+    // database or the gateway between two requests and expect the second one
+    // to see the new state. Tests that exercise the cache set their own value.
+    NEXUS_HEALTH_CACHE_MS: '0',
     NEXUS_SQLITE_PATH: ':memory:',
     NEXUS_DB_DRIVER: 'sqlite',
     FERRUM_ADMIN_URL: edgeUrl,

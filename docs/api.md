@@ -140,7 +140,16 @@ per-endpoint notes below.
 
 ## Health
 
-Public. Registered under `/api/health`.
+Public. Registered under `/api/health`. **Rate-limited** to 120 requests per
+minute per IP across the prefix when `NEXUS_RATE_LIMIT_ENABLED=true` (the
+default; always off under `NEXUS_ENV=test`) — `429 RATE_LIMITED` beyond that.
+
+The database and gateway probes behind these routes are **cached for
+`NEXUS_HEALTH_CACHE_MS`** (default 5 s) and concurrent callers share one
+in-flight probe, so a burst produces a single database query and a single Admin
+API call. A failing probe is cached for the same window. `checked_at` reports
+when the probes ran, not when the request arrived. See
+[`operations.md`](operations.md#9-health-checks).
 
 ### `GET /api/health`
 

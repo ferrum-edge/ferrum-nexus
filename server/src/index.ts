@@ -149,6 +149,20 @@ export interface BuildServerDeps {
 export const AUTH_RATE_LIMIT = { max: 20, timeWindow: '1 minute' } as const;
 
 /**
+ * Rate limit applied to `/api/health*` when `config.rateLimitEnabled` is true.
+ *
+ * The health routes are unauthenticated and each one costs a database query and
+ * an authenticated Admin API call, so they need a ceiling of their own — the
+ * `/api/auth` limiter never covered them. 120/minute per client IP is roughly
+ * one probe every half second, which is far above what a load balancer, a
+ * container liveness probe and a monitoring scraper need between them, and far
+ * below what an anonymous flood wants. The `NEXUS_HEALTH_CACHE_MS` cache in
+ * `routes/health.ts` is what keeps the traffic *under* this ceiling from
+ * reaching the dependencies; this is the ceiling itself.
+ */
+export const HEALTH_RATE_LIMIT = { max: 120, timeWindow: '1 minute' } as const;
+
+/**
  * Translate `config.trustedProxies` into a value Fastify accepts.
  *
  * A hop count becomes a `TrustProxyFunction` rather than being passed through:
@@ -425,6 +439,12 @@ export async function buildServer(
    */
   await app.register(
     async (scope) => {
+      // Scoped to this child instance, like the `/api/auth` limiter: a probe
+      // flood must not consume the budget of the rest of the API, and vice
+      // versa.
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { ...HEALTH_RATE_LIMIT });
+      }
       await scope.register(healthRoutes, { config, store: deps.store, edge: deps.edge });
     },
     { prefix: '/api/health' },

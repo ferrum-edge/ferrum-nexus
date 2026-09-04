@@ -8,8 +8,8 @@
  * Every variable documented in the repo-root `.env.example` is covered here
  * with the same default. A handful of extra variables exist for testing and
  * container deployment (`NEXUS_ENV`, `NEXUS_RATE_LIMIT_ENABLED`,
- * `NEXUS_WEB_DIST`, `NEXUS_ALLOW_PRIVATE_UPSTREAMS`, `FERRUM_ADMIN_TIMEOUT_MS`,
- * `FERRUM_MAX_CREDENTIALS_PER_TYPE`);
+ * `NEXUS_HEALTH_CACHE_MS`, `NEXUS_WEB_DIST`, `NEXUS_ALLOW_PRIVATE_UPSTREAMS`,
+ * `FERRUM_ADMIN_TIMEOUT_MS`, `FERRUM_MAX_CREDENTIALS_PER_TYPE`);
  * they are all optional and default to production-safe values.
  */
 
@@ -157,8 +157,23 @@ export interface NexusConfig {
   secretKey: string;
   /** Session idle lifetime in seconds (sliding). */
   sessionTtlSeconds: number;
-  /** Whether the `/api/auth/*` rate limiter is installed. Off under `NEXUS_ENV=test`. */
+  /** Whether the `/api/auth/*` and `/api/health` rate limiters are installed. Off under `NEXUS_ENV=test`. */
   rateLimitEnabled: boolean;
+  /**
+   * How long `GET /api/health` reuses a dependency probe
+   * (`NEXUS_HEALTH_CACHE_MS`).
+   *
+   * The endpoints are unauthenticated, and each one used to turn a cheap public
+   * request into a database query and an authenticated Admin API call. Within
+   * this window the database and gateway probes are each taken once and shared,
+   * including a failing one — a probe keys on the status code, and a few
+   * seconds of lag is cheaper than letting anonymous traffic drive the
+   * control plane.
+   *
+   * `0` disables the cache: every request probes, which is what the tests that
+   * flip dependency state between requests rely on.
+   */
+  healthCacheMs: number;
   /**
    * Whether a provider may publish an API whose upstream is a loopback, private,
    * link-local or internal destination (`NEXUS_ALLOW_PRIVATE_UPSTREAMS`).
@@ -270,6 +285,7 @@ const envSchema = z.object({
     }),
   NEXUS_SESSION_TTL: intish(DEFAULT_SESSION_TTL_SECONDS, 60, 60 * 60 * 24 * 30),
   NEXUS_RATE_LIMIT_ENABLED: boolish(true),
+  NEXUS_HEALTH_CACHE_MS: intish(5_000, 0, 60_000),
   NEXUS_ALLOW_PRIVATE_UPSTREAMS: boolish(false),
   NEXUS_WEB_DIST: optionalString(),
 
@@ -444,6 +460,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     secretKey: raw.NEXUS_SECRET_KEY,
     sessionTtlSeconds: raw.NEXUS_SESSION_TTL,
     rateLimitEnabled: nodeEnv === 'test' ? false : raw.NEXUS_RATE_LIMIT_ENABLED,
+    healthCacheMs: raw.NEXUS_HEALTH_CACHE_MS,
     allowPrivateUpstreams: raw.NEXUS_ALLOW_PRIVATE_UPSTREAMS,
     webDistPath: raw.NEXUS_WEB_DIST,
     db: {
