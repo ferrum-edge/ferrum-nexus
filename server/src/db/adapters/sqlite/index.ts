@@ -1745,6 +1745,13 @@ class SqliteStore implements NexusStore {
     countByThread: async (threadId) =>
       queryCount(this.db, 'SELECT COUNT(*) AS count FROM messages WHERE thread_id = ?', [threadId]),
 
+    countBySenderSince: async (senderUserId, sinceIso) =>
+      queryCount(
+        this.db,
+        'SELECT COUNT(*) AS count FROM messages WHERE sender_user_id = ? AND created_at >= ?',
+        [senderUserId, sinceIso],
+      ),
+
     deleteByThread: async (threadId) =>
       execute(this.db, 'DELETE FROM messages WHERE thread_id = ?', [threadId]),
   };

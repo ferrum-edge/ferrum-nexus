@@ -1239,6 +1239,74 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(await store.threads.delete(thread.id), true);
     });
 
+    it('messages: countBySenderSince bounds the per-account budget', async () => {
+      const sender = await makeUser();
+      const bystander = await makeUser();
+      const thread = await store.threads.create({
+        subject: `Budget ${newId().slice(0, 6)}`,
+        created_by: sender.id,
+        participant_a: sender.id,
+        participant_b: bystander.id,
+      });
+
+      const boundary = isoInSeconds(-3_600);
+      // One row *at* the boundary, one after it, one comfortably before it.
+      await store.messages.create({
+        thread_id: thread.id,
+        sender_user_id: sender.id,
+        body: 'On the boundary',
+        created_at: boundary,
+      });
+      await store.messages.create({
+        thread_id: thread.id,
+        sender_user_id: sender.id,
+        body: 'Inside',
+        created_at: isoInSeconds(-60),
+      });
+      await store.messages.create({
+        thread_id: thread.id,
+        sender_user_id: sender.id,
+        body: 'Long ago',
+        created_at: isoInSeconds(-7_200),
+      });
+      // Someone else's message in the same thread must not be charged to us.
+      await store.messages.create({
+        thread_id: thread.id,
+        sender_user_id: bystander.id,
+        body: 'Not yours',
+        created_at: isoInSeconds(-60),
+      });
+
+      assert.equal(
+        await store.messages.countBySenderSince(sender.id, boundary),
+        2,
+        'the boundary is inclusive: created_at == since counts',
+      );
+      assert.equal(
+        await store.messages.countBySenderSince(sender.id, isoInSeconds(-3_599)),
+        1,
+        'one second later excludes the boundary row',
+      );
+      assert.equal(
+        await store.messages.countBySenderSince(sender.id, isoInSeconds(-86_400)),
+        3,
+        'a day-wide window sees every row this sender wrote',
+      );
+      assert.equal(
+        await store.messages.countBySenderSince(bystander.id, isoInSeconds(-86_400)),
+        1,
+        'the count is per sender, across every thread — never per thread',
+      );
+      assert.equal(
+        await store.messages.countBySenderSince(sender.id, isoInSeconds(60)),
+        0,
+        'a window that has not started yet counts nothing',
+      );
+
+      await store.messages.deleteByThread(thread.id);
+      await store.threads.delete(thread.id);
+    });
+
     it('threads: participant_user_id matches the seats, never the creator', async () => {
       const admin = await makeUser({ role: 'super_admin' });
       const recipient = await makeUser();
