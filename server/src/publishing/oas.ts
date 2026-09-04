@@ -1,9 +1,10 @@
 /**
  * OpenAPI document parsing and validation.
  *
- * A pure module: text in, metadata out. It never touches the store, the Edge
- * client or the network, which is what makes the publishing service testable
- * without either.
+ * Text in, metadata out: the module never touches the store or the Edge client,
+ * which is what makes the publishing service testable without either. Its one
+ * network dependency — the DNS lookup behind the upstream policy — is injected,
+ * so it is testable without that too.
  *
  * ## What Nexus validates, and what it deliberately does not
  *
@@ -42,8 +43,14 @@
  * point it is about to write a backend to the gateway. Keeping the two apart
  * lets a spec with a private `servers[0]` still be *stored* for an API whose
  * backend is pinned elsewhere.
+ *
+ * That policy check is the one thing in this module that is **not** pure: a
+ * hostname says nothing about where it points, so it resolves the name (through
+ * an injected {@link UpstreamResolver}) and judges the addresses. Everything
+ * above it — parsing, limits, `servers[0]` — still runs without a network.
  */
 
+import { Resolver } from 'node:dns/promises';
 import { isIP } from 'node:net';
 
 import { parse as parseYaml } from 'yaml';
@@ -55,7 +62,7 @@ import {
   OPENAPI_OPERATION_METHODS,
 } from '@ferrum-nexus/shared';
 
-import { specInvalid } from '../lib/errors.js';
+import { specInvalid, type NexusError } from '../lib/errors.js';
 
 /** Upstream a proxy should forward to, decomposed into Edge's proxy fields. */
 export interface SpecUpstream {
@@ -173,6 +180,79 @@ export function parseUpstreamUrl(raw: string): SpecUpstream | null {
   };
 }
 
+/** One address a hostname currently resolves to. */
+export interface ResolvedAddress {
+  /** The address in its textual form, e.g. `10.0.0.5` or `2606:4700::1111`. */
+  address: string;
+  /** `4` for an A record, `6` for an AAAA record. */
+  family: 4 | 6;
+}
+
+/**
+ * Resolve a DNS name to every address it currently answers with.
+ *
+ * Injected into {@link UpstreamPolicy} rather than called directly so the
+ * publishing tests never touch real DNS, and so a deployment that needs a
+ * different resolver (a pinned server, a shorter timeout) can supply one.
+ *
+ * A rejection means "the answer is unknown", which the policy treats as a
+ * refusal — never as "no private address was found".
+ */
+export type UpstreamResolver = (host: string) => Promise<ResolvedAddress[]>;
+
+/** How long one upstream lookup may take before it is failed closed. */
+export const UPSTREAM_DNS_TIMEOUT_MS = 5_000;
+
+/** Attempts per query before the resolver gives up. */
+export const UPSTREAM_DNS_TRIES = 2;
+
+/** Resolver codes that mean "this family has no record", not "the lookup failed". */
+const EMPTY_FAMILY_CODES = new Set(['ENODATA', 'ENOTFOUND']);
+
+function isEmptyFamilyError(reason: unknown): boolean {
+  const code = (reason as NodeJS.ErrnoException | null)?.code;
+  return typeof code === 'string' && EMPTY_FAMILY_CODES.has(code);
+}
+
+/**
+ * The real resolver: A and AAAA over `dns.promises.Resolver`, bounded.
+ *
+ * Both families are queried because the policy has to see the *whole* answer
+ * set — a name with a public A record and a loopback AAAA record is still a way
+ * into the gateway's network. `ENODATA`/`ENOTFOUND` from one family is normal
+ * (most names are v4-only) and is tolerated as long as the other family
+ * answered; any other failure — `SERVFAIL`, a timeout, a refused query — is
+ * rethrown, because a partial view of the answer set cannot show the
+ * destination to be public.
+ *
+ * `Resolver` talks to the configured nameservers directly, so `/etc/hosts` is
+ * not consulted: a name mapped only in the hosts file reads as unresolvable and
+ * is refused. That is the intended reading — Edge resolves the name from *its*
+ * network, not from the portal's hosts file.
+ */
+export function createUpstreamResolver(
+  options: { timeoutMs?: number; tries?: number } = {},
+): UpstreamResolver {
+  const timeout = options.timeoutMs ?? UPSTREAM_DNS_TIMEOUT_MS;
+  const tries = options.tries ?? UPSTREAM_DNS_TRIES;
+  return async function resolveUpstreamHost(host: string): Promise<ResolvedAddress[]> {
+    const resolver = new Resolver({ timeout, tries });
+    const [v4, v6] = await Promise.allSettled([resolver.resolve4(host), resolver.resolve6(host)]);
+    const addresses: ResolvedAddress[] = [];
+    for (const [family, settled] of [
+      [4, v4],
+      [6, v6],
+    ] as const) {
+      if (settled.status === 'rejected') {
+        if (isEmptyFamilyError(settled.reason)) continue;
+        throw settled.reason;
+      }
+      for (const address of settled.value) addresses.push({ address, family });
+    }
+    return addresses;
+  };
+}
+
 /** How the publishing service decides which upstream destinations are acceptable. */
 export interface UpstreamPolicy {
   /**
@@ -182,6 +262,39 @@ export interface UpstreamPolicy {
    * `.localhost`/`.home.arpa` name suffixes are refused.
    */
   allowPrivate: boolean;
+  /**
+   * Resolves a DNS name to its A/AAAA answers.
+   *
+   * {@link createUpstreamResolver} builds the production one; the server wires
+   * it in {@link "../index.js"} and the tests inject a fake.
+   */
+  resolve: UpstreamResolver;
+}
+
+/** `SPEC_INVALID` for a destination the deployment does not allow. */
+function privateUpstreamError(host: string, resolved?: string[]): NexusError {
+  const via =
+    resolved === undefined ? '' : ` (it resolves to ${resolved.join(', ')}, which is not public)`;
+  return specInvalid(
+    `The upstream host '${host}' is a loopback, private, link-local or internal destination${via}; ` +
+      'this portal only publishes APIs with public upstreams (set NEXUS_ALLOW_PRIVATE_UPSTREAMS=true to change that)',
+    {
+      field: 'upstream_url',
+      host,
+      reason: 'private_upstream',
+      ...(resolved === undefined ? {} : { resolved }),
+    },
+  );
+}
+
+/** `SPEC_INVALID` for a name whose addresses could not be established. */
+function unresolvableUpstreamError(host: string): NexusError {
+  return specInvalid(
+    `The upstream host '${host}' could not be resolved, so it cannot be shown to point at a ` +
+      'public destination; this portal only publishes APIs with public upstreams ' +
+      '(set NEXUS_ALLOW_PRIVATE_UPSTREAMS=true to change that)',
+    { field: 'upstream_url', host, reason: 'unresolvable_upstream' },
+  );
 }
 
 /**
@@ -190,20 +303,89 @@ export interface UpstreamPolicy {
  * A provider account is only semi-trusted, and a proxy is an egress path from
  * the gateway's network: without this check any provider could publish an API
  * whose backend is the cloud metadata service, a database on the gateway's
- * subnet, or the Admin API itself. Deployments that legitimately front internal
- * services opt in with `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` and lean on network
- * egress controls instead; a public DNS name that is later re-pointed at a
- * private address is outside what this check can see either way.
+ * subnet, or the Admin API itself.
+ *
+ * Three lines, in order of cost:
+ *
+ * 1. the `.local`/`.internal`/`.localhost`/`.home.arpa` **name suffixes**;
+ * 2. the host as an **IP literal**, which is already the destination;
+ * 3. otherwise the name is **resolved**, and *every* address it answers with
+ *    must be public. A name on no denylist still reaches loopback when its A
+ *    record says so (`127.0.0.1.nip.io`), which is exactly the bypass this
+ *    step closes. A mixed public/private answer set is refused whole.
+ *
+ * The lookup fails **closed**: an empty answer set, a `SERVFAIL`, or a timeout
+ * all refuse the publish, because none of them shows the destination to be
+ * public.
+ *
+ * What this cannot see is a name re-pointed *after* the check — Nexus validates
+ * once, at write time, and the gateway resolves the name again on every
+ * request. Edge's own `FERRUM_BACKEND_ALLOW_IPS=public` egress mode is the
+ * layer that screens the address actually connected to; see
+ * [`docs/security.md`](../../../docs/security.md).
+ *
+ * Deployments that legitimately front internal services opt out with
+ * `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`, which short-circuits before any lookup.
  *
  * @throws NexusError `SPEC_INVALID` naming the host and the setting to change.
  */
-export function assertUpstreamAllowed(upstream: SpecUpstream, policy: UpstreamPolicy): void {
-  if (policy.allowPrivate || isPublicUpstreamHost(upstream.host)) return;
-  throw specInvalid(
-    `The upstream host '${upstream.host}' is a loopback, private, link-local or internal destination; ` +
-      'this portal only publishes APIs with public upstreams (set NEXUS_ALLOW_PRIVATE_UPSTREAMS=true to change that)',
-    { field: 'upstream_url', host: upstream.host, reason: 'private_upstream' },
-  );
+export async function assertUpstreamAllowed(
+  upstream: SpecUpstream,
+  policy: UpstreamPolicy,
+): Promise<void> {
+  // Opting in short-circuits before the network: the answer cannot change the
+  // outcome, and the documented local-development upstream
+  // (`host.docker.internal`) does not resolve from most hosts at all.
+  if (policy.allowPrivate) return;
+
+  if (!isPublicUpstreamHost(upstream.host)) throw privateUpstreamError(upstream.host);
+
+  // An IP literal *is* the destination; the check above already decided it.
+  if (isIP(upstream.host) !== 0) return;
+
+  let resolved: ResolvedAddress[];
+  try {
+    resolved = await policy.resolve(upstream.host);
+  } catch {
+    throw unresolvableUpstreamError(upstream.host);
+  }
+  if (resolved.length === 0) throw unresolvableUpstreamError(upstream.host);
+  if (!resolved.every(isPublicResolvedAddress)) {
+    throw privateUpstreamError(
+      upstream.host,
+      resolved.map((entry) => entry.address),
+    );
+  }
+}
+
+/**
+ * Whether one resolved address is a public destination.
+ *
+ * An IPv4-mapped answer (`::ffff:10.0.0.1`) is judged as the IPv4 address it
+ * carries. Reading it as "some address in `::/8`" would refuse every mapped
+ * public address, and a naive `fc00::`-style check would accept every mapped
+ * private one; the mapping is unwrapped instead so the RFC 1918 rules apply to
+ * what the packet actually reaches. An answer that is not an IP address at all
+ * is refused rather than ignored.
+ */
+export function isPublicResolvedAddress(entry: ResolvedAddress): boolean {
+  const version = isIP(entry.address);
+  if (version === 0) return false;
+  if (version === 4) return isPublicIpv4(entry.address);
+  const mapped = ipv4FromMapped(entry.address);
+  return mapped === null ? isPublicIpv6(entry.address) : isPublicIpv4(mapped);
+}
+
+/** The IPv4 address inside an IPv4-mapped IPv6 address, in either spelling. */
+function ipv4FromMapped(address: string): string | null {
+  const normalized = address.toLowerCase();
+  const dotted = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(normalized);
+  if (dotted) return dotted[1] ?? null;
+  const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(normalized);
+  if (!hex) return null;
+  const high = Number.parseInt(hex[1] as string, 16);
+  const low = Number.parseInt(hex[2] as string, 16);
+  return [high >>> 8, high & 0xff, low >>> 8, low & 0xff].join('.');
 }
 
 /**

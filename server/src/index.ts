@@ -62,6 +62,7 @@ import { registerAuthPlugin } from './middleware/auth-plugin.js';
 import { registerErrorHandler } from './middleware/error-handler.js';
 import { createNotificationsService, type NotificationsService } from './notifications/service.js';
 import { createApiPluginsService, type ApiPluginsService } from './plugins/service.js';
+import { createUpstreamResolver, type UpstreamResolver } from './publishing/oas.js';
 import { createPublishingService, type PublishingService } from './publishing/service.js';
 import { accessRequestRoutes, grantRoutes } from './routes/access.js';
 import { adminRoutes } from './routes/admin.js';
@@ -129,6 +130,12 @@ export interface BuildServerDeps {
   captchaTransport?: CaptchaTransport;
   /** Replace the SMTP transport used by the outbox worker and the SMTP test. */
   mailTransportFactory?: MailTransportFactory;
+  /**
+   * Resolve an upstream hostname to its addresses for the private-destination
+   * policy. Defaults to {@link createUpstreamResolver}; tests inject a fake so
+   * publishing never depends on a real DNS answer.
+   */
+  upstreamResolver?: UpstreamResolver;
   /**
    * Start the outbox poller. Defaults to `false` under `NEXUS_ENV=test`, where
    * tests drive `services.outbox.tick()` themselves, and `true` elsewhere.
@@ -280,6 +287,7 @@ export async function buildServer(
     notifications,
     credentials,
     settings,
+    upstreamResolver: deps.upstreamResolver ?? createUpstreamResolver(),
   });
   const usage = createUsageService({ store: deps.store, edge: deps.edge, publishing });
   // Composed after publishing: the palette reuses its owner-or-admin check, so

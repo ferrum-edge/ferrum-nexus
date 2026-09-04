@@ -970,7 +970,11 @@ Errors: `400 SPEC_INVALID` (unparseable, Swagger 2.0, missing
 `openapi`/`info.title`/`info.version`/`paths`, oversized, no upstream
 determinable, or — unless `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` — an upstream
 that is a loopback, private, link-local or `.internal`/`.local` destination,
-reported with `details.reason = "private_upstream"`), `409 CONFLICT` (slug taken), `502 EDGE_ERROR` /
+reported with `details.reason = "private_upstream"`. The host is **resolved**
+as well as pattern-matched, so a name whose A/AAAA records point at a private
+address is refused the same way, with the answers in `details.resolved`; a name
+that cannot be resolved at all is refused with
+`details.reason = "unresolvable_upstream"`), `409 CONFLICT` (slug taken), `502 EDGE_ERROR` /
 `502 EDGE_UNAVAILABLE`. A failed Edge step is rolled back — the plugin configs
 and proxy are deleted — and nothing is written to the Nexus store.
 

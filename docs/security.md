@@ -50,17 +50,48 @@ session cookie, and that cookie is only useful against Nexus.
 **Upstream destinations.** A published API is an egress path: the gateway will
 forward traffic to whatever `upstream_url` (or `servers[0].url`) the provider
 supplied. A provider account is only semi-trusted — registration may be open —
-so by default Nexus refuses to point a proxy at a loopback, RFC 1918, carrier-
-grade NAT, link-local, multicast or IPv4-mapped address, or at a `.local`,
-`.internal`, `.localhost` or `.home.arpa` name. That closes the obvious SSRF
-targets (cloud metadata at `169.254.169.254`, the Admin API, databases on the
-gateway's subnet) without resolving DNS. The check runs at publish, on a
-`PATCH` of `upstream_url`, and when a spec revision would move a proxy that
-follows its document; it returns `400 SPEC_INVALID` with
-`details.reason = "private_upstream"`. A portal that legitimately fronts
-internal services sets `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` and relies on
-network egress policy instead — a public name that is later re-pointed at a
-private address is outside what a hostname check can see either way.
+so by default Nexus refuses to point a proxy anywhere but a public destination.
+Three checks run, in that order:
+
+1. **Name suffixes.** `.local`, `.internal`, `.localhost` and `.home.arpa`, and
+   the bare name `localhost`, are refused outright.
+2. **IP literals.** A loopback, RFC 1918, carrier-grade NAT, link-local,
+   multicast, unspecified or IPv4-mapped literal is refused. A literal _is_ the
+   destination, so nothing further is looked up.
+3. **Resolved addresses.** Any other hostname is resolved (A **and** AAAA,
+   ~5 s, 2 tries) and **every** address it answers with must be public. One
+   private answer refuses the whole set, an IPv4-mapped answer is judged as the
+   IPv4 address it carries, and an empty answer set, an `NXDOMAIN`, a `SERVFAIL`
+   or a timeout all refuse as well — the lookup **fails closed**, because none
+   of those outcomes shows the destination to be public.
+
+Step 3 is what closes `127.0.0.1.nip.io` and any attacker-controlled record
+pointing into RFC 1918 space: a hostname on no denylist still reaches loopback
+when its A record says so. Steps 1 and 2 stay in front of it because they cost
+nothing and answer most cases. The whole check runs at publish, on a `PATCH` of
+`upstream_url`, and when a spec revision would move a proxy that follows its
+document; it returns `400 SPEC_INVALID` with `details.reason` of
+`"private_upstream"` (with the offending `resolved` addresses, when the refusal
+came from DNS) or `"unresolvable_upstream"`.
+
+A portal that legitimately fronts internal services sets
+`NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`, which skips all three checks — no lookup
+is made — and relies on network egress policy instead.
+
+**Residual risk: the check is time-of-check, not time-of-use.** Nexus resolves
+the name once, when the backend is written; Edge resolves it again on every
+proxied request. A name that answers publicly at publish time and privately
+afterwards — DNS rebinding, a record the provider controls and re-points, a
+short TTL — is not something the portal can see. Nexus does not pin the
+validated address, because the proxy stores a hostname and re-pinning it would
+break every legitimate backend that moves.
+
+The mitigation is layered rather than portal-side: **Ferrum Edge screens the
+address it actually connects to**, with `FERRUM_BACKEND_ALLOW_IPS=public` on
+the gateway. Nexus's check keeps the obvious attempt from ever being stored and
+gives the provider an immediate, explanatory `400`; Edge's egress mode is what
+holds when the record changes underneath it. Run both. A deployment that cannot
+set the gateway mode should restrict gateway egress at the network layer.
 
 ### Out of scope
 
@@ -742,6 +773,12 @@ Before going live:
 - [ ] `NEXUS_ALLOW_PRIVATE_UPSTREAMS` is left at `false` unless the portal is
       meant to front internal services, in which case gateway egress is
       restricted at the network layer.
+- [ ] The Nexus process can resolve public DNS — with
+      `NEXUS_ALLOW_PRIVATE_UPSTREAMS=false` a name that cannot be resolved is
+      refused, so a portal with no resolver publishes nothing.
+- [ ] Ferrum Edge runs with `FERRUM_BACKEND_ALLOW_IPS=public` (or equivalent
+      network egress policy), which is the layer that survives a backend name
+      being re-pointed after publish.
 - [ ] CAPTCHA configured if registration is open to the internet.
 - [ ] Registration policy reviewed: `open_registration`, `allowed_roles`,
       `require_email_verification`.

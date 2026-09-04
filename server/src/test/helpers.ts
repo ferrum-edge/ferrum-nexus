@@ -24,6 +24,7 @@ import type { EmailOutboxRecord, NexusStore } from '../db/store.js';
 import type { MailTransport, MailTransportFactory, OutboundMail } from '../email/service.js';
 import type { OutboxTickResult } from '../email/outbox-worker.js';
 import { createFerrumAdminClient, type FerrumAdminClient } from '../ferrum-admin/index.js';
+import type { ResolvedAddress, UpstreamResolver } from '../publishing/oas.js';
 import { buildServer, type BuildServerDeps, type NexusServices } from '../index.js';
 import { createMockFerrumEdge, type MockFerrumEdge } from './mock-ferrum-edge.js';
 
@@ -73,6 +74,43 @@ export const SAMPLE_SPEC_JSON = JSON.stringify(
   null,
   2,
 );
+
+/* ── Upstream DNS ───────────────────────────────────────────────────────── */
+
+/**
+ * The address every hostname resolves to under {@link buildTestApp}.
+ *
+ * The private-upstream policy resolves the name it is about to publish, and the
+ * fixtures point at `billing.example.com`, `api.example.com` and friends —
+ * names whose real records are not ours to depend on, and which a sandboxed
+ * test run cannot look up at all. The harness therefore injects a resolver that
+ * answers this public address for anything, and a test that cares about the
+ * policy passes its own through `deps.upstreamResolver`.
+ */
+export const TEST_PUBLIC_ADDRESS = '93.184.216.34';
+
+/** A resolver answering {@link TEST_PUBLIC_ADDRESS} for every hostname. */
+export function publicUpstreamResolver(): UpstreamResolver {
+  return async () => [{ address: TEST_PUBLIC_ADDRESS, family: 4 }];
+}
+
+/**
+ * A resolver answering `answers[host]`, falling back to a public address.
+ *
+ * `null` as an answer rejects, which is how a test drives the
+ * `unresolvable_upstream` branch.
+ */
+export function fakeUpstreamResolver(
+  answers: Record<string, ResolvedAddress[] | null>,
+): UpstreamResolver {
+  return async (host) => {
+    const answer = answers[host];
+    if (answer === undefined) return [{ address: TEST_PUBLIC_ADDRESS, family: 4 }];
+    if (answer === null)
+      throw Object.assign(new Error(`no record for ${host}`), { code: 'ENOTFOUND' });
+    return answer;
+  };
+}
 
 /** Build a spec whose `servers[0].url` is `url` — used by the spec-update tests. */
 export function specWithServer(url: string, version = '1.0.0'): string {
@@ -231,6 +269,7 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
     edge: edgeClient,
     serveStatic: false,
     mailTransportFactory: factory,
+    upstreamResolver: publicUpstreamResolver(),
     ...options.deps,
   });
 
