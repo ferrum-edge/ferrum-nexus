@@ -164,6 +164,17 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   assigned to the administrator, so the client could neither see nor revoke
   it; the admin is now the audit actor only.
 
+- **The catalog pages the whole filtered set.** The viewer rule (owned,
+  granted, or published-and-public) is now part of the store query, so a
+  public API older than 200 internal ones is no longer invisible and `total`
+  is exact. `MAX_PAGE_SIZE` is unchanged.
+- **Conversations page from the newest end.** `GET /api/threads/:id` and the
+  new `GET /api/threads/:id/messages` take `limit` and `before` and answer a
+  `MessagePage` (`items`, `total`, `has_more`, `next_before`); the thread page
+  opens on the latest window with "Load older messages", so reply 201 no
+  longer vanishes. The admin inbox predicate (platform thread or admin
+  participates) moved into the store query as well.
+
 ### Security
 
 The rewrite was reviewed twice — once by an adversarial pass over the whole
