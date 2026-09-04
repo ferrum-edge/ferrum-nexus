@@ -2454,6 +2454,184 @@ describe('publishing', () => {
       assert.equal(reread.json<GetApiResponse>().api.spec_enforcement, 'docs_only');
     });
 
+    /**
+     * Plugin config ids Nexus owns by hand, sorted.
+     *
+     * The spec-owned `openapi_validator` is left out because Edge regenerates
+     * it — with a fresh id — every time a document is imported, so it is the
+     * one config whose id is *not* expected to survive a rebuild.
+     */
+    function handOwnedIds(proxyId: string): string[] {
+      return harness.edge
+        .pluginsForProxy(proxyId)
+        .filter((plugin) => plugin.plugin_name !== 'openapi_validator')
+        .map((plugin) => String(plugin.id))
+        .sort();
+    }
+
+    /**
+     * Break one step of a `spec_enforcement` conversion and assert the API it
+     * started from came back whole.
+     *
+     * The conversion deletes the live proxy before rebuilding it, so every one
+     * of these failures used to end with no proxy at all: the portal still
+     * described the API, the gateway served nothing, and retrying the same
+     * PATCH answered `404` because the rebuild it wanted to undo was gone.
+     *
+     * @param from the mode the API is published in; the PATCH moves it to the other
+     * @param inject queues the gateway failure, once the API exists
+     */
+    async function assertConversionRestores(
+      slug: string,
+      from: 'docs_only' | 'routes',
+      inject: () => void,
+    ): Promise<void> {
+      const to = from === 'routes' ? 'docs_only' : 'routes';
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug, spec_enforcement: from }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
+      const finalPath = `/nexus/${slug}`;
+      // Operator-set fields, so the restore has to be the captured document and
+      // not a body composed from the `apis` row.
+      enrichProxy(harness, proxyId);
+      const idsBefore = handOwnedIds(proxyId);
+      const runningBefore = effectiveNames(harness, proxyId);
+
+      inject();
+      const failed = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { spec_enforcement: to },
+      });
+      assert.equal(failed.statusCode, 502, failed.body);
+
+      // One proxy, under the same id, back on the real path — and nothing
+      // parked on a staging path.
+      assert.equal(harness.edge.proxies.size, 1, 'no staging proxy was left behind');
+      assert.equal(String(harness.edge.proxyServing(finalPath)?.id), proxyId);
+      assert.equal(
+        harness.edge.apiSpecForProxy(proxyId) !== undefined,
+        from === 'routes',
+        'the original enforcement mode is what the gateway holds',
+      );
+      assertEnrichmentSurvived(harness, proxyId);
+      assert.deepEqual(handOwnedIds(proxyId), idsBefore, 'the hand-owned configs kept their ids');
+      assert.deepEqual(associatedIds(harness, proxyId), writtenIds(harness, proxyId));
+      assert.deepEqual(effectiveNames(harness, proxyId), runningBefore);
+      assert.ok(runningBefore.includes('key_auth'), 'the API is still authenticated');
+
+      const reread = await harness.authed(provider, { method: 'GET', url: `/api/apis/${apiId}` });
+      assert.equal(reread.json<GetApiResponse>().api.spec_enforcement, from);
+
+      // And the same PATCH works once the gateway is healthy again.
+      const retry = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { spec_enforcement: to },
+      });
+      assert.equal(retry.statusCode, 200, retry.body);
+      assert.equal(retry.json<UpdateApiResponse>().api.spec_enforcement, to);
+      assert.equal(String(harness.edge.proxyServing(finalPath)?.id), proxyId);
+      assert.equal(harness.edge.proxies.size, 1);
+    }
+
+    it('restores docs_only when the routes replacement cannot be created', async () => {
+      await assertConversionRestores('enf-fail-create-routes', 'docs_only', () =>
+        harness.edge.queueFailure(503, { error: 'unavailable' }, '/api-specs', 'POST'),
+      );
+    });
+
+    it('restores docs_only when a plugin cannot be put back', async () => {
+      await assertConversionRestores('enf-fail-plugin-routes', 'docs_only', () =>
+        harness.edge.queueFailure(500, { error: 'config_rejected' }, '/plugins/config', 'POST'),
+      );
+    });
+
+    it('restores docs_only when the second plugin cannot be put back', async () => {
+      await assertConversionRestores('enf-fail-plugin2-routes', 'docs_only', () =>
+        harness.edge.queueFailure(500, { error: 'config_rejected' }, '/plugins/config', 'POST', 1),
+      );
+    });
+
+    it('restores docs_only when the association write fails', async () => {
+      await assertConversionRestores('enf-fail-assoc-routes', 'docs_only', () =>
+        harness.edge.queueFailure(500, { error: 'config_rejected' }, '/proxies/', 'PUT'),
+      );
+    });
+
+    it('restores docs_only when the routes cutover fails', async () => {
+      await assertConversionRestores('enf-fail-cutover-routes', 'docs_only', () =>
+        harness.edge.queueFailure(500, { error: 'spec rejected' }, '/api-specs/', 'PUT'),
+      );
+    });
+
+    it('restores routes when the docs_only replacement cannot be created', async () => {
+      await assertConversionRestores('enf-fail-create-docs', 'routes', () =>
+        harness.edge.queueFailure(503, { error: 'unavailable' }, '/proxies', 'POST'),
+      );
+    });
+
+    it('restores routes when a plugin cannot be put back', async () => {
+      await assertConversionRestores('enf-fail-plugin-docs', 'routes', () =>
+        harness.edge.queueFailure(500, { error: 'config_rejected' }, '/plugins/config', 'POST'),
+      );
+    });
+
+    it('restores routes when the association write fails', async () => {
+      await assertConversionRestores('enf-fail-assoc-docs', 'routes', () =>
+        harness.edge.queueFailure(500, { error: 'config_rejected' }, '/proxies/', 'PUT'),
+      );
+    });
+
+    it('restores routes when the docs_only cutover fails', async () => {
+      // The association is the first `PUT /proxies/{id}` of the rebuild and the
+      // cutover the second, so the failure skips one to land on the cutover.
+      await assertConversionRestores('enf-fail-cutover-docs', 'routes', () =>
+        harness.edge.queueFailure(500, { error: 'config_rejected' }, '/proxies/', 'PUT', 1),
+      );
+    });
+
+    it('records a repair state when the restoration fails as well', async () => {
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'enf-unrepairable' }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
+
+      // Both rebuilds fail: the conversion into `routes` and the restore back.
+      harness.edge.queueFailure(503, { error: 'unavailable' }, '/api-specs', 'POST');
+      harness.edge.queueFailure(503, { error: 'unavailable' }, '/proxies', 'POST');
+      const failed = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { spec_enforcement: 'routes' },
+      });
+      assert.equal(failed.statusCode, 502, failed.body);
+
+      // The snapshot the gateway lost is the only copy there was, so it is
+      // written where an administrator can find and act on it.
+      const row = (await harness.auditRows('api.gateway_repair_required')).find(
+        (entry) => entry.target_id === apiId,
+      );
+      assert.ok(row, 'a repair-required audit row is recorded');
+      assert.equal(row?.details.spec_enforcement, 'docs_only');
+      assert.equal(row?.details.attempted_spec_enforcement, 'routes');
+      assert.equal((row?.details.proxy as Record<string, unknown>).id, proxyId);
+      assert.equal(
+        (row?.details.proxy as Record<string, unknown>).listen_path,
+        '/nexus/enf-unrepairable',
+      );
+      assert.ok(Array.isArray(row?.details.plugin_configs));
+    });
+
     it('regenerates the operation table when a new spec revision is published', async () => {
       const published = await harness.authed(provider, {
         method: 'POST',
@@ -3421,6 +3599,305 @@ describe('per-owner API quota', () => {
     } finally {
       await burst.close();
     }
+  });
+});
+
+/**
+ * Whether a spec revision repoints the proxy.
+ *
+ * An API follows its document while its recorded `upstream_url` is still the
+ * normalized `servers[0]` of the *previous* revision; anything else is a pin
+ * the provider chose, and a document that moves must not overrule it. The
+ * comparison is the whole normalized upstream — scheme, host, port and base
+ * path — because a document that moves `/v2` to `/v3` on the same host moves
+ * the backend just as surely as one that changes hosts.
+ */
+describe('spec upstream following', () => {
+  let harness: TestApp;
+  let provider: TestSession;
+
+  before(async () => {
+    harness = await buildTestApp();
+    await harness.registerUser({ email: 'follow-founder@example.test' });
+    provider = await harness.registerUser({
+      email: 'follow-provider@example.test',
+      role: 'provider',
+    });
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  /** The proxy's backend, in the same normalized form the `apis` row stores. */
+  function gatewayBackend(proxyId: string): string {
+    const proxy = harness.edge.proxies.get(`nexus/${proxyId}`);
+    assert.ok(proxy, `expected proxy ${proxyId} to exist`);
+    const path = proxy.backend_path ?? '';
+    return `${String(proxy.backend_scheme)}://${String(proxy.backend_host)}:${String(
+      proxy.backend_port,
+    )}${String(path)}`;
+  }
+
+  async function publishFollowing(
+    slug: string,
+    enforcement: 'docs_only' | 'routes',
+    server: string,
+    pin?: string,
+  ): Promise<{ apiId: string; proxyId: string }> {
+    const response = await harness.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: publishPayload({
+        slug,
+        spec: specWithServer(server),
+        spec_enforcement: enforcement,
+        ...(pin === undefined ? {} : { upstream_url: pin }),
+      }),
+    });
+    assert.equal(response.statusCode, 201, response.body);
+    const api = response.json<PublishApiResponse>().api;
+    return { apiId: api.id, proxyId: String(api.ferrum_proxy_id) };
+  }
+
+  async function revise(apiId: string, server: string, version = '2.0.0'): Promise<number> {
+    const response = await harness.authed(provider, {
+      method: 'PUT',
+      url: `/api/apis/${apiId}/spec`,
+      payload: { spec: specWithServer(server, version) },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    return response.statusCode;
+  }
+
+  /** Publish at `from`, upload a revision at `to`, assert the backend moved. */
+  async function assertMoves(
+    slug: string,
+    enforcement: 'docs_only' | 'routes',
+    from: string,
+    to: string,
+    expected: string,
+  ): Promise<void> {
+    const { apiId, proxyId } = await publishFollowing(slug, enforcement, from);
+    await revise(apiId, to);
+    assert.equal(gatewayBackend(proxyId), expected, 'the gateway followed the document');
+    assert.equal(
+      (await harness.store.apis.findById(apiId))?.upstream_url,
+      expected,
+      'the recorded upstream followed the gateway',
+    );
+  }
+
+  for (const enforcement of ['docs_only', 'routes'] as const) {
+    it(`follows a base-path-only change in ${enforcement} mode`, async () => {
+      await assertMoves(
+        `follow-path-${enforcement}`,
+        enforcement,
+        'https://billing.example.com:8443/v2',
+        'https://billing.example.com:8443/v3',
+        'https://billing.example.com:8443/v3',
+      );
+    });
+
+    it(`follows a scheme-only change in ${enforcement} mode`, async () => {
+      await assertMoves(
+        `follow-scheme-${enforcement}`,
+        enforcement,
+        'http://billing.example.com:8443/v2',
+        'https://billing.example.com:8443/v2',
+        'https://billing.example.com:8443/v2',
+      );
+    });
+
+    it(`follows a host change in ${enforcement} mode`, async () => {
+      await assertMoves(
+        `follow-host-${enforcement}`,
+        enforcement,
+        'https://one.example.com:8443/v2',
+        'https://two.example.com:8443/v2',
+        'https://two.example.com:8443/v2',
+      );
+    });
+
+    it(`follows a port change in ${enforcement} mode`, async () => {
+      await assertMoves(
+        `follow-port-${enforcement}`,
+        enforcement,
+        'https://billing.example.com:8443/v2',
+        'https://billing.example.com:9443/v2',
+        'https://billing.example.com:9443/v2',
+      );
+    });
+
+    it(`leaves a same-host pin alone in ${enforcement} mode`, async () => {
+      // The pin differs from the document only in its base path, which is
+      // exactly the shape a host-and-port comparison mistook for "following".
+      const { apiId, proxyId } = await publishFollowing(
+        `follow-pinned-${enforcement}`,
+        enforcement,
+        'https://billing.example.com:8443/v2',
+        'https://billing.example.com:8443/pinned',
+      );
+      assert.equal(gatewayBackend(proxyId), 'https://billing.example.com:8443/pinned');
+
+      await revise(apiId, 'https://billing.example.com:8443/v3');
+      assert.equal(
+        gatewayBackend(proxyId),
+        'https://billing.example.com:8443/pinned',
+        'a pinned backend ignores the document',
+      );
+      assert.equal(
+        (await harness.store.apis.findById(apiId))?.upstream_url,
+        'https://billing.example.com:8443/pinned',
+      );
+
+      // And it stays pinned across a second revision, so the rule is a property
+      // of the row rather than of one comparison.
+      await revise(apiId, 'https://billing.example.com:8443/v4', '3.0.0');
+      assert.equal(gatewayBackend(proxyId), 'https://billing.example.com:8443/pinned');
+    });
+
+    it(`keeps the gateway, the row and the document in step on rollback in ${enforcement} mode`, async () => {
+      const slug = `follow-rollback-${enforcement}`;
+      const { apiId, proxyId } = await publishFollowing(
+        slug,
+        enforcement,
+        'https://billing.example.com:8443/v2',
+      );
+
+      failNextTransaction(harness, 'database is gone');
+      const failed = await harness.authed(provider, {
+        method: 'PUT',
+        url: `/api/apis/${apiId}/spec`,
+        payload: { spec: specWithServer('https://billing.example.com:8443/v3', '2.0.0') },
+      });
+      assert.notEqual(failed.statusCode, 200);
+
+      assert.equal(gatewayBackend(proxyId), 'https://billing.example.com:8443/v2');
+      assert.equal(
+        (await harness.store.apis.findById(apiId))?.upstream_url,
+        'https://billing.example.com:8443/v2',
+      );
+      const current = await harness.store.apiSpecs.findCurrentByApi(apiId);
+      assert.match(String(current?.raw_spec), /billing\.example\.com:8443\/v2/);
+
+      // The next revision still follows: the rollback did not pin anything.
+      await revise(apiId, 'https://billing.example.com:8443/v3');
+      assert.equal(gatewayBackend(proxyId), 'https://billing.example.com:8443/v3');
+    });
+  }
+});
+
+/**
+ * The API-count quota bounds proxies and slugs; on its own it bounds no
+ * storage, because every `PUT /api/apis/:id/spec` used to keep another
+ * `MAX_SPEC_BYTES` document for ever. One API revised in a loop was therefore
+ * an unbounded write path for a semi-trusted `provider` account.
+ */
+describe('bounded spec revision history', () => {
+  let harness: TestApp;
+  let provider: TestSession;
+
+  before(async () => {
+    // Two historical revisions plus the current one: the smallest limit that
+    // still distinguishes "kept because it is recent" from "kept because it is
+    // current".
+    harness = await buildTestApp({ env: { NEXUS_SPEC_HISTORY_LIMIT: '2' } });
+    await harness.registerUser({ email: 'history-founder@example.test' });
+    provider = await harness.registerUser({
+      email: 'history-provider@example.test',
+      role: 'provider',
+    });
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  async function publish(slug: string): Promise<string> {
+    const response = await harness.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: publishPayload({ slug, spec: specWithServer('https://v1.example.com:8443') }),
+    });
+    assert.equal(response.statusCode, 201, response.body);
+    return response.json<PublishApiResponse>().api.id;
+  }
+
+  async function revise(apiId: string, version: string): Promise<LightMyRequestResponse> {
+    return harness.authed(provider, {
+      method: 'PUT',
+      url: `/api/apis/${apiId}/spec`,
+      payload: { spec: specWithServer('https://v1.example.com:8443', version) },
+    });
+  }
+
+  /** Every stored revision for an API, newest first. */
+  async function revisions(apiId: string): Promise<{ version: string; current: boolean }[]> {
+    const page = await harness.store.apiSpecs.list({ api_id: apiId });
+    return page.items.map((spec) => ({
+      version: String(spec.parsed_version),
+      current: spec.is_current,
+    }));
+  }
+
+  it('keeps the newest N historical revisions and the current one', async () => {
+    const apiId = await publish('history-bound');
+    for (const version of ['2.0.0', '3.0.0', '4.0.0', '5.0.0']) {
+      const response = await revise(apiId, version);
+      assert.equal(response.statusCode, 200, response.body);
+    }
+
+    // `NEXUS_SPEC_HISTORY_LIMIT` historical revisions, plus the current one.
+    assert.deepEqual(await revisions(apiId), [
+      { version: '5.0.0', current: true },
+      { version: '4.0.0', current: false },
+      { version: '3.0.0', current: false },
+    ]);
+  });
+
+  it('never prunes the current revision, however many times it is replaced', async () => {
+    const apiId = await publish('history-current');
+    for (let round = 0; round < 6; round += 1) {
+      assert.equal((await revise(apiId, `9.${round}.0`)).statusCode, 200);
+      const stored = await revisions(apiId);
+      assert.equal(stored.filter((spec) => spec.current).length, 1);
+      assert.ok(stored.length <= 3, `expected at most 3 rows, found ${stored.length}`);
+    }
+    assert.equal((await revisions(apiId))[0]?.version, '9.5.0');
+  });
+
+  it('prunes nothing when the gateway write fails', async () => {
+    const apiId = await publish('history-gateway-fails');
+    for (const version of ['2.0.0', '3.0.0', '4.0.0']) {
+      assert.equal((await revise(apiId, version)).statusCode, 200);
+    }
+    const before = await revisions(apiId);
+    assert.equal(before.length, 3);
+
+    harness.edge.queueFailure(500, { error: 'config_rejected' }, '/proxies/', 'PUT');
+    const failed = await harness.authed(provider, {
+      method: 'PUT',
+      url: `/api/apis/${apiId}/spec`,
+      payload: { spec: specWithServer('https://v2.example.com:8443', '5.0.0') },
+    });
+    assert.notEqual(failed.statusCode, 200);
+    assert.deepEqual(await revisions(apiId), before, 'a refused revision prunes nothing');
+  });
+
+  it('takes every retained revision down with the API', async () => {
+    const apiId = await publish('history-delete');
+    for (const version of ['2.0.0', '3.0.0']) {
+      assert.equal((await revise(apiId, version)).statusCode, 200);
+    }
+    assert.equal((await revisions(apiId)).length, 3);
+
+    const removed = await harness.authed(provider, {
+      method: 'DELETE',
+      url: `/api/apis/${apiId}`,
+    });
+    assert.equal(removed.statusCode, 200, removed.body);
+    assert.equal((await revisions(apiId)).length, 0);
   });
 });
 

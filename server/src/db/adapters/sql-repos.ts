@@ -101,6 +101,7 @@ import type {
   VerificationTokenRecord,
   VerificationTokenRepo,
 } from '../store.js';
+import { SPEC_HISTORY_PRUNE_BATCH } from '../store.js';
 import {
   bool,
   encodeBool,
@@ -1149,6 +1150,27 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     delete: async (id) => (await execute(exec, 'DELETE FROM api_specs WHERE id = ?', [id])) > 0,
 
     deleteByApi: async (apiId) => execute(exec, 'DELETE FROM api_specs WHERE api_id = ?', [apiId]),
+
+    pruneHistory: async (apiId, keep) => {
+      // Selected then deleted by id rather than deleted through a subquery on
+      // the same table: MySQL refuses that shape ("You can't specify target
+      // table for update in FROM clause"), and both dialects run this one.
+      const rows = await queryAll(
+        exec,
+        `SELECT id FROM api_specs
+          WHERE api_id = ? AND is_current = ?
+          ORDER BY created_at DESC, id DESC
+          LIMIT ? OFFSET ?`,
+        [apiId, encodeBool(false), SPEC_HISTORY_PRUNE_BATCH, Math.max(0, keep)],
+      );
+      if (rows.length === 0) return 0;
+      const ids = rows.map((row) => text(row.id));
+      return execute(
+        exec,
+        `DELETE FROM api_specs WHERE id IN (${ids.map(() => '?').join(', ')})`,
+        ids,
+      );
+    },
   };
 
   /* ── apiPlugins ─────────────────────────────────────────────────────── */

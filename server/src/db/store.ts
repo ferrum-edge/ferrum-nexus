@@ -570,7 +570,35 @@ export interface ApiSpecRepo {
   delete(id: Uuid): Promise<boolean>;
   /** Cascade helper for API deletion. Returns the number of revisions removed. */
   deleteByApi(apiId: Uuid): Promise<number>;
+  /**
+   * Drop every **non-current** revision of `apiId` beyond the newest `keep`.
+   *
+   * Bounded retention for `NEXUS_SPEC_HISTORY_LIMIT`: without it the per-owner
+   * API ceiling bounded proxies and slugs but no storage at all, because each
+   * `PUT /api/apis/:id/spec` kept another document of up to `MAX_SPEC_BYTES`
+   * for ever.
+   *
+   * The current revision is never a candidate whatever `keep` says, and `keep`
+   * is at least `1` in practice, so the predecessor a failed revision rolls
+   * back to always survives. Newest is by `created_at`, ties broken by id, the
+   * same order {@link ApiSpecRepo.list} pages in.
+   *
+   * @returns the number of revisions removed
+   */
+  pruneHistory(apiId: Uuid, keep: number): Promise<number>;
 }
+
+/**
+ * Rows one {@link ApiSpecRepo.pruneHistory} call may remove.
+ *
+ * The candidates are selected with `LIMIT … OFFSET keep` rather than deleted
+ * through a subquery, because MySQL refuses a `DELETE` whose subquery names the
+ * table being deleted from and an `OFFSET` without a `LIMIT` — so one statement
+ * shape has to carry a bound. A deployment upgrading with a long history
+ * therefore trims in batches over successive revisions rather than in one
+ * statement, which is also the kinder thing to do to a live database.
+ */
+export const SPEC_HISTORY_PRUNE_BATCH = 1_000;
 
 /**
  * Palette plugins a provider switched on for their own API.

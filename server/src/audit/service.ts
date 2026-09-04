@@ -58,6 +58,15 @@ export const AuditAction = {
   API_PLUGIN_SET: 'api.plugin_set',
   /** A palette plugin was detached from an API's proxy and deleted. */
   API_PLUGIN_REMOVE: 'api.plugin_remove',
+  /**
+   * A `spec_enforcement` conversion could neither finish nor put the original
+   * proxy back, so the API has no gateway object at all.
+   *
+   * The details carry the proxy document and the hand-owned plugin configs as
+   * they were before the conversion — the only surviving copy — so an
+   * administrator can rebuild the API from this row.
+   */
+  API_GATEWAY_REPAIR_REQUIRED: 'api.gateway_repair_required',
   TEST_CONSUMER_CREATE: 'test_consumer.create',
 
   /* access workflow */

@@ -1289,12 +1289,19 @@ the parsed `info.version`).
 { "api": { … }, "spec": { … } }
 ```
 
-The new revision becomes current. The proxy backend is re-pointed at the
-document's `servers[0]` **only** if the proxy is still pointing where the
-_previous_ revision said it should — once a provider supplies an explicit
-upstream, the document stops being authoritative for it. When the backend does
-move, `upstream_url` on the row moves with it, in the same store transaction as
-the revision; when it does not, `upstream_url` is left alone.
+The new revision becomes current, and the API's oldest revisions past
+`NEXUS_SPEC_HISTORY_LIMIT` (default 10, on top of the current one) are pruned in
+the same transaction.
+
+The proxy backend is re-pointed at the document's `servers[0]` **only** when the
+row's `upstream_url` still equals the normalized `servers[0]` of the _previous_
+current revision. Both sides are normalized the same way — explicit port, no
+trailing slash — and the comparison covers scheme, host, port **and base path**,
+so a document moving `/v2` to `/v3` on the same host moves the backend, while an
+`upstream_url` that differs from the previous document in any of those four is a
+pin the upload leaves alone. When the backend does move, `upstream_url` on the
+row moves with it, in the same store transaction as the revision; when it does
+not, `upstream_url` is left alone.
 
 An API in `routes` mode has its document re-submitted to the gateway, which
 regenerates the operation table from it. That single call also carries the

@@ -316,6 +316,7 @@ export async function buildServer(
     notifications,
     credentials,
     settings,
+    log: (obj, message) => app.log.error(obj, message),
     upstreamResolver: deps.upstreamResolver ?? createUpstreamResolver(),
   });
   const usage = createUsageService({ store: deps.store, edge: deps.edge, publishing });

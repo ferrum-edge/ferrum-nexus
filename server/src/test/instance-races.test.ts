@@ -27,7 +27,13 @@ import {
   type PublishApiResponse,
 } from '@ferrum-nexus/shared';
 
-import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
+import {
+  SAMPLE_SPEC_YAML,
+  buildTestApp,
+  specWithServer,
+  type TestApp,
+  type TestSession,
+} from './helpers.js';
 
 /** Milliseconds the first `PUT /consumers/{id}` is held, to force an overlap. */
 const OVERLAP_MS = 150;
@@ -189,5 +195,188 @@ describe('two instances over one database', () => {
 
   it('approve on one instance, revoke on the other', async () => {
     await race(false);
+  });
+});
+
+/**
+ * A `routes` spec revision racing a runtime `PATCH` on the same proxy.
+ *
+ * `PUT /api-specs/{id}` re-inserts the proxy from the submitted
+ * `x-ferrum-proxy`, so it is a whole-resource proxy write wearing a different
+ * URL — and it used to be issued from a document read *outside* the canonical
+ * `proxy:<id>` lease every other rewrite takes. A `PATCH` landing in between
+ * therefore wrote `allowed_methods`, the timeouts and `allowed_ws_origins` onto
+ * a proxy the spec importer was about to overwrite from a snapshot taken before
+ * them. Both requests answered `200`; only one of the two changes survived.
+ */
+describe('a routes spec revision racing a runtime PATCH', () => {
+  let one: TestApp;
+  let two: TestApp;
+  let provider: TestSession;
+  let counter = 0;
+
+  before(async () => {
+    one = await buildTestApp();
+    two = await buildTestApp({ store: one.store, edge: one.edge });
+    await one.registerUser({ email: 'spec-race-admin@example.test' });
+    provider = await one.registerUser({
+      email: 'spec-race-provider@example.test',
+      role: 'provider',
+    });
+  });
+
+  after(async () => {
+    await two.close();
+    await one.close();
+  });
+
+  async function publishRoutesApi(server: string): Promise<{ apiId: string; proxyId: string }> {
+    counter += 1;
+    const slug = `spec-race-${counter}`;
+    const response = await one.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: {
+        name: `Spec Race ${counter}`,
+        slug,
+        spec: specWithServer(server),
+        auth_plugin: 'key_auth',
+        requestable: true,
+        visibility: 'public',
+        spec_enforcement: 'routes',
+      },
+    });
+    assert.equal(response.statusCode, 201, response.body);
+    const api = response.json<PublishApiResponse>().api;
+    return { apiId: api.id, proxyId: String(api.ferrum_proxy_id) };
+  }
+
+  /** The proxy document the gateway currently holds. */
+  function proxyOf(proxyId: string): Record<string, unknown> {
+    const proxy = one.edge.proxies.get(`nexus/${proxyId}`);
+    assert.ok(proxy, `expected proxy ${proxyId} to exist`);
+    return proxy;
+  }
+
+  const RUNTIME_PATCH = {
+    allowed_methods: ['GET'],
+    timeouts: { connect_ms: 1001, read_ms: 2002, write_ms: 3003 },
+    cors: { allowed_origins: ['https://app.example.com'], allow_credentials: false },
+  };
+
+  /**
+   * Run both operations with the leader's gateway write in flight when the
+   * follower arrives.
+   *
+   * @param specFirst whether the spec revision is the operation that is held
+   */
+  async function race(specFirst: boolean): Promise<void> {
+    const { apiId, proxyId } = await publishRoutesApi('https://v1.example.com:8443/v1');
+
+    const specUpdate = (): Promise<{ statusCode: number; body: string }> =>
+      one.authed(provider, {
+        method: 'PUT',
+        url: `/api/apis/${apiId}/spec`,
+        payload: { spec: specWithServer('https://v2.example.com:8443/v1', '3.0.0') },
+      });
+    const runtimePatch = (): Promise<{ statusCode: number; body: string }> =>
+      two.authed(provider, { method: 'PATCH', url: `/api/apis/${apiId}`, payload: RUNTIME_PATCH });
+
+    one.edge.delay(specFirst ? '/api-specs/' : '/proxies/', OVERLAP_MS, 'PUT');
+    const [first, second] = specFirst ? [specUpdate, runtimePatch] : [runtimePatch, specUpdate];
+    const started = first();
+    await new Promise((resolve) => setTimeout(resolve, STAGGER_MS));
+    const [firstResponse, secondResponse] = await Promise.all([started, second()]);
+    assert.equal(firstResponse.statusCode, 200, firstResponse.body);
+    assert.equal(secondResponse.statusCode, 200, secondResponse.body);
+
+    // Both changes are on the gateway: the document's backend move and every
+    // runtime field the PATCH set.
+    const proxy = proxyOf(proxyId);
+    assert.equal(proxy.backend_host, 'v2.example.com', 'the spec revision moved the backend');
+    assert.deepEqual(
+      proxy.allowed_methods,
+      ['GET', 'OPTIONS'],
+      'the method restriction survived the spec revision',
+    );
+    assert.equal(proxy.backend_connect_timeout_ms, 1001);
+    assert.equal(proxy.backend_read_timeout_ms, 2002);
+    assert.equal(proxy.backend_write_timeout_ms, 3003);
+    assert.deepEqual(proxy.allowed_ws_origins, ['https://app.example.com']);
+
+    // …and both are what Nexus recorded.
+    const row = await one.store.apis.findById(apiId);
+    assert.equal(row?.upstream_url, 'https://v2.example.com:8443/v1');
+    assert.deepEqual(row?.allowed_methods, ['GET']);
+    assert.deepEqual(row?.timeouts, { connect_ms: 1001, read_ms: 2002, write_ms: 3003 });
+    assert.deepEqual(row?.cors, RUNTIME_PATCH.cors);
+
+    // The auth and ACL plugins the API was published with are still associated.
+    const running = one.edge
+      .effectivePluginsForProxy(proxyId)
+      .map((plugin) => String(plugin.plugin_name))
+      .sort();
+    assert.deepEqual(running, ['access_control', 'cors', 'key_auth', 'openapi_validator']);
+  }
+
+  it('keeps both changes when the spec revision is the write in flight', async () => {
+    await race(true);
+  });
+
+  it('keeps both changes when the runtime PATCH is the write in flight', async () => {
+    await race(false);
+  });
+
+  it('compensates a failed revision without eating a concurrent PATCH', async () => {
+    const { apiId, proxyId } = await publishRoutesApi('https://v1.example.com:8443/v1');
+
+    // The store goes down after the gateway has already been moved, which is
+    // the one seam the compensation exists for.
+    const real = one.store.transaction.bind(one.store);
+    one.store.transaction = async <T>(): Promise<T> => {
+      one.store.transaction = real;
+      throw new Error('database is gone');
+    };
+
+    one.edge.delay('/api-specs/', OVERLAP_MS, 'PUT');
+    const specUpdate = one.authed(provider, {
+      method: 'PUT',
+      url: `/api/apis/${apiId}/spec`,
+      payload: { spec: specWithServer('https://v2.example.com:8443/v1', '3.0.0') },
+    });
+    await new Promise((resolve) => setTimeout(resolve, STAGGER_MS));
+    const patched = await two.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${apiId}`,
+      payload: {
+        allowed_methods: ['GET'],
+        timeouts: { connect_ms: 1001, read_ms: 2002, write_ms: 3003 },
+      },
+    });
+    const failed = await specUpdate;
+
+    assert.notEqual(failed.statusCode, 200);
+    assert.equal(patched.statusCode, 200, patched.body);
+
+    // The revision was rolled back on both sides…
+    const proxy = proxyOf(proxyId);
+    assert.equal(proxy.backend_host, 'v1.example.com', 'the backend move was compensated');
+    const specs = await one.store.apiSpecs.list({ api_id: apiId });
+    assert.equal(specs.total, 1, 'no revision was stored');
+    assert.equal(
+      (await one.store.apis.findById(apiId))?.upstream_url,
+      'https://v1.example.com:8443/v1',
+    );
+
+    // …and the compensation did not take the concurrent PATCH down with it.
+    assert.deepEqual(proxy.allowed_methods, ['GET']);
+    assert.equal(proxy.backend_connect_timeout_ms, 1001);
+    assert.equal(proxy.backend_read_timeout_ms, 2002);
+    assert.equal(proxy.backend_write_timeout_ms, 3003);
+    const running = one.edge
+      .effectivePluginsForProxy(proxyId)
+      .map((plugin) => String(plugin.plugin_name))
+      .sort();
+    assert.deepEqual(running, ['access_control', 'key_auth', 'openapi_validator']);
   });
 });

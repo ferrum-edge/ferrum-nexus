@@ -821,6 +821,52 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal((await store.apiSpecs.list({ api_id: api.id })).total, 1);
     });
 
+    it('apiSpecs: pruneHistory drops the oldest revisions and never the current one', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const api = await makeApi(owner.id);
+      const other = await makeApi(owner.id);
+
+      // Explicit stamps: retention is `created_at DESC, id DESC`, and five rows
+      // written in a loop would otherwise share a millisecond.
+      for (let n = 1; n <= 5; n += 1) {
+        await store.apiSpecs.create({
+          api_id: api.id,
+          version: `${n}`,
+          raw_spec: `openapi: 3.1.0 # ${n}`,
+          created_at: `2026-01-0${n}T00:00:00.000Z`,
+          is_current: n === 5,
+        });
+      }
+      await store.apiSpecs.create({
+        api_id: other.id,
+        version: 'other',
+        raw_spec: 'openapi: 3.1.0',
+        created_at: '2026-01-01T00:00:00.000Z',
+        is_current: false,
+      });
+
+      const versions = async (apiId: string): Promise<string[]> =>
+        (await store.apiSpecs.list({ api_id: apiId })).items.map((spec) => spec.version);
+
+      assert.equal(await store.apiSpecs.pruneHistory(api.id, 2), 2);
+      assert.deepEqual(await versions(api.id), ['5', '4', '3']);
+      assert.equal((await store.apiSpecs.findCurrentByApi(api.id))?.version, '5');
+      assert.equal(
+        await store.apiSpecs.pruneHistory(api.id, 2),
+        0,
+        'a second pass removes nothing',
+      );
+
+      // Even asked to keep no history at all, the current revision stays: it is
+      // never a candidate, which is what makes the caller's rollback data safe.
+      assert.equal(await store.apiSpecs.pruneHistory(api.id, 0), 2);
+      assert.deepEqual(await versions(api.id), ['5']);
+      assert.equal((await store.apiSpecs.findCurrentByApi(api.id))?.version, '5');
+
+      assert.deepEqual(await versions(other.id), ['other'], "another API's history is untouched");
+      assert.equal(await store.apiSpecs.pruneHistory(api.id, 10), 0, 'an empty history is a no-op');
+    });
+
     /* ── api plugins ──────────────────────────────────────────────────── */
 
     it('apiPlugins: upserts one row per (api, plugin) and keeps created_at', async () => {

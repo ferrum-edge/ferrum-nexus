@@ -149,6 +149,7 @@ import type {
   VerificationTokenRecord,
   VerificationTokenRepo,
 } from '../../store.js';
+import { SPEC_HISTORY_PRUNE_BATCH } from '../../store.js';
 
 /* ── Collection names (identical to the SQL table names) ────────────────── */
 
@@ -1667,6 +1668,24 @@ class MongoStore implements NexusStore {
 
     deleteByApi: async (apiId) =>
       (await this.col(COLLECTIONS.apiSpecs).deleteMany({ api_id: apiId }, this.opts)).deletedCount,
+
+    pruneHistory: async (apiId, keep) => {
+      const doomed = await this.col(COLLECTIONS.apiSpecs)
+        .find({ api_id: apiId, is_current: false } as Filter<NexusDoc>, this.opts)
+        .sort(NEWEST_FIRST)
+        .skip(Math.max(0, keep))
+        .limit(SPEC_HISTORY_PRUNE_BATCH)
+        .project({ _id: 1 })
+        .toArray();
+      if (doomed.length === 0) return 0;
+      const ids = doomed.map((row) => String(row._id));
+      return (
+        await this.col(COLLECTIONS.apiSpecs).deleteMany(
+          { _id: { $in: ids } } as Filter<NexusDoc>,
+          this.opts,
+        )
+      ).deletedCount;
+    },
   };
 
   /* ── apiPlugins ───────────────────────────────────────────────────────── */
