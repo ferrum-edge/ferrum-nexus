@@ -368,9 +368,47 @@ export interface ThreadFilter {
    * comes from the caller's *current* role, never from this column.
    */
   participant_user_id?: Uuid;
+  /**
+   * The admin inbox as a query predicate: threads with an empty second seat
+   * (the platform inbox, which any administrator answers) **or** threads where
+   * this user occupies a seat.
+   *
+   * It exists so the admin thread list is paginated and counted over the rows
+   * an admin may actually see. Filtering a fetched page instead made every
+   * thread behind a page of unrelated conversations unreachable, whatever
+   * offset the caller asked for. The same seats-only rule as
+   * {@link ThreadFilter.participant_user_id} applies to the second half.
+   */
+  platform_or_participant_user_id?: Uuid;
   api_id?: Uuid;
   /** Case-insensitive substring match on the subject. */
   q?: string;
+}
+
+/**
+ * A point in one thread's transcript, ordered by `(created_at, id)`.
+ *
+ * The id is not decoration: several messages can share an ISO-8601 timestamp
+ * to the millisecond, and a cursor that only carried the timestamp would either
+ * skip their neighbours or repeat them.
+ */
+export interface MessageCursor {
+  created_at: IsoTimestamp;
+  id: Uuid;
+}
+
+/** Options for {@link MessageRepo.listByThread}. */
+export interface MessageListOptions extends ListOptions {
+  /**
+   * Order newest-first instead of the default oldest-first.
+   *
+   * The thread view opens on the *end* of a conversation, which is the one
+   * window a fixed oldest-first page can never reach once the history is longer
+   * than a page.
+   */
+  newest_first?: boolean;
+  /** Restrict to messages strictly older than this point. */
+  before?: MessageCursor;
 }
 
 /** Filters for `notifications.list`. */
@@ -696,8 +734,15 @@ export interface ThreadRepo {
 export interface MessageRepo {
   create(input: CreateInput<MessageRecord>): Promise<MessageRecord>;
   findById(id: Uuid): Promise<MessageRecord | null>;
-  /** Oldest-first page of a thread's messages. */
-  listByThread(threadId: Uuid, options?: ListOptions): Promise<Paginated<MessageRecord>>;
+  /**
+   * One page of a thread's messages, oldest-first by default.
+   *
+   * Ordering is `(created_at, id)` in whichever direction `newest_first` asks
+   * for, so it is total even when timestamps collide. `total` counts the rows
+   * matching the options — with a `before` cursor, that is how many messages
+   * precede the window.
+   */
+  listByThread(threadId: Uuid, options?: MessageListOptions): Promise<Paginated<MessageRecord>>;
   /** Newest message of a thread, for list previews. */
   findLatestByThread(threadId: Uuid): Promise<MessageRecord | null>;
   countByThread(threadId: Uuid): Promise<number>;

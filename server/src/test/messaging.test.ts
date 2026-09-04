@@ -100,8 +100,11 @@ describe('messaging', () => {
     });
     assert.equal(response.statusCode, 200);
     const detail = response.json<MessageThreadDetail>();
-    assert.equal(detail.messages.length, 2);
-    assert.equal(detail.messages[0]?.body, 'Could we raise the burst limit?');
+    assert.equal(detail.messages.items.length, 2);
+    assert.equal(detail.messages.total, 2);
+    assert.equal(detail.messages.has_more, false);
+    assert.equal(detail.messages.next_before, null);
+    assert.equal(detail.messages.items[0]?.body, 'Could we raise the burst limit?');
     assert.equal(detail.participants?.length, 2);
   });
 

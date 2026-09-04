@@ -621,9 +621,43 @@ Errors: `400 VALIDATION_FAILED` (empty subject/body, or messaging yourself),
 
 ### `GET /api/threads/:id`
 
-_session_ — the thread plus its full message list (`MessageThreadDetail`), each
-message carrying a `sender` summary. Participants always; admins for oversight.
-`403 FORBIDDEN` otherwise.
+_session_ — the thread plus its **most recent** window of messages
+(`MessageThreadDetail`), each message carrying a `sender` summary. Participants
+always; admins for oversight. `403 FORBIDDEN` otherwise.
+
+| Query    | Type | Notes                                                  |
+| -------- | ---- | ------------------------------------------------------ |
+| `limit`  | int  | window size, 1–`MAX_PAGE_SIZE` (200), default 25       |
+| `before` | uuid | a message id: return only messages older than that one |
+
+```json
+{
+  "id": "…", "subject": "…", "participants": [ … ],
+  "messages": {
+    "items": [ … ],
+    "total": 208,
+    "has_more": true,
+    "next_before": "5e933aed-…"
+  }
+}
+```
+
+`messages.items` is ordered **oldest-first**, ready to render top to bottom, but
+the window itself is taken from the newest end of the conversation — which is
+what keeps a freshly posted reply visible however long the history behind it.
+`total` counts the whole thread; `has_more` says whether anything precedes
+`items[0]`, and `next_before` is the cursor that fetches it. There is no
+`offset`: a conversation grows at the end the reader is anchored to, so an
+offset into it slides under every reply.
+
+### `GET /api/threads/:id/messages`
+
+_session_ — one window of the same transcript, without re-sending the thread:
+the "load older messages" call. Same `limit`/`before` query and the same
+`MessagePage` body as `messages` above; the same read rule and `403 FORBIDDEN`.
+
+Errors: `400 VALIDATION_FAILED` (a `before` id that is not part of this thread),
+`403 FORBIDDEN` (not a participant), `404 NOT_FOUND` (unknown thread).
 
 ### `POST /api/threads/:id/messages`
 

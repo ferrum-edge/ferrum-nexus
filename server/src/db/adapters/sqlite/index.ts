@@ -1670,6 +1670,13 @@ class SqliteStore implements NexusStore {
           filter.participant_user_id,
         );
       }
+      if (filter.platform_or_participant_user_id !== undefined) {
+        builder.always(
+          '(participant_b IS NULL OR participant_a = ? OR participant_b = ?)',
+          filter.platform_or_participant_user_id,
+          filter.platform_or_participant_user_id,
+        );
+      }
       builder.add(filter.api_id, 'api_id = ?', filter.api_id ?? null);
       builder.addSearch(filter.q, ['subject']);
       const where = builder.build();
@@ -1740,16 +1747,31 @@ class SqliteStore implements NexusStore {
     },
 
     listByThread: async (threadId, options) => {
+      const builder = new WhereBuilder().always('thread_id = ?', threadId);
+      const cursor = options?.before;
+      if (cursor) {
+        // Strictly before `(created_at, id)`, spelled out rather than as a row
+        // comparison so every adapter can carry the same predicate.
+        builder.always(
+          '(created_at < ? OR (created_at = ? AND id < ?))',
+          cursor.created_at,
+          cursor.created_at,
+          cursor.id,
+        );
+      }
+      const where = builder.build();
       const { limit, offset } = page(options);
+      const direction = options?.newest_first === true ? 'DESC' : 'ASC';
       const total = queryCount(
         this.db,
-        'SELECT COUNT(*) AS count FROM messages WHERE thread_id = ?',
-        [threadId],
+        `SELECT COUNT(*) AS count FROM messages${where.sql}`,
+        where.params,
       );
       const rows = queryAll(
         this.db,
-        'SELECT * FROM messages WHERE thread_id = ? ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?',
-        [threadId, limit, offset],
+        `SELECT * FROM messages${where.sql}
+         ORDER BY created_at ${direction}, id ${direction} LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
       );
       return { items: rows.map(mapMessage), total };
     },

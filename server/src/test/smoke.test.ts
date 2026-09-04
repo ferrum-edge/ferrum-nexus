@@ -1423,6 +1423,140 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       );
     });
 
+    it('threads: platform_or_participant_user_id is the admin inbox as a predicate', async () => {
+      const admin = await makeUser({ role: 'admin' });
+      const asker = await makeUser();
+      const bystander = await makeUser();
+      const subject = `Inbox ${newId().slice(0, 6)}`;
+
+      // A platform thread (empty second seat), one the admin sits in, and one
+      // between two other people — which the admin must not see here.
+      const platform = await store.threads.create({
+        subject,
+        created_by: asker.id,
+        participant_a: asker.id,
+      });
+      const seated = await store.threads.create({
+        subject,
+        created_by: asker.id,
+        participant_a: asker.id,
+        participant_b: admin.id,
+      });
+      const unrelated = await store.threads.create({
+        subject,
+        created_by: asker.id,
+        participant_a: asker.id,
+        participant_b: bystander.id,
+      });
+
+      const inbox = await store.threads.list({
+        q: subject,
+        platform_or_participant_user_id: admin.id,
+      });
+      assert.equal(inbox.total, 2, 'total counts the filtered set, not the table');
+      assert.deepEqual(
+        new Set(inbox.items.map((thread) => thread.id)),
+        new Set([platform.id, seated.id]),
+        'the platform inbox plus the admin`s own seats',
+      );
+      assert.ok(!inbox.items.some((thread) => thread.id === unrelated.id));
+
+      // Paginated over the filtered set rather than a prefix of the table.
+      const first = await store.threads.list(
+        { q: subject, platform_or_participant_user_id: admin.id },
+        { limit: 1, offset: 0 },
+      );
+      const second = await store.threads.list(
+        { q: subject, platform_or_participant_user_id: admin.id },
+        { limit: 1, offset: 1 },
+      );
+      assert.equal(first.total, 2);
+      assert.equal(second.total, 2);
+      assert.notEqual(first.items[0]?.id, second.items[0]?.id);
+
+      for (const id of [platform.id, seated.id, unrelated.id]) await store.threads.delete(id);
+    });
+
+    it('messages: newest_first and the before cursor page a long transcript', async () => {
+      const a = await makeUser();
+      const b = await makeUser();
+      const thread = await store.threads.create({
+        subject: `Transcript ${newId().slice(0, 6)}`,
+        created_by: a.id,
+        participant_a: a.id,
+        participant_b: b.id,
+      });
+
+      // Six messages across three timestamps — two per instant, so the id half
+      // of the cursor is what makes the order total.
+      const created: { id: string; created_at: string }[] = [];
+      for (let index = 0; index < 6; index += 1) {
+        const message = await store.messages.create({
+          thread_id: thread.id,
+          sender_user_id: index % 2 === 0 ? a.id : b.id,
+          body: `message ${index}`,
+          created_at: isoInSeconds(-600 + Math.floor(index / 2) * 60),
+        });
+        created.push({ id: message.id, created_at: message.created_at });
+      }
+      const chronological = [...created].sort((left, right) =>
+        left.created_at === right.created_at
+          ? left.id.localeCompare(right.id)
+          : left.created_at.localeCompare(right.created_at),
+      );
+
+      const oldest = await store.messages.listByThread(thread.id, { limit: 6 });
+      assert.deepEqual(
+        oldest.items.map((message) => message.id),
+        chronological.map((entry) => entry.id),
+        'the default order is oldest-first, tie-broken on id',
+      );
+
+      const newest = await store.messages.listByThread(thread.id, {
+        limit: 2,
+        newest_first: true,
+      });
+      assert.deepEqual(
+        newest.items.map((message) => message.id),
+        [...chronological]
+          .reverse()
+          .slice(0, 2)
+          .map((entry) => entry.id),
+        'newest_first reverses both keys, so the window is the end of the thread',
+      );
+      assert.equal(newest.total, 6, 'total ignores the window');
+
+      // Walk backwards from the oldest message of that window: every earlier
+      // message exactly once, including the one sharing its timestamp.
+      const anchor = chronological[4];
+      assert.ok(anchor);
+      const older = await store.messages.listByThread(thread.id, {
+        limit: 10,
+        newest_first: true,
+        before: { created_at: anchor.created_at, id: anchor.id },
+      });
+      assert.deepEqual(
+        older.items.map((message) => message.id),
+        chronological
+          .slice(0, 4)
+          .reverse()
+          .map((entry) => entry.id),
+        'strictly before (created_at, id) — never the anchor, never its twin twice',
+      );
+      assert.equal(older.total, 4, 'total counts what precedes the cursor');
+
+      const start = chronological[0];
+      assert.ok(start);
+      const none = await store.messages.listByThread(thread.id, {
+        before: { created_at: start.created_at, id: start.id },
+      });
+      assert.equal(none.total, 0, 'nothing precedes the first message');
+      assert.equal(none.items.length, 0);
+
+      await store.messages.deleteByThread(thread.id);
+      await store.threads.delete(thread.id);
+    });
+
     /* ── notifications ────────────────────────────────────────────────── */
 
     it('notifications: bulk create, unread counts and marking read', async () => {

@@ -9,6 +9,7 @@ import type {
   CreateThreadRequest,
   CreateThreadResponse,
   GetThreadResponse,
+  ListThreadMessagesResponse,
   ListThreadsQuery,
   ListThreadsResponse,
   SendMessageRequest,
@@ -25,12 +26,30 @@ export function useThreads(query: ListThreadsQuery = {}): UseQueryResult<ListThr
   });
 }
 
-/** One conversation with its full message list. */
+/** One conversation with its most recent window of messages. */
 export function useThread(id: string): UseQueryResult<GetThreadResponse> {
   return useQuery({
     queryKey: queryKeys.threads.detail(id),
     queryFn: () => threadsApi.get(id),
     enabled: id.length > 0,
+  });
+}
+
+/**
+ * Fetch the window of messages older than `before`.
+ *
+ * A mutation rather than a query because it is driven by a button and its
+ * result is merged into what the page already holds — caching one window per
+ * cursor would only make the merge harder to reason about.
+ */
+export function useOlderMessages(): UseMutationResult<
+  ListThreadMessagesResponse,
+  Error,
+  { id: string; before: string }
+> {
+  return useMutation({
+    mutationFn: ({ id, before }: { id: string; before: string }) =>
+      threadsApi.messages(id, { before }),
   });
 }
 

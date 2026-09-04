@@ -9,6 +9,7 @@ import {
   readCookie,
   request,
   setUnauthorizedHandler,
+  threadsApi,
 } from './api';
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -163,6 +164,17 @@ describe('lib/api', () => {
 
     expect(error.code).toBe(ERROR_CODES.RATE_LIMITED);
     expect(onUnauthorized).not.toHaveBeenCalled();
+  });
+
+  it('asks for one older window of a conversation by cursor', async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      jsonResponse({ items: [], total: 0, has_more: false, next_before: null }),
+    );
+
+    await threadsApi.messages('thread 1', { before: 'message 2', limit: 25 });
+
+    const [url] = lastCall();
+    expect(url).toBe('/api/threads/thread%201/messages?before=message+2&limit=25');
   });
 
   it('builds query strings, dropping empty values', () => {

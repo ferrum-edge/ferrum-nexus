@@ -2191,6 +2191,15 @@ class MongoStore implements NexusStore {
           ],
         });
       }
+      if (filter.platform_or_participant_user_id !== undefined) {
+        conditions.push({
+          $or: [
+            { participant_b: null },
+            { participant_a: filter.platform_or_participant_user_id },
+            { participant_b: filter.platform_or_participant_user_id },
+          ],
+        });
+      }
       if (filter.api_id !== undefined) conditions.push({ api_id: filter.api_id });
       if (filter.q !== undefined && filter.q.trim() !== '') {
         conditions.push({ subject: containsInsensitive(filter.q.trim()) });
@@ -2274,14 +2283,28 @@ class MongoStore implements NexusStore {
       return row ? mapMessage(row) : null;
     },
 
-    listByThread: async (threadId, options) =>
-      this.paginate(
+    listByThread: async (threadId, options) => {
+      const conditions: Record<string, unknown>[] = [{ thread_id: threadId }];
+      const cursor = options?.before;
+      if (cursor) {
+        // Strictly before `(created_at, _id)` — the id half is what keeps the
+        // cursor total across messages sharing a millisecond.
+        conditions.push({
+          $or: [
+            { created_at: { $lt: cursor.created_at } },
+            { created_at: cursor.created_at, _id: { $lt: cursor.id } },
+          ],
+        });
+      }
+      const direction = options?.newest_first === true ? -1 : 1;
+      return this.paginate(
         COLLECTIONS.messages,
-        { thread_id: threadId },
-        { created_at: 1, _id: 1 },
+        { $and: conditions } as Filter<NexusDoc>,
+        { created_at: direction, _id: direction },
         options,
         mapMessage,
-      ),
+      );
+    },
 
     findLatestByThread: async (threadId) => {
       const docs = await this.col(COLLECTIONS.messages)
