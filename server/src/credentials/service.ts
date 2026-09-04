@@ -75,6 +75,7 @@ import {
   roleAtLeast,
   type CredentialMetadata,
   type CredentialType,
+  type GatewayTeardownOutcome,
   type IssueCredentialResponse,
   type Paginated,
   type RotateCredentialResponse,
@@ -97,6 +98,7 @@ import type { EdgeCredentialEntry, EdgeCredentialMap } from '../ferrum-admin/typ
 import type { NexusCrypto } from '../lib/crypto.js';
 import { last4, randomSecret, randomToken } from '../lib/crypto.js';
 import { conflict, edgeError, forbidden, notFound, validationFailed } from '../lib/errors.js';
+import { nowIso } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
 import type { ConsumerProvisioner } from './consumers.js';
 
@@ -245,37 +247,93 @@ export function generateCredential(
   }
 }
 
+/** One attempt at stripping a disabled account's gateway identity. */
+export interface GatewayTeardownAttempt {
+  /** What the caller reports to the client. Never a terminal failure. */
+  outcome: GatewayTeardownOutcome;
+  /** `details` for the audit row the caller is already writing. */
+  details: Record<string, unknown>;
+  /** What was torn down, or `null` when the attempt failed. */
+  result: GatewayTeardown | null;
+  /** Failure message when `outcome` is `pending`. */
+  error: string | null;
+}
+
+/** Input for {@link runGatewayTeardown}. */
+export interface RunGatewayTeardownInput {
+  credentials: Pick<CredentialsService, 'disableGatewayAccess'>;
+  store: NexusStore;
+  userId: Uuid;
+  /** Actor id recorded as the Edge write's subject. */
+  subject: string;
+  /**
+   * The durable job this attempt is closing. Looked up by user when omitted —
+   * pass it when the caller already holds the row (the worker does).
+   */
+  jobId?: Uuid | null;
+  log?: (obj: Record<string, unknown>, message: string) => void;
+}
+
 /**
- * Audit `details` describing one gateway teardown, successful or not.
+ * Run one gateway teardown and settle the durable job behind it.
  *
  * Disabling an account must not depend on the gateway being reachable: a
  * portal account left enabled because Edge timed out is strictly worse than a
- * disabled account whose consumer still needs cleaning up. So the failure is
- * logged and recorded in the audit row the caller is already writing, and the
- * disable proceeds.
+ * disabled account whose consumer still needs cleaning up. But a swallowed
+ * failure is worse than both — the account's API key keeps authenticating
+ * against Edge with no session and nothing retrying, which is
+ * `GHSA-8vxw-j3wc-w6vm`.
+ *
+ * So the disable still commits, and the teardown it owes is a
+ * `gateway_teardown_jobs` row written in the same transaction. This function
+ * runs one attempt against it:
+ *
+ * - success (including "the account never had a consumer") closes the job and
+ *   reports `ok` / `no_consumer`;
+ * - failure leaves the job `pending`, logs at `warn`, and reports `pending` —
+ *   which the teardown worker turns into a retry, not an outcome.
  */
-export async function tearDownGatewayAccess(
-  credentials: Pick<CredentialsService, 'disableGatewayAccess'>,
-  userId: Uuid,
-  subject: string,
-  log?: (obj: Record<string, unknown>, message: string) => void,
-): Promise<Record<string, unknown>> {
+export async function runGatewayTeardown(
+  input: RunGatewayTeardownInput,
+): Promise<GatewayTeardownAttempt> {
+  const { credentials, store, userId, subject, log } = input;
   try {
     const result = await credentials.disableGatewayAccess(userId, subject);
-    if (result.consumer_id === null) return { gateway_teardown: 'no_consumer' };
+    const jobId = input.jobId ?? (await store.gatewayTeardownJobs.findByUser(userId))?.id ?? null;
+    if (jobId !== null) await store.gatewayTeardownJobs.markDone(jobId, nowIso());
+    if (result.consumer_id === null) {
+      return {
+        outcome: 'no_consumer',
+        details: { gateway_teardown: 'no_consumer' },
+        result,
+        error: null,
+      };
+    }
     return {
-      gateway_teardown: 'ok',
-      gateway_consumer_id: result.consumer_id,
-      revoked_credentials: result.revoked_credentials,
-      removed_acl_groups: result.removed_groups,
+      outcome: 'ok',
+      details: {
+        gateway_teardown: 'ok',
+        gateway_consumer_id: result.consumer_id,
+        revoked_credentials: result.revoked_credentials,
+        removed_acl_groups: result.removed_groups,
+      },
+      result,
+      error: null,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    // `warn`, not `error`: the portal did the right thing and the work is
+    // queued. This is the line an operator alerts on — see `docs/operations.md`.
     log?.(
       { user_id: userId, error: message },
-      'Could not strip the gateway identity of a disabled account',
+      'Gateway revocation for a disabled account failed; it stays queued for retry',
     );
-    return { gateway_teardown: 'failed', gateway_error: message };
+    return {
+      outcome: 'pending',
+      details: { gateway_teardown: 'pending', gateway_error: message },
+      result: null,
+      error: message,
+    };
   }
 }
 

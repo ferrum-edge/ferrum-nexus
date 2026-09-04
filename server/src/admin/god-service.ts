@@ -36,7 +36,7 @@ import {
 
 import type { AccessService } from '../access/service.js';
 import { AuditAction, type AuditService } from '../audit/service.js';
-import { tearDownGatewayAccess, type CredentialsService } from '../credentials/service.js';
+import { runGatewayTeardown, type CredentialsService } from '../credentials/service.js';
 import type { NexusStore, UserRecord } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
 import { conflict, lastSuperAdmin, notFound, validationFailed } from '../lib/errors.js';
@@ -192,8 +192,12 @@ export function createGodService(deps: GodServiceDeps): GodService {
       // super admin. Bodies are serialised, so the loser re-counts after the
       // winner committed; the conditional update also refuses a target whose
       // role or status changed since it was read.
-      const updated = await store.transaction(async (tx) => {
-        if (target.status === 'disabled') return target;
+      const outcome = await store.transaction(async (tx) => {
+        // The revocation this disable owes is queued in the same transaction as
+        // the status flip, so the account can never be off while nothing
+        // remembers its gateway credentials are still live.
+        const job = await tx.gatewayTeardownJobs.upsertPending(target.id, actor.id, nowIso());
+        if (target.status === 'disabled') return { row: target, jobId: job.id };
         if (
           target.role === 'super_admin' &&
           target.status === 'active' &&
@@ -201,12 +205,14 @@ export function createGodService(deps: GodServiceDeps): GodService {
         ) {
           throw lastSuperAdmin();
         }
-        return tx.users.updateIfMatches(
+        const row = await tx.users.updateIfMatches(
           target.id,
           { role: target.role, status: target.status },
           { status: 'disabled' },
         );
+        return { row, jobId: job.id };
       });
+      const updated = outcome.row;
       if (!updated) {
         if (!(await store.users.findById(target.id))) throw notFound('User', userId);
         throw conflict('That account changed while you were disabling it — reload and try again');
@@ -214,7 +220,14 @@ export function createGodService(deps: GodServiceDeps): GodService {
       // A disabled account keeps no usable browser session — and no working
       // gateway identity, which a session cookie has nothing to do with.
       const terminated = await store.sessions.deleteForUser(target.id);
-      const teardown = await tearDownGatewayAccess(credentials, target.id, actor.id, deps.log);
+      const teardown = await runGatewayTeardown({
+        credentials,
+        store,
+        userId: target.id,
+        subject: actor.id,
+        jobId: outcome.jobId,
+        ...(deps.log ? { log: deps.log } : {}),
+      });
 
       await audit.record(
         { id: actor.id, role: actor.role },
@@ -225,7 +238,7 @@ export function createGodService(deps: GodServiceDeps): GodService {
           revoked_grants: revoked,
           terminated_sessions: terminated,
           previous_status: target.status,
-          ...teardown,
+          ...teardown.details,
         },
         ip,
       );
@@ -234,6 +247,7 @@ export function createGodService(deps: GodServiceDeps): GodService {
         user: toPublicUser(updated),
         revoked_grants: revoked,
         terminated_sessions: terminated,
+        gateway_teardown: teardown.outcome,
       };
     },
 
