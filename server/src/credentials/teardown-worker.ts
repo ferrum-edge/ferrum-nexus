@@ -17,9 +17,9 @@
  *
  * The disable writes a `gateway_teardown_jobs` row inside the same transaction
  * as the status flip, so the debt is committed with the account state. This
- * worker polls every {@link TEARDOWN_POLL_INTERVAL_MS}, claims due rows (an
- * atomic `pending → sending` flip that increments `attempts`, so two workers
- * never claim the same job) and runs the revocation:
+ * worker polls every {@link TEARDOWN_POLL_INTERVAL_MS} and claims due rows one
+ * at a time (an atomic `pending → sending` flip that increments `attempts`, so
+ * two workers never claim the same job), then runs the revocation:
  *
  * - **success** → `markDone`, plus a `user.gateway_teardown_complete` audit row
  *   carrying what was actually revoked;
@@ -28,6 +28,24 @@
  *   attempt count and the error. That line is the one to alert on;
  * - **the account is no longer disabled, or no longer exists** → the job is
  *   dropped. A revocation must never land on a re-enabled account.
+ *
+ * ## Recovering a crashed worker's claims
+ *
+ * A `sending` row is a job some worker took and never finished. **Every** tick
+ * begins by returning rows untouched for {@link TEARDOWN_STALE_AFTER_MS} to
+ * `pending`, before it claims anything. Doing that only at `start()` — as this
+ * worker used to — recovers nothing from the ordinary case: a crash followed by
+ * a restart inside the window leaves rows that are too young for the one sweep,
+ * and no later tick ever revisits them, so a disabled account's credentials
+ * stay live for good. The same sweep is what recovers a job whose store write
+ * failed after the claim, with no restart involved at all.
+ *
+ * The threshold is safe because a claim's lifetime is bounded: rows are claimed
+ * singly, and one job is ~55 seconds at worst (see
+ * {@link TEARDOWN_JOB_BUDGET_MS}). Recovery is idempotent in any case — the
+ * revocation is a clear-and-delete, so a job run twice is wasted work rather
+ * than damage, and the consumer's own Edge lease keeps two instances from
+ * running it at the same instant.
  *
  * ## Why there is no `failed` state
  *
@@ -63,11 +81,38 @@ export const TEARDOWN_BASE_BACKOFF_MS = 10_000;
  */
 export const TEARDOWN_MAX_BACKOFF_MS = 5 * 60_000;
 
-/** A `sending` job untouched for this long is assumed to be a crashed worker's. */
+/**
+ * A `sending` job untouched for this long is assumed to be a crashed worker's
+ * and is returned to `pending`.
+ *
+ * Five minutes, and the arithmetic that makes that safe is the paragraph above
+ * {@link TEARDOWN_JOB_BUDGET_MS}: one job is bounded at ~55 seconds, and jobs
+ * are claimed one at a time, so a live worker never holds a claim for anything
+ * approaching this. Anything still `sending` after five minutes is debris.
+ */
 export const TEARDOWN_STALE_AFTER_MS = 5 * 60_000;
+
+/**
+ * How long one claimed job can legitimately take.
+ *
+ * A teardown is five Ferrum Edge round trips — `GET /consumers/{id}`, the
+ * whole-resource `PUT` that clears the ACL groups, and one `DELETE` per
+ * credential type — each bounded by `FERRUM_ADMIN_TIMEOUT_MS` (5 s by default,
+ * 60 s at the configuration ceiling), plus up to `LEASE_WAIT_MS` (30 s) waiting
+ * for the consumer's lease. That is ~55 seconds on the default configuration.
+ *
+ * Nothing enforces this number; it exists to be compared against
+ * {@link TEARDOWN_STALE_AFTER_MS}, which must stay comfortably above it. An
+ * operator who raises `FERRUM_ADMIN_TIMEOUT_MS` towards its ceiling is pushing
+ * the worst case towards 5.5 minutes and should raise the stale threshold with
+ * it — otherwise a slow gateway looks like a crashed worker.
+ */
+export const TEARDOWN_JOB_BUDGET_MS = 60_000;
 
 /** What one {@link TeardownWorker.tick} did. */
 export interface TeardownTickResult {
+  /** `sending` rows older than the stale threshold returned to `pending`. */
+  released: number;
   /** Jobs claimed from the queue. */
   claimed: number;
   /** Revocations Edge confirmed. */
@@ -76,11 +121,13 @@ export interface TeardownTickResult {
   rescheduled: number;
   /** Jobs dropped because the account is active again or gone. */
   cancelled: number;
+  /** Jobs whose processing threw; recovered by a later tick's stale sweep. */
+  abandoned: number;
 }
 
 /** The background gateway-revocation retrier. */
 export interface TeardownWorker {
-  /** Release stale claims and begin polling. Idempotent. */
+  /** Begin polling. Idempotent. */
   start(): void;
   /** Stop polling and wait for an in-flight tick. Idempotent. */
   stop(): Promise<void>;
@@ -192,29 +239,80 @@ export function createTeardownWorker(deps: TeardownWorkerDeps): TeardownWorker {
     );
   }
 
+  /**
+   * Return jobs a crashed worker left `sending` to the queue.
+   *
+   * Runs on **every** tick, not only at `start()`. A sweep that only happens on
+   * boot recovers nothing from a crash that is followed by a quick restart: the
+   * rows are minutes younger than the threshold when the one sweep runs, and no
+   * later tick ever looks at them again, so a disabled account's credentials
+   * stay live indefinitely. It is one indexed `UPDATE … WHERE status = 'sending'
+   * AND updated_at <= ?` per five-second poll.
+   */
+  async function releaseStale(result: TeardownTickResult): Promise<void> {
+    const staleBefore = new Date(now().getTime() - TEARDOWN_STALE_AFTER_MS).toISOString();
+    result.released = await store.gatewayTeardownJobs.releaseStale(staleBefore);
+    if (result.released > 0) {
+      log({ released: result.released }, 'Released stale gateway teardown claims');
+    }
+  }
+
   async function runTick(): Promise<TeardownTickResult> {
     const result: TeardownTickResult = {
+      released: 0,
       claimed: 0,
       completed: 0,
       rescheduled: 0,
       cancelled: 0,
+      abandoned: 0,
     };
     try {
-      const jobs = await store.gatewayTeardownJobs.claimDue(now().toISOString(), batchSize);
-      result.claimed = jobs.length;
-      for (const job of jobs) {
-        await runJob(result, job);
-      }
-      return result;
+      await releaseStale(result);
     } catch (error) {
-      // A failure here is the store, not one job. Claimed rows are recovered by
-      // `releaseStale` on the next start.
+      // Recovery failing must not stop this tick from doing its ordinary work.
       log(
         { error: error instanceof Error ? error.message : String(error) },
-        'Gateway teardown tick failed',
+        'Could not release stale gateway teardown claims',
       );
-      return result;
     }
+
+    // Claimed one at a time rather than as a batch. A batch's last row sits
+    // `sending` for as long as every row before it takes, which would put the
+    // stale threshold at batch size × TEARDOWN_JOB_BUDGET_MS; claiming singly
+    // keeps a claim's lifetime equal to one job's, which is what makes a
+    // five-minute threshold both safe and quick.
+    for (let taken = 0; taken < batchSize; taken += 1) {
+      let job: GatewayTeardownJobRecord | undefined;
+      try {
+        [job] = await store.gatewayTeardownJobs.claimDue(now().toISOString(), 1);
+      } catch (error) {
+        // The store, not one job: stop claiming and let the next tick retry.
+        log(
+          { error: error instanceof Error ? error.message : String(error) },
+          'Gateway teardown tick failed',
+        );
+        return result;
+      }
+      if (!job) return result;
+      result.claimed += 1;
+      try {
+        await runJob(result, job);
+      } catch (error) {
+        // One job's store write failed after it was claimed. The row stays
+        // `sending` and the stale sweep above brings it back; abandoning the
+        // rest of the tick as well would strand the whole backlog behind it.
+        result.abandoned += 1;
+        log(
+          {
+            user_id: job.user_id,
+            attempts: job.attempts,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'Gateway teardown job was abandoned mid-flight; it is recovered by the stale sweep',
+        );
+      }
+    }
+    return result;
   }
 
   async function tick(): Promise<TeardownTickResult> {
@@ -234,19 +332,8 @@ export function createTeardownWorker(deps: TeardownWorkerDeps): TeardownWorker {
 
     start(): void {
       if (timer !== null) return;
-      const staleBefore = new Date(now().getTime() - TEARDOWN_STALE_AFTER_MS).toISOString();
-      void store.gatewayTeardownJobs
-        .releaseStale(staleBefore)
-        .then((released) => {
-          if (released > 0) log({ released }, 'Released stale gateway teardown claims');
-        })
-        .catch((error: unknown) => {
-          log(
-            { error: error instanceof Error ? error.message : String(error) },
-            'Could not release stale gateway teardown claims',
-          );
-        });
-
+      // No separate startup sweep: the first tick does one, and so does every
+      // tick after it.
       timer = setInterval(() => void tick(), pollIntervalMs);
       // Do not hold the event loop open just for the poller.
       timer.unref?.();

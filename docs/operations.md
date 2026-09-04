@@ -560,9 +560,24 @@ inserts an `email_outbox` row; the worker polls every 5 seconds and drains it.
 | `failed`  | Terminal. Delivery failed on attempt 5 (`OUTBOX_MAX_ATTEMPTS`); `last_error` says why. |
 
 Retries back off `30s · 2^attempts`, capped at one hour, plus up to 10% jitter.
+
 A `sending` row untouched for five minutes is assumed to belong to a crashed
-worker and is released back to `pending` on the next worker `start()` — i.e. on
-the next process boot.
+worker and is released back to `pending`. **That sweep runs at the top of every
+tick**, before anything is claimed — so recovery belongs to whichever worker is
+running, not to the next process boot. Doing it only at `start()`, as it used to
+be, recovered nothing from the ordinary case: a process that crashes and comes
+back inside the five-minute window finds its own rows too young for the one
+sweep, and nothing ever looked at them again. The same sweep is what recovers a
+row whose bookkeeping write failed after the claim, with no restart involved at
+all.
+
+Five minutes is safe because a claim's lifetime is bounded. Rows are claimed
+**one at a time** rather than as a batch — a batch's last row would otherwise
+sit `sending` for as long as every row ahead of it — and one delivery cannot run
+past about 50 seconds, because Nexus pins nodemailer's timeouts (10 s to
+connect, 10 s for the greeting, 30 s of socket inactivity) rather than taking
+its 2 min / 30 s / 10 min defaults. If you raise those, raise the threshold with
+them.
 
 ### The quiet failure mode to watch for
 
@@ -592,11 +607,16 @@ SELECT to_email, attempts, last_error, updated_at
 ```
 
 Alert on: any growth in `failed`; `pending` older than ~15 minutes; `sending`
-older than 5 minutes with no process restart in between.
+older than ~10 minutes, which is two stale-sweep intervals and therefore means
+the worker is not ticking at all.
 
 The worker logs `Outbox message delivery failed, retrying later`,
-`Outbox message failed permanently`, `Released stale outbox claims` and
-`Outbox tick failed` at `warn`.
+`Outbox message failed permanently`, `Released stale outbox claims`,
+`Outbox message was abandoned mid-flight; it is recovered by the stale sweep`,
+`Could not release stale outbox claims` and `Outbox tick failed` at `warn`.
+`Released stale outbox claims` carries a `released` count; a steady trickle of
+it means messages are being re-queued after somebody's crash, and a duplicate
+may have gone out.
 
 To re-drive a `failed` row, set it back to `pending` with `attempts = 0` and
 `next_attempt_at = NULL`. Note that a row reinstated this way keeps its
@@ -788,8 +808,10 @@ single instance by definition.
 
 ### Other multi-instance notes
 
-- **The outbox is safe to run on several instances.** The claim is an atomic
-  `pending → sending` flip, so no row is delivered twice.
+- **The outbox and the teardown poller are safe to run on several instances.**
+  The claim is an atomic `pending → sending` flip, so no row is worked twice,
+  and the stale sweep every tick runs means one instance recovers another's
+  abandoned claims without waiting for that instance to come back.
 - **Sessions live in the database**, not in memory, so any instance can serve
   any session. No sticky sessions needed for auth.
 - **The auth rate limiter is per-process** (`@fastify/rate-limit` with the
@@ -889,8 +911,10 @@ provider reports an unexplained `EDGE_ERROR`.
 
 `SIGINT`/`SIGTERM` trigger a graceful shutdown: the outbox and gateway-teardown
 pollers stop, the Edge dispatcher closes, Fastify drains, then the store closes.
-Give the container at least a few seconds of termination grace. Anything the
-teardown poller had claimed is recovered by `releaseStale` on the next boot.
+Give the container at least a few seconds of termination grace. Anything a
+poller had claimed and did not finish is picked up by the stale sweep at the top
+of some worker's next tick — this instance's after a restart, or another
+instance's straight away — five minutes after the claim.
 
 ---
 
@@ -1003,8 +1027,19 @@ There is **no terminal failure state**. Retries back off `10s · 2^attempts`,
 capped at five minutes, plus up to 10% jitter, and continue for as long as the
 account is disabled — an outbox message nobody can deliver is a lost email, but
 a credential nobody revoked is a live security hole. The only other exit is the
-account being re-enabled, which deletes the job. A `sending` row untouched for
-five minutes is released back to `pending` on the next worker `start()`.
+account being re-enabled, which deletes the job.
+
+A `sending` row untouched for five minutes is released back to `pending` at the
+top of **every** tick, exactly as in the outbox
+([§6](#6-the-email-outbox)) — not once per process boot, which left a crashed
+worker's claim stranded and the account's credentials live indefinitely. Jobs
+are claimed one at a time, and one job is five Edge round trips bounded by
+`FERRUM_ADMIN_TIMEOUT_MS` (5 s by default) plus at most a 30-second wait for the
+consumer's lease — about 55 seconds — so five minutes leaves ample headroom.
+Raising `FERRUM_ADMIN_TIMEOUT_MS` towards its 60-second ceiling pushes that
+worst case towards 5.5 minutes; raise the threshold with it. Recovery is safe to
+repeat in any case: the revocation is a clear-and-delete, and the consumer's own
+Edge lease keeps two instances from running it at the same instant.
 
 There is one row per account (`user_id` is unique), so re-disabling an account
 resets the outstanding job rather than queueing a second revocation.
@@ -1036,7 +1071,10 @@ restart is expected; a line that keeps repeating for the same `user_id` means a
 disabled account still holds working gateway credentials. The worker also logs
 `Gateway revocation retry failed; the credentials are still live`,
 `Gateway revocation for a disabled account completed`,
-`Released stale gateway teardown claims` and `Gateway teardown tick failed`.
+`Released stale gateway teardown claims`,
+`Gateway teardown job was abandoned mid-flight; it is recovered by the stale sweep`,
+`Could not release stale gateway teardown claims` and
+`Gateway teardown tick failed`.
 
 ### Re-driving one by hand
 
