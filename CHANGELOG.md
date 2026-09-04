@@ -66,11 +66,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   (`OPTIONS` is added automatically when a CORS policy exists so preflight
   still works), backend connect/read/write timeouts, and a circuit breaker
   with Edge's defaults.
-- **Routes-only OpenAPI enforcement** (`spec_enforcement: "routes"`): an Edge
-  `openapi_validator` generated from the current document rejects paths and
-  methods it does not declare, and is regenerated on every spec update.
-  Request and response bodies are not validated; `docs_only` stays the
-  default.
+- **Routes-only OpenAPI enforcement** (`spec_enforcement: "routes"`): the
+  API's proxy is created through Edge's API-spec importer (`POST /api-specs`)
+  from the current document, so the gateway's own `openapi_validator`
+  rejects paths and methods the document does not declare; every spec update
+  goes through `PUT /api-specs/{id}` and regenerates it. Request and response
+  bodies are not validated; `docs_only` (a hand-made proxy) stays the
+  default, and switching levels rebuilds the proxy under the same id with a
+  brief interruption. Verified against a live gateway — Edge refuses a
+  directly attached validator on a proxy it does not own, which the mock now
+  models too.
 - `FERRUM_RATE_LIMIT_SYNC_MODE=redis` (+ `FERRUM_RATE_LIMIT_REDIS_URL`,
   `FERRUM_RATE_LIMIT_REDIS_TLS`) stamps Redis counter sync onto every rate
   limit Nexus writes; the operations guide warns that quotas are otherwise
