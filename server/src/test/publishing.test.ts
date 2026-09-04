@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
 
+import type { LightMyRequestResponse } from 'fastify';
+
 import {
   aclGroupForApi,
   type ApiErrorBody,
@@ -3132,5 +3134,249 @@ describe('publishing with Redis-synced rate limits', () => {
       redis_url: 'redis://cache.example.com:6379/2',
       redis_tls: true,
     });
+  });
+});
+
+/* ── Abuse controls ───────────────────────────────────────────────────────
+ *
+ * GHSA-g32g-g9q4-q5wr: registration may be open, and every publishing mutation
+ * cost several Ferrum Edge round trips and up to `MAX_SPEC_BYTES` of storage
+ * with neither a per-account ceiling nor a request limit. Two controls, tested
+ * separately because they bound different things: the quota bounds the *total*
+ * an account may hold, the limiter bounds the *rate* at which it may ask.
+ */
+
+describe('per-owner API quota', () => {
+  let harness: TestApp;
+  let provider: TestSession;
+  let admin: TestSession;
+
+  before(async () => {
+    // A deliberately tiny ceiling: the boundary is the whole point, and two is
+    // the smallest number that distinguishes "at the limit" from "the first
+    // one".
+    harness = await buildTestApp({ env: { NEXUS_MAX_APIS_PER_OWNER: '2' } });
+    admin = await harness.registerUser({ email: 'quota-founder@example.test' });
+    provider = await harness.registerUser({
+      email: 'quota-provider@example.test',
+      role: 'provider',
+    });
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  /** Publish one API for `session` and return the raw response. */
+  async function publish(session: TestSession, slug: string): Promise<LightMyRequestResponse> {
+    return harness.authed(session, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: {
+        name: `API ${slug}`,
+        slug,
+        version: '1.0.0',
+        spec: SAMPLE_SPEC_YAML,
+        auth_plugin: 'key_auth',
+        requestable: true,
+        visibility: 'public',
+      },
+    });
+  }
+
+  it('refuses the publish that would take an account past the limit', async () => {
+    assert.equal((await publish(provider, 'quota-one')).statusCode, 201);
+    assert.equal((await publish(provider, 'quota-two')).statusCode, 201);
+
+    const proxiesBefore = harness.edge.proxies.size;
+    const refused = await publish(provider, 'quota-three');
+    assert.equal(refused.statusCode, 429, refused.body);
+
+    const body = JSON.parse(refused.body) as ApiErrorBody;
+    assert.equal(body.error.code, 'QUOTA_EXCEEDED');
+    assert.deepEqual(body.error.details, {
+      limit: 2,
+      current: 2,
+      setting: 'NEXUS_MAX_APIS_PER_OWNER',
+    });
+    // A provider has to be able to act on it without reading the source.
+    assert.match(body.error.message, /Delete an API|administrator/);
+
+    // Refused before the first gateway write, so there is nothing to roll back
+    // and nothing half-created — not a proxy, not a plugin, not a slug.
+    assert.equal(harness.edge.proxies.size, proxiesBefore);
+    assert.equal(harness.edge.proxyByName('nexus-quota-three'), undefined);
+    assert.equal(harness.edge.proxyServing('/nexus/quota-three'), undefined);
+    assert.equal(await harness.store.apis.findBySlug('quota-three'), null);
+  });
+
+  it('frees a slot when an API is deleted', async () => {
+    const listed = await harness.authed(provider, { method: 'GET', url: '/api/apis?mine=true' });
+    const mine = listed.json<ListApisResponse>().items;
+    assert.equal(mine.length, 2);
+
+    const removed = await harness.authed(provider, {
+      method: 'DELETE',
+      url: `/api/apis/${mine[0]?.id}`,
+    });
+    assert.equal(removed.statusCode, 200, removed.body);
+
+    const retry = await publish(provider, 'quota-four');
+    assert.equal(retry.statusCode, 201, retry.body);
+  });
+
+  it('counts each owner separately, and does not exempt an admin', async () => {
+    // The other account starts from zero even though the portal is at its
+    // per-owner ceiling twice over.
+    assert.equal((await publish(admin, 'quota-admin-one')).statusCode, 201);
+    assert.equal((await publish(admin, 'quota-admin-two')).statusCode, 201);
+    // …and then hits the same wall. An exemption is a bypass, and the case
+    // worth defending against is an admin account that has been taken over.
+    const refused = await publish(admin, 'quota-admin-three');
+    assert.equal(refused.statusCode, 429, refused.body);
+    assert.equal(errorCode(refused.body), 'QUOTA_EXCEEDED');
+  });
+
+  it('publishes without a ceiling when the limit is zero', async () => {
+    const unlimited = await buildTestApp({ env: { NEXUS_MAX_APIS_PER_OWNER: '0' } });
+    try {
+      await unlimited.registerUser({ email: 'unlimited-founder@example.test' });
+      const session = await unlimited.registerUser({
+        email: 'unlimited-provider@example.test',
+        role: 'provider',
+      });
+      for (const slug of ['zero-one', 'zero-two', 'zero-three']) {
+        const response = await unlimited.authed(session, {
+          method: 'POST',
+          url: '/api/apis',
+          payload: {
+            name: `API ${slug}`,
+            slug,
+            version: '1.0.0',
+            spec: SAMPLE_SPEC_YAML,
+            auth_plugin: 'key_auth',
+            requestable: false,
+            visibility: 'public',
+          },
+        });
+        assert.equal(response.statusCode, 201, response.body);
+      }
+      assert.equal(await unlimited.store.apis.count({ owner_user_id: session.user.id }), 3);
+    } finally {
+      await unlimited.close();
+    }
+  });
+
+  it('does not let a burst from one account oversubscribe the limit', async () => {
+    const burst = await buildTestApp({ env: { NEXUS_MAX_APIS_PER_OWNER: '2' } });
+    try {
+      await burst.registerUser({ email: 'burst-founder@example.test' });
+      const session = await burst.registerUser({
+        email: 'burst-provider@example.test',
+        role: 'provider',
+      });
+      // Six at once. Without the per-owner lock every one of them reads a count
+      // of zero before any of them writes a row, and all six succeed.
+      const responses = await Promise.all(
+        ['a', 'b', 'c', 'd', 'e', 'f'].map((slug) =>
+          burst.authed(session, {
+            method: 'POST',
+            url: '/api/apis',
+            payload: {
+              name: `Burst ${slug}`,
+              slug: `burst-${slug}`,
+              version: '1.0.0',
+              spec: SAMPLE_SPEC_YAML,
+              auth_plugin: 'key_auth',
+              requestable: false,
+              visibility: 'public',
+            },
+          }),
+        ),
+      );
+      assert.equal(responses.filter((response) => response.statusCode === 201).length, 2);
+      for (const response of responses.filter((entry) => entry.statusCode !== 201)) {
+        assert.equal(response.statusCode, 429, response.body);
+        assert.equal(errorCode(response.body), 'QUOTA_EXCEEDED');
+      }
+      assert.equal(await burst.store.apis.count({ owner_user_id: session.user.id }), 2);
+      // And the gateway is not carrying proxies for the four that lost.
+      assert.equal(burst.edge.proxies.size, 2);
+    } finally {
+      await burst.close();
+    }
+  });
+});
+
+describe('publishing rate limit', () => {
+  let harness: TestApp;
+  let first: TestSession;
+  let second: TestSession;
+
+  before(async () => {
+    // The limiter is forced off under `NEXUS_ENV=test`, so this app runs as a
+    // development one with it explicitly on.
+    harness = await buildTestApp({
+      env: { NEXUS_ENV: 'development', NEXUS_RATE_LIMIT_ENABLED: 'true' },
+      deps: { startOutboxWorker: false },
+    });
+    await harness.registerUser({ email: 'limit-founder@example.test' });
+    first = await harness.registerUser({ email: 'limit-one@example.test', role: 'provider' });
+    second = await harness.registerUser({ email: 'limit-two@example.test', role: 'provider' });
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  /**
+   * A cheap mutating request on the limited scope.
+   *
+   * A `PATCH` of an API that does not exist is a `404` — it never reaches the
+   * gateway or the store's write path — which is exactly what a test of the
+   * *limiter* wants: the limiter runs before the handler, so the status
+   * distinguishes "counted and allowed" from "counted and refused" without
+   * publishing thirty APIs to get there.
+   */
+  async function patchMissing(session: TestSession): Promise<LightMyRequestResponse> {
+    return harness.authed(session, {
+      method: 'PATCH',
+      url: '/api/apis/00000000-0000-4000-8000-000000000000',
+      payload: { description: 'noop' },
+    });
+  }
+
+  it('refuses the 31st mutation in a minute with RATE_LIMITED', async () => {
+    const statuses: number[] = [];
+    for (let attempt = 0; attempt < 34; attempt += 1) {
+      statuses.push((await patchMissing(first)).statusCode);
+    }
+    assert.equal(
+      statuses.filter((status) => status === 404).length,
+      30,
+      `the limit is 30/minute: ${statuses.join(',')}`,
+    );
+    const refused = await patchMissing(first);
+    assert.equal(refused.statusCode, 429);
+    assert.equal(errorCode(refused.body), 'RATE_LIMITED');
+  });
+
+  it('gives each account its own bucket rather than keying on the address', async () => {
+    // `first` is already over its limit from the test above, and both accounts
+    // present the same 127.0.0.1 to `app.inject`. An IP-keyed limiter would
+    // refuse this; a user-keyed one lets it through — which also proves the
+    // session hook has run by the time the limiter reads `request.currentUser`.
+    assert.equal((await patchMissing(first)).statusCode, 429);
+    const other = await patchMissing(second);
+    assert.equal(other.statusCode, 404, other.body);
+  });
+
+  it('leaves the reads alone', async () => {
+    // The provider's own list is cheap and the SPA polls it; only the mutations
+    // carry the limit.
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const response = await harness.authed(first, { method: 'GET', url: '/api/apis' });
+      assert.equal(response.statusCode, 200, response.body);
+    }
   });
 });

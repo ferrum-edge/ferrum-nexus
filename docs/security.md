@@ -474,6 +474,46 @@ proxy if you run more than one. The limiter keys on `request.ip`, which honours
 client rotate the limiter's key once per request _and_ forge the IP recorded in
 the audit log, so the allowlist/hop-count form is the only one accepted.
 
+### Publishing is bounded per account
+
+Provider registration is open by default, and one `POST /api/apis` stores an
+OpenAPI document of up to `MAX_SPEC_BYTES`, allocates a gateway proxy, creates
+and associates several plugin configs, reserves a slug and a listen path, and
+writes audit rows. `POST /:id/test-consumer` additionally creates a gateway
+consumer and a credential. None of it was bounded: a single self-registered
+provider could fill the database, exhaust Edge's proxy and plugin capacity, and
+saturate the Admin API simply by looping (GHSA-g32g-g9q4-q5wr).
+
+Two controls, bounding different things:
+
+- **`NEXUS_MAX_APIS_PER_OWNER`** (default `50`, `0` = unlimited) caps how many
+  APIs one account may own **at a time**. A publish past it is refused with
+  `429 QUOTA_EXCEEDED` before the first gateway write, carrying
+  `details: { limit, current, setting }`. It bounds aggregate spec storage per
+  account at `MAX_SPEC_BYTES × limit`. Deleting an API frees a slot; retiring
+  one does not, because a retired API keeps its gateway objects. Admins are not
+  exempt — an exemption is a bypass, and the case worth defending against is an
+  admin account that has been taken over.
+- **A 30/minute per-account rate limit** on the mutating `/api/apis/*` routes
+  (`POST /`, `PUT /:id/spec`, `PATCH /:id`, `DELETE /:id`,
+  `PUT|DELETE /:id/plugins/:name`, `POST /:id/test-consumer`), answering
+  `429 RATE_LIMITED`, installed when `NEXUS_RATE_LIMIT_ENABLED=true`. Keyed on
+  the account rather than the address for the same reason the auth limiter is
+  keyed on the address rather than a header: the key has to be the thing the
+  attacker cannot cheaply rotate. Reads are unlimited apart from
+  `GET /:id/usage`, which scrapes the gateway and keeps its own limit.
+
+The quota's check-and-create runs under an in-process per-owner lock, so a
+concurrent burst from one account cannot oversubscribe it. Across N instances
+the overshoot is bounded by N − 1 rather than by the burst size; the limiter's
+store is likewise per process, so the effective allowance is N × 30/min. Both
+are documented in [`operations.md`](operations.md#abuse-controls), and both are
+ceilings rather than billing boundaries.
+
+Neither control replaces the registration policy. A portal that does not want
+strangers allocating gateway resources at all should take `provider` out of
+`allowed_roles` and promote vetted accounts, or close registration entirely.
+
 ### Consumer quotas are per gateway process
 
 A per-API rate limit is enforced by Edge's `rate_limiting` plugin, and its

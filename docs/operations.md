@@ -38,7 +38,8 @@ the process prints every offending variable and exits non-zero. The repo-root
 | `NEXUS_COOKIE_SECURE`           | `true` unless `NEXUS_ENV=development`        | Marks `nexus_session` and `nexus_csrf` `Secure` and turns on HSTS. Set `false` only to serve the portal over plaintext `http://`.                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `NEXUS_LOG_LEVEL`               | `info`                                       | One of `fatal`, `error`, `warn`, `info`, `debug`, `trace`, `silent`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `NEXUS_SESSION_TTL`             | `43200` (12 h)                               | Session idle lifetime in seconds; 60 – 2 592 000. Sliding.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `NEXUS_RATE_LIMIT_ENABLED`      | `true`                                       | Installs the 20 req/min limiter on `/api/auth/*`. Forced off when `NEXUS_ENV=test`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `NEXUS_RATE_LIMIT_ENABLED`      | `true`                                       | Installs the 20 req/min limiter on `/api/auth/*` (per IP) and the 30 req/min limiter on the mutating `/api/apis/*` routes (per account). Forced off when `NEXUS_ENV=test`. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                        |
+| `NEXUS_MAX_APIS_PER_OWNER`      | `50`                                         | How many APIs one account may own at a time; `0` disables the ceiling. A publish past it is refused with `429 QUOTA_EXCEEDED` before any gateway write. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                                           |
 | `NEXUS_ALLOW_PRIVATE_UPSTREAMS` | `false`                                      | Whether providers may publish an API whose upstream is a loopback, RFC 1918 / CGNAT / link-local address or a `.local` / `.internal` / `.localhost` / `.home.arpa` name. A proxy is an egress path from the gateway's network, so the default refuses them with `400 SPEC_INVALID` (`details.reason = private_upstream`). Set `true` only for a portal that fronts internal services — and for local development, where the upstream is `host.docker.internal`. See [`security.md`](security.md#1-threat-model).                                         |
 | `NEXUS_WEB_DIST`                | _(unset)_                                    | Directory of the built SPA to serve. When unset, the server looks for `../../web/dist` relative to itself and then `./web/dist` under the CWD; if neither has an `index.html`, static serving is disabled and only the API is exposed.                                                                                                                                                                                                                                                                                                                   |
 
@@ -136,6 +137,55 @@ settings **override** these at runtime (see [key rotation](#7-rotating-nexus_sec
 | `NEXUS_SMTP_USER`     | _(unset)_                             |
 | `NEXUS_SMTP_PASSWORD` | _(unset)_                             |
 | `NEXUS_EMAIL_FROM`    | `Ferrum Nexus <no-reply@example.com>` |
+
+### Abuse controls
+
+Two settings bound what one semi-trusted account can consume. Registration may
+be open, and a `provider` who signs themselves up can allocate gateway proxies,
+plugin configs, consumers, credentials, listen paths and stored documents — so
+neither is optional on an internet-facing portal.
+
+**A per-account API quota** — `NEXUS_MAX_APIS_PER_OWNER`, default `50`, `0` for
+unlimited. A publish is refused with `429 QUOTA_EXCEEDED` when the account
+already owns that many, **before the first Ferrum Edge write**, so a refusal
+costs nothing and leaves nothing to roll back. The body carries
+`details: { limit, current, setting }` so a provider can see what to remove and
+support can see what to raise.
+
+- It counts what the account **currently owns**. Deleting an API frees its slot
+  at once. _Retiring_ one does not: a retired API keeps its proxy, its plugins
+  and its grants on the gateway, which is the point of the retired state.
+- It applies to administrators too. Anyone who can hit the limit can also raise
+  it or delete something; an exemption would only help a compromised admin
+  account.
+- It is what bounds **aggregate spec storage**: each document is capped at
+  `MAX_SPEC_BYTES` (2 MiB), so one account's stored specs cannot exceed
+  `2 MiB × NEXUS_MAX_APIS_PER_OWNER` — 100 MiB at the default. Multiply by your
+  expected provider count when sizing the database. Revision history is on top
+  of that: every spec upload keeps the previous revision.
+- The check and the row creation run under an **in-process** per-owner lock, so
+  a burst of concurrent publishes from one account cannot each read the count
+  before any of them writes. Across N Nexus instances the lock does not span
+  processes, so a simultaneous burst can overshoot by at most **N − 1** APIs.
+  That is bounded and self-correcting — the next publish on each instance sees
+  the true count — and is the reason the quota is a ceiling rather than a
+  billing boundary.
+
+**A per-account rate limit** on the mutating publishing routes — `POST /`,
+`PUT /:id/spec`, `PATCH /:id`, `DELETE /:id`, `PUT|DELETE /:id/plugins/:name`
+and `POST /:id/test-consumer` under `/api/apis` — at **30 requests per minute**,
+answering `429 RATE_LIMITED`. Installed only when
+`NEXUS_RATE_LIMIT_ENABLED=true`.
+
+- Keyed on the **authenticated account**, falling back to `request.ip` for an
+  anonymous request. An IP bucket would put a whole office behind one NAT into
+  one allowance while letting a single account multiply its own by rotating
+  source addresses.
+- Reads are not limited, except `GET /:id/usage`, which keeps its own 30/min
+  limit because it scrapes the gateway.
+- The store is in-memory and therefore **per process**, exactly like the
+  `/api/auth/*` limiter: with N instances the effective allowance is N × 30/min.
+  Enforce the real limit at the proxy if that matters.
 
 ### Test-only
 

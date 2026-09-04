@@ -81,6 +81,18 @@ export function conflict(message: string, details?: unknown): NexusError {
   return new NexusError('CONFLICT', message, details);
 }
 
+/**
+ * 429 — a configured per-account allowance is already fully used.
+ *
+ * `details` names the setting, so the message can tell a provider what to do
+ * and an operator which variable to raise. Not `CONFLICT`: the request is
+ * well-formed and would succeed for a different account, or for this one after
+ * it releases something.
+ */
+export function quotaExceeded(message: string, details?: unknown): NexusError {
+  return new NexusError('QUOTA_EXCEEDED', message, details);
+}
+
 /** 400 — CAPTCHA token missing, expired or rejected by the provider. */
 export function captchaFailed(message = 'CAPTCHA verification failed'): NexusError {
   return new NexusError('CAPTCHA_FAILED', message);

@@ -197,7 +197,14 @@ import type {
   EdgeProxy,
   EdgeProxyWrite,
 } from '../ferrum-admin/types.js';
-import { conflict, forbidden, notFound, specInvalid, validationFailed } from '../lib/errors.js';
+import {
+  conflict,
+  forbidden,
+  notFound,
+  quotaExceeded,
+  specInvalid,
+  validationFailed,
+} from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
 import { createEdgePluginBinder } from './edge-plugins.js';
@@ -645,6 +652,41 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     return slug;
   }
 
+  /**
+   * Refuse a publish that would take an account past
+   * `NEXUS_MAX_APIS_PER_OWNER`.
+   *
+   * Registration may be open, so a `provider` account is only semi-trusted, and
+   * one publish is not cheap: a stored document of up to `MAX_SPEC_BYTES`, an
+   * Edge proxy, several plugin configs, a slug, a listen path and audit rows.
+   * Unbounded, one account could exhaust the gateway's capacity and the
+   * database's disk (GHSA-g32g-g9q4-q5wr); with the ceiling, aggregate spec
+   * storage per account is bounded by `MAX_SPEC_BYTES × limit`.
+   *
+   * Counts the account's **current** rows, so deleting an API frees its slot
+   * immediately. Retiring one does not: a retired API still holds its proxy,
+   * its plugins and its grants on the gateway, which is the whole point of the
+   * retired state, so it still occupies a slot.
+   *
+   * Applies to admins too. An admin can raise the limit or remove an API, and a
+   * rule with an exemption is a rule with a bypass — the interesting case is an
+   * admin account that has been taken over, not one that is behaving.
+   *
+   * @throws NexusError `QUOTA_EXCEEDED` (429) naming the limit, the current
+   * count and the variable an operator would change.
+   */
+  async function assertOwnerHasApiRoom(ownerId: Uuid): Promise<void> {
+    const limit = config.maxApisPerOwner;
+    if (limit <= 0) return;
+    const current = await store.apis.count({ owner_user_id: ownerId });
+    if (current < limit) return;
+    throw quotaExceeded(
+      `This account already owns ${current} of a maximum ${limit} APIs. ` +
+        'Delete an API you no longer publish, or ask an administrator to raise the limit.',
+      { limit, current, setting: 'NEXUS_MAX_APIS_PER_OWNER' },
+    );
+  }
+
   function specSummary(record: ApiSpecRecord): ApiSpecSummary {
     const { raw_spec: _raw, ...summary } = record;
     return summary;
@@ -749,139 +791,157 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         allowed_ws_origins: wsOriginsFor(cors),
       };
 
-      const created: { proxyId?: string; specId?: string; pluginIds: string[] } = {
-        pluginIds: [],
-      };
-      let persisted: { api: ApiRecord; spec: ApiSpecRecord };
-      try {
-        // In `routes` mode the proxy is created *by the spec importer* — Edge
-        // will not accept the validator any other way. The id is supplied
-        // rather than left to the gateway so `ferrum_proxy_id` stays a plain
-        // proxy id whatever the mode, and so the rollback below has something
-        // to delete even if the response never arrives.
-        if (specEnforcement === 'routes') {
-          const ref = await createSpecOwnedProxy(
+      // Everything from the quota check to the store transaction runs under one
+      // per-owner lock. The quota is a read-then-write — count the rows, then
+      // create one — so two concurrent publishes from the same account would
+      // otherwise both see room and both take it. Serialising them is enough
+      // *on one instance*; across N instances the overshoot is bounded by N-1
+      // rather than by the size of the burst, which is documented rather than
+      // solved here because solving it needs a counter row the store does not
+      // have and a lock the four adapters do not share.
+      const persisted = await edge.serializePerKey(`publish-owner:${owner.id}`, async () => {
+        // Before the first gateway write, so a refused publish costs nothing on
+        // Edge and leaves nothing to roll back.
+        await assertOwnerHasApiRoom(owner.id);
+
+        const created: { proxyId?: string; specId?: string; pluginIds: string[] } = {
+          pluginIds: [],
+        };
+        try {
+          // In `routes` mode the proxy is created *by the spec importer* — Edge
+          // will not accept the validator any other way. The id is supplied
+          // rather than left to the gateway so `ferrum_proxy_id` stays a plain
+          // proxy id whatever the mode, and so the rollback below has something
+          // to delete even if the response never arrives.
+          if (specEnforcement === 'routes') {
+            const ref = await createSpecOwnedProxy(
+              parsed.document,
+              stagingPath,
+              { id: newId(), ...proxyBody },
+              owner.id,
+            );
+            created.proxyId = ref.id;
+            // Kept so the cutover below does not have to look the spec up again
+            // — one fewer round trip in the window the staging path exists.
+            created.specId = ref.specId;
+          } else {
+            created.proxyId = (await edge.proxies.create(proxyBody, owner.id)).id;
+          }
+          const proxy = { id: created.proxyId };
+
+          const auth = await attach(
+            proxy.id,
+            input.auth_plugin,
+            authPluginConfig(input.auth_plugin),
+            owner.id,
+          );
+          created.pluginIds.push(auth.id);
+
+          if (input.requestable) {
+            const acl = await attach(
+              proxy.id,
+              ACCESS_CONTROL_PLUGIN,
+              accessControlConfig(apiId),
+              owner.id,
+            );
+            created.pluginIds.push(acl.id);
+          }
+          if (input.rate_limit) {
+            const limiter = await attach(
+              proxy.id,
+              RATE_LIMIT_PLUGIN,
+              rateLimitConfig(input.rate_limit, config.edge.rateLimit),
+              owner.id,
+            );
+            created.pluginIds.push(limiter.id);
+          }
+          if (cors) {
+            const corsPlugin = await attach(
+              proxy.id,
+              CORS_PLUGIN,
+              corsPluginConfig(cors),
+              owner.id,
+            );
+            created.pluginIds.push(corsPlugin.id);
+          }
+
+          // None of the above is live yet. A proxy-scoped plugin config only runs
+          // once the proxy's own `plugins[]` names it, so this single write is
+          // what turns the proxy from open, ungated and unlimited into what the
+          // portal says it is. Everything so far — including this — happened on
+          // the unguessable staging path; the deterministic one is still a 404.
+          await associate(proxy.id, created.pluginIds, owner.id);
+
+          // …and only now does the API appear where clients will look for it.
+          // The last gateway write of the publish, so the final listen path is
+          // never served by a proxy that is missing a plugin. A failure here
+          // rolls back like any other step: the staging proxy is deleted and the
+          // final path was never taken.
+          await cutOverToListenPath(
+            proxy.id,
+            specEnforcement,
+            listenPath,
             parsed.document,
-            stagingPath,
-            { id: newId(), ...proxyBody },
+            created.specId ?? null,
             owner.id,
           );
-          created.proxyId = ref.id;
-          // Kept so the cutover below does not have to look the spec up again
-          // — one fewer round trip in the window the staging path exists.
-          created.specId = ref.specId;
-        } else {
-          created.proxyId = (await edge.proxies.create(proxyBody, owner.id)).id;
-        }
-        const proxy = { id: created.proxyId };
 
-        const auth = await attach(
-          proxy.id,
-          input.auth_plugin,
-          authPluginConfig(input.auth_plugin),
-          owner.id,
-        );
-        created.pluginIds.push(auth.id);
-
-        if (input.requestable) {
-          const acl = await attach(
-            proxy.id,
-            ACCESS_CONTROL_PLUGIN,
-            accessControlConfig(apiId),
-            owner.id,
-          );
-          created.pluginIds.push(acl.id);
-        }
-        if (input.rate_limit) {
-          const limiter = await attach(
-            proxy.id,
-            RATE_LIMIT_PLUGIN,
-            rateLimitConfig(input.rate_limit, config.edge.rateLimit),
-            owner.id,
-          );
-          created.pluginIds.push(limiter.id);
-        }
-        if (cors) {
-          const corsPlugin = await attach(proxy.id, CORS_PLUGIN, corsPluginConfig(cors), owner.id);
-          created.pluginIds.push(corsPlugin.id);
-        }
-
-        // None of the above is live yet. A proxy-scoped plugin config only runs
-        // once the proxy's own `plugins[]` names it, so this single write is
-        // what turns the proxy from open, ungated and unlimited into what the
-        // portal says it is. Everything so far — including this — happened on
-        // the unguessable staging path; the deterministic one is still a 404.
-        await associate(proxy.id, created.pluginIds, owner.id);
-
-        // …and only now does the API appear where clients will look for it.
-        // The last gateway write of the publish, so the final listen path is
-        // never served by a proxy that is missing a plugin. A failure here
-        // rolls back like any other step: the staging proxy is deleted and the
-        // final path was never taken.
-        await cutOverToListenPath(
-          proxy.id,
-          specEnforcement,
-          listenPath,
-          parsed.document,
-          created.specId ?? null,
-          owner.id,
-        );
-
-        // The Nexus rows are written *inside* the compensated block: a store
-        // failure here would otherwise leave a live, untracked proxy on the
-        // gateway that nothing in the portal knows how to reach or delete. One
-        // transaction so the API and its first spec revision commit together.
-        persisted = await store.transaction(async (tx) => {
-          const row = await tx.apis.create({
-            id: apiId,
-            name,
-            slug,
-            description: input.description ?? parsed.description,
-            owner_user_id: owner.id,
-            ferrum_proxy_id: created.proxyId ?? null,
-            upstream_url: formatUpstreamUrl(upstream),
-            namespace,
-            version,
-            spec_format: 'openapi',
-            requestable: input.requestable,
-            auth_plugin: input.auth_plugin,
-            rate_limit: input.rate_limit ?? null,
-            cors,
-            // The provider's own list, without the CORS-implied `OPTIONS`.
-            allowed_methods: methods,
-            timeouts,
-            circuit_breaker: circuitBreaker,
-            spec_enforcement: specEnforcement,
-            status: 'published',
-            visibility: input.visibility,
+          // The Nexus rows are written *inside* the compensated block: a store
+          // failure here would otherwise leave a live, untracked proxy on the
+          // gateway that nothing in the portal knows how to reach or delete. One
+          // transaction so the API and its first spec revision commit together.
+          return await store.transaction(async (tx) => {
+            const row = await tx.apis.create({
+              id: apiId,
+              name,
+              slug,
+              description: input.description ?? parsed.description,
+              owner_user_id: owner.id,
+              ferrum_proxy_id: created.proxyId ?? null,
+              upstream_url: formatUpstreamUrl(upstream),
+              namespace,
+              version,
+              spec_format: 'openapi',
+              requestable: input.requestable,
+              auth_plugin: input.auth_plugin,
+              rate_limit: input.rate_limit ?? null,
+              cors,
+              // The provider's own list, without the CORS-implied `OPTIONS`.
+              allowed_methods: methods,
+              timeouts,
+              circuit_breaker: circuitBreaker,
+              spec_enforcement: specEnforcement,
+              status: 'published',
+              visibility: input.visibility,
+            });
+            const revision = await tx.apiSpecs.create({
+              api_id: row.id,
+              version,
+              raw_spec: parsed.raw,
+              parsed_title: parsed.title,
+              parsed_version: parsed.version,
+              is_current: true,
+            });
+            return { api: row, spec: revision };
           });
-          const revision = await tx.apiSpecs.create({
-            api_id: row.id,
-            version,
-            raw_spec: parsed.raw,
-            parsed_title: parsed.title,
-            parsed_version: parsed.version,
-            is_current: true,
-          });
-          return { api: row, spec: revision };
-        });
-      } catch (error) {
-        // Undo the Edge side so the whole publish reads as if it never
-        // happened. Deleting the proxy cascades its association rows and its
-        // proxy-scoped plugin configs — and, on a `routes` API, the `api_spec`
-        // that owns it along with the validator it generated — so a half-written
-        // association list needs no separate rollback; the explicit config
-        // deletes make the intent obvious and survive a partial cascade. The
-        // store transaction has already rolled itself back, so nothing is left
-        // on the Nexus side either.
-        for (const pluginId of created.pluginIds) {
-          await edge.pluginConfigs.delete(pluginId, owner.id).catch(() => undefined);
+        } catch (error) {
+          // Undo the Edge side so the whole publish reads as if it never
+          // happened. Deleting the proxy cascades its association rows and its
+          // proxy-scoped plugin configs — and, on a `routes` API, the `api_spec`
+          // that owns it along with the validator it generated — so a half-written
+          // association list needs no separate rollback; the explicit config
+          // deletes make the intent obvious and survive a partial cascade. The
+          // store transaction has already rolled itself back, so nothing is left
+          // on the Nexus side either.
+          for (const pluginId of created.pluginIds) {
+            await edge.pluginConfigs.delete(pluginId, owner.id).catch(() => undefined);
+          }
+          if (created.proxyId) {
+            await edge.proxies.delete(created.proxyId, owner.id).catch(() => undefined);
+          }
+          throw error;
         }
-        if (created.proxyId) {
-          await edge.proxies.delete(created.proxyId, owner.id).catch(() => undefined);
-        }
-        throw error;
-      }
+      });
 
       const { api, spec } = persisted;
 

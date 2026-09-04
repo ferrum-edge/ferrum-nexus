@@ -122,6 +122,7 @@ validation issues, a conflicting slug, an Edge status).
 | `CSRF_MISMATCH`      | 403  | `X-Nexus-CSRF` missing or not matching the cookie/session.                                                                                                                                                                                                                                                                                                                                                                    |
 | `CAPTCHA_FAILED`     | 400  | CAPTCHA token missing, expired, or rejected by the vendor.                                                                                                                                                                                                                                                                                                                                                                    |
 | `RATE_LIMITED`       | 429  | Too many requests from this identity/IP.                                                                                                                                                                                                                                                                                                                                                                                      |
+| `QUOTA_EXCEEDED`     | 429  | A configured per-account allowance is already fully used. `details` is `{ limit, current, setting }`, naming the environment variable an operator would raise. Distinct from `RATE_LIMITED`, which is about request frequency and clears by itself: a quota clears only when the account releases something or the limit is raised.                                                                                           |
 | `EMAIL_NOT_VERIFIED` | 403  | Account exists but its email is unverified and verification is required.                                                                                                                                                                                                                                                                                                                                                      |
 | `USER_DISABLED`      | 403  | Account has been disabled by an admin.                                                                                                                                                                                                                                                                                                                                                                                        |
 | `LAST_SUPER_ADMIN`   | 409  | Refused: would remove, demote or disable the last active `super_admin`.                                                                                                                                                                                                                                                                                                                                                       |
@@ -898,6 +899,29 @@ Spec documents arrive as a JSON string field, not a multipart upload — the SPA
 reads the file client-side, which keeps the CSRF story and the error shape
 identical to every other route.
 
+**Two `429`s apply to the mutating routes here** — `POST /`, `PUT /:id/spec`,
+`PATCH /:id`, `DELETE /:id`, `PUT|DELETE /:id/plugins/:name` and
+`POST /:id/test-consumer`:
+
+- `429 RATE_LIMITED` — more than **30 of them per minute** from one account
+  (falling back to the IP for an anonymous caller). Installed when
+  `NEXUS_RATE_LIMIT_ENABLED=true`, which is the default outside
+  `NEXUS_ENV=test`. Reads are not limited, apart from `GET /:id/usage`, which
+  keeps its own 30/min limit because it scrapes the gateway.
+- `429 QUOTA_EXCEEDED` — on `POST /` only, when the account already owns
+  `NEXUS_MAX_APIS_PER_OWNER` APIs (default 50; `0` disables the ceiling). The
+  body carries `details: { limit, current, setting }`. The check runs before the
+  first gateway write, so a refused publish creates nothing. Deleting an API
+  frees a slot immediately; retiring one does not, because a retired API keeps
+  its proxy and plugins on the gateway.
+
+**A new proxy is never briefly open.** Every proxy is created on an unguessable
+staging listen path, gets its auth, ACL, rate-limit and CORS plugins attached
+and associated there, and is moved to `listen_path` as the last gateway write of
+the request. Until then `listen_path` answers `404` — never an unauthenticated
+`200`. The same is true while `spec_enforcement` is being switched, which
+rebuilds the proxy.
+
 Several fields of the returned `Api` object describe the gateway side of a
 publication. `listen_path` and `invoke_url` are **derived, not stored**: they
 are recomputed on every read from the namespace, the slug and the operator's
@@ -970,9 +994,14 @@ Errors: `400 SPEC_INVALID` (unparseable, Swagger 2.0, missing
 `openapi`/`info.title`/`info.version`/`paths`, oversized, no upstream
 determinable, or — unless `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` — an upstream
 that is a loopback, private, link-local or `.internal`/`.local` destination,
-reported with `details.reason = "private_upstream"`), `409 CONFLICT` (slug taken), `502 EDGE_ERROR` /
-`502 EDGE_UNAVAILABLE`. A failed Edge step is rolled back — the plugin configs
-and proxy are deleted — and nothing is written to the Nexus store.
+reported with `details.reason = "private_upstream"`), `409 CONFLICT` (slug taken),
+`429 QUOTA_EXCEEDED` (the account already owns `NEXUS_MAX_APIS_PER_OWNER` APIs;
+`details` is `{ limit, current, setting }`), `429 RATE_LIMITED`, `502 EDGE_ERROR` /
+`502 EDGE_UNAVAILABLE`. The quota is checked before the first gateway call. A
+failed Edge step is rolled back — the plugin configs and proxy are deleted — and
+nothing is written to the Nexus store; because the proxy is still on its staging
+path when anything before the final cutover fails, `listen_path` was never
+served at all.
 
 ```bash
 SPEC=$(jq -Rs . < billing-openapi.yaml)

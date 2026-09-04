@@ -42,6 +42,17 @@ export type NodeEnv = 'development' | 'test' | 'production';
  */
 export type TrustedProxies = false | number | string[];
 
+/**
+ * Default ceiling on APIs owned by one account (`NEXUS_MAX_APIS_PER_OWNER`).
+ *
+ * High enough that no honest provider meets it — a team publishing fifty
+ * distinct APIs from one portal account is already unusual — and low enough
+ * that a scripted account cannot exhaust the gateway or the database before an
+ * operator notices. `0` turns the ceiling off for a closed deployment where
+ * every provider is vetted.
+ */
+export const DEFAULT_MAX_APIS_PER_OWNER = 50;
+
 /** Aliases `proxy-addr` understands in place of a literal CIDR. */
 const PROXY_KEYWORDS = ['loopback', 'linklocal', 'uniquelocal'] as const;
 
@@ -157,8 +168,20 @@ export interface NexusConfig {
   secretKey: string;
   /** Session idle lifetime in seconds (sliding). */
   sessionTtlSeconds: number;
-  /** Whether the `/api/auth/*` rate limiter is installed. Off under `NEXUS_ENV=test`. */
+  /** Whether the `/api/auth/*` and `/api/apis/*` rate limiters are installed. Off under `NEXUS_ENV=test`. */
   rateLimitEnabled: boolean;
+  /**
+   * How many APIs one account may own at a time (`NEXUS_MAX_APIS_PER_OWNER`).
+   * `0` disables the ceiling.
+   *
+   * Registration may be open, so a `provider` is only semi-trusted, and each
+   * publish stores a document of up to `MAX_SPEC_BYTES` and allocates a proxy,
+   * several plugin configs and a slug on the gateway. Without a ceiling one
+   * account can exhaust all of it (GHSA-g32g-g9q4-q5wr). Aggregate spec storage
+   * per account is therefore bounded by `MAX_SPEC_BYTES × this` — 100 MB at the
+   * default of 50.
+   */
+  maxApisPerOwner: number;
   /**
    * Whether a provider may publish an API whose upstream is a loopback, private,
    * link-local or internal destination (`NEXUS_ALLOW_PRIVATE_UPSTREAMS`).
@@ -270,6 +293,7 @@ const envSchema = z.object({
     }),
   NEXUS_SESSION_TTL: intish(DEFAULT_SESSION_TTL_SECONDS, 60, 60 * 60 * 24 * 30),
   NEXUS_RATE_LIMIT_ENABLED: boolish(true),
+  NEXUS_MAX_APIS_PER_OWNER: intish(DEFAULT_MAX_APIS_PER_OWNER, 0, 100_000),
   NEXUS_ALLOW_PRIVATE_UPSTREAMS: boolish(false),
   NEXUS_WEB_DIST: optionalString(),
 
@@ -444,6 +468,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     secretKey: raw.NEXUS_SECRET_KEY,
     sessionTtlSeconds: raw.NEXUS_SESSION_TTL,
     rateLimitEnabled: nodeEnv === 'test' ? false : raw.NEXUS_RATE_LIMIT_ENABLED,
+    maxApisPerOwner: raw.NEXUS_MAX_APIS_PER_OWNER,
     allowPrivateUpstreams: raw.NEXUS_ALLOW_PRIVATE_UPSTREAMS,
     webDistPath: raw.NEXUS_WEB_DIST,
     db: {
