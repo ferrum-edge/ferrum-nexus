@@ -641,9 +641,10 @@ provider reports an unexplained `EDGE_ERROR`.
 
 ### Shutdown
 
-`SIGINT`/`SIGTERM` trigger a graceful shutdown: the outbox poller stops, the
-Edge dispatcher closes, Fastify drains, then the store closes. Give the
-container at least a few seconds of termination grace.
+`SIGINT`/`SIGTERM` trigger a graceful shutdown: the outbox and gateway-teardown
+pollers stop, the Edge dispatcher closes, Fastify drains, then the store closes.
+Give the container at least a few seconds of termination grace. Anything the
+teardown poller had claimed is recovered by `releaseStale` on the next boot.
 
 ---
 
@@ -727,3 +728,76 @@ parseable samples`), so **the log is where a metrics outage shows up**, not
   `ferrum_requests_total` carries no consumer label. If someone needs "which
   client burned the quota", that is an Edge access-log question, not a portal
   one.
+
+---
+
+## 11. Gateway revocation for disabled accounts
+
+Disabling a portal account has a second half that lives on Ferrum Edge: every
+ACL group off the account's consumer, every credential of every type deleted.
+That half is an HTTP call to another system, so it cannot commit with the
+database write — and a disabled account's API key keeps authenticating against
+the data plane for as long as it is not made, with no portal session involved.
+
+So the disable writes a `gateway_teardown_jobs` row **in the same transaction**
+as `users.status = 'disabled'`, attempts the revocation immediately, and — when
+Edge refuses — leaves the job for the teardown worker rather than reporting the
+disable as finished. See
+[`security.md`](security.md#disabling-an-account) for the security argument.
+
+### Statuses
+
+| Status    | Meaning                                                                    |
+| --------- | -------------------------------------------------------------------------- |
+| `pending` | Owed and due (or waiting for `next_attempt_at`). **Credentials are live.** |
+| `sending` | Claimed by a worker. The claim is atomic and increments `attempts`.        |
+| `done`    | Edge confirmed the revocation; `completed_at` says when.                   |
+
+There is **no terminal failure state**. Retries back off `10s · 2^attempts`,
+capped at five minutes, plus up to 10% jitter, and continue for as long as the
+account is disabled — an outbox message nobody can deliver is a lost email, but
+a credential nobody revoked is a live security hole. The only other exit is the
+account being re-enabled, which deletes the job. A `sending` row untouched for
+five minutes is released back to `pending` on the next worker `start()`.
+
+There is one row per account (`user_id` is unique), so re-disabling an account
+resets the outstanding job rather than queueing a second revocation.
+
+### Monitoring
+
+```sql
+-- how much revocation is owed right now
+SELECT status, count(*) FROM gateway_teardown_jobs GROUP BY status;
+
+-- what is stuck, and why
+SELECT user_id, attempts, last_error, next_attempt_at, updated_at
+  FROM gateway_teardown_jobs WHERE status <> 'done'
+  ORDER BY updated_at DESC LIMIT 20;
+```
+
+`GET /api/users` (admin) also reports the portal-wide backlog as
+`pending_gateway_teardowns`, and `GET /api/users/:id` carries the per-account
+`gateway_teardown` state.
+
+**Alert on this `warn` line:**
+
+```
+Gateway revocation for a disabled account failed; it stays queued for retry
+```
+
+It carries `user_id`, `attempts` and `error`. A single occurrence during an Edge
+restart is expected; a line that keeps repeating for the same `user_id` means a
+disabled account still holds working gateway credentials. The worker also logs
+`Gateway revocation retry failed; the credentials are still live`,
+`Gateway revocation for a disabled account completed`,
+`Released stale gateway teardown claims` and `Gateway teardown tick failed`.
+
+### Re-driving one by hand
+
+`POST /api/users/:id/gateway-teardown/retry` (admin, CSRF) re-queues the job and
+runs it immediately, returning `gateway_teardown: "ok"` when Edge accepted and
+`"pending"` when it refused again. It is audited as
+`user.gateway_teardown_retry`. In the SPA the same action is the **Retry**
+button next to the _Gateway revocation pending_ badge on the admin **Users**
+page. Do not edit the table by hand — the endpoint is idempotent and writes the
+audit trail.
