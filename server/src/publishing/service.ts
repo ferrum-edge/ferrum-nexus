@@ -983,7 +983,14 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           }
           if (patch.timeouts !== undefined)
             Object.assign(proxySettings, timeoutFields(patch.timeouts));
-          if (patch.circuit_breaker !== undefined) {
+          // The boolean row owns whether Nexus enables the breaker, not the
+          // operator-tunable policy behind an already-matching state. Treat a
+          // replayed boolean as a no-op so it cannot reset or remove a live
+          // policy without producing a database change (and its audit row).
+          if (
+            patch.circuit_breaker !== undefined &&
+            patch.circuit_breaker !== api.circuit_breaker
+          ) {
             proxySettings.circuit_breaker = patch.circuit_breaker ? DEFAULT_CIRCUIT_BREAKER : null;
           }
           if (patch.cors !== undefined) proxySettings.allowed_ws_origins = wsOriginsFor(nextCors);
