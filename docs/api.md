@@ -122,6 +122,7 @@ validation issues, a conflicting slug, an Edge status).
 | `CSRF_MISMATCH`      | 403  | `X-Nexus-CSRF` missing or not matching the cookie/session.                                                                                                                                                                                                                                                                                                                                                                    |
 | `CAPTCHA_FAILED`     | 400  | CAPTCHA token missing, expired, or rejected by the vendor.                                                                                                                                                                                                                                                                                                                                                                    |
 | `RATE_LIMITED`       | 429  | Too many requests from this identity/IP.                                                                                                                                                                                                                                                                                                                                                                                      |
+| `QUOTA_EXCEEDED`     | 429  | A configured per-account budget for the period is exhausted. `details` is `{ limit, window, setting }`, naming the environment variable that sets it.                                                                                                                                                                                                                                                                         |
 | `EMAIL_NOT_VERIFIED` | 403  | Account exists but its email is unverified and verification is required.                                                                                                                                                                                                                                                                                                                                                      |
 | `USER_DISABLED`      | 403  | Account has been disabled by an admin.                                                                                                                                                                                                                                                                                                                                                                                        |
 | `LAST_SUPER_ADMIN`   | 409  | Refused: would remove, demote or disable the last active `super_admin`.                                                                                                                                                                                                                                                                                                                                                       |
@@ -497,6 +498,21 @@ Portal messaging. Registered under `/api/threads`; every endpoint needs a
 _session_. Who may read or post in a given thread is decided by the messaging
 service.
 
+**The two write routes are bounded.** Reads are not limited; `POST /api/threads`
+takes 10 requests per minute and `POST /api/threads/:id/messages` takes 30, both
+counted **per account** (not per IP) and both active only when
+`NEXUS_RATE_LIMIT_ENABLED=true` (the default; always off under
+`NEXUS_ENV=test`). Exceeding either is `429 RATE_LIMITED`. Independently, one
+account may post `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY` messages (default 200,
+`0` disables) in a rolling 24 hours across _every_ thread, direct and platform
+alike; exceeding that is `429 QUOTA_EXCEEDED`. A refusal from either bound
+writes no message, audit, notification or email row.
+
+Recipients get at most one `message_received` email per thread per 10 minutes
+however many messages arrive, so the mail announces new activity and links to
+the thread rather than quoting one message. In-app notifications stay one per
+message.
+
 A thread has two seats. A **1:1 thread** pairs a client (`participant_a`) with a
 provider (`participant_b`), optionally about one API. A **platform thread** has
 `participant_b: null` — the empty seat is "the platform", and **any admin may
@@ -535,7 +551,10 @@ _session_ → `201`
 ```
 
 Errors: `400 VALIDATION_FAILED` (empty subject/body, or messaging yourself),
-`404 NOT_FOUND` (unknown or disabled recipient, unknown API).
+`404 NOT_FOUND` (unknown or disabled recipient, unknown API),
+`429 RATE_LIMITED` (more than 10 a minute from this account),
+`429 QUOTA_EXCEEDED` (the account's rolling 24-hour message budget is spent —
+`details` carries `{ limit, window: "24h", setting: "NEXUS_MAX_MESSAGES_PER_USER_PER_DAY" }`).
 
 ### `GET /api/threads/:id`
 
@@ -547,6 +566,12 @@ message carrying a `sender` summary. Participants always; admins for oversight.
 
 _session_ → `201 { "message": Message }`. Body `{ "body": string }` (1–10 000).
 Participants may post; an admin may post into any _platform_ thread.
+
+Errors: `400 VALIDATION_FAILED` (empty body), `403 FORBIDDEN` (not a
+participant), `404 NOT_FOUND` (unknown thread), `429 RATE_LIMITED` (more than 30
+a minute from this account), `429 QUOTA_EXCEEDED` (the account's rolling
+24-hour message budget is spent — it is the same budget `POST /api/threads`
+draws on).
 
 ---
 

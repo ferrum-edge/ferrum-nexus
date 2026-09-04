@@ -272,7 +272,7 @@ each with a built-in default you can override:
 | `access_approved`    | An access request is approved.                         |
 | `access_denied`      | An access request is declined.                         |
 | `access_revoked`     | A grant is revoked.                                    |
-| `message_received`   | Someone receives a portal message.                     |
+| `message_received`   | New activity in a portal thread (see the note below).  |
 | `mass`               | The frame around a mass email or a platform broadcast. |
 | `credential_rotated` | A user's gateway credential is rotated.                |
 
@@ -280,6 +280,14 @@ Each has a **subject**, an **HTML body** and a **plain-text body**; all three
 are required when you save. Editing one stores an override; until then the
 built-in default is used. Resolution is override-first, default-second — never
 a mix.
+
+> **`message_received` is coalesced.** A recipient gets at most one of these per
+> thread per **10 minutes**, however many messages arrive in it — that is what
+> keeps a reply storm from becoming a mail storm. The default wording therefore
+> announces new activity and links to the thread instead of quoting a message.
+> `{{message_preview}}` is still available, but if you put it back it will quote
+> only the message that _opened_ the window; the rest send nothing. In-app
+> notifications are not coalesced — those stay one per message.
 
 #### Placeholders
 
