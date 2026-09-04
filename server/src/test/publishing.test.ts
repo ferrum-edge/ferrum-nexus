@@ -2454,6 +2454,184 @@ describe('publishing', () => {
       assert.equal(reread.json<GetApiResponse>().api.spec_enforcement, 'docs_only');
     });
 
+    /**
+     * Plugin config ids Nexus owns by hand, sorted.
+     *
+     * The spec-owned `openapi_validator` is left out because Edge regenerates
+     * it — with a fresh id — every time a document is imported, so it is the
+     * one config whose id is *not* expected to survive a rebuild.
+     */
+    function handOwnedIds(proxyId: string): string[] {
+      return harness.edge
+        .pluginsForProxy(proxyId)
+        .filter((plugin) => plugin.plugin_name !== 'openapi_validator')
+        .map((plugin) => String(plugin.id))
+        .sort();
+    }
+
+    /**
+     * Break one step of a `spec_enforcement` conversion and assert the API it
+     * started from came back whole.
+     *
+     * The conversion deletes the live proxy before rebuilding it, so every one
+     * of these failures used to end with no proxy at all: the portal still
+     * described the API, the gateway served nothing, and retrying the same
+     * PATCH answered `404` because the rebuild it wanted to undo was gone.
+     *
+     * @param from the mode the API is published in; the PATCH moves it to the other
+     * @param inject queues the gateway failure, once the API exists
+     */
+    async function assertConversionRestores(
+      slug: string,
+      from: 'docs_only' | 'routes',
+      inject: () => void,
+    ): Promise<void> {
+      const to = from === 'routes' ? 'docs_only' : 'routes';
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug, spec_enforcement: from }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
+      const finalPath = `/nexus/${slug}`;
+      // Operator-set fields, so the restore has to be the captured document and
+      // not a body composed from the `apis` row.
+      enrichProxy(harness, proxyId);
+      const idsBefore = handOwnedIds(proxyId);
+      const runningBefore = effectiveNames(harness, proxyId);
+
+      inject();
+      const failed = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { spec_enforcement: to },
+      });
+      assert.equal(failed.statusCode, 502, failed.body);
+
+      // One proxy, under the same id, back on the real path — and nothing
+      // parked on a staging path.
+      assert.equal(harness.edge.proxies.size, 1, 'no staging proxy was left behind');
+      assert.equal(String(harness.edge.proxyServing(finalPath)?.id), proxyId);
+      assert.equal(
+        harness.edge.apiSpecForProxy(proxyId) !== undefined,
+        from === 'routes',
+        'the original enforcement mode is what the gateway holds',
+      );
+      assertEnrichmentSurvived(harness, proxyId);
+      assert.deepEqual(handOwnedIds(proxyId), idsBefore, 'the hand-owned configs kept their ids');
+      assert.deepEqual(associatedIds(harness, proxyId), writtenIds(harness, proxyId));
+      assert.deepEqual(effectiveNames(harness, proxyId), runningBefore);
+      assert.ok(runningBefore.includes('key_auth'), 'the API is still authenticated');
+
+      const reread = await harness.authed(provider, { method: 'GET', url: `/api/apis/${apiId}` });
+      assert.equal(reread.json<GetApiResponse>().api.spec_enforcement, from);
+
+      // And the same PATCH works once the gateway is healthy again.
+      const retry = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { spec_enforcement: to },
+      });
+      assert.equal(retry.statusCode, 200, retry.body);
+      assert.equal(retry.json<UpdateApiResponse>().api.spec_enforcement, to);
+      assert.equal(String(harness.edge.proxyServing(finalPath)?.id), proxyId);
+      assert.equal(harness.edge.proxies.size, 1);
+    }
+
+    it('restores docs_only when the routes replacement cannot be created', async () => {
+      await assertConversionRestores('enf-fail-create-routes', 'docs_only', () =>
+        harness.edge.queueFailure(503, { error: 'unavailable' }, '/api-specs', 'POST'),
+      );
+    });
+
+    it('restores docs_only when a plugin cannot be put back', async () => {
+      await assertConversionRestores('enf-fail-plugin-routes', 'docs_only', () =>
+        harness.edge.queueFailure(500, { error: 'config_rejected' }, '/plugins/config', 'POST'),
+      );
+    });
+
+    it('restores docs_only when the second plugin cannot be put back', async () => {
+      await assertConversionRestores('enf-fail-plugin2-routes', 'docs_only', () =>
+        harness.edge.queueFailure(500, { error: 'config_rejected' }, '/plugins/config', 'POST', 1),
+      );
+    });
+
+    it('restores docs_only when the association write fails', async () => {
+      await assertConversionRestores('enf-fail-assoc-routes', 'docs_only', () =>
+        harness.edge.queueFailure(500, { error: 'config_rejected' }, '/proxies/', 'PUT'),
+      );
+    });
+
+    it('restores docs_only when the routes cutover fails', async () => {
+      await assertConversionRestores('enf-fail-cutover-routes', 'docs_only', () =>
+        harness.edge.queueFailure(500, { error: 'spec rejected' }, '/api-specs/', 'PUT'),
+      );
+    });
+
+    it('restores routes when the docs_only replacement cannot be created', async () => {
+      await assertConversionRestores('enf-fail-create-docs', 'routes', () =>
+        harness.edge.queueFailure(503, { error: 'unavailable' }, '/proxies', 'POST'),
+      );
+    });
+
+    it('restores routes when a plugin cannot be put back', async () => {
+      await assertConversionRestores('enf-fail-plugin-docs', 'routes', () =>
+        harness.edge.queueFailure(500, { error: 'config_rejected' }, '/plugins/config', 'POST'),
+      );
+    });
+
+    it('restores routes when the association write fails', async () => {
+      await assertConversionRestores('enf-fail-assoc-docs', 'routes', () =>
+        harness.edge.queueFailure(500, { error: 'config_rejected' }, '/proxies/', 'PUT'),
+      );
+    });
+
+    it('restores routes when the docs_only cutover fails', async () => {
+      // The association is the first `PUT /proxies/{id}` of the rebuild and the
+      // cutover the second, so the failure skips one to land on the cutover.
+      await assertConversionRestores('enf-fail-cutover-docs', 'routes', () =>
+        harness.edge.queueFailure(500, { error: 'config_rejected' }, '/proxies/', 'PUT', 1),
+      );
+    });
+
+    it('records a repair state when the restoration fails as well', async () => {
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'enf-unrepairable' }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
+
+      // Both rebuilds fail: the conversion into `routes` and the restore back.
+      harness.edge.queueFailure(503, { error: 'unavailable' }, '/api-specs', 'POST');
+      harness.edge.queueFailure(503, { error: 'unavailable' }, '/proxies', 'POST');
+      const failed = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { spec_enforcement: 'routes' },
+      });
+      assert.equal(failed.statusCode, 502, failed.body);
+
+      // The snapshot the gateway lost is the only copy there was, so it is
+      // written where an administrator can find and act on it.
+      const row = (await harness.auditRows('api.gateway_repair_required')).find(
+        (entry) => entry.target_id === apiId,
+      );
+      assert.ok(row, 'a repair-required audit row is recorded');
+      assert.equal(row?.details.spec_enforcement, 'docs_only');
+      assert.equal(row?.details.attempted_spec_enforcement, 'routes');
+      assert.equal((row?.details.proxy as Record<string, unknown>).id, proxyId);
+      assert.equal(
+        (row?.details.proxy as Record<string, unknown>).listen_path,
+        '/nexus/enf-unrepairable',
+      );
+      assert.ok(Array.isArray(row?.details.plugin_configs));
+    });
+
     it('regenerates the operation table when a new spec revision is published', async () => {
       const published = await harness.authed(provider, {
         method: 'POST',

@@ -291,6 +291,14 @@ export interface PublishingServiceDeps {
   /** Resolves the gateway origin each returned API's `invoke_url` is built from. */
   settings: GatewayUrlSource;
   /**
+   * Structured logger, at `error`, for a gateway state no request can repair.
+   *
+   * Only the unrepairable `spec_enforcement` conversion uses it: everything
+   * else either compensates silently or fails the request with a `NexusError`
+   * the route layer already logs.
+   */
+  log?: (obj: Record<string, unknown>, message: string) => void;
+  /**
    * Resolves an upstream hostname to its addresses.
    *
    * Injected rather than imported so the private-destination policy can be
@@ -613,6 +621,11 @@ function safeSpecDocument(rawSpec: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+/** A thrown value as a string, for a log line or an audit detail. */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /* ── Service ────────────────────────────────────────────────────────────── */
@@ -1174,7 +1187,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               proxyId,
               patch.spec_enforcement,
               current ? safeSpecDocument(current.raw_spec) : {},
-              actor.id,
+              actor,
+              ip,
             ),
           );
           update.spec_enforcement = patch.spec_enforcement;
@@ -1767,6 +1781,18 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * rows. Only the spec-owned validator is left behind, because the target mode
    * either regenerates it or must not have one.
    *
+   * **Locally exception-safe.** The original proxy is deleted before anything
+   * can be built in its place, so a failure anywhere in the rebuild is handled
+   * here rather than by the caller's undo stack — the caller never receives a
+   * compensation step for a conversion that threw. Every such failure clears
+   * whatever the half-built replacement left (deleting the proxy cascades its
+   * plugin configs, and the spec and validator with them) and rebuilds the mode
+   * the API came from, through the same staging-and-cutover path, before
+   * rethrowing. If *that* fails too the API has no gateway object at all and
+   * the captured document is the only copy left, so it is logged and written to
+   * an {@link AuditAction.API_GATEWAY_REPAIR_REQUIRED} row instead of being
+   * dropped.
+   *
    * @returns the step that puts the proxy back in the mode it came from
    */
   async function convertEnforcement(
@@ -1774,8 +1800,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     proxyId: string,
     target: SpecEnforcementLevel,
     document: Record<string, unknown>,
-    subject: string,
+    actor: UserRecord,
+    ip: string | null,
   ): Promise<() => Promise<void>> {
+    const subject = actor.id;
     const before = await edge.proxies.get(proxyId);
     if (!before) throw notFound('Proxy', proxyId);
     const carried = handOwnedPlugins(await binder.listByProxy(proxyId));
@@ -1809,16 +1837,94 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       await cutOverToListenPath(proxyId, level, listenPath, document, specId, subject);
     };
 
+    /**
+     * Throw away whatever is on the gateway under this proxy id and build
+     * `level` back from the captured document.
+     *
+     * The delete is what makes this safe to call after a rebuild failed at any
+     * step: it cascades the plugin configs and, for a spec-owned proxy, the
+     * spec and its generated validator, so the rebuild always starts from
+     * nothing. It tolerates a `404` because the failure may well have been the
+     * create itself.
+     */
+    const restore = async (level: SpecEnforcementLevel): Promise<void> => {
+      await edge.proxies.delete(proxyId, subject).catch(() => undefined);
+      await rebuild(level);
+    };
+
     // Deleting the proxy cascades its plugin configs and, when it was
     // spec-owned, the spec and generated validator too — so the recreate starts
     // from nothing whichever direction it runs in.
     await edge.proxies.delete(proxyId, subject);
-    await rebuild(target);
+    try {
+      await rebuild(target);
+    } catch (error) {
+      // The original is already gone, and the caller has no undo step for this
+      // conversion yet — put the API back here or it stays off the gateway.
+      try {
+        await restore(api.spec_enforcement);
+      } catch (restoreError) {
+        await reportUnrepairableProxy({
+          api,
+          target,
+          proxy: body,
+          plugins: carried,
+          actor,
+          error,
+          restoreError,
+          ip,
+        });
+      }
+      throw error;
+    }
 
     return async () => {
-      await edge.proxies.delete(proxyId, subject).catch(() => undefined);
-      await rebuild(api.spec_enforcement);
+      await restore(api.spec_enforcement);
     };
+  }
+
+  /**
+   * Record a proxy the portal could neither convert nor put back.
+   *
+   * The captured proxy document and its hand-owned plugin configs are the only
+   * copy that still exists, so they are logged at `error` *and* written to an
+   * audit row: the log is what a running deployment alerts on, the row is what
+   * survives long enough for an administrator to rebuild the API from it. The
+   * `apis` row itself is deliberately not moved to a failed state — the API's
+   * catalog entry, its grants and its credentials are all still valid, and only
+   * the gateway objects need rebuilding.
+   */
+  async function reportUnrepairableProxy(input: {
+    api: ApiRecord;
+    target: SpecEnforcementLevel;
+    proxy: Record<string, unknown>;
+    plugins: EdgePluginConfig[];
+    actor: UserRecord;
+    error: unknown;
+    restoreError: unknown;
+    ip: string | null;
+  }): Promise<void> {
+    const details = {
+      proxy: input.proxy,
+      plugin_configs: input.plugins,
+      spec_enforcement: input.api.spec_enforcement,
+      attempted_spec_enforcement: input.target,
+      error: errorMessage(input.error),
+      restore_error: errorMessage(input.restoreError),
+    };
+    deps.log?.(
+      { api_id: input.api.id, proxy_id: input.proxy.id, ...details },
+      'the spec_enforcement conversion left the API with no gateway proxy and could not be restored',
+    );
+    await audit
+      .record(
+        { id: input.actor.id, role: input.actor.role },
+        AuditAction.API_GATEWAY_REPAIR_REQUIRED,
+        { type: 'api', id: input.api.id },
+        details,
+        input.ip,
+      )
+      .catch(() => undefined);
   }
 
   async function replaceProxyBackend(
