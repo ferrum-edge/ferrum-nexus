@@ -1374,6 +1374,14 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // requests would otherwise both delete and both create. The key is
       // prefixed so it can never collide with a consumer-id key used by the
       // credentials service.
+      //
+      // A test consumer is a *distinct* Edge consumer (`testConsumerUsername`,
+      // never `nexus-user-<id>`), so it is legitimate for it to carry its own
+      // name-level key on top of the canonical consumer-id one. The nested
+      // `credentials.issueForConsumer` below locks that id — a **different**
+      // key, so the queue and the lease both grant it; nesting the *same* key
+      // would deadlock. Ordering is always name-then-id and never the reverse,
+      // which is what keeps the pair free of lock-order inversion.
       const replaced = await edge.serializePerKey(`test-consumer:${username}`, async () => {
         // Recreating replaces: a test consumer is disposable by definition, and
         // deleting it is the only way to reset its credentials show-once state.

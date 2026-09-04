@@ -24,6 +24,12 @@
  * `edge.serializePerKey(consumerId, …)`. Two approvals for the same user
  * landing at once would otherwise lose one ACL group. {@link mutateAclGroups}
  * is the read-modify-write helper both services use.
+ *
+ * The **Ferrum consumer id** is the canonical lock key for a consumer, used by
+ * every path that touches one — this helper, and issue/rotate/revoke/teardown
+ * in `credentials/service.ts`. That matters because the serializer now takes an
+ * `edge_leases` row for the key as well as queueing in process, so a second
+ * Nexus instance is ordered against this one only if it locks the same string.
  */
 
 import { consumerUsernameForUser, type Uuid } from '@ferrum-nexus/shared';
