@@ -41,6 +41,7 @@ import type {
   GrantStatus,
   IsoTimestamp,
   Message,
+  MessagePage,
   MessageThread,
   MessageThreadDetail,
   Notification,
@@ -789,8 +790,36 @@ export interface CreateThreadResponse {
   message: Message;
 }
 
+/**
+ * Where a message window starts and how large it is.
+ *
+ * Shared by `GET /api/threads/:id` and `GET /api/threads/:id/messages`: both
+ * answer with the `limit` newest messages, and `before` walks backwards from a
+ * window already in hand. There is no `offset` — an offset into a conversation
+ * shifts every time somebody replies, which is how a reader ends up seeing the
+ * same message twice or missing one entirely.
+ */
+export interface MessagePageQuery {
+  /** Window size; clamped to `[1, MAX_PAGE_SIZE]`, defaults to `DEFAULT_PAGE_SIZE`. */
+  limit?: number;
+  /**
+   * Return only messages older than this one — the `next_before` of the window
+   * you already hold. The message must belong to the thread.
+   */
+  before?: Uuid;
+}
+
+/** `GET /api/threads/:id` */
+export type GetThreadQuery = MessagePageQuery;
+
 /** `GET /api/threads/:id` */
 export type GetThreadResponse = MessageThreadDetail;
+
+/** `GET /api/threads/:id/messages` */
+export type ListThreadMessagesQuery = MessagePageQuery;
+
+/** `GET /api/threads/:id/messages` — one window of the transcript, oldest-first. */
+export type ListThreadMessagesResponse = MessagePage;
 
 /** `POST /api/threads/:id/messages` */
 export interface SendMessageRequest {

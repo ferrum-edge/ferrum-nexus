@@ -663,6 +663,99 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(bare?.spec_enforcement, 'docs_only');
     });
 
+    it('apis: visible_to paginates and counts the rows one viewer may browse', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const stranger = await makeUser();
+      const marker = newId().slice(0, 8);
+
+      async function seed(
+        ownerId: string,
+        overrides: {
+          status?: 'published' | 'retired';
+          visibility?: 'public' | 'internal';
+          name?: string;
+        },
+      ): Promise<string> {
+        const api = await store.apis.create({
+          name: overrides.name ?? `Viewer ${marker}`,
+          slug: `viewer-${marker}-${newId().slice(0, 8)}`,
+          owner_user_id: ownerId,
+          namespace: 'nexus',
+          version: '1.0.0',
+          spec_format: 'openapi',
+          requestable: true,
+          auth_plugin: 'key_auth',
+          status: overrides.status ?? 'published',
+          visibility: overrides.visibility ?? 'public',
+        });
+        return api.id;
+      }
+
+      const openApi = await seed(owner.id, {});
+      const unlisted = await seed(owner.id, { visibility: 'internal' });
+      const retired = await seed(owner.id, { status: 'retired' });
+      const granted = await seed(owner.id, { visibility: 'internal' });
+      const ownedByStranger = await seed(stranger.id, {
+        visibility: 'internal',
+        name: `Own ${marker}`,
+      });
+
+      const clause = {
+        owner_user_id: stranger.id,
+        granted_api_ids: [granted],
+        open_status: 'published' as const,
+        open_visibilities: ['public' as const],
+      };
+      // Scope every read to this test's own rows: the suite shares one database.
+      const mine = { q: marker, visible_to: clause };
+
+      const listed = await store.apis.list(mine, { limit: 50 });
+      assert.deepEqual(
+        new Set(listed.items.map((api) => api.id)),
+        new Set([openApi, granted, ownedByStranger]),
+        'owned, granted and published-public rows pass; internal and retired do not',
+      );
+      assert.equal(listed.total, 3, 'total counts the filtered set, not the table');
+      assert.equal(await store.apis.count(mine), 3, 'count applies the same clause');
+      for (const hidden of [unlisted, retired]) {
+        assert.ok(!listed.items.some((api) => api.id === hidden));
+      }
+
+      // The clause narrows a page rather than being applied after it: one row
+      // per page, walked to the end, yields each permitted row exactly once.
+      const walked: string[] = [];
+      for (let offset = 0; offset < 4; offset += 1) {
+        const step = await store.apis.list(mine, { limit: 1, offset });
+        assert.equal(step.total, 3, 'every page reports the same filtered total');
+        walked.push(...step.items.map((api) => api.id));
+      }
+      assert.equal(walked.length, 3, 'paging past the end returns nothing extra');
+      assert.equal(new Set(walked).size, 3, 'no row is served twice');
+
+      // …and it ANDs with the other filters rather than widening them.
+      assert.equal(
+        (await store.apis.list({ ...mine, visibility: 'internal' })).total,
+        2,
+        'a visibility filter still cannot reveal a row the viewer may not browse',
+      );
+      assert.equal(
+        (await store.apis.list({ ...mine, q: `Own ${marker}` })).total,
+        1,
+        'search composes with the viewer clause',
+      );
+      assert.equal(
+        (await store.apis.list({ ...mine, visible_to: { ...clause, granted_api_ids: [] } })).total,
+        2,
+        'an empty grant list drops its disjunct instead of matching everything',
+      );
+      assert.equal(
+        (await store.apis.list({ ...mine, visible_to: { ...clause, open_visibilities: [] } }))
+          .total,
+        2,
+        'an empty visibility list leaves only owned and granted rows',
+      );
+    });
+
     it('apiSpecs: keeps exactly one current revision per API', async () => {
       const owner = await makeUser({ role: 'provider' });
       const api = await makeApi(owner.id);
@@ -1328,6 +1421,140 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         0,
         'creating a thread is not a seat in it — access has to come from the current role',
       );
+    });
+
+    it('threads: platform_or_participant_user_id is the admin inbox as a predicate', async () => {
+      const admin = await makeUser({ role: 'admin' });
+      const asker = await makeUser();
+      const bystander = await makeUser();
+      const subject = `Inbox ${newId().slice(0, 6)}`;
+
+      // A platform thread (empty second seat), one the admin sits in, and one
+      // between two other people — which the admin must not see here.
+      const platform = await store.threads.create({
+        subject,
+        created_by: asker.id,
+        participant_a: asker.id,
+      });
+      const seated = await store.threads.create({
+        subject,
+        created_by: asker.id,
+        participant_a: asker.id,
+        participant_b: admin.id,
+      });
+      const unrelated = await store.threads.create({
+        subject,
+        created_by: asker.id,
+        participant_a: asker.id,
+        participant_b: bystander.id,
+      });
+
+      const inbox = await store.threads.list({
+        q: subject,
+        platform_or_participant_user_id: admin.id,
+      });
+      assert.equal(inbox.total, 2, 'total counts the filtered set, not the table');
+      assert.deepEqual(
+        new Set(inbox.items.map((thread) => thread.id)),
+        new Set([platform.id, seated.id]),
+        'the platform inbox plus the admin`s own seats',
+      );
+      assert.ok(!inbox.items.some((thread) => thread.id === unrelated.id));
+
+      // Paginated over the filtered set rather than a prefix of the table.
+      const first = await store.threads.list(
+        { q: subject, platform_or_participant_user_id: admin.id },
+        { limit: 1, offset: 0 },
+      );
+      const second = await store.threads.list(
+        { q: subject, platform_or_participant_user_id: admin.id },
+        { limit: 1, offset: 1 },
+      );
+      assert.equal(first.total, 2);
+      assert.equal(second.total, 2);
+      assert.notEqual(first.items[0]?.id, second.items[0]?.id);
+
+      for (const id of [platform.id, seated.id, unrelated.id]) await store.threads.delete(id);
+    });
+
+    it('messages: newest_first and the before cursor page a long transcript', async () => {
+      const a = await makeUser();
+      const b = await makeUser();
+      const thread = await store.threads.create({
+        subject: `Transcript ${newId().slice(0, 6)}`,
+        created_by: a.id,
+        participant_a: a.id,
+        participant_b: b.id,
+      });
+
+      // Six messages across three timestamps — two per instant, so the id half
+      // of the cursor is what makes the order total.
+      const created: { id: string; created_at: string }[] = [];
+      for (let index = 0; index < 6; index += 1) {
+        const message = await store.messages.create({
+          thread_id: thread.id,
+          sender_user_id: index % 2 === 0 ? a.id : b.id,
+          body: `message ${index}`,
+          created_at: isoInSeconds(-600 + Math.floor(index / 2) * 60),
+        });
+        created.push({ id: message.id, created_at: message.created_at });
+      }
+      const chronological = [...created].sort((left, right) =>
+        left.created_at === right.created_at
+          ? left.id.localeCompare(right.id)
+          : left.created_at.localeCompare(right.created_at),
+      );
+
+      const oldest = await store.messages.listByThread(thread.id, { limit: 6 });
+      assert.deepEqual(
+        oldest.items.map((message) => message.id),
+        chronological.map((entry) => entry.id),
+        'the default order is oldest-first, tie-broken on id',
+      );
+
+      const newest = await store.messages.listByThread(thread.id, {
+        limit: 2,
+        newest_first: true,
+      });
+      assert.deepEqual(
+        newest.items.map((message) => message.id),
+        [...chronological]
+          .reverse()
+          .slice(0, 2)
+          .map((entry) => entry.id),
+        'newest_first reverses both keys, so the window is the end of the thread',
+      );
+      assert.equal(newest.total, 6, 'total ignores the window');
+
+      // Walk backwards from the oldest message of that window: every earlier
+      // message exactly once, including the one sharing its timestamp.
+      const anchor = chronological[4];
+      assert.ok(anchor);
+      const older = await store.messages.listByThread(thread.id, {
+        limit: 10,
+        newest_first: true,
+        before: { created_at: anchor.created_at, id: anchor.id },
+      });
+      assert.deepEqual(
+        older.items.map((message) => message.id),
+        chronological
+          .slice(0, 4)
+          .reverse()
+          .map((entry) => entry.id),
+        'strictly before (created_at, id) — never the anchor, never its twin twice',
+      );
+      assert.equal(older.total, 4, 'total counts what precedes the cursor');
+
+      const start = chronological[0];
+      assert.ok(start);
+      const none = await store.messages.listByThread(thread.id, {
+        before: { created_at: start.created_at, id: start.id },
+      });
+      assert.equal(none.total, 0, 'nothing precedes the first message');
+      assert.equal(none.items.length, 0);
+
+      await store.messages.deleteByThread(thread.id);
+      await store.threads.delete(thread.id);
     });
 
     /* ── notifications ────────────────────────────────────────────────── */
