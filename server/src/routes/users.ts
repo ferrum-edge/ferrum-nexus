@@ -14,8 +14,10 @@ import {
   ROLE_ORDER,
   type CreateOrganizationResponse,
   type GetMeUserResponse,
+  type GetUserResponse,
   type ListOrganizationsResponse,
   type ListUsersResponse,
+  type RetryGatewayTeardownResponse,
   type UpdateMeResponse,
   type UpdateUserResponse,
 } from '@ferrum-nexus/shared';
@@ -24,7 +26,7 @@ import type { NexusConfig } from '../config/index.js';
 import { clientIp, requestContext, requireAuth, requireRole } from '../middleware/auth-plugin.js';
 import { parseOrThrow } from '../middleware/error-handler.js';
 import { setSessionCookies } from '../middleware/session-cookies.js';
-import type { UsersService } from '../users/service.js';
+import { toTeardownState, type UsersService } from '../users/service.js';
 import { idParamSchema, listOptions, listQuerySchema } from './common.js';
 
 /** Services this route plugin needs. */
@@ -87,8 +89,23 @@ export const usersRoutes: FastifyPluginAsync<UsersRoutesOptions> = async (app, o
 
   app.get('/', { onRequest: requireRole('admin') }, async (request): Promise<ListUsersResponse> => {
     const query = parseOrThrow(listUsersQuery, request.query);
-    return users.listUsers(query, listOptions(query));
+    const [page, pendingGatewayTeardowns] = await Promise.all([
+      users.listUsers(query, listOptions(query)),
+      users.countPendingGatewayTeardowns(),
+    ]);
+    return { ...page, pending_gateway_teardowns: pendingGatewayTeardowns };
   });
+
+  // Declared after `/me` (registered above) so the literal route wins the
+  // parametric one for that path.
+  app.get(
+    '/:id',
+    { onRequest: requireRole('admin') },
+    async (request): Promise<GetUserResponse> => {
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      return users.getUser(id);
+    },
+  );
 
   app.patch(
     '/:id',
@@ -97,7 +114,34 @@ export const usersRoutes: FastifyPluginAsync<UsersRoutesOptions> = async (app, o
       const { user } = requireAuth(request);
       const { id } = parseOrThrow(idParamSchema, request.params);
       const patch = parseOrThrow(updateUserBody, request.body);
-      return { user: await users.updateUser(user, id, patch, clientIp(request)) };
+      const result = await users.updateUser(user, id, patch, clientIp(request));
+      return {
+        user: result.user,
+        ...(result.gateway_teardown !== undefined
+          ? { gateway_teardown: result.gateway_teardown }
+          : {}),
+      };
+    },
+  );
+
+  /**
+   * Re-drive a disabled account's gateway revocation now.
+   *
+   * The operator handle on `gateway_teardown: "pending"`: the teardown worker
+   * retries on a backoff, and this is how an admin stops waiting for it once
+   * Edge is back.
+   */
+  app.post(
+    '/:id/gateway-teardown/retry',
+    { onRequest: requireRole('admin') },
+    async (request): Promise<RetryGatewayTeardownResponse> => {
+      const { user } = requireAuth(request);
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      const result = await users.retryGatewayTeardown(user, id, clientIp(request));
+      return {
+        gateway_teardown: result.gateway_teardown,
+        job: result.job ? toTeardownState(result.job) : null,
+      };
     },
   );
 };

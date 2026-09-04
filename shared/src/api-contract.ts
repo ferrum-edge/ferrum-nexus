@@ -35,6 +35,8 @@ import type {
   EdgeHealth,
   EmailTemplate,
   GatewaySettings,
+  GatewayTeardownOutcome,
+  GatewayTeardownState,
   Grant,
   GrantStatus,
   IsoTimestamp,
@@ -249,7 +251,21 @@ export interface ListUsersQuery extends ListQuery {
 }
 
 /** `GET /api/users` (admin) */
-export type ListUsersResponse = Paginated<User>;
+export interface ListUsersResponse extends Paginated<User> {
+  /**
+   * Disabled accounts whose gateway credentials have not been revoked yet,
+   * across the whole portal rather than this page. Anything above zero means
+   * the teardown worker is still retrying against Edge.
+   */
+  pending_gateway_teardowns: number;
+}
+
+/** `GET /api/users/:id` (admin) */
+export interface GetUserResponse {
+  user: User;
+  /** Outstanding or completed gateway revocation; `null` when there is none. */
+  gateway_teardown: GatewayTeardownState | null;
+}
 
 /** `PATCH /api/users/:id` (admin) — role and status management. */
 export interface UpdateUserRequest {
@@ -262,6 +278,19 @@ export interface UpdateUserRequest {
 /** `PATCH /api/users/:id` (admin) */
 export interface UpdateUserResponse {
   user: User;
+  /**
+   * Present only when this request disabled the account. `pending` means the
+   * portal account is off but the gateway credentials are still being revoked
+   * in the background — the operation is not complete.
+   */
+  gateway_teardown?: GatewayTeardownOutcome;
+}
+
+/** `POST /api/users/:id/gateway-teardown/retry` (admin) */
+export interface RetryGatewayTeardownResponse {
+  gateway_teardown: GatewayTeardownOutcome;
+  /** The job after the attempt: `done` on success, still `pending` otherwise. */
+  job: GatewayTeardownState | null;
 }
 
 /** `GET /api/organizations` (admin) */
@@ -978,6 +1007,11 @@ export interface GodDisableUserResponse {
   revoked_grants: number;
   /** Sessions destroyed as part of the disablement. */
   terminated_sessions: number;
+  /**
+   * Gateway revocation outcome. `pending` means the credentials are still live
+   * on Edge and the teardown worker is retrying — the disable is not finished.
+   */
+  gateway_teardown: GatewayTeardownOutcome;
 }
 
 /** `POST /api/admin/god/broadcast` — platform message to many users at once. */

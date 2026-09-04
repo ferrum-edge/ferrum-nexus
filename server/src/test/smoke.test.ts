@@ -1431,6 +1431,105 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal((await store.emailOutbox.findById(mine?.id ?? ''))?.status, 'pending');
     });
 
+    /* ── gateway teardown jobs ────────────────────────────────────────── */
+
+    it('gatewayTeardownJobs: one row per user, reset rather than duplicated', async () => {
+      const user = await makeUser();
+      const admin = await makeUser({ role: 'admin' });
+
+      const first = await store.gatewayTeardownJobs.upsertPending(user.id, admin.id, nowIso());
+      assert.equal(first.user_id, user.id);
+      assert.equal(first.status, 'pending');
+      assert.equal(first.attempts, 0);
+      assert.equal(first.requested_by, admin.id);
+      assert.equal(first.last_error, null);
+      assert.equal(first.completed_at, null);
+      assert.deepEqual(await store.gatewayTeardownJobs.findByUser(user.id), first);
+
+      // Move it out of `pending` and then re-disable: the row must come back to
+      // the start rather than a second job appearing for the same account.
+      await store.gatewayTeardownJobs.reschedule(first.id, isoInSeconds(600), 'edge unreachable');
+      const rescheduled = await store.gatewayTeardownJobs.findByUser(user.id);
+      assert.equal(rescheduled?.last_error, 'edge unreachable');
+
+      const second = await store.gatewayTeardownJobs.upsertPending(user.id, null, nowIso());
+      assert.equal(second.id, first.id, 'the same row is reused');
+      assert.equal(second.status, 'pending');
+      assert.equal(second.attempts, 0);
+      assert.equal(second.last_error, null);
+      assert.equal(second.requested_by, null);
+
+      assert.equal(await store.gatewayTeardownJobs.deleteByUser(user.id), true);
+      assert.equal(await store.gatewayTeardownJobs.findByUser(user.id), null);
+      assert.equal(await store.gatewayTeardownJobs.deleteByUser(user.id), false);
+    });
+
+    it('gatewayTeardownJobs: claims a due job exactly once, then completes it', async () => {
+      const user = await makeUser();
+      const job = await store.gatewayTeardownJobs.upsertPending(user.id, null, nowIso());
+
+      const claimed = await store.gatewayTeardownJobs.claimDue(nowIso(), 50);
+      const mine = claimed.filter((row) => row.user_id === user.id);
+      assert.equal(mine.length, 1);
+      assert.equal(mine[0]?.status, 'sending');
+      assert.equal(mine[0]?.attempts, 1, 'claiming increments the attempt counter');
+
+      const again = await store.gatewayTeardownJobs.claimDue(nowIso(), 50);
+      assert.equal(
+        again.filter((row) => row.user_id === user.id).length,
+        0,
+        'a claimed job is never handed out twice',
+      );
+
+      // A failure is a retry, not a terminal state: the row goes back to
+      // `pending` with the reason and a backoff stamp.
+      await store.gatewayTeardownJobs.reschedule(job.id, isoInSeconds(-1), 'edge 500');
+      const retryable = await store.gatewayTeardownJobs.findByUser(user.id);
+      assert.equal(retryable?.status, 'pending');
+      assert.equal(retryable?.last_error, 'edge 500');
+      assert.ok((retryable?.next_attempt_at ?? '') < nowIso(), 'the job is due again');
+
+      const reclaimed = await store.gatewayTeardownJobs.claimDue(nowIso(), 50);
+      assert.equal(
+        reclaimed.find((row) => row.id === job.id)?.attempts,
+        2,
+        'the backoff reschedule makes the job claimable again',
+      );
+
+      const at = nowIso();
+      await store.gatewayTeardownJobs.markDone(job.id, at);
+      const done = await store.gatewayTeardownJobs.findByUser(user.id);
+      assert.equal(done?.status, 'done');
+      assert.equal(done?.next_attempt_at, null);
+      assert.equal(done?.last_error, null);
+      assert.equal(done?.completed_at, at);
+      assert.equal(done?.updated_at, at);
+
+      assert.ok((await store.gatewayTeardownJobs.list({ status: 'done' })).total >= 1);
+      assert.equal(
+        (await store.gatewayTeardownJobs.list({ status: 'done' })).items.some(
+          (row) => row.id === job.id,
+        ),
+        true,
+      );
+    });
+
+    it('gatewayTeardownJobs: releaseStale returns stuck claims to pending', async () => {
+      const user = await makeUser();
+      await store.gatewayTeardownJobs.upsertPending(user.id, null, nowIso());
+      const claimed = await store.gatewayTeardownJobs.claimDue(nowIso(), 50);
+      const mine = claimed.find((row) => row.user_id === user.id);
+      assert.equal(mine?.status, 'sending');
+
+      const released = await store.gatewayTeardownJobs.releaseStale(isoInSeconds(60));
+      assert.ok(released >= 1);
+      assert.equal((await store.gatewayTeardownJobs.findByUser(user.id))?.status, 'pending');
+
+      const pending = await store.gatewayTeardownJobs.list({ status: 'pending' });
+      assert.ok(pending.items.some((row) => row.user_id === user.id));
+      assert.ok(pending.total >= 1);
+    });
+
     /* ── audit logs ───────────────────────────────────────────────────── */
 
     it('auditLogs: appends structured details and filters every way', async () => {

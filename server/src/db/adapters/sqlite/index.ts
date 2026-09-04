@@ -35,6 +35,7 @@ import type {
   DbDriver,
   EmailOutboxStatus,
   EmailTemplateKey,
+  GatewayTeardownJobStatus,
   GrantStatus,
   HttpMethod,
   IsoTimestamp,
@@ -81,6 +82,9 @@ import type {
   EmailTemplateRecord,
   EmailTemplateRepo,
   EnqueueEmailInput,
+  GatewayTeardownJobFilter,
+  GatewayTeardownJobRecord,
+  GatewayTeardownJobRepo,
   GrantFilter,
   GrantRecord,
   GrantRepo,
@@ -392,6 +396,21 @@ function mapOutbox(row: Row): EmailOutboxRecord {
     idempotency_key: textOrNull(row.idempotency_key),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
+  };
+}
+
+function mapTeardownJob(row: Row): GatewayTeardownJobRecord {
+  return {
+    id: text(row.id),
+    user_id: text(row.user_id),
+    status: text(row.status) as GatewayTeardownJobStatus,
+    attempts: int(row.attempts),
+    next_attempt_at: textOrNull(row.next_attempt_at),
+    last_error: textOrNull(row.last_error),
+    requested_by: textOrNull(row.requested_by),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+    completed_at: textOrNull(row.completed_at),
   };
 }
 
@@ -1988,6 +2007,119 @@ class SqliteStore implements NexusStore {
       );
       return { items: rows.map(mapOutbox), total };
     },
+  };
+
+  /* ── gatewayTeardownJobs ──────────────────────────────────────────────── */
+
+  readonly gatewayTeardownJobs: GatewayTeardownJobRepo = {
+    upsertPending: async (userId, requestedBy, now) => {
+      // `user_id` is unique, so the conflict target is the account rather than
+      // the row id: a second disable resets the outstanding job instead of
+      // queueing a duplicate revocation.
+      execute(
+        this.db,
+        `INSERT INTO gateway_teardown_jobs
+           (id, user_id, status, attempts, next_attempt_at, last_error, requested_by,
+            created_at, updated_at, completed_at)
+         VALUES (?, ?, 'pending', 0, ?, NULL, ?, ?, ?, NULL)
+         ON CONFLICT (user_id) DO UPDATE SET
+           status = 'pending',
+           attempts = 0,
+           next_attempt_at = excluded.next_attempt_at,
+           last_error = NULL,
+           requested_by = excluded.requested_by,
+           updated_at = excluded.updated_at,
+           completed_at = NULL`,
+        [newId(), userId, now, requestedBy, now, now],
+      );
+      const job = await this.gatewayTeardownJobs.findByUser(userId);
+      if (!job) {
+        throw new Error('gatewayTeardownJobs.upsertPending: row vanished immediately after upsert');
+      }
+      return job;
+    },
+
+    findByUser: async (userId) => {
+      const row = queryOne(this.db, 'SELECT * FROM gateway_teardown_jobs WHERE user_id = ?', [
+        userId,
+      ]);
+      return row ? mapTeardownJob(row) : null;
+    },
+
+    list: async (filter, options) => {
+      const where = new WhereBuilder()
+        .add(filter.status, 'status = ?', filter.status ?? null)
+        .build();
+      const { limit, offset } = page(options);
+      const total = queryCount(
+        this.db,
+        `SELECT COUNT(*) AS count FROM gateway_teardown_jobs${where.sql}`,
+        where.params,
+      );
+      const rows = queryAll(
+        this.db,
+        `SELECT * FROM gateway_teardown_jobs${where.sql}
+         ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
+      );
+      return { items: rows.map(mapTeardownJob), total };
+    },
+
+    claimDue: async (now, limit) => {
+      const claim = this.db.transaction((): GatewayTeardownJobRecord[] => {
+        const ids = queryAll(
+          this.db,
+          `SELECT id FROM gateway_teardown_jobs
+           WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+           ORDER BY next_attempt_at ASC, created_at ASC LIMIT ?`,
+          [now, Math.max(1, Math.floor(limit))],
+        ).map((row) => text(row.id));
+        if (ids.length === 0) return [];
+        execute(
+          this.db,
+          `UPDATE gateway_teardown_jobs
+           SET status = 'sending', attempts = attempts + 1, updated_at = ?
+           WHERE id IN (${ids.map(() => '?').join(', ')}) AND status = 'pending'`,
+          [nowIso(), ...ids],
+        );
+        return queryAll(
+          this.db,
+          `SELECT * FROM gateway_teardown_jobs WHERE id IN (${ids.map(() => '?').join(', ')})`,
+          ids,
+        ).map(mapTeardownJob);
+      });
+      return claim();
+    },
+
+    markDone: async (id, at) => {
+      execute(
+        this.db,
+        `UPDATE gateway_teardown_jobs
+         SET status = 'done', next_attempt_at = NULL, last_error = NULL, completed_at = ?,
+             updated_at = ? WHERE id = ?`,
+        [at, at, id],
+      );
+    },
+
+    reschedule: async (id, nextAttemptAt, lastError) => {
+      execute(
+        this.db,
+        `UPDATE gateway_teardown_jobs
+         SET status = 'pending', next_attempt_at = ?, last_error = ?, updated_at = ? WHERE id = ?`,
+        [nextAttemptAt, lastError, nowIso(), id],
+      );
+    },
+
+    releaseStale: async (olderThan) =>
+      execute(
+        this.db,
+        `UPDATE gateway_teardown_jobs SET status = 'pending', next_attempt_at = ?, updated_at = ?
+         WHERE status = 'sending' AND updated_at <= ?`,
+        [nowIso(), nowIso(), olderThan],
+      ),
+
+    deleteByUser: async (userId) =>
+      execute(this.db, 'DELETE FROM gateway_teardown_jobs WHERE user_id = ?', [userId]) > 0,
   };
 
   /* ── auditLogs ────────────────────────────────────────────────────────── */

@@ -7,9 +7,10 @@ import {
   type User,
 } from '@ferrum-nexus/shared';
 import { formatDateTime } from '../../lib/format';
-import { useUpdateUser, useUsers } from '../../hooks/useUsers';
+import { useRetryGatewayTeardown, useUpdateUser, useUser, useUsers } from '../../hooks/useUsers';
 import { useToast } from '../../stores/toast';
 import { RoleGuard } from '../../components/layout/RoleGuard';
+import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
 import { PageHeader } from '../../components/ui/Card';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
@@ -19,6 +20,56 @@ import { Icon } from '../../components/ui/Icon';
 import { Input } from '../../components/ui/Input';
 import { Select } from '../../components/ui/Select';
 import { RoleBadge, StatusPill } from '../../components/ui/StatusPill';
+import { Tooltip } from '../../components/ui/Tooltip';
+
+/**
+ * "The account is off but its gateway credentials are not."
+ *
+ * A disabled account whose Ferrum consumer could not be stripped keeps a
+ * working API key until the teardown worker gets through, so the state is shown
+ * rather than left to the audit log — with the last error and a way to re-drive
+ * it now that Edge may be back.
+ */
+function GatewayTeardownBadge({ userId }: { userId: string }): ReactElement | null {
+  const detail = useUser(userId);
+  const retry = useRetryGatewayTeardown();
+  const toast = useToast();
+  const teardown = detail.data?.gateway_teardown ?? null;
+
+  if (!teardown || teardown.status === 'done') return null;
+
+  return (
+    <span className="mt-1 flex items-center gap-1.5">
+      <Tooltip
+        label={
+          teardown.last_error
+            ? `Last attempt failed: ${teardown.last_error}`
+            : 'Queued; the gateway teardown worker is retrying.'
+        }
+      >
+        <Badge tone="warning">Gateway revocation pending</Badge>
+      </Tooltip>
+      <Button
+        size="sm"
+        variant="ghost"
+        loading={retry.isPending}
+        onClick={() =>
+          retry.mutate(userId, {
+            onSuccess: (result) => {
+              if (result.gateway_teardown === 'pending') {
+                toast.error('The gateway still refused the revocation; it stays queued');
+              } else {
+                toast.success('Gateway credentials revoked');
+              }
+            },
+          })
+        }
+      >
+        Retry
+      </Button>
+    </span>
+  );
+}
 
 function UsersTable(): ReactElement {
   const [offset, setOffset] = useState(0);
@@ -36,6 +87,9 @@ function UsersTable(): ReactElement {
   const update = useUpdateUser();
   const toast = useToast();
   const [statusTarget, setStatusTarget] = useState<User | null>(null);
+  // Portal-wide, so a page with no outstanding revocation costs no extra
+  // requests at all — the per-row detail is only fetched when this is non-zero.
+  const pendingTeardowns = query.data?.pending_gateway_teardowns ?? 0;
 
   const columns = useMemo<Columns<User>>(
     () => [
@@ -74,7 +128,14 @@ function UsersTable(): ReactElement {
       {
         id: 'status',
         header: 'Status',
-        cell: ({ row }) => <StatusPill status={row.original.status} />,
+        cell: ({ row }) => (
+          <span className="block">
+            <StatusPill status={row.original.status} />
+            {pendingTeardowns > 0 && row.original.status === 'disabled' ? (
+              <GatewayTeardownBadge userId={row.original.id} />
+            ) : null}
+          </span>
+        ),
       },
       {
         id: 'verified',
@@ -105,7 +166,7 @@ function UsersTable(): ReactElement {
         ),
       },
     ],
-    [update, toast],
+    [update, toast, pendingTeardowns],
   );
 
   return (

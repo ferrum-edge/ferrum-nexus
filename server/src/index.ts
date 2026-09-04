@@ -45,6 +45,7 @@ import { createCatalogService, type CatalogService } from './catalog/service.js'
 import { loadConfig, type NexusConfig } from './config/index.js';
 import { createConsumerProvisioner } from './credentials/consumers.js';
 import { createCredentialsService, type CredentialsService } from './credentials/service.js';
+import { createTeardownWorker, type TeardownWorker } from './credentials/teardown-worker.js';
 import { createStore } from './db/index.js';
 import type { NexusStore } from './db/store.js';
 import {
@@ -87,6 +88,11 @@ export interface NexusServices {
   email: EmailService;
   /** Background sender; `tick()` runs one cycle deterministically in tests. */
   outbox: OutboxWorker;
+  /**
+   * Background gateway-revocation retrier for disabled accounts; `tick()` runs
+   * one cycle deterministically in tests.
+   */
+  teardown: TeardownWorker;
   notifications: NotificationsService;
   settings: SettingsService;
   users: UsersService;
@@ -142,6 +148,12 @@ export interface BuildServerDeps {
    * tests drive `services.outbox.tick()` themselves, and `true` elsewhere.
    */
   startOutboxWorker?: boolean;
+  /**
+   * Start the gateway teardown poller. Same default as
+   * {@link BuildServerDeps.startOutboxWorker}: tests drive
+   * `services.teardown.tick()` themselves.
+   */
+  startTeardownWorker?: boolean;
   /** Serve the built SPA. Defaults to "yes when the dist directory exists". */
   serveStatic?: boolean;
 }
@@ -350,12 +362,23 @@ export async function buildServer(
       }),
   });
 
+  // Retries the gateway revocation a disable owes when Edge refused it. Without
+  // it a failed teardown would leave a disabled account's API key working
+  // forever — see `credentials/teardown-worker.ts`.
+  const teardown = createTeardownWorker({
+    store: deps.store,
+    credentials,
+    audit,
+    log: warn,
+  });
+
   const services: NexusServices = {
     audit,
     captcha,
     auth,
     email,
     outbox,
+    teardown,
     notifications,
     settings,
     users,
@@ -523,13 +546,16 @@ export async function buildServer(
 
   app.addHook('onClose', async () => {
     await outbox.stop();
+    await teardown.stop();
     await deps.edge.close();
   });
 
   await app.ready();
 
-  // Tests drive `services.outbox.tick()` by hand so no timer ever fires mid-assert.
+  // Tests drive `services.outbox.tick()` and `services.teardown.tick()` by hand
+  // so no timer ever fires mid-assert.
   if (deps.startOutboxWorker ?? config.env !== 'test') outbox.start();
+  if (deps.startTeardownWorker ?? config.env !== 'test') teardown.start();
 
   return app;
 }

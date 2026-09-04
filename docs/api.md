@@ -454,7 +454,10 @@ organization.
 
 ### `GET /api/users`
 
-_admin_ — `Paginated<User>`.
+_admin_ — `Paginated<User>` plus `pending_gateway_teardowns`: the portal-wide
+count of disabled accounts whose gateway credentials have **not** been revoked
+yet. Anything above zero means the teardown worker is still retrying against
+Edge.
 
 | Query             | Type                                                        |
 | ----------------- | ----------------------------------------------------------- |
@@ -463,6 +466,24 @@ _admin_ — `Paginated<User>`.
 | `org_id`          | uuid                                                        |
 | `q`               | substring match on email or display name (case-insensitive) |
 | `limit`, `offset` | pagination                                                  |
+
+### `GET /api/users/:id`
+
+_admin_ → `{ "user": User, "gateway_teardown": GatewayTeardownState | null }`.
+
+`gateway_teardown` is the account's outstanding (or completed) gateway
+revocation, and is `null` for an account that never had one:
+
+```json
+{
+  "status": "pending",
+  "attempts": 3,
+  "last_error": "Ferrum Edge returned 500",
+  "next_attempt_at": "2026-09-04T09:12:00.000Z",
+  "updated_at": "2026-09-04T09:11:20.000Z",
+  "completed_at": null
+}
+```
 
 ### `PATCH /api/users/:id`
 
@@ -475,7 +496,12 @@ _admin_ — role, status, organization and display name.
 | `org_id`       | uuid \| null           |
 | `display_name` | string, 1–200          |
 
-→ `{ "user": User }`.
+→ `{ "user": User, "gateway_teardown"?: "ok" | "no_consumer" | "pending" }`.
+
+`gateway_teardown` is present **only when this request disabled the account**.
+`pending` means the portal account is off but its Ferrum Edge credentials are
+still live and the teardown worker is retrying — the security operation is not
+complete. There is no `failed` value: a failure is a retry, not an outcome.
 
 Guards enforced in the service:
 
@@ -488,8 +514,23 @@ Guards enforced in the service:
   `409 LAST_SUPER_ADMIN`. This is checked before the self-disable rule, so it is
   also what you get for disabling yourself while you are the last one.
 - Disabling **your own** account in any other case → `409 CONFLICT`.
-- Disabling an account deletes every session it holds.
+- Disabling an account deletes every session it holds, and queues the gateway
+  revocation as durable work inside the same transaction.
+- Re-enabling an account (`status: "active"`) cancels any queued revocation, so
+  a retry can never strip a live account's credentials.
 - `404 NOT_FOUND` when `org_id` names an organization that does not exist.
+
+### `POST /api/users/:id/gateway-teardown/retry`
+
+_admin_ — re-run a disabled account's gateway revocation immediately, instead of
+waiting for the worker's backoff. Idempotent; audited as
+`user.gateway_teardown_retry`.
+
+→ `{ "gateway_teardown": "ok" | "no_consumer" | "pending", "job": GatewayTeardownState | null }`
+
+- `409 CONFLICT` when the account is not `disabled` — an active account's
+  consumer is supposed to work.
+- `404 NOT_FOUND` when the account does not exist.
 
 ---
 
@@ -810,10 +851,18 @@ reviewer wants.
 Body `{ "user_id": uuid, "reason": string, "revoke_grants"?: boolean }`
 
 ```json
-{ "user": { … }, "revoked_grants": 3, "terminated_sessions": 2 }
+{
+  "user": { … },
+  "revoked_grants": 3,
+  "terminated_sessions": 2,
+  "gateway_teardown": "ok"
+}
 ```
 
-Disables the account and destroys every session it holds. Errors:
+Disables the account and destroys every session it holds. `gateway_teardown`
+carries the same `"ok" | "no_consumer" | "pending"` values as
+`PATCH /api/users/:id`, and `pending` means the same thing here: the gateway
+credentials are still live and the revocation is queued for retry. Errors:
 `409 LAST_SUPER_ADMIN` when the target is the last active super admin —
 **including when that is you**, because "promote someone else first" is the
 useful message; `409 CONFLICT` for any other attempt to disable your own

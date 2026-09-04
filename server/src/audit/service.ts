@@ -38,6 +38,13 @@ export const AuditAction = {
   USER_UPDATE: 'user.update',
   USER_ROLE_CHANGE: 'user.role_change',
   USER_DISABLE: 'user.disable',
+  /**
+   * The teardown worker finished the gateway revocation a disable had left
+   * pending. Written by the system, so the actor is {@link SYSTEM_ACTOR}.
+   */
+  USER_GATEWAY_TEARDOWN_COMPLETE: 'user.gateway_teardown_complete',
+  /** An admin re-ran a pending gateway revocation by hand. */
+  USER_GATEWAY_TEARDOWN_RETRY: 'user.gateway_teardown_retry',
   ORG_CREATE: 'org.create',
   ORG_UPDATE: 'org.update',
 
@@ -136,6 +143,16 @@ export interface AuditService {
 
 /** Anonymous actor, for events that happen before a session exists. */
 export const ANONYMOUS_ACTOR: AuditActor = { id: null, role: null };
+
+/**
+ * Actor for rows a background worker writes with no request behind them.
+ *
+ * Shaped like {@link ANONYMOUS_ACTOR} because the columns are the same — the
+ * audit trail has no third party to name — but spelled separately so a reader
+ * of the call site can tell "nobody was signed in yet" apart from "Nexus itself
+ * did this".
+ */
+export const SYSTEM_ACTOR: AuditActor = { id: null, role: null };
 
 /** Build the audit service. */
 export function createAuditService(store: NexusStore): AuditService {

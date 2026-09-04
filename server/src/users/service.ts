@@ -21,11 +21,20 @@
  * Disabling an account also deletes its sessions, so the next request from an
  * open browser tab is a 401 rather than a working page — **and** strips its
  * Ferrum consumer, because an issued API key needs no portal session at all.
+ *
+ * That last step is **durable work, not a side effect**. A
+ * `gateway_teardown_jobs` row is written in the same transaction as
+ * `status = 'disabled'`, the revocation runs immediately, and a failure leaves
+ * the job `pending` for the teardown worker rather than being reported as a
+ * finished disable (`GHSA-8vxw-j3wc-w6vm`). Re-enabling an account deletes the
+ * job, so a retry can never strip a live account's credentials.
  */
 
 import {
   MIN_PASSWORD_LENGTH,
   roleAtLeast,
+  type GatewayTeardownOutcome,
+  type GatewayTeardownState,
   type Organization,
   type Paginated,
   type Role,
@@ -41,10 +50,22 @@ import {
   type IssuedSession,
   type RequestContext,
 } from '../auth/service.js';
-import { tearDownGatewayAccess, type CredentialsService } from '../credentials/service.js';
-import type { ListOptions, NexusStore, UpdateInput, UserFilter, UserRecord } from '../db/store.js';
+import {
+  runGatewayTeardown,
+  type CredentialsService,
+  type GatewayTeardownAttempt,
+} from '../credentials/service.js';
+import type {
+  GatewayTeardownJobRecord,
+  ListOptions,
+  NexusStore,
+  UpdateInput,
+  UserFilter,
+  UserRecord,
+} from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
 import { conflict, forbidden, lastSuperAdmin, notFound, validationFailed } from '../lib/errors.js';
+import { nowIso } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
 
 /** Result of {@link UsersService.updateMe}. */
@@ -76,6 +97,28 @@ export interface UpdateUserInput {
   display_name?: string;
 }
 
+/** Result of {@link UsersService.updateUser}. */
+export interface UpdateUserResult {
+  user: User;
+  /**
+   * Present only when this call disabled the account. `pending` means the
+   * gateway credentials are still live and the teardown worker is retrying.
+   */
+  gateway_teardown?: GatewayTeardownOutcome;
+}
+
+/** Result of {@link UsersService.getUser} — the admin account detail. */
+export interface UserDetail {
+  user: User;
+  gateway_teardown: GatewayTeardownState | null;
+}
+
+/** Result of {@link UsersService.retryGatewayTeardown}. */
+export interface RetryGatewayTeardownResult {
+  gateway_teardown: GatewayTeardownOutcome;
+  job: GatewayTeardownJobRecord | null;
+}
+
 /** Filters accepted by {@link UsersService.listUsers}. */
 export interface UserListFilter {
   role?: Role;
@@ -100,13 +143,28 @@ export interface UsersService {
     context?: RequestContext,
   ): Promise<UpdateMeResult>;
   listUsers(filter?: UserListFilter, options?: ListOptions): Promise<Paginated<User>>;
+  /** Portal-wide count of disabled accounts still owing a gateway revocation. */
+  countPendingGatewayTeardowns(): Promise<number>;
+  /** Admin account detail, including any outstanding gateway revocation. */
+  getUser(targetId: Uuid): Promise<UserDetail>;
   /** Admin update of another account, with the role and last-super-admin guards. */
   updateUser(
     actor: UserRecord,
     targetId: Uuid,
     patch: UpdateUserInput,
     ip?: string | null,
-  ): Promise<User>;
+  ): Promise<UpdateUserResult>;
+  /**
+   * Re-run a disabled account's gateway revocation immediately.
+   *
+   * The explicit operator handle on the pending state: it re-queues the job and
+   * attempts it once, so a recovered Edge does not have to be waited out.
+   */
+  retryGatewayTeardown(
+    actor: UserRecord,
+    targetId: Uuid,
+    ip?: string | null,
+  ): Promise<RetryGatewayTeardownResult>;
   listOrganizations(options?: ListOptions): Promise<Paginated<Organization>>;
   createOrganization(
     actor: UserRecord,
@@ -139,6 +197,18 @@ export interface UsersServiceDeps {
 /** Roles that only a `super_admin` may confer or remove. */
 function isElevated(role: Role): boolean {
   return roleAtLeast(role, 'admin');
+}
+
+/** Project a job row onto the wire shape (dropping the ids admins do not need). */
+export function toTeardownState(job: GatewayTeardownJobRecord): GatewayTeardownState {
+  return {
+    status: job.status,
+    attempts: job.attempts,
+    last_error: job.last_error,
+    next_attempt_at: job.next_attempt_at,
+    updated_at: job.updated_at,
+    completed_at: job.completed_at,
+  };
 }
 
 /** Build the users service. */
@@ -221,7 +291,60 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
       return { items: page.items.map(toPublicUser), total: page.total };
     },
 
-    async updateUser(actor, targetId, patch, ip = null): Promise<User> {
+    async countPendingGatewayTeardowns(): Promise<number> {
+      // Only the total matters here, so the smallest page the store will serve
+      // is enough — `total` ignores pagination.
+      const page = await store.gatewayTeardownJobs.list({ status: 'pending' }, { limit: 1 });
+      return page.total;
+    },
+
+    async getUser(targetId): Promise<UserDetail> {
+      const target = await store.users.findById(targetId);
+      if (!target) throw notFound('User', targetId);
+      const job = await store.gatewayTeardownJobs.findByUser(targetId);
+      return {
+        user: toPublicUser(target),
+        gateway_teardown: job ? toTeardownState(job) : null,
+      };
+    },
+
+    async retryGatewayTeardown(actor, targetId, ip = null): Promise<RetryGatewayTeardownResult> {
+      const target = await store.users.findById(targetId);
+      if (!target) throw notFound('User', targetId);
+      // An active account's consumer is supposed to work; re-running the
+      // teardown against it would revoke credentials nobody asked to revoke.
+      if (target.status !== 'disabled') {
+        throw conflict('Only a disabled account has a gateway revocation to retry');
+      }
+
+      // Re-queue first, so a job that had somehow gone missing (or already
+      // completed against a gateway that has since drifted) is re-driven rather
+      // than silently skipped.
+      const job = await store.gatewayTeardownJobs.upsertPending(target.id, actor.id, nowIso());
+      const attempt = await runGatewayTeardown({
+        credentials,
+        store,
+        userId: target.id,
+        subject: actor.id,
+        jobId: job.id,
+        ...(deps.log ? { log: deps.log } : {}),
+      });
+
+      await audit.record(
+        { id: actor.id, role: actor.role },
+        AuditAction.USER_GATEWAY_TEARDOWN_RETRY,
+        { type: 'user', id: target.id },
+        { attempts: job.attempts, ...attempt.details },
+        ip,
+      );
+
+      return {
+        gateway_teardown: attempt.outcome,
+        job: await store.gatewayTeardownJobs.findByUser(target.id),
+      };
+    },
+
+    async updateUser(actor, targetId, patch, ip = null): Promise<UpdateUserResult> {
       const target = await store.users.findById(targetId);
       if (!target) throw notFound('User', targetId);
 
@@ -278,7 +401,7 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
         changed.push('status');
       }
 
-      if (changed.length === 0) return toPublicUser(target);
+      if (changed.length === 0) return { user: toPublicUser(target) };
 
       // The last-super-admin rule is a count of *other* rows followed by a
       // write to this one, and the checks above ran long before the write. Two
@@ -294,16 +417,29 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
         target.role === 'super_admin' &&
         ((roleChanged && target.status === 'active') || update.status === 'disabled');
 
-      const updated = await store.transaction(async (tx) => {
+      const result = await store.transaction(async (tx) => {
         if (guardsLastSuperAdmin && (await tx.users.countActiveSuperAdmins(target.id)) === 0) {
           throw lastSuperAdmin();
         }
-        return tx.users.updateIfMatches(
+        const row = await tx.users.updateIfMatches(
           target.id,
           { role: target.role, status: target.status },
           update,
         );
+        if (!row) return { row: null, jobId: null };
+        // The revocation the disable owes is committed *with* the disable, so
+        // the two can never disagree: there is no window in which the account
+        // is off and nothing remembers that its gateway credentials are live.
+        if (update.status === 'disabled') {
+          const job = await tx.gatewayTeardownJobs.upsertPending(target.id, actor.id, nowIso());
+          return { row, jobId: job.id };
+        }
+        // Re-enabling cancels any queued revocation — a retry must never strip
+        // the credentials of an account that is live again.
+        if (update.status === 'active') await tx.gatewayTeardownJobs.deleteByUser(target.id);
+        return { row, jobId: null };
       });
+      const updated = result.row;
       if (!updated) {
         if (!(await store.users.findById(target.id))) throw notFound('User', targetId);
         throw conflict('That account changed while you were editing it — reload and try again');
@@ -312,10 +448,17 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
       // A disabled account must not keep a usable browser session — nor a
       // working gateway identity, which outlives the session entirely.
       let terminatedSessions = 0;
-      let teardown: Record<string, unknown> = {};
+      let teardown: GatewayTeardownAttempt | null = null;
       if (update.status === 'disabled') {
         terminatedSessions = await store.sessions.deleteForUser(target.id);
-        teardown = await tearDownGatewayAccess(credentials, target.id, actor.id, deps.log);
+        teardown = await runGatewayTeardown({
+          credentials,
+          store,
+          userId: target.id,
+          subject: actor.id,
+          jobId: result.jobId,
+          ...(deps.log ? { log: deps.log } : {}),
+        });
       }
 
       const action = statusChanged
@@ -335,7 +478,7 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
           ...(roleChanged ? { from_role: target.role, to_role: update.role } : {}),
           ...(statusChanged ? { from_status: target.status, to_status: update.status } : {}),
           ...(terminatedSessions > 0 ? { terminated_sessions: terminatedSessions } : {}),
-          ...teardown,
+          ...(teardown?.details ?? {}),
         },
         ip,
       );
@@ -350,7 +493,10 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
         );
       }
 
-      return toPublicUser(updated);
+      return {
+        user: toPublicUser(updated),
+        ...(teardown ? { gateway_teardown: teardown.outcome } : {}),
+      };
     },
 
     async listOrganizations(options): Promise<Paginated<Organization>> {

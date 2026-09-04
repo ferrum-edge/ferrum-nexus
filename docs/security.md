@@ -406,10 +406,47 @@ is what the gateway authenticates, and it has no idea a portal session ever
 existed. `basicauth` is deleted explicitly because it never appears in a read
 projection, so a group rewrite cannot see it.
 
-The teardown is best-effort by design: if Edge is unreachable the account is
-still disabled and the failure is logged and recorded in the audit row
-(`gateway_teardown: "failed"`) for an operator to finish by hand. An account
-left enabled because the gateway was down would be strictly worse.
+#### The gateway half is durable work, not a side effect
+
+An account left enabled because the gateway was down would be strictly worse
+than a disabled account whose consumer still needs cleaning up, so (1) commits
+whether or not Edge answers. What must **not** happen is the second half being
+quietly dropped: a disabled account's API key authenticates directly to Edge
+with no portal session behind it, so a swallowed failure leaves the credential
+working indefinitely and reports the disable as finished.
+
+So steps (2) and (3) are owed by a `gateway_teardown_jobs` row written **inside
+the same transaction** as `users.status = 'disabled'`. There is one row per
+account (`user_id` is unique), and it carries `status`
+(`pending` → `sending` → `done`), `attempts`, `next_attempt_at`, `last_error`
+and the admin who asked (`requested_by`).
+
+- The revocation runs immediately, as before. On success the job is `done` and
+  the response and audit row say `gateway_teardown: "ok"` (or `"no_consumer"`).
+- On failure the job stays `pending`, the response and audit row say
+  `gateway_teardown: "pending"`, and the failure is logged at `warn`. There is
+  no `"failed"` outcome any more — a failure is a retry, not a result. **Do not
+  read `pending` as "done"**: the credentials are still live.
+- `credentials/teardown-worker.ts` polls every 5 seconds, claims due jobs
+  atomically, and retries with an exponential backoff capped at 5 minutes. It
+  retries **indefinitely** while the account is disabled — unlike the email
+  outbox there is no give-up state, because giving up would leave a live
+  credential and call it settled. Success writes
+  `user.gateway_teardown_complete` with what was revoked.
+- **Re-enabling an account deletes its job**, and the worker drops any job whose
+  account is no longer disabled, so a retry can never strip a live account's
+  credentials.
+- Admins see the state on `GET /api/users/:id`
+  (`gateway_teardown: { status, attempts, last_error, next_attempt_at, … }`),
+  the portal-wide backlog as `pending_gateway_teardowns` on `GET /api/users`,
+  and can re-drive one immediately with
+  `POST /api/users/:id/gateway-teardown/retry` (audited as
+  `user.gateway_teardown_retry`).
+
+**Alert on the `warn` line** `Gateway revocation for a disabled account failed;
+it stays queued for retry` and on a non-zero `pending_gateway_teardowns` that
+does not fall back to zero — both mean disabled accounts still hold working
+gateway credentials.
 
 ---
 
@@ -697,13 +734,15 @@ ordinary reporting.
 
 ### Users and organizations
 
-| Action             | Target type    | Description                                                                                                                                                                                                                                                                                                           |
-| ------------------ | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `user.update`      | `user`         | A profile or account field changed without a role/status change. `details.self` distinguishes self-service from an admin edit; `changed_fields` lists what moved (`password` appears as a field name, never a value). A self-service password change also ends every other session, counted in `terminated_sessions`. |
-| `user.role_change` | `user`         | An admin changed an account's role. `details`: `from_role`, `to_role`.                                                                                                                                                                                                                                                |
-| `user.disable`     | `user`         | An admin disabled (or re-enabled) an account via the ordinary route. `details`: `from_status`, `to_status`, `terminated_sessions`, plus the gateway teardown: `gateway_teardown` (`ok` / `no_consumer` / `failed`), `gateway_consumer_id`, `revoked_credentials`, `removed_acl_groups`, `gateway_error`.              |
-| `org.create`       | `organization` | An organization was created. `details`: name.                                                                                                                                                                                                                                                                         |
-| `org.update`       | `organization` | An organization was edited. `details`: `changed_fields`.                                                                                                                                                                                                                                                              |
+| Action                           | Target type    | Description                                                                                                                                                                                                                                                                                                                                                                                            |
+| -------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `user.update`                    | `user`         | A profile or account field changed without a role/status change. `details.self` distinguishes self-service from an admin edit; `changed_fields` lists what moved (`password` appears as a field name, never a value). A self-service password change also ends every other session, counted in `terminated_sessions`.                                                                                  |
+| `user.role_change`               | `user`         | An admin changed an account's role. `details`: `from_role`, `to_role`.                                                                                                                                                                                                                                                                                                                                 |
+| `user.disable`                   | `user`         | An admin disabled (or re-enabled) an account via the ordinary route. `details`: `from_status`, `to_status`, `terminated_sessions`, plus the gateway teardown: `gateway_teardown` (`ok` / `no_consumer` / `pending`), `gateway_consumer_id`, `revoked_credentials`, `removed_acl_groups`, `gateway_error`. `pending` means the revocation is queued and being retried — the credentials are still live. |
+| `user.gateway_teardown_complete` | `user`         | The teardown worker finished a revocation a disable had left pending. Written by the system, so `actor_user_id` is `null`. `details`: `attempts`, `gateway_teardown`, `gateway_consumer_id`, `revoked_credentials`, `removed_acl_groups`.                                                                                                                                                              |
+| `user.gateway_teardown_retry`    | `user`         | An admin re-ran a pending gateway revocation by hand via `POST /api/users/:id/gateway-teardown/retry`. `details`: `attempts` so far, plus the same teardown fields.                                                                                                                                                                                                                                    |
+| `org.create`                     | `organization` | An organization was created. `details`: name.                                                                                                                                                                                                                                                                                                                                                          |
+| `org.update`                     | `organization` | An organization was edited. `details`: `changed_fields`.                                                                                                                                                                                                                                                                                                                                               |
 
 ### Publishing
 
