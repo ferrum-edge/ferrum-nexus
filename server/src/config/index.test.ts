@@ -97,6 +97,28 @@ describe('loadConfig', () => {
     expectConfigError(baseEnv({ FERRUM_ADMIN_JWT_SECRET: 'too-short' }), 'at least 32 characters');
   });
 
+  it('leaves NEXUS_BOOTSTRAP_TOKEN unset by default and accepts a long one', () => {
+    assert.equal(loadConfig(baseEnv()).bootstrapToken, undefined);
+    assert.equal(
+      loadConfig(baseEnv({ NEXUS_BOOTSTRAP_TOKEN: '   ' })).bootstrapToken,
+      undefined,
+      'blank means unset, so the entry point generates one',
+    );
+    assert.equal(
+      loadConfig(baseEnv({ NEXUS_BOOTSTRAP_TOKEN: 'b'.repeat(64) })).bootstrapToken,
+      'b'.repeat(64),
+    );
+  });
+
+  it('rejects a short NEXUS_BOOTSTRAP_TOKEN', () => {
+    // A guessable token is worse than none: it looks configured while leaving
+    // the founding super_admin election open to anyone who can reach the port.
+    expectConfigError(
+      baseEnv({ NEXUS_BOOTSTRAP_TOKEN: 'sekret' }),
+      'NEXUS_BOOTSTRAP_TOKEN must be at least 16 characters',
+    );
+  });
+
   it('allows plaintext http for loopback admin URLs', () => {
     for (const url of ['http://127.0.0.1:9000', 'http://localhost:9000', 'http://[::1]:9000']) {
       const config = loadConfig(baseEnv({ FERRUM_ADMIN_URL: url }));

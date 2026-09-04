@@ -35,6 +35,16 @@ export const TEST_EDGE_JWT_SECRET = 'test-ferrum-admin-jwt-secret-0123456789';
 /** Default password used by {@link TestApp.registerUser}. */
 export const TEST_PASSWORD = 'correct-horse-battery-staple';
 
+/**
+ * `NEXUS_BOOTSTRAP_TOKEN` every harness is built with.
+ *
+ * Only the very first registration against a harness needs it; the server
+ * ignores the field once any account exists, so {@link TestApp.registerUser}
+ * sends it unconditionally and a test that injects `POST /api/auth/register`
+ * by hand only has to include it when it is creating the founder.
+ */
+export const TEST_BOOTSTRAP_TOKEN = 'test-bootstrap-token-0123456789abcdef';
+
 /* ── OpenAPI fixtures ───────────────────────────────────────────────────── */
 
 /** A minimal but valid OpenAPI 3.1 document with an absolute `servers[0].url`. */
@@ -177,6 +187,7 @@ export interface RegisterPayload {
   company?: string | null;
   phone?: string | null;
   captcha_token?: string;
+  bootstrap_token?: string;
 }
 
 let userCounter = 0;
@@ -212,6 +223,7 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
     NEXUS_ENV: 'test',
     NEXUS_LOG_LEVEL: 'silent',
     NEXUS_SECRET_KEY: TEST_SECRET_KEY,
+    NEXUS_BOOTSTRAP_TOKEN: TEST_BOOTSTRAP_TOKEN,
     NEXUS_SQLITE_PATH: ':memory:',
     NEXUS_DB_DRIVER: 'sqlite',
     FERRUM_ADMIN_URL: edgeUrl,
@@ -266,6 +278,9 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
         password: TEST_PASSWORD,
         display_name: `User ${userCounter}`,
         role: 'client',
+        // Ignored unless this is the portal's first account, in which case it
+        // is what allows the founder to be elected at all.
+        bootstrap_token: TEST_BOOTSTRAP_TOKEN,
         ...overrides,
       };
       const response = await app.inject({

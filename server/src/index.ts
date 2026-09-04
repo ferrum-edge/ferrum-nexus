@@ -13,6 +13,7 @@
  * No route file ever imports a service module directly.
  */
 
+import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -434,7 +435,7 @@ export async function buildServer(
     { prefix: '/api/auth' },
   );
 
-  await app.register(async (scope) => scope.register(brandingRoutes, { settings, captcha }), {
+  await app.register(async (scope) => scope.register(brandingRoutes, { settings, captcha, auth }), {
     prefix: '/api/branding',
   });
 
@@ -610,14 +611,55 @@ function defaultOnRegistered(
 
 /* ── Entry point ────────────────────────────────────────────────────────── */
 
+/**
+ * Announce the first-run bootstrap token on an empty portal.
+ *
+ * Only ever called for a *generated* token: one that came from
+ * `NEXUS_BOOTSTRAP_TOKEN` is the operator's own secret and is never echoed to
+ * the log. The message is deliberately loud — it is the only place this value
+ * is ever shown, and without it nobody can create the portal's first account.
+ */
+function logGeneratedBootstrapToken(app: FastifyInstance, token: string): void {
+  app.log.warn(
+    '\n' +
+      '='.repeat(76) +
+      '\n' +
+      'FIRST-RUN BOOTSTRAP: this portal has no accounts yet.\n' +
+      '\n' +
+      'The first registration becomes the portal super_admin, so it must send\n' +
+      'this bootstrap token as `bootstrap_token` (the sign-up form asks for it):\n' +
+      '\n' +
+      `    ${token}\n` +
+      '\n' +
+      'It was generated for this process only: it changes on every restart and\n' +
+      'differs between instances. Set NEXUS_BOOTSTRAP_TOKEN to pin one value\n' +
+      'across restarts and across a multi-instance deployment.\n' +
+      '='.repeat(76),
+  );
+}
+
 /** Boot the server from `process.env` and listen. */
 export async function main(): Promise<void> {
-  const config = loadConfig(process.env);
+  const loaded = loadConfig(process.env);
+  // With no `NEXUS_BOOTSTRAP_TOKEN` the portal still gets one, generated per
+  // process, so a fresh deployment is never bootstrappable by whoever reaches
+  // the port first — only by whoever can read the log.
+  const generatedBootstrapToken =
+    loaded.bootstrapToken === undefined ? randomBytes(32).toString('hex') : null;
+  const config: NexusConfig =
+    generatedBootstrapToken === null
+      ? loaded
+      : { ...loaded, bootstrapToken: generatedBootstrapToken };
+
   const store = createStore(config);
   await store.init();
   await store.migrate();
+  const emptyPortal = (await store.users.count()) === 0;
 
   const app = await buildServer(config, { store, edge: createFerrumAdmin(config) });
+  if (generatedBootstrapToken !== null && emptyPortal) {
+    logGeneratedBootstrapToken(app, generatedBootstrapToken);
+  }
   // Best-effort: the namespace is also created implicitly by the first write.
   void app.nexus.edge.ensureNamespace('Managed by Ferrum Nexus');
 
