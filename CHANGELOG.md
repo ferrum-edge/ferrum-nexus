@@ -175,6 +175,26 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   longer vanishes. The admin inbox predicate (platform thread or admin
   participates) moved into the store query as well.
 
+- **A `routes` spec revision holds the proxy lease.** The fresh read, the
+  `PUT /api-specs/{id}` replace, the store write and the compensation run
+  under `proxy:<id>`, so a concurrent runtime PATCH (methods, timeouts,
+  backend, WebSocket origins) is no longer overwritten by the importer's
+  re-insert; the publish cutover takes the same key.
+- **A failed enforcement conversion restores the original proxy.** On any
+  rebuild failure the half-built replacement is removed and the captured
+  proxy, its hand-owned plugins and the original mode are rebuilt through the
+  staging path before the error is returned; if that restoration fails too,
+  an `api.gateway_repair_required` audit row carries the snapshot an admin
+  needs. Previously the live proxy was deleted and a retry answered 404.
+- **Spec revision history is bounded.** `NEXUS_SPEC_HISTORY_LIMIT` (default 10) keeps the newest historical revisions per API, pruned inside the
+  transaction that makes a revision current, so the per-owner storage bound
+  is now `MAX_SPEC_BYTES × (limit + 1) × NEXUS_MAX_APIS_PER_OWNER`.
+- **Spec following compares the whole upstream.** An API follows its document
+  while its stored `upstream_url` equals the previous revision's normalised
+  `servers[0]`, and then moves on any scheme, host, port or base-path change;
+  a same-host pin with a different path is left alone. Base-path-only changes
+  previously reported success while the gateway kept the old path.
+
 ### Security
 
 The rewrite was reviewed twice — once by an adversarial pass over the whole
