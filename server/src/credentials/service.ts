@@ -101,7 +101,14 @@ import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import type { EdgeCredentialEntry, EdgeCredentialMap } from '../ferrum-admin/types.js';
 import type { NexusCrypto } from '../lib/crypto.js';
 import { last4, randomSecret, randomToken } from '../lib/crypto.js';
-import { conflict, edgeError, forbidden, notFound, validationFailed } from '../lib/errors.js';
+import {
+  conflict,
+  edgeError,
+  forbidden,
+  notFound,
+  userDisabled,
+  validationFailed,
+} from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
 import type { ConsumerProvisioner } from './consumers.js';
@@ -464,6 +471,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       throw validationFailed(`Unsupported credential type '${input.credentialType}'`);
     }
     return edge.serializePerKey(input.consumerId, async () => {
+      await assertOwnerActive(input.user.id);
       if (input.skipCap !== true) {
         const rows = await liveRows(input.consumerId, input.credentialType);
         if (rows.length >= cap) {
@@ -518,6 +526,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // leave the identities behind it untouched for the retry to pick up.
       for (const foreignId of foreign) {
         revoked += await edge.serializePerKey(foreignId, async () => {
+          await assertStillDisabled(userId);
           const live = await edge.consumers.get(foreignId);
           // A test consumer is disposable by definition — the next provider or
           // admin who wants one recreates it — so it goes away entirely rather
@@ -547,6 +556,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // lock: calling `provisioner.mutateAclGroups` from in here would wait on
       // the block it is already inside.
       return edge.serializePerKey(consumerId, async () => {
+        await assertStillDisabled(userId);
         const live = await edge.consumers.get(consumerId);
         const removedGroups = [...(live?.acl_groups ?? [])];
 
@@ -645,6 +655,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         if (!LIVE_STATUSES.has(current.status)) {
           throw conflict('This credential has already been revoked');
         }
+
+        // The owner, not the actor: an admin rotating somebody else's key must
+        // not be able to hand a disabled account a working one.
+        await assertOwnerActive(current.user_id);
 
         const consumer = await edge.consumers.get(consumerId);
         if (!consumer) throw edgeError('The gateway consumer for this credential no longer exists');
@@ -779,6 +793,48 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       );
     },
   };
+
+  /**
+   * Refuse a gateway write on behalf of an account that is no longer active.
+   *
+   * `serializePerKey` orders writes against a consumer; it does not
+   * re-authorise them. A `POST /api/credentials` that passed authentication a
+   * moment before an admin hit disable is still a valid request object when it
+   * reaches the front of the queue — and if it runs after the teardown, it
+   * mints a key on a disabled account that nothing is retrying to remove.
+   *
+   * So the owner is reloaded **inside** the critical section, after the lock is
+   * held and before any Edge write. Teardown takes the same key, which makes
+   * the two orders the only two possible: the append wins the lock and the
+   * teardown behind it deletes what it appended, or the teardown wins and the
+   * append then sees `disabled` and is refused.
+   */
+  async function assertOwnerActive(userId: Uuid): Promise<void> {
+    const owner = await store.users.findById(userId);
+    if (!owner) throw notFound('User', userId);
+    if (owner.status !== 'active') {
+      throw userDisabled('This account has been disabled; its gateway access cannot be extended');
+    }
+  }
+
+  /**
+   * Refuse to strip an account that is no longer disabled.
+   *
+   * A teardown job claimed before a re-enable would otherwise land afterwards
+   * and take a live account's credentials with it. The worker checks at claim
+   * time; this is the check that matters, because it runs inside the same
+   * per-consumer critical section as the Edge write it guards.
+   */
+  async function assertStillDisabled(userId: Uuid): Promise<void> {
+    const owner = await store.users.findById(userId);
+    if (!owner) return;
+    if (owner.status !== 'disabled') {
+      throw conflict('That account is no longer disabled; its gateway access was left alone', {
+        user_id: userId,
+        status: owner.status,
+      });
+    }
+  }
 
   /**
    * Every Edge consumer other than `canonicalId` that this account still holds

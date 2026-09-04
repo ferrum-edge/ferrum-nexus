@@ -38,7 +38,7 @@ import type { NexusConfig } from '../config/index.js';
 import type { ConsumerRecord, NexusStore, UserRecord } from '../db/store.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import type { EdgeConsumer } from '../ferrum-admin/types.js';
-import { edgeError } from '../lib/errors.js';
+import { edgeError, userDisabled } from '../lib/errors.js';
 
 /** Provisioning and ACL-group maintenance for Edge consumers. */
 export interface ConsumerProvisioner {
@@ -59,7 +59,23 @@ export interface ConsumerProvisioner {
     ferrumConsumerId: string,
     change: (groups: string[]) => string[],
     subject?: string,
+    options?: MutateAclGroupsOptions,
   ): Promise<EdgeConsumer>;
+}
+
+/** Extra conditions {@link ConsumerProvisioner.mutateAclGroups} checks. */
+export interface MutateAclGroupsOptions {
+  /**
+   * Refuse the write unless this account is still `active`, checked **inside**
+   * the critical section.
+   *
+   * An approval that passed authorisation before its grantee was disabled is
+   * still a valid request when it reaches the front of the consumer queue, and
+   * adding a group there re-authorises an account the teardown has already
+   * stripped. Pass the grantee's id on every path that *adds* a group;
+   * removals are always safe and never need it.
+   */
+  requireActiveUser?: Uuid;
 }
 
 /** Dependencies of {@link createConsumerProvisioner}. */
@@ -99,8 +115,17 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
       });
     },
 
-    async mutateAclGroups(ferrumConsumerId, change, subject): Promise<EdgeConsumer> {
+    async mutateAclGroups(ferrumConsumerId, change, subject, options): Promise<EdgeConsumer> {
       return edge.serializePerKey(ferrumConsumerId, async () => {
+        const requiredActive = options?.requireActiveUser;
+        if (requiredActive !== undefined) {
+          const owner = await store.users.findById(requiredActive);
+          if (!owner || owner.status !== 'active') {
+            throw userDisabled(
+              'This account has been disabled; its gateway access cannot be extended',
+            );
+          }
+        }
         const current = await edge.consumers.get(ferrumConsumerId);
         if (!current) {
           throw edgeError('The gateway consumer for this account no longer exists', {

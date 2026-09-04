@@ -430,6 +430,27 @@ failure on any one leaves the durable job `pending`. Because the identity list
 is enumerated from _live_ credential rows, a retry skips whatever an earlier
 attempt already finished.
 
+#### The lock orders writes; it does not authorise them
+
+A request that passed authentication a moment before the disable is still a
+valid request object when it reaches the front of the consumer queue. So every
+path that _extends_ gateway access reloads the account **inside** the critical
+section, after the lock is held and before any Edge write, and refuses a
+non-`active` owner with `403 USER_DISABLED`: credential issue, rotation
+(checking the credential's **owner**, not the acting admin), test-consumer
+issuance, and the approval that adds `nexus:api:<id>:approved`. Removing a
+group never needs the check.
+
+Because the teardown takes the same per-consumer key, only two orders exist and
+both are safe: the append wins the lock and the teardown behind it deletes what
+it appended, or the teardown wins and the append is refused.
+
+The mirror of that rule protects a **re-enable**: `status: "active"` deletes the
+pending job, and `disableGatewayAccess` re-reads the account inside the lock and
+refuses (`409 CONFLICT`) if it is no longer disabled, so a worker that claimed a
+job just before the re-enable cannot strip a live account. The worker drops such
+a job rather than rescheduling it.
+
 #### The gateway half is durable work, not a side effect
 
 An account left enabled because the gateway was down would be strictly worse
