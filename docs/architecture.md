@@ -222,7 +222,8 @@ One collection per logical table, same names as the SQL migrations
 (`users`, `apis`, `api_specs`, `access_requests`, `grants`, `consumers`,
 `credential_metadata`, `message_threads`, `messages`, `notifications`,
 `email_outbox`, `audit_logs`, `app_settings`, `email_templates`,
-`email_verification_tokens`, `organizations`, `sessions`). Four documented
+`email_verification_tokens`, `email_token_issue_claims`, `edge_leases`,
+`organizations`, `sessions`). Four documented
 physical differences:
 
 1. `_id` holds the string UUID; the mappers are the only place `_id` and `id`
@@ -322,22 +323,39 @@ Nexus lost a grant it believes it made, and the user gets a 403 from the
 gateway on an API the portal shows as approved.
 
 The fix is `edge.serializePerKey(consumerId, fn)` — an in-process promise queue
-keyed by consumer id. Independent consumers still run concurrently; the same
-consumer never has two in-flight mutations. **Every** consumer write goes
-through it: ACL-group changes (via `ConsumerProvisioner.mutateAclGroups`),
-credential appends, and credential deletes. A rotation also re-reads the
-consumer _inside_ the serialised block, so the array length it checks and the
-index it deletes cannot drift apart.
+keyed by consumer id, **plus a row in the `edge_leases` table** taken inside
+that queue. Independent consumers still run concurrently; the same consumer
+never has two in-flight mutations, in this process or any other. **Every**
+consumer write goes through it: ACL-group changes (via
+`ConsumerProvisioner.mutateAclGroups`), credential appends, and credential
+deletes. A rotation also re-reads the consumer _inside_ the serialised block, so
+the array length it checks and the index it deletes cannot drift apart.
 
 There is a second reason the body must be built from a fresh `GET`: omitting
 `keyauth` or `jwt` from a `PUT` body **deletes those credentials**. The
 provisioner always echoes `current.credentials` back, redacted placeholders and
 all.
 
-> **Multi-instance caveat.** This serialises within one Node process. A
-> horizontally scaled Nexus needs sticky routing per consumer or an external
-> lock; until then, run one writer. See
-> [`operations.md`](operations.md#8-scaling).
+**Across instances.** The queue alone only ever ordered one Node process, so
+two Nexus instances over one database had two queues — which is no lock, and is
+how a revoked ACL group could be restored by an approval that had merely read
+stale state. `createKeyedSerializer` therefore also takes a lease from
+`edge_leases` (`store.leases`) for the same key before running the section, and
+releases it in a `finally`. One row per resource, an owner id and an expiry:
+60-second TTL renewed at half of it, a 30-second wait for a contended key, and a
+`409 CONFLICT` telling the user to retry if that wait runs out. A crashed holder
+blocks the key only until its lease expires. See
+[`operations.md`](operations.md#8-scaling) for the operational picture.
+
+Keys must be canonical for the lock to mean anything: a consumer is always keyed
+by its **Ferrum consumer id**, a proxy always by `proxy:<id>`. Two wrappers key
+on something else on purpose and nest a canonical key inside — `test-consumer:
+<username>` in `publishing/service.ts` (a distinct Edge consumer whose id is not
+stable across replacements) and `proxy-plugin:<proxy>:<name>` in
+`plugins/service.ts` (so two different palette plugins on one API still save
+concurrently). Both always take the outer key first, never the reverse; neither
+the queue nor the lease is re-entrant, so nesting the _same_ key would
+deadlock.
 
 **Proxy writes are read-modify-write too.** `PUT /proxies/{id}` has exactly the
 same shape as `PUT /consumers/{id}` — a whole-resource replace against a struct
@@ -349,7 +367,10 @@ default. So the publishing service routes every proxy write through
 `mutateProxy`: `GET /proxies/{id}`, overwrite the handful of fields that are
 actually changing, `PUT` the whole document back minus the server-owned
 `namespace` / `created_at` / `updated_at`, all inside
-`serializePerKey('proxy:<id>', …)`.
+`serializePerKey('proxy:<id>', …)` — and therefore under the same cross-instance
+lease consumer writes get. Without it, an auth-method change and a plugin change
+on different instances could leave the proxy running the plugin and no
+authentication at all.
 
 ### 5.3 The plugin naming trap
 

@@ -341,6 +341,13 @@ is what the gateway authenticates, and it has no idea a portal session ever
 existed. `basicauth` is deleted explicitly because it never appears in a read
 projection, so a group rewrite cannot see it.
 
+All three gateway steps run inside one critical section keyed on the Ferrum
+consumer id — an in-process queue plus an `edge_leases` row — so a concurrent
+approval on another Nexus instance cannot read the pre-teardown group list and
+write it back afterwards. Edge replaces consumers whole, with no version token,
+so without that lock a revoked account could be re-authorised by a write that
+was merely stale; see [`operations.md` §8](operations.md#8-scaling).
+
 The teardown is best-effort by design: if Edge is unreachable the account is
 still disabled and the failure is logged and recorded in the audit row
 (`gateway_teardown: "failed"`) for an operator to finish by hand. An account
@@ -752,5 +759,7 @@ Before going live:
 - [ ] Backups running and a restore rehearsed, for both the Nexus database and
       the Ferrum Edge state.
 - [ ] `GET /api/health` wired to your monitor, treating `degraded` as healthy.
-- [ ] Exactly one instance performing consumer mutations
-      ([`operations.md`](operations.md#8-scaling)).
+- [ ] If you run more than one Nexus instance, they share one PostgreSQL, MySQL
+      or MongoDB database — the `edge_leases` table in it is what stops two
+      instances losing each other's ACL-group and proxy-plugin writes
+      ([`operations.md`](operations.md#8-scaling)). SQLite is single-instance.
