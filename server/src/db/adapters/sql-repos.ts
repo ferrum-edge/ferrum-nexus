@@ -2492,27 +2492,28 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
           )) > 0
         );
       }
-      // MySQL has no `WHERE` on `ON DUPLICATE KEY UPDATE`, so the condition
-      // moves into each assignment: a live lease is written back to the value
-      // it already had, which MySQL reports as zero affected rows.
-      //
-      // `expires_at` is assigned **last** on purpose. Assignments are evaluated
-      // left to right and later ones see the values earlier ones just wrote, so
-      // testing `edge_leases.expires_at` after overwriting it would compare
-      // against the *new* expiry and take the lease unconditionally.
-      //
-      // Zero-affected-rows is an unambiguous refusal here: a takeover always
-      // moves `expires_at` from a value at or before `now` to one after it, so
-      // a successful claim can never be a no-op write.
+      // MySQL cannot do this in one statement. `mysql2` connects with the
+      // CLIENT_FOUND_ROWS flag, under which an `ON DUPLICATE KEY UPDATE` that
+      // leaves a live lease exactly as it was still reports one affected row —
+      // the flag makes "found" and "changed" indistinguishable, so a
+      // conditional upsert would claim every lease. Two statements whose counts
+      // cannot lie instead: `INSERT IGNORE` reports a row only when the key was
+      // free, and the UPDATE can only match an expired row, which it always
+      // changes. A release landing between the two reads as a refusal, and the
+      // caller simply polls again.
+      const inserted = await execute(
+        exec,
+        'INSERT IGNORE INTO edge_leases ("key", owner, expires_at, created_at, updated_at) ' +
+          'VALUES (?, ?, ?, ?, ?)',
+        [key, owner, expiresAt, stamp, stamp],
+      );
+      if (inserted > 0) return true;
       return (
         (await execute(
           exec,
-          'INSERT INTO edge_leases ("key", owner, expires_at, created_at, updated_at) ' +
-            'VALUES (?, ?, ?, ?, ?) AS new_row ON DUPLICATE KEY UPDATE ' +
-            'owner = IF(edge_leases.expires_at <= ?, new_row.owner, edge_leases.owner), ' +
-            'updated_at = IF(edge_leases.expires_at <= ?, new_row.updated_at, edge_leases.updated_at), ' +
-            'expires_at = IF(edge_leases.expires_at <= ?, new_row.expires_at, edge_leases.expires_at)',
-          [key, owner, expiresAt, stamp, stamp, now, now, now],
+          'UPDATE edge_leases SET owner = ?, expires_at = ?, updated_at = ? ' +
+            'WHERE "key" = ? AND expires_at <= ?',
+          [owner, expiresAt, stamp, key, now],
         )) > 0
       );
     },
