@@ -695,8 +695,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * one publish is not cheap: a stored document of up to `MAX_SPEC_BYTES`, an
    * Edge proxy, several plugin configs, a slug, a listen path and audit rows.
    * Unbounded, one account could exhaust the gateway's capacity and the
-   * database's disk (GHSA-g32g-g9q4-q5wr); with the ceiling, aggregate spec
-   * storage per account is bounded by `MAX_SPEC_BYTES × limit`.
+   * database's disk (GHSA-g32g-g9q4-q5wr).
+   *
+   * This ceiling bounds proxies, slugs and listen paths. It bounds *storage*
+   * only together with `NEXUS_SPEC_HISTORY_LIMIT`, because one API can be
+   * revised in a loop: the pair bound aggregate spec storage per account at
+   * `MAX_SPEC_BYTES × (specHistoryLimit + 1) × limit`.
    *
    * Counts the account's **current** rows, so deleting an API frees its slot
    * immediately. Retiring one does not: a retired API still holds its proxy,
@@ -1328,6 +1332,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       let backendUpdated = false;
       /** Normalized upstream the proxy now points at, when it moved. */
       let movedTo: string | null = null;
+      /** Historical revisions `NEXUS_SPEC_HISTORY_LIMIT` dropped for this one. */
+      let pruned = 0;
 
       /**
        * Move the gateway, then persist the revision, compensating the gateway
@@ -1451,6 +1457,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               is_current: true,
             });
             await tx.apiSpecs.setCurrent(api.id, revision.id);
+            // Bounded retention, in the *same* transaction that made the new
+            // revision current: a rollback takes the prune with it, and by this
+            // point the revision a rollback would restore is the newest
+            // non-current one, which the limit's minimum of 1 always keeps.
+            pruned = await tx.apiSpecs.pruneHistory(api.id, config.specHistoryLimit);
             // The row that records where the gateway points moves with the
             // gateway, in the same transaction as the revision: if this rolls
             // back, the compensation below puts the proxy back and the row never
@@ -1472,6 +1483,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // details must not claim a move that has just been rewound.
           backendUpdated = false;
           movedTo = null;
+          pruned = 0;
           throw error;
         }
       };
@@ -1491,6 +1503,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           spec_operations: parsed.operationCount,
           spec_enforcement: api.spec_enforcement,
           backend_updated: backendUpdated,
+          pruned_revisions: pruned,
         },
         ip,
       );

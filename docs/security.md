@@ -600,16 +600,25 @@ consumer and a credential. None of it was bounded: a single self-registered
 provider could fill the database, exhaust Edge's proxy and plugin capacity, and
 saturate the Admin API simply by looping (GHSA-g32g-g9q4-q5wr).
 
-Two controls, bounding different things:
+Three controls, bounding different things:
 
 - **`NEXUS_MAX_APIS_PER_OWNER`** (default `50`, `0` = unlimited) caps how many
   APIs one account may own **at a time**. A publish past it is refused with
   `429 QUOTA_EXCEEDED` before the first gateway write, carrying
-  `details: { limit, current, setting }`. It bounds aggregate spec storage per
-  account at `MAX_SPEC_BYTES × limit`. Deleting an API frees a slot; retiring
+  `details: { limit, current, setting }`. Deleting an API frees a slot; retiring
   one does not, because a retired API keeps its gateway objects. Admins are not
   exempt — an exemption is a bypass, and the case worth defending against is an
   admin account that has been taken over.
+- **`NEXUS_SPEC_HISTORY_LIMIT`** (default `10`, minimum `1`) caps how many
+  historical spec revisions each API keeps on top of its current one. Without
+  it the count quota bounded no storage at all: `PUT /api/apis/:id/spec` stored
+  another document of up to `MAX_SPEC_BYTES` every time, so one API revised in
+  a loop was an unbounded write path for a semi-trusted `provider`. Together the
+  two bound aggregate spec storage per account at
+  `MAX_SPEC_BYTES × (NEXUS_SPEC_HISTORY_LIMIT + 1) × NEXUS_MAX_APIS_PER_OWNER`.
+  Pruning happens in the transaction that makes the new revision current, so a
+  refused revision prunes nothing and the predecessor a rollback needs always
+  survives; the current revision is never a candidate.
 - **A 30/minute per-account rate limit** on the mutating `/api/apis/*` routes
   (`POST /`, `PUT /:id/spec`, `PATCH /:id`, `DELETE /:id`,
   `PUT|DELETE /:id/plugins/:name`, `POST /:id/test-consumer`), answering

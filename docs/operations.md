@@ -41,6 +41,7 @@ the process prints every offending variable and exits non-zero. The repo-root
 | `NEXUS_RATE_LIMIT_ENABLED`            | `true`                                       | Installs the 20 req/min limiter on `/api/auth/*` and the 120 req/min limiter on `/api/health*` (both per client IP), the 30 req/min limiter on the mutating `/api/apis/*` routes, and the 10 req/min (new threads) and 30 req/min (replies) limiters on `/api/threads/*` (all three per account). Forced off when `NEXUS_ENV=test`. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `NEXUS_HEALTH_CACHE_MS`               | `5000`                                       | How long `GET /api/health` and `GET /api/health/edge` reuse a dependency probe. Within the window the database and gateway are each probed once and the result — including a failing one — is shared by every caller; concurrent callers also share the one in-flight probe. `0` disables the cache and probes on every request. Range 0–60000. See [§9](#9-health-checks).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `NEXUS_MAX_APIS_PER_OWNER`            | `50`                                         | How many APIs one account may own at a time; `0` disables the ceiling. A publish past it is refused with `429 QUOTA_EXCEEDED` before any gateway write. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `NEXUS_SPEC_HISTORY_LIMIT`            | `10`                                         | Historical spec revisions kept per API, on top of the current one. Older non-current revisions are pruned in the transaction that makes a new revision current. Range 1 – 10 000. With `NEXUS_MAX_APIS_PER_OWNER` this is what bounds per-account spec storage: `MAX_SPEC_BYTES × (limit + 1) × NEXUS_MAX_APIS_PER_OWNER`. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY` | `200`                                        | Messages one account may post in a rolling 24 hours; `0` disables the budget. Range 0 – 1 000 000. Exceeding it is `429 QUOTA_EXCEEDED`. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `NEXUS_ALLOW_PRIVATE_UPSTREAMS`       | `false`                                      | Whether providers may publish an API whose upstream is a loopback, RFC 1918 / CGNAT / link-local address or a `.local` / `.internal` / `.localhost` / `.home.arpa` name. A proxy is an egress path from the gateway's network, so the default refuses them with `400 SPEC_INVALID` (`details.reason = private_upstream`). At `false` the portal also **resolves** every other upstream hostname (A + AAAA, ~5 s) and refuses it if any answer is private, or if the name cannot be resolved at all (`details.reason = unresolvable_upstream`) — so **the Nexus process must be able to resolve public DNS**, or nothing publishes. `true` skips all of it, including the lookup. Set `true` only for a portal that fronts internal services — and for local development, where the upstream is `host.docker.internal`. See [`security.md`](security.md#1-threat-model). |
 | `NEXUS_WEB_DIST`                      | _(unset)_                                    | Directory of the built SPA to serve. When unset, the server looks for `../../web/dist` relative to itself and then `./web/dist` under the CWD; if neither has an `index.html`, static serving is disabled and only the API is exposed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -161,11 +162,15 @@ support can see what to raise.
 - It applies to administrators too. Anyone who can hit the limit can also raise
   it or delete something; an exemption would only help a compromised admin
   account.
-- It is what bounds **aggregate spec storage**: each document is capped at
-  `MAX_SPEC_BYTES` (2 MiB), so one account's stored specs cannot exceed
-  `2 MiB × NEXUS_MAX_APIS_PER_OWNER` — 100 MiB at the default. Multiply by your
-  expected provider count when sizing the database. Revision history is on top
-  of that: every spec upload keeps the previous revision.
+- Together with `NEXUS_SPEC_HISTORY_LIMIT` it bounds **aggregate spec
+  storage**. Each document is capped at `MAX_SPEC_BYTES` (2 MiB) and each API
+  keeps its current revision plus that many historical ones, so one account's
+  stored specs cannot exceed
+  `MAX_SPEC_BYTES × (NEXUS_SPEC_HISTORY_LIMIT + 1) × NEXUS_MAX_APIS_PER_OWNER` —
+  1.1 GiB at the defaults of 10 and 50. Multiply by your expected provider count
+  when sizing the database, and lower the history limit if that is too much:
+  the count quota alone bounds nothing, because one API can be revised in a
+  loop.
 - The check and the row creation run under an **in-process** per-owner lock, so
   a burst of concurrent publishes from one account cannot each read the count
   before any of them writes. Across N Nexus instances the lock does not span
@@ -173,6 +178,20 @@ support can see what to raise.
   That is bounded and self-correcting — the next publish on each instance sees
   the true count — and is the reason the quota is a ceiling rather than a
   billing boundary.
+
+**Bounded spec revision history** — `NEXUS_SPEC_HISTORY_LIMIT`, default `10`,
+minimum `1`. After a spec revision is made current, every non-current revision
+of that API beyond the newest N is deleted.
+
+- The pruning runs **in the same transaction** that makes the new revision
+  current, so a revision that is rolled back prunes nothing, and the previous
+  current revision — the one a failed gateway write restores to — is always the
+  newest historical row and is therefore always kept.
+- The current revision is never a candidate, whatever the limit says.
+- A deployment upgrading with a long accumulated history trims up to 1000 rows
+  per API per revision, so a very old API converges over its next few uploads
+  rather than blocking one request on a huge delete.
+- `api.spec_update` audit rows carry `pruned_revisions`.
 
 **A per-account rate limit** on the mutating publishing routes — `POST /`,
 `PUT /:id/spec`, `PATCH /:id`, `DELETE /:id`, `PUT|DELETE /:id/plugins/:name`

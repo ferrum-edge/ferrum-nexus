@@ -3602,6 +3602,119 @@ describe('per-owner API quota', () => {
   });
 });
 
+/**
+ * The API-count quota bounds proxies and slugs; on its own it bounds no
+ * storage, because every `PUT /api/apis/:id/spec` used to keep another
+ * `MAX_SPEC_BYTES` document for ever. One API revised in a loop was therefore
+ * an unbounded write path for a semi-trusted `provider` account.
+ */
+describe('bounded spec revision history', () => {
+  let harness: TestApp;
+  let provider: TestSession;
+
+  before(async () => {
+    // Two historical revisions plus the current one: the smallest limit that
+    // still distinguishes "kept because it is recent" from "kept because it is
+    // current".
+    harness = await buildTestApp({ env: { NEXUS_SPEC_HISTORY_LIMIT: '2' } });
+    await harness.registerUser({ email: 'history-founder@example.test' });
+    provider = await harness.registerUser({
+      email: 'history-provider@example.test',
+      role: 'provider',
+    });
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  async function publish(slug: string): Promise<string> {
+    const response = await harness.authed(provider, {
+      method: 'POST',
+      url: '/api/apis',
+      payload: publishPayload({ slug, spec: specWithServer('https://v1.example.com:8443') }),
+    });
+    assert.equal(response.statusCode, 201, response.body);
+    return response.json<PublishApiResponse>().api.id;
+  }
+
+  async function revise(apiId: string, version: string): Promise<LightMyRequestResponse> {
+    return harness.authed(provider, {
+      method: 'PUT',
+      url: `/api/apis/${apiId}/spec`,
+      payload: { spec: specWithServer('https://v1.example.com:8443', version) },
+    });
+  }
+
+  /** Every stored revision for an API, newest first. */
+  async function revisions(apiId: string): Promise<{ version: string; current: boolean }[]> {
+    const page = await harness.store.apiSpecs.list({ api_id: apiId });
+    return page.items.map((spec) => ({
+      version: String(spec.parsed_version),
+      current: spec.is_current,
+    }));
+  }
+
+  it('keeps the newest N historical revisions and the current one', async () => {
+    const apiId = await publish('history-bound');
+    for (const version of ['2.0.0', '3.0.0', '4.0.0', '5.0.0']) {
+      const response = await revise(apiId, version);
+      assert.equal(response.statusCode, 200, response.body);
+    }
+
+    // `NEXUS_SPEC_HISTORY_LIMIT` historical revisions, plus the current one.
+    assert.deepEqual(await revisions(apiId), [
+      { version: '5.0.0', current: true },
+      { version: '4.0.0', current: false },
+      { version: '3.0.0', current: false },
+    ]);
+  });
+
+  it('never prunes the current revision, however many times it is replaced', async () => {
+    const apiId = await publish('history-current');
+    for (let round = 0; round < 6; round += 1) {
+      assert.equal((await revise(apiId, `9.${round}.0`)).statusCode, 200);
+      const stored = await revisions(apiId);
+      assert.equal(stored.filter((spec) => spec.current).length, 1);
+      assert.ok(stored.length <= 3, `expected at most 3 rows, found ${stored.length}`);
+    }
+    assert.equal((await revisions(apiId))[0]?.version, '9.5.0');
+  });
+
+  it('prunes nothing when the gateway write fails', async () => {
+    const apiId = await publish('history-gateway-fails');
+    for (const version of ['2.0.0', '3.0.0', '4.0.0']) {
+      assert.equal((await revise(apiId, version)).statusCode, 200);
+    }
+    const before = await revisions(apiId);
+    assert.equal(before.length, 3);
+
+    harness.edge.queueFailure(500, { error: 'config_rejected' }, '/proxies/', 'PUT');
+    const failed = await harness.authed(provider, {
+      method: 'PUT',
+      url: `/api/apis/${apiId}/spec`,
+      payload: { spec: specWithServer('https://v2.example.com:8443', '5.0.0') },
+    });
+    assert.notEqual(failed.statusCode, 200);
+    assert.deepEqual(await revisions(apiId), before, 'a refused revision prunes nothing');
+  });
+
+  it('takes every retained revision down with the API', async () => {
+    const apiId = await publish('history-delete');
+    for (const version of ['2.0.0', '3.0.0']) {
+      assert.equal((await revise(apiId, version)).statusCode, 200);
+    }
+    assert.equal((await revisions(apiId)).length, 3);
+
+    const removed = await harness.authed(provider, {
+      method: 'DELETE',
+      url: `/api/apis/${apiId}`,
+    });
+    assert.equal(removed.statusCode, 200, removed.body);
+    assert.equal((await revisions(apiId)).length, 0);
+  });
+});
+
 describe('publishing rate limit', () => {
   let harness: TestApp;
   let first: TestSession;

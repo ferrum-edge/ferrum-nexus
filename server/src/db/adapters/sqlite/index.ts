@@ -111,6 +111,7 @@ import type {
   VerificationTokenRecord,
   VerificationTokenRepo,
 } from '../../store.js';
+import { SPEC_HISTORY_PRUNE_BATCH } from '../../store.js';
 import {
   bool,
   encodeBool,
@@ -1100,6 +1101,27 @@ class SqliteStore implements NexusStore {
 
     deleteByApi: async (apiId) =>
       execute(this.db, 'DELETE FROM api_specs WHERE api_id = ?', [apiId]),
+
+    pruneHistory: async (apiId, keep) => {
+      // Selected then deleted by id rather than deleted through a subquery on
+      // the same table: MySQL refuses that shape outright, and the three SQL
+      // adapters run the same statements wherever they can.
+      const rows = queryAll(
+        this.db,
+        `SELECT id FROM api_specs
+          WHERE api_id = ? AND is_current = 0
+          ORDER BY created_at DESC, id DESC
+          LIMIT ? OFFSET ?`,
+        [apiId, SPEC_HISTORY_PRUNE_BATCH, Math.max(0, keep)],
+      );
+      if (rows.length === 0) return 0;
+      const ids = rows.map((row) => text(row.id));
+      return execute(
+        this.db,
+        `DELETE FROM api_specs WHERE id IN (${ids.map(() => '?').join(', ')})`,
+        ids,
+      );
+    },
   };
 
   /* ── apiPlugins ───────────────────────────────────────────────────────── */
