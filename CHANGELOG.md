@@ -135,6 +135,18 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `LAST_SUPER_ADMIN` rather than `CONFLICT`.
 - `GET /api/health` documented a gateway version it can never observe.
 
+- **`npm run rotate-secret-key`** re-encrypts the encrypted `app_settings`
+  rows from `NEXUS_SECRET_KEY_PREVIOUS` to the new `NEXUS_SECRET_KEY` in one
+  transaction, so rotating the master key no longer leaves the SMTP password
+  unreadable or locks every admin out of a CAPTCHA-enabled portal; the runbook
+  in `docs/operations.md` §7 is rewritten around it.
+- **The server and `npm run migrate` read the root `.env`** the quickstart
+  tells you to create (working directory or its parent; exported variables
+  win; images with no file are unaffected). A clean checkout previously failed
+  with "NEXUS_SECRET_KEY is required".
+- **The Compose example builds from the repository root** it is copied to;
+  its previous `context: ..` pointed at the parent directory.
+
 ### Security
 
 The rewrite was reviewed twice — once by an adversarial pass over the whole
