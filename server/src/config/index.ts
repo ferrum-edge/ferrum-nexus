@@ -157,8 +157,19 @@ export interface NexusConfig {
   secretKey: string;
   /** Session idle lifetime in seconds (sliding). */
   sessionTtlSeconds: number;
-  /** Whether the `/api/auth/*` rate limiter is installed. Off under `NEXUS_ENV=test`. */
+  /** Whether the route rate limiters are installed. Off under `NEXUS_ENV=test`. */
   rateLimitEnabled: boolean;
+  /**
+   * How many portal messages one account may post in a rolling 24 hours
+   * (`NEXUS_MAX_MESSAGES_PER_USER_PER_DAY`). `0` disables the budget.
+   *
+   * The per-minute limiters bound a burst; this bounds the day, because every
+   * message durably costs a message row, an audit row and — for a platform
+   * thread — a notification row per administrator. Admins are subject to it
+   * too: an account that needs more than a few hundred messages a day is an
+   * integration, not a person.
+   */
+  maxMessagesPerUserPerDay: number;
   /**
    * Whether a provider may publish an API whose upstream is a loopback, private,
    * link-local or internal destination (`NEXUS_ALLOW_PRIVATE_UPSTREAMS`).
@@ -270,6 +281,7 @@ const envSchema = z.object({
     }),
   NEXUS_SESSION_TTL: intish(DEFAULT_SESSION_TTL_SECONDS, 60, 60 * 60 * 24 * 30),
   NEXUS_RATE_LIMIT_ENABLED: boolish(true),
+  NEXUS_MAX_MESSAGES_PER_USER_PER_DAY: intish(200, 0, 1_000_000),
   NEXUS_ALLOW_PRIVATE_UPSTREAMS: boolish(false),
   NEXUS_WEB_DIST: optionalString(),
 
@@ -444,6 +456,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     secretKey: raw.NEXUS_SECRET_KEY,
     sessionTtlSeconds: raw.NEXUS_SESSION_TTL,
     rateLimitEnabled: nodeEnv === 'test' ? false : raw.NEXUS_RATE_LIMIT_ENABLED,
+    maxMessagesPerUserPerDay: raw.NEXUS_MAX_MESSAGES_PER_USER_PER_DAY,
     allowPrivateUpstreams: raw.NEXUS_ALLOW_PRIVATE_UPSTREAMS,
     webDistPath: raw.NEXUS_WEB_DIST,
     db: {

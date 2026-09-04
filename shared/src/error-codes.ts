@@ -22,6 +22,8 @@ export const ERROR_CODES = {
   CAPTCHA_FAILED: 'CAPTCHA_FAILED',
   /** Too many requests from this identity/IP. HTTP 429. */
   RATE_LIMITED: 'RATE_LIMITED',
+  /** A configured per-account budget for the period is exhausted. HTTP 429. */
+  QUOTA_EXCEEDED: 'QUOTA_EXCEEDED',
   /** Account exists but its email address has not been verified yet. HTTP 403. */
   EMAIL_NOT_VERIFIED: 'EMAIL_NOT_VERIFIED',
   /** Account has been disabled by an admin. HTTP 403. */
@@ -63,6 +65,7 @@ export const ERROR_CODE_STATUS: Readonly<Record<ErrorCode, number>> = {
   CSRF_MISMATCH: 403,
   CAPTCHA_FAILED: 400,
   RATE_LIMITED: 429,
+  QUOTA_EXCEEDED: 429,
   EMAIL_NOT_VERIFIED: 403,
   USER_DISABLED: 403,
   LAST_SUPER_ADMIN: 409,
