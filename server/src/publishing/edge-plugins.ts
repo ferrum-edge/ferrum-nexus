@@ -161,10 +161,14 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
      * default, which is how an operator's `hosts`, timeouts, backend TLS or
      * `upstream_id` used to disappear the first time Nexus repointed a backend.
      *
-     * Serialised on the proxy id for the same reason consumer writes are: two
-     * concurrent GET→edit→PUT round trips would silently lose one edit. The key
-     * is prefixed so it can never collide with the consumer-id keys the
-     * credentials service uses.
+     * Serialised on `proxy:<id>` for the same reason consumer writes are: two
+     * concurrent GET→edit→PUT round trips would silently lose one edit — the
+     * way a proxy used to end up running a rate limiter and no auth plugin. The
+     * key is prefixed so it can never collide with the consumer-id keys the
+     * credentials service uses, and it is the **canonical** key for a proxy:
+     * every path that rewrites one goes through here, which is what lets the
+     * `edge_leases` row behind it order two Nexus instances and not just two
+     * calls in this process.
      *
      * `change` may return `null` to mean "already as it should be", which skips
      * the write entirely. Returns the document **as it was found**, which is

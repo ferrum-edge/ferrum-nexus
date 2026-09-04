@@ -63,10 +63,13 @@
  * still live on the second read may be moved out of `active`; anything else is
  * a `CONFLICT` (rotate) or an already-done no-op (revoke).
  *
- * **Multi-instance caveat:** `serializePerKey` orders operations within one
- * Node process. Across processes the check-and-set needs a conditional
- * `UPDATE … WHERE status = 'active'` in the store; until that exists, run one
- * writer (the same constraint the Edge client's serializer already carries).
+ * **Across instances:** every block below locks the **Ferrum consumer id** —
+ * the canonical key for that gateway resource, shared with
+ * `consumers.ts`'s `mutateAclGroups` — and `serializePerKey` backs that key
+ * with an `edge_leases` row, so a second Nexus process waits rather than
+ * interleaving its own GET-edit-PUT. What is still process-local is the
+ * *credential row* check-and-set: two instances rotating the same credential
+ * are ordered by the consumer lease they both need, not by the row itself.
  */
 
 import {

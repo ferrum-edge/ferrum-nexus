@@ -88,6 +88,7 @@ import type {
   GrantFilter,
   GrantRecord,
   GrantRepo,
+  LeaseRepo,
   MessageRecord,
   MessageRepo,
   NexusStore,
@@ -2370,6 +2371,44 @@ class SqliteStore implements NexusStore {
 
     deleteExpired: async (now) =>
       execute(this.db, 'DELETE FROM email_verification_tokens WHERE expires_at <= ?', [now]),
+  };
+
+  /* ── leases ───────────────────────────────────────────────────────────── */
+
+  readonly leases: LeaseRepo = {
+    acquire: async (key, owner, expiresAt, now) => {
+      // One statement, so the "is it free?" test and the claim cannot be split
+      // by another writer. `DO UPDATE … WHERE` skips the update — and reports
+      // zero changes — while the current holder's lease is still live, which is
+      // exactly the refusal the caller needs.
+      const stamp = nowIso();
+      return (
+        execute(
+          this.db,
+          `INSERT INTO edge_leases (key, owner, expires_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT (key) DO UPDATE
+             SET owner = excluded.owner,
+                 expires_at = excluded.expires_at,
+                 updated_at = excluded.updated_at
+             WHERE edge_leases.expires_at <= ?`,
+          [key, owner, expiresAt, stamp, stamp, now],
+        ) > 0
+      );
+    },
+
+    release: async (key, owner) =>
+      execute(this.db, 'DELETE FROM edge_leases WHERE key = ? AND owner = ?', [key, owner]) > 0,
+
+    renew: async (key, owner, expiresAt) =>
+      execute(
+        this.db,
+        'UPDATE edge_leases SET expires_at = ?, updated_at = ? WHERE key = ? AND owner = ?',
+        [expiresAt, nowIso(), key, owner],
+      ) > 0,
+
+    deleteExpired: async (now) =>
+      execute(this.db, 'DELETE FROM edge_leases WHERE expires_at <= ?', [now]),
   };
 }
 

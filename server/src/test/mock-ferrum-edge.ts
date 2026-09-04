@@ -140,6 +140,16 @@ export interface MockFerrumEdgeOptions {
   requireNamespaceClaim?: boolean;
 }
 
+/** A queued synthetic delay, consumed by the next matching request. */
+interface QueuedDelay {
+  /** Only delay requests whose path contains this substring. */
+  pathContains: string;
+  /** Milliseconds to hold the request before handling it. */
+  ms: number;
+  /** Only delay requests using this method. */
+  method?: string;
+}
+
 /** A queued synthetic failure, consumed by the next matching request. */
 interface QueuedFailure {
   status: number;
@@ -178,6 +188,21 @@ export interface MockFerrumEdge {
    * operation, `method`.
    */
   queueFailure(status: number, body?: unknown, pathContains?: string, method?: string): void;
+  /**
+   * Hold the next request whose path contains `pathContains` for `ms` *before*
+   * it is handled, then forget the entry.
+   *
+   * The barrier the two-instance race tests need. Note the "before it is
+   * handled": a held request has not touched the stored resource yet, so
+   * delaying a `PUT` is what opens a lost-update window — another writer can
+   * read the pre-`PUT` state and write over it, and the held `PUT` then lands
+   * on top of that. Delaying a `GET` does *not* make it read stale data; it
+   * reads whatever is current when the delay ends.
+   *
+   * Applied after authentication and after the request is recorded, so a held
+   * request still shows up in `requests` at the moment it arrived.
+   */
+  delay(pathContains: string, ms: number, method?: string): void;
   /** Direct access to stored consumers, keyed `<namespace>/<id>`. */
   readonly consumers: Map<string, StoredConsumer>;
   /** Direct access to stored proxies, keyed `<namespace>/<id>`. */
@@ -1235,6 +1260,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   const namespaces = new Map<string, { name: string; description: string | null }>();
   const requests: RecordedRequest[] = [];
   const failures: QueuedFailure[] = [];
+  const delays: QueuedDelay[] = [];
 
   /** `<namespace>|<proxy_id>|<method>|<status>` → cumulative count. */
   const requestCounters = new Map<string, number>();
@@ -2374,6 +2400,16 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       return fail(res, 403, `Token is not authorized for namespace '${scopedNamespace}'`);
     }
 
+    const held = delays.find(
+      (entry) =>
+        url.pathname.includes(entry.pathContains) &&
+        (entry.method === undefined || entry.method === method),
+    );
+    if (held) {
+      delays.splice(delays.indexOf(held), 1);
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, held.ms));
+    }
+
     const failure = failures.find(
       (entry) =>
         (entry.pathContains === undefined || url.pathname.includes(entry.pathContains)) &&
@@ -2487,6 +2523,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       namespaces.clear();
       requests.length = 0;
       failures.length = 0;
+      delays.length = 0;
       requestCounters.clear();
       requestDurations.clear();
       backendStates.clear();
@@ -2503,6 +2540,10 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         ...(pathContains === undefined ? {} : { pathContains }),
         ...(method === undefined ? {} : { method }),
       });
+    },
+
+    delay(pathContains: string, ms: number, method?: string): void {
+      delays.push({ pathContains, ms, ...(method === undefined ? {} : { method }) });
     },
 
     seedConsumer(consumer): StoredConsumer {

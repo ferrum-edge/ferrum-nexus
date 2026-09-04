@@ -77,6 +77,7 @@ import type {
   GrantFilter,
   GrantRecord,
   GrantRepo,
+  LeaseRepo,
   MessageRecord,
   MessageRepo,
   NexusStore,
@@ -599,6 +600,7 @@ export interface SqlRepos {
   settings: SettingRepo;
   emailTemplates: EmailTemplateRepo;
   verificationTokens: VerificationTokenRepo;
+  leases: LeaseRepo;
 }
 
 /**
@@ -2467,6 +2469,69 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       execute(exec, 'DELETE FROM email_verification_tokens WHERE expires_at <= ?', [now]),
   };
 
+  /* ── leases ─────────────────────────────────────────────────────────── */
+
+  const leases: LeaseRepo = {
+    acquire: async (key, owner, expiresAt, now) => {
+      const stamp = nowIso();
+      if (dialect === 'pg') {
+        // One statement, so "is it free?" and the claim cannot be split by
+        // another writer. `DO UPDATE … WHERE` skips the update — and reports
+        // zero rows — while the current holder's lease is still live.
+        return (
+          (await execute(
+            exec,
+            `INSERT INTO edge_leases ("key", owner, expires_at, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT ("key") DO UPDATE
+               SET owner = EXCLUDED.owner,
+                   expires_at = EXCLUDED.expires_at,
+                   updated_at = EXCLUDED.updated_at
+               WHERE edge_leases.expires_at <= ?`,
+            [key, owner, expiresAt, stamp, stamp, now],
+          )) > 0
+        );
+      }
+      // MySQL has no `WHERE` on `ON DUPLICATE KEY UPDATE`, so the condition
+      // moves into each assignment: a live lease is written back to the value
+      // it already had, which MySQL reports as zero affected rows.
+      //
+      // `expires_at` is assigned **last** on purpose. Assignments are evaluated
+      // left to right and later ones see the values earlier ones just wrote, so
+      // testing `edge_leases.expires_at` after overwriting it would compare
+      // against the *new* expiry and take the lease unconditionally.
+      //
+      // Zero-affected-rows is an unambiguous refusal here: a takeover always
+      // moves `expires_at` from a value at or before `now` to one after it, so
+      // a successful claim can never be a no-op write.
+      return (
+        (await execute(
+          exec,
+          'INSERT INTO edge_leases ("key", owner, expires_at, created_at, updated_at) ' +
+            'VALUES (?, ?, ?, ?, ?) AS new_row ON DUPLICATE KEY UPDATE ' +
+            'owner = IF(edge_leases.expires_at <= ?, new_row.owner, edge_leases.owner), ' +
+            'updated_at = IF(edge_leases.expires_at <= ?, new_row.updated_at, edge_leases.updated_at), ' +
+            'expires_at = IF(edge_leases.expires_at <= ?, new_row.expires_at, edge_leases.expires_at)',
+          [key, owner, expiresAt, stamp, stamp, now, now, now],
+        )) > 0
+      );
+    },
+
+    release: async (key, owner) =>
+      (await execute(exec, 'DELETE FROM edge_leases WHERE "key" = ? AND owner = ?', [key, owner])) >
+      0,
+
+    renew: async (key, owner, expiresAt) =>
+      (await execute(
+        exec,
+        'UPDATE edge_leases SET expires_at = ?, updated_at = ? WHERE "key" = ? AND owner = ?',
+        [expiresAt, nowIso(), key, owner],
+      )) > 0,
+
+    deleteExpired: async (now) =>
+      execute(exec, 'DELETE FROM edge_leases WHERE expires_at <= ?', [now]),
+  };
+
   return {
     users,
     organizations,
@@ -2487,6 +2552,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     settings,
     emailTemplates,
     verificationTokens,
+    leases,
   };
 }
 
@@ -2552,6 +2618,7 @@ class SqlStore implements NexusStore {
   readonly settings: SettingRepo;
   readonly emailTemplates: EmailTemplateRepo;
   readonly verificationTokens: VerificationTokenRepo;
+  readonly leases: LeaseRepo;
 
   private readonly backend: SqlStoreBackend;
 
@@ -2591,6 +2658,7 @@ class SqlStore implements NexusStore {
     this.settings = repos.settings;
     this.emailTemplates = repos.emailTemplates;
     this.verificationTokens = repos.verificationTokens;
+    this.leases = repos.leases;
   }
 
   init(): Promise<void> {

@@ -721,7 +721,13 @@ export async function main(): Promise<void> {
   await store.migrate();
   const emptyPortal = (await store.users.count()) === 0;
 
-  const app = await buildServer(config, { store, edge: createFerrumAdmin(config) });
+  // The store is built first because the Edge client borrows its lease table:
+  // that is what makes consumer and proxy read-modify-writes exclusive across
+  // every Nexus instance, not just within this process.
+  const app = await buildServer(config, {
+    store,
+    edge: createFerrumAdmin(config, undefined, store.leases),
+  });
   if (generatedBootstrapToken !== null && emptyPortal) {
     logGeneratedBootstrapToken(app, generatedBootstrapToken);
   }

@@ -688,37 +688,78 @@ credential operations do not. Nothing at rest is affected.
 
 ## 8. Scaling
 
-### The single-writer constraint
+### How gateway writes are coordinated
 
-`PUT /consumers/{id}` on the Ferrum Edge Admin API is a whole-resource replace
-with **no concurrency token**. Nexus compensates with an in-process
-per-consumer promise queue (`edge.serializePerKey`), which every consumer
-mutation goes through: ACL-group changes on approve/revoke, credential appends,
-credential deletes.
+`PUT /consumers/{id}` and `PUT /proxies/{id}` on the Ferrum Edge Admin API are
+whole-resource replaces with **no concurrency token**. Every Nexus mutation of
+either is therefore a read-modify-write — `GET`, change a field, `PUT` the whole
+document back — and two of those interleaving lose one of the changes outright.
+What that costs is not an inconvenience:
 
-**That queue is per Node process.** Two Nexus instances have two independent
-queues, so two operations on the _same consumer_ landing on _different
-instances_ at the same time can still lose one — for example, approving a user
-for two APIs simultaneously, where one ACL group silently vanishes. The symptom
-is nasty: the portal shows an active grant and the gateway returns 403.
+- Two operations on the same **consumer** (a revocation and an approval, say)
+  both read `[A]`; the revocation writes `[]` and the stale approval writes
+  `[A, B]`. Nexus records A as revoked and the gateway keeps authorising it.
+- Two operations on the same **proxy** (an auth-method change and a plugin
+  change) both read the old plugin list; whichever writes last drops the
+  other's entry. A published API can end up with no authentication plugin
+  attached while the portal reports one.
 
-Until an external lock exists, the supported topology is:
+Nexus closes this with two layers:
 
-> **Run exactly one Nexus instance that performs consumer mutations.**
+1. **An in-process queue** per resource (`edge.serializePerKey`). Fast, and it
+   is what orders two requests that land on the same instance.
+2. **A lease row in the `edge_leases` table**, taken inside that queue. This is
+   what orders _instances_ against each other. One row per resource — a Ferrum
+   consumer id, or `proxy:<id>` — holding the id of the instance that owns it
+   and an expiry.
 
-Practical options:
+Every code path that **rewrites** a gateway resource takes the same key for it,
+which is what makes the lock mean anything: approvals and revocations,
+credential issue/rotate/revoke, the disable-account teardown, backend and
+runtime-setting changes, first-class and palette plugin changes, and the
+rollback steps that undo them all funnel through one key per consumer and one
+per proxy.
 
-- **One instance.** Simplest, and adequate for a portal — the workload is
-  human-paced.
-- **Active/passive.** A hot standby that takes over on failure. Only one live
-  at a time.
-- **Sticky routing by consumer.** If you must run several, route every request
-  that can touch a given user's consumer to the same instance. In practice that
-  means routing by the _affected_ user, which for an approval is the requester,
-  not the caller — awkward, and easy to get wrong.
+The exceptions are the whole-lifecycle operations that **create or destroy** a
+proxy rather than editing one — publishing a new API, unpublishing it, and the
+delete-and-recreate that switches OpenAPI enforcement mode. Those are not
+lease-guarded, so an unpublish racing a plugin edit on the same API can still
+leave an orphaned plugin config behind. They cannot lose an _authentication_
+plugin the way an edit-versus-edit race could, because the proxy they race with
+is being removed outright; treat them as operations to do when nobody else is
+editing the same API.
 
-Everything else scales normally: the catalog, messaging, notifications, the
-audit log and the whole read surface are stateless over a shared database.
+The numbers:
+
+| Setting               | Value             | Meaning                                            |
+| --------------------- | ----------------- | -------------------------------------------------- |
+| Lease TTL             | 60 s              | How long a held lease stays valid without renewal. |
+| Renewal interval      | 30 s              | A long operation extends its own lease at TTL/2.   |
+| Wait before giving up | 30 s              | How long a blocked operation waits for the lease.  |
+| Poll interval         | 100 ms (jittered) | How often a waiter retries.                        |
+
+**A crashed instance is not a deadlock.** Nothing has to notice the crash and
+nothing has to be unlocked by hand: the lease simply stops being renewed, and
+the next instance that wants the resource takes it over once the expiry passes
+— at most 60 seconds later. `edge_leases` needs no maintenance; rows are
+deleted on release, and an orphan is overwritten rather than accumulating.
+
+**What a user sees under contention.** A request that could not get the lease
+inside 30 seconds fails with `409 CONFLICT` and the message _"Another portal
+instance is updating this gateway resource right now — please retry"_. Nothing
+was written, so retrying is safe and is the correct advice. Seeing this
+routinely means something is holding a gateway resource for tens of seconds —
+look for a slow or hanging Edge Admin API rather than for a Nexus bug.
+
+### Supported topologies
+
+**Several Nexus instances over one shared database are supported**, including
+for consumer and proxy mutations. Any instance may serve any request; no sticky
+routing and no active/passive split is required.
+
+The database has to be one every instance can reach — **PostgreSQL, MySQL or a
+MongoDB replica set**. SQLite cannot be shared, so a SQLite deployment is a
+single instance by definition.
 
 ### Other multi-instance notes
 
@@ -734,6 +775,9 @@ audit log and the whole read surface are stateless over a shared database.
 - **The bootstrap token is per-process when generated**, which is not harmless:
   set `NEXUS_BOOTSTRAP_TOKEN` so every instance accepts the same one. See
   [First run](#first-run-and-the-bootstrap-token).
+- **The gateway metrics/health cache is per-process** (10 seconds per proxy).
+  Also harmless: two instances may answer a usage query from snapshots up to
+  ten seconds apart.
 - **SQLite cannot be shared.** Multi-instance means PostgreSQL, MySQL or a
   MongoDB replica set.
 

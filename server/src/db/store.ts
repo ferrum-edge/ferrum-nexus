@@ -877,6 +877,46 @@ export interface VerificationTokenRepo {
   deleteExpired(now: IsoTimestamp): Promise<number>;
 }
 
+/**
+ * Expiring, single-holder leases over Ferrum Edge resources.
+ *
+ * Edge replaces consumers and proxies whole, with no ETag or version token, so
+ * every mutation is a GET-edit-PUT that must not interleave with another. The
+ * in-process queue in `ferrum-admin/client.ts` orders one Node process; this
+ * repository is what orders *all* of them, which is what stops a revoke on one
+ * instance being overwritten by a stale approval on another.
+ *
+ * `key` is the canonical lock key for one Edge resource — a Ferrum consumer id,
+ * or `proxy:<id>` — and `owner` a per-process random id. Expiry rather than an
+ * explicit unlock is what makes a crashed holder recoverable: nothing has to
+ * notice the crash, the lease simply becomes takeable.
+ *
+ * Every method is a single atomic statement on every adapter. Callers must not
+ * read-then-write around one.
+ */
+export interface LeaseRepo {
+  /**
+   * Take the lease for `key` until `expiresAt`, as `owner`.
+   *
+   * Succeeds when no row exists, or when the existing row expired at or before
+   * `now`; a live lease held by anyone (including `owner` itself) is refused.
+   * Exactly one of any number of concurrent callers gets `true`.
+   */
+  acquire(key: string, owner: string, expiresAt: IsoTimestamp, now: IsoTimestamp): Promise<boolean>;
+  /**
+   * Drop the lease. Returns `false` when `owner` no longer holds it — the lease
+   * expired and somebody else took it — in which case the row is left alone.
+   */
+  release(key: string, owner: string): Promise<boolean>;
+  /**
+   * Push the expiry out while the critical section is still running. Returns
+   * `false` when `owner` has already lost the lease.
+   */
+  renew(key: string, owner: string, expiresAt: IsoTimestamp): Promise<boolean>;
+  /** Housekeeping sweep of leases nobody can hold any more. */
+  deleteExpired(now: IsoTimestamp): Promise<number>;
+}
+
 /* ── The store ──────────────────────────────────────────────────────────── */
 
 /** Result of {@link NexusStore.healthCheck}. */
@@ -933,4 +973,5 @@ export interface NexusStore {
   readonly settings: SettingRepo;
   readonly emailTemplates: EmailTemplateRepo;
   readonly verificationTokens: VerificationTokenRepo;
+  readonly leases: LeaseRepo;
 }

@@ -1896,6 +1896,80 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(await store.verificationTokens.deleteForUser(user.id), 1);
     });
 
+    /* ── leases ───────────────────────────────────────────────────────── */
+
+    it('leases: one holder at a time, taken over only after expiry', async () => {
+      const key = `consumer-${newId()}`;
+      const past = '2020-01-01T00:00:00.000Z';
+      const future = isoInSeconds(600);
+      const now = nowIso();
+
+      assert.equal(await store.leases.acquire(key, 'instance-a', future, now), true);
+      assert.equal(
+        await store.leases.acquire(key, 'instance-b', future, now),
+        false,
+        'a live lease is refused, whoever asks',
+      );
+      assert.equal(
+        await store.leases.acquire(key, 'instance-a', future, now),
+        false,
+        'and refused to the holder too — the lock is not re-entrant',
+      );
+
+      // Rewrite the row to one that expired in the past, the way a crashed
+      // holder leaves it, and prove the next caller inherits it.
+      assert.equal(await store.leases.renew(key, 'instance-a', past), true);
+      assert.equal(await store.leases.acquire(key, 'instance-b', future, now), true);
+      assert.equal(
+        await store.leases.release(key, 'instance-a'),
+        false,
+        'the previous owner can no longer release what it lost',
+      );
+      assert.equal(
+        await store.leases.acquire(key, 'instance-c', future, now),
+        false,
+        'the row survived the non-owner release',
+      );
+
+      assert.equal(await store.leases.release(key, 'instance-b'), true);
+      assert.equal(
+        await store.leases.acquire(key, 'instance-c', future, now),
+        true,
+        'a released lease is free immediately, without waiting for expiry',
+      );
+      assert.equal(await store.leases.release(key, 'instance-c'), true);
+    });
+
+    it('leases: renewal and the expiry sweep', async () => {
+      const key = `proxy-${newId()}`;
+      const now = nowIso();
+      assert.equal(await store.leases.acquire(key, 'holder', isoInSeconds(600), now), true);
+      assert.equal(
+        await store.leases.renew(key, 'someone-else', isoInSeconds(600)),
+        false,
+        'only the owner may extend a lease',
+      );
+      assert.equal(await store.leases.renew(key, 'holder', isoInSeconds(1200)), true);
+      assert.equal(await store.leases.deleteExpired(now), 0, 'a live lease is not swept');
+
+      assert.equal(await store.leases.renew(key, 'holder', '2020-01-01T00:00:00.000Z'), true);
+      assert.equal(await store.leases.deleteExpired(nowIso()), 1);
+      assert.equal(await store.leases.renew(key, 'holder', isoInSeconds(600)), false);
+    });
+
+    it('leases: exactly one of ten concurrent acquires wins the key', async () => {
+      const key = `race-${newId()}`;
+      const now = nowIso();
+      const expiresAt = isoInSeconds(600);
+
+      const results = await Promise.all(
+        Array.from({ length: 10 }, (_unused, index) =>
+          store.leases.acquire(key, `instance-${index}`, expiresAt, now),
+        ),
+      );
+      assert.equal(results.filter(Boolean).length, 1);
+    });
+
     /* ── transactions ─────────────────────────────────────────────────── */
 
     it('transactions: commit when the body resolves', async () => {
