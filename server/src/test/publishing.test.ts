@@ -1089,6 +1089,66 @@ describe('publishing', () => {
       assert.equal(reset.circuit_breaker, null);
     });
 
+    it('does not overwrite an operator-tuned breaker when its boolean is replayed', async () => {
+      const proxy = storedProxy(harness, proxyId);
+      proxy.circuit_breaker = {
+        failure_threshold: 99,
+        timeout_seconds: 300,
+        trip_on_connection_errors: true,
+      };
+
+      const putsBeforeDisabledReplay = harness.edge.callsTo('PUT', `/proxies/${proxyId}`).length;
+      const auditsBeforeDisabledReplay = (await harness.auditRows('api.update')).length;
+      const disabledReplay = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { circuit_breaker: false },
+      });
+      assert.equal(disabledReplay.statusCode, 200, disabledReplay.body);
+      assert.deepEqual(storedProxy(harness, proxyId).circuit_breaker, {
+        failure_threshold: 99,
+        timeout_seconds: 300,
+        trip_on_connection_errors: true,
+      });
+      assert.equal(
+        harness.edge.callsTo('PUT', `/proxies/${proxyId}`).length,
+        putsBeforeDisabledReplay,
+      );
+      assert.equal((await harness.auditRows('api.update')).length, auditsBeforeDisabledReplay);
+
+      const enabled = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { circuit_breaker: true },
+      });
+      assert.equal(enabled.statusCode, 200, enabled.body);
+      const tuned = storedProxy(harness, proxyId);
+      tuned.circuit_breaker = {
+        failure_threshold: 77,
+        timeout_seconds: 240,
+        trip_on_connection_errors: false,
+      };
+
+      const putsBeforeEnabledReplay = harness.edge.callsTo('PUT', `/proxies/${proxyId}`).length;
+      const auditsBeforeEnabledReplay = (await harness.auditRows('api.update')).length;
+      const enabledReplay = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { circuit_breaker: true },
+      });
+      assert.equal(enabledReplay.statusCode, 200, enabledReplay.body);
+      assert.deepEqual(storedProxy(harness, proxyId).circuit_breaker, {
+        failure_threshold: 77,
+        timeout_seconds: 240,
+        trip_on_connection_errors: false,
+      });
+      assert.equal(
+        harness.edge.callsTo('PUT', `/proxies/${proxyId}`).length,
+        putsBeforeEnabledReplay,
+      );
+      assert.equal((await harness.auditRows('api.update')).length, auditsBeforeEnabledReplay);
+    });
+
     it('re-derives OPTIONS and the WS origins when CORS arrives later and leaves', async () => {
       await harness.authed(provider, {
         method: 'PATCH',
