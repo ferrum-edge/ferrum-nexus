@@ -155,6 +155,16 @@ export interface NexusConfig {
   logLevel: LogLevel;
   /** Master secret; every other key is HKDF-derived from it. */
   secretKey: string;
+  /**
+   * Secret the first-ever registration must present to become the founding
+   * `super_admin` (`NEXUS_BOOTSTRAP_TOKEN`).
+   *
+   * `undefined` means the variable is unset, in which case the entry point
+   * generates one per process and prints it — see `main()` in `../index.ts`.
+   * A server built with this still `undefined` refuses every registration
+   * against an empty portal, because there is no token that could match.
+   */
+  bootstrapToken: string | undefined;
   /** Session idle lifetime in seconds (sliding). */
   sessionTtlSeconds: number;
   /** Whether the `/api/auth/*` rate limiter is installed. Off under `NEXUS_ENV=test`. */
@@ -248,6 +258,8 @@ const envSchema = z.object({
     .string({ required_error: 'is required' })
     .min(32, 'must be at least 32 characters (generate with `openssl rand -hex 32`)'),
 
+  NEXUS_BOOTSTRAP_TOKEN: optionalString(),
+
   NEXUS_HOST: stringish('127.0.0.1'),
   NEXUS_PORT: intish(8787, 0, 65_535),
   NEXUS_PUBLIC_URL: stringish('http://127.0.0.1:5173'),
@@ -324,6 +336,9 @@ const envSchema = z.object({
 });
 
 const NAMESPACE_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+
+/** Shortest `NEXUS_BOOTSTRAP_TOKEN` accepted; the generated one is 64 hex chars. */
+export const MIN_BOOTSTRAP_TOKEN_LENGTH = 16;
 
 /**
  * Validate an environment record into a {@link NexusConfig}.
@@ -426,6 +441,17 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     );
   }
 
+  // ── Bootstrap token ──────────────────────────────────────────────────────
+  // Optional, but a short one is worse than none: it looks configured while
+  // being guessable, and what it guards is the founding super_admin.
+  const bootstrapToken = raw.NEXUS_BOOTSTRAP_TOKEN;
+  if (bootstrapToken !== undefined && bootstrapToken.length < MIN_BOOTSTRAP_TOKEN_LENGTH) {
+    problems.push(
+      `NEXUS_BOOTSTRAP_TOKEN must be at least ${MIN_BOOTSTRAP_TOKEN_LENGTH} characters ` +
+        '(generate with `openssl rand -hex 32`), or be left unset so the server generates one',
+    );
+  }
+
   // ── Non-sqlite drivers need a connection URL ─────────────────────────────
   if (raw.NEXUS_DB_DRIVER !== 'sqlite' && raw.NEXUS_DB_URL === '') {
     problems.push(`NEXUS_DB_URL is required when NEXUS_DB_DRIVER=${raw.NEXUS_DB_DRIVER}`);
@@ -442,6 +468,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     cookieSecure,
     logLevel: raw.NEXUS_LOG_LEVEL,
     secretKey: raw.NEXUS_SECRET_KEY,
+    bootstrapToken,
     sessionTtlSeconds: raw.NEXUS_SESSION_TTL,
     rateLimitEnabled: nodeEnv === 'test' ? false : raw.NEXUS_RATE_LIMIT_ENABLED,
     allowPrivateUpstreams: raw.NEXUS_ALLOW_PRIVATE_UPSTREAMS,

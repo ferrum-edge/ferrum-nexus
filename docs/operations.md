@@ -41,6 +41,7 @@ the process prints every offending variable and exits non-zero. The repo-root
 | `NEXUS_RATE_LIMIT_ENABLED`      | `true`                                       | Installs the 20 req/min limiter on `/api/auth/*`. Forced off when `NEXUS_ENV=test`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `NEXUS_ALLOW_PRIVATE_UPSTREAMS` | `false`                                      | Whether providers may publish an API whose upstream is a loopback, RFC 1918 / CGNAT / link-local address or a `.local` / `.internal` / `.localhost` / `.home.arpa` name. A proxy is an egress path from the gateway's network, so the default refuses them with `400 SPEC_INVALID` (`details.reason = private_upstream`). Set `true` only for a portal that fronts internal services — and for local development, where the upstream is `host.docker.internal`. See [`security.md`](security.md#1-threat-model).                                         |
 | `NEXUS_WEB_DIST`                | _(unset)_                                    | Directory of the built SPA to serve. When unset, the server looks for `../../web/dist` relative to itself and then `./web/dist` under the CWD; if neither has an `index.html`, static serving is disabled and only the API is exposed.                                                                                                                                                                                                                                                                                                                   |
+| `NEXUS_BOOTSTRAP_TOKEN`         | _(unset)_                                    | Secret the very first registration must present to become the founding `super_admin` (see [First run](#first-run-and-the-bootstrap-token)). Minimum 16 characters when set; generate with `openssl rand -hex 32`. When unset the server generates one **per process** and prints it at `warn` while the user table is empty — so set it for any deployment running more than one instance. Ignored once any account exists.                                                                                                                              |
 
 ### Database
 
@@ -146,6 +147,46 @@ test: `NEXUS_TEST_POSTGRES_URL`, `NEXUS_TEST_MYSQL_URL`,
 Booleans accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`. An empty
 string is treated as "unset" everywhere, so `FOO=` in an env file means the
 default applies.
+
+### First run and the bootstrap token
+
+The first account ever created becomes the portal's `super_admin`, so that one
+registration is authenticated out of band: it must present the bootstrap token.
+
+- **`NEXUS_BOOTSTRAP_TOKEN` set** — that value is the token. Minimum 16
+  characters; startup fails on a shorter one. It is never written to the log.
+- **Unset** — the server generates a 32-byte random token for the process, and
+  prints it at `warn` **only if the user table is empty** once migrations have
+  run:
+
+  ```text
+  ============================================================================
+  FIRST-RUN BOOTSTRAP: this portal has no accounts yet.
+
+  The first registration becomes the portal super_admin, so it must send
+  this bootstrap token as `bootstrap_token` (the sign-up form asks for it):
+
+      9f1c…64 hex characters…
+
+  It was generated for this process only: it changes on every restart and
+  differs between instances. Set NEXUS_BOOTSTRAP_TOKEN to pin one value
+  across restarts and across a multi-instance deployment.
+  ============================================================================
+  ```
+
+Operational consequences:
+
+- **Multi-instance deployments must set the variable.** A generated token is
+  per process, so N instances print N different tokens and only the instance
+  that happens to answer the registration accepts its own.
+- **A restart invalidates a generated token.** Bootstrap in the window between
+  starting the server and restarting it, or pin the variable.
+- **Nothing consumes the token.** It stays valid until an account exists, at
+  which point the field is ignored entirely — the founder is decided by the
+  atomic `bootstrap.super_admin_claimed` setting, which is never released.
+- `GET /api/branding` reports `bootstrap_required: true` while the portal is
+  empty; that is how the sign-up form knows to ask. It reveals only that the
+  portal has no accounts, never the token.
 
 ---
 
@@ -263,14 +304,24 @@ files for Mongo, but the same `schema_migrations` bookkeeping applies.
 ```bash
 docker build -t ferrum-nexus -f docker/Dockerfile .
 
-docker run --rm -p 8787:8787 \
+# Note `127.0.0.1:` on the published port. The image binds 0.0.0.0 inside the
+# container, so a bare `-p 8787:8787` offers the portal on every host
+# interface — including before anyone has registered, which is exactly when an
+# unbootstrapped portal is at its most interesting to a stranger. Publish on
+# loopback and put your TLS terminator in front of it (see §4).
+docker run --rm -p 127.0.0.1:8787:8787 \
   -e NEXUS_SECRET_KEY="$(openssl rand -hex 32)" \
+  -e NEXUS_BOOTSTRAP_TOKEN="$(openssl rand -hex 32)" \
   -e FERRUM_ADMIN_URL=http://host.docker.internal:9000 \
   -e FERRUM_ADMIN_JWT_SECRET=change-me-at-least-32-characters-long \
   -e NEXUS_PUBLIC_URL=https://portal.example.com \
   -v nexus-data:/app/data \
   ferrum-nexus
 ```
+
+Drop `NEXUS_BOOTSTRAP_TOKEN` and the container prints a generated one on its
+first start (`docker logs`); see
+[First run](#first-run-and-the-bootstrap-token).
 
 The image is a two-stage build on `node:22-bookworm-slim`. What it bakes in:
 
@@ -589,6 +640,9 @@ audit log and the whole read surface are stateless over a shared database.
   Enforce the real limit at the proxy if that matters.
 - **The admin-JWT cache is per-process.** Harmless — it just means each
   instance mints its own tokens.
+- **The bootstrap token is per-process when generated**, which is not harmless:
+  set `NEXUS_BOOTSTRAP_TOKEN` so every instance accepts the same one. See
+  [First run](#first-run-and-the-bootstrap-token).
 - **SQLite cannot be shared.** Multi-instance means PostgreSQL, MySQL or a
   MongoDB replica set.
 

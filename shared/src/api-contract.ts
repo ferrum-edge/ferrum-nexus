@@ -107,6 +107,16 @@ export interface RegisterRequest {
   phone?: string | null;
   /** Vendor CAPTCHA token; required when CAPTCHA is enabled. */
   captcha_token?: string;
+  /**
+   * Out-of-band bootstrap secret, **required** while the portal has no
+   * accounts — see `bootstrap_required` on {@link BrandingResponse}.
+   *
+   * The first registration elects the portal's `super_admin`, so it has to
+   * prove it comes from the operator: the value is the server's
+   * `NEXUS_BOOTSTRAP_TOKEN`, or the per-process token printed in the startup
+   * log when that variable is unset. Ignored once any account exists.
+   */
+  bootstrap_token?: string;
 }
 
 /** `POST /api/auth/register` */
@@ -993,4 +1003,12 @@ export interface BrandingResponse extends BrandingSettings {
   /** Echoed so the SPA can bootstrap the theme before authenticating. */
   default_theme: ThemePreference;
   captcha: CaptchaPublicConfig;
+  /**
+   * True while the portal has no accounts at all: the next registration elects
+   * the founding `super_admin` and must therefore carry `bootstrap_token`.
+   *
+   * Only a signal for the sign-up form — the token itself is never public, and
+   * the server re-checks the condition on every registration.
+   */
+  bootstrap_required: boolean;
 }

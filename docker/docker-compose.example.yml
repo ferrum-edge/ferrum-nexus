@@ -12,8 +12,13 @@
 # must be at least 32 bytes and has to exist *before* anyone publishes a
 # `basic_auth` API: the gateway refuses to build the plugin without it.
 #
+# Optionally also `export NEXUS_BOOTSTRAP_TOKEN=$(openssl rand -hex 32)` to
+# choose the token the first registration must present to become the portal's
+# super_admin; without it, the token is generated and printed by the container.
+#
 # The portal is then on http://127.0.0.1:8787 and the gateway's proxy
-# listener on http://127.0.0.1:8000.
+# listener on http://127.0.0.1:8000 — both published on loopback only, so
+# nothing is exposed to the network before the portal has been bootstrapped.
 
 services:
   nexus:
@@ -24,6 +29,10 @@ services:
       - '127.0.0.1:8787:8787'
     environment:
       NEXUS_SECRET_KEY: ${NEXUS_SECRET_KEY:?set NEXUS_SECRET_KEY}
+      # The first registration must present this to become the portal's
+      # super_admin. Leave it out and the container prints a generated one on
+      # its first start (`docker compose logs nexus`).
+      NEXUS_BOOTSTRAP_TOKEN: ${NEXUS_BOOTSTRAP_TOKEN:-}
       NEXUS_PUBLIC_URL: http://127.0.0.1:8787
       NEXUS_DB_DRIVER: postgres
       NEXUS_DB_URL: postgres://nexus:${NEXUS_DB_PASSWORD:?set NEXUS_DB_PASSWORD}@postgres:5432/nexus

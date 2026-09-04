@@ -13,7 +13,7 @@ import { after, before, describe, it } from 'node:test';
 
 import { CSRF_COOKIE, SESSION_COOKIE } from '@ferrum-nexus/shared';
 
-import { buildTestApp, TEST_PASSWORD, type TestApp } from './helpers.js';
+import { buildTestApp, TEST_BOOTSTRAP_TOKEN, TEST_PASSWORD, type TestApp } from './helpers.js';
 
 /** Raw `Set-Cookie` headers of a response, as strings. */
 function setCookies(headers: Record<string, unknown>): string[] {
@@ -241,6 +241,8 @@ describe('cookie policy', () => {
           password: TEST_PASSWORD,
           display_name: 'Cookie',
           role: 'client',
+          // A fresh harness, so this is the portal's bootstrap registration.
+          bootstrap_token: TEST_BOOTSTRAP_TOKEN,
         },
       });
       assert.equal(response.statusCode, 201, response.body);
@@ -270,6 +272,8 @@ describe('cookie policy', () => {
           password: TEST_PASSWORD,
           display_name: 'Cookie',
           role: 'client',
+          // A fresh harness, so this is the portal's bootstrap registration.
+          bootstrap_token: TEST_BOOTSTRAP_TOKEN,
         },
       });
       assert.equal(response.statusCode, 201, response.body);
@@ -299,6 +303,8 @@ describe('cookie policy', () => {
           password: TEST_PASSWORD,
           display_name: 'Cookie',
           role: 'client',
+          // A fresh harness, so this is the portal's bootstrap registration.
+          bootstrap_token: TEST_BOOTSTRAP_TOKEN,
         },
       });
       assert.equal(response.statusCode, 201, response.body);

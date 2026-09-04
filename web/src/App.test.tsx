@@ -25,6 +25,7 @@ function stubApi(): void {
               tagline: 'APIs for everyone',
               support_email: null,
               captcha: { enabled: false, provider: 'none', site_key: null },
+              bootstrap_required: false,
             }),
             { status: 200, headers: { 'Content-Type': 'application/json' } },
           ),
