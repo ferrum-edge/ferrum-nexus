@@ -176,3 +176,31 @@ fails without the fix.
 - **Password changes end every other session**, and the public health
   endpoint no longer discloses database or gateway internals to anonymous
   callers.
+- **The founding registration needs a bootstrap token.** While the portal
+  has no accounts, `POST /api/auth/register` refuses everything that does not
+  carry `bootstrap_token`: `NEXUS_BOOTSTRAP_TOKEN`, or the per-process value
+  the server prints at startup. A fresh deployment reachable before its
+  operator registered used to hand `super_admin` to whoever connected first.
+  `GET /api/branding` reports `bootstrap_required` so the sign-up form asks
+  for it, and the single-container quickstarts now publish on loopback.
+- **Upstream hostnames are resolved before they are accepted.** With
+  `NEXUS_ALLOW_PRIVATE_UPSTREAMS=false` the private-upstream guard used to
+  judge only IP literals and a short suffix list, so `127.0.0.1.nip.io` or
+  any attacker-controlled record turned the gateway into an internal SSRF
+  path. Every publish, upstream change and spec-following move now resolves
+  A and AAAA and refuses a name if any answer is non-public or the lookup
+  fails (`details.reason = unresolvable_upstream`). Names re-pointed after
+  publish are screened by Edge's own `FERRUM_BACKEND_ALLOW_IPS=public`.
+- **Health probes are cached and rate limited.** `GET /api/health` and
+  `GET /api/health/edge` reuse one database probe and one gateway probe per
+  `NEXUS_HEALTH_CACHE_MS` (default 5 s) with concurrent callers coalesced,
+  and sit behind a 120 req/min per-IP limiter, so anonymous traffic can no
+  longer be amplified into unbounded Admin API and database work.
+- **Gateway revocation on account disable is durable.** Disabling an
+  account enqueues a `gateway_teardown_jobs` row in the same transaction as
+  the status change; a worker retries the Edge teardown with backoff until it
+  succeeds, the disable response reports `gateway_teardown: "pending"`
+  instead of a swallowed `failed`, admins see the pending state and can
+  retry (`POST /api/users/:id/gateway-teardown/retry`), and re-enabling
+  cancels the job. A disabled user's API key used to stay valid for good
+  whenever the Admin API was unreachable at the moment of disable.
