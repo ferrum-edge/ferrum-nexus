@@ -120,6 +120,7 @@ import type {
   GrantFilter,
   GrantRecord,
   GrantRepo,
+  LeaseRepo,
   ListOptions,
   MessageRecord,
   MessageRepo,
@@ -166,6 +167,7 @@ const COLLECTIONS = {
   emailTemplates: 'email_templates',
   verificationTokens: 'email_verification_tokens',
   tokenIssueClaims: 'email_token_issue_claims',
+  leases: 'edge_leases',
 } as const;
 
 /* ── Small decoders (Mongo hands back native types already) ─────────────── */
@@ -882,6 +884,15 @@ const PURPOSE_INDEXES: IndexDefinition[] = [
   },
 ];
 
+/** Indexes added by `009_edge_leases`. */
+const LEASE_INDEXES: IndexDefinition[] = [
+  // `_id` already carries the key, so this is the redundant-but-explicit
+  // counterpart of the SQL primary key; the expiry index backs the
+  // housekeeping sweep.
+  { collection: 'edge_leases', name: 'ux_edge_leases_key', key: { key: 1 }, unique: true },
+  { collection: 'edge_leases', name: 'ix_edge_leases_expires', key: { expires_at: 1 } },
+];
+
 /** Create one batch of {@link IndexDefinition}s. */
 async function createIndexes(db: Db, indexes: IndexDefinition[]): Promise<void> {
   for (const index of indexes) {
@@ -922,6 +933,10 @@ const MONGO_MIGRATIONS: { id: string; apply: (db: Db) => Promise<void> }[] = [
   {
     id: '006_email_token_issue_claims',
     apply: async (): Promise<void> => undefined,
+  },
+  {
+    id: '009_edge_leases',
+    apply: (db: Db): Promise<void> => createIndexes(db, LEASE_INDEXES),
   },
 ];
 
@@ -2679,6 +2694,59 @@ class MongoStore implements NexusStore {
     deleteExpired: async (now) =>
       (
         await this.col(COLLECTIONS.verificationTokens).deleteMany(
+          { expires_at: { $lte: now } } as Filter<NexusDoc>,
+          this.opts,
+        )
+      ).deletedCount,
+  };
+
+  /* ── leases ───────────────────────────────────────────────────────────── */
+
+  readonly leases: LeaseRepo = {
+    acquire: async (key, owner, expiresAt, now) => {
+      const stamp = nowIso();
+      try {
+        // The filter is the free-or-expired test and the upsert is the claim,
+        // in one atomic command. When the lease is live the filter matches
+        // nothing, so Mongo tries to *insert* — and collides with the `_id` of
+        // the row already there, which is the refusal.
+        const result = await this.col(COLLECTIONS.leases).updateOne(
+          { _id: key, expires_at: { $lte: now } } as Filter<NexusDoc>,
+          {
+            $set: { key, owner, expires_at: expiresAt, updated_at: stamp },
+            $setOnInsert: { created_at: stamp },
+          },
+          { ...this.opts, upsert: true },
+        );
+        return result.matchedCount > 0 || result.upsertedCount > 0;
+      } catch (error) {
+        // A live lease, or a concurrent upsert that won the `_id` race: either
+        // way somebody else holds it.
+        if ((error as { code?: unknown }).code === 11000) return false;
+        throw error;
+      }
+    },
+
+    release: async (key, owner) =>
+      (
+        await this.col(COLLECTIONS.leases).deleteOne(
+          { _id: key, owner } as Filter<NexusDoc>,
+          this.opts,
+        )
+      ).deletedCount > 0,
+
+    renew: async (key, owner, expiresAt) =>
+      (
+        await this.col(COLLECTIONS.leases).updateOne(
+          { _id: key, owner } as Filter<NexusDoc>,
+          { $set: { expires_at: expiresAt, updated_at: nowIso() } },
+          this.opts,
+        )
+      ).matchedCount > 0,
+
+    deleteExpired: async (now) =>
+      (
+        await this.col(COLLECTIONS.leases).deleteMany(
           { expires_at: { $lte: now } } as Filter<NexusDoc>,
           this.opts,
         )
