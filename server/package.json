@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "start": "node dist/index.js",
     "migrate": "tsx src/db/migrate-cli.ts",
+    "rotate-secret-key": "tsx src/db/rotate-key-cli.ts",
     "test": "node --import tsx --test \"src/**/*.test.ts\""
   },
   "dependencies": {

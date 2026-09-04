@@ -29,10 +29,10 @@ are. A relative `NEXUS_SQLITE_PATH` resolves from `server/`.
 
 ### Required
 
-| Variable                  | Notes                                                                                                                                                                                   |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NEXUS_SECRET_KEY`        | **Required.** Minimum 32 characters. The master secret; the settings-encryption key and the session-token HMAC key are both HKDF-derived from it. Generate with `openssl rand -hex 32`. |
-| `FERRUM_ADMIN_JWT_SECRET` | **Required.** Minimum 32 characters. Must match the gateway's `FERRUM_ADMIN_JWT_SECRET` exactly.                                                                                        |
+| Variable                  | Notes                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NEXUS_SECRET_KEY`        | **Required.** Minimum 32 characters. The master secret; the settings-encryption key and the session-token HMAC key are both HKDF-derived from it. Generate with `openssl rand -hex 32`. To change it, run `npm run rotate-secret-key` with the old value in `NEXUS_SECRET_KEY_PREVIOUS` first — see [§7](#7-rotating-nexus_secret_key). |
+| `FERRUM_ADMIN_JWT_SECRET` | **Required.** Minimum 32 characters. Must match the gateway's `FERRUM_ADMIN_JWT_SECRET` exactly.                                                                                                                                                                                                                                        |
 
 ### Server
 
@@ -630,42 +630,58 @@ HKDF-derived from it:
 Password hashes are scrypt with a per-hash random salt and are **not** derived
 from the master key — rotation does not affect sign-in with a password.
 
-### There is no automated re-encryption flow
+### What rotation does and does not affect
 
-This is worth stating plainly, because it is the thing an operator most wants
-to be untrue. Nexus has **no** re-encrypt command, no dual-key decrypt path,
-and no migration that walks `app_settings` under an old key. `readEncryptedSetting`
-catches a decryption failure and returns `null` — so after a rotation the
-affected settings simply read as _absent_, silently:
+`readEncryptedSetting` catches a decryption failure and returns `null`, so a
+row written under the old key reads as _absent_ after a plain key swap — and
+that is not harmless:
 
-- SMTP falls back to the `NEXUS_SMTP_*` environment values. If those do not
-  supply a password, authenticated relays start rejecting mail and the outbox
-  fills with `failed` rows.
+- SMTP falls back to the `NEXUS_SMTP_*` environment values; without a password
+  there, authenticated relays reject mail and the outbox fills with `failed`
+  rows.
 - CAPTCHA **fails closed**: `captcha.verify` throws
   `CAPTCHA_FAILED — "CAPTCHA is enabled but not fully configured"`, so
-  registration and login stop working until the secret is re-entered.
+  registration **and login** stop working. On a CAPTCHA-enabled portal a bare
+  key swap therefore locks every administrator out before anyone can re-enter
+  the secret.
 
-Every live session and every unused email-verification token is also
-invalidated, because their stored hashes were computed under the old HMAC key.
+That is why the rotation is a two-key, offline step: `npm run rotate-secret-key`
+re-encrypts every `app_settings` row with `encrypted = 1` from the previous key
+to the new one, in one transaction, and refuses to write anything if a single
+row does not open under the previous key. Both keys come from the environment
+(never from arguments, so neither lands in a shell history or a process list),
+and the command prints only counts and setting _names_.
+
+Every live session and every unused email-verification token is still
+invalidated by a rotation, because their stored hashes were computed under the
+old HMAC key; password sign-in is unaffected.
 
 ### Procedure
 
 1. **Announce a short window.** Everyone will be signed out.
-2. Note which encrypted settings are in use — check
-   `GET /api/admin/settings` and record whether `smtp.password_set` and
-   `captcha.secret_set` are `true`. Have the actual SMTP password and CAPTCHA
-   secret to hand; Nexus cannot show them to you.
-3. Back up the database (see [§5](#5-backups)).
-4. Set the new `NEXUS_SECRET_KEY` and restart. Keep the **old** value recorded
-   somewhere safe until step 6 succeeds — it is your only rollback.
-5. Sign in as an admin (password sign-in is unaffected) and go to
-   **Admin → Settings**:
-   - re-enter the **SMTP password** and save;
-   - re-enter the **CAPTCHA secret key** and save.
-     Saving writes fresh AES-256-GCM blobs under the new key. Both fields are
-     write-only, so the form shows them as unset until you type a value.
-6. Verify: **Send test email** on the settings page returns `ok: true`, and a
-   sign-out/sign-in round trip works with CAPTCHA enabled.
+2. Back up the database (see [§5](#5-backups)) and record the current
+   `NEXUS_SECRET_KEY` — it is your rollback.
+3. **Stop every Nexus instance** (or run the step against a database no
+   instance is using). A running server would keep writing blobs under the old
+   key while you rotate.
+4. Re-encrypt the settings with both keys in the environment. With a `.env`
+   file, `NEXUS_SECRET_KEY` is read from it; put the previous key in the shell:
+
+   ```bash
+   export NEXUS_SECRET_KEY_PREVIOUS="<the key the database was last written with>"
+   export NEXUS_SECRET_KEY="$(openssl rand -hex 32)"     # or the value now in .env
+   npm run rotate-secret-key
+   # Re-encrypted 2 setting(s) under the new NEXUS_SECRET_KEY (captcha.secret_key, smtp.password); …
+   ```
+
+   The command exits non-zero and changes nothing if the previous key is wrong,
+   if the two keys are equal, or if it has already been run.
+
+5. Start the server with the new `NEXUS_SECRET_KEY` (and without
+   `NEXUS_SECRET_KEY_PREVIOUS`).
+6. Verify as a **super admin** (SMTP and CAPTCHA settings are super-admin-only):
+   sign in — with CAPTCHA on, this is the proof the secret survived — then
+   **Send test email** on the settings page returns `ok: true`.
 7. Optionally clean up the invalidated rows — they are inert, not harmful:
 
    ```sql
@@ -681,9 +697,16 @@ invalidated, because their stored hashes were computed under the old HMAC key.
 GROUP BY status`. Any `failed` rows accumulated during the window can be
    re-driven as described in [§6](#6-the-email-outbox).
 
-To **roll back**, restore the old `NEXUS_SECRET_KEY` — but only if you have not
-yet re-saved the settings under the new key. Once re-saved, the blobs are new
-and the old key no longer opens them.
+**Rollback** is the same command with the keys swapped (`NEXUS_SECRET_KEY_PREVIOUS`
+= the new key, `NEXUS_SECRET_KEY` = the old one), run before the server has
+re-saved anything under the new key; then restart with the old key.
+
+**If you cannot run the command** (for example a hosted database you can only
+reach through the running portal), a super admin can avoid the lockout by
+hand: disable CAPTCHA in **Admin → Settings** _before_ the swap, swap the key
+and restart, sign in with a password, re-enter the SMTP password and the
+CAPTCHA secret, then re-enable CAPTCHA and verify a sign-out/sign-in round
+trip. Do not "fix" the lockout by making CAPTCHA fail open.
 
 ### Rotating `FERRUM_ADMIN_JWT_SECRET`
 
