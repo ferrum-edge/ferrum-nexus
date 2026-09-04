@@ -98,6 +98,9 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
   const [methods, setMethods] = useState<HttpMethod[]>(api.allowed_methods ?? []);
   const [timeouts, setTimeouts] = useState<TimeoutDraft>(timeoutDraftFrom(api.timeouts));
   const [circuitBreaker, setCircuitBreaker] = useState(api.circuit_breaker);
+  const [methodsChanged, setMethodsChanged] = useState(false);
+  const [timeoutsChanged, setTimeoutsChanged] = useState(false);
+  const [circuitBreakerChanged, setCircuitBreakerChanged] = useState(false);
   const [specEnforcement, setSpecEnforcement] = useState<SpecEnforcementLevel>(
     api.spec_enforcement,
   );
@@ -143,7 +146,7 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
     const cors: CorsConfig | null =
       origins.length > 0 ? { allowed_origins: origins, allow_credentials: corsCredentials } : null;
 
-    const parsedTimeouts = parseTimeoutDraft(timeouts);
+    const parsedTimeouts = timeoutsChanged ? parseTimeoutDraft(timeouts) : undefined;
     if (typeof parsedTimeouts === 'string') {
       toast.error('Timeout out of range', parsedTimeouts);
       return;
@@ -162,16 +165,23 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
           requestable,
           rate_limit: rateLimit,
           cors,
-          // Clearing every checkbox sends `null`, which accepts every method
-          // again; clearing the timeout boxes restores the gateway defaults.
-          allowed_methods: methods.length > 0 ? methods : null,
-          timeouts: parsedTimeouts,
-          circuit_breaker: circuitBreaker,
+          // Omit untouched proxy controls so operator-managed live settings survive
+          // unrelated edits. Once changed, empty values intentionally reset them.
+          ...(methodsChanged ? { allowed_methods: methods.length > 0 ? methods : null } : {}),
+          ...(timeoutsChanged ? { timeouts: parsedTimeouts } : {}),
+          ...(circuitBreakerChanged ? { circuit_breaker: circuitBreaker } : {}),
           spec_enforcement: specEnforcement,
           ...(upstreamUrl.trim() ? { upstream_url: upstreamUrl.trim() } : {}),
         },
       },
-      { onSuccess: () => toast.success('API settings saved') },
+      {
+        onSuccess: () => {
+          setMethodsChanged(false);
+          setTimeoutsChanged(false);
+          setCircuitBreakerChanged(false);
+          toast.success('API settings saved');
+        },
+      },
     );
   };
 
@@ -306,11 +316,20 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
               <p className="mb-3 text-sm font-medium text-fg">Advanced</p>
               <AdvancedProxySettings
                 methods={methods}
-                onMethodsChange={setMethods}
+                onMethodsChange={(next) => {
+                  setMethods(next);
+                  setMethodsChanged(true);
+                }}
                 timeouts={timeouts}
-                onTimeoutsChange={setTimeouts}
+                onTimeoutsChange={(next) => {
+                  setTimeouts(next);
+                  setTimeoutsChanged(true);
+                }}
                 circuitBreaker={circuitBreaker}
-                onCircuitBreakerChange={setCircuitBreaker}
+                onCircuitBreakerChange={(next) => {
+                  setCircuitBreaker(next);
+                  setCircuitBreakerChanged(true);
+                }}
                 specMethods={specMethods}
               />
             </div>
