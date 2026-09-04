@@ -59,6 +59,7 @@ import { isNexusError } from './lib/errors.js';
 import { buildLoggerOptions, type LoggerOptions } from './lib/logger.js';
 import { createMessagingService, type MessagingService } from './messaging/service.js';
 import { registerAuthPlugin } from './middleware/auth-plugin.js';
+import { userOrIpKey } from './middleware/rate-limit-keys.js';
 import { registerErrorHandler } from './middleware/error-handler.js';
 import { createNotificationsService, type NotificationsService } from './notifications/service.js';
 import { createApiPluginsService, type ApiPluginsService } from './plugins/service.js';
@@ -446,9 +447,19 @@ export async function buildServer(
     prefix: '/api/organizations',
   });
 
-  await app.register(async (scope) => scope.register(messagingRoutes, { messaging }), {
-    prefix: '/api/threads',
-  });
+  await app.register(
+    async (scope) => {
+      // `global: false` so only the two write routes carry a limit — listing
+      // and reading a thread are as cheap as any other GET. The key generator
+      // buckets per account (see `userOrIpKey`), which is what makes this an
+      // abuse control rather than a shared-NAT outage.
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
+      }
+      await scope.register(messagingRoutes, { messaging });
+    },
+    { prefix: '/api/threads' },
+  );
 
   await app.register(
     async (scope) => scope.register(notificationsRoutes, { notifications, audit }),
