@@ -271,6 +271,11 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
     FERRUM_ADMIN_URL: edgeUrl,
     FERRUM_ADMIN_JWT_SECRET: TEST_EDGE_JWT_SECRET,
     FERRUM_NAMESPACE: 'nexus',
+    // Off by default, the way `NEXUS_RATE_LIMIT_ENABLED` is: most suites share
+    // one provider account across dozens of publishes, and a production ceiling
+    // silently turning half a suite into `429`s would be a confusing way to
+    // discover it. The quota tests set a small limit explicitly.
+    NEXUS_MAX_APIS_PER_OWNER: '0',
     ...options.env,
   });
 

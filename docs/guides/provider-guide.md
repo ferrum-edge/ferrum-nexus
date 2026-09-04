@@ -330,6 +330,15 @@ listed on the proxy before the gateway runs it, so publishing finishes by
 attaching the whole set to the proxy in one write. Nothing you configure here is
 live until that lands.
 
+**Your URL does not answer until all of it has landed.** The gateway starts
+serving a route the instant it is created, so the portal builds yours at a
+private, randomly named address first, attaches and switches on everything
+above, and moves it to `/<namespace>/<slug>` as the very last step. Until then
+your address returns `404`. It never returns an unauthenticated `200`: there is
+no moment in a publish when your API is reachable without the key, group or rate
+limit you asked for. The same is true of a level switch, which is why it shows as
+a brief `404` rather than as a brief open door.
+
 At the `routes` enforcement level the route itself is created _from_ your
 document rather than alongside it — the gateway will only build the enforcement
 rules for a route it owns. That is invisible day to day; the one place it shows

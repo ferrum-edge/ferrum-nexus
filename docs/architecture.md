@@ -488,6 +488,46 @@ proxy-scoped config the explicit deletes missed) if any step fails, before
 rethrowing. The Nexus rows are written last, so a failed publish leaves nothing
 behind on either side.
 
+#### The listen path is written last
+
+Every one of those writes happens on a **staging listen path**, and the move
+onto the real one is the final gateway call.
+
+Edge serves a proxy from the instant it exists, and a proxy-scoped plugin config
+is inert until the proxy's own `plugins[]` names it. Creating the proxy at
+`/<namespace>/<slug>` therefore made the API live, open and unlimited for the
+round trips it took to attach and associate its auth, ACL, rate-limit and CORS
+plugins — and rollback can delete a proxy but cannot un-forward requests it
+already served (GHSA-gxvf-jj3q-x4fc). Reordering does not help: Edge refuses a
+plugin config for a proxy that does not exist yet, and `allowed_methods` must be
+`null` or a **non-empty** array, so there is no deny-all proxy to build first.
+
+So the _path_ moves instead. `stagingListenPath()` mints
+`/<namespace>/.staging/<32 hex>` from 16 bytes of `crypto.randomBytes` — a slug
+can never begin with `.`, so it cannot collide with any API's real path, and 128
+bits of entropy is what makes "unguessable" a claim rather than a hope.
+
+| #   | `docs_only`                                         | `routes`                                    |
+| --- | --------------------------------------------------- | ------------------------------------------- |
+| 1   | `POST /proxies` at the **staging** path             | `POST /api-specs` at the **staging** path   |
+| 2   | `POST /plugins/config` × N                          | `POST /plugins/config` × N                  |
+| 3   | `PUT /proxies/{id}` — the association write         | `PUT /proxies/{id}` — the association write |
+| 4   | `PUT /proxies/{id}` — **cutover** to `/<ns>/<slug>` | `PUT /api-specs/{id}` — **cutover**         |
+
+Step 4 is `cutOverToListenPath`. For a spec-owned proxy both `servers[0].url`
+and `x-ferrum-proxy.listen_path` move in the same write, because Edge prefixes
+every generated operation matcher with the former — sending one without the
+other would leave the validator rejecting every request on the new path as an
+unknown operation. Edge accepts the move: `PUT /api-specs/{id}` updates the
+proxy row in place (same id, same `created_at`) and its uniqueness check
+excludes the proxy being written, at admission and again inside the write
+transaction.
+
+The real path is therefore either a `404` or fully gated. It is never open. The
+`spec_enforcement` conversion, which deletes and recreates the proxy, takes the
+same detour — and so does its undo step — so an API that already has consumers
+answers `404` for the rebuild rather than answering unauthenticated.
+
 ```
 apis row ─── proxy          name `nexus-<slug>`, listen_path `/<namespace>/<slug>`
               │             allowed_methods, backend_{connect,read,write}_timeout_ms,
@@ -547,10 +587,11 @@ transaction, then tags both with the spec's id. Three consequences:
 3. **changing the level rebuilds the proxy.** Edge cannot attach a spec to an
    existing proxy, cannot detach one without deleting it, and refuses a spec
    naming a proxy id that already exists — so the conversion deletes the proxy
-   and builds it back under the same id, carrying the whole proxy document and
-   every hand-owned plugin config across _with their original ids_. The API
-   answers `404` for the round trips in between; the audit row says
-   `proxy_rebuilt: true`.
+   and builds it back under the same id — **on a fresh staging path** — carrying
+   the whole proxy document and every hand-owned plugin config across _with
+   their original ids_, and only then cuts it over. The API answers `404` for
+   the round trips in between rather than answering unauthenticated; the audit
+   row says `proxy_rebuilt: true`.
 
 A CORS policy does not enter into any of this. `cors` runs at priority 100 and
 `openapi_validator` at 2960, and `preflight_continue` defaults to `false`, so a
@@ -577,10 +618,10 @@ read-modify-write with one undo step. A PATCH that does not name a setting does
 not write it at all, so timeouts an operator tuned by hand on the proxy survive
 a provider changing something else.
 
-The single association write is also why the proxy is briefly live with no
-plugins: Edge refuses a plugin config whose `proxy_id` does not exist yet, so
-the window cannot be closed from the Nexus side, only kept to one round trip
-and rolled back if anything in it fails.
+The single association write is what turns a stored plugin config into one the
+gateway runs. It happens while the proxy is still on its staging path, so the
+interval in which the proxy exists with no plugins is not observable at
+`/<namespace>/<slug>` — see "The listen path is written last" above.
 
 A `PATCH` maintains the association through every plugin change, each with a
 matching undo step. The orderings are chosen so the gateway is never _less_

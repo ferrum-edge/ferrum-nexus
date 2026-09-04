@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { loadConfig, type EnvRecord } from './index.js';
+import { DEFAULT_MAX_APIS_PER_OWNER, loadConfig, type EnvRecord } from './index.js';
 import { isNexusError } from '../lib/errors.js';
 
 const SECRET = 'a'.repeat(40);
@@ -164,6 +164,20 @@ describe('loadConfig', () => {
   it('disables rate limiting in the test environment', () => {
     assert.equal(loadConfig(baseEnv({ NEXUS_ENV: 'test' })).rateLimitEnabled, false);
     assert.equal(loadConfig(baseEnv({ NEXUS_ENV: 'production' })).rateLimitEnabled, true);
+  });
+
+  it('reads the per-owner API quota, defaulting to 50 and honouring 0 as unlimited', () => {
+    assert.equal(loadConfig(baseEnv()).maxApisPerOwner, DEFAULT_MAX_APIS_PER_OWNER);
+    assert.equal(loadConfig(baseEnv({ NEXUS_MAX_APIS_PER_OWNER: '5' })).maxApisPerOwner, 5);
+    // `0` is a meaningful value here, not "absent" — it turns the ceiling off —
+    // so it must survive the blank-is-default coercion every other variable has.
+    assert.equal(loadConfig(baseEnv({ NEXUS_MAX_APIS_PER_OWNER: '0' })).maxApisPerOwner, 0);
+    assert.equal(
+      loadConfig(baseEnv({ NEXUS_MAX_APIS_PER_OWNER: '  ' })).maxApisPerOwner,
+      DEFAULT_MAX_APIS_PER_OWNER,
+    );
+    expectConfigError(baseEnv({ NEXUS_MAX_APIS_PER_OWNER: '-1' }), 'NEXUS_MAX_APIS_PER_OWNER');
+    expectConfigError(baseEnv({ NEXUS_MAX_APIS_PER_OWNER: '2.5' }), 'NEXUS_MAX_APIS_PER_OWNER');
   });
 
   it('treats blank optional variables as unset', () => {
