@@ -228,3 +228,11 @@ fails without the fix.
   self-registered account could previously mail-bomb every administrator
   and grow the message, audit, notification and outbox tables without limit.
   Migration `010_message_sender_index` adds the index the budget check runs on.
+- **Gateway writes are exclusive across Nexus instances.** Every consumer
+  and proxy read-modify-write now holds a database lease (`edge_leases`,
+  migration `009`, 60 s TTL, renewed while held, up to 30 s wait, then
+  `409 CONFLICT`) in addition to the in-process queue, so two instances over
+  one database can no longer restore a revoked ACL group or drop a proxy's
+  auth association by overwriting each other's whole-resource `PUT`. The
+  single-writer topology in the operations guide is no longer required;
+  proxy delete-and-recreate paths remain outside the lease and say so.
