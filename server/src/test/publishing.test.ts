@@ -2034,7 +2034,7 @@ describe('publishing', () => {
       assert.deepEqual(associatedIds(harness, proxyId), writtenIds(harness, proxyId));
     });
 
-    it('bypasses the OPTIONS preflight when the API also has a CORS policy', async () => {
+    it('allows OPTIONS only on declared paths when the API also has a CORS policy', async () => {
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -2046,9 +2046,13 @@ describe('publishing', () => {
       });
       assert.equal(response.statusCode, 201, response.body);
       const proxyId = String(response.json<PublishApiResponse>().api.ferrum_proxy_id);
-      // Without this the preflight would be an undeclared operation and a 400
-      // long before the cors plugin could answer it.
-      assert.deepEqual(validatorConfig(proxyId)?.bypass, { methods: ['OPTIONS'] });
+      assert.deepEqual(operationLabels(proxyId), [
+        'GET /nexus/enf-cors/invoices',
+        'GET /nexus/enf-cors/invoices/{id}',
+        'OPTIONS /nexus/enf-cors/invoices',
+        'OPTIONS /nexus/enf-cors/invoices/{id}',
+      ]);
+      assert.equal('bypass' in (validatorConfig(proxyId) ?? {}), false);
     });
 
     it('refuses routes for a document that declares no operations', async () => {
@@ -2123,7 +2127,7 @@ describe('publishing', () => {
       assert.deepEqual(associatedIds(harness, proxyId), writtenIds(harness, proxyId));
     });
 
-    it('refreshes the bypass when a CORS policy arrives and when it leaves', async () => {
+    it('refreshes path-scoped OPTIONS operations when CORS arrives and leaves', async () => {
       const published = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -2143,7 +2147,13 @@ describe('publishing', () => {
         },
       });
       assert.equal(added.statusCode, 200, added.body);
-      assert.deepEqual(validatorConfig(proxyId)?.bypass, { methods: ['OPTIONS'] });
+      assert.deepEqual(operationLabels(proxyId), [
+        'GET /nexus/enf-cors-patch/invoices',
+        'GET /nexus/enf-cors-patch/invoices/{id}',
+        'OPTIONS /nexus/enf-cors-patch/invoices',
+        'OPTIONS /nexus/enf-cors-patch/invoices/{id}',
+      ]);
+      assert.equal('bypass' in (validatorConfig(proxyId) ?? {}), false);
       // Rewritten in place, so the association list never had to change.
       assert.equal(
         String(harness.edge.pluginForProxy(proxyId, 'openapi_validator')?.id),
@@ -2157,6 +2167,10 @@ describe('publishing', () => {
       });
       assert.equal(removed.statusCode, 200, removed.body);
       assert.equal('bypass' in (validatorConfig(proxyId) ?? {}), false);
+      assert.deepEqual(operationLabels(proxyId), [
+        'GET /nexus/enf-cors-patch/invoices',
+        'GET /nexus/enf-cors-patch/invoices/{id}',
+      ]);
       assert.equal(
         String(harness.edge.pluginForProxy(proxyId, 'openapi_validator')?.id),
         validatorId,
