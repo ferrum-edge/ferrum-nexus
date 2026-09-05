@@ -356,6 +356,15 @@ Migrations are **applied automatically at startup**: `main()` calls
 is idempotent — applied ids are recorded in a `schema_migrations` table (or
 collection) and skipped on the next boot.
 
+Because they run at the first upgraded instance's boot, a migration that
+changes what a row must carry needs every pre-upgrade instance **stopped
+first**. `011_credential_ordinal` is one: an instance still running the
+previous version writes `credential_metadata` rows without an `edge_ordinal`,
+and the upgraded code reads such a row as a legacy row of unknown position —
+index 0 when it is alone, `409 CONFLICT` beside another — which is exactly the
+wrong-key deletion the ordinal exists to prevent. Stop all instances, start
+one upgraded instance (or run `npm run migrate`), then roll out the rest.
+
 For deployments that prefer a separate schema step:
 
 ```bash
