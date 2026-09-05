@@ -4,15 +4,20 @@
  * Rules enforced here rather than in the routes, so every caller gets them:
  *
  * - Email addresses are unique case-insensitively and stored lowercased.
- * - **The first account ever created becomes `super_admin` and is
- *   automatically email-verified**; later accounts get the registrable role
- *   they asked for (`client` or `provider`) and nothing more. "First" is
- *   decided by an atomic claim on {@link SUPER_ADMIN_CLAIM_KEY}, not by
- *   counting users — see {@link AuthService.register}.
- * - **That first registration must present the bootstrap token**
+ * - **While the portal has no active `super_admin`, the next registration
+ *   becomes one and is automatically email-verified**; every other account
+ *   gets the registrable role it asked for (`client` or `provider`) and nothing
+ *   more. The founder's seat is taken under the cross-instance
+ *   {@link SUPER_ADMIN_LOCK_KEY} lock and inside one transaction, so the
+ *   account, the {@link SUPER_ADMIN_CLAIM_KEY} record and the role commit
+ *   together or not at all — see {@link AuthService.register}.
+ * - **A founding registration must present the bootstrap token**
  *   (`NEXUS_BOOTSTRAP_TOKEN`, or the per-process value printed at startup).
- *   Public self-registration can therefore never elect a founder: the atomic
- *   claim decides *which* candidate wins, the token decides who may stand.
+ *   Public self-registration can therefore never elect a founder: the lock
+ *   decides *which* candidate wins, the token decides who may stand. The gate
+ *   is "no active super_admin", not "no user", so a portal whose founder was
+ *   never seated — the failure mode this guards against — can still be
+ *   bootstrapped, and only through the token.
  * - Passwords are scrypt-hashed; verification is constant-time and a missing
  *   account still costs one hash so sign-in does not leak which emails exist.
  * - The two "email me a link" endpoints — {@link AuthService.requestPasswordReset}
@@ -50,7 +55,9 @@ import {
   validationFailed,
 } from '../lib/errors.js';
 import { isoInSeconds, nowIso } from '../lib/ids.js';
+import { SUPER_ADMIN_LOCK_KEY, type KeyedSerializer } from '../lib/keyed-serializer.js';
 import type { CaptchaService } from './captcha.js';
+import { createPasswordChangeSerializer } from './password-change.js';
 
 /** `app_settings` key holding the registration policy. */
 export const REGISTRATION_SETTINGS_KEY = 'registration';
@@ -58,10 +65,13 @@ export const REGISTRATION_SETTINGS_KEY = 'registration';
 /**
  * `app_settings` key that records the bootstrap election.
  *
- * Its value is `{ user_id, claimed_at }` — the account that won the race to be
- * the platform's first `super_admin`. The row exists to be *unique*: it is
- * written with `settings.insertIfAbsent`, so the database's unique constraint,
- * not a read-then-write in application code, decides the winner.
+ * Its value is `{ user_id, claimed_at }` — the account seated as the portal's
+ * founding `super_admin`. It is a record, not the lock: the seat is decided by
+ * {@link SUPER_ADMIN_LOCK_KEY} plus a count of active super admins taken inside
+ * the founder's transaction, and this row is written in that same transaction,
+ * so it can only ever describe a founder who was actually committed. A stale
+ * value left behind by a deployment that predates the atomic seat is simply
+ * overwritten when the portal is bootstrapped again.
  */
 export const SUPER_ADMIN_CLAIM_KEY = 'bootstrap.super_admin_claimed';
 
@@ -132,7 +142,7 @@ export interface RegisterInput {
   company?: string | null;
   phone?: string | null;
   captcha_token?: string | undefined;
-  /** Out-of-band bootstrap secret; required only while the portal is empty. */
+  /** Out-of-band bootstrap secret; required only while no active `super_admin` exists. */
   bootstrap_token?: string | undefined;
 }
 
@@ -156,6 +166,32 @@ export interface LoginInput {
 export interface LoginResult {
   user: User;
   issued: IssuedSession;
+}
+
+/**
+ * Everything a registration writes, computed before any lock or transaction.
+ *
+ * The password is already hashed: the one slow step of a registration happens
+ * with nothing held, and the transaction that follows is a handful of inserts.
+ */
+interface RegistrationDraft {
+  email: string;
+  passwordHash: string;
+  displayName: string;
+  role: RegistrableRole;
+  company: string | null;
+  phone: string | null;
+  requireEmailVerification: boolean;
+  ip: string | null;
+}
+
+/** What a committed registration transaction produced. */
+interface RegistrationOutcome {
+  record: UserRecord;
+  /** True when the account was seated as the founding `super_admin`. */
+  promoted: boolean;
+  /** Plaintext verification token minted in the transaction, when one was. */
+  verificationToken: string | null;
 }
 
 /**
@@ -236,11 +272,19 @@ export interface AuthService {
   /** Current registration policy, with defaults applied. */
   getRegistrationPolicy(): Promise<RegistrationPolicy>;
   /**
-   * True while the portal has no accounts, i.e. the next registration is the
-   * bootstrap one and must carry a valid `bootstrap_token`.
+   * True while the portal has no active `super_admin`, i.e. the next
+   * registration is the bootstrap one and must carry a valid `bootstrap_token`.
+   *
+   * Deliberately not "no accounts": a portal whose founding registration was
+   * cut short before the role landed has users but nobody to administer them,
+   * and this is what lets the documented bootstrap flow — token and all — put
+   * that right instead of leaving it to database surgery. An established
+   * portal with a seated super admin answers `false` whatever else is true of
+   * it.
    *
    * Published on `GET /api/branding` so the sign-up form can ask for the token
-   * up front. It is a hint, not a gate — {@link AuthService.register} decides.
+   * up front. It is a hint, not a gate — {@link AuthService.register} decides,
+   * and decides again under the lock.
    */
   bootstrapRequired(): Promise<boolean>;
 }
@@ -252,6 +296,14 @@ export interface AuthServiceDeps {
   crypto: NexusCrypto;
   audit: AuditService;
   captcha: CaptchaService;
+  /**
+   * Store-level cross-instance lock, built in the composition root from
+   * `store.leases`. The founder's seat is taken under
+   * {@link SUPER_ADMIN_LOCK_KEY} — the same key every transition that can
+   * shrink the active `super_admin` set runs under — so two instances cannot
+   * each seat a founder, and a bootstrap cannot interleave with a demotion.
+   */
+  locks: KeyedSerializer;
   /** Optional hook so the email service can enqueue the verification mail. */
   onRegistered?: OnRegistered;
   /** Optional hook that delivers a re-sent verification link. */
@@ -280,7 +332,8 @@ export function capabilitiesFor(role: Role): Capabilities {
 
 /** Build the authentication service. */
 export function createAuthService(deps: AuthServiceDeps): AuthService {
-  const { config, store, crypto, audit, captcha } = deps;
+  const { config, store, crypto, audit, captcha, locks } = deps;
+  const serializePasswordChange = createPasswordChangeSerializer(store);
 
   async function getRegistrationPolicy(): Promise<RegistrationPolicy> {
     const row = await store.settings.get(REGISTRATION_SETTINGS_KEY);
@@ -321,9 +374,9 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
   /**
    * Gate the bootstrap registration on the out-of-band token.
    *
-   * The founder election is the one place where an anonymous request can hand
-   * itself `super_admin`, so on an empty portal "who is allowed to win" has to
-   * be answered before "who won". The expected value is
+   * Seating a founder is the one place where an anonymous request can hand
+   * itself `super_admin`, so while the seat is open "who is allowed to win"
+   * has to be answered before "who won". The expected value is
    * {@link NexusConfig.bootstrapToken}: `NEXUS_BOOTSTRAP_TOKEN`, or the
    * per-process token the entry point generates and logs. An unset token means
    * no value can match — a server built without one simply cannot be
@@ -335,10 +388,101 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
       return;
     }
     throw forbidden(
-      'This portal has no accounts yet, so the first registration becomes its super_admin ' +
+      'This portal has no super_admin yet, so the next registration becomes its super_admin ' +
         'and must include the bootstrap token printed in the server log at startup ' +
         '(or the configured NEXUS_BOOTSTRAP_TOKEN)',
     );
+  }
+
+  async function bootstrapRequired(): Promise<boolean> {
+    return (await store.users.countActiveSuperAdmins()) === 0;
+  }
+
+  /**
+   * Write one registration — account, founder record, verification token and
+   * audit row — through `tx`, so they commit or roll back together.
+   *
+   * `founder` is the decision, already taken by the caller: `true` seats the
+   * account as a verified `super_admin` and records it under
+   * {@link SUPER_ADMIN_CLAIM_KEY}; `false` creates the ordinary member the
+   * draft describes. Nothing here hashes, waits or calls out — everything slow
+   * happened before the transaction opened.
+   */
+  async function persistRegistration(
+    tx: NexusStore,
+    draft: RegistrationDraft,
+    founder: boolean,
+  ): Promise<RegistrationOutcome> {
+    const record = await tx.users.create({
+      email: draft.email,
+      password_hash: draft.passwordHash,
+      display_name: draft.displayName,
+      role: founder ? 'super_admin' : draft.role,
+      company: draft.company,
+      phone: draft.phone,
+      status: 'active',
+      // The founder bootstraps the platform: verified, since there is nobody
+      // to configure SMTP for them.
+      email_verified: founder || !draft.requireEmailVerification,
+    });
+
+    if (founder) {
+      // An upsert on purpose: a deployment that predates the atomic seat can
+      // hold a stale record pointing at an account that was never promoted,
+      // and this transaction — under the lock, having counted zero active
+      // super admins — is exactly the writer allowed to replace it.
+      await tx.settings.set(SUPER_ADMIN_CLAIM_KEY, { user_id: record.id, claimed_at: nowIso() });
+    }
+
+    const requiresVerification = !founder && draft.requireEmailVerification;
+    let verificationToken: string | null = null;
+    if (requiresVerification) {
+      verificationToken = crypto.newSessionToken();
+      await tx.verificationTokens.create({
+        user_id: record.id,
+        token_hash: crypto.hashToken(verificationToken),
+        purpose: 'email_verification',
+        expires_at: isoInSeconds(EMAIL_VERIFICATION_TTL_SECONDS),
+      });
+    }
+
+    await audit.forStore(tx).record(
+      { id: record.id, role: record.role },
+      AuditAction.AUTH_REGISTER,
+      { type: 'user', id: record.id },
+      {
+        email: draft.email,
+        role: record.role,
+        first_user: founder,
+        verification_required: requiresVerification,
+      },
+      draft.ip,
+    );
+
+    return { record, promoted: founder, verificationToken };
+  }
+
+  /**
+   * Seat the founder, or fall back to an ordinary member if the seat is taken.
+   *
+   * Runs inside {@link SUPER_ADMIN_LOCK_KEY} *and* a transaction. The lock is
+   * what makes the count authoritative across instances: every writer that can
+   * add or remove an active `super_admin` takes it, so a zero counted here
+   * stays zero until this body has committed. The transaction is what makes the
+   * seat all-or-nothing: a failure after the account is created — the case
+   * that used to leave a portal with users and no administrator — rolls the
+   * account back too, and the next attempt finds the seat still open.
+   *
+   * A candidate that arrives to a seat somebody else has just taken is not an
+   * error; it keeps the role it asked for, exactly as a later registration
+   * would.
+   */
+  async function seatFounder(
+    tx: NexusStore,
+    draft: RegistrationDraft,
+  ): Promise<RegistrationOutcome> {
+    const seatTaken = (await tx.users.countActiveSuperAdmins()) > 0;
+    return persistRegistration(tx, draft, !seatTaken);
   }
 
   async function issueSession(user: UserRecord, context: RequestContext): Promise<IssuedSession> {
@@ -359,10 +503,7 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
   return {
     getRegistrationPolicy,
     issueSession,
-
-    async bootstrapRequired(): Promise<boolean> {
-      return (await store.users.count()) === 0;
-    },
+    bootstrapRequired,
 
     async register(input, context): Promise<RegisterResult> {
       const policy = await getRegistrationPolicy();
@@ -379,12 +520,13 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
       await captcha.verify(input.captcha_token, context.ip);
 
       // Advisory only: it decides whether the registration policy applies, and
-      // whether this registration stands for the bootstrap election below. It
-      // is *not* what makes anyone a super_admin. An empty user table also
-      // implies the default policy, since editing it needs an admin account.
-      const emptyPortal = (await store.users.count()) === 0;
-      if (emptyPortal) {
-        // The founder is elected here, so this registration has to prove it
+      // whether this registration stands for the founder's seat below. It is
+      // *not* what makes anyone a super_admin — the seat is decided again under
+      // the lock. A portal with no super admin also implies the default policy,
+      // since editing it needs an administrator account.
+      const seatOpen = await bootstrapRequired();
+      if (seatOpen) {
+        // The founder is seated here, so this registration has to prove it
         // comes from whoever runs the server. Checked before the password is
         // hashed and before any row is written: a caller without the token
         // leaves no trace beyond the audit-free 403 it gets back.
@@ -402,63 +544,33 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         throw conflict('An account with that email address already exists');
       }
 
-      // Create with the role that was actually requested. Hashing the password
-      // takes ~100 ms, so any number of registrations can be in flight here at
-      // once; deciding the founder before that await is how every one of them
-      // used to come back a super_admin.
-      let record = await store.users.create({
+      // Hash before the lock and before the transaction. Scrypt takes ~100 ms,
+      // and any number of registrations may be in flight here at once; none of
+      // them may hold the super-admin lock or a write transaction (on SQLite,
+      // the whole connection) for that long.
+      const draft: RegistrationDraft = {
         email,
-        password_hash: await crypto.hashPassword(password),
-        display_name: input.display_name.trim(),
+        passwordHash: await crypto.hashPassword(password),
+        displayName: input.display_name.trim(),
         role: input.role,
         company: input.company ?? null,
         phone: input.phone ?? null,
-        status: 'active',
-        email_verified: !policy.require_email_verification,
-      });
+        requireEmailVerification: policy.require_email_verification,
+        ip: context.ip,
+      };
 
-      // The bootstrap election: one insert against a unique key, so exactly one
-      // concurrent registration is told `true`. Registrations that saw an
-      // already-populated portal never stand, which keeps an upgraded
-      // deployment (whose founder predates this row) from minting a second one.
-      const promoted =
-        emptyPortal &&
-        (await store.settings.insertIfAbsent(SUPER_ADMIN_CLAIM_KEY, {
-          user_id: record.id,
-          claimed_at: nowIso(),
-        }));
-      if (promoted) {
-        // The founder bootstraps the platform: super_admin, and verified so
-        // there is nobody to configure SMTP for them.
-        record =
-          (await store.users.update(record.id, {
-            role: 'super_admin',
-            email_verified: true,
-          })) ?? record;
-      }
+      // The lock is taken *outside* the transaction (see `KeyedSerializer`):
+      // the lease repository runs statements of its own, and waiting for it
+      // from inside a body would, on SQLite, wait on the very transaction that
+      // has to finish before the lease can be released.
+      const founderTransaction = (): Promise<RegistrationOutcome> =>
+        store.transaction((tx) => seatFounder(tx, draft));
+      const { record, promoted, verificationToken } = seatOpen
+        ? await locks(SUPER_ADMIN_LOCK_KEY, founderTransaction)
+        : await store.transaction((tx) => persistRegistration(tx, draft, false));
 
-      const role: Role = record.role;
-      const requiresVerification = !promoted && policy.require_email_verification;
+      const requiresVerification = !promoted && verificationToken !== null;
       const user = toPublicUser(record);
-
-      let verificationToken: string | null = null;
-      if (requiresVerification) {
-        verificationToken = crypto.newSessionToken();
-        await store.verificationTokens.create({
-          user_id: record.id,
-          token_hash: crypto.hashToken(verificationToken),
-          purpose: 'email_verification',
-          expires_at: isoInSeconds(EMAIL_VERIFICATION_TTL_SECONDS),
-        });
-      }
-
-      await audit.record(
-        { id: record.id, role },
-        AuditAction.AUTH_REGISTER,
-        { type: 'user', id: record.id },
-        { email, role, first_user: promoted, verification_required: requiresVerification },
-        context.ip,
-      );
 
       if (deps.onRegistered) {
         await deps.onRegistered({ user, verificationToken, requestContext: context });
@@ -718,35 +830,46 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
       // transaction open across it would serialise unrelated work behind it.
       const passwordHash = await crypto.hashPassword(newPassword);
 
-      await store.transaction(async (tx) => {
-        // The compare-and-set burn is what makes the link single-use; the
-        // transaction is what keeps a burn from outliving the password change
-        // it was spent on.
-        const burned = await tx.verificationTokens.markUsed(row.id, nowIso());
-        if (!burned) throw invalidResetLink();
-
-        const updated = await tx.users.update(record.id, {
-          password_hash: passwordHash,
-          // Redeeming a link mailed to the address proves the mailbox, which is
-          // all verification ever claimed.
-          email_verified: true,
-        });
-        if (!updated) throw invalidResetLink();
-
-        // Any other reset link for this account dies with this one, and every
-        // session goes: whoever prompted the reset must not keep a live one.
-        await tx.verificationTokens.deleteForUser(record.id, 'password_reset');
-        await tx.sessions.deleteForUser(record.id);
-
-        await audit
-          .forStore(tx)
-          .record(
-            { id: updated.id, role: updated.role },
-            AuditAction.AUTH_PASSWORD_RESET,
-            { type: 'user', id: updated.id },
-            { email: updated.email },
-            context.ip,
+      await serializePasswordChange(record.id, async () => {
+        await store.transaction(async (tx) => {
+          // Recheck after taking the lease: an earlier change may have deleted
+          // the link, or it may have expired while hashing or waiting.
+          const live = await tx.verificationTokens.findByTokenHash(
+            crypto.hashToken(token),
+            'password_reset',
           );
+          if (!live || live.used_at !== null || Date.parse(live.expires_at) <= Date.now()) {
+            throw invalidResetLink();
+          }
+          const current = await tx.users.findById(record.id);
+          if (!current) throw invalidResetLink();
+          if (current.status !== 'active') throw userDisabled();
+          const burned = await tx.verificationTokens.markUsed(live.id, nowIso());
+          if (!burned) throw invalidResetLink();
+
+          const updated = await tx.users.update(record.id, {
+            password_hash: passwordHash,
+            // Redeeming a link mailed to the address proves the mailbox, which is
+            // all verification ever claimed.
+            email_verified: true,
+          });
+          if (!updated) throw invalidResetLink();
+
+          // Any other reset link for this account dies with this one, and every
+          // session goes: whoever prompted the reset must not keep a live one.
+          await tx.verificationTokens.deleteForUser(record.id, 'password_reset');
+          await tx.sessions.deleteForUser(record.id);
+
+          await audit
+            .forStore(tx)
+            .record(
+              { id: updated.id, role: updated.role },
+              AuditAction.AUTH_PASSWORD_RESET,
+              { type: 'user', id: updated.id },
+              { email: updated.email },
+              context.ip,
+            );
+        });
       });
     },
   };

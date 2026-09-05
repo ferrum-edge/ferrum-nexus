@@ -1,4 +1,4 @@
-import { useState, type ReactElement } from 'react';
+import { useRef, useState, type ReactElement } from 'react';
 import { ROLE_LABELS, type MassEmailAudience, type Role } from '@ferrum-nexus/shared';
 import { useMassEmail } from '../../hooks/useAdminSettings';
 import { useToast } from '../../stores/toast';
@@ -39,23 +39,59 @@ function Composer(): ReactElement {
   const [bodyText, setBodyText] = useState('');
   const [bodyHtml, setBodyHtml] = useState('');
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const campaign = useRef<{ id: string; content: string } | null>(null);
+  const submitting = useRef(false);
 
   const submit = (): void => {
+    if (submitting.current) return;
+    const request = {
+      subject: subject.trim(),
+      body_text: bodyText,
+      body_html: bodyHtml.trim() || `<p>${bodyText.replace(/\n/g, '<br />')}</p>`,
+      audience: audienceFor(choice),
+    };
+    // Keep the failed submission's ID until its content changes or it succeeds.
+    const content = JSON.stringify(request);
+    const isRetry = campaign.current?.content === content;
+    if (!isRetry) {
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      campaign.current = {
+        id: Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join(''),
+        content,
+      };
+    }
+    const id = campaign.current?.id;
+    if (!id) return;
+    submitting.current = true;
     send.mutate(
       {
-        subject: subject.trim(),
-        body_text: bodyText,
-        body_html: bodyHtml.trim() || `<p>${bodyText.replace(/\n/g, '<br />')}</p>`,
-        audience: audienceFor(choice),
-        idempotency_key: `mass-${subject.trim()}-${choice}`,
+        ...request,
+        idempotency_key: id,
       },
       {
         onSuccess: (response) => {
           setConfirmOpen(false);
+          campaign.current = null;
+          if (response.enqueued === 0 && response.recipients > 0) {
+            if (isRetry) {
+              toast.push('Mass email already queued', {
+                description: 'This campaign was already queued. No duplicate messages were added.',
+              });
+            } else {
+              toast.error(
+                'Mass email unexpectedly deduplicated',
+                'No messages were added for this new campaign. Check the audit log before resending.',
+              );
+            }
+            return;
+          }
           toast.success(
             'Mass email queued',
             `${response.enqueued} of ${response.recipients} recipients enqueued.`,
           );
+        },
+        onSettled: () => {
+          submitting.current = false;
         },
       },
     );
@@ -66,7 +102,7 @@ function Composer(): ReactElement {
       <Card>
         <CardHeader
           title="Compose"
-          description="One outbox row is enqueued per recipient; the idempotency key makes a repeated send at-most-once."
+          description="Retry unchanged submissions to avoid duplicates. Each completed send starts a new campaign."
         />
         <CardBody className="flex flex-col gap-5">
           <LabeledSelect<AudienceChoice>
@@ -78,6 +114,7 @@ function Composer(): ReactElement {
           <LabeledInput
             label="Subject"
             required
+            maxLength={300}
             value={subject}
             onChange={(event) => setSubject(event.target.value)}
           />

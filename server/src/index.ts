@@ -273,6 +273,7 @@ export async function buildServer(
     crypto,
     audit,
     captcha,
+    locks,
     onRegistered: deps.onRegistered ?? defaultOnRegistered(config, email, notifications, warn),
     onVerificationResend: emailTokenSender(config, email, warn, {
       templateKey: 'verification',
@@ -705,21 +706,24 @@ function defaultOnRegistered(
 /* ── Entry point ────────────────────────────────────────────────────────── */
 
 /**
- * Announce the first-run bootstrap token on an empty portal.
+ * Announce the first-run bootstrap token on a portal with no super admin.
  *
  * Only ever called for a *generated* token: one that came from
  * `NEXUS_BOOTSTRAP_TOKEN` is the operator's own secret and is never echoed to
  * the log. The message is deliberately loud — it is the only place this value
- * is ever shown, and without it nobody can create the portal's first account.
+ * is ever shown, and without it nobody can seat the portal's administrator.
+ * "No super admin" rather than "no accounts" on purpose: a portal whose
+ * founding registration failed part-way has users and nobody to run it, and a
+ * restart printing a fresh token is its documented way back.
  */
 function logGeneratedBootstrapToken(app: FastifyInstance, token: string): void {
   app.log.warn(
     '\n' +
       '='.repeat(76) +
       '\n' +
-      'FIRST-RUN BOOTSTRAP: this portal has no accounts yet.\n' +
+      'FIRST-RUN BOOTSTRAP: this portal has no super_admin yet.\n' +
       '\n' +
-      'The first registration becomes the portal super_admin, so it must send\n' +
+      'The next registration becomes the portal super_admin, so it must send\n' +
       'this bootstrap token as `bootstrap_token` (the sign-up form asks for it):\n' +
       '\n' +
       `    ${token}\n` +
@@ -749,7 +753,8 @@ export async function main(): Promise<void> {
   const store = createStore(config);
   await store.init();
   await store.migrate();
-  const emptyPortal = (await store.users.count()) === 0;
+  // The same condition `GET /api/branding` publishes as `bootstrap_required`.
+  const founderSeatOpen = (await store.users.countActiveSuperAdmins()) === 0;
 
   // The store is built first because the Edge client borrows its lease table:
   // that is what makes consumer and proxy read-modify-writes exclusive across
@@ -759,7 +764,7 @@ export async function main(): Promise<void> {
     edge: createFerrumAdmin(config, undefined, store.leases),
   });
   if (envFile !== null) app.log.info({ file: envFile }, 'Loaded environment file');
-  if (generatedBootstrapToken !== null && emptyPortal) {
+  if (generatedBootstrapToken !== null && founderSeatOpen) {
     logGeneratedBootstrapToken(app, generatedBootstrapToken);
   }
   // Best-effort: the namespace is also created implicitly by the first write.

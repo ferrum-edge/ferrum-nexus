@@ -107,6 +107,12 @@ rather feed it to your own tooling. **You do not need access to read the
 docs.** That is deliberate: you should be able to tell whether an API is worth
 requesting before you ask.
 
+Operations appear under each of their tags. Large documents initially show up
+to 200 entries; the **Show more** control reveals up to 200 additional entries
+per click. When operations appear under multiple tags, the paging count is
+labeled **operation entries** and includes each appearance. The header counts
+each operation only once.
+
 ### "I was sent a link but I cannot find it in the catalog"
 
 That is an **internal** API. Internal means _unlisted_, not private: it does not

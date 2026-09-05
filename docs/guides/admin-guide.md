@@ -366,7 +366,19 @@ The response tells you both numbers: `recipients` (how many matched) and
 
 ### Idempotency
 
-Supply an **idempotency key** (8–128 characters) and the send becomes
+The composer generates a random 32-character campaign ID when you first send.
+After a timeout or network failure, retry the unchanged submission in the same
+page to reuse that ID and avoid duplicate messages. An **already queued** notice
+means the earlier attempt queued the campaign and the retry added no messages.
+Unexpected deduplication on a fresh campaign is shown as an error.
+
+After a successful response, the next send gets a fresh ID, even with the same
+subject and audience. Changing the submitted content or audience also starts a
+new campaign. Reloading or leaving the page loses the retry ID, so check the
+audit log before resending after navigation. Subjects may contain up to 300
+characters; their length does not affect the campaign ID.
+
+For API callers, supply an **idempotency key** (8–128 characters) and the send becomes
 at-most-once: re-posting the same request with the same key enqueues nothing
 new. Use it whenever you are sending to a large audience — if the request times
 out, you can safely retry without double-mailing everyone.

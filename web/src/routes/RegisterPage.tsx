@@ -25,8 +25,8 @@ const ROLE_DESCRIPTIONS: Readonly<Record<RegistrableRole, string>> = {
 export function RegisterPage(): ReactElement {
   const { status, register } = useAuth();
   const { data: captcha } = useCaptchaConfig();
-  // True only while the portal has no accounts: this registration elects its
-  // super_admin, so it has to carry the operator's bootstrap token.
+  // True only while the portal has no active super_admin: this registration
+  // seats one, so it has to carry the operator's bootstrap token.
   const bootstrapRequired = useBranding().data?.bootstrap_required === true;
   const navigate = useNavigate();
 
@@ -116,7 +116,7 @@ export function RegisterPage(): ReactElement {
         {bootstrapRequired ? (
           <>
             <FormNotice tone="warning">
-              This portal has no accounts yet, so this registration becomes its super-admin.
+              This portal has no super-admin yet, so this registration becomes its super-admin.
             </FormNotice>
             <LabeledInput
               label="Bootstrap token"

@@ -255,7 +255,7 @@ export function OpenApiView({ text }: OpenApiViewProps): ReactElement {
 }
 
 /**
- * How many operations to mount at once.
+ * How many grouped operation entries to mount initially and add per click.
  *
  * A spec is provider-authored and may declare tens of thousands of operations
  * within the server's size limit; mounting a card for each one synchronously
@@ -266,7 +266,8 @@ const OPERATIONS_PAGE = 200;
 function ParsedSpecView({ spec }: { spec: ParsedSpec }): ReactElement {
   const [visibleCount, setVisibleCount] = useState(OPERATIONS_PAGE);
 
-  // Walk groups in order, taking operations until the budget runs out.
+  // Page the complete grouped-entry sequence so every tag presentation is preserved.
+  // Both the budget and remaining count include each appearance of a multi-tag operation.
   const visibleGroups = useMemo(() => {
     let remaining = visibleCount;
     const groups: { group: SpecTagGroup; operations: SpecOperation[] }[] = [];
@@ -280,7 +281,9 @@ function ParsedSpecView({ spec }: { spec: ParsedSpec }): ReactElement {
   }, [spec.groups, visibleCount]);
 
   const shownCount = visibleGroups.reduce((total, entry) => total + entry.operations.length, 0);
-  const hiddenCount = spec.operationCount - shownCount;
+  const totalEntries = spec.groups.reduce((total, group) => total + group.operations.length, 0);
+  const hiddenCount = totalEntries - shownCount;
+  const entryLabel = totalEntries === spec.operationCount ? 'operations' : 'operation entries';
 
   return (
     <div className="flex flex-col gap-6">
@@ -338,7 +341,7 @@ function ParsedSpecView({ spec }: { spec: ParsedSpec }): ReactElement {
       {hiddenCount > 0 ? (
         <div className="fx-card flex flex-wrap items-center justify-between gap-3 p-4">
           <p className="text-sm text-fg-muted">
-            Showing {shownCount} of {spec.operationCount} operations.
+            Showing {shownCount} of {totalEntries} {entryLabel}.
           </p>
           <button
             type="button"
