@@ -356,6 +356,15 @@ Migrations are **applied automatically at startup**: `main()` calls
 is idempotent — applied ids are recorded in a `schema_migrations` table (or
 collection) and skipped on the next boot.
 
+Because they run at the first upgraded instance's boot, a migration that
+changes what a row must carry needs every pre-upgrade instance **stopped
+first**. `011_credential_ordinal` is one: an instance still running the
+previous version writes `credential_metadata` rows without an `edge_ordinal`,
+and the upgraded code reads such a row as a legacy row of unknown position —
+index 0 when it is alone, `409 CONFLICT` beside another — which is exactly the
+wrong-key deletion the ordinal exists to prevent. Stop all instances, start
+one upgraded instance (or run `npm run migrate`), then roll out the rest.
+
 For deployments that prefer a separate schema step:
 
 ```bash
@@ -1199,8 +1208,13 @@ Edge gives credential entries **no id**, and every read redacts the material, so
 there is nothing on the wire that identifies one entry. What identifies it is
 its position: `POST` appends, `DELETE /consumers/{id}/credentials/{type}/{i}`
 removes by 0-based index, and Nexus writes one `credential_metadata` row per
-append. The non-revoked rows for a `(consumer, type)` pair, oldest first, are a
-**mirror** of the Edge array, and a row's position in that list is its index.
+append. Each row carries **`edge_ordinal`**, a strictly increasing counter per
+consumer and credential type that the store assigns in the same statement as
+the insert, under the same per-consumer lock as the Edge append. The non-revoked
+rows for a `(consumer, type)` pair, ordered by ordinal, are a **mirror** of the
+Edge array, and a row's position in that list is its index. Timestamps play no
+part: two appends inside one millisecond, or a clock stepped backwards between
+two appends, used to reorder the mirror and send a revoke to the wrong entry.
 
 Every destructive call cross-checks that mirror against the live array length
 read in the same critical section. Nexus itself can no longer break the
@@ -1220,28 +1234,61 @@ rows, `actual` the length of the Edge array. The one case that is not an error
 is a single live row: a revoke then degrades to deleting the whole credential
 type, which is what a revoke asked for anyway.
 
-### Reconciling one
+### What an ambiguous legacy consumer looks like
 
-Decide which side is right, and make the other match it. Edge is the side that
-authenticates, so the safe default is to **empty the type and re-issue**:
+Rows written before `011_credential_ordinal` have no ordinal of their own. The
+migration numbers them from the old `(created_at, id)` sort where that sort was
+unambiguous — no two live rows of the consumer and type share a timestamp — and
+leaves the whole group `NULL` where it was not, because nothing on either side
+can say which gateway entry is which. A lone unresolved row is still index 0
+and works normally. Two or more make every rotate or revoke of them return
+`409 CONFLICT`:
+
+> The gateway position of this credential cannot be determined …
+
+with `details: { consumer_id, credential_type, unresolved_credentials }`. New
+credentials issued on the same consumer carry ordinals and are unaffected. To
+find such rows ahead of time:
 
 ```sql
--- 1. what the portal thinks is live for this consumer
-SELECT id, credential_type, last4, status, created_at
+SELECT ferrum_consumer_id, credential_type, COUNT(*) AS unresolved
   FROM credential_metadata
-  WHERE ferrum_consumer_id = '<edge consumer id>' AND status <> 'revoked'
-  ORDER BY created_at;
+  WHERE edge_ordinal IS NULL AND status <> 'revoked'
+  GROUP BY ferrum_consumer_id, credential_type
+  HAVING COUNT(*) > 1;
 ```
 
-1. Revoke each live row through the portal (**Administration → Users → the
-   account → Credentials**) if the call succeeds — with one row left it degrades
-   to a whole-type delete and clears both sides at once.
-2. If it does not, delete the type on the gateway
-   (`DELETE /consumers/{id}/credentials/{type}` on the Edge Admin API) and then
-   mark the rows `revoked`. Never leave a row `active` for an entry that is
-   gone: it will drift again on the next operation.
-3. Tell the account holder to issue new credentials. The old secrets were
-   show-once and cannot be recovered from either side.
+### Reconciling one
+
+Edge is the side that authenticates, and it exposes neither an id nor the
+material of an entry on read, so the only repair that needs no guessing is to
+**empty the type and re-issue**. That is what the reconciliation endpoint does:
+
+```http
+POST /api/admin/credentials/reconcile
+{ "consumer_id": "<edge consumer id>", "credential_type": "keyauth", "reason": "…" }
+```
+
+Inside the consumer's critical section it issues
+`DELETE /consumers/{id}/credentials/{type}` on the gateway, moves every live
+portal row for the pair to `revoked`, writes a `credential.reconcile` audit row
+(with the optional `reason`) and notifies each affected account. The response
+reports `revoked_credentials` and whether the gateway consumer still existed
+(`gateway_cleared`). It is admin-only, idempotent, and destructive by design:
+every live credential of that type on that consumer stops working.
+
+Before running it, see what the portal thinks is live:
+
+```sql
+SELECT id, credential_type, last4, status, edge_ordinal, created_at
+  FROM credential_metadata
+  WHERE ferrum_consumer_id = '<edge consumer id>' AND status <> 'revoked'
+  ORDER BY edge_ordinal;
+```
+
+Then tell the account holder to issue new credentials. The old secrets were
+show-once and cannot be recovered from either side. Never leave a row `active`
+for an entry that is gone: it will drift again on the next operation.
 
 A failed rotation **at the cap** is not drift and needs none of this. The old
 entry is deleted before the replacement is appended (there is no room for both),

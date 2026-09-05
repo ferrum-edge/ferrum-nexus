@@ -23,6 +23,7 @@ import {
   type ListAuditLogsResponse,
   type ListEmailTemplatesResponse,
   type MassEmailResponse,
+  type ReconcileCredentialsResponse,
   type SmtpTestResponse,
   type UpdateEmailTemplateResponse,
   type UpdateSettingsResponse,
@@ -32,6 +33,7 @@ import type { GodService } from '../admin/god-service.js';
 import type { MassEmailService } from '../admin/mass-email-service.js';
 import type { SettingsService } from '../admin/settings-service.js';
 import { AuditAction, type AuditService } from '../audit/service.js';
+import { CREDENTIAL_TYPES, type CredentialsService } from '../credentials/service.js';
 import type { AuditLogFilter } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
 import { assertRole, clientIp, requireAuth, requireRole } from '../middleware/auth-plugin.js';
@@ -45,6 +47,7 @@ export interface AdminRoutesOptions {
   email: EmailService;
   audit: AuditService;
   god: GodService;
+  credentials: CredentialsService;
 }
 
 /** Largest accepted logo, as a data URL. Roughly 384 KiB of binary. */
@@ -143,6 +146,12 @@ const auditLogsQuery = listQuerySchema.extend({
 
 const godReason = z.string().trim().min(1).max(2_000);
 
+const reconcileCredentialsBody = z.object({
+  consumer_id: z.string().trim().min(1).max(128),
+  credential_type: z.enum(CREDENTIAL_TYPES),
+  reason: z.string().trim().max(500).nullish(),
+});
+
 const godRevokeGrantBody = z.object({
   grant_id: z.string().trim().min(1).max(64),
   reason: godReason,
@@ -175,7 +184,7 @@ const godBroadcastBody = z.object({
 
 /** `/api/admin` route plugin. */
 export const adminRoutes: FastifyPluginAsync<AdminRoutesOptions> = async (app, options) => {
-  const { settings, massEmail, email, audit, god } = options;
+  const { settings, massEmail, email, audit, god, credentials } = options;
   app.addHook('onRequest', requireRole('admin'));
 
   /* ── Settings ─────────────────────────────────────────────────────────── */
@@ -259,6 +268,28 @@ export const adminRoutes: FastifyPluginAsync<AdminRoutesOptions> = async (app, o
       ...(query.to !== undefined ? { to: query.to } : {}),
     };
     return audit.list(filter, listOptions(query));
+  });
+
+  /* ── Credential reconciliation ────────────────────────────────────────── */
+
+  /**
+   * Empty one credential type on a gateway consumer, on both sides. The repair
+   * for a consumer whose credential positions can no longer be trusted; see
+   * `docs/operations.md` §12. Destructive by design — every live credential of
+   * that type stops working — so it is admin-only and audited.
+   */
+  app.post('/credentials/reconcile', async (request): Promise<ReconcileCredentialsResponse> => {
+    const { user } = requireAuth(request);
+    const body = parseOrThrow(reconcileCredentialsBody, request.body);
+    return credentials.reconcile(
+      user,
+      {
+        consumerId: body.consumer_id,
+        credentialType: body.credential_type,
+        reason: body.reason ?? null,
+      },
+      clientIp(request),
+    );
   });
 
   /* ── God mode (super_admin only) ───────────────────────────────────────

@@ -714,6 +714,34 @@ Registered under `/api/admin`. The **entire** plugin requires _admin_; the four
 `god/*` endpoints additionally require _super_admin_, and so do the `smtp` and
 `captcha` sections of `PUT /settings`.
 
+### `POST /api/admin/credentials/reconcile`
+
+_admin_ — empty one credential type on one Edge consumer and settle the portal's
+rows to match. The repair for a consumer whose live rows cannot be positioned
+(two or more without an `edge_ordinal`; see the operations guide, "Legacy
+credential rows"). Destructive by design: every live credential of that type on
+that consumer stops working, and the account holders are notified.
+
+Body: `consumer_id` (the Edge consumer id carried on
+`CredentialMetadata.ferrum_consumer_id`, ≤ 128), `credential_type` ∈ `keyauth`
+\| `basicauth` \| `jwt`, optional `reason` (≤ 500, nullable; recorded on the
+`credential.reconcile` audit row).
+
+```json
+{
+  "consumer_id": "7c1d…",
+  "credential_type": "keyauth",
+  "revoked_credentials": 2,
+  "gateway_cleared": true
+}
+```
+
+`gateway_cleared` is `false` when the gateway consumer no longer existed, in
+which case only the portal rows changed. Idempotent: a second call revokes
+nothing and clears an already-empty type. Errors: `400 VALIDATION_FAILED`,
+`502 EDGE_ERROR` / `502 EDGE_UNAVAILABLE` (nothing is revoked when the gateway
+call fails).
+
 ### `GET /api/admin/settings`
 
 _admin_ — the whole settings snapshot. Secrets are never returned; booleans
@@ -1559,6 +1587,10 @@ is no path back to the plaintext on either side.
 ### `GET /api/credentials`
 
 _session_ — `Paginated<CredentialMetadata>`. Never contains a secret.
+`edge_ordinal` is the row's durable append position within its consumer and
+type (`null` for a row written before `011_credential_ordinal` whose position
+could not be recovered); the portal derives an entry's gateway array index from
+it.
 
 | Query             | Type                                | Notes                                                                                     |
 | ----------------- | ----------------------------------- | ----------------------------------------------------------------------------------------- |
@@ -1576,7 +1608,8 @@ optional `label` (≤ 120, nullable).
 ```json
 {
   "credential": { "id": "…", "credential_type": "keyauth", "fingerprint": "…",
-                  "last4": "9f2a", "status": "active", "rotated_from_id": null, … },
+                  "last4": "9f2a", "status": "active", "rotated_from_id": null,
+                  "edge_ordinal": 1, … },
   "consumer_username": "nexus-user-7c1d…",
   "secret": { "type": "keyauth", "key": "nxs_pQ7…" }
 }

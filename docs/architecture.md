@@ -791,10 +791,30 @@ Edge gives credential entries **no id**, and reads redact the material, so
 there is nothing on the wire to match a specific entry against. What is stable
 is _ordering_: `POST` appends, `DELETE /{type}/{index}` removes by 0-based
 index (the array re-indexes), and Nexus writes one `credential_metadata` row
-per append. The non-revoked rows for a `(consumer, type)` pair, oldest first,
-are a mirror of the Edge array — a row's position in that list is its index.
+per append. Each row carries **`edge_ordinal`**, a strictly increasing counter
+per `(consumer, type)` that the store assigns as `MAX + 1` in the same
+statement as the insert, inside the same per-consumer critical section as the
+Edge append — so ordinal order _is_ append order by construction. The
+non-revoked rows for a pair, ordered by ordinal, are a mirror of the Edge
+array, and a row's position in that list is its index.
 
-`resolveCredentialIndex` computes that position and cross-checks it against the
+The ordering key used to be `created_at` with the row id as tie-break. That is
+not append order: two appends inside one millisecond sort by a random UUID, and
+a clock stepped backwards between two appends puts the later one first — either
+way a revoke deleted _another_ live key while marking the requested one revoked
+(#77). Nothing reads `created_at` for position any more.
+
+Rows written before the ordinal existed were backfilled from the old sort by
+`011_credential_ordinal` where that sort was unambiguous (distinct timestamps
+among the live rows of a group). Where it was not, the whole group carries
+`edge_ordinal = NULL`: those rows all precede every row that has an ordinal,
+but their order among themselves is unknowable. A lone such row is still index
+0; two or more make a target **ambiguous**, and the operation is refused with
+`409 CONFLICT` until an administrator runs
+`POST /api/admin/credentials/reconcile`, which empties the type on both sides
+(§6.3).
+
+`resolveCredentialIndex` computes the position and cross-checks it against the
 live array length read inside the same serialised block. On a mismatch (someone
 hand-edited the consumer) it degrades to deleting the whole credential type
 when only one row is live, and otherwise **refuses** rather than deleting
@@ -807,7 +827,7 @@ POST /api/credentials/:id/rotate
   │
   └─ serializePerKey(consumer):
        GET /consumers/{id}                      fresh view, same critical section
-       rows      = live credential_metadata rows for (consumer, type), oldest first
+       rows      = live credential_metadata rows for (consumer, type), by edge_ordinal
        position  = index of the target
        appendFirst = (edge array length < FERRUM_MAX_CREDENTIALS_PER_TYPE)
 
@@ -819,7 +839,8 @@ POST /api/credentials/:id/rotate
          DELETE /consumers/{id}/credentials/{type}/{position}
          POST   /consumers/{id}/credentials/{type}   -> new secret, returned once
 
-       old row -> status 'revoked', new row -> rotated_from_id = old id
+       old row -> status 'revoked', new row -> rotated_from_id = old id,
+                                              edge_ordinal = next for (consumer, type)
 ```
 
 Append-then-delete keeps both secrets live across the hand-off, which is the
@@ -827,6 +848,18 @@ whole point of a rotation. At the cap there is no room to append, so the old
 entry has to go first — briefly leaving the account with no working credential
 of that type. Raising `FERRUM_MAX_CREDENTIALS_PER_TYPE` (and the matching
 gateway setting) above 1 avoids that window.
+
+### 6.3 Reconciling a consumer
+
+`POST /api/admin/credentials/reconcile` (`admin`+) takes a `consumer_id` and a
+`credential_type` and, inside the consumer's critical section, issues
+`DELETE /consumers/{id}/credentials/{type}` on Edge and moves every live row
+for the pair to `revoked`. It writes a `credential.reconcile` audit row and
+notifies each affected owner. This is the only repair that needs no per-entry
+identity, which is why it is the documented answer both to a drifted array and
+to ambiguous legacy rows; the account holder then issues fresh credentials,
+which carry ordinals and are addressable again. Operational detail lives in
+[`operations.md`](operations.md#12-the-credential-mirror) §12.
 
 ---
 

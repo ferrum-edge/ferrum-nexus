@@ -105,6 +105,8 @@ import {
   type RetryGatewayTeardownResponse,
   type RevokeGrantRequest,
   type RevokeGrantResponse,
+  type ReconcileCredentialsRequest,
+  type ReconcileCredentialsResponse,
   type RotateCredentialRequest,
   type RotateCredentialResponse,
   type SendMessageRequest,
@@ -499,6 +501,10 @@ export const adminApi = {
     post<MassEmailResponse>('/admin/mass-email', body),
   auditLogs: (query: ListAuditLogsQuery = {}): Promise<ListAuditLogsResponse> =>
     get<ListAuditLogsResponse>('/admin/audit-logs', { ...query }),
+  reconcileCredentials: (
+    body: ReconcileCredentialsRequest,
+  ): Promise<ReconcileCredentialsResponse> =>
+    post<ReconcileCredentialsResponse>('/admin/credentials/reconcile', body),
 };
 
 /* ── Admin: god mode (super_admin only) ─────────────────────────────────── */
