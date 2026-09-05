@@ -100,6 +100,7 @@ describe('RegisterPage bootstrap token', () => {
 
     expect(screen.getByText(/becomes its super-admin/)).toBeInTheDocument();
     const token = await screen.findByLabelText(/^Bootstrap token/);
+    expect(token).toHaveAttribute('type', 'password');
     expect(screen.getByText(/NEXUS_BOOTSTRAP_TOKEN/)).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText(/^Display name/), { target: { value: 'Founder' } });
