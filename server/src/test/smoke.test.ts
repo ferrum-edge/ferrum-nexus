@@ -110,7 +110,27 @@ interface SmokeTarget {
   teardown: () => Promise<void>;
 }
 
-function testConfig(driver: DbDriver, url = ''): ReturnType<typeof loadConfig> {
+/**
+ * The connection URL the contract for `driver` is running against, so a config
+ * built for a non-SQLite store validates: `loadConfig` requires `NEXUS_DB_URL`
+ * for every driver but sqlite. Services built over a store never dial it —
+ * they use the store they are handed — so any well-formed URL for the driver
+ * is enough, and the lane's own URL is the honest one.
+ */
+function testDbUrl(driver: DbDriver): string {
+  switch (driver) {
+    case 'postgres':
+      return process.env.NEXUS_TEST_POSTGRES_URL ?? '';
+    case 'mysql':
+      return process.env.NEXUS_TEST_MYSQL_URL ?? '';
+    case 'mongodb':
+      return process.env.NEXUS_TEST_MONGO_URL ?? '';
+    default:
+      return '';
+  }
+}
+
+function testConfig(driver: DbDriver, url = testDbUrl(driver)): ReturnType<typeof loadConfig> {
   return loadConfig({
     NEXUS_SECRET_KEY: SECRET,
     FERRUM_ADMIN_JWT_SECRET: SECRET,
