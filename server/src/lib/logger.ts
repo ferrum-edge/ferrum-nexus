@@ -1,8 +1,8 @@
 /**
  * Fastify logger options.
  *
- * The only interesting part is the redaction list: cookies and `Authorization`
- * headers must never reach a log line, in either direction. Nexus session
+ * Cookies and `Authorization` headers must never reach a log line, in either
+ * direction; query-string credentials are sanitised separately. Nexus session
  * cookies are bearer-equivalent, and the outbound `Authorization` header
  * carries a live Ferrum Edge admin JWT.
  */
@@ -10,6 +10,7 @@
 import type { FastifyServerOptions } from 'fastify';
 
 import type { NexusConfig } from '../config/index.js';
+import { sanitizeUrlForLog } from './sanitize-url-for-log.js';
 
 /** Paths pino replaces with `[Redacted]` before serialising a log record. */
 export const REDACTED_PATHS = [
@@ -45,7 +46,11 @@ export function buildLoggerOptions(config: NexusConfig): LoggerOptions {
     redact: { paths: [...REDACTED_PATHS], censor: '[Redacted]' },
     serializers: {
       req(request: { method?: string; url?: string; ip?: string }) {
-        return { method: request.method, url: request.url, ip: request.ip };
+        return {
+          method: request.method,
+          url: request.url === undefined ? undefined : sanitizeUrlForLog(request.url),
+          ip: request.ip,
+        };
       },
     },
   };
