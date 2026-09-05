@@ -60,6 +60,75 @@ const JSON_SPEC = JSON.stringify({
 
 afterEach(cleanup);
 
+function multiTagSpec(count: number, includeLastGroup = false): string {
+  const paths: Record<string, unknown> = {};
+  for (let index = 0; index < count; index += 1) {
+    paths[`/resource-${index}`] = {
+      get: { tags: ['A', 'B'], responses: { '200': { description: 'ok' } } },
+    };
+  }
+  if (includeLastGroup) {
+    paths['/last-group'] = {
+      get: { tags: ['C'], responses: { '200': { description: 'ok' } } },
+    };
+  }
+  return JSON.stringify({
+    openapi: '3.0.3',
+    info: { title: 'Multi-tag API', version: '1.0.0' },
+    paths,
+  });
+}
+
+describe('OpenApiView multi-tag paging', () => {
+  it('reveals a final group after 100 operations appearing under both A and B', () => {
+    const { container } = render(<OpenApiView text={multiTagSpec(100, true)} />);
+
+    expect(screen.getByText('101 operations')).toBeInTheDocument();
+    expect(container.querySelectorAll('button[aria-expanded]')).toHaveLength(200);
+    expect(screen.getByText('Showing 200 of 201 operation entries.')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'C' })).not.toBeInTheDocument();
+    expect(screen.queryByText('/last-group')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show 1 more' }));
+
+    expect(screen.getByRole('heading', { name: 'C' })).toBeInTheDocument();
+    expect(screen.getByText('/last-group')).toBeInTheDocument();
+    expect(container.querySelectorAll('button[aria-expanded]')).toHaveLength(201);
+    expect(screen.queryByRole('button', { name: /Show .* more/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Showing/)).not.toBeInTheDocument();
+  });
+
+  it.each([99, 100, 101, 250])('pages all tag entries for %i multi-tag operations', (count) => {
+    const { container } = render(<OpenApiView text={multiTagSpec(count)} />);
+    const totalEntries = count * 2;
+    let shown = Math.min(200, totalEntries);
+
+    expect(screen.getByText(`${count} operations`)).toBeInTheDocument();
+    expect(container.querySelectorAll('button[aria-expanded]')).toHaveLength(shown);
+
+    while (shown < totalEntries) {
+      expect(
+        screen.getByText(`Showing ${shown} of ${totalEntries} operation entries.`),
+      ).toBeInTheDocument();
+      const remaining = totalEntries - shown;
+      expect(remaining).toBeGreaterThan(0);
+      expect(screen.queryByRole('button', { name: /Show -\d+ more/ })).not.toBeInTheDocument();
+      const nextPage = Math.min(200, remaining);
+      fireEvent.click(screen.getByRole('button', { name: `Show ${nextPage} more` }));
+      shown += nextPage;
+      expect(container.querySelectorAll('button[aria-expanded]')).toHaveLength(shown);
+    }
+
+    expect(screen.getByRole('heading', { name: 'A' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'B' })).toBeInTheDocument();
+    const expectedPaths = Array.from({ length: count }, (_, index) => `/resource-${index}`);
+    const renderedPaths = Array.from(container.querySelectorAll('button code'), (el) => el.textContent);
+    expect(renderedPaths).toEqual([...expectedPaths, ...expectedPaths]);
+    expect(screen.queryByRole('button', { name: /Show .* more/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Showing/)).not.toBeInTheDocument();
+  });
+});
+
 describe('OpenApiView', () => {
   it('renders info, servers and tag-grouped operations from a YAML document', () => {
     render(<OpenApiView text={YAML_SPEC} />);
