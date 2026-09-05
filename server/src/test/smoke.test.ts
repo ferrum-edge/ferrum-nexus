@@ -90,14 +90,16 @@ function authServiceOver(store: NexusStore): AuthService {
 /** A registration that asks for `client` and carries the operator's token. */
 function candidate(
   email: string,
-  bootstrapToken: string | undefined = BOOTSTRAP_TOKEN,
+  // `null` means "present no token": an explicit `undefined` would select the
+  // default parameter and silently hand the candidate the operator's token.
+  bootstrapToken: string | null = BOOTSTRAP_TOKEN,
 ): RegisterInput {
   return {
     email,
     password: 'correct-horse-battery-staple',
     display_name: 'Candidate',
     role: 'client',
-    ...(bootstrapToken === undefined ? {} : { bootstrap_token: bootstrapToken }),
+    ...(bootstrapToken === null ? {} : { bootstrap_token: bootstrapToken }),
   };
 }
 
@@ -2465,7 +2467,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         const forbidden = (error: unknown): boolean =>
           isNexusError(error) && error.code === 'FORBIDDEN';
         await assert.rejects(
-          () => auth.register(candidate('joiner@example.test', undefined), ANONYMOUS_REQUEST),
+          () => auth.register(candidate('joiner@example.test', null), ANONYMOUS_REQUEST),
           forbidden,
         );
         const wrongToken = candidate('guesser@example.test', `${BOOTSTRAP_TOKEN}x`);
