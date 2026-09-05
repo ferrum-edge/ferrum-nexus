@@ -320,15 +320,15 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
   /**
    * Refuse the send when the sender has spent their rolling 24-hour budget.
    *
-   * Called first in both write paths, before the thread is resolved or any row
-   * is written, so a refusal costs exactly one COUNT and leaves nothing behind.
+   * Called inside the same serialised database transaction as the message
+   * insert, so concurrent sends cannot all spend the same remaining slot.
    * `0` means the operator turned the budget off.
    */
-  async function assertWithinBudget(senderUserId: Uuid): Promise<void> {
+  async function assertWithinBudget(tx: NexusStore, senderUserId: Uuid): Promise<void> {
     const limit = config.maxMessagesPerUserPerDay;
     if (limit <= 0) return;
     const since = new Date(Date.now() - MESSAGE_BUDGET_WINDOW_MS).toISOString();
-    const used = await store.messages.countBySenderSince(senderUserId, since);
+    const used = await tx.messages.countBySenderSince(senderUserId, since);
     if (used < limit) return;
     throw new NexusError(
       'QUOTA_EXCEEDED',
@@ -434,8 +434,6 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
       const body = input.body.trim();
       if (subject === '') throw validationFailed('A subject is required');
       if (body === '') throw validationFailed('A message body is required');
-      await assertWithinBudget(input.actor.id);
-
       let counterpart: UserRecord | null = null;
       if (input.recipientUserId) {
         if (input.recipientUserId === input.actor.id) {
@@ -463,24 +461,27 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
         participantB = input.actor.id;
       }
 
-      const existing = await store.threads.findExisting(participantA, participantB, apiId);
-      const thread =
-        existing ??
-        (await store.threads.create({
-          subject,
-          api_id: apiId,
-          created_by: input.actor.id,
-          participant_a: participantA,
-          participant_b: participantB,
-        }));
-
-      const message = await store.messages.create({
-        thread_id: thread.id,
-        sender_user_id: input.actor.id,
-        body,
+      const { existing, thread, message, at } = await store.transaction(async (tx) => {
+        await assertWithinBudget(tx, input.actor.id);
+        const existing = await tx.threads.findExisting(participantA, participantB, apiId);
+        const thread =
+          existing ??
+          (await tx.threads.create({
+            subject,
+            api_id: apiId,
+            created_by: input.actor.id,
+            participant_a: participantA,
+            participant_b: participantB,
+          }));
+        const message = await tx.messages.create({
+          thread_id: thread.id,
+          sender_user_id: input.actor.id,
+          body,
+        });
+        const at = nowIso();
+        await tx.threads.touchLastMessage(thread.id, at);
+        return { existing, thread, message, at };
       });
-      const at = nowIso();
-      await store.threads.touchLastMessage(thread.id, at);
 
       if (!existing) {
         await audit.record(
@@ -547,16 +548,19 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
     async sendMessage(user, threadId, body, ip = null): Promise<Message> {
       const trimmed = body.trim();
       if (trimmed === '') throw validationFailed('A message body is required');
-      await assertWithinBudget(user.id);
       const thread = await loadThread(threadId);
       assertCanPost(user, thread);
 
-      const message = await store.messages.create({
-        thread_id: thread.id,
-        sender_user_id: user.id,
-        body: trimmed,
+      const message = await store.transaction(async (tx) => {
+        await assertWithinBudget(tx, user.id);
+        const created = await tx.messages.create({
+          thread_id: thread.id,
+          sender_user_id: user.id,
+          body: trimmed,
+        });
+        await tx.threads.touchLastMessage(thread.id, nowIso());
+        return created;
       });
-      await store.threads.touchLastMessage(thread.id, nowIso());
 
       await audit.record(
         { id: user.id, role: user.role },
