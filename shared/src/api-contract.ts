@@ -111,13 +111,13 @@ export interface RegisterRequest {
   /** Vendor CAPTCHA token; required when CAPTCHA is enabled. */
   captcha_token?: string;
   /**
-   * Out-of-band bootstrap secret, **required** while the portal has no
-   * accounts — see `bootstrap_required` on {@link BrandingResponse}.
+   * Out-of-band bootstrap secret, **required** while the portal has no active
+   * `super_admin` — see `bootstrap_required` on {@link BrandingResponse}.
    *
-   * The first registration elects the portal's `super_admin`, so it has to
+   * That registration is seated as the portal's `super_admin`, so it has to
    * prove it comes from the operator: the value is the server's
    * `NEXUS_BOOTSTRAP_TOKEN`, or the per-process token printed in the startup
-   * log when that variable is unset. Ignored once any account exists.
+   * log when that variable is unset. Ignored once a super admin exists.
    */
   bootstrap_token?: string;
 }
@@ -1067,8 +1067,10 @@ export interface BrandingResponse extends BrandingSettings {
   default_theme: ThemePreference;
   captcha: CaptchaPublicConfig;
   /**
-   * True while the portal has no accounts at all: the next registration elects
-   * the founding `super_admin` and must therefore carry `bootstrap_token`.
+   * True while the portal has no active `super_admin`: the next registration
+   * is seated as one and must therefore carry `bootstrap_token`. Usually that
+   * means an empty portal; it also covers one whose founding registration
+   * failed part-way, so that the bootstrap flow can put it right.
    *
    * Only a signal for the sign-up form — the token itself is never public, and
    * the server re-checks the condition on every registration.
