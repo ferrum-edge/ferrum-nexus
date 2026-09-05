@@ -328,8 +328,8 @@ gateway on an API the portal shows as approved.
 
 The fix is `edge.serializePerKey(consumerId, fn)` — an in-process promise queue
 keyed by consumer id, **plus a row in the `edge_leases` table** taken inside
-that queue. Independent consumers still run concurrently; the same consumer
-never has two in-flight mutations, in this process or any other. **Every**
+that queue. Independent consumers still run concurrently; under normal lease
+operation the same consumer has only one in-flight mutation. **Every**
 consumer write goes through it: ACL-group changes (via
 `ConsumerProvisioner.mutateAclGroups`), credential appends, and credential
 deletes. A rotation also re-reads the consumer _inside_ the serialised block, so
@@ -348,8 +348,10 @@ stale state. `createKeyedSerializer` therefore also takes a lease from
 releases it in a `finally`. One row per resource, an owner id and an expiry:
 60-second TTL renewed at half of it, a 30-second wait for a contended key, and a
 `409 CONFLICT` telling the user to retry if that wait runs out. A crashed holder
-blocks the key only until its lease expires. See
-[`operations.md`](operations.md#8-scaling) for the operational picture.
+blocks the key only until its lease expires. Because Edge has no fencing token,
+a paused holder can resume after expiry and still issue a stale write; the
+supported deployment therefore has only one active gateway-writing instance.
+See [`operations.md`](operations.md#8-scaling) for the operational picture.
 
 Keys must be canonical for the lock to mean anything: a consumer is always keyed
 by its **Ferrum consumer id**, a proxy always by `proxy:<id>`. Two wrappers key

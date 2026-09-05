@@ -407,11 +407,12 @@ existed. `basicauth` is deleted explicitly because it never appears in a read
 projection, so a group rewrite cannot see it.
 
 All three gateway steps run inside one critical section keyed on the Ferrum
-consumer id — an in-process queue plus an `edge_leases` row — so a concurrent
-approval on another Nexus instance cannot read the pre-teardown group list and
-write it back afterwards. Edge replaces consumers whole, with no version token,
-so without that lock a revoked account could be re-authorised by a write that
-was merely stale; see [`operations.md` §8](operations.md#8-scaling).
+consumer id — an in-process queue plus an `edge_leases` row. The lease reduces
+cross-instance overlap but cannot fence a holder that resumes after expiry;
+deployments must therefore use only one active gateway-writing Nexus instance.
+Edge replaces consumers whole, with no version token, so overlapping writers
+could re-authorise a revoked account with a stale write; see
+[`operations.md` §8](operations.md#8-scaling).
 
 #### The gateway half is durable work, not a side effect
 
@@ -1007,7 +1008,7 @@ Before going live:
 - [ ] Backups running and a restore rehearsed, for both the Nexus database and
       the Ferrum Edge state.
 - [ ] `GET /api/health` wired to your monitor, treating `degraded` as healthy.
-- [ ] If you run more than one Nexus instance, they share one PostgreSQL, MySQL
-      or MongoDB database — the `edge_leases` table in it is what stops two
-      instances losing each other's ACL-group and proxy-plugin writes
+- [ ] Exactly one active Nexus instance serves gateway-mutating requests. Any
+      passive standbys share one PostgreSQL, MySQL or MongoDB database and do
+      not serve requests or run gateway-mutating background work until promoted
       ([`operations.md`](operations.md#8-scaling)). SQLite is single-instance.
