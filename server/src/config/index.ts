@@ -179,13 +179,14 @@ export interface NexusConfig {
   /** Master secret; every other key is HKDF-derived from it. */
   secretKey: string;
   /**
-   * Secret the first-ever registration must present to become the founding
-   * `super_admin` (`NEXUS_BOOTSTRAP_TOKEN`).
+   * Secret a registration must present to be seated as the founding
+   * `super_admin` (`NEXUS_BOOTSTRAP_TOKEN`) — required while the portal has no
+   * active super admin, ignored once it has one.
    *
    * `undefined` means the variable is unset, in which case the entry point
    * generates one per process and prints it — see `main()` in `../index.ts`.
    * A server built with this still `undefined` refuses every registration
-   * against an empty portal, because there is no token that could match.
+   * while the seat is open, because there is no token that could match.
    */
   bootstrapToken: string | undefined;
   /** Session idle lifetime in seconds (sliding). */

@@ -145,6 +145,12 @@ export interface BuildTestAppOptions {
    */
   store?: NexusStore;
   /**
+   * Interpose on the store the app is built over — typically
+   * `faultInjectingStore` from `./fault-injection.ts`. Applied after the store
+   * is migrated; the harness still closes the underlying store it created.
+   */
+  wrapStore?: (store: NexusStore) => NexusStore;
+  /**
    * Share one already-started mock gateway, for the same reason. `close()`
    * leaves a shared mock running.
    */
@@ -294,11 +300,12 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
   });
 
   const sharedStore = options.store !== undefined;
-  const store = options.store ?? createStore(config);
+  const ownedStore = options.store ?? createStore(config);
   if (!sharedStore) {
-    await store.init();
-    await store.migrate();
+    await ownedStore.init();
+    await ownedStore.migrate();
   }
+  const store = options.wrapStore ? options.wrapStore(ownedStore) : ownedStore;
 
   // The real composition root passes `store.leases`, so the whole suite runs
   // through the cross-instance path rather than the in-process queue alone.
@@ -388,7 +395,7 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
       await app.close();
       // A store or mock the caller supplied belongs to the caller; closing it
       // here would pull it out from under the app that is sharing it.
-      if (!sharedStore) await store.close();
+      if (!sharedStore) await ownedStore.close();
       if (!sharedEdge) await edge.stop();
     },
   };

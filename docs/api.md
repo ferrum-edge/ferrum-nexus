@@ -235,20 +235,23 @@ _public_ → `201`
 | `company`         | string \| null             | optional, ≤ 200                                                           |
 | `phone`           | string \| null             | optional, ≤ 64                                                            |
 | `captcha_token`   | string                     | optional, required when CAPTCHA is enabled                                |
-| `bootstrap_token` | string                     | **Required while the portal has no accounts**; ignored afterwards.        |
+| `bootstrap_token` | string                     | **Required while the portal has no active `super_admin`**; ignored after. |
 
 ```json
 { "user": { "id": "…", "email": "…", "role": "client", … }, "email_verification_required": false }
 ```
 
-- **The first account ever created becomes `super_admin`** and is
-  auto-verified, whatever `role` it asked for; the registration policy
-  (`open_registration`, `allowed_roles`) is bypassed for it.
-- **That first registration must carry `bootstrap_token`** — the server's
+- **While the portal has no active `super_admin`, the registration becomes
+  one** and is auto-verified, whatever `role` it asked for; the registration
+  policy (`open_registration`, `allowed_roles`) is bypassed for it. The account
+  and its role are written in one transaction, so a registration either
+  produces a seated super admin or nothing at all.
+- **That registration must carry `bootstrap_token`** — the server's
   `NEXUS_BOOTSTRAP_TOKEN`, or the per-process token printed in its startup log.
   Without a matching value the request is refused with `403 FORBIDDEN` and
   nothing is created. `GET /api/branding` reports `bootstrap_required` so a
-  client knows when to ask for it. Once any account exists the field is ignored.
+  client knows when to ask for it. Once an active super admin exists the field
+  is ignored.
 - When verification is not required, the response also sets the session
   cookies and the user is signed in.
 - Errors: `409 CONFLICT` (email taken), `403 FORBIDDEN` (missing or wrong
@@ -423,10 +426,12 @@ before a session exists.
 }
 ```
 
-`bootstrap_required` is `true` only while the portal has no accounts at all: the
-next registration elects the founding `super_admin` and must therefore send
-`bootstrap_token`. The flag says that the portal is empty and nothing else — the
-token is never public.
+`bootstrap_required` is `true` only while the portal has no active
+`super_admin`: the next registration is seated as one and must therefore send
+`bootstrap_token`. Normally that is an empty portal; it is also a portal whose
+founding registration failed part-way and left accounts with nobody to run
+them, which the same flow recovers. The flag says that the seat is open and
+nothing else — the token is never public.
 
 ---
 
