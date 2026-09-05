@@ -159,4 +159,48 @@ describe('mass email', () => {
     assert.equal(harness.mailbox.sent.length, pending);
     assert.equal((await harness.outbox()).filter((row) => row.status === 'pending').length, 0);
   });
+
+  it('delivers campaigns with 300-character subjects once despite lost responses', async () => {
+    const subject = 'S'.repeat(300);
+    const campaigns = [
+      { id: '0123456789abcdef0123456789abcdef', body: 'First announcement' },
+      { id: 'fedcba9876543210fedcba9876543210', body: 'Second announcement' },
+    ];
+    const sentBefore = harness.mailbox.sent.length;
+
+    for (const campaign of campaigns) {
+      const request = {
+        method: 'POST' as const,
+        url: '/api/admin/mass-email',
+        payload: {
+          subject,
+          body_text: campaign.body,
+          body_html: `<p>${campaign.body}</p>`,
+          audience: { scope: 'filtered', roles: ['client'] },
+          idempotency_key: campaign.id,
+        },
+      };
+      // The server handles the request, but the client loses its response.
+      await harness.authed(founder, request);
+      const retry = await harness.authed(founder, request);
+      assert.equal(retry.statusCode, 200);
+      assert.deepEqual(retry.json<MassEmailResponse>(), { enqueued: 0, recipients: 2 });
+
+      const rows = (await harness.outbox()).filter((row) =>
+        row.idempotency_key?.startsWith(`mass:${campaign.id}:`),
+      );
+      assert.equal(rows.length, 2);
+      for (const client of [clientA, clientB]) {
+        const recipientRows = rows.filter((row) => row.to_email === client.user.email);
+        assert.equal(recipientRows.length, 1);
+        assert.equal(recipientRows[0]?.subject, subject);
+        assert.ok(recipientRows[0]?.body_text.includes(campaign.body));
+      }
+    }
+
+    const result = await harness.tick();
+    assert.equal(result.sent, 4);
+    assert.equal(harness.mailbox.sent.length - sentBefore, 4);
+    assert.equal((await harness.tick()).sent, 0);
+  });
 });
