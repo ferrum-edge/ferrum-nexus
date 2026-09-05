@@ -36,14 +36,73 @@ import pg from 'pg';
 
 import type { DbDriver } from '@ferrum-nexus/shared';
 
+import { createAuditService } from '../audit/service.js';
+import { createCaptchaService } from '../auth/captcha.js';
+import {
+  createAuthService,
+  SUPER_ADMIN_CLAIM_KEY,
+  type AuthService,
+  type RegisterInput,
+  type RegisterResult,
+  type RequestContext,
+} from '../auth/service.js';
 import { loadConfig } from '../config/index.js';
 import { createStore } from '../db/index.js';
 import type { NexusStore, UserRecord } from '../db/store.js';
+import { createCrypto } from '../lib/crypto.js';
 import { isNexusError } from '../lib/errors.js';
 import { isoInSeconds, newId, nowIso } from '../lib/ids.js';
+import {
+  createKeyedSerializer,
+  SUPER_ADMIN_LOCK_CONFLICT_MESSAGE,
+} from '../lib/keyed-serializer.js';
+import { faultInjectingStore } from './fault-injection.js';
 import { runPasswordChangeContract } from './password-change-contract.js';
 
 const SECRET = 'cross-adapter-smoke-secret-0123456789ab';
+
+/** `NEXUS_BOOTSTRAP_TOKEN` the bootstrap cases run with. */
+const BOOTSTRAP_TOKEN = 'smoke-bootstrap-token-0123456789abcdef';
+
+/** Request context for service calls made straight from the suite. */
+const ANONYMOUS_REQUEST: RequestContext = { ip: null, userAgent: null };
+
+/**
+ * The real auth service over `store`, as the composition root would build it.
+ *
+ * Each call gets its own keyed serializer — and therefore its own lease owner —
+ * so two services over one store model two Nexus instances over one database.
+ */
+function authServiceOver(store: NexusStore): AuthService {
+  const crypto = createCrypto(SECRET);
+  return createAuthService({
+    config: { ...testConfig(store.driver), bootstrapToken: BOOTSTRAP_TOKEN },
+    store,
+    crypto,
+    audit: createAuditService(store),
+    captcha: createCaptchaService({ store, crypto }),
+    locks: createKeyedSerializer({
+      leases: store.leases,
+      conflictMessage: SUPER_ADMIN_LOCK_CONFLICT_MESSAGE,
+    }),
+  });
+}
+
+/** A registration that asks for `client` and carries the operator's token. */
+function candidate(
+  email: string,
+  // `null` means "present no token": an explicit `undefined` would select the
+  // default parameter and silently hand the candidate the operator's token.
+  bootstrapToken: string | null = BOOTSTRAP_TOKEN,
+): RegisterInput {
+  return {
+    email,
+    password: 'correct-horse-battery-staple',
+    display_name: 'Candidate',
+    role: 'client',
+    ...(bootstrapToken === null ? {} : { bootstrap_token: bootstrapToken }),
+  };
+}
 
 /** A store plus whatever needs tearing down after the suite. */
 interface SmokeTarget {
@@ -2336,6 +2395,121 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         }),
       ]);
       assert.deepEqual(order, ['a:start', 'a:end', 'b:start', 'b:end']);
+    });
+
+    /* ── bootstrap ────────────────────────────────────────────────────── */
+
+    // The founder's seat, driven through the real auth service over a fresh
+    // store of this adapter (the suite's own store has users by now). The
+    // account, the claim record and the audit row must commit together, and a
+    // failure after any of them must leave the seat open for the next attempt.
+
+    it('bootstrap: a failure after the founder is created rolls the whole seat back', async () => {
+      const fresh = await makeStore();
+      try {
+        const faults = faultInjectingStore(fresh.store);
+        const auth = authServiceOver(faults.store);
+        assert.equal(await auth.bootstrapRequired(), true);
+
+        // One failure right after the account insert, one right after the claim.
+        for (const [repo, method] of [
+          ['settings', 'set'],
+          ['auditLogs', 'create'],
+        ] as const) {
+          faults.failNext(repo, method);
+          await assert.rejects(
+            () => auth.register(candidate('founder@example.test'), ANONYMOUS_REQUEST),
+            /injected failure/,
+          );
+          assert.deepEqual(faults.pending(), [], `${repo}.${method} was reached`);
+          assert.equal(await fresh.store.users.count(), 0, `${repo}.${method}: rolled back`);
+          assert.equal(await fresh.store.settings.get(SUPER_ADMIN_CLAIM_KEY), null);
+          assert.equal(await fresh.store.auditLogs.count({ action: 'auth.register' }), 0);
+          assert.equal(await auth.bootstrapRequired(), true, 'the seat is still open');
+        }
+
+        const seated = await auth.register(candidate('founder@example.test'), ANONYMOUS_REQUEST);
+        assert.equal(seated.user.role, 'super_admin');
+        assert.equal(seated.user.email_verified, true);
+        assert.ok(seated.issued, 'the founder lands signed in');
+        const claim = await fresh.store.settings.get(SUPER_ADMIN_CLAIM_KEY);
+        assert.equal((claim?.value as { user_id: string }).user_id, seated.user.id);
+        assert.equal(await fresh.store.auditLogs.count({ action: 'auth.register' }), 1);
+        assert.equal(await auth.bootstrapRequired(), false);
+
+        // The token is inert now: a replay is an ordinary member.
+        const member = await auth.register(candidate('member@example.test'), ANONYMOUS_REQUEST);
+        assert.equal(member.user.role, 'client');
+        assert.equal(await fresh.store.users.countActiveSuperAdmins(), 1);
+      } finally {
+        await fresh.teardown();
+      }
+    });
+
+    it('bootstrap: a stranded portal is recoverable through the token alone', async () => {
+      const fresh = await makeStore();
+      try {
+        // What the pre-#80 code left behind: the account with the role it asked
+        // for, a claim in its name, and no promotion.
+        const stranded = await fresh.store.users.create({
+          email: 'stranded@example.test',
+          password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+          display_name: 'Stranded Founder',
+          role: 'client',
+          status: 'active',
+          email_verified: true,
+        });
+        await fresh.store.settings.set(SUPER_ADMIN_CLAIM_KEY, {
+          user_id: stranded.id,
+          claimed_at: nowIso(),
+        });
+        const auth = authServiceOver(fresh.store);
+        assert.equal(await auth.bootstrapRequired(), true, 'accounts exist, but nobody runs them');
+
+        const forbidden = (error: unknown): boolean =>
+          isNexusError(error) && error.code === 'FORBIDDEN';
+        await assert.rejects(
+          () => auth.register(candidate('joiner@example.test', null), ANONYMOUS_REQUEST),
+          forbidden,
+        );
+        const wrongToken = candidate('guesser@example.test', `${BOOTSTRAP_TOKEN}x`);
+        await assert.rejects(() => auth.register(wrongToken, ANONYMOUS_REQUEST), forbidden);
+        assert.equal(await fresh.store.users.count(), 1, 'refusals write nothing');
+
+        const seated = await auth.register(candidate('operator@example.test'), ANONYMOUS_REQUEST);
+        assert.equal(seated.user.role, 'super_admin');
+        const claim = await fresh.store.settings.get(SUPER_ADMIN_CLAIM_KEY);
+        assert.equal((claim?.value as { user_id: string }).user_id, seated.user.id);
+        assert.equal((await fresh.store.users.findById(stranded.id))?.role, 'client');
+        assert.equal(await auth.bootstrapRequired(), false);
+      } finally {
+        await fresh.teardown();
+      }
+    });
+
+    it('bootstrap: two services over one database seat exactly one founder', async () => {
+      const fresh = await makeStore();
+      try {
+        const instances = [authServiceOver(fresh.store), authServiceOver(fresh.store)];
+        const inFlight: Promise<RegisterResult>[] = [];
+        instances.forEach((auth, which) => {
+          for (const index of [0, 1]) {
+            const input = candidate(`racer-${which}-${index}@example.test`);
+            inFlight.push(auth.register(input, ANONYMOUS_REQUEST));
+          }
+        });
+        const results = await Promise.all(inFlight);
+        const founders = results.filter((result) => result.user.role === 'super_admin');
+        assert.equal(founders.length, 1, results.map((result) => result.user.role).join(', '));
+        for (const loser of results.filter((result) => result.user.role !== 'super_admin')) {
+          assert.equal(loser.user.role, 'client');
+        }
+        assert.equal(await fresh.store.users.countActiveSuperAdmins(), 1);
+        const claim = await fresh.store.settings.get(SUPER_ADMIN_CLAIM_KEY);
+        assert.equal((claim?.value as { user_id: string }).user_id, founders[0]?.user.id);
+      } finally {
+        await fresh.teardown();
+      }
     });
 
     it('lifecycle: closing twice is safe', async () => {

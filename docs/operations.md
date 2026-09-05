@@ -55,7 +55,7 @@ are. A relative `NEXUS_SQLITE_PATH` resolves from `server/`.
 | `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY` | `200`                                        | Messages one account may post in a rolling 24 hours; `0` disables the budget. Range 0 – 1 000 000. Exceeding it is `429 QUOTA_EXCEEDED`. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `NEXUS_ALLOW_PRIVATE_UPSTREAMS`       | `false`                                      | Whether providers may publish an API whose upstream is a loopback, RFC 1918 / CGNAT / link-local address or a `.local` / `.internal` / `.localhost` / `.home.arpa` name. A proxy is an egress path from the gateway's network, so the default refuses them with `400 SPEC_INVALID` (`details.reason = private_upstream`). At `false` the portal also **resolves** every other upstream hostname (A + AAAA, ~5 s) and refuses it if any answer is private, or if the name cannot be resolved at all (`details.reason = unresolvable_upstream`) — so **the Nexus process must be able to resolve public DNS**, or nothing publishes. `true` skips all of it, including the lookup. Set `true` only for a portal that fronts internal services — and for local development, where the upstream is `host.docker.internal`. See [`security.md`](security.md#1-threat-model). |
 | `NEXUS_WEB_DIST`                      | _(unset)_                                    | Directory of the built SPA to serve. When unset, the server looks for `../../web/dist` relative to itself and then `./web/dist` under the CWD; if neither has an `index.html`, static serving is disabled and only the API is exposed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `NEXUS_BOOTSTRAP_TOKEN`               | _(unset)_                                    | Secret the very first registration must present to become the founding `super_admin` (see [First run](#first-run-and-the-bootstrap-token)). Minimum 16 characters when set; generate with `openssl rand -hex 32`. When unset the server generates one **per process** and prints it at `warn` while the user table is empty — so set it for any deployment running more than one instance. Ignored once any account exists.                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `NEXUS_BOOTSTRAP_TOKEN`               | _(unset)_                                    | Secret the founding registration must present to become the portal's `super_admin` (see [First run](#first-run-and-the-bootstrap-token)). Minimum 16 characters when set; generate with `openssl rand -hex 32`. When unset the server generates one **per process** and prints it at `warn` while the portal has no active super admin — so set it for any deployment running more than one instance. Ignored once an active `super_admin` exists.                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
 ### Database
 
@@ -270,8 +270,12 @@ default applies.
 
 ### First run and the bootstrap token
 
-The first account ever created becomes the portal's `super_admin`, so that one
-registration is authenticated out of band: it must present the bootstrap token.
+While the portal has no active `super_admin`, the next registration becomes
+one, so that registration is authenticated out of band: it must present the
+bootstrap token. The account, its role and the `bootstrap.super_admin_claimed`
+record are written in **one transaction, under the cross-instance super-admin
+lock**, so a founding registration either produces a seated super admin or
+leaves nothing behind — there is no half-created state to clean up.
 
 - **`NEXUS_BOOTSTRAP_TOKEN` set** — that value is the token. Minimum 16
   characters; startup fails on a shorter one. It is never written to the log.
@@ -281,9 +285,9 @@ registration is authenticated out of band: it must present the bootstrap token.
 
   ```text
   ============================================================================
-  FIRST-RUN BOOTSTRAP: this portal has no accounts yet.
+  FIRST-RUN BOOTSTRAP: this portal has no super_admin yet.
 
-  The first registration becomes the portal super_admin, so it must send
+  The next registration becomes the portal super_admin, so it must send
   this bootstrap token as `bootstrap_token` (the sign-up form asks for it):
 
       9f1c…64 hex characters…
@@ -301,12 +305,45 @@ Operational consequences:
   that happens to answer the registration accepts its own.
 - **A restart invalidates a generated token.** Bootstrap in the window between
   starting the server and restarting it, or pin the variable.
-- **Nothing consumes the token.** It stays valid until an account exists, at
-  which point the field is ignored entirely — the founder is decided by the
-  atomic `bootstrap.super_admin_claimed` setting, which is never released.
-- `GET /api/branding` reports `bootstrap_required: true` while the portal is
-  empty; that is how the sign-up form knows to ask. It reveals only that the
-  portal has no accounts, never the token.
+- **Nothing consumes the token.** It stays valid until an active super admin
+  exists, at which point the field is ignored entirely — the seat is decided
+  under the super-admin lock, and `bootstrap.super_admin_claimed` records who
+  took it.
+- `GET /api/branding` reports `bootstrap_required: true` while the portal has
+  no active super admin; that is how the sign-up form knows to ask. It reveals
+  only that the seat is open, never the token.
+
+### Recovering a portal with no super admin
+
+Before the founding registration became atomic, a failure between creating the
+first account and promoting it — a database blip, a crash — left a portal with
+accounts but no `super_admin`, and because "bootstrap" then meant "no
+accounts", the flow above could not reach it. The condition is now "no active
+`super_admin`", so the same flow recovers such a portal, and only the token can
+drive it: ordinary registration is refused with `403 FORBIDDEN` until an
+administrator has been seated. To recover:
+
+1. **Confirm the state.** `GET /api/branding` answers with
+   `bootstrap_required: true` even though accounts exist. (Directly against the
+   database: no row in `users` has `role = 'super_admin'` and
+   `status = 'active'`.)
+2. **Have a token.** If `NEXUS_BOOTSTRAP_TOKEN` is set, use it. If not, restart
+   one instance: the startup banner is printed whenever the portal has no
+   active super admin, not only when it is empty, and that process accepts the
+   token it printed.
+3. **Register through the sign-up form** (or `POST /api/auth/register`) with a
+   **new** email address and the token. That account is seated as a verified
+   `super_admin`; existing accounts are left exactly as they were, including
+   the one the failed attempt created — recovery adds an administrator, it does
+   not promote whoever happened to be first. A stale
+   `bootstrap.super_admin_claimed` record from the failed attempt is replaced.
+4. **Verify.** `bootstrap_required` is now `false`, and the new account can
+   sign in and manage users, so it can promote or remove the stranded account
+   as appropriate.
+
+No database surgery is involved, and nothing here lets a portal that already
+has a super admin mint another one: with a seated administrator the token is
+inert and registration follows the ordinary policy.
 
 ---
 
