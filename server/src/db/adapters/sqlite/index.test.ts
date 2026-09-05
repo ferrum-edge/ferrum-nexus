@@ -968,12 +968,12 @@ describe('sqlite store', () => {
       assert.ok(await store.users.findByEmail(email));
     });
 
-    it('documents that a root write during an open body shares its fate', async () => {
-      // One connection, a synchronous driver: a bare repository call issued
-      // from outside the transaction context while `BEGIN` is held executes
-      // inside that transaction. This is the hazard the queue cannot cover, and
-      // the reason service code never mixes the two. Asserted so the behaviour
-      // is a decision rather than a surprise.
+    it('treats a root-store call made from inside the body as part of it', async () => {
+      // One connection, a synchronous driver: a bare `store.*` call issued from
+      // the body's own async context carries the transaction's token, so it is
+      // nested work and shares the transaction's fate exactly as `tx.*` does.
+      // Asserted so the behaviour is a decision rather than a surprise; the
+      // tests below cover the calls that do *not* come from the body.
       const email = `tx-root-write-${newId()}@example.test`;
       await assert.rejects(
         () =>
@@ -991,6 +991,244 @@ describe('sqlite store', () => {
         /outer rolls back/,
       );
       assert.equal(await store.users.findByEmail(email), null);
+    });
+
+    it('parks outside reads and writes until the open transaction has ended', async () => {
+      const dirty = `tx-dirty-${newId()}@example.test`;
+      const outside = `tx-outside-${newId()}@example.test`;
+      let release = (): void => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let aBodyStarted = (): void => {};
+      const started = new Promise<void>((resolve) => {
+        aBodyStarted = resolve;
+      });
+
+      const a = store.transaction(async (tx) => {
+        await tx.users.create({
+          email: dirty,
+          password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+          display_name: 'Uncommitted',
+          role: 'client',
+          status: 'active',
+          email_verified: false,
+        });
+        aBodyStarted();
+        await gate;
+        throw new Error('a rolls back');
+      });
+      await started;
+
+      // Neither call carries A's token: both are independent callers that, on
+      // one synchronous connection, would otherwise execute inside A.
+      let readSettled = false;
+      const read = store.users.findByEmail(dirty).then((row) => {
+        readSettled = true;
+        return row;
+      });
+      let writeSettled = false;
+      const write = store.users
+        .create({
+          email: outside,
+          password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+          display_name: 'Outside write',
+          role: 'client',
+          status: 'active',
+          email_verified: false,
+        })
+        .then((row) => {
+          writeSettled = true;
+          return row;
+        });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(readSettled, false, 'an outside read must wait for the open transaction');
+      assert.equal(writeSettled, false, 'an outside write must wait for the open transaction');
+
+      release();
+      await assert.rejects(() => a, /a rolls back/);
+      assert.equal(await read, null, 'the read ran after the rollback and saw no dirty row');
+      assert.ok(await write, 'the write ran after the rollback');
+      assert.ok(await store.users.findByEmail(outside), 'and survived it');
+      assert.equal(await store.users.findByEmail(dirty), null);
+    });
+
+    it('lets a parked read see what the transaction committed', async () => {
+      const email = `tx-committed-${newId()}@example.test`;
+      let release = (): void => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let aBodyStarted = (): void => {};
+      const started = new Promise<void>((resolve) => {
+        aBodyStarted = resolve;
+      });
+
+      const a = store.transaction(async (tx) => {
+        await tx.users.create({
+          email,
+          password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+          display_name: 'Committed later',
+          role: 'client',
+          status: 'active',
+          email_verified: false,
+        });
+        aBodyStarted();
+        await gate;
+      });
+      await started;
+
+      let readSettled = false;
+      const read = store.users.findByEmail(email).then((row) => {
+        readSettled = true;
+        return row;
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(readSettled, false);
+
+      release();
+      await a;
+      assert.ok(await read, 'the read ran after the commit and saw the row');
+    });
+
+    it('keeps nested work flowing while outside callers are parked', async () => {
+      // A body that re-enters the store through `store.*`, `tx.*` and a nested
+      // `transaction()` after an outside caller has queued must not deadlock on
+      // that caller: the body owns the connection until it ends.
+      const inside = `tx-inside-${newId()}@example.test`;
+      const nested = `tx-nested-inside-${newId()}@example.test`;
+      const outside = `tx-outside-parked-${newId()}@example.test`;
+      let aBodyStarted = (): void => {};
+      const started = new Promise<void>((resolve) => {
+        aBodyStarted = resolve;
+      });
+      let outsideIssued = (): void => {};
+      const issued = new Promise<void>((resolve) => {
+        outsideIssued = resolve;
+      });
+
+      const a = store.transaction(async (tx) => {
+        aBodyStarted();
+        await issued;
+        await store.users.create({
+          email: inside,
+          password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+          display_name: 'Inside',
+          role: 'client',
+          status: 'active',
+          email_verified: false,
+        });
+        await tx.transaction(async (inner) => {
+          await inner.users.create({
+            email: nested,
+            password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+            display_name: 'Nested inside',
+            role: 'client',
+            status: 'active',
+            email_verified: false,
+          });
+        });
+        assert.ok(await tx.users.findByEmail(inside), 'the body reads its own writes');
+        assert.equal(await tx.users.findByEmail(outside), null, 'and not the parked one');
+      });
+      await started;
+
+      const parked = store.users.create({
+        email: outside,
+        password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+        display_name: 'Parked',
+        role: 'client',
+        status: 'active',
+        email_verified: false,
+      });
+      outsideIssued();
+
+      await a;
+      await parked;
+      assert.ok(await store.users.findByEmail(inside));
+      assert.ok(await store.users.findByEmail(nested));
+      assert.ok(await store.users.findByEmail(outside));
+    });
+
+    it('treats a continuation of a finished transaction as an outside caller', async () => {
+      const fromA = `tx-late-a-${newId()}@example.test`;
+      const fromB = `tx-late-b-${newId()}@example.test`;
+      const afterwards = `tx-late-after-${newId()}@example.test`;
+      let resolveIssued: (issued: { call: Promise<UserRecord> }) => void = () => {};
+      const issued = new Promise<{ call: Promise<UserRecord> }>((resolve) => {
+        resolveIssued = resolve;
+      });
+
+      await store.transaction(async () => {
+        // Work A arms and never awaits. The callback inherits A's async context
+        // — and with it A's token — but fires only after A has settled.
+        setTimeout(() => {
+          resolveIssued({
+            call: store.users.create({
+              email: fromA,
+              password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+              display_name: 'Late from A',
+              role: 'client',
+              status: 'active',
+              email_verified: false,
+            }),
+          });
+        }, 0);
+      });
+
+      // A has committed and its token is dead. Hold B open before the timer
+      // fires, so the late call arrives while another transaction owns the
+      // connection.
+      let release = (): void => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let bBodyStarted = (): void => {};
+      const started = new Promise<void>((resolve) => {
+        bBodyStarted = resolve;
+      });
+      const b = store.transaction(async (tx) => {
+        await tx.users.create({
+          email: fromB,
+          password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+          display_name: 'B rolls back',
+          role: 'client',
+          status: 'active',
+          email_verified: false,
+        });
+        bBodyStarted();
+        await gate;
+        throw new Error('b rolls back');
+      });
+      await started;
+
+      const { call } = await issued;
+      let lateSettled = false;
+      const late = call.then((row) => {
+        lateSettled = true;
+        return row;
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(lateSettled, false, "A's dead token grants no access to B's transaction");
+
+      release();
+      await assert.rejects(() => b, /b rolls back/);
+      assert.ok(await late, 'the late write ran after B');
+      assert.ok(await store.users.findByEmail(fromA), 'and survived its rollback');
+      assert.equal(await store.users.findByEmail(fromB), null);
+
+      // The queue is intact afterwards.
+      await store.transaction(async (tx) => {
+        await tx.users.create({
+          email: afterwards,
+          password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+          display_name: 'Afterwards',
+          role: 'client',
+          status: 'active',
+          email_verified: false,
+        });
+      });
+      assert.ok(await store.users.findByEmail(afterwards));
     });
   });
 

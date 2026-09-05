@@ -357,8 +357,12 @@ NEXUS_SQLITE_PATH=/var/lib/ferrum-nexus/nexus.sqlite
 - **WAL means three files**: `nexus.sqlite`, `-wal` and `-shm`. Copying only
   the main file while the process is running gives you a torn backup.
 - The driver is synchronous; transactions are serialised through an in-process
-  queue. Only one process may write. Do not point two Nexus instances at the
-  same file, and do not put it on NFS.
+  queue, and while one is open every store call from outside it — another
+  request, a worker tick — waits on that queue until it commits or rolls back.
+  Bodies are short (pure database work), so the wait is microseconds, but it
+  means a request is never told its write succeeded while an unrelated
+  transaction could still roll it back. Only one process may write. Do not
+  point two Nexus instances at the same file, and do not put it on NFS.
 
 ### PostgreSQL
 

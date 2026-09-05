@@ -41,12 +41,15 @@
  * cannot suspend a real `BEGIN`/`COMMIT` across an `await`. It instead
  * serialises transaction bodies through a **per-connection promise queue**:
  * only one `transaction(fn)` body runs at a time, it issues `BEGIN` before
- * `fn` and `COMMIT`/`ROLLBACK` after it settles, and because the process is
- * single-threaded no other statement can interleave as long as *all* writes go
- * through this store. Other adapters use their driver's native transaction
- * (a `pg` client checkout, a mysql2 connection, a Mongo session) and should
- * keep the same observable behaviour: serialised bodies, atomic commit,
- * rollback on throw.
+ * `fn` and `COMMIT`/`ROLLBACK` after it settles. While a body is open, every
+ * repository call from an async context that does not belong to that body —
+ * another request, a worker tick, a continuation left over from an earlier
+ * transaction — waits on the same queue until the body has committed or rolled
+ * back; calls from inside the body run at once. Other adapters use their
+ * driver's native transaction (a `pg` client checkout, a mysql2 connection, a
+ * Mongo session) and should keep the same observable behaviour: serialised
+ * bodies, atomic commit, rollback on throw, no outside caller sharing a body's
+ * fate.
  */
 
 import type {
@@ -1060,10 +1063,14 @@ export interface NexusStore {
    * A `transaction()` call made *from inside* a body joins that transaction
    * rather than starting a second one. An independent call made while a body is
    * merely suspended on an `await` is not nested: it waits for the running
-   * transaction and then gets one of its own. Statements issued through the
-   * *outer* store while a body is open are undefined behaviour and adapter
-   * specific — on SQLite they run inside the open transaction and share its
-   * fate, because there is one connection.
+   * transaction and then gets one of its own. The same holds for a plain
+   * repository call: issued from inside the body's async context it belongs to
+   * the transaction (on SQLite, through either store — there is one
+   * connection); issued from any other context it never joins an open body. On
+   * the pooled adapters it simply runs on another connection; on SQLite it is
+   * parked until the body has committed or rolled back. A body must therefore
+   * never wait for another context's store call, which on SQLite would wait for
+   * the body.
    */
   transaction<T>(fn: (tx: NexusStore) => Promise<T>): Promise<T>;
 
