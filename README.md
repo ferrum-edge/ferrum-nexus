@@ -76,12 +76,13 @@ scripts run.
 Open <http://127.0.0.1:5173>. The backend serves on `http://127.0.0.1:8787`.
 
 The first user to register becomes the initial `super_admin`, so that one
-registration has to prove it comes from you: while the portal has no accounts
-the sign-up form asks for a **bootstrap token**. Set `NEXUS_BOOTSTRAP_TOKEN`
-yourself, or leave it blank and copy the token the server prints at startup:
+registration has to prove it comes from you: while the portal has no super
+admin the sign-up form asks for a **bootstrap token**. Set
+`NEXUS_BOOTSTRAP_TOKEN` yourself, or leave it blank and copy the token the
+server prints at startup:
 
 ```
-FIRST-RUN BOOTSTRAP: this portal has no accounts yet.
+FIRST-RUN BOOTSTRAP: this portal has no super_admin yet.
 ...
     2f6c1b…  ← paste this into the form's "Bootstrap token" field
 ```

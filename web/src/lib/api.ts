@@ -105,6 +105,8 @@ import {
   type RetryGatewayTeardownResponse,
   type RevokeGrantRequest,
   type RevokeGrantResponse,
+  type ReconcileCredentialsRequest,
+  type ReconcileCredentialsResponse,
   type RotateCredentialRequest,
   type RotateCredentialResponse,
   type SendMessageRequest,

@@ -183,6 +183,16 @@ they are built to answer nothing:
   transaction that writes the new password, so a burn cannot outlive the change
   it was spent on. Redeeming one also deletes any other outstanding reset link
   for that account.
+- **Every password change invalidates outstanding reset links.** Self-service
+  changes and reset-link redemption commit the password, deletion of all
+  `password_reset` tokens, session invalidation and audit entry in one
+  transaction. A persistence failure rolls them all back; `email_verification`
+  tokens are left intact. Both paths take the same per-user database lease
+  before opening the transaction, so competing changes across instances are
+  ordered. A self-service change rechecks its password proof after acquiring
+  the lease and issues the caller's replacement session only after commit,
+  while still holding the lease. Reset redemption issues no replacement session.
+  A fresh reset link can still be requested subject to the existing throttle.
 - **The audit log is where the truth is.** `auth.password_reset_request` and
   `auth.verification_resend` are written only when a link was really issued, so
   operators can see what the response would not say.
@@ -329,17 +339,17 @@ provider reach a plugin they are not entitled to.
 
 ### First user and the last-super-admin guard
 
-**The first account ever registered becomes `super_admin`** regardless of the
-role it requested, is auto-verified, and bypasses the registration policy — the
-platform has to be bootstrappable. Every later registration gets only the
-registrable role it asked for, subject to `open_registration` and
-`allowed_roles`.
+**While the portal has no active `super_admin`, the next registration becomes
+one** regardless of the role it requested, is auto-verified, and bypasses the
+registration policy — the platform has to be bootstrappable. Every other
+registration gets only the registrable role it asked for, subject to
+`open_registration` and `allowed_roles`.
 
 #### The bootstrap token
 
-Because that first registration hands out `super_admin`, it is not a public
-operation: while the `users` table is empty, `POST /api/auth/register` requires
-`bootstrap_token` and refuses everything else with `403 FORBIDDEN`.
+Because that registration hands out `super_admin`, it is not a public
+operation: while no active super admin exists, `POST /api/auth/register`
+requires `bootstrap_token` and refuses everything else with `403 FORBIDDEN`.
 
 - **What it protects.** The founding account, and therefore user and role
   administration, SMTP and CAPTCHA settings, god mode, the audit log, and the
@@ -348,37 +358,51 @@ operation: while the `users` table is empty, `POST /api/auth/register` requires
   hands all of that to whoever connects first.
 - **Where it comes from.** `NEXUS_BOOTSTRAP_TOKEN` (16+ characters, validated
   at startup), or — when that is unset — a 32-byte random value generated per
-  process and printed at `warn`, and only while the portal is still empty. A
-  token supplied through the environment is never logged. See
+  process and printed at `warn`, and only while the portal has no active super
+  admin. A token supplied through the environment is never logged. See
   [`operations.md`](operations.md#first-run-and-the-bootstrap-token).
 - **How it is checked.** SHA-256 digests compared with `timingSafeEqual`, so
   neither the outcome's timing nor its cost varies with how much of the token
   the caller guessed correctly. The check runs **before** the password is
   hashed and before any row is written: a failed attempt creates no user, mints
-  no session and does not touch the election key, so guessing cannot wear the
-  bootstrap capability down.
+  no session and does not touch the election record, so guessing cannot wear
+  the bootstrap capability down.
 - **Public self-registration can never elect a founder.** The two rules
-  compose: the token decides who may stand for the election, the atomic claim
-  below decides which of them wins. A server built with no configured token has
-  no value that can match, so it refuses every registration against an empty
-  portal rather than falling open.
+  compose: the token decides who may stand for the seat, the lock below decides
+  which of them takes it. A server built with no configured token has no value
+  that can match, so it refuses every registration while the seat is open
+  rather than falling open.
 - **After bootstrap the field is inert.** Registration number two is an
-  ordinary `client`/`provider` whether or not it replays the token, since the
-  claim key is already taken and is never released.
-- `GET /api/branding` publishes `bootstrap_required` (the user table is empty)
+  ordinary `client`/`provider` whether or not it replays the token: the seat is
+  taken, and the only ways to add a super admin are promotion by an existing
+  admin. An established portal cannot be talked into a second founder.
+- `GET /api/branding` publishes `bootstrap_required` (no active super admin)
   so the sign-up form knows to ask for the token. That flag is the only public
   signal; the token itself is never exposed over the API.
 
-"First" is decided by an **atomic claim**, not by counting rows. Registration
-creates the account with the role that was requested and then inserts the
-`bootstrap.super_admin_claimed` key with `settings.insertIfAbsent`; only the
-insert that wins the unique constraint is promoted. Counting users and then
-awaiting a ~100 ms scrypt hash before the insert is a race every concurrent
-registration against an empty database wins — and a transaction does not close
-it, because under PostgreSQL's READ COMMITTED and under MongoDB two concurrent
-transactions can both observe zero users. Registrations that saw an
-already-populated portal never stand for the election, so an upgraded
-deployment cannot mint a second founder.
+#### The founder's seat is atomic
+
+The seat is decided by a **count of active super admins taken inside the
+founder's transaction, under the cross-instance `users:super-admins` lock** —
+the same database lease every transition that can shrink the super-admin set
+runs under, so two Nexus instances against one database take turns, and a
+bootstrap cannot interleave with a demotion. The lock is taken outside the
+transaction (a lease statement issued from inside a SQLite body would wait on
+that body) and the password is hashed before either, so the ~100 ms of scrypt
+never holds the lock or a write transaction.
+
+Inside the transaction the account is created **already** a verified
+`super_admin`, the `bootstrap.super_admin_claimed` record is written in its
+name, and the `auth.register` audit row lands — together, or not at all.
+Creating the account, claiming the election and promoting used to be three
+separately committed writes, and a failure after the first left a portal with
+users and no administrator that the bootstrap flow, then gated on "no users",
+could not reach (#80). Now a failure anywhere in the body rolls the account
+back too, the next attempt finds the seat still open, and a portal already
+stranded by the old code is recovered by the same token-gated flow — see
+[Recovering a portal with no super admin](operations.md#recovering-a-portal-with-no-super-admin).
+Candidates that reach the lock after the seat is taken are created with the
+role they asked for, exactly as a later registration would be.
 
 The mirror-image protection: **the last active `super_admin` cannot be demoted,
 disabled or removed** → `409 LAST_SUPER_ADMIN`. The check counts active super

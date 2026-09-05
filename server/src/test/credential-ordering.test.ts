@@ -384,7 +384,10 @@ describe('credential positions follow the append ordinal', () => {
         legacy.credential.ferrum_consumer_id,
         'jwt',
       );
-      assert.deepEqual(rows.map((row) => row.id), [legacy.credential.id, later.credential.id]);
+      assert.deepEqual(
+        rows.map((row) => row.id),
+        [legacy.credential.id, later.credential.id],
+      );
     });
 
     it('reconciliation is admin-only, validated, and tolerates a missing consumer', async () => {

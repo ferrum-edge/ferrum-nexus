@@ -51,6 +51,7 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { AuditAction, type AuditService } from '../audit/service.js';
+import { createPasswordChangeSerializer } from '../auth/password-change.js';
 import {
   toPublicUser,
   type AuthService,
@@ -236,6 +237,7 @@ export function toTeardownState(job: GatewayTeardownJobRecord): GatewayTeardownS
 /** Build the users service. */
 export function createUsersService(deps: UsersServiceDeps): UsersService {
   const { store, crypto, audit, notifications, auth, credentials } = deps;
+  const serializePasswordChange = createPasswordChangeSerializer(store);
   // Without a lock the service is exactly as safe as it was: the store's own
   // transaction serialisation, which is enough for one instance.
   const locks: KeyedSerializer = deps.locks ?? ((_key, fn) => fn());
@@ -277,32 +279,49 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
 
       if (changed.length === 0) return { user: toPublicUser(user), reissued: null };
 
-      const updated = await store.users.update(user.id, update);
-      if (!updated) throw notFound('User', user.id);
+      const change = async (): Promise<UpdateMeResult> => {
+        const updated = await store.transaction(async (tx) => {
+          if (update.password_hash !== undefined) {
+            const current = await tx.users.findById(user.id);
+            if (!current) throw notFound('User', user.id);
+            // Verification and hashing ran outside the lock. A reset that won
+            // meanwhile must not be overwritten using the old password proof.
+            if (current.password_hash !== user.password_hash) {
+              throw forbidden('Your current password is incorrect');
+            }
+          }
+          const row = await tx.users.update(user.id, update);
+          if (!row) throw notFound('User', user.id);
 
-      // A password change ends every session of the account — the point of
-      // changing it is usually that somebody else might hold one. The caller
-      // gets a replacement so they are not signed out of the tab they did it
-      // in; every other session is gone, sliding expiry and all.
-      let reissued: IssuedSession | null = null;
-      let terminatedSessions = 0;
-      if (update.password_hash !== undefined) {
-        terminatedSessions = await store.sessions.deleteForUser(user.id);
-        reissued = await auth.issueSession(updated, context);
-      }
+          let terminatedSessions = 0;
+          if (update.password_hash !== undefined) {
+            await tx.verificationTokens.deleteForUser(user.id, 'password_reset');
+            terminatedSessions = await tx.sessions.deleteForUser(user.id);
+          }
+          await audit.forStore(tx).record(
+            { id: user.id, role: user.role },
+            AuditAction.USER_UPDATE,
+            { type: 'user', id: user.id },
+            {
+              self: true,
+              changed_fields: changed,
+              ...(terminatedSessions > 0 ? { terminated_sessions: terminatedSessions } : {}),
+            },
+            ip,
+          );
+          return row;
+        });
 
-      await audit.record(
-        { id: user.id, role: user.role },
-        AuditAction.USER_UPDATE,
-        { type: 'user', id: user.id },
-        {
-          self: true,
-          changed_fields: changed,
-          ...(terminatedSessions > 0 ? { terminated_sessions: terminatedSessions } : {}),
-        },
-        ip,
-      );
-      return { user: toPublicUser(updated), reissued };
+        // Commit before issuing the caller's replacement. Keep the password
+        // lease until issuance finishes so a concurrent reset cannot leave a
+        // session issued by the earlier password change alive after its reset.
+        const reissued =
+          update.password_hash !== undefined ? await auth.issueSession(updated, context) : null;
+        return { user: toPublicUser(updated), reissued };
+      };
+      return update.password_hash !== undefined
+        ? serializePasswordChange(user.id, change)
+        : change();
     },
 
     async listUsers(filter = {}, options): Promise<Paginated<User>> {

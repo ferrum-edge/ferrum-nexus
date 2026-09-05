@@ -598,6 +598,16 @@ level_, not to uploading a new revision at a level you are already on.
 Requests for the APIs you own land in your inbox, with an in-app notification
 and an email.
 
+Open **My APIs → the API → Requests** to review them. **Request status** defaults
+to **Pending**, so older requests awaiting a decision remain visible. Choose
+**Approved**, **Denied**, or **All** to review history; All also includes cancelled
+and revoked requests. The filter searches the full queue, not just the current page.
+
+Both **Requests** and **Grants** show up to 50 records per page, the matching total,
+and **Previous** / **Next** controls. Changing the status filter returns to the
+first page. After a decision or revocation, counts refresh and an empty later
+page moves back to the previous page.
+
 Each request shows the requester (name, email, company), the API, and their
 justification. Judge whether the case they made matches the data behind the
 API. If the justification is thin, **message them** rather than declining
@@ -623,6 +633,10 @@ reason usually produces a corrected request; a silent one produces a support
 thread. The requester can request again after fixing whatever you raised.
 
 ### Revoke
+
+The **Grants** tab defaults to **Active**. Use **Grant status → Revoked** for
+revocation history or **All** for both statuses, and page through older grants
+with **Next**.
 
 **Grants → Revoke** removes the access group from that consumer. Effect is
 immediate: their next call gets a `403`. Their credential still authenticates —
