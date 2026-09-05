@@ -115,9 +115,7 @@ describe('ferrum admin client', () => {
     await assert.rejects(
       () => client.consumers.getByUsername('nexus-user-zz'),
       (error: unknown) =>
-        isNexusError(error) &&
-        error.code === 'EDGE_ERROR' &&
-        /more consumers/i.test(error.message),
+        isNexusError(error) && error.code === 'EDGE_ERROR' && /more consumers/i.test(error.message),
     );
     // Exactly the cap is still a complete read.
     edge.consumers.delete('nexus/u-first');
