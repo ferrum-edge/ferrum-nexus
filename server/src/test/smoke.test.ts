@@ -1433,6 +1433,42 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
           }),
         (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
       );
+      // Assignment is one past the HIGHEST ordinal on file, not a count: a
+      // revoke keeps its row, so the value it held is never handed out again.
+      // Two rounds, so neither "live rows + 1" nor "all rows + 1" fits the
+      // numbers by coincidence.
+      assert.equal(
+        (await store.credentials.update(skewed.id, { status: 'revoked' }))?.status,
+        'revoked',
+      );
+      const afterRevoke = await store.credentials.create({
+        user_id: user.id,
+        ferrum_consumer_id: user.id,
+        credential_type: 'keyauth',
+        ferrum_credential_id: 'keyauth:4',
+        fingerprint: `fp-${newId()}`,
+        last4: 'four',
+        status: 'active',
+      });
+      assert.equal(afterRevoke.edge_ordinal, 4, 'a revoked row still holds its ordinal');
+      assert.equal(
+        (await store.credentials.update(afterRevoke.id, { status: 'revoked' }))?.status,
+        'revoked',
+      );
+      const afterSecondRevoke = await store.credentials.create({
+        user_id: user.id,
+        ferrum_consumer_id: user.id,
+        credential_type: 'keyauth',
+        ferrum_credential_id: 'keyauth:5',
+        fingerprint: `fp-${newId()}`,
+        last4: 'five',
+        status: 'active',
+      });
+      assert.equal(afterSecondRevoke.edge_ordinal, 5, 'three live rows, yet the next value is 5');
+      assert.equal(
+        (await store.credentials.update(afterSecondRevoke.id, { status: 'revoked' }))?.status,
+        'revoked',
+      );
       assert.equal(await store.credentials.delete(legacy.id), true);
       assert.equal(await store.credentials.delete(skewed.id), true);
       assert.equal(await store.credentials.delete(jwt.id), true);
@@ -1443,14 +1479,13 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(
         (await store.credentials.list({ ferrum_consumer_id: user.id, credential_type: 'keyauth' }))
           .total,
-        2,
+        4,
       );
       assert.equal(await store.credentials.delete(second.id), true);
       assert.equal(await store.credentials.delete(second.id), false);
-      // The next value is one past the highest ordinal still on file. Revocation
-      // keeps its row (the credential-ordering tests pin that no value is ever
-      // reused in production); a hard delete is a test-only operation, and the
-      // rows deleted above carried the higher ordinals.
+      // The next value is one past the highest ordinal still on file: the two
+      // revoked rows from the rounds above (4 and 5) keep theirs. A hard delete
+      // is a test-only operation; production only ever revokes.
       const next = await store.credentials.create({
         user_id: user.id,
         ferrum_consumer_id: user.id,
@@ -1460,7 +1495,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         last4: 'next',
         status: 'active',
       });
-      assert.equal(next.edge_ordinal, 2, 'one past the highest ordinal still on file');
+      assert.equal(next.edge_ordinal, 6, 'one past the highest ordinal still on file');
     });
 
     /* ── threads and messages ─────────────────────────────────────────── */
