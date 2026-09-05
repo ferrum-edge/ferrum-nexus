@@ -73,7 +73,11 @@ import type {
 import type { NexusCrypto } from '../lib/crypto.js';
 import { conflict, forbidden, lastSuperAdmin, notFound, validationFailed } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
-import { SUPER_ADMIN_LOCK_KEY, type KeyedSerializer } from '../lib/keyed-serializer.js';
+import {
+  SUPER_ADMIN_LOCK_KEY,
+  userLifecycleLockKey,
+  type KeyedSerializer,
+} from '../lib/keyed-serializer.js';
 import type { NotificationsService } from '../notifications/service.js';
 
 /** Result of {@link UsersService.updateMe}. */
@@ -470,9 +474,17 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
           return { row, jobId: null };
         });
 
+      // A status flip is also taken under the account's own lifecycle key, the
+      // one the credentials service holds while it registers a new gateway
+      // identity for the account. Without it a provider's first test consumer
+      // could pass its "owner is active" check, be disabled, and only then be
+      // registered — after the teardown had already enumerated nothing. Inside
+      // the super-admin key, never around it, so the lock order is fixed.
+      const lifecycle = (): Promise<{ row: UserRecord | null; jobId: Uuid | null }> =>
+        statusChanged ? locks(userLifecycleLockKey(target.id), transition) : transition();
       const result = guardsLastSuperAdmin
-        ? await locks(SUPER_ADMIN_LOCK_KEY, transition)
-        : await transition();
+        ? await locks(SUPER_ADMIN_LOCK_KEY, lifecycle)
+        : await lifecycle();
       const updated = result.row;
       if (!updated) {
         if (!(await store.users.findById(target.id))) throw notFound('User', targetId);

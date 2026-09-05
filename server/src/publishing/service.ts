@@ -197,7 +197,7 @@ import type {
   NexusStore,
   UserRecord,
 } from '../db/store.js';
-import type { CredentialsService } from '../credentials/service.js';
+import { gatewayIdentityLockKey, type CredentialsService } from '../credentials/service.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import type {
   EdgeCircuitBreakerConfig,
@@ -1635,7 +1635,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // every replacement, so it is not a stable key, and two concurrent
       // requests would otherwise both delete and both create. The key is
       // prefixed so it can never collide with a consumer-id key used by the
-      // credentials service.
+      // credentials service — and it is the key the account teardown takes for
+      // a registered identity, so a disable that lands mid-way waits here.
       //
       // A test consumer is a *distinct* Edge consumer (`testConsumerUsername`,
       // never `nexus-user-<id>`), so it is legitimate for it to carry its own
@@ -1644,7 +1645,14 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // key, so the queue and the lease both grant it; nesting the *same* key
       // would deadlock. Ordering is always name-then-id and never the reverse,
       // which is what keeps the pair free of lock-order inversion.
-      const replaced = await edge.serializePerKey(`test-consumer:${username}`, async () => {
+      const replaced = await edge.serializePerKey(gatewayIdentityLockKey(username), async () => {
+        // Ownership first, durably, before the gateway is touched. This is
+        // what the account teardown enumerates, so an identity whose first
+        // credential is still being appended when its owner is disabled is
+        // found and waited for rather than missed — and an owner who is
+        // already disabled is refused here, before anything is created.
+        const identity = await credentials.claimGatewayIdentity(actor.id, username);
+
         // Recreating replaces: a test consumer is disposable by definition, and
         // deleting it is the only way to reset its credentials show-once state.
         const existing = await edge.consumers.getByUsername(username);
@@ -1661,20 +1669,32 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           }
         }
 
-        const consumer = await edge.consumers.create(
-          { username, custom_id: `nexus-test:${api.id}`, acl_groups: [group] },
-          actor.id,
-        );
+        let consumerId: string | null = null;
+        try {
+          const consumer = await edge.consumers.create(
+            { username, custom_id: `nexus-test:${api.id}`, acl_groups: [group] },
+            actor.id,
+          );
+          consumerId = consumer.id;
+          await credentials.bindGatewayIdentity(identity, consumer.id);
 
-        const issued = await credentials.issueForConsumer({
-          user: actor,
-          consumerId: consumer.id,
-          consumerUsername: consumer.username,
-          credentialType: CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin],
-          label: label ?? `Test consumer for ${api.slug}`,
-        });
+          const issued = await credentials.issueForConsumer({
+            user: actor,
+            consumerId: consumer.id,
+            consumerUsername: consumer.username,
+            credentialType: CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin],
+            label: label ?? `Test consumer for ${api.slug}`,
+          });
 
-        return { consumer, issued, replacedExisting: existing !== null, revokedCredentials };
+          return { consumer, issued, replacedExisting: existing !== null, revokedCredentials };
+        } catch (error) {
+          // The append was refused — the owner was disabled after the claim —
+          // or the gateway failed. Whatever got as far as the gateway comes
+          // down again, and the registration with it; a delete that fails
+          // leaves the registration for the teardown to find.
+          await credentials.abandonGatewayIdentity(identity, consumerId, actor.id);
+          throw error;
+        }
       });
 
       await audit.record(

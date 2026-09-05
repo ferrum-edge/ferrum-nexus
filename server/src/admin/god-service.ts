@@ -41,7 +41,11 @@ import type { NexusStore, UserRecord } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
 import { conflict, lastSuperAdmin, notFound, validationFailed } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
-import { SUPER_ADMIN_LOCK_KEY, type KeyedSerializer } from '../lib/keyed-serializer.js';
+import {
+  SUPER_ADMIN_LOCK_KEY,
+  userLifecycleLockKey,
+  type KeyedSerializer,
+} from '../lib/keyed-serializer.js';
 import type { NotificationsService } from '../notifications/service.js';
 import type { PublishingService } from '../publishing/service.js';
 import { escapeHtml, MASS_RAW_HTML_VARS } from '../email/templates.js';
@@ -226,9 +230,15 @@ export function createGodService(deps: GodServiceDeps): GodService {
           return { row, jobId: job.id };
         });
 
+      // And, exactly as there, under the account's lifecycle key — the one a
+      // gateway identity registration for this account is taken under — so the
+      // teardown that follows the flip sees every identity the account got as
+      // far as registering. Inside the super-admin key, never around it.
+      const lifecycle = (): Promise<{ row: UserRecord | null; jobId: Uuid }> =>
+        locks(userLifecycleLockKey(target.id), transition);
       const outcome = guardsLastSuperAdmin
-        ? await locks(SUPER_ADMIN_LOCK_KEY, transition)
-        : await transition();
+        ? await locks(SUPER_ADMIN_LOCK_KEY, lifecycle)
+        : await lifecycle();
       const updated = outcome.row;
       if (!updated) {
         if (!(await store.users.findById(target.id))) throw notFound('User', userId);

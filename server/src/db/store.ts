@@ -186,6 +186,28 @@ export type CredentialRecord = CredentialMetadata;
 /** A `consumers` row — the cached Nexus-user → Edge-consumer mapping. */
 export type ConsumerRecord = Consumer;
 
+/**
+ * A `gateway_identities` row — durable ownership of an Edge consumer that is
+ * *not* the account's canonical `nexus-user-<id>` one.
+ *
+ * In practice a provider's test consumer (`nexus-test-<api_id>`). The row is
+ * written before anything is created for the identity on the gateway, so the
+ * account teardown can enumerate it even while its first credential is still
+ * being appended and no `credential_metadata` row exists yet. `ferrum_username`
+ * is the stable key — it is known before Edge is touched — and
+ * `ferrum_consumer_id` is filled in once the gateway has assigned one.
+ */
+export interface GatewayIdentityRecord {
+  id: Uuid;
+  user_id: Uuid;
+  namespace: string;
+  ferrum_username: string;
+  /** `null` until the consumer exists on Edge, or after a crash in between. */
+  ferrum_consumer_id: string | null;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
+}
+
 /** A `message_threads` row (without joins/previews). */
 export type ThreadRecord = Omit<MessageThread, 'api' | 'participants' | 'last_message_preview'>;
 
@@ -769,6 +791,39 @@ export interface ConsumerRepo {
   delete(id: Uuid): Promise<boolean>;
 }
 
+/** Input for {@link GatewayIdentityRepo.claim}. */
+export interface ClaimGatewayIdentityInput {
+  user_id: Uuid;
+  namespace: string;
+  ferrum_username: string;
+  /** Usually `null`: the consumer is created after the claim, and bound then. */
+  ferrum_consumer_id: string | null;
+}
+
+/**
+ * Registry of the non-canonical gateway identities each account owns.
+ *
+ * Every method is a single statement; the caller — the credentials service —
+ * holds the account's lifecycle lock around `claim`, which is what orders a
+ * registration against the status flip that disables the account.
+ */
+export interface GatewayIdentityRepo {
+  /**
+   * Register `ferrum_username` as owned by `user_id`, taking it over from any
+   * previous owner. An upsert on `(namespace, ferrum_username)`: recreating a
+   * test consumer moves the registration rather than duplicating it, and the
+   * row keeps its id across owners.
+   */
+  claim(input: ClaimGatewayIdentityInput): Promise<GatewayIdentityRecord>;
+  findById(id: Uuid): Promise<GatewayIdentityRecord | null>;
+  findByUsername(namespace: string, ferrumUsername: string): Promise<GatewayIdentityRecord | null>;
+  /** Every identity registered to `userId` in `namespace`, oldest first. */
+  listByUser(userId: Uuid, namespace: string): Promise<GatewayIdentityRecord[]>;
+  /** Record the consumer id Edge assigned (or clear it when the consumer is gone). */
+  bindConsumer(id: Uuid, ferrumConsumerId: string | null): Promise<GatewayIdentityRecord | null>;
+  delete(id: Uuid): Promise<boolean>;
+}
+
 /** Conversations between a client and a provider (or the platform). */
 export interface ThreadRepo {
   create(input: CreateInput<ThreadRecord>): Promise<ThreadRecord>;
@@ -1109,6 +1164,7 @@ export interface NexusStore {
   readonly grants: GrantRepo;
   readonly credentials: CredentialRepo;
   readonly consumers: ConsumerRepo;
+  readonly gatewayIdentities: GatewayIdentityRepo;
   readonly threads: ThreadRepo;
   readonly messages: MessageRepo;
   readonly notifications: NotificationRepo;

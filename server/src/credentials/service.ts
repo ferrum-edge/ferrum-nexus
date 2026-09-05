@@ -130,6 +130,7 @@ import type { NexusConfig } from '../config/index.js';
 import type {
   CredentialFilter,
   CredentialRecord,
+  GatewayIdentityRecord,
   ListOptions,
   NexusStore,
   UserRecord,
@@ -148,6 +149,7 @@ import {
   validationFailed,
 } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
+import { userLifecycleLockKey, type KeyedSerializer } from '../lib/keyed-serializer.js';
 import type { NotificationsService } from '../notifications/service.js';
 import type { ConsumerProvisioner } from './consumers.js';
 
@@ -160,6 +162,21 @@ export const CREDENTIAL_TYPES = [
 
 /** Statuses that still occupy a slot in the Edge credentials array. */
 const LIVE_STATUSES = new Set(['active', 'retiring']);
+
+/**
+ * The serializer key for a non-canonical gateway identity, by **name**.
+ *
+ * A test consumer's Edge id changes every time it is recreated, so the id is
+ * not a stable key for "the test consumer of API X"; its username is. Creation
+ * (`publishing.createTestConsumer`) and teardown ({@link
+ * CredentialsService.disableGatewayAccess}) both take this key first and the
+ * consumer's id key second — always in that order, never the reverse — so the
+ * pair can never invert. The prefix keeps it disjoint from every consumer-id
+ * key.
+ */
+export function gatewayIdentityLockKey(username: string): string {
+  return `test-consumer:${username}`;
+}
 
 /**
  * Raised whenever the Nexus mirror and the live Edge array disagree.
@@ -278,15 +295,57 @@ export interface CredentialsService {
    * its own key and its own approval group.
    *
    * Every identity has to come down for this to have succeeded, so a failure on
-   * any one of them throws and the durable job stays `pending`. A retry
-   * enumerates from live credential rows, so identities an earlier attempt
-   * already finished are not touched again.
+   * any one of them throws and the durable job stays `pending`.
+   *
+   * Non-canonical identities are enumerated from two places. First the
+   * `gateway_identities` registry — written by {@link claimGatewayIdentity}
+   * **before** anything exists for the identity on the gateway, so an identity
+   * whose first credential is still being appended is found and waited for
+   * rather than missed. Then, for consumers that predate the registry, from
+   * live credential rows. Both are consumed as they are finished — the
+   * registration is deleted, the rows are `revoked` — so a retry does not
+   * touch what an earlier attempt already completed.
    */
   disableGatewayAccess(userId: Uuid, subject: string): Promise<GatewayTeardown>;
   /** Append a credential to an arbitrary consumer — the test-consumer path. */
   issueForConsumer(
     input: IssueForConsumerInput,
   ): Promise<{ credential: CredentialRecord; secret: ShowOnceSecret }>;
+  /**
+   * Register a non-canonical gateway identity as `ownerId`'s, durably, before
+   * anything is created for it on the gateway.
+   *
+   * Taken under the owner's lifecycle key — the key both disable paths flip
+   * `status` under — and the owner is re-read inside it. So either the account
+   * is still active and the registration is committed before any disable can
+   * commit, in which case the teardown that follows the disable enumerates it
+   * and waits behind the creation for its name key; or the disable committed
+   * first, and this refuses with `403 USER_DISABLED` before the gateway is
+   * touched. There is no third order. The caller must already hold the
+   * identity's name key ({@link gatewayIdentityLockKey}).
+   *
+   * An upsert: recreating a test consumer, possibly by a different
+   * administrator, moves the registration to the new owner.
+   */
+  claimGatewayIdentity(ownerId: Uuid, username: string): Promise<GatewayIdentityRecord>;
+  /** Record the consumer id Edge assigned to a claimed identity. */
+  bindGatewayIdentity(identity: GatewayIdentityRecord, consumerId: string): Promise<void>;
+  /**
+   * Compensate a claim whose issuance did not complete — the owner was
+   * disabled between the claim and the append, or the gateway failed.
+   *
+   * Deletes `consumerId` (when one was created) and then the registration.
+   * When the delete itself fails, the registration is **kept**: it is what the
+   * teardown enumerates, and if the owner is no longer active a `pending`
+   * teardown job is (re)queued so the worker strips the identity — the
+   * durable work that must remain until every identity is gone. Never throws;
+   * the failure that triggered the compensation is the one worth reporting.
+   */
+  abandonGatewayIdentity(
+    identity: GatewayIdentityRecord,
+    consumerId: string | null,
+    subject: string,
+  ): Promise<void>;
 }
 
 /** Dependencies of {@link createCredentialsService}. */
@@ -299,6 +358,16 @@ export interface CredentialsServiceDeps {
   notifications: NotificationsService;
   email: EmailService;
   provisioner: ConsumerProvisioner;
+  /**
+   * Store-level cross-instance lock, built in the composition root from
+   * `store.leases` — the same serializer the users and god-mode services take
+   * {@link userLifecycleLockKey} on, which is what orders an identity
+   * registration against the status flip that disables its owner.
+   *
+   * Optional so a unit test can construct the service without one; a process
+   * that omits it is ordered only within itself.
+   */
+  locks?: KeyedSerializer;
 }
 
 /* ── Material generation ────────────────────────────────────────────────── */
@@ -447,6 +516,10 @@ export async function runGatewayTeardown(
 export function createCredentialsService(deps: CredentialsServiceDeps): CredentialsService {
   const { config, store, edge, crypto, audit, notifications, email, provisioner } = deps;
   const cap = config.edge.maxCredentialsPerType;
+  const namespace = config.edge.namespace;
+  // Without a lock the registration is still ordered against a disable on this
+  // instance by nothing but timing — the single-instance shape a unit test uses.
+  const locks: KeyedSerializer = deps.locks ?? ((_key, fn) => fn());
 
   /**
    * Rows still occupying an Edge array slot, in array order.
@@ -629,28 +702,121 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     provisioner,
     issueForConsumer,
 
+    async claimGatewayIdentity(ownerId, username): Promise<GatewayIdentityRecord> {
+      return locks(userLifecycleLockKey(ownerId), async () => {
+        // Inside the key, so the answer cannot change between here and the
+        // write: a disable is either already committed, or waiting for this.
+        await assertOwnerActive(ownerId);
+        return store.gatewayIdentities.claim({
+          user_id: ownerId,
+          namespace,
+          ferrum_username: username,
+          ferrum_consumer_id: null,
+        });
+      });
+    },
+
+    async bindGatewayIdentity(identity, consumerId): Promise<void> {
+      await store.gatewayIdentities.bindConsumer(identity.id, consumerId);
+    },
+
+    async abandonGatewayIdentity(identity, consumerId, subject): Promise<void> {
+      if (consumerId !== null) {
+        const created = consumerId;
+        try {
+          // The caller holds the identity's name key and has left the
+          // consumer's id key (the append that failed released it), so this
+          // is the same name-then-id order as everywhere else.
+          await edge.serializePerKey(created, () => edge.consumers.delete(created, subject));
+        } catch {
+          // The consumer is still up, carrying the API's approval group. The
+          // registration stays — it is what a teardown enumerates — and if the
+          // owner is no longer active, a teardown must be owed for it.
+          await ensureTeardownOwed(identity.user_id).catch(() => undefined);
+          return;
+        }
+      }
+      // Only ever the registration that is still this owner's: the row keeps
+      // its id across owners, so the owner is what says whether it is ours.
+      const current = await store.gatewayIdentities
+        .findByUsername(namespace, identity.ferrum_username)
+        .catch(() => null);
+      if (current && current.user_id === identity.user_id) {
+        await store.gatewayIdentities.delete(current.id).catch(() => undefined);
+      }
+    },
+
     async disableGatewayAccess(userId, subject): Promise<GatewayTeardown> {
       const consumer = await provisioner.findConsumer(userId);
       const consumerId = consumer?.ferrum_consumer_id ?? null;
+      let revoked = 0;
+      const deleted: string[] = [];
 
       // Everything else the account can still authenticate as. A provider's
       // `nexus-test-<apiId>` consumer is a *separate* Edge identity carrying a
       // credential attributed to whoever created it, and it holds the API's
       // approval group, so leaving it up defeats the whole offboarding.
       //
-      // The enumeration reads live credential rows, which is also what makes a
-      // retry skip the identities an earlier attempt already finished: their
-      // rows are `revoked`, so they never come back into this list.
+      // The registry first. A registration is written before the identity
+      // exists on the gateway and under the owner's lifecycle key, so by the
+      // time this runs — after the status flip, which takes the same key —
+      // every identity the account got as far as registering is here, whether
+      // or not its first credential has landed yet. Its name key is the one
+      // creation holds for the whole of its work, so an in-flight issuance is
+      // waited for and then undone rather than raced.
+      for (const identity of await store.gatewayIdentities.listByUser(userId, namespace)) {
+        const outcome = await edge.serializePerKey(
+          gatewayIdentityLockKey(identity.ferrum_username),
+          async () => {
+            await assertStillDisabled(userId);
+            // Re-read under the key: the registration may have changed hands
+            // while this teardown waited for it — an administrator recreating
+            // the test consumer takes it over, and their replacement has
+            // already revoked this account's rows on the old consumer.
+            const current = await store.gatewayIdentities.findByUsername(
+              namespace,
+              identity.ferrum_username,
+            );
+            if (!current || current.user_id !== userId) return { count: 0, consumerId: null };
+
+            const live = await edge.consumers.getByUsername(identity.ferrum_username);
+            let count = 0;
+            if (live) {
+              // Name, then id — the order creation takes the two keys in. A
+              // test consumer is disposable by definition, so it goes away
+              // entirely rather than being stripped and left as an empty
+              // identity.
+              count += await edge.serializePerKey(live.id, async () => {
+                await edge.consumers.delete(live.id, subject);
+                return revokeRowsFor(live.id);
+              });
+            }
+            if (current.ferrum_consumer_id !== null && current.ferrum_consumer_id !== live?.id) {
+              // The consumer this registration last knew is already gone;
+              // whatever rows still describe it cannot authenticate anything.
+              count += await revokeRowsFor(current.ferrum_consumer_id);
+            }
+            // Consumed: a retry must not come back to an identity that is done.
+            await store.gatewayIdentities.delete(current.id);
+            return { count, consumerId: live?.id ?? null };
+          },
+        );
+        revoked += outcome.count;
+        if (outcome.consumerId !== null) deleted.push(outcome.consumerId);
+      }
+
+      // Then whatever predates the registry: consumers the account holds live
+      // credential rows on and nothing else records. Reading live rows is also
+      // what makes a retry skip the identities an earlier attempt finished —
+      // their rows are `revoked`, so they never come back into this list.
       const foreign = await foreignConsumerIds(userId, consumerId);
-      let revoked = 0;
-      const deleted: string[] = [];
 
       if (consumerId === null && foreign.length === 0) {
         return {
           consumer_id: null,
-          revoked_credentials: 0,
+          revoked_credentials: revoked,
           removed_groups: [],
-          deleted_consumers: [],
+          deleted_consumers: deleted,
         };
       }
 
@@ -1069,13 +1235,33 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
   }
 
   /**
+   * Make sure a disabled (or deleted-in-progress) owner still owes a teardown.
+   *
+   * A compensation that could not delete the consumer it created has left a
+   * live identity behind. The teardown that is waiting on the identity's name
+   * key will get it — in-process — but a teardown on another instance may
+   * have timed out on the key and, having found nothing else, could have
+   * closed its job. A `done` job is reopened; a `pending` or `sending` one is
+   * already the durable work required and is left alone.
+   */
+  async function ensureTeardownOwed(userId: Uuid): Promise<void> {
+    const owner = await store.users.findById(userId);
+    if (!owner || owner.status === 'active') return;
+    const job = await store.gatewayTeardownJobs.findByUser(userId);
+    if (job && job.status !== 'done') return;
+    await store.gatewayTeardownJobs.upsertPending(userId, null, nowIso());
+  }
+
+  /**
    * Every Edge consumer other than `canonicalId` that this account still holds
    * live credential material on, in a stable order.
    *
-   * In practice that is the account's provider test consumers: `issue` only
-   * ever writes rows against the caller's own consumer, while
-   * `createTestConsumer` writes one against `nexus-test-<apiId>` attributed to
-   * the provider or admin who asked for it.
+   * In practice that is the account's provider test consumers from before the
+   * `gateway_identities` registry existed: `issue` only ever writes rows
+   * against the caller's own consumer, while `createTestConsumer` writes one
+   * against `nexus-test-<apiId>` attributed to the provider or admin who asked
+   * for it. Registered identities are torn down — and their rows revoked —
+   * before this is read, so they do not reappear here.
    */
   async function foreignConsumerIds(userId: Uuid, canonicalId: string | null): Promise<string[]> {
     const seen = new Set<string>();

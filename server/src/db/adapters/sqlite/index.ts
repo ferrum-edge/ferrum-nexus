@@ -119,6 +119,8 @@ import type {
   EmailTemplateRecord,
   EmailTemplateRepo,
   EnqueueEmailInput,
+  GatewayIdentityRecord,
+  GatewayIdentityRepo,
   GatewayTeardownJobFilter,
   GatewayTeardownJobRecord,
   GatewayTeardownJobRepo,
@@ -379,6 +381,18 @@ function mapConsumer(row: Row): ConsumerRecord {
     namespace: text(row.namespace),
     ferrum_consumer_id: text(row.ferrum_consumer_id),
     ferrum_username: text(row.ferrum_username),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapGatewayIdentity(row: Row): GatewayIdentityRecord {
+  return {
+    id: text(row.id),
+    user_id: text(row.user_id),
+    namespace: text(row.namespace),
+    ferrum_username: text(row.ferrum_username),
+    ferrum_consumer_id: textOrNull(row.ferrum_consumer_id),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -649,6 +663,7 @@ class SqliteStore implements NexusStore {
     this.grants = guardRepo(this.grants, mediate);
     this.credentials = guardRepo(this.credentials, mediate);
     this.consumers = guardRepo(this.consumers, mediate);
+    this.gatewayIdentities = guardRepo(this.gatewayIdentities, mediate);
     this.threads = guardRepo(this.threads, mediate);
     this.messages = guardRepo(this.messages, mediate);
     this.notifications = guardRepo(this.notifications, mediate);
@@ -1814,6 +1829,79 @@ class SqliteStore implements NexusStore {
     },
 
     delete: async (id) => execute(this.db, 'DELETE FROM consumers WHERE id = ?', [id]) > 0,
+  };
+
+  /* ── gatewayIdentities ────────────────────────────────────────────────── */
+
+  readonly gatewayIdentities: GatewayIdentityRepo = {
+    claim: async (input) => {
+      // The conflict target is the identity's name, not the row id: a second
+      // claim on the same name moves the registration to its new owner and
+      // keeps the row, so there is never more than one owner on record.
+      const now = nowIso();
+      execute(
+        this.db,
+        `INSERT INTO gateway_identities
+           (id, user_id, namespace, ferrum_username, ferrum_consumer_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (namespace, ferrum_username) DO UPDATE SET
+           user_id = excluded.user_id,
+           ferrum_consumer_id = excluded.ferrum_consumer_id,
+           updated_at = excluded.updated_at`,
+        [
+          newId(),
+          input.user_id,
+          input.namespace,
+          input.ferrum_username,
+          input.ferrum_consumer_id,
+          now,
+          now,
+        ],
+      );
+      const claimed = await this.gatewayIdentities.findByUsername(
+        input.namespace,
+        input.ferrum_username,
+      );
+      if (!claimed) {
+        throw new Error('gatewayIdentities.claim: row vanished immediately after upsert');
+      }
+      return claimed;
+    },
+
+    findById: async (id) => {
+      const row = queryOne(this.db, 'SELECT * FROM gateway_identities WHERE id = ?', [id]);
+      return row ? mapGatewayIdentity(row) : null;
+    },
+
+    findByUsername: async (namespace, ferrumUsername) => {
+      const row = queryOne(
+        this.db,
+        'SELECT * FROM gateway_identities WHERE namespace = ? AND ferrum_username = ?',
+        [namespace, ferrumUsername],
+      );
+      return row ? mapGatewayIdentity(row) : null;
+    },
+
+    listByUser: async (userId, namespace) => {
+      const rows = queryAll(
+        this.db,
+        `SELECT * FROM gateway_identities WHERE user_id = ? AND namespace = ?
+         ORDER BY created_at ASC, id ASC`,
+        [userId, namespace],
+      );
+      return rows.map(mapGatewayIdentity);
+    },
+
+    bindConsumer: async (id, ferrumConsumerId) => {
+      execute(
+        this.db,
+        'UPDATE gateway_identities SET ferrum_consumer_id = ?, updated_at = ? WHERE id = ?',
+        [ferrumConsumerId, nowIso(), id],
+      );
+      return this.gatewayIdentities.findById(id);
+    },
+
+    delete: async (id) => execute(this.db, 'DELETE FROM gateway_identities WHERE id = ?', [id]) > 0,
   };
 
   /* ── threads ──────────────────────────────────────────────────────────── */

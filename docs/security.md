@@ -399,8 +399,8 @@ Both paths — `PATCH /api/users/:id` with `status: "disabled"` and
 2. strip every ACL group from the account's Ferrum consumer;
 3. delete **every credential of every type** on that consumer and mark the
    matching `credential_metadata` rows `revoked`;
-4. delete every **other** Edge consumer the account still holds live credential
-   material on, and revoke those rows too.
+4. delete every **other** Edge consumer registered to the account — or that it
+   still holds live credential material on — and revoke those rows too.
 
 (2) alone is not enough. An API published with `requestable: false` carries no
 `access_control` plugin, so an empty group list stops nothing; the credential
@@ -428,9 +428,11 @@ Edge replaces consumers whole, with no version token, so without that lock a
 revoked account could be re-authorised by a write that was merely stale; see
 [`operations.md` §8](operations.md#8-scaling). Identities are torn down one at a
 time, and the teardown reports success only when **all** of them are clean: a
-failure on any one leaves the durable job `pending`. Because the identity list
-is enumerated from _live_ credential rows, a retry skips whatever an earlier
-attempt already finished.
+failure on any one leaves the durable job `pending`. Non-canonical identities
+are enumerated from the `gateway_identities` registry first (see below) and then
+from _live_ credential rows for consumers that predate it; both are consumed as
+they are finished — the registration deleted, the rows `revoked` — so a retry
+skips whatever an earlier attempt already completed.
 
 #### The lock orders writes; it does not authorise them
 
@@ -447,11 +449,45 @@ Because the teardown takes the same per-consumer key, only two orders exist and
 both are safe: the append wins the lock and the teardown behind it deletes what
 it appended, or the teardown wins and the append is refused.
 
+#### An identity is registered before it exists
+
+The per-consumer key cannot order what has no consumer yet. A provider's first
+`POST /api/apis/:id/test-consumer` passes the owner check, then creates the
+`nexus-test-<api_id>` consumer and appends its first credential — and until
+that append lands there is no `credential_metadata` row for the teardown to
+find the identity by. A disable landing in between used to report
+`no_consumer`, close its job, and the append then handed the disabled provider
+a working key carrying the API's approval group.
+
+So a non-canonical identity is **registered durably before the gateway is
+touched**: a `gateway_identities` row keyed by the consumer's username, which is
+known before Edge assigns an id. The registration is written under the
+account's **lifecycle key** (`users:lifecycle:<user_id>`, on the same
+cross-instance lease table as the consumer keys), the owner is re-read inside
+it, and both disable paths flip `status` under the same key. Whichever wins:
+
+- the registration committed first, so the teardown that follows the flip
+  enumerates it, takes the identity's name key — the key creation holds for the
+  whole of its work — and, once the append has landed or been refused, deletes
+  the consumer and revokes its rows; or
+- the flip committed first, and the registration is refused with
+  `403 USER_DISABLED` before anything exists on the gateway.
+
+An append refused after the consumer was created is compensated: the consumer
+is deleted and the registration dropped. If that delete fails, the registration
+stays — it is what the teardown enumerates — and, when the owner is no longer
+active, a `pending` teardown job is (re)queued so the worker strips the
+identity. Recreating a test consumer, by its provider or by an administrator,
+moves the registration to the new owner; the row is deleted once the teardown
+has taken the consumer down.
+
 The mirror of that rule protects a **re-enable**: `status: "active"` deletes the
-pending job, and `disableGatewayAccess` re-reads the account inside the lock and
-refuses (`409 CONFLICT`) if it is no longer disabled, so a worker that claimed a
-job just before the re-enable cannot strip a live account. The worker drops such
-a job rather than rescheduling it.
+pending job, and `disableGatewayAccess` re-reads the account inside the lock —
+for every identity, the registered ones included — and refuses
+(`409 CONFLICT`) if it is no longer disabled, so a worker that claimed a job
+just before the re-enable cannot strip a live account, nor a test consumer the
+account recreated after it. The worker drops such a job rather than
+rescheduling it.
 
 #### The gateway half is durable work, not a side effect
 

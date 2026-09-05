@@ -120,6 +120,8 @@ import type {
   EmailOutboxRepo,
   EmailTemplateRecord,
   EmailTemplateRepo,
+  GatewayIdentityRecord,
+  GatewayIdentityRepo,
   GatewayTeardownJobFilter,
   GatewayTeardownJobRecord,
   GatewayTeardownJobRepo,
@@ -164,6 +166,7 @@ const COLLECTIONS = {
   accessRequests: 'access_requests',
   grants: 'grants',
   consumers: 'consumers',
+  gatewayIdentities: 'gateway_identities',
   credentials: 'credential_metadata',
   threads: 'message_threads',
   messages: 'messages',
@@ -572,6 +575,18 @@ function mapOutbox(row: Row): EmailOutboxRecord {
   };
 }
 
+function mapGatewayIdentity(row: Row): GatewayIdentityRecord {
+  return {
+    id: str(row._id),
+    user_id: str(row.user_id),
+    namespace: str(row.namespace),
+    ferrum_username: str(row.ferrum_username),
+    ferrum_consumer_id: strOrNull(row.ferrum_consumer_id),
+    created_at: str(row.created_at),
+    updated_at: str(row.updated_at),
+  };
+}
+
 function mapTeardownJob(row: Row): GatewayTeardownJobRecord {
   return {
     id: str(row._id),
@@ -968,6 +983,24 @@ const LEASE_INDEXES: IndexDefinition[] = [
   { collection: 'edge_leases', name: 'ix_edge_leases_expires', key: { expires_at: 1 } },
 ];
 
+/** Indexes added by `012_gateway_identities`. */
+const IDENTITY_INDEXES: IndexDefinition[] = [
+  // One registration per identity name: `claim` upserts on this key, which is
+  // what moves a recreated test consumer to its new owner instead of
+  // recording two.
+  {
+    collection: 'gateway_identities',
+    name: 'ux_gateway_identities_username',
+    key: { namespace: 1, ferrum_username: 1 },
+    unique: true,
+  },
+  {
+    collection: 'gateway_identities',
+    name: 'ix_gateway_identities_user',
+    key: { user_id: 1, namespace: 1 },
+  },
+];
+
 /** Indexes added by `011_credential_ordinal`. */
 const ORDINAL_INDEXES: IndexDefinition[] = [
   // Partial, so any number of unresolved legacy documents (no ordinal) coexist
@@ -1109,6 +1142,12 @@ const MONGO_MIGRATIONS: { id: string; apply: (db: Db) => Promise<void> }[] = [
       await backfillCredentialOrdinals(db);
       await createIndexes(db, ORDINAL_INDEXES);
     },
+  },
+  {
+    id: '012_gateway_identities',
+    // The unique name index is what makes `claim` a per-identity upsert; the
+    // collection itself is created on the first insert.
+    apply: (db: Db): Promise<void> => createIndexes(db, IDENTITY_INDEXES),
   },
 ];
 
@@ -2274,6 +2313,76 @@ class MongoStore implements NexusStore {
 
     delete: async (id) =>
       (await this.col(COLLECTIONS.consumers).deleteOne({ _id: id }, this.opts)).deletedCount > 0,
+  };
+
+  /* ── gatewayIdentities ────────────────────────────────────────────────── */
+
+  readonly gatewayIdentities: GatewayIdentityRepo = {
+    claim: async (input) => {
+      // Keyed on the identity's name (unique), so a second claim moves the
+      // registration to its new owner and keeps the row. `_id` and
+      // `created_at` only land on the insert.
+      const now = nowIso();
+      const doc = await this.col(COLLECTIONS.gatewayIdentities).findOneAndUpdate(
+        { namespace: input.namespace, ferrum_username: input.ferrum_username } as Filter<NexusDoc>,
+        {
+          $set: {
+            user_id: input.user_id,
+            ferrum_consumer_id: input.ferrum_consumer_id,
+            updated_at: now,
+          },
+          $setOnInsert: {
+            _id: newId(),
+            namespace: input.namespace,
+            ferrum_username: input.ferrum_username,
+            created_at: now,
+          },
+        } as UpdateFilter<NexusDoc>,
+        { ...this.opts, upsert: true, returnDocument: 'after' },
+      );
+      const row = asRow(doc);
+      if (!row) throw new Error('gatewayIdentities.claim: row vanished immediately after upsert');
+      return mapGatewayIdentity(row);
+    },
+
+    findById: async (id) => {
+      const row = asRow(
+        await this.col(COLLECTIONS.gatewayIdentities).findOne({ _id: id }, this.opts),
+      );
+      return row ? mapGatewayIdentity(row) : null;
+    },
+
+    findByUsername: async (namespace, ferrumUsername) => {
+      const row = asRow(
+        await this.col(COLLECTIONS.gatewayIdentities).findOne(
+          { namespace, ferrum_username: ferrumUsername },
+          this.opts,
+        ),
+      );
+      return row ? mapGatewayIdentity(row) : null;
+    },
+
+    listByUser: async (userId, namespace) => {
+      const docs = await this.col(COLLECTIONS.gatewayIdentities)
+        .find({ user_id: userId, namespace } as Filter<NexusDoc>, this.opts)
+        .sort({ created_at: 1, _id: 1 })
+        .toArray();
+      return docs.map((doc) => mapGatewayIdentity(doc as Row));
+    },
+
+    bindConsumer: async (id, ferrumConsumerId) => {
+      await this.col(COLLECTIONS.gatewayIdentities).updateOne(
+        { _id: id },
+        { $set: { ferrum_consumer_id: ferrumConsumerId, updated_at: nowIso() } },
+        this.opts,
+      );
+      return this.gatewayIdentities.findById(id);
+    },
+
+    delete: async (id) =>
+      (
+        await this.col(COLLECTIONS.gatewayIdentities).deleteOne({ _id: id }, this.opts)
+      ).deletedCount > 0,
   };
 
   /* ── threads ──────────────────────────────────────────────────────────── */

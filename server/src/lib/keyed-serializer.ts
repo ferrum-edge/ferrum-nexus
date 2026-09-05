@@ -56,6 +56,32 @@ export const SUPER_ADMIN_LOCK_KEY = 'users:super-admins';
 export const SUPER_ADMIN_LOCK_CONFLICT_MESSAGE =
   'Another administrator change is in flight right now — please retry';
 
+/**
+ * The per-account **lifecycle** key: every `status` transition of one account
+ * (`PATCH /api/users/:id`, god mode's `disable-user`) and every registration
+ * of a new gateway identity for it are taken under this key.
+ *
+ * The two have to be ordered against each other, not merely against other
+ * writes to the same Edge consumer. A provider's first test consumer has no
+ * consumer id and no credential row until its issuance is well under way, so
+ * a disable that lands in between finds nothing to tear down — unless the
+ * identity was registered durably *before* the gateway was touched, and that
+ * registration was atomic with respect to the status flip. This key is what
+ * makes it atomic: the registration checks the account is still active and
+ * writes its row inside the section, and the disable flips the status inside
+ * it too, so whichever wins, the teardown that follows the flip sees every
+ * identity the account got as far as registering.
+ *
+ * Per account rather than portal-wide: the invariant is a property of one
+ * account, and two different accounts never need to wait for each other. It is
+ * always taken **inside** {@link SUPER_ADMIN_LOCK_KEY} when both are needed,
+ * and a caller that holds a gateway consumer key may take it — never the
+ * reverse — which is what keeps the three keys free of lock-order inversion.
+ */
+export function userLifecycleLockKey(userId: string): string {
+  return `users:lifecycle:${userId}`;
+}
+
 /** Options for {@link createKeyedSerializer}. */
 export interface KeyedSerializerOptions {
   /**
