@@ -294,19 +294,17 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
             await tx.verificationTokens.deleteForUser(user.id, 'password_reset');
             terminatedSessions = await tx.sessions.deleteForUser(user.id);
           }
-          await audit
-            .forStore(tx)
-            .record(
-              { id: user.id, role: user.role },
-              AuditAction.USER_UPDATE,
-              { type: 'user', id: user.id },
-              {
-                self: true,
-                changed_fields: changed,
-                ...(terminatedSessions > 0 ? { terminated_sessions: terminatedSessions } : {}),
-              },
-              ip,
-            );
+          await audit.forStore(tx).record(
+            { id: user.id, role: user.role },
+            AuditAction.USER_UPDATE,
+            { type: 'user', id: user.id },
+            {
+              self: true,
+              changed_fields: changed,
+              ...(terminatedSessions > 0 ? { terminated_sessions: terminatedSessions } : {}),
+            },
+            ip,
+          );
           return row;
         });
 
