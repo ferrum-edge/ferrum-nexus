@@ -403,7 +403,13 @@ describe('first gateway identity versus disable', () => {
       provider.user.id,
       username,
     );
-    const seeded = harness.edge.seedConsumer({ username, acl_groups: [aclGroupForApi(api.id)] });
+    // Seeded into the namespace the service and the assertions below read;
+    // the mock's own default is a different namespace.
+    const seeded = harness.edge.seedConsumer({
+      username,
+      namespace: 'nexus',
+      acl_groups: [aclGroupForApi(api.id)],
+    });
     await harness.services.credentials.bindGatewayIdentity(identity, seeded.id);
     await harness.store.users.update(provider.user.id, { status: 'disabled' });
     const job = await harness.store.gatewayTeardownJobs.upsertPending(
