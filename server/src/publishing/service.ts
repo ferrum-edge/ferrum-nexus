@@ -1915,8 +1915,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         await reportUnrepairableProxy({
           api,
           target,
-          proxy: body,
-          plugins: carried,
+          proxyId,
+          pluginNames: carried.map((plugin) => plugin.plugin_name).sort(),
           actor,
           error,
           restoreError,
@@ -1934,34 +1934,33 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   /**
    * Record a proxy the portal could neither convert nor put back.
    *
-   * The captured proxy document and its hand-owned plugin configs are the only
-   * copy that still exists, so they are logged at `error` *and* written to an
-   * audit row: the log is what a running deployment alerts on, the row is what
-   * survives long enough for an administrator to rebuild the API from it. The
-   * `apis` row itself is deliberately not moved to a failed state — the API's
-   * catalog entry, its grants and its credentials are all still valid, and only
-   * the gateway objects need rebuilding.
+   * The audit row and error log contain only identifiers and plugin names. The
+   * captured Edge resources can contain infrastructure credentials and other
+   * operator-managed secrets, so neither snapshot may cross into these broadly
+   * readable sinks. The `apis` row itself is deliberately not moved to a failed
+   * state — the API's catalog entry, its grants and its credentials are all
+   * still valid, and only the gateway objects need rebuilding.
    */
   async function reportUnrepairableProxy(input: {
     api: ApiRecord;
     target: SpecEnforcementLevel;
-    proxy: Record<string, unknown>;
-    plugins: EdgePluginConfig[];
+    proxyId: string;
+    pluginNames: string[];
     actor: UserRecord;
     error: unknown;
     restoreError: unknown;
     ip: string | null;
   }): Promise<void> {
     const details = {
-      proxy: input.proxy,
-      plugin_configs: input.plugins,
+      proxy_id: input.proxyId,
+      plugin_names: input.pluginNames,
       spec_enforcement: input.api.spec_enforcement,
       attempted_spec_enforcement: input.target,
       error: errorMessage(input.error),
       restore_error: errorMessage(input.restoreError),
     };
     deps.log?.(
-      { api_id: input.api.id, proxy_id: input.proxy.id, ...details },
+      { api_id: input.api.id, ...details },
       'the spec_enforcement conversion left the API with no gateway proxy and could not be restored',
     );
     await audit
