@@ -2605,6 +2605,12 @@ describe('publishing', () => {
       assert.equal(published.statusCode, 201, published.body);
       const apiId = published.json<PublishApiResponse>().api.id;
       const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
+      const secret = 'rediss://redis-user:S3cret-Pass@cache.example.test:6380/7';
+      const plugin = harness.edge.pluginForProxy(proxyId, 'key_auth');
+      assert.ok(plugin);
+      plugin.config = { redis_url: secret };
+      const proxy = storedProxy(harness, proxyId);
+      proxy.operator_secret = secret;
 
       // Both rebuilds fail: the conversion into `routes` and the restore back.
       harness.edge.queueFailure(503, { error: 'unavailable' }, '/api-specs', 'POST');
@@ -2616,20 +2622,19 @@ describe('publishing', () => {
       });
       assert.equal(failed.statusCode, 502, failed.body);
 
-      // The snapshot the gateway lost is the only copy there was, so it is
-      // written where an administrator can find and act on it.
+      // The audit row identifies what was lost without persisting the raw Edge
+      // resources, which may contain infrastructure credentials.
       const row = (await harness.auditRows('api.gateway_repair_required')).find(
         (entry) => entry.target_id === apiId,
       );
       assert.ok(row, 'a repair-required audit row is recorded');
       assert.equal(row?.details.spec_enforcement, 'docs_only');
       assert.equal(row?.details.attempted_spec_enforcement, 'routes');
-      assert.equal((row?.details.proxy as Record<string, unknown>).id, proxyId);
-      assert.equal(
-        (row?.details.proxy as Record<string, unknown>).listen_path,
-        '/nexus/enf-unrepairable',
-      );
-      assert.ok(Array.isArray(row?.details.plugin_configs));
+      assert.equal(row?.details.proxy_id, proxyId);
+      assert.ok(Array.isArray(row?.details.plugin_names));
+      assert.equal('proxy' in (row?.details ?? {}), false);
+      assert.equal('plugin_configs' in (row?.details ?? {}), false);
+      assert.equal(JSON.stringify(row?.details).includes(secret), false);
     });
 
     it('regenerates the operation table when a new spec revision is published', async () => {
