@@ -1,5 +1,5 @@
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
-import { useMemo, useState, type FormEvent, type ReactElement } from 'react';
+import { useEffect, useMemo, useState, type FormEvent, type ReactElement } from 'react';
 import {
   AUTH_PLUGIN_LABELS,
   AUTH_PLUGIN_TYPES,
@@ -442,8 +442,55 @@ function SpecTab({ api }: { api: Api }): ReactElement {
   );
 }
 
-function RequestsTab({ apiId }: { apiId: string }): ReactElement {
-  const query = useAccessRequests({ api_id: apiId, limit: 50 });
+const ACCESS_PAGE_SIZE = 50;
+
+function AccessPagination({
+  page,
+  total,
+  fetching,
+  onPageChange,
+}: {
+  page: number;
+  total: number | undefined;
+  fetching: boolean;
+  onPageChange: (page: number) => void;
+}): ReactElement {
+  return (
+    <div className="flex items-center justify-between gap-3 border-t border-border px-5 py-4">
+      <p role="status" className="text-sm text-fg-muted">
+        {total === undefined
+          ? 'Loading count…'
+          : `${total} total · Page ${page + 1} of ${Math.max(1, Math.ceil(total / ACCESS_PAGE_SIZE))}`}
+      </p>
+      <div className="flex gap-2">
+        <Button disabled={fetching || page === 0} onClick={() => onPageChange(page - 1)}>
+          Previous
+        </Button>
+        <Button
+          disabled={fetching || total === undefined || (page + 1) * ACCESS_PAGE_SIZE >= total}
+          onClick={() => onPageChange(page + 1)}
+        >
+          Next
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
+  const [page, setPage] = useState(0);
+  const [status, setStatus] = useState<'pending' | 'approved' | 'denied' | 'all'>('pending');
+  const query = useAccessRequests({
+    api_id: apiId,
+    limit: ACCESS_PAGE_SIZE,
+    offset: page * ACCESS_PAGE_SIZE,
+    ...(status === 'all' ? {} : { status }),
+  });
+  useEffect(() => {
+    if (query.isSuccess && !query.isFetching && query.data.items.length === 0 && page > 0) {
+      setPage((current) => current - 1);
+    }
+  }, [query.isSuccess, query.isFetching, query.data, page]);
   const approve = useApproveAccessRequest();
   const deny = useDenyAccessRequest();
   const toast = useToast();
@@ -462,10 +509,26 @@ function RequestsTab({ apiId }: { apiId: string }): ReactElement {
           title="Access requests"
           description="Approve to add the API's ACL group to the requester's consumer."
         />
+        <div className="px-5 pb-4">
+          <LabeledSelect
+            label="Request status"
+            value={status}
+            onValueChange={(value) => {
+              setStatus(value);
+              setPage(0);
+            }}
+            options={[
+              { value: 'pending', label: 'Pending' },
+              { value: 'approved', label: 'Approved' },
+              { value: 'denied', label: 'Denied' },
+              { value: 'all', label: 'All' },
+            ]}
+          />
+        </div>
         {query.isLoading ? (
           <LoadingPanel />
         ) : requests.length === 0 ? (
-          <EmptyState icon="grant" title="No access requests" />
+          <EmptyState icon="grant" title="No matching access requests" />
         ) : (
           <ul>
             {requests.map((request) => (
@@ -523,6 +586,12 @@ function RequestsTab({ apiId }: { apiId: string }): ReactElement {
             ))}
           </ul>
         )}
+        <AccessPagination
+          page={page}
+          total={query.data?.total}
+          fetching={query.isFetching}
+          onPageChange={setPage}
+        />
       </Card>
 
       <ConfirmDialog
@@ -564,8 +633,20 @@ function RequestsTab({ apiId }: { apiId: string }): ReactElement {
   );
 }
 
-function GrantsTab({ apiId }: { apiId: string }): ReactElement {
-  const query = useGrants({ api_id: apiId, limit: 50 });
+export function GrantsTab({ apiId }: { apiId: string }): ReactElement {
+  const [page, setPage] = useState(0);
+  const [status, setStatus] = useState<'active' | 'revoked' | 'all'>('active');
+  const query = useGrants({
+    api_id: apiId,
+    limit: ACCESS_PAGE_SIZE,
+    offset: page * ACCESS_PAGE_SIZE,
+    ...(status === 'all' ? {} : { status }),
+  });
+  useEffect(() => {
+    if (query.isSuccess && !query.isFetching && query.data.items.length === 0 && page > 0) {
+      setPage((current) => current - 1);
+    }
+  }, [query.isSuccess, query.isFetching, query.data, page]);
   const revoke = useRevokeGrant();
   const toast = useToast();
   const [revoking, setRevoking] = useState<Grant | null>(null);
@@ -576,14 +657,26 @@ function GrantsTab({ apiId }: { apiId: string }): ReactElement {
   return (
     <>
       <Card className="overflow-hidden">
-        <CardHeader
-          title="Grants"
-          description="Every consumer currently carrying this API's ACL group."
-        />
+        <CardHeader title="Grants" description="Active and revoked access to this API." />
+        <div className="px-5 pb-4">
+          <LabeledSelect
+            label="Grant status"
+            value={status}
+            onValueChange={(value) => {
+              setStatus(value);
+              setPage(0);
+            }}
+            options={[
+              { value: 'active', label: 'Active' },
+              { value: 'revoked', label: 'Revoked' },
+              { value: 'all', label: 'All' },
+            ]}
+          />
+        </div>
         {query.isLoading ? (
           <LoadingPanel />
         ) : grants.length === 0 ? (
-          <EmptyState icon="grant" title="No grants issued" />
+          <EmptyState icon="grant" title="No matching grants" />
         ) : (
           <ul>
             {grants.map((grant) => (
@@ -619,6 +712,12 @@ function GrantsTab({ apiId }: { apiId: string }): ReactElement {
             ))}
           </ul>
         )}
+        <AccessPagination
+          page={page}
+          total={query.data?.total}
+          fetching={query.isFetching}
+          onPageChange={setPage}
+        />
       </Card>
 
       <ConfirmDialog
@@ -963,9 +1062,9 @@ function ApiDetail({ apiId }: { apiId: string }): ReactElement {
               stats.pending_requests > 0 ? (
                 <Badge tone="warning">{stats.pending_requests}</Badge>
               ) : undefined,
-            content: <RequestsTab apiId={api.id} />,
+            content: <RequestsTab key={api.id} apiId={api.id} />,
           },
-          { value: 'grants', label: 'Grants', content: <GrantsTab apiId={api.id} /> },
+          { value: 'grants', label: 'Grants', content: <GrantsTab key={api.id} apiId={api.id} /> },
           { value: 'test', label: 'Test consumer', content: <TestConsumerTab api={api} /> },
         ]}
       />
