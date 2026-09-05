@@ -41,6 +41,7 @@ import { createStore } from '../db/index.js';
 import type { NexusStore, UserRecord } from '../db/store.js';
 import { isNexusError } from '../lib/errors.js';
 import { isoInSeconds, newId, nowIso } from '../lib/ids.js';
+import { runPasswordChangeContract } from './password-change-contract.js';
 
 const SECRET = 'cross-adapter-smoke-secret-0123456789ab';
 
@@ -182,6 +183,7 @@ async function mongoTarget(baseUrl: string): Promise<SmokeTarget> {
  * whatever `makeStore` returns.
  */
 function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): void {
+  runPasswordChangeContract(label, makeStore);
   describe(`store contract — ${label}`, () => {
     let target: SmokeTarget;
     let store: NexusStore;

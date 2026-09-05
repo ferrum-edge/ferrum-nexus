@@ -51,6 +51,7 @@ import {
 } from '../lib/errors.js';
 import { isoInSeconds, nowIso } from '../lib/ids.js';
 import type { CaptchaService } from './captcha.js';
+import { createPasswordChangeSerializer } from './password-change.js';
 
 /** `app_settings` key holding the registration policy. */
 export const REGISTRATION_SETTINGS_KEY = 'registration';
@@ -281,6 +282,7 @@ export function capabilitiesFor(role: Role): Capabilities {
 /** Build the authentication service. */
 export function createAuthService(deps: AuthServiceDeps): AuthService {
   const { config, store, crypto, audit, captcha } = deps;
+  const serializePasswordChange = createPasswordChangeSerializer(store);
 
   async function getRegistrationPolicy(): Promise<RegistrationPolicy> {
     const row = await store.settings.get(REGISTRATION_SETTINGS_KEY);
@@ -718,35 +720,46 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
       // transaction open across it would serialise unrelated work behind it.
       const passwordHash = await crypto.hashPassword(newPassword);
 
-      await store.transaction(async (tx) => {
-        // The compare-and-set burn is what makes the link single-use; the
-        // transaction is what keeps a burn from outliving the password change
-        // it was spent on.
-        const burned = await tx.verificationTokens.markUsed(row.id, nowIso());
-        if (!burned) throw invalidResetLink();
-
-        const updated = await tx.users.update(record.id, {
-          password_hash: passwordHash,
-          // Redeeming a link mailed to the address proves the mailbox, which is
-          // all verification ever claimed.
-          email_verified: true,
-        });
-        if (!updated) throw invalidResetLink();
-
-        // Any other reset link for this account dies with this one, and every
-        // session goes: whoever prompted the reset must not keep a live one.
-        await tx.verificationTokens.deleteForUser(record.id, 'password_reset');
-        await tx.sessions.deleteForUser(record.id);
-
-        await audit
-          .forStore(tx)
-          .record(
-            { id: updated.id, role: updated.role },
-            AuditAction.AUTH_PASSWORD_RESET,
-            { type: 'user', id: updated.id },
-            { email: updated.email },
-            context.ip,
+      await serializePasswordChange(record.id, async () => {
+        await store.transaction(async (tx) => {
+          // Recheck after taking the lease: an earlier change may have deleted
+          // the link, or it may have expired while hashing or waiting.
+          const live = await tx.verificationTokens.findByTokenHash(
+            crypto.hashToken(token),
+            'password_reset',
           );
+          if (!live || live.used_at !== null || Date.parse(live.expires_at) <= Date.now()) {
+            throw invalidResetLink();
+          }
+          const current = await tx.users.findById(record.id);
+          if (!current) throw invalidResetLink();
+          if (current.status !== 'active') throw userDisabled();
+          const burned = await tx.verificationTokens.markUsed(live.id, nowIso());
+          if (!burned) throw invalidResetLink();
+
+          const updated = await tx.users.update(record.id, {
+            password_hash: passwordHash,
+            // Redeeming a link mailed to the address proves the mailbox, which is
+            // all verification ever claimed.
+            email_verified: true,
+          });
+          if (!updated) throw invalidResetLink();
+
+          // Any other reset link for this account dies with this one, and every
+          // session goes: whoever prompted the reset must not keep a live one.
+          await tx.verificationTokens.deleteForUser(record.id, 'password_reset');
+          await tx.sessions.deleteForUser(record.id);
+
+          await audit
+            .forStore(tx)
+            .record(
+              { id: updated.id, role: updated.role },
+              AuditAction.AUTH_PASSWORD_RESET,
+              { type: 'user', id: updated.id },
+              { email: updated.email },
+              context.ip,
+            );
+        });
       });
     },
   };

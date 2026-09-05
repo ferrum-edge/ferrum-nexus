@@ -183,6 +183,16 @@ they are built to answer nothing:
   transaction that writes the new password, so a burn cannot outlive the change
   it was spent on. Redeeming one also deletes any other outstanding reset link
   for that account.
+- **Every password change invalidates outstanding reset links.** Self-service
+  changes and reset-link redemption commit the password, deletion of all
+  `password_reset` tokens, session invalidation and audit entry in one
+  transaction. A persistence failure rolls them all back; `email_verification`
+  tokens are left intact. Both paths take the same per-user database lease
+  before opening the transaction, so competing changes across instances are
+  ordered. A self-service change rechecks its password proof after acquiring
+  the lease and issues the caller's replacement session only after commit,
+  while still holding the lease. Reset redemption issues no replacement session.
+  A fresh reset link can still be requested subject to the existing throttle.
 - **The audit log is where the truth is.** `auth.password_reset_request` and
   `auth.verification_resend` are written only when a link was really issued, so
   operators can see what the response would not say.
