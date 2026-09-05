@@ -17,7 +17,7 @@
  * must present the same contract using their native transaction primitive.
  *
  * **"Nested" means *this* async context, not "some transaction is open".**
- * Nesting is detected with an {@link AsyncLocalStorage} whose value is the
+ * Ownership is tracked with an {@link AsyncLocalStorage} whose value is the
  * running transaction's token: a `transaction()` call whose own async context
  * carries the active token is a nested call and joins; one that carries nothing
  * is an independent caller and queues, exactly like the SQL adapters'
@@ -26,17 +26,30 @@
  * nested — its writes then committed as far as it could tell and vanished when
  * the unrelated transaction rolled back.
  *
- * **Root-store statements issued while a transaction is open still land inside
- * it.** There is one connection and better-sqlite3 is synchronous, so a
- * `store.users.create(...)` issued from outside the transaction context between
- * two `await`s of an open body executes on that connection while its `BEGIN` is
- * live: it commits with the body, or rolls back with it. The queue removes the
- * common case (an independent `store.transaction(...)`); a bare repository call
- * cannot be queued without making every read block on the writer. Service code
- * therefore does its work either wholly inside a transaction body or wholly
- * outside one, and a transaction body never awaits anything that lets an
- * unrelated request's bare writes run — which is what the request-scoped store
- * handed to `fn` is for.
+ * **Every repository call is gated on that ownership, not only
+ * `transaction()`.** There is one connection and better-sqlite3 is synchronous,
+ * so a `store.users.create(...)` issued while a body holds `BEGIN` would execute
+ * inside that transaction and share its fate — commit with it, or vanish with
+ * its rollback after having reported success. Each repository method therefore
+ * runs through {@link SqliteStore.mediate}: while a transaction is open, a call
+ * whose async context carries that transaction's token (the body itself, its
+ * nested `transaction()` calls, `tx.*` and `store.*` alike) executes at once,
+ * and a call from any other context — another request, a worker tick, a
+ * detached continuation — waits its turn on the same queue as independent
+ * `transaction()` calls and runs after the transaction has committed or rolled
+ * back. Reads are gated too, so an unrelated caller can never observe
+ * uncommitted rows. When no transaction is open, calls execute immediately in
+ * autocommit mode.
+ *
+ * **A token dies with its transaction.** The gate compares the context's token
+ * with the token of the transaction that currently holds `BEGIN`, so a
+ * continuation left over from a finished body (work started with `void` and
+ * never awaited, a timer it armed) carries no capability once that body has
+ * settled: it is an outside caller, queues behind whatever is open now, and
+ * cannot join a later transaction by accident. The corollary for service code
+ * is that a transaction body must never *wait for* another async context's
+ * store call — that caller is parked until the body ends, so the body would be
+ * waiting on itself.
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -556,13 +569,44 @@ function stamps(input: {
   };
 }
 
+/** Runs one repository call once its caller is entitled to the connection. */
+type Mediator = <T>(work: () => Promise<T>) => Promise<T>;
+
+/** The shape every repository method has: arguments in, promise out. */
+type RepoMethod = (...args: unknown[]) => Promise<unknown>;
+
+/**
+ * Return a copy of `repo` whose every method runs through `mediate`.
+ *
+ * The repository literals below are written against the bare connection; this
+ * is what turns them into the gated surface the rest of the process sees. The
+ * methods are arrow functions closed over the store, so detaching them from
+ * the literal loses nothing.
+ */
+function guardRepo<R extends object>(repo: R, mediate: Mediator): R {
+  const guarded: Record<string, unknown> = {};
+  for (const name of Object.keys(repo) as (keyof R & string)[]) {
+    const member: unknown = repo[name];
+    if (typeof member !== 'function') {
+      guarded[name] = member;
+      continue;
+    }
+    const method = member as RepoMethod;
+    guarded[name] = (...args: unknown[]): Promise<unknown> => mediate(() => method(...args));
+  }
+  return guarded as unknown as R;
+}
+
 /** The SQLite {@link NexusStore}. Construct it with {@link createSqliteStore}. */
 class SqliteStore implements NexusStore {
   readonly driver: DbDriver = 'sqlite';
 
   private readonly db: Database;
 
-  /** Serialises `transaction` bodies; see the module docblock. */
+  /**
+   * Serialises `transaction` bodies and every repository call made from outside
+   * the open transaction; see the module docblock.
+   */
   private queue: Promise<unknown> = Promise.resolve();
 
   /**
@@ -588,6 +632,31 @@ class SqliteStore implements NexusStore {
 
   constructor(db: Database) {
     this.db = db;
+    // The repository literals below run straight against the connection; the
+    // process sees them only through the ownership gate. Every repository the
+    // store exposes must be listed here — an unguarded one would reopen the
+    // hole the gate closes.
+    const mediate: Mediator = (work) => this.mediate(work);
+    this.users = guardRepo(this.users, mediate);
+    this.organizations = guardRepo(this.organizations, mediate);
+    this.sessions = guardRepo(this.sessions, mediate);
+    this.apis = guardRepo(this.apis, mediate);
+    this.apiSpecs = guardRepo(this.apiSpecs, mediate);
+    this.apiPlugins = guardRepo(this.apiPlugins, mediate);
+    this.accessRequests = guardRepo(this.accessRequests, mediate);
+    this.grants = guardRepo(this.grants, mediate);
+    this.credentials = guardRepo(this.credentials, mediate);
+    this.consumers = guardRepo(this.consumers, mediate);
+    this.threads = guardRepo(this.threads, mediate);
+    this.messages = guardRepo(this.messages, mediate);
+    this.notifications = guardRepo(this.notifications, mediate);
+    this.emailOutbox = guardRepo(this.emailOutbox, mediate);
+    this.gatewayTeardownJobs = guardRepo(this.gatewayTeardownJobs, mediate);
+    this.auditLogs = guardRepo(this.auditLogs, mediate);
+    this.settings = guardRepo(this.settings, mediate);
+    this.emailTemplates = guardRepo(this.emailTemplates, mediate);
+    this.verificationTokens = guardRepo(this.verificationTokens, mediate);
+    this.leases = guardRepo(this.leases, mediate);
   }
 
   /* ── Lifecycle ────────────────────────────────────────────────────────── */
@@ -611,6 +680,8 @@ class SqliteStore implements NexusStore {
   async healthCheck(): Promise<StoreHealth> {
     const started = Date.now();
     try {
+      // Deliberately not gated: `SELECT 1` reads no rows, and a liveness probe
+      // must answer while a transaction is open rather than queue behind it.
       queryOne(this.db, 'SELECT 1 AS ok');
       return { ok: true, latencyMs: Date.now() - started, error: null };
     } catch (error) {
@@ -622,13 +693,58 @@ class SqliteStore implements NexusStore {
     }
   }
 
+  /**
+   * Whether the calling async context owns the transaction holding `BEGIN`.
+   *
+   * True only while a transaction is open *and* the caller carries its token.
+   * A caller carrying a finished transaction's token is not an owner: the
+   * token expired with the transaction, so the detached work it came from has
+   * no more claim on the connection than any other outside caller.
+   */
+  private ownsOpenTransaction(): boolean {
+    return this.activeTx !== null && this.txContext.getStore() === this.activeTx;
+  }
+
+  /**
+   * Run one repository call when its caller is entitled to the connection.
+   *
+   * - No transaction open: run now, in autocommit mode.
+   * - Transaction open and the caller owns it: run now, inside it.
+   * - Transaction open and the caller is anyone else: wait on the queue behind
+   *   it (and behind anything already queued), then run. By the time the
+   *   queued call executes the transaction has committed or rolled back, so
+   *   the call neither sees uncommitted rows nor lands inside a transaction
+   *   that could later undo it.
+   *
+   * The queued call runs in its caller's async context, so a multi-statement
+   * repository method that re-enters the gate for its own nested calls (a
+   * `create` reading back the row it inserted) finds no transaction open and
+   * proceeds. Queue failures are contained: `work` is chained on both branches,
+   * and the queue itself only ever settles to `undefined`.
+   *
+   * Invariant for the repositories: a method that needs atomicity uses the
+   * driver's synchronous `db.transaction(...)`, never `this.transaction(...)`.
+   * A queued call *is* the queue head while it runs, so a `transaction()` it
+   * chained behind itself would wait for it forever.
+   */
+  private mediate<T>(work: () => Promise<T>): Promise<T> {
+    if (this.activeTx === null || this.ownsOpenTransaction()) {
+      return work();
+    }
+    const result = this.queue.then(work, work);
+    this.queue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
   transaction<T>(fn: (tx: NexusStore) => Promise<T>): Promise<T> {
-    const inherited = this.txContext.getStore();
-    if (inherited !== undefined && inherited === this.activeTx) {
+    if (this.ownsOpenTransaction()) {
       // This call is running inside the body of the transaction that currently
       // holds `BEGIN` — a genuine nested call, so join it. A caller that merely
-      // arrived while that body was awaiting carries no token and falls through
-      // to the queue below.
+      // arrived while that body was awaiting carries no token (or a dead one)
+      // and falls through to the queue below.
       return fn(this);
     }
     const token = Symbol('sqlite-tx');

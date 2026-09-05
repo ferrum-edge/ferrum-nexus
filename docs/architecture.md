@@ -188,12 +188,26 @@ never `DATETIME`, so there is nothing for a driver to reinterpret.
 ### 4.2 The SQLite adapter is the reference
 
 better-sqlite3 is synchronous, so every repo method returns an already-settled
-promise. Because a synchronous driver cannot hold `BEGIN` open across an
-`await`, `transaction()` funnels bodies through a per-connection promise queue:
-one body at a time, `BEGIN IMMEDIATE` before it, `COMMIT` on resolve,
-`ROLLBACK` on reject, and a nested call joins the running transaction rather
-than starting a second one. The other three adapters must present that same
-contract using their native primitive.
+promise whenever it gets to run. Because a synchronous driver cannot hold
+`BEGIN` open across an `await`, `transaction()` funnels bodies through a
+per-connection promise queue: one body at a time, `BEGIN IMMEDIATE` before it,
+`COMMIT` on resolve, `ROLLBACK` on reject, and a nested call joins the running
+transaction rather than starting a second one. The other three adapters must
+present that same contract using their native primitive.
+
+There is one connection, so a statement issued while a body holds `BEGIN`
+would execute inside that transaction whoever issued it. The adapter therefore
+gates **every** repository call on transaction ownership, tracked with an
+`AsyncLocalStorage` token: a call whose async context belongs to the open body
+(the body itself, `tx.*`, a nested `transaction()`) runs immediately; a call
+from any other context — another request, the outbox worker, a stray
+continuation of an already-finished transaction — waits on the same queue and
+runs after the body has committed or rolled back. Reads are gated too, so no
+caller observes uncommitted rows, and no unrelated write can be reported as
+successful and then disappear with someone else's rollback. The token dies
+with its transaction, so detached work cannot carry an expired capability into
+a later one. The one rule this imposes on service code: a transaction body
+must never wait for another async context's store call.
 
 Pragmas on open: `foreign_keys = ON`, `busy_timeout = 5000`, and for
 file-backed databases `journal_mode = WAL` + `synchronous = NORMAL`.
