@@ -196,6 +196,11 @@ export function int(value: unknown): number {
   return Number(value ?? 0);
 }
 
+/** Decode a nullable numeric column. */
+export function intOrNull(value: unknown): number | null {
+  return value === null || value === undefined ? null : int(value);
+}
+
 /** Decode a JSON text column, falling back when it is null or unparsable. */
 export function json<T>(value: unknown, fallback: T): T {
   if (value === null || value === undefined) return fallback;

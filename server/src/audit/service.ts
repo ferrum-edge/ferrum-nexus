@@ -84,6 +84,11 @@ export const AuditAction = {
   CREDENTIAL_ISSUE: 'credential.issue',
   CREDENTIAL_ROTATE: 'credential.rotate',
   CREDENTIAL_REVOKE: 'credential.revoke',
+  /**
+   * An admin emptied one credential type on a gateway consumer and revoked its
+   * portal rows — the repair for positions that can no longer be trusted.
+   */
+  CREDENTIAL_RECONCILE: 'credential.reconcile',
 
   /* messaging & notifications */
   MESSAGE_THREAD_CREATE: 'message.thread_create',

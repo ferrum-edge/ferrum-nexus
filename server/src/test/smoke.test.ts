@@ -1284,9 +1284,77 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.deepEqual(
         byConsumer.map((entry) => entry.id),
         [first.id, second.id],
-        'oldest first, mirroring the Edge array order',
+        'append order, mirroring the Edge array order',
       );
       assert.equal((await store.credentials.listByConsumer(user.id)).length, 2);
+
+      // The store assigns the append ordinal per consumer and type, and the
+      // clock plays no part in it: the later append here carries the *earlier*
+      // timestamp yet sorts after the first.
+      assert.equal(first.edge_ordinal, 1);
+      assert.equal(second.edge_ordinal, 2);
+      const skewed = await store.credentials.create({
+        user_id: user.id,
+        ferrum_consumer_id: user.id,
+        credential_type: 'keyauth',
+        ferrum_credential_id: 'keyauth:2',
+        fingerprint: `fp-${newId()}`,
+        last4: 'skew',
+        status: 'active',
+        created_at: isoInSeconds(-3600),
+      });
+      assert.equal(skewed.edge_ordinal, 3);
+      assert.deepEqual(
+        (await store.credentials.listByConsumer(user.id, 'keyauth')).map((entry) => entry.id),
+        [first.id, second.id, skewed.id],
+        'ordinal order, not timestamp order',
+      );
+      // Another type on the same consumer counts from one.
+      const jwt = await store.credentials.create({
+        user_id: user.id,
+        ferrum_consumer_id: user.id,
+        credential_type: 'jwt',
+        ferrum_credential_id: 'jwt:0',
+        fingerprint: `fp-${newId()}`,
+        last4: 'jwt1',
+        status: 'active',
+      });
+      assert.equal(jwt.edge_ordinal, 1);
+      // An explicit null records a legacy row of unknown position; it lists
+      // ahead of every row with an ordinal whatever its timestamp says.
+      const legacy = await store.credentials.create({
+        user_id: user.id,
+        ferrum_consumer_id: user.id,
+        credential_type: 'keyauth',
+        ferrum_credential_id: 'keyauth:legacy',
+        fingerprint: `fp-${newId()}`,
+        last4: 'lega',
+        status: 'active',
+        edge_ordinal: null,
+      });
+      assert.equal(legacy.edge_ordinal, null);
+      assert.deepEqual(
+        (await store.credentials.listByConsumer(user.id, 'keyauth')).map((entry) => entry.id),
+        [legacy.id, first.id, second.id, skewed.id],
+      );
+      // Two assigned ordinals can never collide within a consumer and type.
+      await assert.rejects(
+        () =>
+          store.credentials.create({
+            user_id: user.id,
+            ferrum_consumer_id: user.id,
+            credential_type: 'keyauth',
+            ferrum_credential_id: 'keyauth:dup',
+            fingerprint: `fp-${newId()}`,
+            last4: 'dupe',
+            status: 'active',
+            edge_ordinal: 1,
+          }),
+        (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
+      );
+      assert.equal(await store.credentials.delete(legacy.id), true);
+      assert.equal(await store.credentials.delete(skewed.id), true);
+      assert.equal(await store.credentials.delete(jwt.id), true);
 
       const retired = await store.credentials.update(first.id, { status: 'retiring' });
       assert.equal(retired?.status, 'retiring');
@@ -1298,6 +1366,17 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       );
       assert.equal(await store.credentials.delete(second.id), true);
       assert.equal(await store.credentials.delete(second.id), false);
+      // A value is never reused once handed out, whatever became of its row.
+      const next = await store.credentials.create({
+        user_id: user.id,
+        ferrum_consumer_id: user.id,
+        credential_type: 'keyauth',
+        ferrum_credential_id: 'keyauth:3',
+        fingerprint: `fp-${newId()}`,
+        last4: 'next',
+        status: 'active',
+      });
+      assert.equal(next.edge_ordinal, 4, 'past the highest ordinal still on file');
     });
 
     /* ── threads and messages ─────────────────────────────────────────── */

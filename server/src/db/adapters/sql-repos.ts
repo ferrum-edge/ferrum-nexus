@@ -110,6 +110,7 @@ import {
   FOR_UPDATE_SKIP_LOCKED,
   insertParts,
   int,
+  intOrNull,
   json,
   mapSqlConflict,
   page,
@@ -323,6 +324,7 @@ function mapCredential(row: Row): CredentialRecord {
     label: textOrNull(row.label),
     status: text(row.status) as CredentialStatus,
     rotated_from_id: textOrNull(row.rotated_from_id),
+    edge_ordinal: intOrNull(row.edge_ordinal),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -1518,28 +1520,47 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
   const credentials: CredentialRepo = {
     create: async (input) => {
       const meta = stamps(input);
+      const columns = `(id, user_id, ferrum_consumer_id, credential_type, ferrum_credential_id,
+              fingerprint, last4, label, status, rotated_from_id, edge_ordinal, created_at,
+              updated_at)`;
+      const values: SqlParam[] = [
+        meta.id,
+        input.user_id,
+        input.ferrum_consumer_id,
+        input.credential_type,
+        input.ferrum_credential_id,
+        input.fingerprint,
+        input.last4,
+        input.label ?? null,
+        input.status,
+        input.rotated_from_id ?? null,
+      ];
+      // With no ordinal given it is computed inside the insert: one statement,
+      // so the read of the current maximum and the write claiming the next
+      // value cannot be split. `INSERT … SELECT` rather than a scalar subquery
+      // in `VALUES`, because MySQL refuses the latter on the target table.
       await mapSqlConflict('That credential is already registered', () =>
-        execute(
-          exec,
-          `INSERT INTO credential_metadata
-             (id, user_id, ferrum_consumer_id, credential_type, ferrum_credential_id, fingerprint,
-              last4, label, status, rotated_from_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            meta.id,
-            input.user_id,
-            input.ferrum_consumer_id,
-            input.credential_type,
-            input.ferrum_credential_id,
-            input.fingerprint,
-            input.last4,
-            input.label ?? null,
-            input.status,
-            input.rotated_from_id ?? null,
-            meta.created_at,
-            meta.updated_at,
-          ],
-        ),
+        input.edge_ordinal === undefined
+          ? execute(
+              exec,
+              `INSERT INTO credential_metadata ${columns}
+               SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(MAX(edge_ordinal), 0) + 1, ?, ?
+                 FROM credential_metadata
+                WHERE ferrum_consumer_id = ? AND credential_type = ?`,
+              [
+                ...values,
+                meta.created_at,
+                meta.updated_at,
+                input.ferrum_consumer_id,
+                input.credential_type,
+              ],
+            )
+          : execute(
+              exec,
+              `INSERT INTO credential_metadata ${columns}
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [...values, input.edge_ordinal, meta.created_at, meta.updated_at],
+            ),
       );
       const created = await credentials.findById(meta.id);
       if (!created) throw new Error('credentials.create: row vanished immediately after insert');
@@ -1589,9 +1610,14 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         .always('ferrum_consumer_id = ?', ferrumConsumerId)
         .add(type, 'credential_type = ?', type ?? null)
         .build();
+      // Unresolved rows (NULL ordinal) first, then append order. The CASE is
+      // what makes NULL placement identical on PostgreSQL (NULLs last by
+      // default) and MySQL (NULLs first).
       const rows = await queryAll(
         exec,
-        `SELECT * FROM credential_metadata${where.sql} ORDER BY created_at ASC, id ASC`,
+        `SELECT * FROM credential_metadata${where.sql}
+          ORDER BY CASE WHEN edge_ordinal IS NULL THEN 0 ELSE 1 END ASC, edge_ordinal ASC,
+                   created_at ASC, id ASC`,
         where.params,
       );
       return rows.map(mapCredential);

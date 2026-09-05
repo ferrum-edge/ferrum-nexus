@@ -32,24 +32,42 @@
  *   `username`/`id`/`custom_id`. `ShowOnceSecret.jwt_key` therefore carries the
  *   consumer username — the value the client must put in `sub`.
  *
- * ## Locating an entry to delete: Nexus row order *is* the array index
+ * ## Locating an entry to delete: the append ordinal *is* the array index
  *
  * Edge gives credential entries **no id**, and reads redact the material, so
  * there is nothing on the wire to match a specific entry against. What is
  * stable is the ordering: `POST` appends, `DELETE /{type}/{index}` removes by
- * 0-based index, and Nexus writes one `credential_metadata` row per append. The
- * non-revoked rows for a `(consumer, type)` pair, oldest first, are therefore a
- * mirror of the Edge array, and a row's position in that list is its index.
+ * 0-based index, and Nexus writes one `credential_metadata` row per append.
+ * Each row carries `edge_ordinal`, a per-`(consumer, type)` counter the store
+ * assigns as `MAX + 1` inside the same per-consumer critical section as the
+ * append itself, so ordinal order **is** append order by construction. The
+ * non-revoked rows for a pair, ordered by ordinal, mirror the Edge array, and a
+ * row's position in that list is its index.
  *
- * {@link resolveCredentialIndex} computes that position and cross-checks it
- * against the live array length before any destructive call; a mismatch (an
- * operator edited the consumer by hand) degrades to deleting the whole
- * credential type when only one row is live, and otherwise refuses rather than
- * deleting somebody else's key. **That degradation is valid for `revoke`
- * only** — deleting everything is what a revoke asked for. `rotate` refuses
- * the drift instead, because "delete the whole type" would take the entry it
- * had just appended with it. A target that is no longer live at all resolves
- * to `not-live` and never to `whole-type`.
+ * The ordering key used to be `created_at` with the row id as tie-break, and
+ * that is not append order: two appends inside one millisecond sort by a random
+ * UUID, and a clock stepped backwards between two appends puts the later one
+ * first. Either way a revoke deleted *another* live key while marking the
+ * requested one revoked. Nothing here reads `created_at` for position any more.
+ *
+ * Rows written before the ordinal existed were backfilled from the old sort
+ * where that sort was unambiguous (distinct timestamps). Where it was not, they
+ * carry `edge_ordinal = null`: they all precede every row that has an ordinal,
+ * but their order among themselves is unknowable. A single such row still has
+ * a definite index (0); two or more make the target **ambiguous**, and
+ * {@link resolveCredentialIndex} refuses to act on it until an administrator
+ * runs {@link CredentialsService.reconcile}, which empties the type on both
+ * sides — the only repair that needs no per-entry identity.
+ *
+ * {@link resolveCredentialIndex} also cross-checks the mirror against the live
+ * array length before any destructive call; a mismatch (an operator edited the
+ * consumer by hand) degrades to deleting the whole credential type when only
+ * one row is live, and otherwise refuses rather than deleting somebody else's
+ * key. **That degradation is valid for `revoke` only** — deleting everything is
+ * what a revoke asked for. `rotate` refuses the drift instead, because "delete
+ * the whole type" would take the entry it had just appended with it. A target
+ * that is no longer live at all resolves to `not-live` and never to
+ * `whole-type`.
  *
  * ## The mirror is written the instant Edge confirms, never later
  *
@@ -101,6 +119,7 @@ import {
   type GatewayTeardownOutcome,
   type IssueCredentialResponse,
   type Paginated,
+  type ReconcileCredentialsResponse,
   type RotateCredentialResponse,
   type ShowOnceSecret,
   type Uuid,
@@ -153,6 +172,17 @@ const LIVE_STATUSES = new Set(['active', 'retiring']);
  */
 const RECONCILE_MESSAGE =
   'The gateway credential list does not match the portal. An administrator must reconcile this consumer — revoke the portal’s remaining credentials for it and issue new ones, or delete the entries added to the gateway by hand — before it can be rotated or revoked';
+
+/**
+ * Raised when the target predates the append ordinal and shares that state
+ * with another live row of its type, so its gateway position cannot be known.
+ *
+ * Not an Edge error: both sides are internally consistent, the portal simply
+ * cannot say which entry is which. The fix is
+ * {@link CredentialsService.reconcile}; see `operations.md` §12.
+ */
+const AMBIGUOUS_MESSAGE =
+  'The gateway position of this credential cannot be determined: it predates the portal’s position tracking and shares that state with another live credential of the same type. An administrator must reconcile this consumer — clearing the credential type on the gateway and revoking its portal rows — after which new credentials can be issued';
 
 /** Generated plaintext plus the Edge entry that carries it. */
 interface GeneratedCredential {
@@ -217,6 +247,22 @@ export interface CredentialsService {
   ): Promise<RotateCredentialResponse>;
   /** Delete the entry from Edge and mark the row revoked. */
   revoke(user: UserRecord, credentialId: Uuid, ip?: string | null): Promise<void>;
+  /**
+   * Empty one credential type on a consumer, on both sides: `DELETE
+   * /consumers/{id}/credentials/{type}` on Edge, every live portal row for the
+   * pair moved to `revoked`. Administrators only.
+   *
+   * The repair for a consumer whose credential positions can no longer be
+   * trusted — the array drifted from the mirror, or live rows predate the
+   * append ordinal and share a timestamp. Edge exposes neither an id nor the
+   * material of an entry on read, so nothing finer-grained than "clear the type
+   * and reissue" can be done without guessing which entry is which.
+   */
+  reconcile(
+    actor: UserRecord,
+    input: { consumerId: string; credentialType: CredentialType; reason?: string | null },
+    ip?: string | null,
+  ): Promise<ReconcileCredentialsResponse>;
   /**
    * Take a user's gateway identity away entirely: every ACL group off the
    * canonical consumer, every credential of every type deleted, every mirrored
@@ -402,12 +448,29 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
   const { config, store, edge, crypto, audit, notifications, email, provisioner } = deps;
   const cap = config.edge.maxCredentialsPerType;
 
-  /** Rows still occupying an Edge array slot, oldest first. */
+  /**
+   * Rows still occupying an Edge array slot, in array order.
+   *
+   * The store already returns this order; sorting again here keeps the
+   * invariant local to the code that depends on it. Rows without an ordinal
+   * precede every row with one — they were all appended before the counter
+   * existed — and are otherwise left in the store's tie-break order, which is
+   * meaningless for position and never read as such (see
+   * {@link resolveCredentialIndex}). `created_at` plays no part.
+   */
   async function liveRows(consumerId: string, type: CredentialType): Promise<CredentialRecord[]> {
     const rows = await store.credentials.listByConsumer(consumerId, type);
-    return rows
-      .filter((row) => LIVE_STATUSES.has(row.status))
-      .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+    const live = rows.filter((row) => LIVE_STATUSES.has(row.status));
+    return live
+      .map((row, position) => ({ row, position }))
+      .sort((a, b) => {
+        if (a.row.edge_ordinal === null || b.row.edge_ordinal === null) {
+          if (a.row.edge_ordinal === b.row.edge_ordinal) return a.position - b.position;
+          return a.row.edge_ordinal === null ? -1 : 1;
+        }
+        return a.row.edge_ordinal - b.row.edge_ordinal;
+      })
+      .map((entry) => entry.row);
   }
 
   /**
@@ -428,11 +491,27 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     // whole credential type: everything still live belongs to someone else's
     // successful operation.
     if (index === -1) return 'not-live';
-    if (rows.length === edgeLength) return index;
-    // The mirror drifted (a hand-edited consumer). Removing the entire type is
-    // safe only when this is the last credential Nexus knows about.
-    if (rows.length === 1) return 'whole-type';
-    throw edgeError(RECONCILE_MESSAGE, { expected: rows.length, actual: edgeLength });
+    if (rows.length !== edgeLength) {
+      // The mirror drifted (a hand-edited consumer). Removing the entire type
+      // is safe only when this is the last credential Nexus knows about.
+      if (rows.length === 1) return 'whole-type';
+      throw edgeError(RECONCILE_MESSAGE, { expected: rows.length, actual: edgeLength });
+    }
+    // A target without an ordinal sits in the leading block of legacy rows.
+    // Alone there, it is index 0 whatever else is live; with company, its
+    // position within that block is unknowable and acting on `index` would be
+    // exactly the wrong-key deletion this module exists to prevent.
+    if (target.edge_ordinal === null) {
+      const unresolved = rows.filter((row) => row.edge_ordinal === null).length;
+      if (unresolved > 1) {
+        throw conflict(AMBIGUOUS_MESSAGE, {
+          consumer_id: target.ferrum_consumer_id,
+          credential_type: target.credential_type,
+          unresolved_credentials: unresolved,
+        });
+      }
+    }
+    return index;
   }
 
   /** Length of the Edge credentials array for one type (basicauth is never emitted). */
@@ -495,8 +574,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         ferrum_consumer_id: input.consumerId,
         credential_type: input.type,
         // Edge assigns credential entries no id of their own; the addressable
-        // resource is the per-type collection, and position is tracked by row
-        // order (see the module docblock).
+        // resource is the per-type collection, and position is tracked by
+        // `edge_ordinal`, which the store assigns here as the next value for
+        // this consumer and type — under the consumer lease the caller holds,
+        // which is what makes it the entry's true append position.
         ferrum_credential_id: `${input.consumerId}/credentials/${input.type}`,
         fingerprint: crypto.fingerprint(generated.material),
         last4: last4(generated.material),
@@ -878,6 +959,70 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         { credential_type: type, consumer_id: consumerId, last4: target.last4 },
         ip,
       );
+    },
+
+    async reconcile(actor, input, ip = null): Promise<ReconcileCredentialsResponse> {
+      if (!roleAtLeast(actor.role, 'admin')) {
+        throw forbidden('Only an administrator can reconcile a gateway consumer’s credentials');
+      }
+      const { consumerId, credentialType: type } = input;
+      if (!(CREDENTIAL_TYPES as readonly string[]).includes(type)) {
+        throw validationFailed(`Unsupported credential type '${String(type)}'`);
+      }
+
+      const result = await edge.serializePerKey(consumerId, async () => {
+        const live = await edge.consumers.get(consumerId);
+        // Gateway first: a row may only say `revoked` once its entry is gone.
+        // The whole-type delete is idempotent, so a type Edge no longer holds
+        // — or never shows, as with `basicauth` on every read — costs one 204.
+        if (live) await edge.consumers.deleteCredentialType(consumerId, type, actor.id);
+        const revokedIds: Uuid[] = [];
+        const owners = new Set<Uuid>();
+        for (const row of await store.credentials.listByConsumer(consumerId, type)) {
+          if (!LIVE_STATUSES.has(row.status)) continue;
+          await store.credentials.update(row.id, { status: 'revoked' });
+          revokedIds.push(row.id);
+          owners.add(row.user_id);
+        }
+        return { gatewayCleared: live !== null, revokedIds, owners: [...owners] };
+      });
+
+      await audit.record(
+        { id: actor.id, role: actor.role },
+        AuditAction.CREDENTIAL_RECONCILE,
+        { type: 'consumer', id: consumerId },
+        {
+          credential_type: type,
+          consumer_id: consumerId,
+          gateway_cleared: result.gatewayCleared,
+          revoked_credentials: result.revokedIds.length,
+          revoked_credential_ids: result.revokedIds,
+          owner_user_ids: result.owners,
+          ...(input.reason ? { reason: input.reason } : {}),
+        },
+        ip,
+      );
+
+      // A courtesy, like every notification: the account holder has to learn
+      // that their credentials stopped working and why.
+      for (const ownerId of result.owners) {
+        await notifications
+          .notify(
+            ownerId,
+            'system',
+            'Gateway credentials reset',
+            `Your ${type} credentials were reset by an administrator; issue new ones from the credentials page.`,
+            '/credentials',
+          )
+          .catch(() => undefined);
+      }
+
+      return {
+        consumer_id: consumerId,
+        credential_type: type,
+        revoked_credentials: result.revokedIds.length,
+        gateway_cleared: result.gatewayCleared,
+      };
     },
   };
 

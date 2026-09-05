@@ -546,7 +546,8 @@ export async function buildServer(
   );
 
   await app.register(
-    async (scope) => scope.register(adminRoutes, { settings, massEmail, email, audit, god }),
+    async (scope) =>
+      scope.register(adminRoutes, { settings, massEmail, email, audit, god, credentials }),
     { prefix: '/api/admin' },
   );
 

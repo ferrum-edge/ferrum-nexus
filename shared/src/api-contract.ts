@@ -995,6 +995,36 @@ export interface ListAuditLogsQuery extends ListQuery {
 /** `GET /api/admin/audit-logs` */
 export type ListAuditLogsResponse = Paginated<AuditLog>;
 
+/* ── Admin: credential reconciliation ───────────────────────────────────── */
+
+/**
+ * `POST /api/admin/credentials/reconcile` — empty one credential type on a
+ * gateway consumer and mark every portal row for it revoked.
+ *
+ * The recovery for a consumer whose credential positions can no longer be
+ * trusted: the gateway array drifted from the portal, or live rows predate the
+ * append counter and share a timestamp. Edge exposes no per-entry identity or
+ * material on read, so the only safe repair is to clear the type on both sides
+ * and have the account holder issue new credentials.
+ */
+export interface ReconcileCredentialsRequest {
+  /** Ferrum Edge consumer id, as carried on `CredentialMetadata.ferrum_consumer_id`. */
+  consumer_id: string;
+  credential_type: CredentialType;
+  /** Recorded on the audit row. */
+  reason?: string | null;
+}
+
+/** `POST /api/admin/credentials/reconcile` */
+export interface ReconcileCredentialsResponse {
+  consumer_id: string;
+  credential_type: CredentialType;
+  /** Portal rows moved to `revoked`. */
+  revoked_credentials: number;
+  /** `false` when the gateway consumer no longer existed, so only rows changed. */
+  gateway_cleared: boolean;
+}
+
 /* ── Admin: god mode (super_admin only) ─────────────────────────────────── */
 
 /** `POST /api/admin/god/revoke-grant` — emergency revoke, bypasses ownership. */

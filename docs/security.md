@@ -521,11 +521,25 @@ The one exception is an account already at `FERRUM_MAX_CREDENTIALS_PER_TYPE`
 live credentials of that type: there is no room to append, so the old entry is
 deleted first and there is a brief gap. Keeping the cap at 2 or more avoids it.
 
-Because Edge gives credential entries no id, Nexus locates one by _position_
-(its row order mirrors the Edge array). If the two views disagree — someone
-hand-edited the consumer — the operation is **refused** with `EDGE_ERROR`
-rather than guessing, unless exactly one credential is live, in which case
-removing the whole type is unambiguous.
+Because Edge gives credential entries no id, Nexus locates one by _position_.
+Every `credential_metadata` row carries `edge_ordinal`, a per-consumer,
+per-type append counter the store assigns under the same lock as the Edge
+append, and a live entry's index is its rank among the consumer's live rows of
+that type ordered by it. Position is **never** inferred from `created_at`:
+equal-millisecond appends and backward clock steps reorder timestamps relative
+to the gateway array, and a revoke keyed on them could delete a different live
+key while marking the requested one revoked. If the two views disagree in
+length — someone hand-edited the consumer — the operation is **refused** with
+`EDGE_ERROR` rather than guessing, unless exactly one credential is live, in
+which case removing the whole type is unambiguous.
+
+Rows that predate the ordinal were backfilled only where their timestamps were
+distinct. Where two live rows of one type share a timestamp, both stay without
+an ordinal and any rotate or revoke of them is refused with `409 CONFLICT`
+until an administrator reconciles the consumer through
+`POST /api/admin/credentials/reconcile`, which clears the type on the gateway
+and revokes the rows — nothing finer-grained is possible without storing or
+reading back plaintext, which Nexus never does.
 
 That last fallback applies to **`revoke` only**. In a rotation, "delete the
 whole type" would take the entry appended moments earlier with it, leaving the
@@ -962,11 +976,12 @@ ordinary reporting.
 
 ### Credentials
 
-| Action              | Target type  | Description                                                                                                                                                                                                                                                               |
-| ------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `credential.issue`  | `credential` | A gateway credential was minted. `details`: credential type, consumer id, `last4`.                                                                                                                                                                                        |
-| `credential.rotate` | `credential` | Append-then-delete rotation. Target is the **new** credential; `details`: type, consumer id, `rotated_from`, `previous_last4`, plus `owner_user_id` when an admin rotated somebody else's credential — the replacement stays with its owner, the admin is only the actor. |
-| `credential.revoke` | `credential` | A credential was deleted from Edge and marked revoked. `details`: type, consumer id, `last4`.                                                                                                                                                                             |
+| Action                 | Target type  | Description                                                                                                                                                                                                                                                                                                                                                |
+| ---------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `credential.issue`     | `credential` | A gateway credential was minted. `details`: credential type, consumer id, `last4`.                                                                                                                                                                                                                                                                         |
+| `credential.rotate`    | `credential` | Append-then-delete rotation. Target is the **new** credential; `details`: type, consumer id, `rotated_from`, `previous_last4`, plus `owner_user_id` when an admin rotated somebody else's credential — the replacement stays with its owner, the admin is only the actor.                                                                                  |
+| `credential.revoke`    | `credential` | A credential was deleted from Edge and marked revoked. `details`: type, consumer id, `last4`.                                                                                                                                                                                                                                                              |
+| `credential.reconcile` | `consumer`   | An admin emptied one credential type on a gateway consumer and revoked its portal rows — the repair for positions that can no longer be trusted (drifted array, or legacy rows sharing a timestamp). `details`: `credential_type`, `consumer_id`, `gateway_cleared`, `revoked_credentials`, `revoked_credential_ids`, `owner_user_ids`, optional `reason`. |
 
 ### Messaging and notifications
 

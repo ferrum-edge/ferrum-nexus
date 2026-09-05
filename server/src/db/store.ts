@@ -720,11 +720,36 @@ export interface GrantRepo {
 
 /** Show-once gateway credential metadata (fingerprint + last4 only). */
 export interface CredentialRepo {
+  /**
+   * Insert a row and assign its `edge_ordinal`.
+   *
+   * Omit `edge_ordinal` and the store assigns the next value for the row's
+   * `(ferrum_consumer_id, credential_type)`: one more than the largest already
+   * recorded there, revoked rows included, so a value is never reused. The
+   * caller must hold the consumer's `serializePerKey` lease, exactly as it
+   * must for the Edge append the row mirrors — that lease is what makes
+   * "largest already recorded" the row's true append position. A unique index
+   * on `(consumer, type, ordinal)` turns a breach of that rule into a
+   * `CONFLICT` rather than two rows claiming one Edge slot.
+   *
+   * Pass `edge_ordinal: null` only to record a row whose gateway position is
+   * unknown — the state the migration backfill leaves ambiguous legacy rows in.
+   * No service does this.
+   */
   create(input: CreateInput<CredentialRecord>): Promise<CredentialRecord>;
   findById(id: Uuid): Promise<CredentialRecord | null>;
-  update(id: Uuid, patch: UpdateInput<CredentialRecord>): Promise<CredentialRecord | null>;
+  /** `edge_ordinal` is not updatable: a row's position is fixed at append time. */
+  update(
+    id: Uuid,
+    patch: Omit<UpdateInput<CredentialRecord>, 'edge_ordinal'>,
+  ): Promise<CredentialRecord | null>;
   list(filter: CredentialFilter, options?: ListOptions): Promise<Paginated<CredentialRecord>>;
-  /** All credentials of a consumer, oldest first — mirrors the Edge array order. */
+  /**
+   * All credentials of a consumer in gateway order: rows without an ordinal
+   * first (every one of them predates every row that has one), then by
+   * `edge_ordinal`, then by `created_at` and `id` as a tie-break only the
+   * unresolved rows need.
+   */
   listByConsumer(ferrumConsumerId: string, type?: CredentialType): Promise<CredentialRecord[]>;
   findByFingerprint(fingerprint: string): Promise<CredentialRecord | null>;
   count(filter: CredentialFilter): Promise<number>;

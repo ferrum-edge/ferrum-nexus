@@ -314,6 +314,19 @@ export interface CredentialMetadata {
   status: CredentialStatus;
   /** Set on the replacement credential produced by a rotation. */
   rotated_from_id: Uuid | null;
+  /**
+   * Append counter for the Edge credential array: strictly increasing per
+   * `(ferrum_consumer_id, credential_type)`, assigned by the store when the
+   * row is written, never reused. Edge addresses credential entries only by
+   * array position, and the position of a live entry is its rank among the
+   * consumer's live entries of that type ordered by this value — not by
+   * `created_at`, which equal-millisecond appends and clock steps can reorder.
+   *
+   * `null` only on a row written before the counter existed whose order could
+   * not be recovered unambiguously; such a row cannot be addressed by index and
+   * its consumer needs an administrator's reconciliation.
+   */
+  edge_ordinal: number | null;
   created_at: IsoTimestamp;
   updated_at: IsoTimestamp;
 }

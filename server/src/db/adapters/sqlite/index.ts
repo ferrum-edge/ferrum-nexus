@@ -156,6 +156,7 @@ import {
   execute,
   insertParts,
   int,
+  intOrNull,
   json,
   mapConflict,
   page,
@@ -365,6 +366,7 @@ function mapCredential(row: Row): CredentialRecord {
     label: textOrNull(row.label),
     status: text(row.status) as CredentialStatus,
     rotated_from_id: textOrNull(row.rotated_from_id),
+    edge_ordinal: intOrNull(row.edge_ordinal),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -1598,28 +1600,46 @@ class SqliteStore implements NexusStore {
   readonly credentials: CredentialRepo = {
     create: async (input) => {
       const meta = stamps(input);
+      const columns = `(id, user_id, ferrum_consumer_id, credential_type, ferrum_credential_id,
+              fingerprint, last4, label, status, rotated_from_id, edge_ordinal, created_at,
+              updated_at)`;
+      const values: Param[] = [
+        meta.id,
+        input.user_id,
+        input.ferrum_consumer_id,
+        input.credential_type,
+        input.ferrum_credential_id,
+        input.fingerprint,
+        input.last4,
+        input.label ?? null,
+        input.status,
+        input.rotated_from_id ?? null,
+      ];
+      // With no ordinal given it is computed inside the insert: one statement,
+      // so no other writer can slip between the read of the current maximum and
+      // the write that claims the next value.
       mapConflict('That credential is already registered', () =>
-        execute(
-          this.db,
-          `INSERT INTO credential_metadata
-             (id, user_id, ferrum_consumer_id, credential_type, ferrum_credential_id, fingerprint,
-              last4, label, status, rotated_from_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            meta.id,
-            input.user_id,
-            input.ferrum_consumer_id,
-            input.credential_type,
-            input.ferrum_credential_id,
-            input.fingerprint,
-            input.last4,
-            input.label ?? null,
-            input.status,
-            input.rotated_from_id ?? null,
-            meta.created_at,
-            meta.updated_at,
-          ],
-        ),
+        input.edge_ordinal === undefined
+          ? execute(
+              this.db,
+              `INSERT INTO credential_metadata ${columns}
+               SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(MAX(edge_ordinal), 0) + 1, ?, ?
+                 FROM credential_metadata
+                WHERE ferrum_consumer_id = ? AND credential_type = ?`,
+              [
+                ...values,
+                meta.created_at,
+                meta.updated_at,
+                input.ferrum_consumer_id,
+                input.credential_type,
+              ],
+            )
+          : execute(
+              this.db,
+              `INSERT INTO credential_metadata ${columns}
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [...values, input.edge_ordinal, meta.created_at, meta.updated_at],
+            ),
       );
       const created = await this.credentials.findById(meta.id);
       if (!created) throw new Error('credentials.create: row vanished immediately after insert');
@@ -1669,9 +1689,13 @@ class SqliteStore implements NexusStore {
         .always('ferrum_consumer_id = ?', ferrumConsumerId)
         .add(type, 'credential_type = ?', type ?? null)
         .build();
+      // Unresolved rows (NULL ordinal) first, then append order. The CASE keeps
+      // the NULL placement explicit rather than relying on the engine default.
       return queryAll(
         this.db,
-        `SELECT * FROM credential_metadata${where.sql} ORDER BY created_at ASC, id ASC`,
+        `SELECT * FROM credential_metadata${where.sql}
+          ORDER BY CASE WHEN edge_ordinal IS NULL THEN 0 ELSE 1 END ASC, edge_ordinal ASC,
+                   created_at ASC, id ASC`,
         where.params,
       ).map(mapCredential);
     },

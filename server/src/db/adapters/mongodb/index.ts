@@ -45,6 +45,7 @@
 
 import {
   MongoClient,
+  type AnyBulkWriteOperation,
   type ClientSession,
   type Collection,
   type Db,
@@ -210,6 +211,10 @@ function flag(value: unknown): boolean {
 
 function num(value: unknown): number {
   return typeof value === 'number' ? value : Number(value ?? 0);
+}
+
+function numOrNull(value: unknown): number | null {
+  return value === null || value === undefined ? null : num(value);
 }
 
 /**
@@ -491,6 +496,9 @@ function mapCredential(row: Row): CredentialRecord {
     label: strOrNull(row.label),
     status: str(row.status) as CredentialStatus,
     rotated_from_id: strOrNull(row.rotated_from_id),
+    // Absent on a document written before `011_credential_ordinal` ran, which
+    // reads back exactly like the SQL backfill's unresolved NULL.
+    edge_ordinal: numOrNull(row.edge_ordinal),
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
   };
@@ -960,6 +968,83 @@ const LEASE_INDEXES: IndexDefinition[] = [
   { collection: 'edge_leases', name: 'ix_edge_leases_expires', key: { expires_at: 1 } },
 ];
 
+/** Indexes added by `011_credential_ordinal`. */
+const ORDINAL_INDEXES: IndexDefinition[] = [
+  // Partial, so any number of unresolved legacy documents (no ordinal) coexist
+  // — the SQL dialects get that from NULLs being distinct in a unique index.
+  // Two *assigned* ordinals can never collide within a consumer and type.
+  {
+    collection: 'credential_metadata',
+    name: 'ux_credentials_ordinal',
+    key: { ferrum_consumer_id: 1, credential_type: 1, edge_ordinal: 1 },
+    unique: true,
+    partialFilterExpression: { edge_ordinal: { $type: 'number' } },
+  },
+];
+
+/**
+ * Backfill `edge_ordinal` — the Mongo half of `011_credential_ordinal.sql`.
+ *
+ * Same rule as the SQL dialects: within one `(ferrum_consumer_id,
+ * credential_type)` group the documents are numbered from 1 in `(created_at,
+ * _id)` order, but only when no two *live* documents of the group share a
+ * `created_at`. An ambiguous group is set to `null` throughout and left for an
+ * administrator's reconciliation (`docs/operations.md` §12), because nothing on
+ * either side can say which gateway entry is which.
+ */
+async function backfillCredentialOrdinals(db: Db): Promise<void> {
+  const collection = db.collection<NexusDoc>('credential_metadata');
+  const groups = new Map<string, Row[]>();
+  const cursor = collection.find(
+    {},
+    { projection: { _id: 1, ferrum_consumer_id: 1, credential_type: 1, created_at: 1, status: 1 } },
+  );
+  for await (const doc of cursor) {
+    const row = doc as Row;
+    const key = `${str(row.ferrum_consumer_id)}\u0000${str(row.credential_type)}`;
+    const group = groups.get(key);
+    if (group) group.push(row);
+    else groups.set(key, [row]);
+  }
+
+  // Plain code-point order, matching the binary collation the SQL sort uses.
+  const byAppend = (a: Row, b: Row): number => {
+    const stamp = compareStrings(str(a.created_at), str(b.created_at));
+    return stamp !== 0 ? stamp : compareStrings(str(a._id), str(b._id));
+  };
+
+  const writes: AnyBulkWriteOperation<NexusDoc>[] = [];
+  for (const group of groups.values()) {
+    group.sort(byAppend);
+    const liveStamps = new Set<string>();
+    let ambiguous = false;
+    for (const row of group) {
+      if (str(row.status) === 'revoked') continue;
+      const stamp = str(row.created_at);
+      if (liveStamps.has(stamp)) {
+        ambiguous = true;
+        break;
+      }
+      liveStamps.add(stamp);
+    }
+    group.forEach((row, index) => {
+      writes.push({
+        updateOne: {
+          filter: { _id: str(row._id) },
+          update: { $set: { edge_ordinal: ambiguous ? null : index + 1 } },
+        },
+      });
+    });
+  }
+  if (writes.length > 0) await collection.bulkWrite(writes, { ordered: false });
+}
+
+function compareStrings(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
 /** Create one batch of {@link IndexDefinition}s. */
 async function createIndexes(db: Db, indexes: IndexDefinition[]): Promise<void> {
   for (const index of indexes) {
@@ -1016,6 +1101,15 @@ const MONGO_MIGRATIONS: { id: string; apply: (db: Db) => Promise<void> }[] = [
     id: '010_message_sender_index',
     apply: (db: Db): Promise<void> => createIndexes(db, SENDER_INDEXES),
   },
+  {
+    id: '011_credential_ordinal',
+    // Backfill first: the unique index would otherwise be built over documents
+    // that are about to change under it.
+    apply: async (db: Db): Promise<void> => {
+      await backfillCredentialOrdinals(db);
+      await createIndexes(db, ORDINAL_INDEXES);
+    },
+  },
 ];
 
 /* ── Shared connection state ────────────────────────────────────────────── */
@@ -1051,6 +1145,29 @@ class MongoStore implements NexusStore {
   /** The collection handle for a logical table. */
   private col(name: string): Collection<NexusDoc> {
     return this.ctx.db.collection<NexusDoc>(name);
+  }
+
+  /**
+   * One more than the largest `edge_ordinal` recorded for a consumer and type.
+   *
+   * Two operations rather than the SQL adapters' single `INSERT … SELECT`. The
+   * caller's consumer lease is what keeps two appends from reading the same
+   * maximum, and the partial unique index turns a breach of that into a
+   * `CONFLICT` instead of two rows claiming one gateway slot.
+   */
+  private async nextCredentialOrdinal(consumerId: string, type: CredentialType): Promise<number> {
+    const query: Record<string, unknown> = {
+      ferrum_consumer_id: consumerId,
+      credential_type: type,
+      edge_ordinal: { $type: 'number' },
+    };
+    const top = await this.col(COLLECTIONS.credentials)
+      .find(query as Filter<NexusDoc>, this.opts)
+      .sort({ edge_ordinal: -1 })
+      .limit(1)
+      .project<Row>({ edge_ordinal: 1 })
+      .toArray();
+    return num(top[0]?.edge_ordinal ?? 0) + 1;
   }
 
   /** Session option threaded through every operation of a scoped store. */
@@ -1982,6 +2099,10 @@ class MongoStore implements NexusStore {
   readonly credentials: CredentialRepo = {
     create: async (input) => {
       const meta = stamps(input);
+      const edgeOrdinal =
+        input.edge_ordinal === undefined
+          ? await this.nextCredentialOrdinal(input.ferrum_consumer_id, input.credential_type)
+          : input.edge_ordinal;
       await mapConflict('That credential is already registered', () =>
         this.col(COLLECTIONS.credentials).insertOne(
           {
@@ -1995,6 +2116,7 @@ class MongoStore implements NexusStore {
             label: input.label ?? null,
             status: input.status,
             rotated_from_id: input.rotated_from_id ?? null,
+            edge_ordinal: edgeOrdinal,
             created_at: meta.created_at,
             updated_at: meta.updated_at,
           } as NexusDoc,
@@ -2040,9 +2162,11 @@ class MongoStore implements NexusStore {
     listByConsumer: async (ferrumConsumerId, type) => {
       const query: Record<string, unknown> = { ferrum_consumer_id: ferrumConsumerId };
       if (type !== undefined) query.credential_type = type;
+      // Ascending BSON order puts null and missing before every number, so
+      // unresolved documents lead, then append order.
       const docs = await this.col(COLLECTIONS.credentials)
         .find(query as Filter<NexusDoc>, this.opts)
-        .sort({ created_at: 1, _id: 1 })
+        .sort({ edge_ordinal: 1, created_at: 1, _id: 1 })
         .toArray();
       return docs.map((doc) => mapCredential(doc as Row));
     },
