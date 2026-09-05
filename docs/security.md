@@ -813,6 +813,14 @@ would otherwise hand out internal hostnames, ports and database account names
 (`connect ECONNREFUSED 10.0.3.14:5432`, `password authentication failed for
 user "nexus_app"`). The real text goes to the log at `error` level.
 
+**Request URL redaction.** Request and error logs replace query-string token
+values with `[Redacted]`, including password-reset and email-verification links.
+The same rule covers `code`, `state`, `key`, `secret`, `signature`, `access_token`,
+`refresh_token`, `api_key`, and `password`. Repeated parameters and percent-encoded
+names and values are covered; malformed parameter names have their values redacted
+conservatively. Paths and harmless diagnostic parameters remain readable. Existing
+cookie, Authorization, CSRF, and Set-Cookie header redaction remains in place.
+
 **Admin-authored HTML is a trusted-but-real input.** Email template bodies and
 the mass-email composer accept HTML, and only variables explicitly listed in
 `rawHtmlVars` skip escaping. Everything interpolated into an HTML body is

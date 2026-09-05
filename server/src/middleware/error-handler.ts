@@ -12,6 +12,7 @@ import { ZodError, type ZodType } from 'zod';
 import type { ApiErrorBody, ErrorCode } from '@ferrum-nexus/shared';
 
 import { NexusError, isNexusError } from '../lib/errors.js';
+import { sanitizeUrlForLog } from '../lib/sanitize-url-for-log.js';
 
 /** Turn a `ZodError` into `VALIDATION_FAILED` with per-field issue details. */
 export function fromZodError(error: ZodError, message = 'Request validation failed'): NexusError {
@@ -102,10 +103,17 @@ export function registerErrorHandler(
     const nexusError = toNexusError(error);
 
     if (nexusError.statusCode >= 500) {
-      request.log.error({ err: error, url: request.url }, 'Unhandled server error');
+      request.log.error(
+        { err: error, url: sanitizeUrlForLog(request.url) },
+        'Unhandled server error',
+      );
     } else {
       request.log.debug(
-        { code: nexusError.code, status: nexusError.statusCode, url: request.url },
+        {
+          code: nexusError.code,
+          status: nexusError.statusCode,
+          url: sanitizeUrlForLog(request.url),
+        },
         'Request failed',
       );
     }
