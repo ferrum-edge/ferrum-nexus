@@ -7,6 +7,43 @@ import { accessRequestsApi, grantsApi } from '../lib/api';
 import { ToastProvider } from '../stores/toast';
 import { GrantsTab, RequestsTab } from './ApiDetailPage';
 
+// Radix Select cannot be driven reliably under jsdom (no layout, no pointer
+// capture); each attempt stalled for 30 s and timed out. The status filter is
+// a plain value picker here, so stand in a native <select> that keeps the same
+// props contract and accessible name, and test the paging logic behind it.
+vi.mock('../components/ui/Select', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../components/ui/Select')>();
+  function LabeledSelect({
+    label,
+    value,
+    onValueChange,
+    options,
+  }: {
+    label: string;
+    value: string;
+    onValueChange: (value: never) => void;
+    options: ReadonlyArray<{ value: string; label: string }>;
+  }): ReactElement {
+    return (
+      <label>
+        {label}
+        <select
+          aria-label={label}
+          value={value}
+          onChange={(event) => onValueChange(event.target.value as never)}
+        >
+          {options.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+    );
+  }
+  return { ...actual, LabeledSelect };
+});
+
 const CREATED_AT = '2026-01-01T00:00:00.000Z';
 
 function request(index: number, status: AccessRequest['status']): AccessRequest {
@@ -71,19 +108,11 @@ function renderTab(tab: ReactElement): void {
 }
 
 async function selectStatus(label: string, option: string): Promise<void> {
-  const trigger = screen.getByRole('combobox', { name: label });
-  fireEvent.keyDown(trigger, { key: 'Enter' });
-  // The portal has a layout-dependent visibility check in jsdom. Locate its
-  // listbox directly, then query only its few options instead of repeatedly
-  // computing accessibility styles across the entire provider table.
-  const listbox = await screen.findByRole('listbox', { hidden: true });
-  const item = (await within(listbox).findByText(option)).closest('[role="option"]');
-  expect(item).not.toBeNull();
-  fireEvent.keyDown(item as HTMLElement, { key: 'Enter' });
-  await waitFor(() => {
-    expect(trigger).toHaveAttribute('aria-expanded', 'false');
-    expect(trigger).toHaveTextContent(option);
-  });
+  const select = screen.getByRole('combobox', { name: label }) as HTMLSelectElement;
+  const match = Array.from(select.options).find((entry) => entry.textContent === option);
+  expect(match).toBeDefined();
+  fireEvent.change(select, { target: { value: match!.value } });
+  await waitFor(() => expect(select.value).toBe(match!.value));
 }
 
 async function expectPage(total: number, page: number): Promise<void> {
