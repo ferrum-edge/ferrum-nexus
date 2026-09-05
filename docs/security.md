@@ -421,9 +421,11 @@ emptied; whoever needs one next recreates it.
 Every gateway step for one identity runs inside a critical section keyed on
 _that_ consumer's Ferrum id — an in-process queue plus an `edge_leases` row —
 so a concurrent approval or credential issue on another Nexus instance cannot
-read the pre-teardown state and write it back afterwards. Edge replaces
-consumers whole, with no version token, so without that lock a revoked account
-could be re-authorised by a write that was merely stale; see
+read the pre-teardown state and write it back afterwards. The lease reduces
+cross-instance overlap but cannot fence a holder that resumes after expiry;
+deployments must therefore use only one active gateway-writing Nexus instance.
+Edge replaces consumers whole, with no version token, so without that lock a
+revoked account could be re-authorised by a write that was merely stale; see
 [`operations.md` §8](operations.md#8-scaling). Identities are torn down one at a
 time, and the teardown reports success only when **all** of them are clean: a
 failure on any one leaves the durable job `pending`. Because the identity list
@@ -1055,8 +1057,10 @@ Before going live:
 - [ ] Backups running and a restore rehearsed, for both the Nexus database and
       the Ferrum Edge state.
 - [ ] `GET /api/health` wired to your monitor, treating `degraded` as healthy.
-- [ ] If you run more than one Nexus instance, they share one PostgreSQL, MySQL
-      or MongoDB database — the `edge_leases` table in it is what stops two
-      instances losing each other's ACL-group and proxy-plugin writes, and what
-      stops two of them demoting the last two `super_admin` accounts at once
+- [ ] Exactly one active Nexus instance serves gateway-mutating requests. Any
+      passive standbys share one PostgreSQL, MySQL or MongoDB database and do
+      not serve requests or run gateway-mutating background work until promoted.
+      The `edge_leases` table in that database is what stops two instances
+      losing each other's ACL-group and proxy-plugin writes, and what stops two
+      of them demoting the last two `super_admin` accounts at once
       ([`operations.md`](operations.md#8-scaling)). SQLite is single-instance.

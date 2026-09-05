@@ -776,14 +776,14 @@ What that costs is not an inconvenience:
   other's entry. A published API can end up with no authentication plugin
   attached while the portal reports one.
 
-Nexus closes this with two layers:
+Nexus reduces this risk with two layers:
 
 1. **An in-process queue** per resource (`edge.serializePerKey`). Fast, and it
    is what orders two requests that land on the same instance.
-2. **A lease row in the `edge_leases` table**, taken inside that queue. This is
-   what orders _instances_ against each other. One row per resource — a Ferrum
-   consumer id, or `proxy:<id>` — holding the id of the instance that owns it
-   and an expiry.
+2. **A lease row in the `edge_leases` table**, taken inside that queue. This
+   normally orders _instances_ against each other. One row per resource — a
+   Ferrum consumer id, or `proxy:<id>` — holding the id of the instance that
+   owns it and an expiry.
 
 Every code path that **rewrites** a gateway resource takes the same key for it,
 which is what makes the lock mean anything: approvals and revocations,
@@ -823,6 +823,13 @@ was written, so retrying is safe and is the correct advice. Seeing this
 routinely means something is holding a gateway resource for tens of seconds —
 look for a slow or hanging Edge Admin API rather than for a Nexus bug.
 
+The lease is **not a fencing token** understood by Ferrum Edge. If a holder is
+paused beyond the TTL, loses ownership during a failed renewal, or calculates
+an expiry from a sufficiently skewed host clock, it can resume after another
+instance has acquired the lease. Edge cannot reject that stale holder's later
+`PUT`. Renewal makes this overlap unlikely during normal operation, but it does
+not make concurrent gateway writers safe.
+
 ### The same table guards the last super admin
 
 `edge_leases` is not only for gateway resources. One database invariant needs
@@ -850,13 +857,18 @@ to retry.
 
 ### Supported topologies
 
-**Several Nexus instances over one shared database are supported**, including
-for consumer and proxy mutations. Any instance may serve any request; no sticky
-routing and no active/passive split is required.
+> **Run exactly one active Nexus instance that can perform gateway mutations.**
 
-The database has to be one every instance can reach — **PostgreSQL, MySQL or a
-MongoDB replica set**. SQLite cannot be shared, so a SQLite deployment is a
-single instance by definition.
+One instance is the simplest supported topology. An active/passive deployment
+is also supported provided only one instance serves requests at a time. Do not
+use sticky routing as a substitute: operations initiated by different actors
+can still target the same consumer or proxy, and a lease that expires cannot
+fence the former holder from Edge.
+
+Standby instances must not serve requests or run gateway-mutating background
+work until promoted. Active/passive instances need one shared **PostgreSQL,
+MySQL or MongoDB replica-set** database. SQLite cannot be shared, so a SQLite
+deployment is a single instance by definition.
 
 ### Other multi-instance notes
 
