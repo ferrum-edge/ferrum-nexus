@@ -71,8 +71,19 @@ function renderTab(tab: ReactElement): void {
 }
 
 async function selectStatus(label: string, option: string): Promise<void> {
-  fireEvent.keyDown(screen.getByRole('combobox', { name: label }), { key: 'Enter' });
-  fireEvent.click(await screen.findByRole('option', { name: option }));
+  const trigger = screen.getByRole('combobox', { name: label });
+  fireEvent.keyDown(trigger, { key: 'Enter' });
+  // The portal has a layout-dependent visibility check in jsdom. Locate its
+  // listbox directly, then query only its few options instead of repeatedly
+  // computing accessibility styles across the entire provider table.
+  const listbox = await screen.findByRole('listbox', { hidden: true });
+  const item = (await within(listbox).findByText(option)).closest('[role="option"]');
+  expect(item).not.toBeNull();
+  fireEvent.keyDown(item as HTMLElement, { key: 'Enter' });
+  await waitFor(() => {
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    expect(trigger).toHaveTextContent(option);
+  });
 }
 
 async function expectPage(total: number, page: number): Promise<void> {
