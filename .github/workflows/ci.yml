@@ -20,6 +20,61 @@ jobs:
       - run: npm run format:check
       - run: npm run build
 
+  store-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: nexus_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: nexus_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost -pnexus_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Start MongoDB replica set
+        run: |
+          docker run -d --name nexus-mongo -p 27017:27017 mongo:7 --replSet rs0 --bind_ip_all
+          for attempt in $(seq 1 60); do
+            if docker exec nexus-mongo mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec nexus-mongo mongosh --quiet --eval \
+            'rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "localhost:27017" }] })'
+          docker exec nexus-mongo mongosh --quiet --eval \
+            'for (let i = 0; i < 60; i++) { if (db.hello().isWritablePrimary) quit(0); sleep(1000); } quit(1);'
+      - run: npm ci
+      - run: npm run build --workspace shared
+      - name: Run all four store contracts
+        working-directory: server
+        env:
+          NEXUS_TEST_POSTGRES_URL: postgres://postgres:nexus_test@127.0.0.1:5432/postgres
+          NEXUS_TEST_MYSQL_URL: mysql://root:nexus_test@127.0.0.1:3306/mysql
+          NEXUS_TEST_MONGO_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
+        run: node --import tsx --test src/test/smoke.test.ts
+
   docker:
     runs-on: ubuntu-latest
     steps:
