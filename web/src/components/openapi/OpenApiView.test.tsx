@@ -122,7 +122,10 @@ describe('OpenApiView multi-tag paging', () => {
     expect(screen.getByRole('heading', { name: 'A' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'B' })).toBeInTheDocument();
     const expectedPaths = Array.from({ length: count }, (_, index) => `/resource-${index}`);
-    const renderedPaths = Array.from(container.querySelectorAll('button code'), (el) => el.textContent);
+    const renderedPaths = Array.from(
+      container.querySelectorAll('button code'),
+      (el) => el.textContent,
+    );
     expect(renderedPaths).toEqual([...expectedPaths, ...expectedPaths]);
     expect(screen.queryByRole('button', { name: /Show .* more/ })).not.toBeInTheDocument();
     expect(screen.queryByText(/Showing/)).not.toBeInTheDocument();
