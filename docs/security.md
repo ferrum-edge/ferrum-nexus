@@ -500,10 +500,21 @@ it, and both disable paths flip `status` under the same key. Whichever wins:
 An append refused after the consumer was created is compensated: the consumer
 is deleted and the registration dropped. If that delete fails, the registration
 stays — it is what the teardown enumerates — and, when the owner is no longer
-active, a `pending` teardown job is (re)queued so the worker strips the
-identity. Recreating a test consumer, by its provider or by an administrator,
-moves the registration to the new owner; the row is deleted once the teardown
-has taken the consumer down.
+active, the teardown job that will strip the identity is made sure of: a
+`pending` or `sending` job is left alone, and a `done` one — closed by another
+instance that found nothing else — is reopened as `pending`. Recreating a test
+consumer, by its provider or by an administrator, moves the registration to the
+new owner; the replacement of the old consumer happens under that claim and is
+compensated the same way, so a failed replacement abandons the claim and leaves
+the consumer to whoever held it. The row is deleted once the teardown has taken
+the consumer down.
+
+A registration bound to its consumer's id leads the teardown there directly,
+on a gateway of any size. Only a registration whose creation stopped before the
+id was recorded is resolved by username, a paged scan of `GET /consumers`; a
+scan that reaches its page cap without finding the name fails the attempt —
+the job stays `pending` and the registration is kept — rather than treating an
+unread namespace as "no consumer".
 
 The mirror of that rule protects a **re-enable**: `status: "active"` deletes the
 pending job, and `disableGatewayAccess` re-reads the account inside the lock —

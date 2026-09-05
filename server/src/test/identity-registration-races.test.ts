@@ -16,6 +16,10 @@
  * exactly as it does in production and the interleaving is exact rather than
  * timed. What is asserted is the property the issue names: when the disable
  * reports completion, nothing of the account is live on the gateway.
+ *
+ * The second suite runs the same teardown on a gateway whose namespace has
+ * outgrown the username scan, where a registration is the only thing that
+ * can lead to its consumer.
  */
 
 import assert from 'node:assert/strict';
@@ -30,6 +34,7 @@ import {
   type PublishApiResponse,
 } from '@ferrum-nexus/shared';
 
+import { CONSUMER_SCAN_LIMIT } from '../ferrum-admin/client.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
 function errorCode(body: string): string {
@@ -51,12 +56,141 @@ type DisableMode = 'patch' | 'god';
 
 const MODES: readonly DisableMode[] = ['patch', 'god'];
 
-describe('first gateway identity versus disable', () => {
-  let harness: TestApp;
-  /** The first registered account, therefore `super_admin`. */
-  let founder: TestSession;
-  let counter = 0;
+/** The app under test; each suite below builds and closes its own. */
+let harness: TestApp;
+/** The first registered account of the current harness, therefore `super_admin`. */
+let founder: TestSession;
+let counter = 0;
 
+async function freshProvider(): Promise<TestSession> {
+  counter += 1;
+  return harness.registerUser({
+    email: `identity-provider${counter}@example.test`,
+    role: 'provider',
+  });
+}
+
+async function publish(owner: TestSession, slug: string): Promise<{ id: string }> {
+  const response = await harness.authed(owner, {
+    method: 'POST',
+    url: '/api/apis',
+    payload: {
+      name: `API ${slug}`,
+      slug,
+      spec: SAMPLE_SPEC_YAML,
+      auth_plugin: 'key_auth',
+      requestable: true,
+      visibility: 'public',
+    },
+  });
+  assert.equal(response.statusCode, 201, response.body);
+  return response.json<PublishApiResponse>().api;
+}
+
+/**
+ * Park the **next** call of one Edge client method at the moment the service
+ * has decided to make it — after every check that precedes it, before the
+ * gateway has seen it. The wrapper restores itself as it is entered, so only
+ * that one call is held.
+ */
+function holdNext(method: 'create' | 'addCredential'): Gate {
+  const consumers = harness.edgeClient.consumers as unknown as Record<string, EdgeCall>;
+  const real = consumers[method];
+  if (!real) throw new Error(`no Edge client method ${method}`);
+  const bound: EdgeCall = (...args) => real.apply(harness.edgeClient.consumers, args);
+  let arrivedOpen: () => void = () => undefined;
+  let proceedOpen: () => void = () => undefined;
+  const arrived = new Promise<void>((resolve) => {
+    arrivedOpen = resolve;
+  });
+  const proceed = new Promise<void>((resolve) => {
+    proceedOpen = resolve;
+  });
+  consumers[method] = async (...args) => {
+    consumers[method] = bound;
+    arrivedOpen();
+    await proceed;
+    return bound(...args);
+  };
+  return { arrived, release: proceedOpen };
+}
+
+function createTestConsumer(actor: TestSession, apiId: string) {
+  return harness.authed(actor, {
+    method: 'POST',
+    url: `/api/apis/${apiId}/test-consumer`,
+    payload: {},
+  });
+}
+
+async function disable(
+  mode: DisableMode,
+  target: TestSession,
+): Promise<{ status: number; teardown: string | undefined; body: string }> {
+  const response =
+    mode === 'patch'
+      ? await harness.authed(founder, {
+          method: 'PATCH',
+          url: `/api/users/${target.user.id}`,
+          payload: { status: 'disabled' },
+        })
+      : await harness.authed(founder, {
+          method: 'POST',
+          url: '/api/admin/god/disable-user',
+          payload: { user_id: target.user.id, reason: 'Racing the first test-consumer append.' },
+        });
+  return {
+    status: response.statusCode,
+    teardown: response.json<{ gateway_teardown?: string }>().gateway_teardown,
+    body: response.body,
+  };
+}
+
+/** Block until the disable's portal half has committed. */
+async function untilDisabled(userId: string): Promise<void> {
+  for (let attempt = 0; attempt < 1000; attempt += 1) {
+    if ((await harness.store.users.findById(userId))?.status === 'disabled') return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error('the disable never committed');
+}
+
+async function registrations(userId: string): Promise<number> {
+  return (await harness.store.gatewayIdentities.listByUser(userId, 'nexus')).length;
+}
+
+/** The property every test ends on: nothing of the account is live anywhere. */
+async function assertNothingLive(provider: TestSession, apiId: string): Promise<void> {
+  const username = `nexus-test-${apiId}`;
+  assert.equal(
+    harness.edge.consumerByUsername(username),
+    undefined,
+    'the test consumer is gone from the gateway',
+  );
+  const canonical = harness.edge.consumerByUsername(consumerUsernameForUser(provider.user.id));
+  if (canonical) {
+    assert.deepEqual(canonical.acl_groups, [], 'the canonical consumer holds no group');
+    assert.deepEqual(canonical.credentials, {}, 'the canonical consumer holds no credential');
+  }
+  const group = aclGroupForApi(apiId);
+  for (const consumer of harness.edge.consumers.values()) {
+    assert.ok(
+      !consumer.acl_groups.includes(group),
+      `no consumer carries the approval group (${consumer.username} does)`,
+    );
+  }
+  const rows = await harness.store.credentials.list({ user_id: provider.user.id }, { limit: 50 });
+  for (const row of rows.items) {
+    assert.equal(row.status, 'revoked', `credential ${row.id} is revoked in the mirror`);
+  }
+  assert.equal(await registrations(provider.user.id), 0, 'no registration is left behind');
+  assert.equal(
+    (await harness.store.gatewayTeardownJobs.findByUser(provider.user.id))?.status,
+    'done',
+  );
+}
+
+describe('first gateway identity versus disable', () => {
   before(async () => {
     harness = await buildTestApp();
     founder = await harness.registerUser({ email: 'identity-founder@example.test' });
@@ -65,136 +199,6 @@ describe('first gateway identity versus disable', () => {
   after(async () => {
     await harness.close();
   });
-
-  /* ── helpers ──────────────────────────────────────────────────────────── */
-
-  async function freshProvider(): Promise<TestSession> {
-    counter += 1;
-    return harness.registerUser({
-      email: `identity-provider${counter}@example.test`,
-      role: 'provider',
-    });
-  }
-
-  async function publish(owner: TestSession, slug: string): Promise<{ id: string }> {
-    const response = await harness.authed(owner, {
-      method: 'POST',
-      url: '/api/apis',
-      payload: {
-        name: `API ${slug}`,
-        slug,
-        spec: SAMPLE_SPEC_YAML,
-        auth_plugin: 'key_auth',
-        requestable: true,
-        visibility: 'public',
-      },
-    });
-    assert.equal(response.statusCode, 201, response.body);
-    return response.json<PublishApiResponse>().api;
-  }
-
-  /**
-   * Park the **next** call of one Edge client method at the moment the service
-   * has decided to make it — after every check that precedes it, before the
-   * gateway has seen it. The wrapper restores itself as it is entered, so only
-   * that one call is held.
-   */
-  function holdNext(method: 'create' | 'addCredential'): Gate {
-    const consumers = harness.edgeClient.consumers as unknown as Record<string, EdgeCall>;
-    const real = consumers[method];
-    if (!real) throw new Error(`no Edge client method ${method}`);
-    const bound: EdgeCall = (...args) => real.apply(harness.edgeClient.consumers, args);
-    let arrivedOpen: () => void = () => undefined;
-    let proceedOpen: () => void = () => undefined;
-    const arrived = new Promise<void>((resolve) => {
-      arrivedOpen = resolve;
-    });
-    const proceed = new Promise<void>((resolve) => {
-      proceedOpen = resolve;
-    });
-    consumers[method] = async (...args) => {
-      consumers[method] = bound;
-      arrivedOpen();
-      await proceed;
-      return bound(...args);
-    };
-    return { arrived, release: proceedOpen };
-  }
-
-  function createTestConsumer(actor: TestSession, apiId: string) {
-    return harness.authed(actor, {
-      method: 'POST',
-      url: `/api/apis/${apiId}/test-consumer`,
-      payload: {},
-    });
-  }
-
-  async function disable(
-    mode: DisableMode,
-    target: TestSession,
-  ): Promise<{ status: number; teardown: string | undefined; body: string }> {
-    const response =
-      mode === 'patch'
-        ? await harness.authed(founder, {
-            method: 'PATCH',
-            url: `/api/users/${target.user.id}`,
-            payload: { status: 'disabled' },
-          })
-        : await harness.authed(founder, {
-            method: 'POST',
-            url: '/api/admin/god/disable-user',
-            payload: { user_id: target.user.id, reason: 'Racing the first test-consumer append.' },
-          });
-    return {
-      status: response.statusCode,
-      teardown: response.json<{ gateway_teardown?: string }>().gateway_teardown,
-      body: response.body,
-    };
-  }
-
-  /** Block until the disable's portal half has committed. */
-  async function untilDisabled(userId: string): Promise<void> {
-    for (let attempt = 0; attempt < 1000; attempt += 1) {
-      if ((await harness.store.users.findById(userId))?.status === 'disabled') return;
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-    throw new Error('the disable never committed');
-  }
-
-  async function registrations(userId: string): Promise<number> {
-    return (await harness.store.gatewayIdentities.listByUser(userId, 'nexus')).length;
-  }
-
-  /** The property every test ends on: nothing of the account is live anywhere. */
-  async function assertNothingLive(provider: TestSession, apiId: string): Promise<void> {
-    const username = `nexus-test-${apiId}`;
-    assert.equal(
-      harness.edge.consumerByUsername(username),
-      undefined,
-      'the test consumer is gone from the gateway',
-    );
-    const canonical = harness.edge.consumerByUsername(consumerUsernameForUser(provider.user.id));
-    if (canonical) {
-      assert.deepEqual(canonical.acl_groups, [], 'the canonical consumer holds no group');
-      assert.deepEqual(canonical.credentials, {}, 'the canonical consumer holds no credential');
-    }
-    const group = aclGroupForApi(apiId);
-    for (const consumer of harness.edge.consumers.values()) {
-      assert.ok(
-        !consumer.acl_groups.includes(group),
-        `no consumer carries the approval group (${consumer.username} does)`,
-      );
-    }
-    const rows = await harness.store.credentials.list({ user_id: provider.user.id }, { limit: 50 });
-    for (const row of rows.items) {
-      assert.equal(row.status, 'revoked', `credential ${row.id} is revoked in the mirror`);
-    }
-    assert.equal(await registrations(provider.user.id), 0, 'no registration is left behind');
-    assert.equal(
-      (await harness.store.gatewayTeardownJobs.findByUser(provider.user.id))?.status,
-      'done',
-    );
-  }
 
   /* ── The append wins the identity's key; the teardown follows it ──────── */
 
@@ -243,6 +247,7 @@ describe('first gateway identity versus disable', () => {
       const api = await publish(provider, `identity-refused-${mode}`);
 
       // Held at the consumer create — registered, nothing on the gateway yet.
+      const deletesBefore = harness.edge.callsTo('DELETE', '/consumers/').length;
       const gate = holdNext('create');
       const creating = createTestConsumer(provider, api.id);
       await gate.arrived;
@@ -262,9 +267,10 @@ describe('first gateway identity versus disable', () => {
         'the compensation had already removed what the issuance created',
       );
       await assertNothingLive(provider, api.id);
-      assert.ok(
-        harness.edge.callsTo('DELETE', '/consumers/').length >= 1,
-        'the consumer the issuance created was deleted again',
+      assert.equal(
+        harness.edge.callsTo('DELETE', '/consumers/').length - deletesBefore,
+        1,
+        'the one delete is the compensation taking down the consumer the issuance created',
       );
     });
   }
@@ -484,5 +490,142 @@ describe('first gateway identity versus disable', () => {
 
     const tick = await harness.services.teardown.tick();
     assert.equal(tick.claimed, 0, 'nothing is queued against a live account');
+  });
+
+  /* ── Takeover ────────────────────────────────────────────────────────── */
+
+  it('a takeover that cannot replace the consumer leaves it to its previous owner', async () => {
+    const provider = await freshProvider();
+    const api = await publish(provider, 'identity-takeover');
+    const username = `nexus-test-${api.id}`;
+
+    const first = await createTestConsumer(provider, api.id);
+    assert.equal(first.statusCode, 201, first.body);
+    const credentialId = first.json<CreateTestConsumerResponse>().credential.id;
+    const theirs = harness.edge.consumerByUsername(username);
+    assert.ok(theirs);
+
+    // An administrator recreates it, and the gateway refuses to delete the
+    // consumer being replaced. The claim has already moved the registration.
+    harness.edge.queueFailure(503, { error: 'down' }, `/consumers/${theirs.id}`, 'DELETE');
+    const taken = await createTestConsumer(founder, api.id);
+    assert.equal(taken.statusCode, 502, taken.body);
+    assert.equal(errorCode(taken.body), 'EDGE_ERROR');
+
+    // Ownership and reality agree: the consumer is up with the provider's key,
+    // and no registration names the administrator — the claim was abandoned.
+    assert.equal(harness.edge.consumerByUsername(username)?.id, theirs.id);
+    assert.equal(harness.edge.consumerByUsername(username)?.credentials.keyauth?.length, 1);
+    assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'active');
+    assert.equal(await registrations(founder.user.id), 0, 'the moved registration was abandoned');
+    assert.equal(await registrations(provider.user.id), 0, 'the claim had taken the old one');
+
+    // What is left is the previous owner's live row, which is how their own
+    // teardown finds the consumer — not the administrator's.
+    const disabled = await disable('patch', provider);
+    assert.equal(disabled.status, 200, disabled.body);
+    assert.equal(disabled.teardown, 'ok');
+    await assertNothingLive(provider, api.id);
+    const audited = (await harness.auditRows('user.disable')).find(
+      (row) => row.target_id === provider.user.id,
+    );
+    assert.deepEqual(audited?.details.deleted_consumers, [theirs.id]);
+  });
+});
+
+/* ── Past the username-scan cap ──────────────────────────────────────────── */
+
+/**
+ * The Edge client finds a consumer by username by walking `GET /consumers`,
+ * and stops after `CONSUMER_SCAN_LIMIT` of them. A registration bound to its
+ * consumer's id must lead the teardown there directly, on a gateway of any
+ * size; and a registration that never got as far as the id must not be
+ * consumed on the strength of a scan that never reached its consumer.
+ */
+describe('gateway identities past the username-scan cap', () => {
+  /** Consumers that are nobody's: what pushes the namespace past the cap. */
+  const fillers: string[] = [];
+
+  /** Seed anonymous consumers until the namespace holds `count`. */
+  function fillNamespaceTo(count: number): void {
+    let held = [...harness.edge.consumers.values()].filter(
+      (consumer) => consumer.namespace === 'nexus',
+    ).length;
+    while (held < count) {
+      const filler = harness.edge.seedConsumer({
+        username: `filler-${fillers.length}`,
+        namespace: 'nexus',
+      });
+      fillers.push(filler.id);
+      held += 1;
+    }
+  }
+
+  before(async () => {
+    harness = await buildTestApp();
+    founder = await harness.registerUser({ email: 'identity-scan-founder@example.test' });
+    // Exactly the cap: a scan still reads the whole namespace, so a test
+    // consumer can be created — and it lands just past what a scan sees.
+    fillNamespaceTo(CONSUMER_SCAN_LIMIT);
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  it('tears down a bound identity by id, not by a scan that cannot reach it', async () => {
+    const provider = await freshProvider();
+    const api = await publish(provider, 'identity-scan-bound');
+    const username = `nexus-test-${api.id}`;
+
+    const created = await createTestConsumer(provider, api.id);
+    assert.equal(created.statusCode, 201, created.body);
+    assert.ok(harness.edge.consumerByUsername(username));
+    // The consumer is one past the cap: a username scan gives up before it,
+    // and says so rather than answering "not found".
+    await assert.rejects(
+      () => harness.edgeClient.consumers.getByUsername(username),
+      (error: Error) => /more consumers/i.test(error.message),
+    );
+
+    const disabled = await disable('patch', provider);
+    assert.equal(disabled.status, 200, disabled.body);
+    assert.equal(disabled.teardown, 'ok', 'the registration led straight to the consumer');
+    await assertNothingLive(provider, api.id);
+  });
+
+  it('leaves an unbound identity pending rather than closing over an unread scan', async () => {
+    const provider = await freshProvider();
+    const api = await publish(provider, 'identity-scan-unbound');
+    const username = `nexus-test-${api.id}`;
+
+    // A creation that stopped before `bind`: registered, with a consumer of
+    // the registered name up on the gateway — one past the cap.
+    await harness.services.credentials.claimGatewayIdentity(provider.user.id, username);
+    fillNamespaceTo(CONSUMER_SCAN_LIMIT);
+    harness.edge.seedConsumer({
+      username,
+      namespace: 'nexus',
+      acl_groups: [aclGroupForApi(api.id)],
+    });
+
+    const disabled = await disable('patch', provider);
+    assert.equal(disabled.status, 200, disabled.body);
+    assert.equal(disabled.teardown, 'pending', 'an unread namespace is not "no consumer"');
+    assert.ok(harness.edge.consumerByUsername(username), 'the consumer is still up');
+    assert.equal(await registrations(provider.user.id), 1, 'the registration is kept');
+    assert.equal(
+      (await harness.store.gatewayTeardownJobs.findByUser(provider.user.id))?.status,
+      'pending',
+    );
+
+    // Once the namespace is back within reach, the retry finds the consumer
+    // through the registration it kept.
+    const spare = fillers.pop();
+    assert.ok(spare);
+    harness.edge.consumers.delete(`nexus/${spare}`);
+    const tick = await harness.services.teardown.tick();
+    assert.ok(tick.completed >= 1, JSON.stringify(tick));
+    await assertNothingLive(provider, api.id);
   });
 });

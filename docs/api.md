@@ -1366,6 +1366,12 @@ Creates (or **replaces**, deleting the old one) the disposable consumer
 `nexus-test-<api_id>`, carrying this API's ACL group and one credential of the
 API's auth type. The secret appears in this response and nowhere else, ever.
 
+The consumer belongs to whoever created it last: recreating it — an
+administrator recreating a provider's, say — moves its registration and the
+attribution of its credential to the caller, and it is the caller's disabling
+that takes it down. `403 USER_DISABLED` when the caller was disabled while the
+request was in flight; nothing is created.
+
 ---
 
 ## Plugin palette

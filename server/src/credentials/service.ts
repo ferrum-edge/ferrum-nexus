@@ -336,10 +336,12 @@ export interface CredentialsService {
    *
    * Deletes `consumerId` (when one was created) and then the registration.
    * When the delete itself fails, the registration is **kept**: it is what the
-   * teardown enumerates, and if the owner is no longer active a `pending`
-   * teardown job is (re)queued so the worker strips the identity — the
-   * durable work that must remain until every identity is gone. Never throws;
-   * the failure that triggered the compensation is the one worth reporting.
+   * teardown enumerates. If the owner is no longer active, the teardown job
+   * that must strip the identity is made sure of: a `pending` or `sending` job
+   * is already that work and is left alone; a `done` one — closed by another
+   * instance that found nothing else — is reopened as `pending`. Never
+   * throws; the failure that triggered the compensation is the one worth
+   * reporting.
    */
   abandonGatewayIdentity(
     identity: GatewayIdentityRecord,
@@ -779,7 +781,17 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             );
             if (!current || current.user_id !== userId) return { count: 0, consumerId: null };
 
-            const live = await edge.consumers.getByUsername(identity.ferrum_username);
+            // By id once the registration is bound: one read, on a gateway of
+            // any size. The username scan is capped, and only a registration
+            // whose creation stopped before `bind` — the consumer may or may
+            // not exist — has nothing better to go on. Past the cap the scan
+            // throws rather than answering "not found", so the job stays
+            // `pending` with the registration intact instead of closing over
+            // a consumer nobody looked at.
+            const live =
+              current.ferrum_consumer_id !== null
+                ? await edge.consumers.get(current.ferrum_consumer_id)
+                : await edge.consumers.getByUsername(identity.ferrum_username);
             let count = 0;
             if (live) {
               // Name, then id — the order creation takes the two keys in. A

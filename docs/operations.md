@@ -1174,7 +1174,12 @@ provider's `nexus-test-<api_id>` consumer — is found in two places:
   (the lease both disable paths flip `status` under), so a disable that lands
   while the identity's first credential is still being appended finds it and
   waits for the append on the identity's name lease (`test-consumer:<username>`)
-  rather than missing it. A registration is deleted once its consumer is gone.
+  rather than missing it. A registration bound to its consumer's id resolves
+  the consumer by id; one that never got that far — the creation stopped
+  before the id was recorded — is resolved by username, a paged scan that
+  fails the attempt (job `pending`, registration kept) rather than answering
+  "no consumer" on a namespace larger than it reads. A registration is deleted
+  once its consumer is gone.
 - `credential_metadata` rows that are still live, for consumers created before
   that table existed.
 

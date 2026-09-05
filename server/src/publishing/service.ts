@@ -1653,24 +1653,30 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // already disabled is refused here, before anything is created.
         const identity = await credentials.claimGatewayIdentity(actor.id, username);
 
-        // Recreating replaces: a test consumer is disposable by definition, and
-        // deleting it is the only way to reset its credentials show-once state.
-        const existing = await edge.consumers.getByUsername(username);
-        let revokedCredentials = 0;
-        if (existing) {
-          await edge.consumers.delete(existing.id, actor.id);
-          // The credentials of the deleted consumer no longer exist on the
-          // gateway; leaving their rows `active` would show the provider keys
-          // that cannot authenticate anything. The mirror follows the gateway.
-          for (const row of await store.credentials.listByConsumer(existing.id)) {
-            if (row.status === 'revoked') continue;
-            await store.credentials.update(row.id, { status: 'revoked' });
-            revokedCredentials += 1;
-          }
-        }
-
+        // From here on the registration is the actor's, so everything that
+        // can fail is compensated: a claim left standing over a consumer that
+        // was never replaced would be torn down — the previous owner's live
+        // key with it — the day the *actor* is disabled.
         let consumerId: string | null = null;
         try {
+          // Recreating replaces: a test consumer is disposable by definition,
+          // and deleting it is the only way to reset its credentials show-once
+          // state.
+          const existing = await edge.consumers.getByUsername(username);
+          let revokedCredentials = 0;
+          if (existing) {
+            await edge.consumers.delete(existing.id, actor.id);
+            // The credentials of the deleted consumer no longer exist on the
+            // gateway; leaving their rows `active` would show the provider
+            // keys that cannot authenticate anything. The mirror follows the
+            // gateway.
+            for (const row of await store.credentials.listByConsumer(existing.id)) {
+              if (row.status === 'revoked') continue;
+              await store.credentials.update(row.id, { status: 'revoked' });
+              revokedCredentials += 1;
+            }
+          }
+
           const consumer = await edge.consumers.create(
             { username, custom_id: `nexus-test:${api.id}`, acl_groups: [group] },
             actor.id,
@@ -1689,9 +1695,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           return { consumer, issued, replacedExisting: existing !== null, revokedCredentials };
         } catch (error) {
           // The append was refused — the owner was disabled after the claim —
-          // or the gateway failed. Whatever got as far as the gateway comes
-          // down again, and the registration with it; a delete that fails
-          // leaves the registration for the teardown to find.
+          // or the gateway failed, before or after the replacement was
+          // created. Whatever got as far as the gateway comes down again, and
+          // the registration with it; a delete that fails leaves the
+          // registration for the teardown to find. A previous owner's consumer
+          // that survived stays theirs: their live rows are what a teardown
+          // finds it by.
           await credentials.abandonGatewayIdentity(identity, consumerId, actor.id);
           throw error;
         }
