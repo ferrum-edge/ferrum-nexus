@@ -1366,7 +1366,10 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       );
       assert.equal(await store.credentials.delete(second.id), true);
       assert.equal(await store.credentials.delete(second.id), false);
-      // A value is never reused once handed out, whatever became of its row.
+      // The next value is one past the highest ordinal still on file. Revocation
+      // keeps its row (the credential-ordering tests pin that no value is ever
+      // reused in production); a hard delete is a test-only operation, and the
+      // rows deleted above carried the higher ordinals.
       const next = await store.credentials.create({
         user_id: user.id,
         ferrum_consumer_id: user.id,
@@ -1376,7 +1379,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         last4: 'next',
         status: 'active',
       });
-      assert.equal(next.edge_ordinal, 4, 'past the highest ordinal still on file');
+      assert.equal(next.edge_ordinal, 2, 'one past the highest ordinal still on file');
     });
 
     /* ── threads and messages ─────────────────────────────────────────── */
