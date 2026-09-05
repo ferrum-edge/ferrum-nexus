@@ -217,9 +217,8 @@ export const adminRoutes: FastifyPluginAsync<AdminRoutesOptions> = async (app, o
 
   /* ── Email templates ──────────────────────────────────────────────────── */
 
-  app.get(
-    '/email-templates',
-    async (): Promise<ListEmailTemplatesResponse> => settings.listEmailTemplates(),
+  app.get('/email-templates', async (): Promise<ListEmailTemplatesResponse> =>
+    settings.listEmailTemplates(),
   );
 
   app.get('/email-templates/:key', async (request): Promise<GetEmailTemplateResponse> => {

@@ -2380,9 +2380,8 @@ class MongoStore implements NexusStore {
     },
 
     delete: async (id) =>
-      (
-        await this.col(COLLECTIONS.gatewayIdentities).deleteOne({ _id: id }, this.opts)
-      ).deletedCount > 0,
+      (await this.col(COLLECTIONS.gatewayIdentities).deleteOne({ _id: id }, this.opts))
+        .deletedCount > 0,
   };
 
   /* ── threads ──────────────────────────────────────────────────────────── */
