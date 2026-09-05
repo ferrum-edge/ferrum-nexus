@@ -306,6 +306,81 @@ describe('daily message budget', () => {
   });
 });
 
+describe('daily message budget concurrency', () => {
+  it('atomically caps concurrent thread openers from one account', async () => {
+    const harness = await buildTestApp({
+      env: { NEXUS_MAX_MESSAGES_PER_USER_PER_DAY: '2' },
+      deps: { startOutboxWorker: false },
+    });
+    try {
+      await harness.registerUser({ email: 'atomic-create-founder@example.test' });
+      const sender = await harness.registerUser({ email: 'atomic-create-sender@example.test' });
+
+      const responses = await Promise.all(
+        Array.from({ length: 5 }, (_, attempt) =>
+          harness.authed(sender, {
+            method: 'POST',
+            url: '/api/threads',
+            payload: { subject: `Concurrent thread ${attempt}`, body: `Concurrent ${attempt}` },
+          }),
+        ),
+      );
+
+      assert.equal(responses.filter(({ statusCode }) => statusCode === 201).length, 2);
+      assert.equal(responses.filter(({ statusCode }) => statusCode === 429).length, 3);
+      assert.equal((await harness.store.threads.list({}, { limit: 10 })).total, 1);
+      assert.equal(
+        await harness.store.messages.countBySenderSince(sender.user.id, new Date(0).toISOString()),
+        2,
+      );
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('atomically caps concurrent sends from one account', async () => {
+    const harness = await buildTestApp({
+      env: { NEXUS_MAX_MESSAGES_PER_USER_PER_DAY: '2' },
+      deps: { startOutboxWorker: false },
+    });
+    try {
+      const founder = await harness.registerUser({ email: 'atomic-founder@example.test' });
+      const sender = await harness.registerUser({ email: 'atomic-sender@example.test' });
+      const opened = await harness.authed(sender, {
+        method: 'POST',
+        url: '/api/threads',
+        payload: { subject: 'Atomic budget', recipient_user_id: founder.user.id, body: 'One' },
+      });
+      assert.equal(opened.statusCode, 201, opened.body);
+      const threadId = opened.json<CreateThreadResponse>().thread.id;
+
+      const responses = await Promise.all(
+        Array.from({ length: 5 }, (_, attempt) =>
+          harness.authed(sender, {
+            method: 'POST',
+            url: `/api/threads/${threadId}/messages`,
+            payload: { body: `Concurrent ${attempt}` },
+          }),
+        ),
+      );
+
+      assert.equal(responses.filter(({ statusCode }) => statusCode === 201).length, 1);
+      assert.equal(responses.filter(({ statusCode }) => statusCode === 429).length, 4);
+      assert.ok(
+        responses
+          .filter(({ statusCode }) => statusCode === 429)
+          .every((response) => error(response.body).code === 'QUOTA_EXCEEDED'),
+      );
+      assert.equal(
+        await harness.store.messages.countBySenderSince(sender.user.id, new Date(0).toISOString()),
+        2,
+      );
+    } finally {
+      await harness.close();
+    }
+  });
+});
+
 describe('daily message budget disabled', () => {
   it('treats 0 as unlimited', async () => {
     const harness = await buildTestApp({

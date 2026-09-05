@@ -275,6 +275,36 @@ export interface UserFilter {
   email_verified?: boolean;
 }
 
+/**
+ * One viewer's browse rule, as a disjunction the database can evaluate.
+ *
+ * A row passes when **any** of the three holds: the viewer owns it, the viewer
+ * holds a listed grant on it, or it is openly listed (`open_status` plus one of
+ * `open_visibilities`). The catalog service is the only caller; it exists so
+ * that the "may I see this?" test happens inside the query rather than over a
+ * page already fetched, which is the difference between paginating the rows a
+ * viewer may browse and paginating a prefix of the table.
+ *
+ * It composes with the rest of {@link ApiFilter} by `AND`: a caller filtering
+ * `visibility=internal` still sees only rows this clause admits.
+ */
+export interface ApiViewerFilter {
+  /** Rows owned by this user pass whatever their status or visibility. */
+  owner_user_id: Uuid;
+  /**
+   * Rows the viewer holds a grant on, which pass whatever their status.
+   *
+   * Bounded by the viewer's own grants, and every id becomes one bound
+   * parameter — the reason it is a caller-supplied list rather than a join is
+   * that MongoDB has no cross-collection `find` filter.
+   */
+  granted_api_ids: readonly Uuid[];
+  /** Any other row must carry this status… */
+  open_status: ApiStatus;
+  /** …and one of these visibilities. An empty list admits none of them. */
+  open_visibilities: readonly ApiVisibility[];
+}
+
 /** Filters for `apis.list`. */
 export interface ApiFilter {
   owner_user_id?: Uuid;
@@ -284,6 +314,8 @@ export interface ApiFilter {
   /** Case-insensitive substring match on name, slug or description. */
   q?: string;
   ids?: Uuid[];
+  /** Restrict to rows one viewer may browse. Omit for an unrestricted read. */
+  visible_to?: ApiViewerFilter;
 }
 
 /** Filters for `apiSpecs.list`. */
@@ -336,9 +368,47 @@ export interface ThreadFilter {
    * comes from the caller's *current* role, never from this column.
    */
   participant_user_id?: Uuid;
+  /**
+   * The admin inbox as a query predicate: threads with an empty second seat
+   * (the platform inbox, which any administrator answers) **or** threads where
+   * this user occupies a seat.
+   *
+   * It exists so the admin thread list is paginated and counted over the rows
+   * an admin may actually see. Filtering a fetched page instead made every
+   * thread behind a page of unrelated conversations unreachable, whatever
+   * offset the caller asked for. The same seats-only rule as
+   * {@link ThreadFilter.participant_user_id} applies to the second half.
+   */
+  platform_or_participant_user_id?: Uuid;
   api_id?: Uuid;
   /** Case-insensitive substring match on the subject. */
   q?: string;
+}
+
+/**
+ * A point in one thread's transcript, ordered by `(created_at, id)`.
+ *
+ * The id is not decoration: several messages can share an ISO-8601 timestamp
+ * to the millisecond, and a cursor that only carried the timestamp would either
+ * skip their neighbours or repeat them.
+ */
+export interface MessageCursor {
+  created_at: IsoTimestamp;
+  id: Uuid;
+}
+
+/** Options for {@link MessageRepo.listByThread}. */
+export interface MessageListOptions extends ListOptions {
+  /**
+   * Order newest-first instead of the default oldest-first.
+   *
+   * The thread view opens on the *end* of a conversation, which is the one
+   * window a fixed oldest-first page can never reach once the history is longer
+   * than a page.
+   */
+  newest_first?: boolean;
+  /** Restrict to messages strictly older than this point. */
+  before?: MessageCursor;
 }
 
 /** Filters for `notifications.list`. */
@@ -500,7 +570,35 @@ export interface ApiSpecRepo {
   delete(id: Uuid): Promise<boolean>;
   /** Cascade helper for API deletion. Returns the number of revisions removed. */
   deleteByApi(apiId: Uuid): Promise<number>;
+  /**
+   * Drop every **non-current** revision of `apiId` beyond the newest `keep`.
+   *
+   * Bounded retention for `NEXUS_SPEC_HISTORY_LIMIT`: without it the per-owner
+   * API ceiling bounded proxies and slugs but no storage at all, because each
+   * `PUT /api/apis/:id/spec` kept another document of up to `MAX_SPEC_BYTES`
+   * for ever.
+   *
+   * The current revision is never a candidate whatever `keep` says, and `keep`
+   * is at least `1` in practice, so the predecessor a failed revision rolls
+   * back to always survives. Newest is by `created_at`, ties broken by id, the
+   * same order {@link ApiSpecRepo.list} pages in.
+   *
+   * @returns the number of revisions removed
+   */
+  pruneHistory(apiId: Uuid, keep: number): Promise<number>;
 }
+
+/**
+ * Rows one {@link ApiSpecRepo.pruneHistory} call may remove.
+ *
+ * The candidates are selected with `LIMIT … OFFSET keep` rather than deleted
+ * through a subquery, because MySQL refuses a `DELETE` whose subquery names the
+ * table being deleted from and an `OFFSET` without a `LIMIT` — so one statement
+ * shape has to carry a bound. A deployment upgrading with a long history
+ * therefore trims in batches over successive revisions rather than in one
+ * statement, which is also the kinder thing to do to a live database.
+ */
+export const SPEC_HISTORY_PRUNE_BATCH = 1_000;
 
 /**
  * Palette plugins a provider switched on for their own API.
@@ -664,8 +762,15 @@ export interface ThreadRepo {
 export interface MessageRepo {
   create(input: CreateInput<MessageRecord>): Promise<MessageRecord>;
   findById(id: Uuid): Promise<MessageRecord | null>;
-  /** Oldest-first page of a thread's messages. */
-  listByThread(threadId: Uuid, options?: ListOptions): Promise<Paginated<MessageRecord>>;
+  /**
+   * One page of a thread's messages, oldest-first by default.
+   *
+   * Ordering is `(created_at, id)` in whichever direction `newest_first` asks
+   * for, so it is total even when timestamps collide. `total` counts the rows
+   * matching the options — with a `before` cursor, that is how many messages
+   * precede the window.
+   */
+  listByThread(threadId: Uuid, options?: MessageListOptions): Promise<Paginated<MessageRecord>>;
   /** Newest message of a thread, for list previews. */
   findLatestByThread(threadId: Uuid): Promise<MessageRecord | null>;
   countByThread(threadId: Uuid): Promise<number>;
@@ -951,6 +1056,14 @@ export interface NexusStore {
    * Run `fn` inside one transaction. Commits on resolve, rolls back on reject.
    * The store handed to `fn` is scoped to the transaction — use it, not the
    * outer store, for every statement inside the body.
+   *
+   * A `transaction()` call made *from inside* a body joins that transaction
+   * rather than starting a second one. An independent call made while a body is
+   * merely suspended on an `await` is not nested: it waits for the running
+   * transaction and then gets one of its own. Statements issued through the
+   * *outer* store while a body is open are undefined behaviour and adapter
+   * specific — on SQLite they run inside the open transaction and share its
+   * fate, because there is one connection.
    */
   transaction<T>(fn: (tx: NexusStore) => Promise<T>): Promise<T>;
 

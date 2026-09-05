@@ -938,11 +938,18 @@ coerced once in `routes/common.ts` (`limit`/`offset` clamped to
 `[1, MAX_PAGE_SIZE]`, query booleans normalised) rather than in each handler.
 
 List endpoints share one envelope, `{ items, total }`, where `total` ignores
-`limit`/`offset`. Two endpoints scan a bounded page and filter in memory
-instead of pushing the predicate into SQL — the catalog (visibility depends on
-per-row grants) and the admin thread list (the platform inbox has no
-`ThreadFilter` predicate). Both are capped at `MAX_PAGE_SIZE` rows and both are
-human-sized surfaces by construction.
+`limit`/`offset`. Every predicate that decides what a caller may see is pushed
+into the query rather than applied to an already-fetched page — the catalog's
+"mine, or granted to me, or published and public" rule travels as
+`ApiFilter.visible_to`, and the admin inbox's "platform thread, or one I sit in"
+as `ThreadFilter.platform_or_participant_user_id`. Both are evaluated by the
+database, so `offset` reaches past the first page and `total` counts the whole
+permitted set.
+
+A thread's transcript is the one list that does **not** use `offset`: it is
+cursor-paginated from the newest end (`?limit=&before=`, answering a
+`MessagePage`), because a conversation grows at exactly the end a reader is
+anchored to and an offset into it slides under every reply.
 
 Full reference: [`api.md`](api.md).
 

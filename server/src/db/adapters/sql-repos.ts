@@ -59,6 +59,7 @@ import type {
   ApiRepo,
   ApiSpecRecord,
   ApiSpecRepo,
+  ApiViewerFilter,
   AuditLogFilter,
   AuditLogRecord,
   AuditLogRepo,
@@ -100,6 +101,7 @@ import type {
   VerificationTokenRecord,
   VerificationTokenRepo,
 } from '../store.js';
+import { SPEC_HISTORY_PRUNE_BATCH } from '../store.js';
 import {
   bool,
   encodeBool,
@@ -477,6 +479,33 @@ function userWhere(filter: UserFilter): SqlWhereBuilder {
   return builder;
 }
 
+/**
+ * `owner OR granted OR openly listed` — {@link ApiViewerFilter} as one
+ * parenthesised disjunction, so it ANDs cleanly with the other filters.
+ *
+ * Every granted id costs one placeholder. Both servers cap a statement's
+ * parameters (PostgreSQL at 65 535, MySQL likewise), and the list is bounded by
+ * how many grants one account holds, so a portal would need tens of thousands
+ * of grants on a single account to approach it. An empty grant or visibility
+ * list drops its disjunct rather than emitting `IN ()`, which is a syntax
+ * error on both servers.
+ */
+function apiViewerCondition(viewer: ApiViewerFilter): { sql: string; params: SqlParam[] } {
+  const parts = ['owner_user_id = ?'];
+  const params: SqlParam[] = [viewer.owner_user_id];
+  const granted = [...new Set(viewer.granted_api_ids)];
+  if (granted.length > 0) {
+    parts.push(`id IN (${placeholders(granted.length)})`);
+    params.push(...granted);
+  }
+  const visibilities = [...new Set(viewer.open_visibilities)];
+  if (visibilities.length > 0) {
+    parts.push(`(status = ? AND visibility IN (${placeholders(visibilities.length)}))`);
+    params.push(viewer.open_status, ...visibilities);
+  }
+  return { sql: `(${parts.join(' OR ')})`, params };
+}
+
 function apiWhere(filter: ApiFilter): SqlWhereBuilder {
   const builder = new SqlWhereBuilder()
     .add(filter.owner_user_id, 'owner_user_id = ?', filter.owner_user_id ?? null)
@@ -487,6 +516,10 @@ function apiWhere(filter: ApiFilter): SqlWhereBuilder {
     builder.always('requestable = ?', encodeBool(filter.requestable));
   }
   if (filter.ids !== undefined) builder.addIn('id', filter.ids);
+  if (filter.visible_to !== undefined) {
+    const viewer = apiViewerCondition(filter.visible_to);
+    builder.always(viewer.sql, ...viewer.params);
+  }
   return builder;
 }
 
@@ -1117,6 +1150,27 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     delete: async (id) => (await execute(exec, 'DELETE FROM api_specs WHERE id = ?', [id])) > 0,
 
     deleteByApi: async (apiId) => execute(exec, 'DELETE FROM api_specs WHERE api_id = ?', [apiId]),
+
+    pruneHistory: async (apiId, keep) => {
+      // Selected then deleted by id rather than deleted through a subquery on
+      // the same table: MySQL refuses that shape ("You can't specify target
+      // table for update in FROM clause"), and both dialects run this one.
+      const rows = await queryAll(
+        exec,
+        `SELECT id FROM api_specs
+          WHERE api_id = ? AND is_current = ?
+          ORDER BY created_at DESC, id DESC
+          LIMIT ? OFFSET ?`,
+        [apiId, encodeBool(false), SPEC_HISTORY_PRUNE_BATCH, Math.max(0, keep)],
+      );
+      if (rows.length === 0) return 0;
+      const ids = rows.map((row) => text(row.id));
+      return execute(
+        exec,
+        `DELETE FROM api_specs WHERE id IN (${ids.map(() => '?').join(', ')})`,
+        ids,
+      );
+    },
   };
 
   /* ── apiPlugins ─────────────────────────────────────────────────────── */
@@ -1721,6 +1775,13 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
           filter.participant_user_id,
         );
       }
+      if (filter.platform_or_participant_user_id !== undefined) {
+        builder.always(
+          '(participant_b IS NULL OR participant_a = ? OR participant_b = ?)',
+          filter.platform_or_participant_user_id,
+          filter.platform_or_participant_user_id,
+        );
+      }
       builder.add(filter.api_id, 'api_id = ?', filter.api_id ?? null);
       builder.addSearch(filter.q, ['subject']);
       const where = builder.build();
@@ -1793,16 +1854,31 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     },
 
     listByThread: async (threadId, options) => {
+      const builder = new SqlWhereBuilder().always('thread_id = ?', threadId);
+      const cursor = options?.before;
+      if (cursor) {
+        // Strictly before `(created_at, id)`, spelled out rather than as a row
+        // comparison so every adapter can carry the same predicate.
+        builder.always(
+          '(created_at < ? OR (created_at = ? AND id < ?))',
+          cursor.created_at,
+          cursor.created_at,
+          cursor.id,
+        );
+      }
+      const where = builder.build();
       const { limit, offset } = page(options);
+      const direction = options?.newest_first === true ? 'DESC' : 'ASC';
       const total = await queryCount(
         exec,
-        'SELECT COUNT(*) AS cnt FROM messages WHERE thread_id = ?',
-        [threadId],
+        `SELECT COUNT(*) AS cnt FROM messages${where.sql}`,
+        where.params,
       );
       const rows = await queryAll(
         exec,
-        'SELECT * FROM messages WHERE thread_id = ? ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?',
-        [threadId, limit, offset],
+        `SELECT * FROM messages${where.sql}
+         ORDER BY created_at ${direction}, id ${direction} LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
       );
       return { items: rows.map(mapMessage), total };
     },

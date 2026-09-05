@@ -15,8 +15,31 @@
  * `ROLLBACK` on reject. A nested `transaction()` call from inside a body joins
  * the running transaction instead of starting a new one. The other adapters
  * must present the same contract using their native transaction primitive.
+ *
+ * **"Nested" means *this* async context, not "some transaction is open".**
+ * Nesting is detected with an {@link AsyncLocalStorage} whose value is the
+ * running transaction's token: a `transaction()` call whose own async context
+ * carries the active token is a nested call and joins; one that carries nothing
+ * is an independent caller and queues, exactly like the SQL adapters'
+ * transaction-scoped store. The store used to track nesting with a single
+ * counter, which made *any* caller arriving while a body was awaiting look
+ * nested — its writes then committed as far as it could tell and vanished when
+ * the unrelated transaction rolled back.
+ *
+ * **Root-store statements issued while a transaction is open still land inside
+ * it.** There is one connection and better-sqlite3 is synchronous, so a
+ * `store.users.create(...)` issued from outside the transaction context between
+ * two `await`s of an open body executes on that connection while its `BEGIN` is
+ * live: it commits with the body, or rolls back with it. The queue removes the
+ * common case (an independent `store.transaction(...)`); a bare repository call
+ * cannot be queued without making every read block on the writer. Service code
+ * therefore does its work either wholly inside a transaction body or wholly
+ * outside one, and a transaction body never awaits anything that lets an
+ * unrelated request's bare writes run — which is what the request-scoped store
+ * handed to `fn` is for.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
@@ -68,6 +91,7 @@ import type {
   ApiRepo,
   ApiSpecRecord,
   ApiSpecRepo,
+  ApiViewerFilter,
   AuditLogFilter,
   AuditLogRecord,
   AuditLogRepo,
@@ -111,6 +135,7 @@ import type {
   VerificationTokenRecord,
   VerificationTokenRepo,
 } from '../../store.js';
+import { SPEC_HISTORY_PRUNE_BATCH } from '../../store.js';
 import {
   bool,
   encodeBool,
@@ -540,7 +565,24 @@ class SqliteStore implements NexusStore {
   /** Serialises `transaction` bodies; see the module docblock. */
   private queue: Promise<unknown> = Promise.resolve();
 
-  private depth = 0;
+  /**
+   * Carries the running transaction's token into everything its body awaits.
+   *
+   * This is how a genuinely nested `transaction()` call is told apart from an
+   * independent caller that merely happened to arrive while a body was
+   * suspended: the nested one runs inside the body's async context and sees the
+   * token, the independent one does not.
+   */
+  private readonly txContext = new AsyncLocalStorage<symbol>();
+
+  /**
+   * Token of the transaction currently holding `BEGIN`, or `null`.
+   *
+   * Compared against {@link txContext} so that a stray continuation left over
+   * from a *finished* transaction — work a body started with `void` and never
+   * awaited — cannot be mistaken for a nested call inside a later one.
+   */
+  private activeTx: symbol | null = null;
 
   private closed = false;
 
@@ -581,15 +623,20 @@ class SqliteStore implements NexusStore {
   }
 
   transaction<T>(fn: (tx: NexusStore) => Promise<T>): Promise<T> {
-    if (this.depth > 0) {
-      // Already inside a transaction body — join it rather than nesting.
+    const inherited = this.txContext.getStore();
+    if (inherited !== undefined && inherited === this.activeTx) {
+      // This call is running inside the body of the transaction that currently
+      // holds `BEGIN` — a genuine nested call, so join it. A caller that merely
+      // arrived while that body was awaiting carries no token and falls through
+      // to the queue below.
       return fn(this);
     }
+    const token = Symbol('sqlite-tx');
     const run = async (): Promise<T> => {
       this.db.exec('BEGIN IMMEDIATE');
-      this.depth += 1;
+      this.activeTx = token;
       try {
-        const result = await fn(this);
+        const result = await this.txContext.run(token, () => fn(this));
         this.db.exec('COMMIT');
         return result;
       } catch (error) {
@@ -600,7 +647,7 @@ class SqliteStore implements NexusStore {
         }
         throw error;
       } finally {
-        this.depth -= 1;
+        this.activeTx = null;
       }
     };
     const result = this.queue.then(run, run);
@@ -1100,6 +1147,27 @@ class SqliteStore implements NexusStore {
 
     deleteByApi: async (apiId) =>
       execute(this.db, 'DELETE FROM api_specs WHERE api_id = ?', [apiId]),
+
+    pruneHistory: async (apiId, keep) => {
+      // Selected then deleted by id rather than deleted through a subquery on
+      // the same table: MySQL refuses that shape outright, and the three SQL
+      // adapters run the same statements wherever they can.
+      const rows = queryAll(
+        this.db,
+        `SELECT id FROM api_specs
+          WHERE api_id = ? AND is_current = 0
+          ORDER BY created_at DESC, id DESC
+          LIMIT ? OFFSET ?`,
+        [apiId, SPEC_HISTORY_PRUNE_BATCH, Math.max(0, keep)],
+      );
+      if (rows.length === 0) return 0;
+      const ids = rows.map((row) => text(row.id));
+      return execute(
+        this.db,
+        `DELETE FROM api_specs WHERE id IN (${ids.map(() => '?').join(', ')})`,
+        ids,
+      );
+    },
   };
 
   /* ── apiPlugins ───────────────────────────────────────────────────────── */
@@ -1669,6 +1737,13 @@ class SqliteStore implements NexusStore {
           filter.participant_user_id,
         );
       }
+      if (filter.platform_or_participant_user_id !== undefined) {
+        builder.always(
+          '(participant_b IS NULL OR participant_a = ? OR participant_b = ?)',
+          filter.platform_or_participant_user_id,
+          filter.platform_or_participant_user_id,
+        );
+      }
       builder.add(filter.api_id, 'api_id = ?', filter.api_id ?? null);
       builder.addSearch(filter.q, ['subject']);
       const where = builder.build();
@@ -1739,16 +1814,31 @@ class SqliteStore implements NexusStore {
     },
 
     listByThread: async (threadId, options) => {
+      const builder = new WhereBuilder().always('thread_id = ?', threadId);
+      const cursor = options?.before;
+      if (cursor) {
+        // Strictly before `(created_at, id)`, spelled out rather than as a row
+        // comparison so every adapter can carry the same predicate.
+        builder.always(
+          '(created_at < ? OR (created_at = ? AND id < ?))',
+          cursor.created_at,
+          cursor.created_at,
+          cursor.id,
+        );
+      }
+      const where = builder.build();
       const { limit, offset } = page(options);
+      const direction = options?.newest_first === true ? 'DESC' : 'ASC';
       const total = queryCount(
         this.db,
-        'SELECT COUNT(*) AS count FROM messages WHERE thread_id = ?',
-        [threadId],
+        `SELECT COUNT(*) AS count FROM messages${where.sql}`,
+        where.params,
       );
       const rows = queryAll(
         this.db,
-        'SELECT * FROM messages WHERE thread_id = ? ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?',
-        [threadId, limit, offset],
+        `SELECT * FROM messages${where.sql}
+         ORDER BY created_at ${direction}, id ${direction} LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
       );
       return { items: rows.map(mapMessage), total };
     },
@@ -2431,6 +2521,29 @@ function userWhere(filter: UserFilter): WhereBuilder {
   return builder;
 }
 
+/**
+ * `owner OR granted OR openly listed` — {@link ApiViewerFilter} as one
+ * parenthesised disjunction, so it ANDs cleanly with the other filters.
+ *
+ * An empty grant list or visibility list simply drops its disjunct rather than
+ * emitting `IN ()`, which is a syntax error.
+ */
+function apiViewerCondition(viewer: ApiViewerFilter): { sql: string; params: Param[] } {
+  const parts = ['owner_user_id = ?'];
+  const params: Param[] = [viewer.owner_user_id];
+  const granted = [...new Set(viewer.granted_api_ids)];
+  if (granted.length > 0) {
+    parts.push(`id IN (${granted.map(() => '?').join(', ')})`);
+    params.push(...granted);
+  }
+  const visibilities = [...new Set(viewer.open_visibilities)];
+  if (visibilities.length > 0) {
+    parts.push(`(status = ? AND visibility IN (${visibilities.map(() => '?').join(', ')}))`);
+    params.push(viewer.open_status, ...visibilities);
+  }
+  return { sql: `(${parts.join(' OR ')})`, params };
+}
+
 function apiWhere(filter: ApiFilter): WhereBuilder {
   const builder = new WhereBuilder()
     .add(filter.owner_user_id, 'owner_user_id = ?', filter.owner_user_id ?? null)
@@ -2441,6 +2554,10 @@ function apiWhere(filter: ApiFilter): WhereBuilder {
     builder.always('requestable = ?', encodeBool(filter.requestable));
   }
   if (filter.ids !== undefined) builder.addIn('id', filter.ids);
+  if (filter.visible_to !== undefined) {
+    const viewer = apiViewerCondition(filter.visible_to);
+    builder.always(viewer.sql, ...viewer.params);
+  }
   return builder;
 }
 

@@ -43,11 +43,11 @@
  */
 
 import {
-  MAX_PAGE_SIZE,
   clampPageSize,
   roleAtLeast,
   type ApiSummary,
   type Message,
+  type MessagePage,
   type MessageThread,
   type MessageThreadDetail,
   type Paginated,
@@ -59,6 +59,7 @@ import { AuditAction, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type {
   ListOptions,
+  MessageCursor,
   MessageRecord,
   NexusStore,
   ThreadRecord,
@@ -108,6 +109,14 @@ export interface ThreadListFilter {
   q?: string;
 }
 
+/** Which window of a conversation to read. */
+export interface MessagePageOptions {
+  /** Window size; clamped to `[1, MAX_PAGE_SIZE]`. */
+  limit?: number;
+  /** Id of a message to read strictly backwards from. Must be in the thread. */
+  before?: Uuid;
+}
+
 /** Messaging operations. */
 export interface MessagingService {
   /** Open (or continue) a conversation and post its first message. */
@@ -120,8 +129,18 @@ export interface MessagingService {
     filter?: ThreadListFilter,
     options?: ListOptions,
   ): Promise<Paginated<MessageThread>>;
-  /** One thread with its full message list. */
-  getThread(user: UserRecord, threadId: Uuid): Promise<MessageThreadDetail>;
+  /** One thread with its most recent window of messages. */
+  getThread(
+    user: UserRecord,
+    threadId: Uuid,
+    options?: MessagePageOptions,
+  ): Promise<MessageThreadDetail>;
+  /** One window of a thread's transcript, for walking back through history. */
+  listMessages(
+    user: UserRecord,
+    threadId: Uuid,
+    options?: MessagePageOptions,
+  ): Promise<MessagePage>;
   /** Post a message into an existing thread. */
   sendMessage(user: UserRecord, threadId: Uuid, body: string, ip?: string | null): Promise<Message>;
 }
@@ -301,15 +320,15 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
   /**
    * Refuse the send when the sender has spent their rolling 24-hour budget.
    *
-   * Called first in both write paths, before the thread is resolved or any row
-   * is written, so a refusal costs exactly one COUNT and leaves nothing behind.
+   * Called inside the same serialised database transaction as the message
+   * insert, so concurrent sends cannot all spend the same remaining slot.
    * `0` means the operator turned the budget off.
    */
-  async function assertWithinBudget(senderUserId: Uuid): Promise<void> {
+  async function assertWithinBudget(tx: NexusStore, senderUserId: Uuid): Promise<void> {
     const limit = config.maxMessagesPerUserPerDay;
     if (limit <= 0) return;
     const since = new Date(Date.now() - MESSAGE_BUDGET_WINDOW_MS).toISOString();
-    const used = await store.messages.countBySenderSince(senderUserId, since);
+    const used = await tx.messages.countBySenderSince(senderUserId, since);
     if (used < limit) return;
     throw new NexusError(
       'QUOTA_EXCEEDED',
@@ -327,6 +346,68 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
     const thread = await store.threads.findById(threadId);
     if (!thread) throw notFound('Thread', threadId);
     return thread;
+  }
+
+  /**
+   * One window of a thread's transcript, newest-first from the database and
+   * reversed into reading order.
+   *
+   * The window is always anchored at the *end* of the conversation, optionally
+   * walked backwards with `before`. A fixed oldest-first page could not reach
+   * the end at all: once a thread held more than a page of messages, every new
+   * reply landed outside it and the sender watched their own message vanish.
+   */
+  async function messagePage(
+    thread: ThreadRecord,
+    options: MessagePageOptions | undefined,
+  ): Promise<MessagePage> {
+    const limit = clampPageSize(options?.limit);
+    const before = options?.before ? await resolveCursor(thread.id, options.before) : undefined;
+
+    const window = await store.messages.listByThread(thread.id, {
+      limit,
+      newest_first: true,
+      ...(before ? { before } : {}),
+    });
+    // `total` on that read counts what precedes the window's newest end, which
+    // is exactly the "is there more history?" question.
+    const hasMore = window.total > window.items.length;
+    const ordered = [...window.items].reverse();
+
+    const senders = new Map(
+      (
+        await store.users.findManyByIds([
+          ...new Set(ordered.map((message) => message.sender_user_id)),
+        ])
+      ).map((record) => [record.id, record]),
+    );
+    const items: Message[] = ordered.map((message) => {
+      const sender = senders.get(message.sender_user_id);
+      return sender ? { ...message, sender: toUserSummary(sender) } : { ...message };
+    });
+
+    return {
+      items,
+      total: await store.messages.countByThread(thread.id),
+      has_more: hasMore,
+      next_before: hasMore ? (items[0]?.id ?? null) : null,
+    };
+  }
+
+  /**
+   * Turn a caller-supplied message id into the `(created_at, id)` point the
+   * store pages from, refusing an id that belongs to another conversation —
+   * otherwise a cursor would leak the timestamps of messages the caller cannot
+   * read.
+   */
+  async function resolveCursor(threadId: Uuid, messageId: Uuid): Promise<MessageCursor> {
+    const anchor = await store.messages.findById(messageId);
+    if (!anchor || anchor.thread_id !== threadId) {
+      throw validationFailed('That message is not part of this conversation', {
+        before: messageId,
+      });
+    }
+    return { created_at: anchor.created_at, id: anchor.id };
   }
 
   /**
@@ -353,8 +434,6 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
       const body = input.body.trim();
       if (subject === '') throw validationFailed('A subject is required');
       if (body === '') throw validationFailed('A message body is required');
-      await assertWithinBudget(input.actor.id);
-
       let counterpart: UserRecord | null = null;
       if (input.recipientUserId) {
         if (input.recipientUserId === input.actor.id) {
@@ -382,24 +461,27 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
         participantB = input.actor.id;
       }
 
-      const existing = await store.threads.findExisting(participantA, participantB, apiId);
-      const thread =
-        existing ??
-        (await store.threads.create({
-          subject,
-          api_id: apiId,
-          created_by: input.actor.id,
-          participant_a: participantA,
-          participant_b: participantB,
-        }));
-
-      const message = await store.messages.create({
-        thread_id: thread.id,
-        sender_user_id: input.actor.id,
-        body,
+      const { existing, thread, message, at } = await store.transaction(async (tx) => {
+        await assertWithinBudget(tx, input.actor.id);
+        const existing = await tx.threads.findExisting(participantA, participantB, apiId);
+        const thread =
+          existing ??
+          (await tx.threads.create({
+            subject,
+            api_id: apiId,
+            created_by: input.actor.id,
+            participant_a: participantA,
+            participant_b: participantB,
+          }));
+        const message = await tx.messages.create({
+          thread_id: thread.id,
+          sender_user_id: input.actor.id,
+          body,
+        });
+        const at = nowIso();
+        await tx.threads.touchLastMessage(thread.id, at);
+        return { existing, thread, message, at };
       });
-      const at = nowIso();
-      await store.threads.touchLastMessage(thread.id, at);
 
       if (!existing) {
         await audit.record(
@@ -434,60 +516,51 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
         ...(filter.q !== undefined ? { q: filter.q } : {}),
       };
 
-      if (!roleAtLeast(user.role, 'admin')) {
-        const page = await store.threads.list({ ...base, participant_user_id: user.id }, options);
-        return { items: await decorate(page.items), total: page.total };
-      }
-
-      // Admins additionally see the platform inbox (`participant_b IS NULL`).
-      // `ThreadFilter` has no predicate for that and widening `NexusStore` would
-      // mean changing all four adapters, so the admin view merges one bounded
-      // page and selects in memory. Support volume is small by construction.
-      const limit = clampPageSize(options?.limit);
-      const offset = Math.max(0, options?.offset ?? 0);
-      const scan = await store.threads.list(base, { limit: MAX_PAGE_SIZE, offset: 0 });
-      const visible = scan.items.filter(
-        (thread) => isPlatformThread(thread) || isThreadParticipant(user, thread),
-      );
-      return {
-        items: await decorate(visible.slice(offset, offset + limit)),
-        total: visible.length,
-      };
+      // Both audiences are one query with a different seat predicate: an
+      // ordinary user sees the threads they sit in, an admin additionally sees
+      // the platform inbox (`participant_b IS NULL`). The admin half used to
+      // scan one bounded page and select in memory, which put every platform
+      // thread behind a page of unrelated conversations out of reach whatever
+      // offset the caller asked for, and reported the survivors as `total`.
+      const seats = roleAtLeast(user.role, 'admin')
+        ? { platform_or_participant_user_id: user.id }
+        : { participant_user_id: user.id };
+      const page = await store.threads.list({ ...base, ...seats }, options);
+      return { items: await decorate(page.items), total: page.total };
     },
 
-    async getThread(user, threadId): Promise<MessageThreadDetail> {
+    async getThread(user, threadId, options): Promise<MessageThreadDetail> {
       const thread = await loadThread(threadId);
       assertCanRead(user, thread);
-
-      const page = await store.messages.listByThread(thread.id, { limit: MAX_PAGE_SIZE });
-      const senders = new Map(
-        (
-          await store.users.findManyByIds([
-            ...new Set(page.items.map((message) => message.sender_user_id)),
-          ])
-        ).map((record) => [record.id, record]),
-      );
-      const [decorated] = await decorate([thread]);
-      const messages: Message[] = page.items.map((message) => {
-        const sender = senders.get(message.sender_user_id);
-        return sender ? { ...message, sender: toUserSummary(sender) } : { ...message };
-      });
+      const [decorated, messages] = await Promise.all([
+        decorate([thread]).then(([entry]) => entry),
+        messagePage(thread, options),
+      ]);
       return { ...(decorated ?? thread), messages };
+    },
+
+    async listMessages(user, threadId, options): Promise<MessagePage> {
+      const thread = await loadThread(threadId);
+      assertCanRead(user, thread);
+      return messagePage(thread, options);
     },
 
     async sendMessage(user, threadId, body, ip = null): Promise<Message> {
       const trimmed = body.trim();
       if (trimmed === '') throw validationFailed('A message body is required');
-      await assertWithinBudget(user.id);
       const thread = await loadThread(threadId);
       assertCanPost(user, thread);
 
-      const message = await store.messages.create({
-        thread_id: thread.id,
-        sender_user_id: user.id,
-        body: trimmed,
+      const message = await store.transaction(async (tx) => {
+        await assertWithinBudget(tx, user.id);
+        const created = await tx.messages.create({
+          thread_id: thread.id,
+          sender_user_id: user.id,
+          body: trimmed,
+        });
+        await tx.threads.touchLastMessage(thread.id, nowIso());
+        return created;
       });
-      await store.threads.touchLastMessage(thread.id, nowIso());
 
       await audit.record(
         { id: user.id, role: user.role },

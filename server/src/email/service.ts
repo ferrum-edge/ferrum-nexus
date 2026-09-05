@@ -74,12 +74,29 @@ export interface ResolvedSmtpSettings {
   from: string;
 }
 
+/**
+ * Ceiling on one `send`, in milliseconds.
+ *
+ * Nodemailer's defaults are 2 minutes to connect, 30 seconds for the greeting
+ * and 10 minutes of socket inactivity, so a single unlucky message could hold
+ * its outbox claim for a quarter of an hour — far past the worker's stale
+ * threshold, at which point another worker re-queues a message that is still in
+ * flight and the relay gets two copies. These are the numbers
+ * `OUTBOX_SEND_BUDGET_MS` is derived from; keep the two in step.
+ */
+const SMTP_CONNECTION_TIMEOUT_MS = 10_000;
+const SMTP_GREETING_TIMEOUT_MS = 10_000;
+const SMTP_SOCKET_TIMEOUT_MS = 30_000;
+
 /** Build a nodemailer-backed transport for resolved settings. */
 export function createSmtpTransport(settings: ResolvedSmtpSettings): MailTransport {
   const transporter = nodemailer.createTransport({
     host: settings.host ?? '',
     port: settings.port,
     secure: settings.secure,
+    connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
+    greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
+    socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
     ...(settings.user ? { auth: { user: settings.user, pass: settings.password ?? '' } } : {}),
   });
   return {

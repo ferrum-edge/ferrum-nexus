@@ -51,6 +51,25 @@
  * had just appended with it. A target that is no longer live at all resolves
  * to `not-live` and never to `whole-type`.
  *
+ * ## The mirror is written the instant Edge confirms, never later
+ *
+ * A rotation touches two systems and there is no transaction spanning them, so
+ * the only defence is ordering: **no Nexus row may describe a gateway state
+ * that a later step could still fail to reach.**
+ *
+ * - Below the cap, rotation appends first and both secrets are briefly live;
+ *   the old row is revoked only after its entry is actually gone.
+ * - **At** the cap there is no room to append, so the old entry is deleted
+ *   first — and its row is revoked immediately, before the append is even
+ *   attempted. Deferring it to the end (as this used to) left two `active` rows
+ *   against one Edge entry whenever the append failed, and every later
+ *   operation on the *surviving* credential — including the revoke an incident
+ *   response needs — then died on {@link resolveCredentialIndex}'s length
+ *   check. The failed rotation now reports plainly that the old credential is
+ *   gone and a new one must be issued.
+ * - An append Edge accepted whose metadata row cannot be written is deleted
+ *   again, because a live secret with no row is one nobody can see or revoke.
+ *
  * ## The target is loaded twice, and the second read is the one that counts
  *
  * `rotate` and `revoke` resolve the credential once outside the per-consumer
@@ -74,6 +93,7 @@
 
 import {
   CREDENTIAL_TYPE_FOR_PLUGIN,
+  MAX_PAGE_SIZE,
   consumerUsernameForUser,
   roleAtLeast,
   type CredentialMetadata,
@@ -100,7 +120,14 @@ import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import type { EdgeCredentialEntry, EdgeCredentialMap } from '../ferrum-admin/types.js';
 import type { NexusCrypto } from '../lib/crypto.js';
 import { last4, randomSecret, randomToken } from '../lib/crypto.js';
-import { conflict, edgeError, forbidden, notFound, validationFailed } from '../lib/errors.js';
+import {
+  conflict,
+  edgeError,
+  forbidden,
+  notFound,
+  userDisabled,
+  validationFailed,
+} from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
 import type { ConsumerProvisioner } from './consumers.js';
@@ -115,9 +142,17 @@ export const CREDENTIAL_TYPES = [
 /** Statuses that still occupy a slot in the Edge credentials array. */
 const LIVE_STATUSES = new Set(['active', 'retiring']);
 
-/** Raised whenever the Nexus mirror and the live Edge array disagree. */
+/**
+ * Raised whenever the Nexus mirror and the live Edge array disagree.
+ *
+ * Nothing in the credential paths can produce this any more — every failure
+ * mode leaves the mirror matching Edge — so reaching it means the consumer was
+ * edited outside Nexus. The message names the fix because the operator holding
+ * the 502 is the one who has to apply it; the full procedure is
+ * `operations.md` §12, "The credential mirror".
+ */
 const RECONCILE_MESSAGE =
-  'The gateway credential list does not match the portal; ask an administrator to reconcile this consumer before rotating or revoking';
+  'The gateway credential list does not match the portal. An administrator must reconcile this consumer — revoke the portal’s remaining credentials for it and issue new ones, or delete the entries added to the gateway by hand — before it can be rotated or revoked';
 
 /** Generated plaintext plus the Edge entry that carries it. */
 interface GeneratedCredential {
@@ -131,10 +166,15 @@ interface GeneratedCredential {
 export interface GatewayTeardown {
   /** The Edge consumer that was stripped, or `null` when the user had none. */
   consumer_id: string | null;
-  /** `credential_metadata` rows moved to `revoked`. */
+  /** `credential_metadata` rows moved to `revoked`, across every identity. */
   revoked_credentials: number;
-  /** ACL groups the consumer held before the teardown. */
+  /** ACL groups the canonical consumer held before the teardown. */
   removed_groups: string[];
+  /**
+   * Edge consumers deleted outright because they were not the account's
+   * canonical identity — a provider's `nexus-test-<apiId>` consumers.
+   */
+  deleted_consumers: string[];
 }
 
 /** Input for {@link CredentialsService.issueForConsumer}. */
@@ -179,13 +219,22 @@ export interface CredentialsService {
   revoke(user: UserRecord, credentialId: Uuid, ip?: string | null): Promise<void>;
   /**
    * Take a user's gateway identity away entirely: every ACL group off the
-   * consumer, every credential of every type deleted, every mirrored row
-   * `revoked`.
+   * canonical consumer, every credential of every type deleted, every mirrored
+   * row `revoked` — and the same for every *other* Edge consumer the account
+   * still holds credential material on, which in practice means its provider
+   * test consumers (`nexus-test-<apiId>`), deleted outright.
    *
    * Called when an account is disabled. Killing the portal session is not
    * enough on its own — an issued API key keeps working without one, and an
    * API published with `requestable: false` carries no `access_control`
-   * plugin, so an empty group list does not stop it either.
+   * plugin, so an empty group list does not stop it either. Nor is stripping
+   * the canonical consumer enough: a test consumer is a separate identity with
+   * its own key and its own approval group.
+   *
+   * Every identity has to come down for this to have succeeded, so a failure on
+   * any one of them throws and the durable job stays `pending`. A retry
+   * enumerates from live credential rows, so identities an earlier attempt
+   * already finished are not touched again.
    */
   disableGatewayAccess(userId: Uuid, subject: string): Promise<GatewayTeardown>;
   /** Append a credential to an arbitrary consumer — the test-consumer path. */
@@ -304,7 +353,10 @@ export async function runGatewayTeardown(
     const result = await credentials.disableGatewayAccess(userId, subject);
     const jobId = input.jobId ?? (await store.gatewayTeardownJobs.findByUser(userId))?.id ?? null;
     if (jobId !== null) await store.gatewayTeardownJobs.markDone(jobId, nowIso());
-    if (result.consumer_id === null) {
+    // `no_consumer` means "this account never had a gateway identity at all",
+    // so a provider whose only identity was a test consumer reports `ok` — the
+    // work was real and it landed.
+    if (result.consumer_id === null && result.deleted_consumers.length === 0) {
       return {
         outcome: 'no_consumer',
         details: { gateway_teardown: 'no_consumer' },
@@ -319,6 +371,9 @@ export async function runGatewayTeardown(
         gateway_consumer_id: result.consumer_id,
         revoked_credentials: result.revoked_credentials,
         removed_acl_groups: result.removed_groups,
+        ...(result.deleted_consumers.length > 0
+          ? { deleted_consumers: result.deleted_consumers }
+          : {}),
       },
       result,
       error: null,
@@ -404,36 +459,62 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     return credential;
   }
 
+  /**
+   * Append one entry to a consumer and mirror it, or leave neither behind.
+   *
+   * The two writes are on different systems, so there is no transaction to put
+   * them in. What there is instead is a compensation: an entry Edge accepted
+   * whose row could not be written is a live secret nobody in the portal can
+   * see, name or revoke, so it is deleted again before the failure propagates.
+   * `appendIndex` is where `POST` will have put it — Edge appends, so that is
+   * the array length before the call.
+   */
   async function appendCredential(input: {
-    user: UserRecord;
+    /** The account the row is attributed to and that the secret belongs to. */
+    ownerId: Uuid;
+    /** Who Edge records as the subject of the write — an admin, when acting. */
+    actorId: Uuid;
     consumerId: string;
     consumerUsername: string;
     type: CredentialType;
     label: string | null;
     rotatedFromId?: Uuid | null;
+    /** Index the appended entry occupies, for the compensating delete. */
+    appendIndex?: number;
   }): Promise<{ credential: CredentialRecord; secret: ShowOnceSecret }> {
     const generated = generateCredential(input.type, input.consumerUsername);
     await edge.consumers.addCredential(
       input.consumerId,
       input.type,
       generated.entry,
-      input.user.id,
+      input.actorId,
     );
-    const credential = await store.credentials.create({
-      user_id: input.user.id,
-      ferrum_consumer_id: input.consumerId,
-      credential_type: input.type,
-      // Edge assigns credential entries no id of their own; the addressable
-      // resource is the per-type collection, and position is tracked by row
-      // order (see the module docblock).
-      ferrum_credential_id: `${input.consumerId}/credentials/${input.type}`,
-      fingerprint: crypto.fingerprint(generated.material),
-      last4: last4(generated.material),
-      label: input.label,
-      status: 'active',
-      rotated_from_id: input.rotatedFromId ?? null,
-    });
-    return { credential, secret: generated.secret };
+    try {
+      const credential = await store.credentials.create({
+        user_id: input.ownerId,
+        ferrum_consumer_id: input.consumerId,
+        credential_type: input.type,
+        // Edge assigns credential entries no id of their own; the addressable
+        // resource is the per-type collection, and position is tracked by row
+        // order (see the module docblock).
+        ferrum_credential_id: `${input.consumerId}/credentials/${input.type}`,
+        fingerprint: crypto.fingerprint(generated.material),
+        last4: last4(generated.material),
+        label: input.label,
+        status: 'active',
+        rotated_from_id: input.rotatedFromId ?? null,
+      });
+      return { credential, secret: generated.secret };
+    } catch (error) {
+      if (input.appendIndex !== undefined) {
+        // Best effort: the store failure is the one worth reporting, and a
+        // failed compensation leaves an orphan the reconciliation guard names.
+        await edge.consumers
+          .deleteCredentialAt(input.consumerId, input.type, input.appendIndex, input.actorId)
+          .catch(() => undefined);
+      }
+      throw error;
+    }
   }
 
   async function issueForConsumer(
@@ -443,21 +524,22 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       throw validationFailed(`Unsupported credential type '${input.credentialType}'`);
     }
     return edge.serializePerKey(input.consumerId, async () => {
-      if (input.skipCap !== true) {
-        const rows = await liveRows(input.consumerId, input.credentialType);
-        if (rows.length >= cap) {
-          throw conflict(
-            `You already hold ${rows.length} live ${input.credentialType} credentials (the gateway allows ${cap}); revoke or rotate one first`,
-            { credential_type: input.credentialType, limit: cap },
-          );
-        }
+      await assertOwnerActive(input.user.id);
+      const rows = await liveRows(input.consumerId, input.credentialType);
+      if (input.skipCap !== true && rows.length >= cap) {
+        throw conflict(
+          `You already hold ${rows.length} live ${input.credentialType} credentials (the gateway allows ${cap}); revoke or rotate one first`,
+          { credential_type: input.credentialType, limit: cap },
+        );
       }
       return appendCredential({
-        user: input.user,
+        ownerId: input.user.id,
+        actorId: input.user.id,
         consumerId: input.consumerId,
         consumerUsername: input.consumerUsername,
         type: input.credentialType,
         label: input.label ?? null,
+        appendIndex: rows.length,
       });
     });
   }
@@ -468,14 +550,66 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
 
     async disableGatewayAccess(userId, subject): Promise<GatewayTeardown> {
       const consumer = await provisioner.findConsumer(userId);
-      if (!consumer) return { consumer_id: null, revoked_credentials: 0, removed_groups: [] };
-      const consumerId = consumer.ferrum_consumer_id;
+      const consumerId = consumer?.ferrum_consumer_id ?? null;
+
+      // Everything else the account can still authenticate as. A provider's
+      // `nexus-test-<apiId>` consumer is a *separate* Edge identity carrying a
+      // credential attributed to whoever created it, and it holds the API's
+      // approval group, so leaving it up defeats the whole offboarding.
+      //
+      // The enumeration reads live credential rows, which is also what makes a
+      // retry skip the identities an earlier attempt already finished: their
+      // rows are `revoked`, so they never come back into this list.
+      const foreign = await foreignConsumerIds(userId, consumerId);
+      let revoked = 0;
+      const deleted: string[] = [];
+
+      if (consumerId === null && foreign.length === 0) {
+        return {
+          consumer_id: null,
+          revoked_credentials: 0,
+          removed_groups: [],
+          deleted_consumers: [],
+        };
+      }
+
+      // Each identity gets its own critical section, keyed on its own consumer
+      // id — the same key its issue path locks, so a teardown and an in-flight
+      // append can never interleave. Sequential, not concurrent: a failure must
+      // leave the identities behind it untouched for the retry to pick up.
+      for (const foreignId of foreign) {
+        revoked += await edge.serializePerKey(foreignId, async () => {
+          await assertStillDisabled(userId);
+          const live = await edge.consumers.get(foreignId);
+          // A test consumer is disposable by definition — the next provider or
+          // admin who wants one recreates it — so it goes away entirely rather
+          // than being stripped and left as an empty identity.
+          if (live) await edge.consumers.delete(foreignId, subject);
+          const count = await revokeRowsFor(foreignId);
+          const cached = await store.consumers.findByFerrumId(foreignId);
+          // Only ever a mapping that belongs to *this* account: the tracking row
+          // of somebody else's consumer is not this teardown's to delete.
+          if (cached && cached.user_id === userId) await store.consumers.delete(cached.id);
+          return count;
+        });
+        deleted.push(foreignId);
+      }
+
+      if (consumerId === null) {
+        return {
+          consumer_id: null,
+          revoked_credentials: revoked,
+          removed_groups: [],
+          deleted_consumers: deleted,
+        };
+      }
 
       // One serialised block, like every other consumer mutation — and *only*
       // one, because `serializePerKey` is a queue rather than a re-entrant
       // lock: calling `provisioner.mutateAclGroups` from in here would wait on
       // the block it is already inside.
       return edge.serializePerKey(consumerId, async () => {
+        await assertStillDisabled(userId);
         const live = await edge.consumers.get(consumerId);
         const removedGroups = [...(live?.acl_groups ?? [])];
 
@@ -503,18 +637,13 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
 
         // The mirror follows the gateway, including when the consumer was
         // already gone: those rows describe credentials that cannot work.
-        const rows = await store.credentials.listByConsumer(consumerId);
-        let revoked = 0;
-        for (const row of rows) {
-          if (row.status === 'revoked') continue;
-          await store.credentials.update(row.id, { status: 'revoked' });
-          revoked += 1;
-        }
+        revoked += await revokeRowsFor(consumerId);
 
         return {
           consumer_id: consumerId,
           revoked_credentials: revoked,
           removed_groups: removedGroups,
+          deleted_consumers: deleted,
         };
       });
     },
@@ -580,6 +709,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           throw conflict('This credential has already been revoked');
         }
 
+        // The owner, not the actor: an admin rotating somebody else's key must
+        // not be able to hand a disabled account a working one.
+        await assertOwnerActive(current.user_id);
+
         const consumer = await edge.consumers.get(consumerId);
         if (!consumer) throw edgeError('The gateway consumer for this credential no longer exists');
         const rows = await liveRows(consumerId, type);
@@ -602,24 +735,55 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         // no working credential of this type, which is unavoidable at the cap.
         const appendFirst = length < cap;
 
+        let previous = current;
         if (!appendFirst) {
           await removeAt(consumerId, type, position, user.id);
+          // Immediately, not at the end. The delete is the destructive step and
+          // Edge has confirmed it; deferring the row until the append also
+          // succeeds is what left two `active` rows against one Edge entry
+          // after a failed append, and `resolveCredentialIndex` then refused
+          // every later operation on the *surviving* credential — including the
+          // revoke an incident response needs.
+          previous = (await store.credentials.update(current.id, { status: 'revoked' })) ?? current;
         }
+
         const created = await appendCredential({
-          user,
+          // The replacement belongs to whoever the credential belonged to. An
+          // admin may rotate somebody else's key — `loadOwned` allows it — but
+          // rotating is not taking: attributing the row to the admin would put
+          // the replacement on a consumer the owner cannot list it against, and
+          // the owner's own `DELETE` of it would come back 403.
+          ownerId: current.user_id,
+          // The admin is still the actor: theirs is the id Edge records as the
+          // write's subject, and the one the Nexus audit row names.
+          actorId: user.id,
           consumerId,
           consumerUsername: consumer.username,
           type,
           label: label ?? current.label,
           rotatedFromId: current.id,
+          appendIndex: appendFirst ? length : length - 1,
+        }).catch((error: unknown) => {
+          if (appendFirst) throw error;
+          // At the cap the old secret is already gone and cannot be recreated —
+          // it was show-once. Say so plainly rather than leaving the caller to
+          // assume nothing happened and keep using a key that no longer exists.
+          throw edgeError(
+            'The previous credential was removed from the gateway but its replacement could not be created; issue a new credential',
+            {
+              credential_type: type,
+              revoked_credential_id: current.id,
+              cause: error instanceof Error ? error.message : String(error),
+            },
+          );
         });
+
         if (appendFirst) {
           // `POST` appends, so the old entry's index is unchanged by the append.
           await removeAt(consumerId, type, position, user.id);
+          previous = (await store.credentials.update(current.id, { status: 'revoked' })) ?? current;
         }
 
-        const previous =
-          (await store.credentials.update(current.id, { status: 'revoked' })) ?? current;
         return { created, previous };
       });
 
@@ -632,6 +796,9 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           consumer_id: consumerId,
           rotated_from: target.id,
           previous_last4: target.last4,
+          // Only when they differ: an admin acting on somebody else's
+          // credential is the case worth being able to find in the log.
+          ...(target.user_id === user.id ? {} : { owner_user_id: target.user_id }),
         },
         ip,
       );
@@ -713,6 +880,87 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       );
     },
   };
+
+  /**
+   * Refuse a gateway write on behalf of an account that is no longer active.
+   *
+   * `serializePerKey` orders writes against a consumer; it does not
+   * re-authorise them. A `POST /api/credentials` that passed authentication a
+   * moment before an admin hit disable is still a valid request object when it
+   * reaches the front of the queue — and if it runs after the teardown, it
+   * mints a key on a disabled account that nothing is retrying to remove.
+   *
+   * So the owner is reloaded **inside** the critical section, after the lock is
+   * held and before any Edge write. Teardown takes the same key, which makes
+   * the two orders the only two possible: the append wins the lock and the
+   * teardown behind it deletes what it appended, or the teardown wins and the
+   * append then sees `disabled` and is refused.
+   */
+  async function assertOwnerActive(userId: Uuid): Promise<void> {
+    const owner = await store.users.findById(userId);
+    if (!owner) throw notFound('User', userId);
+    if (owner.status !== 'active') {
+      throw userDisabled('This account has been disabled; its gateway access cannot be extended');
+    }
+  }
+
+  /**
+   * Refuse to strip an account that is no longer disabled.
+   *
+   * A teardown job claimed before a re-enable would otherwise land afterwards
+   * and take a live account's credentials with it. The worker checks at claim
+   * time; this is the check that matters, because it runs inside the same
+   * per-consumer critical section as the Edge write it guards.
+   */
+  async function assertStillDisabled(userId: Uuid): Promise<void> {
+    const owner = await store.users.findById(userId);
+    if (!owner) return;
+    if (owner.status !== 'disabled') {
+      throw conflict('That account is no longer disabled; its gateway access was left alone', {
+        user_id: userId,
+        status: owner.status,
+      });
+    }
+  }
+
+  /**
+   * Every Edge consumer other than `canonicalId` that this account still holds
+   * live credential material on, in a stable order.
+   *
+   * In practice that is the account's provider test consumers: `issue` only
+   * ever writes rows against the caller's own consumer, while
+   * `createTestConsumer` writes one against `nexus-test-<apiId>` attributed to
+   * the provider or admin who asked for it.
+   */
+  async function foreignConsumerIds(userId: Uuid, canonicalId: string | null): Promise<string[]> {
+    const seen = new Set<string>();
+    for (const status of LIVE_STATUSES) {
+      let offset = 0;
+      for (;;) {
+        const page = await store.credentials.list(
+          { user_id: userId, status: status as CredentialMetadata['status'] },
+          { limit: MAX_PAGE_SIZE, offset },
+        );
+        for (const row of page.items) {
+          if (row.ferrum_consumer_id !== canonicalId) seen.add(row.ferrum_consumer_id);
+        }
+        offset += page.items.length;
+        if (page.items.length === 0 || offset >= page.total) break;
+      }
+    }
+    return [...seen].sort();
+  }
+
+  /** Move every live row of one consumer to `revoked`; returns how many moved. */
+  async function revokeRowsFor(consumerId: string): Promise<number> {
+    let revoked = 0;
+    for (const row of await store.credentials.listByConsumer(consumerId)) {
+      if (row.status === 'revoked') continue;
+      await store.credentials.update(row.id, { status: 'revoked' });
+      revoked += 1;
+    }
+    return revoked;
+  }
 
   /** Delete one entry by index, or the whole type when the index is unusable. */
   async function removeAt(

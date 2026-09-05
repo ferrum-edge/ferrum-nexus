@@ -135,6 +135,82 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `LAST_SUPER_ADMIN` rather than `CONFLICT`.
 - `GET /api/health` documented a gateway version it can never observe.
 
+- **`npm run rotate-secret-key`** re-encrypts the encrypted `app_settings`
+  rows from `NEXUS_SECRET_KEY_PREVIOUS` to the new `NEXUS_SECRET_KEY` in one
+  transaction, so rotating the master key no longer leaves the SMTP password
+  unreadable or locks every admin out of a CAPTCHA-enabled portal; the runbook
+  in `docs/operations.md` §7 is rewritten around it.
+- **The server and `npm run migrate` read the root `.env`** the quickstart
+  tells you to create (working directory or its parent; exported variables
+  win; images with no file are unaffected). A clean checkout previously failed
+  with "NEXUS_SECRET_KEY is required".
+- **The Compose example builds from the repository root** it is copied to;
+  its previous `context: ..` pointed at the parent directory.
+
+- **Disabling an account now tears down every gateway identity it holds**,
+  including provider test consumers (`nexus-test-<apiId>`), whose key and
+  approval group previously stayed live behind a `gateway_teardown: "ok"`.
+- **A credential mutation re-checks the owner inside the consumer lock**, so
+  an issue, rotation, test-consumer issuance or approval that was in flight
+  when the account was disabled is refused (or removed by the teardown that
+  follows it) instead of minting a live key for a disabled account.
+- **Rotation at the per-type cap can no longer leave the portal disagreeing
+  with the gateway.** The retired row is revoked the moment Edge confirms the
+  delete; a failed append answers `502` saying the previous credential was
+  removed and a new one must be issued, and a failed metadata insert deletes
+  the key it just appended. `docs/operations.md` gains the reconciliation
+  procedure the mismatch error now points at.
+- **An admin-rotated credential keeps its owner.** The replacement used to be
+  assigned to the administrator, so the client could neither see nor revoke
+  it; the admin is now the audit actor only.
+
+- **The catalog pages the whole filtered set.** The viewer rule (owned,
+  granted, or published-and-public) is now part of the store query, so a
+  public API older than 200 internal ones is no longer invisible and `total`
+  is exact. `MAX_PAGE_SIZE` is unchanged.
+- **Conversations page from the newest end.** `GET /api/threads/:id` and the
+  new `GET /api/threads/:id/messages` take `limit` and `before` and answer a
+  `MessagePage` (`items`, `total`, `has_more`, `next_before`); the thread page
+  opens on the latest window with "Load older messages", so reply 201 no
+  longer vanishes. The admin inbox predicate (platform thread or admin
+  participates) moved into the store query as well.
+
+- **A `routes` spec revision holds the proxy lease.** The fresh read, the
+  `PUT /api-specs/{id}` replace, the store write and the compensation run
+  under `proxy:<id>`, so a concurrent runtime PATCH (methods, timeouts,
+  backend, WebSocket origins) is no longer overwritten by the importer's
+  re-insert; the publish cutover takes the same key.
+- **A failed enforcement conversion restores the original proxy.** On any
+  rebuild failure the half-built replacement is removed and the captured
+  proxy, its hand-owned plugins and the original mode are rebuilt through the
+  staging path before the error is returned; if that restoration fails too,
+  an `api.gateway_repair_required` audit row carries the snapshot an admin
+  needs. Previously the live proxy was deleted and a retry answered 404.
+- **Spec revision history is bounded.** `NEXUS_SPEC_HISTORY_LIMIT` (default 10) keeps the newest historical revisions per API, pruned inside the
+  transaction that makes a revision current, so the per-owner storage bound
+  is now `MAX_SPEC_BYTES × (limit + 1) × NEXUS_MAX_APIS_PER_OWNER`.
+- **Spec following compares the whole upstream.** An API follows its document
+  while its stored `upstream_url` equals the previous revision's normalised
+  `servers[0]`, and then moves on any scheme, host, port or base-path change;
+  a same-host pin with a different path is left alone. Base-path-only changes
+  previously reported success while the gateway kept the old path.
+
+- **Workers recover abandoned claims on every tick**, not only at start, and
+  claim one row at a time with a per-row budget (60 s; SMTP timeouts are now
+  pinned so a hung send cannot outlive the 5-minute stale threshold). A crash
+  followed by a quick restart no longer strands gateway teardowns or
+  transactional mail, and a store failure mid-batch leaves the rest workable.
+- **The last-super-admin rule holds across instances.** Every transition that
+  can shrink the active super-admin set (demotion, disable, god-mode disable)
+  runs under a store-level lease (`users:super-admins`) taken outside the
+  transaction, so two instances can no longer each demote the other.
+- **SQLite no longer mistakes an unrelated caller for a nested transaction.**
+  Nesting is tracked with `AsyncLocalStorage`; an independent transaction
+  started while another body is awaiting queues behind it instead of joining
+  it and losing its writes to the other's rollback. The remaining hazard, a
+  bare root-store write issued while a body is open, is documented on the
+  store contract.
+
 ### Security
 
 The rewrite was reviewed twice — once by an adversarial pass over the whole

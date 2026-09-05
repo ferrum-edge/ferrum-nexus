@@ -50,6 +50,7 @@ import {
   type GetApiResponse,
   type GetEmailTemplateResponse,
   type GetMeUserResponse,
+  type GetThreadQuery,
   type GetThreadResponse,
   type GetUserResponse,
   type GodBroadcastRequest,
@@ -79,6 +80,8 @@ import {
   type ListNotificationsResponse,
   type ListOrganizationsQuery,
   type ListOrganizationsResponse,
+  type ListThreadMessagesQuery,
+  type ListThreadMessagesResponse,
   type ListThreadsQuery,
   type ListThreadsResponse,
   type ListUsersQuery,
@@ -454,8 +457,14 @@ export const threadsApi = {
     get<ListThreadsResponse>('/threads', { ...query }),
   create: (body: CreateThreadRequest): Promise<CreateThreadResponse> =>
     post<CreateThreadResponse>('/threads', body),
-  get: (id: string): Promise<GetThreadResponse> =>
-    get<GetThreadResponse>(`/threads/${encodeURIComponent(id)}`),
+  get: (id: string, query: GetThreadQuery = {}): Promise<GetThreadResponse> =>
+    get<GetThreadResponse>(`/threads/${encodeURIComponent(id)}`, { ...query }),
+  /** One older window of a conversation, for "load older messages". */
+  messages: (
+    id: string,
+    query: ListThreadMessagesQuery = {},
+  ): Promise<ListThreadMessagesResponse> =>
+    get<ListThreadMessagesResponse>(`/threads/${encodeURIComponent(id)}/messages`, { ...query }),
   sendMessage: (id: string, body: SendMessageRequest): Promise<SendMessageResponse> =>
     post<SendMessageResponse>(`/threads/${encodeURIComponent(id)}/messages`, body),
 };

@@ -1,8 +1,8 @@
 # Operations
 
 Running Ferrum Nexus in production: configuration, databases, containers, TLS,
-backups, key rotation, the email outbox, scaling limits, health checks, and
-metrics.
+backups, key rotation, the email outbox, scaling limits, health checks, metrics,
+and the credential mirror.
 
 - Architecture background: [`architecture.md`](architecture.md)
 - Security posture: [`security.md`](security.md)
@@ -12,17 +12,27 @@ metrics.
 
 ## 1. Environment variables
 
-`server/src/config/index.ts` is the **only** reader of `process.env`. It
+`server/src/config/index.ts` is the **only** reader of the environment. It
 validates everything with zod at startup and refuses to boot half-configured:
 the process prints every offending variable and exits non-zero. The repo-root
 [`.env.example`](../.env.example) mirrors this table.
 
+**Where the environment comes from.** The server (`npm run dev`, `npm start`)
+and the migration CLI (`npm run migrate`) read a `.env` file if one exists in
+the working directory or its parent — the workspace scripts run from
+`server/`, so the documented repo-root `.env` is found either way — and layer
+the real environment **over** it: a variable exported in the shell, set by a
+container runtime or injected by an orchestrator always wins, and a deployed
+image with no `.env` behaves exactly as if the feature did not exist. The
+path of the file that was read is logged once at startup; its contents never
+are. A relative `NEXUS_SQLITE_PATH` resolves from `server/`.
+
 ### Required
 
-| Variable                  | Notes                                                                                                                                                                                   |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NEXUS_SECRET_KEY`        | **Required.** Minimum 32 characters. The master secret; the settings-encryption key and the session-token HMAC key are both HKDF-derived from it. Generate with `openssl rand -hex 32`. |
-| `FERRUM_ADMIN_JWT_SECRET` | **Required.** Minimum 32 characters. Must match the gateway's `FERRUM_ADMIN_JWT_SECRET` exactly.                                                                                        |
+| Variable                  | Notes                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NEXUS_SECRET_KEY`        | **Required.** Minimum 32 characters. The master secret; the settings-encryption key and the session-token HMAC key are both HKDF-derived from it. Generate with `openssl rand -hex 32`. To change it, run `npm run rotate-secret-key` with the old value in `NEXUS_SECRET_KEY_PREVIOUS` first — see [§7](#7-rotating-nexus_secret_key). |
+| `FERRUM_ADMIN_JWT_SECRET` | **Required.** Minimum 32 characters. Must match the gateway's `FERRUM_ADMIN_JWT_SECRET` exactly.                                                                                                                                                                                                                                        |
 
 ### Server
 
@@ -41,6 +51,7 @@ the process prints every offending variable and exits non-zero. The repo-root
 | `NEXUS_RATE_LIMIT_ENABLED`            | `true`                                       | Installs the 20 req/min limiter on `/api/auth/*` and the 120 req/min limiter on `/api/health*` (both per client IP), the 30 req/min limiter on the mutating `/api/apis/*` routes, and the 10 req/min (new threads) and 30 req/min (replies) limiters on `/api/threads/*` (all three per account). Forced off when `NEXUS_ENV=test`. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `NEXUS_HEALTH_CACHE_MS`               | `5000`                                       | How long `GET /api/health` and `GET /api/health/edge` reuse a dependency probe. Within the window the database and gateway are each probed once and the result — including a failing one — is shared by every caller; concurrent callers also share the one in-flight probe. `0` disables the cache and probes on every request. Range 0–60000. See [§9](#9-health-checks).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `NEXUS_MAX_APIS_PER_OWNER`            | `50`                                         | How many APIs one account may own at a time; `0` disables the ceiling. A publish past it is refused with `429 QUOTA_EXCEEDED` before any gateway write. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `NEXUS_SPEC_HISTORY_LIMIT`            | `10`                                         | Historical spec revisions kept per API, on top of the current one. Older non-current revisions are pruned in the transaction that makes a new revision current. Range 1 – 10 000. With `NEXUS_MAX_APIS_PER_OWNER` this is what bounds per-account spec storage: `MAX_SPEC_BYTES × (limit + 1) × NEXUS_MAX_APIS_PER_OWNER`. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY` | `200`                                        | Messages one account may post in a rolling 24 hours; `0` disables the budget. Range 0 – 1 000 000. Exceeding it is `429 QUOTA_EXCEEDED`. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `NEXUS_ALLOW_PRIVATE_UPSTREAMS`       | `false`                                      | Whether providers may publish an API whose upstream is a loopback, RFC 1918 / CGNAT / link-local address or a `.local` / `.internal` / `.localhost` / `.home.arpa` name. A proxy is an egress path from the gateway's network, so the default refuses them with `400 SPEC_INVALID` (`details.reason = private_upstream`). At `false` the portal also **resolves** every other upstream hostname (A + AAAA, ~5 s) and refuses it if any answer is private, or if the name cannot be resolved at all (`details.reason = unresolvable_upstream`) — so **the Nexus process must be able to resolve public DNS**, or nothing publishes. `true` skips all of it, including the lookup. Set `true` only for a portal that fronts internal services — and for local development, where the upstream is `host.docker.internal`. See [`security.md`](security.md#1-threat-model). |
 | `NEXUS_WEB_DIST`                      | _(unset)_                                    | Directory of the built SPA to serve. When unset, the server looks for `../../web/dist` relative to itself and then `./web/dist` under the CWD; if neither has an `index.html`, static serving is disabled and only the API is exposed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -161,11 +172,15 @@ support can see what to raise.
 - It applies to administrators too. Anyone who can hit the limit can also raise
   it or delete something; an exemption would only help a compromised admin
   account.
-- It is what bounds **aggregate spec storage**: each document is capped at
-  `MAX_SPEC_BYTES` (2 MiB), so one account's stored specs cannot exceed
-  `2 MiB × NEXUS_MAX_APIS_PER_OWNER` — 100 MiB at the default. Multiply by your
-  expected provider count when sizing the database. Revision history is on top
-  of that: every spec upload keeps the previous revision.
+- Together with `NEXUS_SPEC_HISTORY_LIMIT` it bounds **aggregate spec
+  storage**. Each document is capped at `MAX_SPEC_BYTES` (2 MiB) and each API
+  keeps its current revision plus that many historical ones, so one account's
+  stored specs cannot exceed
+  `MAX_SPEC_BYTES × (NEXUS_SPEC_HISTORY_LIMIT + 1) × NEXUS_MAX_APIS_PER_OWNER` —
+  1.1 GiB at the defaults of 10 and 50. Multiply by your expected provider count
+  when sizing the database, and lower the history limit if that is too much:
+  the count quota alone bounds nothing, because one API can be revised in a
+  loop.
 - The check and the row creation run under an **in-process** per-owner lock, so
   a burst of concurrent publishes from one account cannot each read the count
   before any of them writes. Across N Nexus instances the lock does not span
@@ -173,6 +188,20 @@ support can see what to raise.
   That is bounded and self-correcting — the next publish on each instance sees
   the true count — and is the reason the quota is a ceiling rather than a
   billing boundary.
+
+**Bounded spec revision history** — `NEXUS_SPEC_HISTORY_LIMIT`, default `10`,
+minimum `1`. After a spec revision is made current, every non-current revision
+of that API beyond the newest N is deleted.
+
+- The pruning runs **in the same transaction** that makes the new revision
+  current, so a revision that is rolled back prunes nothing, and the previous
+  current revision — the one a failed gateway write restores to — is always the
+  newest historical row and is therefore always kept.
+- The current revision is never a candidate, whatever the limit says.
+- A deployment upgrading with a long accumulated history trims up to 1000 rows
+  per API per revision, so a very old API converges over its next few uploads
+  rather than blocking one request on a huge delete.
+- `api.spec_update` audit rows carry `pruned_revisions`.
 
 **A per-account rate limit** on the mutating publishing routes — `POST /`,
 `PUT /:id/spec`, `PATCH /:id`, `DELETE /:id`, `PUT|DELETE /:id/plugins/:name`
@@ -560,9 +589,24 @@ inserts an `email_outbox` row; the worker polls every 5 seconds and drains it.
 | `failed`  | Terminal. Delivery failed on attempt 5 (`OUTBOX_MAX_ATTEMPTS`); `last_error` says why. |
 
 Retries back off `30s · 2^attempts`, capped at one hour, plus up to 10% jitter.
+
 A `sending` row untouched for five minutes is assumed to belong to a crashed
-worker and is released back to `pending` on the next worker `start()` — i.e. on
-the next process boot.
+worker and is released back to `pending`. **That sweep runs at the top of every
+tick**, before anything is claimed — so recovery belongs to whichever worker is
+running, not to the next process boot. Doing it only at `start()`, as it used to
+be, recovered nothing from the ordinary case: a process that crashes and comes
+back inside the five-minute window finds its own rows too young for the one
+sweep, and nothing ever looked at them again. The same sweep is what recovers a
+row whose bookkeeping write failed after the claim, with no restart involved at
+all.
+
+Five minutes is safe because a claim's lifetime is bounded. Rows are claimed
+**one at a time** rather than as a batch — a batch's last row would otherwise
+sit `sending` for as long as every row ahead of it — and one delivery cannot run
+past about 50 seconds, because Nexus pins nodemailer's timeouts (10 s to
+connect, 10 s for the greeting, 30 s of socket inactivity) rather than taking
+its 2 min / 30 s / 10 min defaults. If you raise those, raise the threshold with
+them.
 
 ### The quiet failure mode to watch for
 
@@ -592,11 +636,16 @@ SELECT to_email, attempts, last_error, updated_at
 ```
 
 Alert on: any growth in `failed`; `pending` older than ~15 minutes; `sending`
-older than 5 minutes with no process restart in between.
+older than ~10 minutes, which is two stale-sweep intervals and therefore means
+the worker is not ticking at all.
 
 The worker logs `Outbox message delivery failed, retrying later`,
-`Outbox message failed permanently`, `Released stale outbox claims` and
-`Outbox tick failed` at `warn`.
+`Outbox message failed permanently`, `Released stale outbox claims`,
+`Outbox message was abandoned mid-flight; it is recovered by the stale sweep`,
+`Could not release stale outbox claims` and `Outbox tick failed` at `warn`.
+`Released stale outbox claims` carries a `released` count; a steady trickle of
+it means messages are being re-queued after somebody's crash, and a duplicate
+may have gone out.
 
 To re-drive a `failed` row, set it back to `pending` with `attempts = 0` and
 `next_attempt_at = NULL`. Note that a row reinstated this way keeps its
@@ -620,42 +669,58 @@ HKDF-derived from it:
 Password hashes are scrypt with a per-hash random salt and are **not** derived
 from the master key — rotation does not affect sign-in with a password.
 
-### There is no automated re-encryption flow
+### What rotation does and does not affect
 
-This is worth stating plainly, because it is the thing an operator most wants
-to be untrue. Nexus has **no** re-encrypt command, no dual-key decrypt path,
-and no migration that walks `app_settings` under an old key. `readEncryptedSetting`
-catches a decryption failure and returns `null` — so after a rotation the
-affected settings simply read as _absent_, silently:
+`readEncryptedSetting` catches a decryption failure and returns `null`, so a
+row written under the old key reads as _absent_ after a plain key swap — and
+that is not harmless:
 
-- SMTP falls back to the `NEXUS_SMTP_*` environment values. If those do not
-  supply a password, authenticated relays start rejecting mail and the outbox
-  fills with `failed` rows.
+- SMTP falls back to the `NEXUS_SMTP_*` environment values; without a password
+  there, authenticated relays reject mail and the outbox fills with `failed`
+  rows.
 - CAPTCHA **fails closed**: `captcha.verify` throws
   `CAPTCHA_FAILED — "CAPTCHA is enabled but not fully configured"`, so
-  registration and login stop working until the secret is re-entered.
+  registration **and login** stop working. On a CAPTCHA-enabled portal a bare
+  key swap therefore locks every administrator out before anyone can re-enter
+  the secret.
 
-Every live session and every unused email-verification token is also
-invalidated, because their stored hashes were computed under the old HMAC key.
+That is why the rotation is a two-key, offline step: `npm run rotate-secret-key`
+re-encrypts every `app_settings` row with `encrypted = 1` from the previous key
+to the new one, in one transaction, and refuses to write anything if a single
+row does not open under the previous key. Both keys come from the environment
+(never from arguments, so neither lands in a shell history or a process list),
+and the command prints only counts and setting _names_.
+
+Every live session and every unused email-verification token is still
+invalidated by a rotation, because their stored hashes were computed under the
+old HMAC key; password sign-in is unaffected.
 
 ### Procedure
 
 1. **Announce a short window.** Everyone will be signed out.
-2. Note which encrypted settings are in use — check
-   `GET /api/admin/settings` and record whether `smtp.password_set` and
-   `captcha.secret_set` are `true`. Have the actual SMTP password and CAPTCHA
-   secret to hand; Nexus cannot show them to you.
-3. Back up the database (see [§5](#5-backups)).
-4. Set the new `NEXUS_SECRET_KEY` and restart. Keep the **old** value recorded
-   somewhere safe until step 6 succeeds — it is your only rollback.
-5. Sign in as an admin (password sign-in is unaffected) and go to
-   **Admin → Settings**:
-   - re-enter the **SMTP password** and save;
-   - re-enter the **CAPTCHA secret key** and save.
-     Saving writes fresh AES-256-GCM blobs under the new key. Both fields are
-     write-only, so the form shows them as unset until you type a value.
-6. Verify: **Send test email** on the settings page returns `ok: true`, and a
-   sign-out/sign-in round trip works with CAPTCHA enabled.
+2. Back up the database (see [§5](#5-backups)) and record the current
+   `NEXUS_SECRET_KEY` — it is your rollback.
+3. **Stop every Nexus instance** (or run the step against a database no
+   instance is using). A running server would keep writing blobs under the old
+   key while you rotate.
+4. Re-encrypt the settings with both keys in the environment. With a `.env`
+   file, `NEXUS_SECRET_KEY` is read from it; put the previous key in the shell:
+
+   ```bash
+   export NEXUS_SECRET_KEY_PREVIOUS="<the key the database was last written with>"
+   export NEXUS_SECRET_KEY="$(openssl rand -hex 32)"     # or the value now in .env
+   npm run rotate-secret-key
+   # Re-encrypted 2 setting(s) under the new NEXUS_SECRET_KEY (captcha.secret_key, smtp.password); …
+   ```
+
+   The command exits non-zero and changes nothing if the previous key is wrong,
+   if the two keys are equal, or if it has already been run.
+
+5. Start the server with the new `NEXUS_SECRET_KEY` (and without
+   `NEXUS_SECRET_KEY_PREVIOUS`).
+6. Verify as a **super admin** (SMTP and CAPTCHA settings are super-admin-only):
+   sign in — with CAPTCHA on, this is the proof the secret survived — then
+   **Send test email** on the settings page returns `ok: true`.
 7. Optionally clean up the invalidated rows — they are inert, not harmful:
 
    ```sql
@@ -671,9 +736,16 @@ invalidated, because their stored hashes were computed under the old HMAC key.
 GROUP BY status`. Any `failed` rows accumulated during the window can be
    re-driven as described in [§6](#6-the-email-outbox).
 
-To **roll back**, restore the old `NEXUS_SECRET_KEY` — but only if you have not
-yet re-saved the settings under the new key. Once re-saved, the blobs are new
-and the old key no longer opens them.
+**Rollback** is the same command with the keys swapped (`NEXUS_SECRET_KEY_PREVIOUS`
+= the new key, `NEXUS_SECRET_KEY` = the old one), run before the server has
+re-saved anything under the new key; then restart with the old key.
+
+**If you cannot run the command** (for example a hosted database you can only
+reach through the running portal), a super admin can avoid the lockout by
+hand: disable CAPTCHA in **Admin → Settings** _before_ the swap, swap the key
+and restart, sign in with a password, re-enter the SMTP password and the
+CAPTCHA secret, then re-enable CAPTCHA and verify a sign-out/sign-in round
+trip. Do not "fix" the lockout by making CAPTCHA fail open.
 
 ### Rotating `FERRUM_ADMIN_JWT_SECRET`
 
@@ -758,6 +830,31 @@ instance has acquired the lease. Edge cannot reject that stale holder's later
 `PUT`. Renewal makes this overlap unlikely during normal operation, but it does
 not make concurrent gateway writers safe.
 
+### The same table guards the last super admin
+
+`edge_leases` is not only for gateway resources. One database invariant needs
+the same treatment, for the same reason: **the last active `super_admin`**.
+
+The rule is a count of the _other_ active super admins followed by a write to
+one account. A database transaction makes those two steps atomic against other
+work on the same connection pool, and that is enough for one process — but a
+multi-instance deployment has one pool per instance, and two of them counted
+one another's administrator and both demoted. The portal was then left with no
+account able to restore the role, recoverable only by editing the database.
+
+So every transition that can _shrink_ the set — a role change away from
+`super_admin`, a `status: "disabled"`, and god mode's `disable-user` — runs
+under one shared key, `users:super-admins`, taken before the transaction opens.
+The loser waits, re-counts after the winner committed, and gets the ordinary
+`409 LAST_SUPER_ADMIN` with nothing written. Promotions and re-enables take no
+lock; they only ever grow the set.
+
+Operationally this behaves like any other lease: same TTL, same 30-second wait,
+same crash recovery. Contention is a single key portal-wide, so a `CONFLICT`
+carrying _"Another administrator change is in flight right now"_ means two
+admins edited administrator accounts within the same instant — rare, and safe
+to retry.
+
 ### Supported topologies
 
 > **Run exactly one active Nexus instance that can perform gateway mutations.**
@@ -775,8 +872,10 @@ deployment is a single instance by definition.
 
 ### Other multi-instance notes
 
-- **The outbox is safe to run on several instances.** The claim is an atomic
-  `pending → sending` flip, so no row is delivered twice.
+- **The outbox and the teardown poller are safe to run on several instances.**
+  The claim is an atomic `pending → sending` flip, so no row is worked twice,
+  and the stale sweep every tick runs means one instance recovers another's
+  abandoned claims without waiting for that instance to come back.
 - **Sessions live in the database**, not in memory, so any instance can serve
   any session. No sticky sessions needed for auth.
 - **The auth rate limiter is per-process** (`@fastify/rate-limit` with the
@@ -876,8 +975,10 @@ provider reports an unexplained `EDGE_ERROR`.
 
 `SIGINT`/`SIGTERM` trigger a graceful shutdown: the outbox and gateway-teardown
 pollers stop, the Edge dispatcher closes, Fastify drains, then the store closes.
-Give the container at least a few seconds of termination grace. Anything the
-teardown poller had claimed is recovered by `releaseStale` on the next boot.
+Give the container at least a few seconds of termination grace. Anything a
+poller had claimed and did not finish is picked up by the stale sweep at the top
+of some worker's next tick — this instance's after a restart, or another
+instance's straight away — five minutes after the claim.
 
 ---
 
@@ -990,8 +1091,19 @@ There is **no terminal failure state**. Retries back off `10s · 2^attempts`,
 capped at five minutes, plus up to 10% jitter, and continue for as long as the
 account is disabled — an outbox message nobody can deliver is a lost email, but
 a credential nobody revoked is a live security hole. The only other exit is the
-account being re-enabled, which deletes the job. A `sending` row untouched for
-five minutes is released back to `pending` on the next worker `start()`.
+account being re-enabled, which deletes the job.
+
+A `sending` row untouched for five minutes is released back to `pending` at the
+top of **every** tick, exactly as in the outbox
+([§6](#6-the-email-outbox)) — not once per process boot, which left a crashed
+worker's claim stranded and the account's credentials live indefinitely. Jobs
+are claimed one at a time, and one job is five Edge round trips bounded by
+`FERRUM_ADMIN_TIMEOUT_MS` (5 s by default) plus at most a 30-second wait for the
+consumer's lease — about 55 seconds — so five minutes leaves ample headroom.
+Raising `FERRUM_ADMIN_TIMEOUT_MS` towards its 60-second ceiling pushes that
+worst case towards 5.5 minutes; raise the threshold with it. Recovery is safe to
+repeat in any case: the revocation is a clear-and-delete, and the consumer's own
+Edge lease keeps two instances from running it at the same instant.
 
 There is one row per account (`user_id` is unique), so re-disabling an account
 resets the outstanding job rather than queueing a second revocation.
@@ -1023,7 +1135,10 @@ restart is expected; a line that keeps repeating for the same `user_id` means a
 disabled account still holds working gateway credentials. The worker also logs
 `Gateway revocation retry failed; the credentials are still live`,
 `Gateway revocation for a disabled account completed`,
-`Released stale gateway teardown claims` and `Gateway teardown tick failed`.
+`Released stale gateway teardown claims`,
+`Gateway teardown job was abandoned mid-flight; it is recovered by the stale sweep`,
+`Could not release stale gateway teardown claims` and
+`Gateway teardown tick failed`.
 
 ### Re-driving one by hand
 
@@ -1034,3 +1149,61 @@ runs it immediately, returning `gateway_teardown: "ok"` when Edge accepted and
 button next to the _Gateway revocation pending_ badge on the admin **Users**
 page. Do not edit the table by hand — the endpoint is idempotent and writes the
 audit trail.
+
+---
+
+## 12. The credential mirror
+
+Edge gives credential entries **no id**, and every read redacts the material, so
+there is nothing on the wire that identifies one entry. What identifies it is
+its position: `POST` appends, `DELETE /consumers/{id}/credentials/{type}/{i}`
+removes by 0-based index, and Nexus writes one `credential_metadata` row per
+append. The non-revoked rows for a `(consumer, type)` pair, oldest first, are a
+**mirror** of the Edge array, and a row's position in that list is its index.
+
+Every destructive call cross-checks that mirror against the live array length
+read in the same critical section. Nexus itself can no longer break the
+agreement — a rotation revokes the row it retired the moment Edge confirms the
+delete, and an append whose row cannot be written is deleted again — so a
+mismatch means the consumer was edited **outside Nexus**.
+
+### What a drifted consumer looks like
+
+Rotate or revoke returns `502 EDGE_ERROR`:
+
+> The gateway credential list does not match the portal. An administrator must
+> reconcile this consumer …
+
+with `details: { expected, actual }` — `expected` is the number of live portal
+rows, `actual` the length of the Edge array. The one case that is not an error
+is a single live row: a revoke then degrades to deleting the whole credential
+type, which is what a revoke asked for anyway.
+
+### Reconciling one
+
+Decide which side is right, and make the other match it. Edge is the side that
+authenticates, so the safe default is to **empty the type and re-issue**:
+
+```sql
+-- 1. what the portal thinks is live for this consumer
+SELECT id, credential_type, last4, status, created_at
+  FROM credential_metadata
+  WHERE ferrum_consumer_id = '<edge consumer id>' AND status <> 'revoked'
+  ORDER BY created_at;
+```
+
+1. Revoke each live row through the portal (**Administration → Users → the
+   account → Credentials**) if the call succeeds — with one row left it degrades
+   to a whole-type delete and clears both sides at once.
+2. If it does not, delete the type on the gateway
+   (`DELETE /consumers/{id}/credentials/{type}` on the Edge Admin API) and then
+   mark the rows `revoked`. Never leave a row `active` for an entry that is
+   gone: it will drift again on the next operation.
+3. Tell the account holder to issue new credentials. The old secrets were
+   show-once and cannot be recovered from either side.
+
+A failed rotation **at the cap** is not drift and needs none of this. The old
+entry is deleted before the replacement is appended (there is no room for both),
+so if the append fails the response says so plainly — _the previous credential
+was removed … issue a new credential_ — the retired row is already `revoked`,
+and everything still live remains revocable.

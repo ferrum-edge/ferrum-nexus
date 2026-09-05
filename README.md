@@ -67,6 +67,12 @@ npm run migrate   # builds shared, then applies migrations
 npm run dev
 ```
 
+Both commands read the root `.env` (looked up in the working directory and its
+parent, so the workspace scripts find it too). Anything already exported in the
+shell wins over the file, and a deployed image with no `.env` is unaffected.
+A relative `NEXUS_SQLITE_PATH` resolves from `server/`, where the workspace
+scripts run.
+
 Open <http://127.0.0.1:5173>. The backend serves on `http://127.0.0.1:8787`.
 
 The first user to register becomes the initial `super_admin`, so that one

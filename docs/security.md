@@ -393,12 +393,14 @@ answer that says how to fix it — promote a second super admin.
 ### Disabling an account
 
 Both paths — `PATCH /api/users/:id` with `status: "disabled"` and
-`POST /api/admin/god/disable-user` — do three things, not one:
+`POST /api/admin/god/disable-user` — do four things, not one:
 
 1. delete every session, so an open tab gets a `401`;
 2. strip every ACL group from the account's Ferrum consumer;
 3. delete **every credential of every type** on that consumer and mark the
-   matching `credential_metadata` rows `revoked`.
+   matching `credential_metadata` rows `revoked`;
+4. delete every **other** Edge consumer the account still holds live credential
+   material on, and revoke those rows too.
 
 (2) alone is not enough. An API published with `requestable: false` carries no
 `access_control` plugin, so an empty group list stops nothing; the credential
@@ -406,13 +408,50 @@ is what the gateway authenticates, and it has no idea a portal session ever
 existed. `basicauth` is deleted explicitly because it never appears in a read
 projection, so a group rewrite cannot see it.
 
-All three gateway steps run inside one critical section keyed on the Ferrum
-consumer id — an in-process queue plus an `edge_leases` row. The lease reduces
+(4) exists because `nexus-user-<id>` is not the account's only gateway
+identity. A provider's **test consumer** (`nexus-test-<api_id>`, created by
+`POST /api/apis/:id/test-consumer`) is a separate Edge consumer holding its own
+show-once credential — attributed in `credential_metadata` to the provider or
+admin who asked for it — and carrying the API's `nexus:api:<id>:approved`
+group. Stripping only the canonical consumer would leave that key authenticating
+and that group in place, which is offboarding that did not happen. A test
+consumer is disposable by definition, so it is deleted outright rather than
+emptied; whoever needs one next recreates it.
+
+Every gateway step for one identity runs inside a critical section keyed on
+_that_ consumer's Ferrum id — an in-process queue plus an `edge_leases` row —
+so a concurrent approval or credential issue on another Nexus instance cannot
+read the pre-teardown state and write it back afterwards. The lease reduces
 cross-instance overlap but cannot fence a holder that resumes after expiry;
 deployments must therefore use only one active gateway-writing Nexus instance.
-Edge replaces consumers whole, with no version token, so overlapping writers
-could re-authorise a revoked account with a stale write; see
-[`operations.md` §8](operations.md#8-scaling).
+Edge replaces consumers whole, with no version token, so without that lock a
+revoked account could be re-authorised by a write that was merely stale; see
+[`operations.md` §8](operations.md#8-scaling). Identities are torn down one at a
+time, and the teardown reports success only when **all** of them are clean: a
+failure on any one leaves the durable job `pending`. Because the identity list
+is enumerated from _live_ credential rows, a retry skips whatever an earlier
+attempt already finished.
+
+#### The lock orders writes; it does not authorise them
+
+A request that passed authentication a moment before the disable is still a
+valid request object when it reaches the front of the consumer queue. So every
+path that _extends_ gateway access reloads the account **inside** the critical
+section, after the lock is held and before any Edge write, and refuses a
+non-`active` owner with `403 USER_DISABLED`: credential issue, rotation
+(checking the credential's **owner**, not the acting admin), test-consumer
+issuance, and the approval that adds `nexus:api:<id>:approved`. Removing a
+group never needs the check.
+
+Because the teardown takes the same per-consumer key, only two orders exist and
+both are safe: the append wins the lock and the teardown behind it deletes what
+it appended, or the teardown wins and the append is refused.
+
+The mirror of that rule protects a **re-enable**: `status: "active"` deletes the
+pending job, and `disableGatewayAccess` re-reads the account inside the lock and
+refuses (`409 CONFLICT`) if it is no longer disabled, so a worker that claimed a
+job just before the re-enable cannot strip a live account. The worker drops such
+a job rather than rescheduling it.
 
 #### The gateway half is durable work, not a side effect
 
@@ -423,7 +462,7 @@ quietly dropped: a disabled account's API key authenticates directly to Edge
 with no portal session behind it, so a swallowed failure leaves the credential
 working indefinitely and reports the disable as finished.
 
-So steps (2) and (3) are owed by a `gateway_teardown_jobs` row written **inside
+So steps (2) through (4) are owed by a `gateway_teardown_jobs` row written **inside
 the same transaction** as `users.status = 'disabled'`. There is one row per
 account (`user_id` is unique), and it carries `status`
 (`pending` → `sending` → `done`), `attempts`, `next_attempt_at`, `last_error`
@@ -601,16 +640,25 @@ consumer and a credential. None of it was bounded: a single self-registered
 provider could fill the database, exhaust Edge's proxy and plugin capacity, and
 saturate the Admin API simply by looping (GHSA-g32g-g9q4-q5wr).
 
-Two controls, bounding different things:
+Three controls, bounding different things:
 
 - **`NEXUS_MAX_APIS_PER_OWNER`** (default `50`, `0` = unlimited) caps how many
   APIs one account may own **at a time**. A publish past it is refused with
   `429 QUOTA_EXCEEDED` before the first gateway write, carrying
-  `details: { limit, current, setting }`. It bounds aggregate spec storage per
-  account at `MAX_SPEC_BYTES × limit`. Deleting an API frees a slot; retiring
+  `details: { limit, current, setting }`. Deleting an API frees a slot; retiring
   one does not, because a retired API keeps its gateway objects. Admins are not
   exempt — an exemption is a bypass, and the case worth defending against is an
   admin account that has been taken over.
+- **`NEXUS_SPEC_HISTORY_LIMIT`** (default `10`, minimum `1`) caps how many
+  historical spec revisions each API keeps on top of its current one. Without
+  it the count quota bounded no storage at all: `PUT /api/apis/:id/spec` stored
+  another document of up to `MAX_SPEC_BYTES` every time, so one API revised in
+  a loop was an unbounded write path for a semi-trusted `provider`. Together the
+  two bound aggregate spec storage per account at
+  `MAX_SPEC_BYTES × (NEXUS_SPEC_HISTORY_LIMIT + 1) × NEXUS_MAX_APIS_PER_OWNER`.
+  Pruning happens in the transaction that makes the new revision current, so a
+  refused revision prunes nothing and the predecessor a rollback needs always
+  survives; the current revision is never a candidate.
 - **A 30/minute per-account rate limit** on the mutating `/api/apis/*` routes
   (`POST /`, `PUT /:id/spec`, `PATCH /:id`, `DELETE /:id`,
   `PUT|DELETE /:id/plugins/:name`, `POST /:id/test-consumer`), answering
@@ -888,16 +936,17 @@ ordinary reporting.
 
 ### Publishing
 
-| Action                 | Target type | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| ---------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `api.publish`          | `api`       | An API was published: its Edge proxy and plugin configs created, then associated on the proxy so the gateway runs them. `details`: slug, listen path, proxy id, auth plugin, requestable, visibility, rate limit, CORS policy, method allow-list, backend timeouts, circuit breaker, OpenAPI enforcement level, upstream, spec path count. The proxy's `allowed_ws_origins` is not logged separately — it is a pure function of the CORS policy already recorded here. |
-| `api.update`           | `api`       | Safe runtime settings changed. `details`: `changed_fields`, plus context such as `previous_auth_plugin` and `existing_credentials_invalidated`. A `spec_enforcement` change additionally carries `proxy_rebuilt: true`: moving between `docs_only` and `routes` deletes and recreates the gateway proxy under the same id, so the API was briefly unreachable and an operator reading the log needs to be able to explain the gap.                                     |
-| `api.spec_update`      | `api`       | A new spec revision was published and made current. `details`: spec id, version, path count, OpenAPI enforcement level, `backend_updated`. At the `routes` level the revision also changes what the gateway accepts, so the level is recorded on every upload.                                                                                                                                                                                                         |
-| `api.retire`           | `api`       | An API moved to `retired`. Emitted instead of `api.update` for that transition. `details.gateway_untouched` records that the proxy and live grants were left alone.                                                                                                                                                                                                                                                                                                    |
-| `api.delete`           | `api`       | An API and its Edge objects were destroyed. `details`: slug, proxy id, `revoked_grants`.                                                                                                                                                                                                                                                                                                                                                                               |
-| `api.plugin_set`       | `api`       | A palette plugin was created or replaced on the API's proxy. `details`: `plugin_name`, `enabled`, `config_keys`, `trigger`, `replaced`. **The config keys are logged, never their values** — a plugin config can carry a Content-Security-Policy or a partner IP allow-list, and an audit row is not the place for either. The trigger is a method list and a path prefix, which are policy rather than data, so it is recorded in full.                               |
-| `api.plugin_remove`    | `api`       | A palette plugin was detached from the proxy and deleted. `details`: `plugin_name`, `label`, `was_attached` (false when an operator had already removed the gateway config by hand).                                                                                                                                                                                                                                                                                   |
-| `test_consumer.create` | `api`       | A provider created (or replaced) the disposable `nexus-test-<api_id>` consumer. `details`: consumer username/id, credential type, `replaced`.                                                                                                                                                                                                                                                                                                                          |
+| Action                        | Target type | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ----------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `api.publish`                 | `api`       | An API was published: its Edge proxy and plugin configs created, then associated on the proxy so the gateway runs them. `details`: slug, listen path, proxy id, auth plugin, requestable, visibility, rate limit, CORS policy, method allow-list, backend timeouts, circuit breaker, OpenAPI enforcement level, upstream, spec path count. The proxy's `allowed_ws_origins` is not logged separately — it is a pure function of the CORS policy already recorded here.                                                                               |
+| `api.update`                  | `api`       | Safe runtime settings changed. `details`: `changed_fields`, plus context such as `previous_auth_plugin` and `existing_credentials_invalidated`. A `spec_enforcement` change additionally carries `proxy_rebuilt: true`: moving between `docs_only` and `routes` deletes and recreates the gateway proxy under the same id, so the API was briefly unreachable and an operator reading the log needs to be able to explain the gap.                                                                                                                   |
+| `api.spec_update`             | `api`       | A new spec revision was published and made current. `details`: spec id, version, path count, OpenAPI enforcement level, `backend_updated`. At the `routes` level the revision also changes what the gateway accepts, so the level is recorded on every upload.                                                                                                                                                                                                                                                                                       |
+| `api.retire`                  | `api`       | An API moved to `retired`. Emitted instead of `api.update` for that transition. `details.gateway_untouched` records that the proxy and live grants were left alone.                                                                                                                                                                                                                                                                                                                                                                                  |
+| `api.delete`                  | `api`       | An API and its Edge objects were destroyed. `details`: slug, proxy id, `revoked_grants`.                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `api.plugin_set`              | `api`       | A palette plugin was created or replaced on the API's proxy. `details`: `plugin_name`, `enabled`, `config_keys`, `trigger`, `replaced`. **The config keys are logged, never their values** — a plugin config can carry a Content-Security-Policy or a partner IP allow-list, and an audit row is not the place for either. The trigger is a method list and a path prefix, which are policy rather than data, so it is recorded in full.                                                                                                             |
+| `api.plugin_remove`           | `api`       | A palette plugin was detached from the proxy and deleted. `details`: `plugin_name`, `label`, `was_attached` (false when an operator had already removed the gateway config by hand).                                                                                                                                                                                                                                                                                                                                                                 |
+| `api.gateway_repair_required` | `api`       | A `spec_enforcement` conversion could neither finish nor put the original proxy back, so the API has **no gateway object at all** while its catalog entry, grants and credentials stay valid. `details`: `proxy_id`, hand-owned `plugin_names`, `spec_enforcement`, `attempted_spec_enforcement`, and both error messages. Raw proxy and plugin configurations are never included because they may contain infrastructure credentials or other operator-managed secrets. Also logged at `error`. Alert on it: no later request repairs it by itself. |
+| `test_consumer.create`        | `api`       | A provider created (or replaced) the disposable `nexus-test-<api_id>` consumer. `details`: consumer username/id, credential type, `replaced`.                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 ### Access workflow
 
@@ -913,11 +962,11 @@ ordinary reporting.
 
 ### Credentials
 
-| Action              | Target type  | Description                                                                                                                    |
-| ------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| `credential.issue`  | `credential` | A gateway credential was minted. `details`: credential type, consumer id, `last4`.                                             |
-| `credential.rotate` | `credential` | Append-then-delete rotation. Target is the **new** credential; `details`: type, consumer id, `rotated_from`, `previous_last4`. |
-| `credential.revoke` | `credential` | A credential was deleted from Edge and marked revoked. `details`: type, consumer id, `last4`.                                  |
+| Action              | Target type  | Description                                                                                                                                                                                                                                                               |
+| ------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `credential.issue`  | `credential` | A gateway credential was minted. `details`: credential type, consumer id, `last4`.                                                                                                                                                                                        |
+| `credential.rotate` | `credential` | Append-then-delete rotation. Target is the **new** credential; `details`: type, consumer id, `rotated_from`, `previous_last4`, plus `owner_user_id` when an admin rotated somebody else's credential — the replacement stays with its owner, the admin is only the actor. |
+| `credential.revoke` | `credential` | A credential was deleted from Edge and marked revoked. `details`: type, consumer id, `last4`.                                                                                                                                                                             |
 
 ### Messaging and notifications
 
@@ -1010,5 +1059,8 @@ Before going live:
 - [ ] `GET /api/health` wired to your monitor, treating `degraded` as healthy.
 - [ ] Exactly one active Nexus instance serves gateway-mutating requests. Any
       passive standbys share one PostgreSQL, MySQL or MongoDB database and do
-      not serve requests or run gateway-mutating background work until promoted
+      not serve requests or run gateway-mutating background work until promoted.
+      The `edge_leases` table in that database is what stops two instances
+      losing each other's ACL-group and proxy-plugin writes, and what stops two
+      of them demoting the last two `super_admin` accounts at once
       ([`operations.md`](operations.md#8-scaling)). SQLite is single-instance.

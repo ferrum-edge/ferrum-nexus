@@ -120,6 +120,7 @@ export function RegisterPage(): ReactElement {
             </FormNotice>
             <LabeledInput
               label="Bootstrap token"
+              type="password"
               autoComplete="off"
               required
               hint="Printed in the server log at startup, or the value of NEXUS_BOOTSTRAP_TOKEN."

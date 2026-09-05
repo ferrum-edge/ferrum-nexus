@@ -53,6 +53,18 @@ export type TrustedProxies = false | number | string[];
  */
 export const DEFAULT_MAX_APIS_PER_OWNER = 50;
 
+/**
+ * Default number of **historical** spec revisions kept per API
+ * (`NEXUS_SPEC_HISTORY_LIMIT`).
+ *
+ * Ten is enough that a provider can see how their document has moved over a
+ * normal release cycle, and few enough that the per-account storage a revision
+ * loop can reach stays bounded: `MAX_SPEC_BYTES × (limit + 1)` per API. The
+ * minimum is `1`, because the previous current revision is what a failed
+ * revision rolls back to.
+ */
+export const DEFAULT_SPEC_HISTORY_LIMIT = 10;
+
 /** Aliases `proxy-addr` understands in place of a literal CIDR. */
 const PROXY_KEYWORDS = ['loopback', 'linklocal', 'uniquelocal'] as const;
 
@@ -203,10 +215,22 @@ export interface NexusConfig {
    * publish stores a document of up to `MAX_SPEC_BYTES` and allocates a proxy,
    * several plugin configs and a slug on the gateway. Without a ceiling one
    * account can exhaust all of it (GHSA-g32g-g9q4-q5wr). Aggregate spec storage
-   * per account is therefore bounded by `MAX_SPEC_BYTES × this` — 100 MB at the
-   * default of 50.
+   * per account is bounded by
+   * `MAX_SPEC_BYTES × (specHistoryLimit + 1) × this` — 1.1 GB at the defaults
+   * of 50 APIs and 10 retained revisions.
    */
   maxApisPerOwner: number;
+  /**
+   * How many **historical** spec revisions each API keeps
+   * (`NEXUS_SPEC_HISTORY_LIMIT`), on top of the current one.
+   *
+   * The API-count ceiling bounds proxies and slugs; without this it bounded no
+   * storage at all, because every revision stored another document of up to
+   * `MAX_SPEC_BYTES` for ever and one API could be revised in a loop. Pruning
+   * runs in the same transaction that makes a revision current, so the
+   * predecessor a rollback needs is never the row that is removed. Minimum `1`.
+   */
+  specHistoryLimit: number;
   /**
    * How many portal messages one account may post in a rolling 24 hours
    * (`NEXUS_MAX_MESSAGES_PER_USER_PER_DAY`). `0` disables the budget.
@@ -333,6 +357,7 @@ const envSchema = z.object({
   NEXUS_RATE_LIMIT_ENABLED: boolish(true),
   NEXUS_HEALTH_CACHE_MS: intish(5_000, 0, 60_000),
   NEXUS_MAX_APIS_PER_OWNER: intish(DEFAULT_MAX_APIS_PER_OWNER, 0, 100_000),
+  NEXUS_SPEC_HISTORY_LIMIT: intish(DEFAULT_SPEC_HISTORY_LIMIT, 1, 10_000),
   NEXUS_MAX_MESSAGES_PER_USER_PER_DAY: intish(200, 0, 1_000_000),
   NEXUS_ALLOW_PRIVATE_UPSTREAMS: boolish(false),
   NEXUS_WEB_DIST: optionalString(),
@@ -525,6 +550,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     rateLimitEnabled: nodeEnv === 'test' ? false : raw.NEXUS_RATE_LIMIT_ENABLED,
     healthCacheMs: raw.NEXUS_HEALTH_CACHE_MS,
     maxApisPerOwner: raw.NEXUS_MAX_APIS_PER_OWNER,
+    specHistoryLimit: raw.NEXUS_SPEC_HISTORY_LIMIT,
     maxMessagesPerUserPerDay: raw.NEXUS_MAX_MESSAGES_PER_USER_PER_DAY,
     allowPrivateUpstreams: raw.NEXUS_ALLOW_PRIVATE_UPSTREAMS,
     webDistPath: raw.NEXUS_WEB_DIST,
