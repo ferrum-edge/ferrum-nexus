@@ -294,6 +294,12 @@ function audienceFor(choice: BroadcastChoice): MassEmailAudience {
   return { scope: 'filtered', roles: [choice as Role], status: 'active' };
 }
 
+function broadcastEmailBatchId(): string {
+  // getRandomValues also supports the portal's plain-HTTP deployments.
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
 function BroadcastPanel(): ReactElement {
   const broadcast = useGodBroadcast();
   const toast = useToast();
@@ -302,6 +308,7 @@ function BroadcastPanel(): ReactElement {
   const [body, setBody] = useState('');
   const [sendEmail, setSendEmail] = useState(false);
   const [open, setOpen] = useState(false);
+  const [emailBatch, setEmailBatch] = useState(broadcastEmailBatchId);
 
   return (
     <>
@@ -368,10 +375,12 @@ function BroadcastPanel(): ReactElement {
               body: body.trim(),
               audience: audienceFor(choice),
               send_email: sendEmail,
+              idempotency_key: emailBatch,
             },
             {
               onSuccess: (response) => {
                 setOpen(false);
+                setEmailBatch(broadcastEmailBatchId());
                 setSubject('');
                 setBody('');
                 toast.success('Broadcast sent', `${response.notified} account(s) notified.`);

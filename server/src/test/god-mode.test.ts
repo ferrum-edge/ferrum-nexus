@@ -428,6 +428,57 @@ describe('API deletion and god mode', () => {
       assert.ok(queued.every((row) => row.body_text.includes('Rotate your gateway credentials')));
     });
 
+    for (const key of [undefined, 'campaign-0001']) {
+      it(`deduplicates broadcast email retries with key=${key ?? 'legacy'}`, async () => {
+        const payload = {
+          subject: `Maintenance window ${key ?? 'legacy'}`,
+          body: 'Planned maintenance on Sunday.',
+          audience: { scope: 'explicit', user_ids: [client.user.id] },
+          send_email: true,
+          ...(key ? { idempotency_key: key } : {}),
+        };
+        const send = () =>
+          harness.authed(superAdmin, {
+            method: 'POST',
+            url: '/api/admin/god/broadcast',
+            payload,
+          });
+        const first = await send();
+        const second = await send();
+        assert.equal(first.statusCode, 200, first.body);
+        assert.equal(second.statusCode, 200, second.body);
+        assert.equal(first.json<GodBroadcastResponse>().emails_enqueued, 1);
+        assert.equal(second.json<GodBroadcastResponse>().emails_enqueued, 0);
+        const rows = (await harness.outbox()).filter((row) => row.subject === payload.subject);
+        assert.equal(rows.length, 1);
+        assert.ok(rows[0]!.idempotency_key?.startsWith('god-broadcast:'));
+      });
+    }
+
+    it('queues distinct content and intentional new broadcast campaigns', async () => {
+      for (const [key, body] of [
+        ['campaign-0001', 'First announcement'],
+        ['campaign-0001', 'Second announcement'],
+        ['campaign-0002', 'First announcement'],
+      ]) {
+        const response = await harness.authed(superAdmin, {
+          method: 'POST',
+          url: '/api/admin/god/broadcast',
+          payload: {
+            subject: 'Distinct campaigns',
+            body,
+            audience: { scope: 'explicit', user_ids: [client.user.id] },
+            send_email: true,
+            idempotency_key: key,
+          },
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        assert.equal(response.json<GodBroadcastResponse>().emails_enqueued, 1);
+      }
+      const rows = (await harness.outbox()).filter((row) => row.subject === 'Distinct campaigns');
+      assert.equal(rows.length, 3);
+    });
+
     it('never sends the broadcasting super_admin their own announcement', async () => {
       const response = await harness.authed(superAdmin, {
         method: 'POST',

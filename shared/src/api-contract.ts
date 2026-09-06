@@ -1080,6 +1080,8 @@ export interface GodBroadcastRequest {
   audience: MassEmailAudience;
   /** Also enqueue an email alongside the in-app notification. */
   send_email?: boolean;
+  /** Reuse for email retries; change to intentionally resend identical content. */
+  idempotency_key?: string;
 }
 
 /** `POST /api/admin/god/broadcast` */

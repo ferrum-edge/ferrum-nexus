@@ -521,6 +521,12 @@ being dismissed from the bell, and any administrator can follow up in the same
 thread. Optionally enqueues an email as well.
 
 Audience selection works exactly like mass email (all / filtered / explicit).
+The composer reuses its email campaign key after a failed request, so retrying
+unchanged content does not queue duplicate mail. A successful send starts a new
+campaign for the next composition. API callers can supply `idempotency_key`
+(8–128 characters); use a new key for an intentional repeat. Without a key,
+identical subject/body and audience are deduplicated per sender and recipient.
+This protection applies to email; in-app notifications/messages remain per call.
 You are excluded from your own broadcast.
 
 _Use for_ incident notices, maintenance windows and forced credential
