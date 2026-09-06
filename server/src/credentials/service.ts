@@ -307,6 +307,8 @@ export interface CredentialsService {
    * touch what an earlier attempt already completed.
    */
   disableGatewayAccess(userId: Uuid, subject: string): Promise<GatewayTeardown>;
+  /** Restore retained active-grant groups, without restoring credential material. */
+  restoreGatewayAccess(userId: Uuid, subject: string): Promise<void>;
   /** Append a credential to an arbitrary consumer — the test-consumer path. */
   issueForConsumer(
     input: IssueForConsumerInput,
@@ -746,6 +748,46 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       if (current && current.user_id === identity.user_id) {
         await store.gatewayIdentities.delete(current.id).catch(() => undefined);
       }
+    },
+
+    async restoreGatewayAccess(userId, subject): Promise<void> {
+      const consumer = await provisioner.findConsumer(userId);
+      if (!consumer) {
+        if ((await store.grants.listActiveByUser(userId)).length > 0) {
+          throw edgeError('Active grants have no canonical gateway consumer mapping');
+        }
+        // A provider with only disposable test identities needs no canonical
+        // consumer, and re-enabling must not recreate those identities.
+        return;
+      }
+      await edge.serializePerKey(consumer.ferrum_consumer_id, async () => {
+        const owner = await store.users.findById(userId);
+        if (!owner || owner.status !== 'active') {
+          throw userDisabled('This account is no longer active; gateway access was not restored');
+        }
+        // Read grants inside the same consumer section as approvals,
+        // revocations, and teardown. A revocation that claims a grant after
+        // this read removes its group after this write; one that won before
+        // the read is never replayed here.
+        const grants = await store.grants.listActiveByUser(userId);
+        if (grants.length === 0) return;
+        const live = await edge.consumers.get(consumer.ferrum_consumer_id);
+        if (!live) throw edgeError('The gateway consumer for this account no longer exists');
+        const groups = [
+          ...new Set([...(live.acl_groups ?? []), ...grants.map((grant) => grant.acl_group)]),
+        ];
+        await edge.consumers.replace(
+          live.id,
+          {
+            id: live.id,
+            username: live.username,
+            custom_id: live.custom_id ?? null,
+            credentials: live.credentials,
+            acl_groups: groups,
+          },
+          subject,
+        );
+      });
     },
 
     async disableGatewayAccess(userId, subject): Promise<GatewayTeardown> {

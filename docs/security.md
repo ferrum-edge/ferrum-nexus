@@ -522,7 +522,12 @@ for every identity, the registered ones included — and refuses
 (`409 CONFLICT`) if it is no longer disabled, so a worker that claimed a job
 just before the re-enable cannot strip a live account, nor a test consumer the
 account recreated after it. The worker drops such a job rather than
-rescheduling it.
+rescheduling it. Re-enabling also restores retained active-grant ACL groups on
+its canonical consumer under that consumer's serializer. Grants are read inside
+the section, so a concurrent revocation either excludes its group from the
+restore or removes it afterwards. Revoked credential material and disposable
+test identities are never restored. A gateway error is returned to the operator;
+repeating the active-status PATCH retries the restore after a partial failure.
 
 #### The gateway half is durable work, not a side effect
 
