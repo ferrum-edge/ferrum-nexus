@@ -238,8 +238,8 @@ repo would make the reference implementation worse to read.
 
 One collection per logical table, same names as the SQL migrations
 (`users`, `apis`, `api_specs`, `access_requests`, `grants`, `consumers`,
-`credential_metadata`, `message_threads`, `messages`, `notifications`,
-`email_outbox`, `gateway_teardown_jobs`, `audit_logs`, `app_settings`,
+`gateway_identities`, `credential_metadata`, `message_threads`, `messages`,
+`notifications`, `email_outbox`, `gateway_teardown_jobs`, `audit_logs`, `app_settings`,
 `email_templates`, `email_verification_tokens`, `email_token_issue_claims`,
 `edge_leases`, `organizations`, `sessions`). Four documented physical
 differences:

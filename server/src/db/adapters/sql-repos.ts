@@ -73,6 +73,8 @@ import type {
   EmailOutboxRepo,
   EmailTemplateRecord,
   EmailTemplateRepo,
+  GatewayIdentityRecord,
+  GatewayIdentityRepo,
   GatewayTeardownJobRecord,
   GatewayTeardownJobRepo,
   GrantFilter,
@@ -337,6 +339,18 @@ function mapConsumer(row: Row): ConsumerRecord {
     namespace: text(row.namespace),
     ferrum_consumer_id: text(row.ferrum_consumer_id),
     ferrum_username: text(row.ferrum_username),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapGatewayIdentity(row: Row): GatewayIdentityRecord {
+  return {
+    id: text(row.id),
+    user_id: text(row.user_id),
+    namespace: text(row.namespace),
+    ferrum_username: text(row.ferrum_username),
+    ferrum_consumer_id: textOrNull(row.ferrum_consumer_id),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -626,6 +640,7 @@ export interface SqlRepos {
   grants: GrantRepo;
   credentials: CredentialRepo;
   consumers: ConsumerRepo;
+  gatewayIdentities: GatewayIdentityRepo;
   threads: ThreadRepo;
   messages: MessageRepo;
   notifications: NotificationRepo;
@@ -1740,6 +1755,86 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     delete: async (id) => (await execute(exec, 'DELETE FROM consumers WHERE id = ?', [id])) > 0,
   };
 
+  /* ── gatewayIdentities ──────────────────────────────────────────────── */
+
+  const IDENTITY_CLAIM = upsertSql(
+    dialect,
+    'gateway_identities',
+    [
+      'id',
+      'user_id',
+      'namespace',
+      'ferrum_username',
+      'ferrum_consumer_id',
+      'created_at',
+      'updated_at',
+    ],
+    'namespace, ferrum_username',
+    ['user_id', 'ferrum_consumer_id', 'updated_at'],
+  );
+
+  const gatewayIdentities: GatewayIdentityRepo = {
+    claim: async (input) => {
+      // The conflict target is the identity's name, not the row id: a second
+      // claim on the same name moves the registration to its new owner and
+      // keeps the row, so there is never more than one owner on record.
+      const now = nowIso();
+      await execute(exec, IDENTITY_CLAIM, [
+        newId(),
+        input.user_id,
+        input.namespace,
+        input.ferrum_username,
+        input.ferrum_consumer_id,
+        now,
+        now,
+      ]);
+      const claimed = await gatewayIdentities.findByUsername(
+        input.namespace,
+        input.ferrum_username,
+      );
+      if (!claimed) {
+        throw new Error('gatewayIdentities.claim: row vanished immediately after upsert');
+      }
+      return claimed;
+    },
+
+    findById: async (id) => {
+      const row = await queryOne(exec, 'SELECT * FROM gateway_identities WHERE id = ?', [id]);
+      return row ? mapGatewayIdentity(row) : null;
+    },
+
+    findByUsername: async (namespace, ferrumUsername) => {
+      const row = await queryOne(
+        exec,
+        'SELECT * FROM gateway_identities WHERE namespace = ? AND ferrum_username = ?',
+        [namespace, ferrumUsername],
+      );
+      return row ? mapGatewayIdentity(row) : null;
+    },
+
+    listByUser: async (userId, namespace) => {
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM gateway_identities WHERE user_id = ? AND namespace = ?
+         ORDER BY created_at ASC, id ASC`,
+        [userId, namespace],
+      );
+      return rows.map(mapGatewayIdentity);
+    },
+
+    bindConsumer: async (id, ferrumConsumerId) => {
+      await execute(
+        exec,
+        'UPDATE gateway_identities SET ferrum_consumer_id = ?, updated_at = ? WHERE id = ?',
+        [ferrumConsumerId, nowIso(), id],
+      );
+      return gatewayIdentities.findById(id);
+    },
+
+    delete: async (id) =>
+      (await execute(exec, 'DELETE FROM gateway_identities WHERE id = ?', [id])) > 0,
+  };
+
   /* ── threads ────────────────────────────────────────────────────────── */
 
   const threads: ThreadRepo = {
@@ -2646,6 +2741,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     grants,
     credentials,
     consumers,
+    gatewayIdentities,
     threads,
     messages,
     notifications,
@@ -2712,6 +2808,7 @@ class SqlStore implements NexusStore {
   readonly grants: GrantRepo;
   readonly credentials: CredentialRepo;
   readonly consumers: ConsumerRepo;
+  readonly gatewayIdentities: GatewayIdentityRepo;
   readonly threads: ThreadRepo;
   readonly messages: MessageRepo;
   readonly notifications: NotificationRepo;
@@ -2752,6 +2849,7 @@ class SqlStore implements NexusStore {
     this.grants = repos.grants;
     this.credentials = repos.credentials;
     this.consumers = repos.consumers;
+    this.gatewayIdentities = repos.gatewayIdentities;
     this.threads = repos.threads;
     this.messages = repos.messages;
     this.notifications = repos.notifications;

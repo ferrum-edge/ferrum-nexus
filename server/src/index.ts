@@ -320,6 +320,10 @@ export async function buildServer(
     notifications,
     email,
     provisioner,
+    // The same store-level serializer users and god mode take their account
+    // lifecycle key on: registering a gateway identity has to be ordered
+    // against the status flip that disables its owner.
+    locks,
   });
   // Users is composed after credentials: disabling an account has to strip the
   // gateway identity, not merely the browser session.

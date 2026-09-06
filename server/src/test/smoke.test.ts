@@ -1970,6 +1970,72 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal((await store.emailOutbox.findById(mine?.id ?? ''))?.status, 'pending');
     });
 
+    /* ── gateway identities ───────────────────────────────────────────── */
+
+    it('gatewayIdentities: one registration per name, moved by a later claim', async () => {
+      const owner = await makeUser();
+      const successor = await makeUser({ role: 'admin' });
+      const username = `nexus-test-${newId()}`;
+
+      const claimed = await store.gatewayIdentities.claim({
+        user_id: owner.id,
+        namespace: 'nexus',
+        ferrum_username: username,
+        ferrum_consumer_id: null,
+      });
+      assert.equal(claimed.user_id, owner.id);
+      assert.equal(claimed.namespace, 'nexus');
+      assert.equal(claimed.ferrum_username, username);
+      assert.equal(claimed.ferrum_consumer_id, null);
+      assert.deepEqual(await store.gatewayIdentities.findByUsername('nexus', username), claimed);
+      assert.deepEqual(await store.gatewayIdentities.findById(claimed.id), claimed);
+      assert.equal(await store.gatewayIdentities.findByUsername('staging', username), null);
+
+      const bound = await store.gatewayIdentities.bindConsumer(claimed.id, 'consumer-1');
+      assert.equal(bound?.ferrum_consumer_id, 'consumer-1');
+      assert.ok((bound?.updated_at ?? '') >= claimed.updated_at);
+      assert.equal(await store.gatewayIdentities.bindConsumer(newId(), 'consumer-x'), null);
+      assert.deepEqual(
+        (await store.gatewayIdentities.listByUser(owner.id, 'nexus')).map((row) => row.id),
+        [claimed.id],
+      );
+      assert.deepEqual(await store.gatewayIdentities.listByUser(owner.id, 'staging'), []);
+
+      // A second claim on the same name is a takeover, not a duplicate: the
+      // row keeps its id, changes owner, and forgets the consumer that is
+      // about to be recreated.
+      const moved = await store.gatewayIdentities.claim({
+        user_id: successor.id,
+        namespace: 'nexus',
+        ferrum_username: username,
+        ferrum_consumer_id: null,
+      });
+      assert.equal(moved.id, claimed.id, 'the row is kept');
+      assert.equal(moved.user_id, successor.id);
+      assert.equal(moved.ferrum_consumer_id, null);
+      assert.equal(moved.created_at, claimed.created_at);
+      assert.deepEqual(await store.gatewayIdentities.listByUser(owner.id, 'nexus'), []);
+
+      const second = await store.gatewayIdentities.claim({
+        user_id: successor.id,
+        namespace: 'nexus',
+        ferrum_username: `nexus-test-${newId()}`,
+        ferrum_consumer_id: 'consumer-2',
+      });
+      assert.equal(second.ferrum_consumer_id, 'consumer-2');
+      const listed = await store.gatewayIdentities.listByUser(successor.id, 'nexus');
+      assert.deepEqual(
+        listed.map((row) => row.id).sort(),
+        [claimed.id, second.id].sort(),
+        'every registration of the account, and only those',
+      );
+
+      assert.equal(await store.gatewayIdentities.delete(claimed.id), true);
+      assert.equal(await store.gatewayIdentities.delete(claimed.id), false);
+      assert.equal(await store.gatewayIdentities.findByUsername('nexus', username), null);
+      assert.equal(await store.gatewayIdentities.delete(second.id), true);
+    });
+
     /* ── gateway teardown jobs ────────────────────────────────────────── */
 
     it('gatewayTeardownJobs: one row per user, reset rather than duplicated', async () => {

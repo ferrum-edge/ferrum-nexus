@@ -10,6 +10,7 @@ import type { EdgeConfig } from '../config/index.js';
 import { isNexusError } from '../lib/errors.js';
 import { createMockFerrumEdge, type MockFerrumEdge } from '../test/mock-ferrum-edge.js';
 import {
+  CONSUMER_SCAN_LIMIT,
   createFerrumAdminClient,
   createKeyedSerializer,
   type FerrumAdminClient,
@@ -100,6 +101,24 @@ describe('ferrum admin client', () => {
     await client.consumers.create({ id: 'u-b', username: 'nexus-user-b' });
     const found = await client.consumers.getByUsername('nexus-user-b');
     assert.equal(found?.id, 'u-b');
+    assert.equal(await client.consumers.getByUsername('nexus-user-zz'), null);
+  });
+
+  it('refuses to answer "not found" for a namespace the username scan cannot finish', async () => {
+    await client.consumers.create({ id: 'u-first', username: 'nexus-user-first' });
+    for (let index = 0; index < CONSUMER_SCAN_LIMIT; index += 1) {
+      edge.seedConsumer({ username: `filler-${index}`, namespace: 'nexus' });
+    }
+    // Within the scan: found as ever.
+    assert.equal((await client.consumers.getByUsername('nexus-user-first'))?.id, 'u-first');
+    // Beyond it: the scan gave up, and says so rather than answering `null`.
+    await assert.rejects(
+      () => client.consumers.getByUsername('nexus-user-zz'),
+      (error: unknown) =>
+        isNexusError(error) && error.code === 'EDGE_ERROR' && /more consumers/i.test(error.message),
+    );
+    // Exactly the cap is still a complete read.
+    edge.consumers.delete('nexus/u-first');
     assert.equal(await client.consumers.getByUsername('nexus-user-zz'), null);
   });
 

@@ -158,6 +158,12 @@ export interface FerrumAdminClient {
      * Find a consumer by `username` by scanning `GET /consumers` pages — Edge
      * has no username filter. Nexus normally reads the mapping from its own
      * `consumers` table; this is the reconciliation path.
+     *
+     * `null` means the whole namespace was read and holds no such consumer.
+     * A scan that reaches its page cap without a match **throws** rather than
+     * answering `null`: on a gateway that large "not found" would only mean
+     * "not searched", and a caller acting on it — creating a duplicate, or
+     * closing a teardown with the consumer still up — would be wrong.
      */
     getByUsername(username: string): Promise<EdgeConsumer | null>;
     create(body: EdgeConsumerWrite, subject?: string): Promise<EdgeConsumer>;
@@ -306,6 +312,13 @@ export interface FerrumAdminClient {
 
 const MAX_CONSUMER_SCAN_PAGES = 20;
 const CONSUMER_SCAN_PAGE_SIZE = 500;
+
+/**
+ * How many consumers `consumers.getByUsername` reads before giving up. Past
+ * this the lookup throws instead of answering `null`, because "not in the
+ * first 10,000" is not "not there".
+ */
+export const CONSUMER_SCAN_LIMIT = MAX_CONSUMER_SCAN_PAGES * CONSUMER_SCAN_PAGE_SIZE;
 
 /**
  * Edge's `MAX_PAGE_SIZE` (`src/admin/mod.rs`). A larger `limit` is clamped to
@@ -702,24 +715,29 @@ export function createFerrumAdminClient(
    * short page, once `offset + data.length` covers `pagination.total`, or after
    * `maxPages` pages — the cap keeps a runaway `total` from turning one probe
    * into an unbounded scan.
+   *
+   * Resolves `true` when the walk ended on its own terms — `visit` stopped it,
+   * or the last page was read — and `false` when the page cap cut it short
+   * with pages unread, so a caller can tell "not there" from "not looked".
    */
   async function scanPages<T>(
     path: string,
     pageSize: number,
     maxPages: number,
     visit: (items: T[]) => boolean,
-  ): Promise<void> {
+  ): Promise<boolean> {
     for (let page = 0; page < maxPages; page += 1) {
       const offset = page * pageSize;
       const result = await callRequired<EdgePage<T>>('GET', path, {
         query: { limit: pageSize, offset },
       });
       const items = Array.isArray(result.data) ? result.data : [];
-      if (!visit(items)) return;
-      if (items.length === 0 || items.length < pageSize) return;
+      if (!visit(items)) return true;
+      if (items.length === 0 || items.length < pageSize) return true;
       const total = result.pagination?.total ?? items.length;
-      if (offset + items.length >= total) return;
+      if (offset + items.length >= total) return true;
     }
+    return false;
   }
 
   /** Whether an Edge response body is a `HealthResponse` and not an error. */
@@ -840,7 +858,7 @@ export function createFerrumAdminClient(
 
       async getByUsername(username: string): Promise<EdgeConsumer | null> {
         let found: EdgeConsumer | null = null;
-        await scanPages<EdgeConsumer>(
+        const complete = await scanPages<EdgeConsumer>(
           '/consumers',
           CONSUMER_SCAN_PAGE_SIZE,
           MAX_CONSUMER_SCAN_PAGES,
@@ -852,6 +870,18 @@ export function createFerrumAdminClient(
             return false;
           },
         );
+        if (found === null && !complete) {
+          // Not "no such consumer" — the namespace holds more than the scan
+          // reads, and a `null` here would be acted on as if it were.
+          logger.warn(
+            { path: '/consumers', scanned: CONSUMER_SCAN_LIMIT, username },
+            'Consumer lookup by username gave up before the end of the namespace',
+          );
+          throw edgeError('The gateway holds more consumers than a username lookup can scan', {
+            scanned: CONSUMER_SCAN_LIMIT,
+            username,
+          });
+        }
         return found;
       },
 

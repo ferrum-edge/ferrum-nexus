@@ -899,6 +899,12 @@ The loser waits, re-counts after the winner committed, and gets the ordinary
 `409 LAST_SUPER_ADMIN` with nothing written. Promotions and re-enables take no
 lock; they only ever grow the set.
 
+A second store-level key, `users:lifecycle:<user_id>`, orders every status
+change of one account against the registration of a new gateway identity for
+it — see [§11](#11-gateway-revocation-for-disabled-accounts). It is per
+account, so it never contends across accounts, and it is always taken inside
+`users:super-admins` when both are needed.
+
 Operationally this behaves like any other lease: same TTL, same 30-second wait,
 same crash recovery. Contention is a single key portal-wide, so a `CONFLICT`
 carrying _"Another administrator change is in flight right now"_ means two
@@ -1158,6 +1164,29 @@ Edge lease keeps two instances from running it at the same instant.
 There is one row per account (`user_id` is unique), so re-disabling an account
 resets the outstanding job rather than queueing a second revocation.
 
+### Which identities a teardown finds
+
+The canonical consumer comes from `consumers`. Every other identity — a
+provider's `nexus-test-<api_id>` consumer — is found in two places:
+
+- `gateway_identities` registers a non-canonical consumer **before** it is
+  created on the gateway, under the account's `users:lifecycle:<user_id>` lease
+  (the lease both disable paths flip `status` under), so a disable that lands
+  while the identity's first credential is still being appended finds it and
+  waits for the append on the identity's name lease (`test-consumer:<username>`)
+  rather than missing it. A registration bound to its consumer's id resolves
+  the consumer by id; one that never got that far — the creation stopped
+  before the id was recorded — is resolved by username, a paged scan that
+  fails the attempt (job `pending`, registration kept) rather than answering
+  "no consumer" on a namespace larger than it reads. A registration is deleted
+  once its consumer is gone.
+- `credential_metadata` rows that are still live, for consumers created before
+  that table existed.
+
+A registration that outlives the account's job means a compensating delete
+failed after the disable had already closed the job; the credentials service
+reopens the job for it, and the worker takes the consumer down on the next tick.
+
 ### Monitoring
 
 ```sql
@@ -1168,6 +1197,12 @@ SELECT status, count(*) FROM gateway_teardown_jobs GROUP BY status;
 SELECT user_id, attempts, last_error, next_attempt_at, updated_at
   FROM gateway_teardown_jobs WHERE status <> 'done'
   ORDER BY updated_at DESC LIMIT 20;
+
+-- identities still registered to disabled accounts: each is a consumer still owed
+SELECT gi.user_id, gi.ferrum_username, gi.ferrum_consumer_id, gi.updated_at
+  FROM gateway_identities AS gi
+  JOIN users AS u ON u.id = gi.user_id
+ WHERE u.status = 'disabled';
 ```
 
 `GET /api/users` (admin) also reports the portal-wide backlog as
