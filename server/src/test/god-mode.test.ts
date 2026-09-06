@@ -431,7 +431,7 @@ describe('API deletion and god mode', () => {
     for (const key of [undefined, 'campaign-0001']) {
       it(`deduplicates broadcast email retries with key=${key ?? 'legacy'}`, async () => {
         const payload = {
-          subject: 'Maintenance window',
+          subject: `Maintenance window ${key ?? 'legacy'}`,
           body: 'Planned maintenance on Sunday.',
           audience: { scope: 'explicit', user_ids: [client.user.id] },
           send_email: true,

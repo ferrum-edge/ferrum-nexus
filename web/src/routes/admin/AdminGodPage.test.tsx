@@ -83,13 +83,12 @@ describe('emergency targets beyond the first page', () => {
   });
 });
 
-
 describe('broadcast email campaign identity', () => {
   it('keeps the retry key until success and starts a new campaign afterward', () => {
     render(<AdminGodPage />);
     const compose = () => {
-      fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'Maintenance' } });
-      fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'Sunday window' } });
+      fireEvent.change(screen.getByLabelText(/^Subject/), { target: { value: 'Maintenance' } });
+      fireEvent.change(screen.getByLabelText(/^Message/), { target: { value: 'Sunday window' } });
       fireEvent.click(screen.getByRole('button', { name: 'Broadcast' }));
       const dialog = within(screen.getByRole('dialog'));
       fireEvent.change(dialog.getByPlaceholderText('BROADCAST'), { target: { value: 'BROADCAST' } });
