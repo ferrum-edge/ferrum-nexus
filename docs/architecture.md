@@ -466,6 +466,13 @@ approved for an API _or_ issues a credential, whichever comes first. If a
 consumer exists on the gateway without a Nexus row — a database restore, say —
 `ensureConsumer` finds it by username and re-caches it rather than 409-ing on a
 re-create.
+The mapping lookup, username adoption/create, and mapping insert share a stable
+`consumer-name:[namespace,username]` lease. Concurrent first issuance and approval
+therefore initialize one canonical identity. A retry after local mapping failure
+adopts the already-created gateway identity. Provisioning releases this name
+lease before later credential/ACL operations acquire the consumer-id lease;
+there is no nested name/id acquisition. This does not change the deployment's
+one-active-gateway-writer limitation.
 
 Providers also get a disposable **test consumer** per API, `nexus-test-<api_id>`,
 carrying that API's ACL group and one credential of the API's auth type.
