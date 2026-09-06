@@ -277,7 +277,7 @@ the route, while "is this your API" is a property of the row.
 | Read the audit log                                |   —    |    —     |   ✓   |      ✓      |
 | Portal settings: **SMTP and CAPTCHA**             |   —    |    —     | **—** |      ✓      |
 | Grant or revoke `admin` / `super_admin`           |   —    |    —     | **—** |      ✓      |
-| Disable or re-enable an `admin` or `super_admin` |   —    |    —     | **—** |      ✓      |
+| Disable or re-enable an `admin` or `super_admin`  |   —    |    —     | **—** |      ✓      |
 | God mode (4 endpoints)                            |   —    |    —     |   —   |      ✓      |
 
 The three bolded gaps are the point of the `super_admin` tier: an `admin` has
