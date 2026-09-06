@@ -19,6 +19,8 @@ export interface FaultInjectingStore {
    * hands out — and behave normally again afterwards.
    */
   failNext(repo: keyof NexusStore, method: string, error?: Error): void;
+  /** Fail after this many successful calls to the same repository method. */
+  failAfter(repo: keyof NexusStore, method: string, successfulCalls: number, error?: Error): void;
   /** Faults armed but not yet consumed, as `repo.method`. */
   pending(): string[];
 }
@@ -35,7 +37,7 @@ export interface FaultInjectingStore {
  * unaffected while nothing is armed, so assertions can use the same object.
  */
 export function faultInjectingStore(base: NexusStore): FaultInjectingStore {
-  const armed = new Map<string, Error>();
+  const armed = new Map<string, { error: Error; remaining: number }>();
 
   function wrapRepo(repoName: string, repo: object): object {
     return new Proxy(repo, {
@@ -45,11 +47,16 @@ export function faultInjectingStore(base: NexusStore): FaultInjectingStore {
         const faultKey = `${repoName}.${property}`;
         return (...args: unknown[]): unknown => {
           const fault = armed.get(faultKey);
-          if (fault) {
+          if (fault?.remaining === 0) {
             armed.delete(faultKey);
-            return Promise.reject(fault);
+            return Promise.reject(fault.error);
           }
-          return Reflect.apply(value, target, args);
+          const result: unknown = Reflect.apply(value, target, args);
+          if (!fault) return result;
+          return Promise.resolve(result).then((accepted) => {
+            fault.remaining -= 1;
+            return accepted;
+          });
         };
       },
     });
@@ -77,7 +84,15 @@ export function faultInjectingStore(base: NexusStore): FaultInjectingStore {
   return {
     store: wrapStore(base),
     failNext(repo, method, error = new Error(`injected failure in ${String(repo)}.${method}`)) {
-      armed.set(`${String(repo)}.${method}`, error);
+      armed.set(`${String(repo)}.${method}`, { error, remaining: 0 });
+    },
+    failAfter(
+      repo,
+      method,
+      successfulCalls,
+      error = new Error(`injected failure in ${String(repo)}.${method}`),
+    ) {
+      armed.set(`${String(repo)}.${method}`, { error, remaining: successfulCalls });
     },
     pending() {
       return [...armed.keys()];

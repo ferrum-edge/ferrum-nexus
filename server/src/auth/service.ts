@@ -330,24 +330,29 @@ export function capabilitiesFor(role: Role): Capabilities {
   };
 }
 
+/** Read registration defaults or overrides through the supplied store. */
+export async function readRegistrationPolicy(store: NexusStore): Promise<RegistrationPolicy> {
+  const row = await store.settings.get(REGISTRATION_SETTINGS_KEY);
+  if (!row || row.value === null || typeof row.value !== 'object') {
+    return DEFAULT_REGISTRATION_POLICY;
+  }
+  const value = row.value as Partial<RegistrationPolicy>;
+  return {
+    open_registration: value.open_registration !== false,
+    require_email_verification: value.require_email_verification === true,
+    allowed_roles: Array.isArray(value.allowed_roles)
+      ? value.allowed_roles.filter((role): role is Role => typeof role === 'string')
+      : DEFAULT_REGISTRATION_POLICY.allowed_roles,
+  };
+}
+
 /** Build the authentication service. */
 export function createAuthService(deps: AuthServiceDeps): AuthService {
   const { config, store, crypto, audit, captcha, locks } = deps;
   const serializePasswordChange = createPasswordChangeSerializer(store);
 
   async function getRegistrationPolicy(): Promise<RegistrationPolicy> {
-    const row = await store.settings.get(REGISTRATION_SETTINGS_KEY);
-    if (!row || row.value === null || typeof row.value !== 'object') {
-      return DEFAULT_REGISTRATION_POLICY;
-    }
-    const value = row.value as Partial<RegistrationPolicy>;
-    return {
-      open_registration: value.open_registration !== false,
-      require_email_verification: value.require_email_verification === true,
-      allowed_roles: Array.isArray(value.allowed_roles)
-        ? value.allowed_roles.filter((role): role is Role => typeof role === 'string')
-        : DEFAULT_REGISTRATION_POLICY.allowed_roles,
-    };
+    return readRegistrationPolicy(store);
   }
 
   /**
