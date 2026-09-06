@@ -44,6 +44,7 @@ vi.mock('../../components/layout/RoleGuard', () => ({
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 const oldest = '12345678-1234-4234-8234-123456789abc';
@@ -84,7 +85,8 @@ describe('emergency targets beyond the first page', () => {
 });
 
 describe('broadcast email campaign identity', () => {
-  it('keeps the retry key until success and starts a new campaign afterward', () => {
+  it('keeps HTTP-compatible retry keys until success and starts a new campaign afterward', () => {
+    vi.stubGlobal('crypto', { getRandomValues: crypto.getRandomValues.bind(crypto) });
     render(<AdminGodPage />);
     const compose = () => {
       fireEvent.change(screen.getByLabelText(/^Subject/), { target: { value: 'Maintenance' } });
@@ -98,7 +100,7 @@ describe('broadcast email campaign identity', () => {
     };
     compose();
     const firstKey = sendBroadcast.mock.calls[0]![0].idempotency_key;
-    expect(firstKey).toBeTruthy();
+    expect(firstKey).toMatch(/^[0-9a-f]{32}$/);
     // A failed mutation leaves the dialog open and the form intact.
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Broadcast' }));
     expect(sendBroadcast.mock.calls[1]![0].idempotency_key).toBe(firstKey);
