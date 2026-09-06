@@ -70,7 +70,7 @@ async function seedCredentials(pool: mysql.Pool): Promise<void> {
   for (const [id, consumer, created] of [
     ['first', 'ordered', '2026-01-01'], ['second', 'ordered', '2026-01-02'],
     ['ambiguous-a', 'ambiguous', '2026-01-01'], ['ambiguous-b', 'ambiguous', '2026-01-01'],
-  ]) {
+  ] as const) {
     await pool.execute(`INSERT INTO credential_metadata
       (id, user_id, ferrum_consumer_id, credential_type, ferrum_credential_id,
        fingerprint, last4, status, created_at, updated_at)
@@ -115,11 +115,13 @@ describe('MySQL committed migration recovery', { skip: !adminUrl, timeout: 600_0
       const boundaries = [...statements.map((_, step) => step), 'ledger'] as const;
       for (const boundary of boundaries) {
         await fixture(async (pool, url) => {
-          await runMysqlMigrations(pool, migrations.slice(0, index));
-          // Legacy installations had only the migration ledger, no step journal.
-          await pool.query('DROP TABLE schema_migration_steps');
+          await runMysqlMigrations(pool, migrations.slice(0, Math.min(index, 10)));
           const credentials = index > 0;
           if (credentials) await seedCredentials(pool);
+          // Seed legacy credentials before 011 even when testing a later migration.
+          if (index > 10) await runMysqlMigrations(pool, migrations.slice(0, index));
+          // Legacy installations had only the migration ledger, no step journal.
+          await pool.query('DROP TABLE schema_migration_steps');
           let fired = false;
           let backfillCommitted = false;
           const faulty = intercept(pool, (method, sql, params, after) => {

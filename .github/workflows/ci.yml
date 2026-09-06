@@ -17,7 +17,13 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
-      - run: npm run format:check
+      - name: Check formatting and show required changes
+        run: |
+          if ! npm run format:check; then
+            npm exec --no -- prettier --write .
+            git diff --no-ext-diff
+            exit 1
+          fi
       - run: npm run build
 
   store-contracts:
