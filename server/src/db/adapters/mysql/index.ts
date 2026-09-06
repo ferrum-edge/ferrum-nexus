@@ -10,12 +10,7 @@
  *   (`"ident"` → `` `ident` ``, which is what lets the shared repos say
  *   `"key"` — a reserved word here and not in PostgreSQL) and reports
  *   `affectedRows` as the affected row count;
- * - the migration runner, applying the `.mysql.sql` files and recording them in
- *   `schema_migrations` under the same protocol as the sqlite adapter. MySQL
- *   has no transactional DDL, so a migration's statements are applied
- *   sequentially and the bookkeeping row is written last — a crash mid-way
- *   leaves the migration unrecorded, and the `CREATE TABLE IF NOT EXISTS`
- *   spelling used throughout makes the retry idempotent.
+ * - the serialized, resumable migration runner in `migrations.ts`;
  * - `transaction()`, a real `START TRANSACTION`/`COMMIT`/`ROLLBACK` on a
  *   dedicated connection checked out of the pool for the duration of the body.
  *   Nested `transaction()` calls join the outer one, and bodies are serialised,
@@ -32,15 +27,7 @@ import mysql from 'mysql2/promise';
 import type { DbDriver } from '@ferrum-nexus/shared';
 
 import type { NexusConfig } from '../../../config/index.js';
-import { nowIso } from '../../../lib/ids.js';
-import {
-  loadMigrations,
-  runMigrations,
-  SCHEMA_MIGRATIONS_TABLE,
-  splitSqlStatements,
-  type MigrationDriver,
-  type MigrationFile,
-} from '../../migrate.js';
+import { runMysqlMigrations } from './migrations.js';
 import type { NexusStore, StoreHealth } from '../../store.js';
 import { formatSql, type Row, type SqlExecutor, type SqlParam } from '../sql-common.js';
 import { createSqlStore, type SqlStoreBackend } from '../sql-repos.js';
@@ -74,35 +61,6 @@ function mysqlExecutor(queryable: MysqlQueryable): SqlExecutor {
   };
 }
 
-function createMigrationDriver(pool: MysqlPool): MigrationDriver {
-  return {
-    async ensureMigrationsTable(): Promise<void> {
-      await pool.query(
-        `CREATE TABLE IF NOT EXISTS ${SCHEMA_MIGRATIONS_TABLE} (
-           id VARCHAR(191) NOT NULL,
-           applied_at VARCHAR(32) NOT NULL,
-           PRIMARY KEY (id)
-         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`,
-      );
-    },
-    async listApplied(): Promise<string[]> {
-      const [rows] = await pool.query(`SELECT id FROM ${SCHEMA_MIGRATIONS_TABLE}`);
-      return Array.isArray(rows) ? (rows as { id: string }[]).map((row) => String(row.id)) : [];
-    },
-    async applyMigration(migration: MigrationFile): Promise<void> {
-      // DDL is not transactional in MySQL; record the migration only once every
-      // statement has succeeded, so a failure leaves it pending for a retry.
-      for (const statement of splitSqlStatements(migration.sql)) {
-        await pool.query(statement);
-      }
-      await pool.execute(`INSERT INTO ${SCHEMA_MIGRATIONS_TABLE} (id, applied_at) VALUES (?, ?)`, [
-        migration.id,
-        nowIso(),
-      ]);
-    },
-  };
-}
-
 /** The MySQL {@link SqlStoreBackend}. */
 class MysqlBackend implements SqlStoreBackend {
   readonly driver: DbDriver = 'mysql';
@@ -126,7 +84,7 @@ class MysqlBackend implements SqlStoreBackend {
   }
 
   async migrate(): Promise<void> {
-    await runMigrations(createMigrationDriver(this.db), loadMigrations('mysql'));
+    await runMysqlMigrations(this.db);
   }
 
   async close(): Promise<void> {
