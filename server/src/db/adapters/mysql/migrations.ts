@@ -32,7 +32,12 @@ interface Guard {
   indexes?: Index[];
   check?: { name: string; clause: string };
 }
-const textColumn = (name: string): Column => ({ name, type: 'text', nullable: true, default: null });
+const textColumn = (name: string): Column => ({
+  name,
+  type: 'text',
+  nullable: true,
+  default: null,
+});
 
 // Exact statement matching makes a changed/new ALTER fail closed until its
 // recovery postconditions are reviewed too. Never swallow duplicate-name errors.
@@ -45,25 +50,43 @@ const guards: Guard[] = [
   {
     sql: "ALTER TABLE email_verification_tokens ADD COLUMN purpose VARCHAR(32) NOT NULL DEFAULT 'email_verification', ADD KEY ix_verification_tokens_user_purpose (user_id, purpose)",
     table: 'email_verification_tokens',
-    columns: [{ name: 'purpose', type: 'varchar(32)', nullable: false, default: 'email_verification' }],
-    indexes: [{ name: 'ix_verification_tokens_user_purpose', columns: ['user_id', 'purpose'], unique: false }],
+    columns: [
+      { name: 'purpose', type: 'varchar(32)', nullable: false, default: 'email_verification' },
+    ],
+    indexes: [
+      {
+        name: 'ix_verification_tokens_user_purpose',
+        columns: ['user_id', 'purpose'],
+        unique: false,
+      },
+    ],
   },
   {
     sql: 'ALTER TABLE apis ADD COLUMN allowed_methods_json TEXT NULL, ADD COLUMN timeouts_json TEXT NULL, ADD COLUMN circuit_breaker TINYINT NOT NULL DEFAULT 0',
     table: 'apis',
-    columns: [textColumn('allowed_methods_json'), textColumn('timeouts_json'),
-      { name: 'circuit_breaker', type: 'tinyint', nullable: false, default: '0' }],
+    columns: [
+      textColumn('allowed_methods_json'),
+      textColumn('timeouts_json'),
+      { name: 'circuit_breaker', type: 'tinyint', nullable: false, default: '0' },
+    ],
   },
   {
     sql: "ALTER TABLE apis ADD COLUMN spec_enforcement VARCHAR(32) NOT NULL DEFAULT 'docs_only', ADD CONSTRAINT ck_apis_spec_enforcement CHECK (spec_enforcement IN ('docs_only', 'routes'))",
     table: 'apis',
-    columns: [{ name: 'spec_enforcement', type: 'varchar(32)', nullable: false, default: 'docs_only' }],
-    check: { name: 'ck_apis_spec_enforcement', clause: "spec_enforcement IN ('docs_only', 'routes')" },
+    columns: [
+      { name: 'spec_enforcement', type: 'varchar(32)', nullable: false, default: 'docs_only' },
+    ],
+    check: {
+      name: 'ck_apis_spec_enforcement',
+      clause: "spec_enforcement IN ('docs_only', 'routes')",
+    },
   },
   {
     sql: 'ALTER TABLE messages ADD INDEX ix_messages_sender (sender_user_id, created_at)',
     table: 'messages',
-    indexes: [{ name: 'ix_messages_sender', columns: ['sender_user_id', 'created_at'], unique: false }],
+    indexes: [
+      { name: 'ix_messages_sender', columns: ['sender_user_id', 'created_at'], unique: false },
+    ],
   },
   {
     sql: 'ALTER TABLE credential_metadata ADD COLUMN edge_ordinal INT DEFAULT NULL',
@@ -73,18 +96,30 @@ const guards: Guard[] = [
   {
     sql: 'ALTER TABLE credential_metadata ADD UNIQUE KEY ux_credentials_ordinal (ferrum_consumer_id, credential_type, edge_ordinal)',
     table: 'credential_metadata',
-    indexes: [{ name: 'ux_credentials_ordinal', columns: ['ferrum_consumer_id', 'credential_type', 'edge_ordinal'], unique: true }],
+    indexes: [
+      {
+        name: 'ux_credentials_ordinal',
+        columns: ['ferrum_consumer_id', 'credential_type', 'edge_ordinal'],
+        unique: true,
+      },
+    ],
   },
 ];
 
 function mismatch(table: string, name: string): never {
-  throw new Error(`MySQL migration schema mismatch at ${table}.${name}; stop writers and follow the migration recovery runbook`);
+  throw new Error(
+    `MySQL migration schema mismatch at ${table}.${name}; stop writers and follow the migration recovery runbook`,
+  );
 }
 
 function checkExpression(value: string): string {
   // MySQL decorates these literal-only IN checks with charset introducers,
-  // identifier quotes and parentheses in information_schema.
-  return value.replace(/_utf8mb4/g, '').replace(/[\s`()]/g, '').toLowerCase();
+  // escaped literal delimiters, identifier quotes and parentheses in information_schema.
+  return value
+    .replace(/_utf8mb4/g, '')
+    .replace(/\\'/g, "'")
+    .replace(/[\s`()]/g, '')
+    .toLowerCase();
 }
 
 async function alreadyApplied(connection: mysql.PoolConnection, guard: Guard): Promise<boolean> {
@@ -101,9 +136,13 @@ async function alreadyApplied(connection: mysql.PoolConnection, guard: Guard): P
     if (!row) continue;
     const type = String(row.COLUMN_TYPE).replace(/^(tinyint|int)\(\d+\)$/, '$1');
     const columnDefault = row.COLUMN_DEFAULT == null ? null : String(row.COLUMN_DEFAULT);
-    if (type !== expected.type || (row.IS_NULLABLE === 'YES') !== expected.nullable ||
-        columnDefault !== expected.default || row.EXTRA !== '' ||
-        (/text|varchar/.test(type) && row.COLLATION_NAME !== 'utf8mb4_bin')) {
+    if (
+      type !== expected.type ||
+      (row.IS_NULLABLE === 'YES') !== expected.nullable ||
+      columnDefault !== expected.default ||
+      row.EXTRA !== '' ||
+      (/text|varchar/.test(type) && row.COLLATION_NAME !== 'utf8mb4_bin')
+    ) {
       mismatch(guard.table, expected.name);
     }
   }
@@ -117,10 +156,19 @@ async function alreadyApplied(connection: mysql.PoolConnection, guard: Guard): P
     );
     present.push(rows.length > 0);
     if (rows.length === 0) continue;
-    if (rows.length !== expected.columns.length || rows.some((row, index) =>
-      row.COLUMN_NAME !== expected.columns[index] || Number(row.NON_UNIQUE) !== (expected.unique ? 0 : 1) ||
-      row.SUB_PART !== null || row.EXPRESSION !== null || row.INDEX_TYPE !== 'BTREE' || row.IS_VISIBLE !== 'YES',
-    )) mismatch(guard.table, expected.name);
+    if (
+      rows.length !== expected.columns.length ||
+      rows.some(
+        (row, index) =>
+          row.COLUMN_NAME !== expected.columns[index] ||
+          Number(row.NON_UNIQUE) !== (expected.unique ? 0 : 1) ||
+          row.SUB_PART !== null ||
+          row.EXPRESSION !== null ||
+          row.INDEX_TYPE !== 'BTREE' ||
+          row.IS_VISIBLE !== 'YES',
+      )
+    )
+      mismatch(guard.table, expected.name);
   }
   if (guard.check) {
     const [rows] = await connection.execute<mysql.RowDataPacket[]>(
@@ -132,8 +180,12 @@ async function alreadyApplied(connection: mysql.PoolConnection, guard: Guard): P
       [guard.table, guard.check.name],
     );
     present.push(rows.length > 0);
-    if (rows.length > 0 && (rows.length !== 1 || rows[0]!.ENFORCED !== 'YES' ||
-        checkExpression(String(rows[0]!.CHECK_CLAUSE)) !== checkExpression(guard.check.clause))) {
+    if (
+      rows.length > 0 &&
+      (rows.length !== 1 ||
+        rows[0]!.ENFORCED !== 'YES' ||
+        checkExpression(String(rows[0]!.CHECK_CLAUSE)) !== checkExpression(guard.check.clause))
+    ) {
       mismatch(guard.table, guard.check.name);
     }
   }
@@ -141,7 +193,10 @@ async function alreadyApplied(connection: mysql.PoolConnection, guard: Guard): P
   return present.length > 0 && present.every(Boolean);
 }
 
-async function applyMigration(connection: mysql.PoolConnection, migration: MigrationFile): Promise<void> {
+async function applyMigration(
+  connection: mysql.PoolConnection,
+  migration: MigrationFile,
+): Promise<void> {
   const statements = splitSqlStatements(migration.sql);
   for (const [step, statement] of statements.entries()) {
     const hash = digest(normalizedSql(statement));
@@ -152,26 +207,33 @@ async function applyMigration(connection: mysql.PoolConnection, migration: Migra
     const guard = guards.find((entry) => normalizedSql(entry.sql) === normalizedSql(statement));
     if (recorded[0]) {
       if (recorded[0].statement_hash !== hash) {
-        throw new Error(`MySQL migration ${migration.id} step ${step} changed after it was applied`);
+        throw new Error(
+          `MySQL migration ${migration.id} step ${step} changed after it was applied`,
+        );
       }
-      if (guard && !await alreadyApplied(connection, guard)) mismatch(guard.table, 'recorded step');
+      if (guard && !(await alreadyApplied(connection, guard)))
+        mismatch(guard.table, 'recorded step');
       continue;
     }
-    const checkpoint = () => connection.execute(
-      `INSERT INTO ${STEPS} (migration_id, step, statement_hash, applied_at) VALUES (?, ?, ?, ?)`,
-      [migration.id, step, hash, nowIso()],
-    );
+    const checkpoint = () =>
+      connection.execute(
+        `INSERT INTO ${STEPS} (migration_id, step, statement_hash, applied_at) VALUES (?, ?, ?, ?)`,
+        [migration.id, step, hash, nowIso()],
+      );
     if (guard) {
       // This also recovers legacy databases with committed DDL and no step journal.
-      if (!await alreadyApplied(connection, guard)) await connection.query(statement);
-      if (!await alreadyApplied(connection, guard)) mismatch(guard.table, 'ALTER postcondition');
+      if (!(await alreadyApplied(connection, guard))) await connection.query(statement);
+      if (!(await alreadyApplied(connection, guard))) mismatch(guard.table, 'ALTER postcondition');
       await checkpoint();
     } else if (/^CREATE TABLE IF NOT EXISTS\s/i.test(statement)) {
       // Shipped CREATEs include their indexes/constraints in one atomic DDL.
       await connection.query(statement);
       await checkpoint();
-    } else if (migration.id === '011_credential_ordinal' && step === 1 &&
-               /^UPDATE credential_metadata AS cm\s/.test(statement)) {
+    } else if (
+      migration.id === '011_credential_ordinal' &&
+      step === 1 &&
+      /^UPDATE credential_metadata AS cm\s/.test(statement)
+    ) {
       // The deterministic legacy backfill and its progress record commit together.
       // A replay after a legacy interruption is safe while old writers are stopped.
       await connection.beginTransaction();
@@ -184,13 +246,15 @@ async function applyMigration(connection: mysql.PoolConnection, migration: Migra
         throw error;
       }
     } else {
-      throw new Error(`MySQL migration ${migration.id} step ${step} needs reviewed recovery postconditions`);
+      throw new Error(
+        `MySQL migration ${migration.id} step ${step} needs reviewed recovery postconditions`,
+      );
     }
   }
-  await connection.execute(`INSERT INTO ${SCHEMA_MIGRATIONS_TABLE} (id, applied_at) VALUES (?, ?)`, [
-    migration.id,
-    nowIso(),
-  ]);
+  await connection.execute(
+    `INSERT INTO ${SCHEMA_MIGRATIONS_TABLE} (id, applied_at) VALUES (?, ?)`,
+    [migration.id, nowIso()],
+  );
 }
 
 /** One connection owns the advisory lock, ledger reads, all steps, and release. */
@@ -203,35 +267,47 @@ export async function runMysqlMigrations(
   let reusable = true;
   try {
     const [rows] = await connection.query<mysql.RowDataPacket[]>('SELECT DATABASE() AS db');
-    if (typeof rows[0]?.db !== 'string') throw new Error('MySQL migrations require a selected database');
+    if (typeof rows[0]?.db !== 'string')
+      throw new Error('MySQL migrations require a selected database');
     const name = `nexus:migrations:${digest(rows[0].db).slice(0, 32)}`;
     // Acquisition can commit server-side before a transport error reaches us.
     lockName = name;
-    const [locks] = await connection.execute<mysql.RowDataPacket[]>('SELECT GET_LOCK(?, 30) AS acquired', [name]);
+    const [locks] = await connection.execute<mysql.RowDataPacket[]>(
+      'SELECT GET_LOCK(?, 30) AS acquired',
+      [name],
+    );
     if (Number(locks[0]?.acquired) !== 1) {
       throw new Error('MySQL migrations are busy; retry after the other migrator finishes');
     }
-    await runMigrations({
-      async ensureMigrationsTable() {
-        await connection.query(`CREATE TABLE IF NOT EXISTS ${SCHEMA_MIGRATIONS_TABLE} (
+    await runMigrations(
+      {
+        async ensureMigrationsTable() {
+          await connection.query(`CREATE TABLE IF NOT EXISTS ${SCHEMA_MIGRATIONS_TABLE} (
           id VARCHAR(191) NOT NULL, applied_at VARCHAR(32) NOT NULL, PRIMARY KEY (id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`);
-        await connection.query(`CREATE TABLE IF NOT EXISTS ${STEPS} (
+          await connection.query(`CREATE TABLE IF NOT EXISTS ${STEPS} (
           migration_id VARCHAR(191) NOT NULL, step INT NOT NULL,
           statement_hash CHAR(64) NOT NULL, applied_at VARCHAR(32) NOT NULL,
           PRIMARY KEY (migration_id, step)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`);
+        },
+        async listApplied() {
+          const [applied] = await connection.query<mysql.RowDataPacket[]>(
+            `SELECT id FROM ${SCHEMA_MIGRATIONS_TABLE}`,
+          );
+          return applied.map((row) => String(row.id));
+        },
+        applyMigration: (migration) => applyMigration(connection, migration),
       },
-      async listApplied() {
-        const [applied] = await connection.query<mysql.RowDataPacket[]>(`SELECT id FROM ${SCHEMA_MIGRATIONS_TABLE}`);
-        return applied.map((row) => String(row.id));
-      },
-      applyMigration: (migration) => applyMigration(connection, migration),
-    }, migrations);
+      migrations,
+    );
   } finally {
     if (lockName) {
       try {
-        const [released] = await connection.execute<mysql.RowDataPacket[]>('SELECT RELEASE_LOCK(?) AS released', [lockName]);
+        const [released] = await connection.execute<mysql.RowDataPacket[]>(
+          'SELECT RELEASE_LOCK(?) AS released',
+          [lockName],
+        );
         reusable = Number(released[0]?.released) === 1;
       } catch {
         reusable = false;
