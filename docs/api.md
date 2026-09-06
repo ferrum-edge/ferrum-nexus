@@ -1541,15 +1541,25 @@ _session_, **API owner or admin** →
 Body: `{ "decision_note"?: string | null }` (≤ 2000). The body may be omitted
 entirely.
 
-What happens: the requester's Edge consumer is created if needed, the ACL group
-`nexus:api:<api_id>:approved` is added to it (serialised per consumer), and
-only then are the grant row and the request status committed in one store
-transaction. The requester gets a notification and an `access_approved` email.
+Admission is rechecked under the same proxy lease used by catalog updates. A
+retired or non-requestable API refuses approval before claiming the pending
+request or touching gateway access. The lease remains held through grant/ACL
+commit or compensation: approval completed before retirement creates an existing
+grant that retirement preserves; retirement completed first refuses new access.
+
+What happens: a compare-and-set claims the pending request as approved before
+touching the gateway. The requester's Edge consumer is created if needed and the
+ACL group `nexus:api:<api_id>:approved` is added (serialised per consumer), then
+the grant row is committed. The requester gets a notification and an
+`access_approved` email.
 
 Errors: `403 FORBIDDEN` (not the owner and not an admin), `409 CONFLICT`
-(already decided, or the user already holds an active grant),
-`502 EDGE_ERROR` / `502 EDGE_UNAVAILABLE` — in which case nothing is committed
-and the request stays `pending`, safe to retry.
+(already decided, the user already holds an active grant, or the API is retired
+or no longer requestable),
+`502 EDGE_ERROR` / `502 EDGE_UNAVAILABLE` — failed approval attempts compensate
+unowned ACL additions and return the request to `pending` where possible.
+Incomplete compensation is recorded in `access.approve_rollback` audit details
+and logs; inspect the current request/grant before retrying an ambiguous failure.
 
 ### `POST /api/access-requests/:id/deny`
 

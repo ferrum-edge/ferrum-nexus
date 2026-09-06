@@ -91,6 +91,7 @@ import type {
   UserRecord,
 } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
+import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import { conflict, forbidden, notFound, validationFailed, type NexusError } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
@@ -167,6 +168,7 @@ export interface AccessService {
 
 /** Dependencies of {@link createAccessService}. */
 export interface AccessServiceDeps {
+  edge: FerrumAdminClient;
   config: NexusConfig;
   store: NexusStore;
   audit: AuditService;
@@ -180,7 +182,7 @@ export interface AccessServiceDeps {
 
 /** Build the access service. */
 export function createAccessService(deps: AccessServiceDeps): AccessService {
-  const { config, store, audit, notifications, email, provisioner, settings } = deps;
+  const { config, store, edge, audit, notifications, email, provisioner, settings } = deps;
   const namespace = config.edge.namespace;
 
   function userSummary(user: UserRecord): UserSummary {
@@ -632,99 +634,118 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     },
 
     async approve(actor, requestId, note = null, ip = null) {
-      const { request, api, requester } = await loadRequest(requestId);
-      assertCanReview(actor, api);
-      if (request.status !== 'pending') {
-        throw conflict(`This request is already ${request.status}`);
-      }
-      if (await store.grants.findActiveByApiAndUser(api.id, requester.id)) {
-        throw conflict('This user already has an active grant for this API');
-      }
+      const initial = await loadRequest(requestId);
+      assertCanReview(actor, initial.api);
+      // Publishing holds the same proxy lease through catalog policy changes.
+      // Reload admission inside it and retain it through grant/ACL commit (or
+      // compensation), so retirement cannot finish before a new grant lands.
+      const decide = async () => {
+        const { request, api, requester } = await loadRequest(requestId);
+        assertCanReview(actor, api);
+        if (api.ferrum_proxy_id !== initial.api.ferrum_proxy_id) {
+          throw conflict('The gateway proxy changed while approval was waiting; reload and retry');
+        }
+        if (api.status !== 'published') {
+          throw conflict('This API is retired and is no longer accepting access approvals');
+        }
+        if (!api.requestable) {
+          throw conflict('This API does not accept access approvals');
+        }
+        if (request.status !== 'pending') {
+          throw conflict(`This request is already ${request.status}`);
+        }
+        if (await store.grants.findActiveByApiAndUser(api.id, requester.id)) {
+          throw conflict('This user already has an active grant for this API');
+        }
 
-      // Step 1 — claim the decision before anything reaches the gateway. A
-      // cancellation or a denial racing this approval either loses here, or
-      // wins and leaves this call with a CONFLICT and no gateway side effect
-      // to explain away.
-      const decidedAt = nowIso();
-      const updated = await store.accessRequests.updateIfStatus(request.id, 'pending', {
-        status: 'approved',
-        decided_by: actor.id,
-        decided_at: decidedAt,
-        decision_note: note ?? null,
-      });
-      if (!updated) throw await decisionConflict(request.id);
-
-      // Steps 2 and 3 — see the module docblock for why the gateway goes
-      // first, and `unwindApproval` for what happens when the grant does not
-      // follow it.
-      let addedGroup: string | null = null;
-      let grant: GrantRecord;
-      try {
-        addedGroup = await setGroupMembership(requester, api.id, true);
-        const group = addedGroup;
-        grant = await store.transaction(async (tx) =>
-          tx.grants.create({
-            api_id: api.id,
-            user_id: requester.id,
-            access_request_id: request.id,
-            acl_group: group,
-            status: 'active',
-            granted_by: actor.id,
-          }),
-        );
-      } catch (error) {
-        await unwindApproval({
-          actor,
-          api,
-          requester,
-          requestId: request.id,
-          groupAdded: addedGroup,
-          cause: error,
-          ip,
+        // Step 1 — claim the decision before anything reaches the gateway. A
+        // cancellation or a denial racing this approval either loses here, or
+        // wins and leaves this call with a CONFLICT and no gateway side effect
+        // to explain away.
+        const decidedAt = nowIso();
+        const updated = await store.accessRequests.updateIfStatus(request.id, 'pending', {
+          status: 'approved',
+          decided_by: actor.id,
+          decided_at: decidedAt,
+          decision_note: note ?? null,
         });
-        throw error;
-      }
+        if (!updated) throw await decisionConflict(request.id);
 
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.ACCESS_APPROVE,
-        { type: 'access_request', id: request.id },
-        {
-          api_id: api.id,
-          api_slug: api.slug,
-          user_id: requester.id,
-          grant_id: grant.id,
-          acl_group: grant.acl_group,
-        },
-        ip,
-      );
+        // Steps 2 and 3 — see the module docblock for why the gateway goes
+        // first, and `unwindApproval` for what happens when the grant does not
+        // follow it.
+        let addedGroup: string | null = null;
+        let grant: GrantRecord;
+        try {
+          addedGroup = await setGroupMembership(requester, api.id, true);
+          const group = addedGroup;
+          grant = await store.transaction(async (tx) =>
+            tx.grants.create({
+              api_id: api.id,
+              user_id: requester.id,
+              access_request_id: request.id,
+              acl_group: group,
+              status: 'active',
+              granted_by: actor.id,
+            }),
+          );
+        } catch (error) {
+          await unwindApproval({
+            actor,
+            api,
+            requester,
+            requestId: request.id,
+            groupAdded: addedGroup,
+            cause: error,
+            ip,
+          });
+          throw error;
+        }
 
-      await announce(
-        requester,
-        {
-          type: 'access_request_approved',
-          title: `Access approved: ${api.name}`,
-          body: `${actor.display_name} approved your request for ${api.name}.`,
-          link: `/catalog/${api.slug}`,
-        },
-        {
-          templateKey: 'access_approved',
-          vars: {
-            api_name: api.name,
+        await audit.record(
+          { id: actor.id, role: actor.role },
+          AuditAction.ACCESS_APPROVE,
+          { type: 'access_request', id: request.id },
+          {
+            api_id: api.id,
             api_slug: api.slug,
-            api_url: catalogUrl(api.slug),
-            decided_by_name: actor.display_name,
-            decision_note: note ?? '',
+            user_id: requester.id,
+            grant_id: grant.id,
+            acl_group: grant.acl_group,
           },
-        },
-      );
+          ip,
+        );
 
-      const [decoratedRequest] = await decorateRequests([updated]);
-      const [decoratedGrant] = await decorateGrants([grant]);
-      return {
-        access_request: decoratedRequest ?? updated,
-        grant: decoratedGrant ?? grant,
+        await announce(
+          requester,
+          {
+            type: 'access_request_approved',
+            title: `Access approved: ${api.name}`,
+            body: `${actor.display_name} approved your request for ${api.name}.`,
+            link: `/catalog/${api.slug}`,
+          },
+          {
+            templateKey: 'access_approved',
+            vars: {
+              api_name: api.name,
+              api_slug: api.slug,
+              api_url: catalogUrl(api.slug),
+              decided_by_name: actor.display_name,
+              decision_note: note ?? '',
+            },
+          },
+        );
+
+        const [decoratedRequest] = await decorateRequests([updated]);
+        const [decoratedGrant] = await decorateGrants([grant]);
+        return {
+          access_request: decoratedRequest ?? updated,
+          grant: decoratedGrant ?? grant,
+        };
       };
+      return initial.api.ferrum_proxy_id
+        ? edge.serializePerKey(`proxy:${initial.api.ferrum_proxy_id}`, decide)
+        : decide();
     },
 
     async deny(actor, requestId, note = null, ip = null): Promise<AccessRequest> {
