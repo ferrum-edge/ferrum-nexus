@@ -422,7 +422,8 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
               : {}),
           };
           const connectionChanged =
-            (next.host ?? config.smtp.host ?? null) !== (current.host ?? config.smtp.host ?? null) ||
+            (next.host ?? config.smtp.host ?? null) !==
+              (current.host ?? config.smtp.host ?? null) ||
             (next.port ?? config.smtp.port) !== (current.port ?? config.smtp.port) ||
             (next.secure ?? config.smtp.secure) !== (current.secure ?? config.smtp.secure) ||
             (next.username ?? config.smtp.user ?? null) !==
