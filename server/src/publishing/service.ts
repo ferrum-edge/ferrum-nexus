@@ -673,15 +673,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   // steps all live in `edge-plugins.ts` so the palette service drives Edge
   // through exactly the same code.
   const binder = createEdgePluginBinder(edge);
-  const {
-    attach,
-    associate,
-    disassociate,
-    mutateProxy,
-    reconcileOptionalPlugin,
-    undoAttach,
-    undoRemoval,
-  } = binder;
+  const { attach, associate } = binder;
 
   /** Every plugin config attached to the API's proxy, or `[]` when unpublished. */
   async function pluginsOf(api: ApiRecord): Promise<EdgePluginConfig[]> {
@@ -1075,310 +1067,329 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     },
 
     async update(actor, apiId, patch, ip = null): Promise<Api> {
-      const api = await loadApi(apiId);
-      assertCanAdminister(actor, api);
+      const initial = await loadApi(apiId);
+      assertCanAdminister(actor, initial);
+      // The read, gateway mutations, rollback, and catalog write are one
+      // canonical proxy operation. Helpers inside must not reacquire the key.
+      const apply = async (): Promise<Api> => {
+        const {
+          associateLocked: associate,
+          disassociateLocked: disassociate,
+          mutateProxyLocked: mutateProxy,
+          reconcileOptionalPluginLocked: reconcileOptionalPlugin,
+          undoAttachLocked: undoAttach,
+          undoRemovalLocked: undoRemoval,
+        } = binder;
+        const api = await loadApi(apiId);
+        assertCanAdminister(actor, api);
 
-      const update: Partial<ApiRecord> = {};
-      const changed: string[] = [];
-      const details: Record<string, unknown> = {};
+        const update: Partial<ApiRecord> = {};
+        const changed: string[] = [];
+        const details: Record<string, unknown> = {};
 
-      if (patch.name !== undefined) {
-        const name = patch.name.trim();
-        if (name === '') throw validationFailed('An API name is required');
-        update.name = name;
-        changed.push('name');
-      }
-      if (patch.description !== undefined) {
-        update.description = patch.description;
-        changed.push('description');
-      }
-      if (patch.version !== undefined && patch.version.trim() !== '') {
-        update.version = patch.version.trim();
-        changed.push('version');
-      }
-      if (patch.visibility !== undefined && patch.visibility !== api.visibility) {
-        update.visibility = patch.visibility;
-        changed.push('visibility');
-      }
-      if (patch.status !== undefined && patch.status !== api.status) {
-        // Retirement is a catalog state only — the proxy and every live grant
-        // keep working so integrations already in production do not break.
-        update.status = patch.status;
-        changed.push('status');
-        details.gateway_untouched = true;
-      }
-
-      const plugins = await pluginsOf(api);
-      const proxyId = api.ferrum_proxy_id;
-
-      // Edge has no cross-resource transaction, so every gateway mutation below
-      // records the call that undoes it. Any later failure — the next plugin
-      // call, or the Nexus row update itself — unwinds them in reverse, so a
-      // half-applied PATCH never leaves the gateway in a shape the portal does
-      // not describe.
-      const undo: (() => Promise<void>)[] = [];
-      let updated: ApiRecord;
-
-      try {
-        if (patch.upstream_url !== undefined && patch.upstream_url.trim() !== '' && proxyId) {
-          const upstream = parseUpstreamUrl(patch.upstream_url);
-          if (!upstream) {
-            throw specInvalid('The upstream URL must be an absolute http:// or https:// URL', {
-              field: 'upstream_url',
-              value: patch.upstream_url,
-            });
-          }
-          await assertUpstreamAllowed(upstream, upstreamPolicy);
-          const before = await replaceProxyBackend(proxyId, upstream, actor.id);
-          undo.push(restoreProxyBackend(before, actor.id));
-          // The row records where the gateway is now pointed, normalized rather
-          // than however the provider typed it.
-          update.upstream_url = formatUpstreamUrl(upstream);
-          changed.push('upstream_url');
-          details.upstream = `${upstream.scheme}://${upstream.host}:${upstream.port}`;
+        if (patch.name !== undefined) {
+          const name = patch.name.trim();
+          if (name === '') throw validationFailed('An API name is required');
+          update.name = name;
+          changed.push('name');
+        }
+        if (patch.description !== undefined) {
+          update.description = patch.description;
+          changed.push('description');
+        }
+        if (patch.version !== undefined && patch.version.trim() !== '') {
+          update.version = patch.version.trim();
+          changed.push('version');
+        }
+        if (patch.visibility !== undefined && patch.visibility !== api.visibility) {
+          update.visibility = patch.visibility;
+          changed.push('visibility');
+        }
+        if (patch.status !== undefined && patch.status !== api.status) {
+          // Retirement is a catalog state only — the proxy and every live grant
+          // keep working so integrations already in production do not break.
+          update.status = patch.status;
+          changed.push('status');
+          details.gateway_untouched = true;
         }
 
-        if (patch.auth_plugin !== undefined && patch.auth_plugin !== api.auth_plugin && proxyId) {
-          const previous = findPlugin(plugins, api.auth_plugin);
-          // Attach *and associate* the replacement before detaching the
-          // incumbent. For the moment both are live the proxy accepts either
-          // credential (auth plugins run in priority order until one succeeds,
-          // §3.4), which is a vastly safer window than the one the other order
-          // opens: a live proxy fronting the provider's upstream with no
-          // authentication plugin the gateway actually runs. Associating is
-          // part of that — a config the proxy does not name is not "attached"
-          // in any sense the gateway cares about.
-          const attached = await attach(
-            proxyId,
-            patch.auth_plugin,
-            authPluginConfig(patch.auth_plugin),
-            actor.id,
+        const plugins = await pluginsOf(api);
+        const proxyId = api.ferrum_proxy_id;
+        if (proxyId !== initial.ferrum_proxy_id) {
+          throw conflict(
+            'The gateway proxy changed while this update was waiting; reload and retry',
           );
-          undo.push(undoAttach(proxyId, attached.id, actor.id));
-          await associate(proxyId, [attached.id], actor.id);
-          if (previous) {
-            undo.push(undoRemoval(proxyId, previous, actor.id));
-            await disassociate(proxyId, [previous.id], actor.id);
-            await edge.pluginConfigs.delete(previous.id, actor.id);
-          }
-          update.auth_plugin = patch.auth_plugin;
-          changed.push('auth_plugin');
-          // Credentials of the previous flavour are kept on the consumer (they may
-          // still authenticate other APIs) but they no longer satisfy *this* API.
-          details.previous_auth_plugin = api.auth_plugin;
-          details.previous_credential_type = CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin];
-          details.existing_credentials_invalidated = true;
         }
 
-        if (patch.requestable !== undefined && patch.requestable !== api.requestable && proxyId) {
-          const acl = findPlugin(plugins, ACCESS_CONTROL_PLUGIN);
-          if (patch.requestable && !acl) {
+        // Edge has no cross-resource transaction, so every gateway mutation below
+        // records the call that undoes it. Any later failure — the next plugin
+        // call, or the Nexus row update itself — unwinds them in reverse, so a
+        // half-applied PATCH never leaves the gateway in a shape the portal does
+        // not describe.
+        const undo: (() => Promise<void>)[] = [];
+        let updated: ApiRecord;
+
+        try {
+          if (patch.upstream_url !== undefined && patch.upstream_url.trim() !== '' && proxyId) {
+            const upstream = parseUpstreamUrl(patch.upstream_url);
+            if (!upstream) {
+              throw specInvalid('The upstream URL must be an absolute http:// or https:// URL', {
+                field: 'upstream_url',
+                value: patch.upstream_url,
+              });
+            }
+            await assertUpstreamAllowed(upstream, upstreamPolicy);
+            const before = await replaceProxyBackendLocked(proxyId, upstream, actor.id);
+            undo.push(restoreProxyBackendLocked(before, actor.id));
+            // The row records where the gateway is now pointed, normalized rather
+            // than however the provider typed it.
+            update.upstream_url = formatUpstreamUrl(upstream);
+            changed.push('upstream_url');
+            details.upstream = `${upstream.scheme}://${upstream.host}:${upstream.port}`;
+          }
+
+          if (patch.auth_plugin !== undefined && patch.auth_plugin !== api.auth_plugin && proxyId) {
+            const previous = findPlugin(plugins, api.auth_plugin);
+            // Attach *and associate* the replacement before detaching the
+            // incumbent. For the moment both are live the proxy accepts either
+            // credential (auth plugins run in priority order until one succeeds,
+            // §3.4), which is a vastly safer window than the one the other order
+            // opens: a live proxy fronting the provider's upstream with no
+            // authentication plugin the gateway actually runs. Associating is
+            // part of that — a config the proxy does not name is not "attached"
+            // in any sense the gateway cares about.
             const attached = await attach(
               proxyId,
-              ACCESS_CONTROL_PLUGIN,
-              accessControlConfig(api.id),
+              patch.auth_plugin,
+              authPluginConfig(patch.auth_plugin),
               actor.id,
             );
             undo.push(undoAttach(proxyId, attached.id, actor.id));
             await associate(proxyId, [attached.id], actor.id);
-          } else if (!patch.requestable && acl) {
-            // Dropping the gate opens the API to every authenticated consumer;
-            // existing grants stay on the consumers and become inert.
-            undo.push(undoRemoval(proxyId, acl, actor.id));
-            await disassociate(proxyId, [acl.id], actor.id);
-            await edge.pluginConfigs.delete(acl.id, actor.id);
+            if (previous) {
+              undo.push(undoRemoval(proxyId, previous, actor.id));
+              await disassociate(proxyId, [previous.id], actor.id);
+              await edge.pluginConfigs.delete(previous.id, actor.id);
+            }
+            update.auth_plugin = patch.auth_plugin;
+            changed.push('auth_plugin');
+            // Credentials of the previous flavour are kept on the consumer (they may
+            // still authenticate other APIs) but they no longer satisfy *this* API.
+            details.previous_auth_plugin = api.auth_plugin;
+            details.previous_credential_type = CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin];
+            details.existing_credentials_invalidated = true;
           }
-          update.requestable = patch.requestable;
-          changed.push('requestable');
-        }
 
-        if (patch.rate_limit !== undefined && proxyId) {
-          await reconcileOptionalPlugin(
-            proxyId,
-            findPlugin(plugins, RATE_LIMIT_PLUGIN),
-            RATE_LIMIT_PLUGIN,
-            patch.rate_limit === null
-              ? null
-              : rateLimitConfig(patch.rate_limit, config.edge.rateLimit),
-            actor.id,
-            undo,
-          );
-          update.rate_limit = patch.rate_limit;
-          changed.push('rate_limit');
-        }
+          if (patch.requestable !== undefined && patch.requestable !== api.requestable && proxyId) {
+            const acl = findPlugin(plugins, ACCESS_CONTROL_PLUGIN);
+            if (patch.requestable && !acl) {
+              const attached = await attach(
+                proxyId,
+                ACCESS_CONTROL_PLUGIN,
+                accessControlConfig(api.id),
+                actor.id,
+              );
+              undo.push(undoAttach(proxyId, attached.id, actor.id));
+              await associate(proxyId, [attached.id], actor.id);
+            } else if (!patch.requestable && acl) {
+              // Dropping the gate opens the API to every authenticated consumer;
+              // existing grants stay on the consumers and become inert.
+              undo.push(undoRemoval(proxyId, acl, actor.id));
+              await disassociate(proxyId, [acl.id], actor.id);
+              await edge.pluginConfigs.delete(acl.id, actor.id);
+            }
+            update.requestable = patch.requestable;
+            changed.push('requestable');
+          }
 
-        if (patch.cors !== undefined && proxyId) {
-          await reconcileOptionalPlugin(
-            proxyId,
-            findPlugin(plugins, CORS_PLUGIN),
-            CORS_PLUGIN,
-            patch.cors === null ? null : corsPluginConfig(patch.cors),
-            actor.id,
-            undo,
-          );
-          update.cors = patch.cors;
-          changed.push('cors');
-        }
-
-        // ── OpenAPI enforcement ─────────────────────────────────────────
-        // Moving the level rebuilds the proxy: `routes` needs one Edge's spec
-        // importer created, `docs_only` needs one it did not, and Edge offers
-        // no way to attach or detach a spec in place. A CORS change no longer
-        // participates — `cors` short-circuits the preflight at priority 100,
-        // long before the validator's unknown-operation check at 2960 — so the
-        // level is now the only input this PATCH can move. The other is the
-        // document, which `updateSpec` owns.
-        const enforcementMoved =
-          patch.spec_enforcement !== undefined && patch.spec_enforcement !== api.spec_enforcement;
-        // Guarded on the proxy like every other gateway-backed field: without
-        // one there is nothing to enforce against, and recording a level the
-        // gateway is not applying would make the portal claim something untrue.
-        if (proxyId && enforcementMoved && patch.spec_enforcement !== undefined) {
-          const current = await store.apiSpecs.findCurrentByApi(api.id);
-          // Refused before the proxy is torn down, not after: a document with
-          // nothing to enforce would come back as a proxy that `400`s every
-          // request.
-          assertRoutesEnforceable(
-            patch.spec_enforcement,
-            current ? safeSpecPaths(current.raw_spec) : [],
-          );
-          undo.push(
-            await convertEnforcement(
-              api,
+          if (patch.rate_limit !== undefined && proxyId) {
+            await reconcileOptionalPlugin(
               proxyId,
-              patch.spec_enforcement,
-              current ? safeSpecDocument(current.raw_spec) : {},
-              actor,
-              ip,
-            ),
-          );
-          update.spec_enforcement = patch.spec_enforcement;
-          changed.push('spec_enforcement');
-          details.spec_enforcement = patch.spec_enforcement;
-          // The rebuild is a delete and a recreate, so the API answered `404`
-          // for the round trips in between. Recorded because an operator
-          // reading the log needs to be able to explain the gap.
-          details.proxy_rebuilt = true;
-        }
-
-        // ── Proxy runtime settings ──────────────────────────────────────
-        // One read-modify-write for all of them, and only for the ones this
-        // PATCH actually addresses: `undefined` leaves a setting alone,
-        // including whatever an operator set on the proxy by hand, while
-        // `null` writes the gateway's documented default back explicitly —
-        // `PUT` echoes the `GET`, so "reset" is a value, not an omission.
-        //
-        // Guarded on the proxy like every other gateway-backed field: recording
-        // a preference the gateway is not enforcing would make the portal claim
-        // something untrue.
-        if (proxyId) {
-          const nextCors = patch.cors === undefined ? api.cors : patch.cors;
-          const nextMethods =
-            patch.allowed_methods === undefined ? api.allowed_methods : patch.allowed_methods;
-          const proxySettings: Record<string, unknown> = {};
-          // A CORS change re-derives the method list even when the provider did
-          // not touch it: adding a policy has to add `OPTIONS`, and removing one
-          // has to take it away again.
-          if (patch.allowed_methods !== undefined || (patch.cors !== undefined && nextMethods)) {
-            proxySettings.allowed_methods = proxyAllowedMethods(nextMethods, nextCors);
-          }
-          if (patch.timeouts !== undefined)
-            Object.assign(proxySettings, timeoutFields(patch.timeouts));
-          // The boolean row owns whether Nexus enables the breaker, not the
-          // operator-tunable policy behind an already-matching state. Treat a
-          // replayed boolean as a no-op so it cannot reset or remove a live
-          // policy without producing a database change (and its audit row).
-          if (
-            patch.circuit_breaker !== undefined &&
-            patch.circuit_breaker !== api.circuit_breaker
-          ) {
-            proxySettings.circuit_breaker = patch.circuit_breaker ? DEFAULT_CIRCUIT_BREAKER : null;
-          }
-          if (patch.cors !== undefined) proxySettings.allowed_ws_origins = wsOriginsFor(nextCors);
-
-          if (Object.keys(proxySettings).length > 0) {
-            let written = false;
-            const before = await mutateProxy(
-              proxyId,
-              (proxy) => {
-                const record = proxy as unknown as Record<string, unknown>;
-                const differs = Object.entries(proxySettings).some(
-                  ([field, value]) => !isDeepStrictEqual(record[field], value),
-                );
-                if (!differs) return null;
-                written = true;
-                return { ...proxy, ...proxySettings };
-              },
+              findPlugin(plugins, RATE_LIMIT_PLUGIN),
+              RATE_LIMIT_PLUGIN,
+              patch.rate_limit === null
+                ? null
+                : rateLimitConfig(patch.rate_limit, config.edge.rateLimit),
               actor.id,
+              undo,
             );
-            if (written)
-              undo.push(restoreProxySettings(before, Object.keys(proxySettings), actor.id));
+            update.rate_limit = patch.rate_limit;
+            changed.push('rate_limit');
           }
 
-          if (patch.allowed_methods !== undefined) {
-            // The row keeps the provider's list; the gateway's copy may carry an
-            // extra `OPTIONS` that belongs to the CORS policy, not to this field.
-            update.allowed_methods = patch.allowed_methods;
-            changed.push('allowed_methods');
+          if (patch.cors !== undefined && proxyId) {
+            await reconcileOptionalPlugin(
+              proxyId,
+              findPlugin(plugins, CORS_PLUGIN),
+              CORS_PLUGIN,
+              patch.cors === null ? null : corsPluginConfig(patch.cors),
+              actor.id,
+              undo,
+            );
+            update.cors = patch.cors;
+            changed.push('cors');
           }
-          if (patch.timeouts !== undefined) {
-            update.timeouts = patch.timeouts;
-            changed.push('timeouts');
+
+          // ── OpenAPI enforcement ─────────────────────────────────────────
+          // Moving the level rebuilds the proxy: `routes` needs one Edge's spec
+          // importer created, `docs_only` needs one it did not, and Edge offers
+          // no way to attach or detach a spec in place. A CORS change no longer
+          // participates — `cors` short-circuits the preflight at priority 100,
+          // long before the validator's unknown-operation check at 2960 — so the
+          // level is now the only input this PATCH can move. The other is the
+          // document, which `updateSpec` owns.
+          const enforcementMoved =
+            patch.spec_enforcement !== undefined && patch.spec_enforcement !== api.spec_enforcement;
+          // Guarded on the proxy like every other gateway-backed field: without
+          // one there is nothing to enforce against, and recording a level the
+          // gateway is not applying would make the portal claim something untrue.
+          if (proxyId && enforcementMoved && patch.spec_enforcement !== undefined) {
+            const current = await store.apiSpecs.findCurrentByApi(api.id);
+            // Refused before the proxy is torn down, not after: a document with
+            // nothing to enforce would come back as a proxy that `400`s every
+            // request.
+            assertRoutesEnforceable(
+              patch.spec_enforcement,
+              current ? safeSpecPaths(current.raw_spec) : [],
+            );
+            undo.push(
+              await convertEnforcementLocked(
+                api,
+                proxyId,
+                patch.spec_enforcement,
+                current ? safeSpecDocument(current.raw_spec) : {},
+                actor,
+                ip,
+              ),
+            );
+            update.spec_enforcement = patch.spec_enforcement;
+            changed.push('spec_enforcement');
+            details.spec_enforcement = patch.spec_enforcement;
+            // The rebuild is a delete and a recreate, so the API answered `404`
+            // for the round trips in between. Recorded because an operator
+            // reading the log needs to be able to explain the gap.
+            details.proxy_rebuilt = true;
           }
-          if (
-            patch.circuit_breaker !== undefined &&
-            patch.circuit_breaker !== api.circuit_breaker
-          ) {
-            update.circuit_breaker = patch.circuit_breaker;
-            changed.push('circuit_breaker');
+
+          // ── Proxy runtime settings ──────────────────────────────────────
+          // One read-modify-write for all of them, and only for the ones this
+          // PATCH actually addresses: `undefined` leaves a setting alone,
+          // including whatever an operator set on the proxy by hand, while
+          // `null` writes the gateway's documented default back explicitly —
+          // `PUT` echoes the `GET`, so "reset" is a value, not an omission.
+          //
+          // Guarded on the proxy like every other gateway-backed field: recording
+          // a preference the gateway is not enforcing would make the portal claim
+          // something untrue.
+          if (proxyId) {
+            const nextCors = patch.cors === undefined ? api.cors : patch.cors;
+            const nextMethods =
+              patch.allowed_methods === undefined ? api.allowed_methods : patch.allowed_methods;
+            const proxySettings: Record<string, unknown> = {};
+            // A CORS change re-derives the method list even when the provider did
+            // not touch it: adding a policy has to add `OPTIONS`, and removing one
+            // has to take it away again.
+            if (patch.allowed_methods !== undefined || (patch.cors !== undefined && nextMethods)) {
+              proxySettings.allowed_methods = proxyAllowedMethods(nextMethods, nextCors);
+            }
+            if (patch.timeouts !== undefined)
+              Object.assign(proxySettings, timeoutFields(patch.timeouts));
+            // The boolean row owns whether Nexus enables the breaker, not the
+            // operator-tunable policy behind an already-matching state. Treat a
+            // replayed boolean as a no-op so it cannot reset or remove a live
+            // policy without producing a database change (and its audit row).
+            if (
+              patch.circuit_breaker !== undefined &&
+              patch.circuit_breaker !== api.circuit_breaker
+            ) {
+              proxySettings.circuit_breaker = patch.circuit_breaker
+                ? DEFAULT_CIRCUIT_BREAKER
+                : null;
+            }
+            if (patch.cors !== undefined) proxySettings.allowed_ws_origins = wsOriginsFor(nextCors);
+
+            if (Object.keys(proxySettings).length > 0) {
+              let written = false;
+              const before = await mutateProxy(
+                proxyId,
+                (proxy) => {
+                  const record = proxy as unknown as Record<string, unknown>;
+                  const differs = Object.entries(proxySettings).some(
+                    ([field, value]) => !isDeepStrictEqual(record[field], value),
+                  );
+                  if (!differs) return null;
+                  written = true;
+                  return { ...proxy, ...proxySettings };
+                },
+                actor.id,
+              );
+              if (written)
+                undo.push(restoreProxySettingsLocked(before, Object.keys(proxySettings), actor.id));
+            }
+
+            if (patch.allowed_methods !== undefined) {
+              // The row keeps the provider's list; the gateway's copy may carry an
+              // extra `OPTIONS` that belongs to the CORS policy, not to this field.
+              update.allowed_methods = patch.allowed_methods;
+              changed.push('allowed_methods');
+            }
+            if (patch.timeouts !== undefined) {
+              update.timeouts = patch.timeouts;
+              changed.push('timeouts');
+            }
+            if (
+              patch.circuit_breaker !== undefined &&
+              patch.circuit_breaker !== api.circuit_breaker
+            ) {
+              update.circuit_breaker = patch.circuit_breaker;
+              changed.push('circuit_breaker');
+            }
           }
+
+          // A no-op PATCH still answers with the API as the wire describes it.
+          if (changed.length === 0) return presentApi(api, await settings.getGatewayPublicUrl());
+
+          const persisted = await store.apis.update(api.id, update);
+          if (!persisted) throw notFound('API', apiId);
+          updated = persisted;
+        } catch (error) {
+          for (const step of undo.reverse()) {
+            await step().catch(() => undefined);
+          }
+          throw error;
         }
 
-        // A no-op PATCH still answers with the API as the wire describes it.
-        if (changed.length === 0) return presentApi(api, await settings.getGatewayPublicUrl());
-
-        const persisted = await store.apis.update(api.id, update);
-        if (!persisted) throw notFound('API', apiId);
-        updated = persisted;
-      } catch (error) {
-        for (const step of undo.reverse()) {
-          await step().catch(() => undefined);
-        }
-        throw error;
-      }
-
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        update.status === 'retired' ? AuditAction.API_RETIRE : AuditAction.API_UPDATE,
-        { type: 'api', id: api.id },
-        { changed_fields: changed, ...details },
-        ip,
-      );
-
-      if (details.existing_credentials_invalidated === true) {
-        await notifyGrantees(
-          api.id,
-          'system',
-          `${updated.name} changed its authentication method`,
-          `This API now uses ${updated.auth_plugin}. Issue a matching credential from your credentials page to keep calling it.`,
-          '/credentials',
+        await audit.record(
+          { id: actor.id, role: actor.role },
+          update.status === 'retired' ? AuditAction.API_RETIRE : AuditAction.API_UPDATE,
+          { type: 'api', id: api.id },
+          { changed_fields: changed, ...details },
+          ip,
         );
-      }
 
-      return presentApi(updated, await settings.getGatewayPublicUrl());
+        if (details.existing_credentials_invalidated === true) {
+          await notifyGrantees(
+            api.id,
+            'system',
+            `${updated.name} changed its authentication method`,
+            `This API now uses ${updated.auth_plugin}. Issue a matching credential from your credentials page to keep calling it.`,
+            '/credentials',
+          );
+        }
+
+        return presentApi(updated, await settings.getGatewayPublicUrl());
+      };
+      return initial.ferrum_proxy_id ? binder.withProxy(initial.ferrum_proxy_id, apply) : apply();
     },
 
     async updateSpec(actor, apiId, specText, version, ip = null): Promise<PublishResult> {
-      const api = await loadApi(apiId);
+      let api = await loadApi(apiId);
       assertCanAdminister(actor, api);
 
       const parsed = parseOpenApiSpec(specText);
-      const previous = await store.apiSpecs.findCurrentByApi(api.id);
+      let previous = await store.apiSpecs.findCurrentByApi(api.id);
       const nextVersion = version?.trim() || parsed.version;
       const proxyId = api.ferrum_proxy_id;
-      // Refused before any gateway write: an enforcing API whose new revision
-      // declares nothing would come back as a proxy that `400`s every request.
-      assertRoutesEnforceable(api.spec_enforcement, parsed.paths);
 
       // The gateway moves **first**, and the revision only becomes current once
       // it has. The other order publishes a document describing a backend Edge
@@ -1391,10 +1402,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       let movedTo: string | null = null;
       /** Historical revisions `NEXUS_SPEC_HISTORY_LIMIT` dropped for this one. */
       let pruned = 0;
-      // Decided from the rows rather than from the gateway, and *before* the
-      // proxy lease is taken so the DNS lookup the upstream policy needs is not
-      // held under it.
-      const backend = proxyId ? await followedUpstream(api, previous, parsed) : null;
+      // Validate the proposed upstream before waiting for the proxy lease.
+      // If the catalog changes while waiting, derive it again under the lease.
+      let backend = proxyId ? await followedUpstream(api, previous, parsed) : null;
 
       /**
        * Move the gateway, then persist the revision, compensating the gateway
@@ -1412,6 +1422,20 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
        * helpers — the serializer is not re-entrant.
        */
       const apply = async (): Promise<{ spec: ApiSpecRecord; api: ApiRecord }> => {
+        const fresh = await loadApi(apiId);
+        assertCanAdminister(actor, fresh);
+        if (fresh.ferrum_proxy_id !== proxyId) {
+          throw conflict(
+            'The gateway proxy changed while this revision was waiting; reload and retry',
+          );
+        }
+        const current = await store.apiSpecs.findCurrentByApi(apiId);
+        if (!isDeepStrictEqual(fresh, api) || current?.id !== previous?.id) {
+          api = fresh;
+          previous = current;
+          backend = proxyId ? await followedUpstream(api, previous, parsed) : null;
+        }
+        assertRoutesEnforceable(api.spec_enforcement, parsed.paths);
         const undo: (() => Promise<void>)[] = [];
         try {
           if (proxyId) {
@@ -1738,7 +1762,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * a default on a whole-resource `PUT`.
    *
    * Returns the proxy as it was before the move, ready for
-   * {@link restoreProxyBackend}.
+   * {@link restoreProxyBackendLocked}.
    */
   /* ── Spec-owned proxies (`routes` mode) ───────────────────────────────── */
 
@@ -1800,30 +1824,43 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     specId: string | null,
     subject: string,
   ): Promise<void> {
+    return binder.withProxy(proxyId, () =>
+      cutOverToListenPathLocked(proxyId, level, listenPath, document, specId, subject),
+    );
+  }
+
+  async function cutOverToListenPathLocked(
+    proxyId: string,
+    level: SpecEnforcementLevel,
+    listenPath: string,
+    document: Record<string, unknown>,
+    specId: string | null,
+    subject: string,
+  ): Promise<void> {
     if (level !== 'routes') {
-      await mutateProxy(proxyId, (proxy) => ({ ...proxy, listen_path: listenPath }), subject);
+      await binder.mutateProxyLocked(
+        proxyId,
+        (proxy) => ({ ...proxy, listen_path: listenPath }),
+        subject,
+      );
       return;
     }
     const id = specId ?? (await specIdForProxy(proxyId));
-    // Under the canonical proxy lease, like the `docs_only` branch above takes
-    // through `mutateProxy`: the read and the replace are a read-modify-write
-    // of the whole proxy document, so a concurrent rewrite landing between them
-    // would be dropped by the re-insert.
-    await binder.withProxy(proxyId, async () => {
-      // A fresh read for the same reason `mutateProxy` takes one: the replace is
-      // whole-resource, so anything the body omits — an operator's `hosts`, the
-      // timeouts and method list written at create — reverts to its default.
-      const proxy = await edge.proxies.get(proxyId);
-      if (!proxy) throw notFound('Proxy', proxyId);
-      await edge.apiSpecs.replace(
-        id,
-        routesSpecDocument(document, {
-          listenPath,
-          proxy: { ...submittableProxyBody(proxy), listen_path: listenPath },
-        }),
-        subject,
-      );
-    });
+    // The caller holds the canonical proxy lease across this fresh read and
+    // whole-resource re-insert, including when this is part of a conversion.
+    // A fresh read for the same reason `mutateProxy` takes one: the replace is
+    // whole-resource, so anything the body omits — an operator's `hosts`, the
+    // timeouts and method list written at create — reverts to its default.
+    const proxy = await edge.proxies.get(proxyId);
+    if (!proxy) throw notFound('Proxy', proxyId);
+    await edge.apiSpecs.replace(
+      id,
+      routesSpecDocument(document, {
+        listenPath,
+        proxy: { ...submittableProxyBody(proxy), listen_path: listenPath },
+      }),
+      subject,
+    );
   }
 
   /**
@@ -1870,9 +1907,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * an {@link AuditAction.API_GATEWAY_REPAIR_REQUIRED} row instead of being
    * dropped.
    *
+   * The caller holds the canonical proxy lease from its catalog re-read
+   * through conversion and catalog persistence, including every undo step.
+   *
    * @returns the step that puts the proxy back in the mode it came from
    */
-  async function convertEnforcement(
+  async function convertEnforcementLocked(
     api: ApiRecord,
     proxyId: string,
     target: SpecEnforcementLevel,
@@ -1910,8 +1950,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // operator added has to survive the rebuild.
         await edge.proxies.create(staged as unknown as EdgeProxyWrite, subject);
       }
-      await binder.restorePlugins(proxyId, carried, subject);
-      await cutOverToListenPath(proxyId, level, listenPath, document, specId, subject);
+      await binder.restorePluginsLocked(proxyId, carried, subject);
+      await cutOverToListenPathLocked(proxyId, level, listenPath, document, specId, subject);
     };
 
     /**
@@ -2003,15 +2043,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       .catch(() => undefined);
   }
 
-  async function replaceProxyBackend(
-    proxyId: string,
-    upstream: SpecUpstream,
-    subject: string,
-  ): Promise<EdgeProxy> {
-    return binder.withProxy(proxyId, () => replaceProxyBackendLocked(proxyId, upstream, subject));
-  }
-
-  /** {@link replaceProxyBackend} for a caller already holding the proxy lease. */
+  /** Replace the backend while the caller holds the canonical proxy lease. */
   async function replaceProxyBackendLocked(
     proxyId: string,
     upstream: SpecUpstream,
@@ -2036,7 +2068,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
 
   /**
    * Undo step that puts a proxy's backend back where
-   * {@link replaceProxyBackend} found it.
+   * {@link replaceProxyBackendLocked} found it.
    *
    * Only the backend fields are rewound, on top of a fresh read. A blanket
    * restore of the whole captured document would also revert the plugin
@@ -2048,13 +2080,13 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * them.
    *
    * Only the fields that were actually written are rewound, on top of a fresh
-   * read, for the same reason {@link restoreProxyBackend} is narrow: a blanket
+   * read, for the same reason {@link restoreProxyBackendLocked} is narrow: a blanket
    * restore of the captured document would also revert plugin association
    * changes made by other steps of the same PATCH, which have their own undo.
    * A field the gateway did not report falls back to its documented default —
    * a whole-resource `PUT` would otherwise drop it rather than leave it alone.
    */
-  function restoreProxySettings(
+  function restoreProxySettingsLocked(
     previous: EdgeProxy,
     fields: string[],
     subject: string,
@@ -2064,18 +2096,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       fields.map((field) => [field, record[field] ?? PROXY_SETTING_DEFAULTS[field] ?? null]),
     );
     return async () => {
-      await mutateProxy(previous.id, (proxy) => ({ ...proxy, ...restored }), subject);
+      await binder.mutateProxyLocked(previous.id, (proxy) => ({ ...proxy, ...restored }), subject);
     };
   }
 
-  function restoreProxyBackend(previous: EdgeProxy, subject: string): () => Promise<void> {
-    const restore = restoreProxyBackendLocked(previous, subject);
-    return async () => {
-      await binder.withProxy(previous.id, restore);
-    };
-  }
-
-  /** {@link restoreProxyBackend} for a caller already holding the proxy lease. */
+  /** Restore backend fields while the caller holds the canonical proxy lease. */
   function restoreProxyBackendLocked(previous: EdgeProxy, subject: string): () => Promise<void> {
     const backend = proxyBackendFields(previous);
     return async () => {

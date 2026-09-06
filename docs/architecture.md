@@ -565,6 +565,15 @@ The real path is therefore either a `404` or fully gated. It is never open. The
 same detour — and so does its undo step — so an API that already has consumers
 answers `404` for the rebuild rather than answering unauthenticated.
 
+Published API PATCH and spec revision share the canonical `proxy:<id>` lease.
+PATCH holds it from its catalog re-read through gateway writes, any rollback,
+and catalog persistence. Conversion therefore takes its snapshot after earlier
+spec/runtime edits have completed and cannot replay a stale backend or runtime
+setting over them. The composed binder and cutover helpers use their `Locked`
+variants under that outer lease; the serializer itself remains non-reentrant.
+Spec revision refreshes its catalog mode and current revision after acquiring
+the lease, so a conversion that won first changes how the revision is applied.
+
 ```
 apis row ─── proxy          name `nexus-<slug>`, listen_path `/<namespace>/<slug>`
               │             allowed_methods, backend_{connect,read,write}_timeout_ms,

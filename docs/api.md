@@ -1302,6 +1302,13 @@ when `routes` is asked for and the current revision declares nothing to allow),
 > Nothing else does this: a spec revision, a CORS change and every runtime
 > setting are all in-place writes.
 
+Enforcement conversion, runtime PATCH, and spec revision use the same per-proxy
+database lease. The conversion holds it across the fresh proxy/spec reads,
+rebuild, compensation, and catalog update. A waiting mutation re-reads catalog
+state after acquiring the lease so it uses the current enforcement mode and
+backend. If the API's proxy identity changed while waiting, the request returns
+`409 CONFLICT`; reload the API before retrying.
+
 ### `DELETE /api/apis/:id`
 
 _provider_, owner-or-admin → `{ "ok": true }`.
