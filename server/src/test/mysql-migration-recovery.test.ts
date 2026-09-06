@@ -250,8 +250,10 @@ describe('MySQL committed migration recovery', { skip: !adminUrl, timeout: 600_0
         let fired = false;
         const faulty = intercept(pool, (method, sql, params, after) => {
           const boundary = afterCheckpoint
-            ? method === 'execute' && sql.startsWith('INSERT INTO schema_migration_steps ') &&
-              (params as unknown[])[0] === '011_credential_ordinal' && (params as unknown[])[1] === 1
+            ? method === 'execute' &&
+              sql.startsWith('INSERT INTO schema_migration_steps ') &&
+              (params as unknown[])[0] === '011_credential_ordinal' &&
+              (params as unknown[])[1] === 1
             : method === 'query' && sql.startsWith('UPDATE credential_metadata AS cm');
           if (!fired && after && boundary) {
             fired = true;
@@ -271,7 +273,10 @@ describe('MySQL committed migration recovery', { skip: !adminUrl, timeout: 600_0
         const [assigned] = await pool.query<mysql.RowDataPacket[]>(
           "SELECT edge_ordinal FROM credential_metadata WHERE ferrum_consumer_id = 'ordered' ORDER BY id",
         );
-        assert.deepEqual(assigned.map((row) => row.edge_ordinal), [1, 2]);
+        assert.deepEqual(
+          assigned.map((row) => row.edge_ordinal),
+          [1, 2],
+        );
       });
     }
   });
@@ -286,7 +291,9 @@ describe('MySQL committed migration recovery', { skip: !adminUrl, timeout: 600_0
         await runMysqlMigrations(pool, migrations.slice(0, 4));
         await pool.query(splitSqlStatements(migrations[4]!.sql)[0]!);
         await pool.query('ALTER TABLE apis DROP CHECK ck_apis_spec_enforcement');
-        await pool.query(`ALTER TABLE apis ADD CONSTRAINT ck_apis_spec_enforcement CHECK (${clause})`);
+        await pool.query(
+          `ALTER TABLE apis ADD CONSTRAINT ck_apis_spec_enforcement CHECK (${clause})`,
+        );
         await assert.rejects(() => runMysqlMigrations(pool), /schema mismatch/);
       });
     }

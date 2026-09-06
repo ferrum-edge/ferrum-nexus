@@ -116,10 +116,16 @@ function checkExpression(value: string): string {
   // Metadata escapes literal delimiters. Normalize only SQL decoration outside
   // literals: case and whitespace inside the enum values are significant.
   const parts = value.replace(/\\'/g, "'").match(/'[^']*'|[^']+/g) ?? [];
-  return parts.map((part) => part.startsWith("'") ? part : part
-    .replace(/_utf8mb4\b/g, '')
-    .replace(/[\s`()]/g, '')
-    .toLowerCase()).join('');
+  return parts
+    .map((part) =>
+      part.startsWith("'")
+        ? part
+        : part
+            .replace(/_utf8mb4\b/g, '')
+            .replace(/[\s`()]/g, '')
+            .toLowerCase(),
+    )
+    .join('');
 }
 
 async function alreadyApplied(connection: mysql.PoolConnection, guard: Guard): Promise<boolean> {
