@@ -84,7 +84,7 @@ function RevokeGrantPanel(): ReactElement {
         open={open}
         onOpenChange={setOpen}
         title="Revoke this grant"
-        description={`Grant ${grantId} loses gateway access when Edge applies the change.}`}
+        description={`Grant ${grantId} loses gateway access when Edge applies the change.`}
         confirmLabel="Revoke grant"
         danger
         confirmPhrase="REVOKE"
@@ -171,7 +171,7 @@ function DeleteApiPanel(): ReactElement {
         open={open}
         onOpenChange={setOpen}
         title={`Delete ${selected?.name ?? 'this API'}`}
-        description={`API ${apiId} will be deleted. Calls will receive gateway 404s.}`}
+        description={`API ${apiId} will be deleted. Calls will receive gateway 404s.`}
         confirmLabel="Delete API"
         danger
         confirmPhrase={selected?.slug ?? 'DELETE'}
@@ -261,7 +261,7 @@ function DisableUserPanel(): ReactElement {
         open={open}
         onOpenChange={setOpen}
         title={`Disable ${selected?.display_name ?? 'this account'}`}
-        description={`Account ${userId} will be signed out and blocked from signing in.}`}
+        description={`Account ${userId} will be signed out and blocked from signing in.`}
         confirmLabel="Disable account"
         danger
         confirmPhrase={selected?.email ?? 'DISABLE'}
