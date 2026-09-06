@@ -30,7 +30,8 @@
  * left alone: an over-strict portal would reject specs the gateway is perfectly
  * happy to sit in front of.
  *
- * `servers[0].url` is read as the **default upstream**, but only when it is an
+ * The first usable `servers[].url` is read as the **default upstream** after
+ * substituting server variable defaults, but only when it is an
  * absolute `http(s)` URL. Relative server URLs (`/v1`, `./api`) are legal
  * OpenAPI and simply mean "same origin as wherever this document is served
  * from" — there is no origin to resolve them against here, so they yield no
@@ -66,7 +67,7 @@ import { specInvalid, type NexusError } from '../lib/errors.js';
 
 /** Upstream a proxy should forward to, decomposed into Edge's proxy fields. */
 export interface SpecUpstream {
-  /** The absolute URL exactly as it appeared (or was supplied). */
+  /** The absolute URL after template expansion (or as explicitly supplied). */
   url: string;
   scheme: 'http' | 'https';
   /** Hostname only — Edge rejects a `backend_host` that contains a scheme. */
@@ -102,7 +103,7 @@ export interface ParsedSpec {
   description: string | null;
   /** The `openapi` version string, e.g. `3.1.0`. */
   openapiVersion: string;
-  /** `servers[0].url` when it is absolute http(s), else `null`. */
+  /** First usable expanded `servers[].url` when absolute http(s), else `null`. */
   defaultUpstream: SpecUpstream | null;
   /** Number of path items — surfaced in audit details and the provider UI. */
   pathCount: number;
@@ -153,7 +154,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  */
 export function parseUpstreamUrl(raw: string): SpecUpstream | null {
   const trimmed = raw.trim();
-  if (trimmed === '') return null;
+  if (trimmed === '' || /[{}]/.test(trimmed)) return null;
   let url: URL;
   try {
     url = new URL(trimmed);
@@ -162,6 +163,7 @@ export function parseUpstreamUrl(raw: string): SpecUpstream | null {
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
   if (url.hostname === '' || url.username !== '' || url.password !== '') return null;
+  if (/[{}]/.test(url.hostname)) return null;
 
   // `URL.hostname` keeps IPv6 literals in brackets; Edge wants the bare form.
   const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
@@ -603,15 +605,42 @@ function readPaths(paths: Record<string, unknown>): SpecPath[] {
   return declared;
 }
 
-/** `servers[0].url` as an upstream, when it is absolute http(s). */
+/** Expand declared string defaults once; never pass unresolved templates to URL parsing. */
+function expandServerUrl(server: Record<string, unknown>): string | null {
+  if (typeof server.url !== 'string') return null;
+  const variables = isRecord(server.variables) ? server.variables : {};
+  let valid = true;
+  let expandedLength = server.url.length;
+  const expanded = server.url.replace(/\{([^{}]+)\}/g, (placeholder: string, name: string) => {
+    if (!valid) return '';
+    const variable = Object.hasOwn(variables, name) ? variables[name] : undefined;
+    if (
+      !isRecord(variable) ||
+      typeof variable.default !== 'string' ||
+      (variable.enum !== undefined &&
+        (!Array.isArray(variable.enum) || !variable.enum.includes(variable.default)))
+    ) {
+      valid = false;
+      return '';
+    }
+    expandedLength += variable.default.length - placeholder.length;
+    if (expandedLength > MAX_SPEC_BYTES) {
+      valid = false;
+      return '';
+    }
+    return variable.default;
+  });
+  return valid && !/[{}]/.test(expanded) ? expanded : null;
+}
+
+/** First usable expanded server URL, skipping relative or unresolved entries. */
 function readDefaultUpstream(servers: unknown): SpecUpstream | null {
   if (!Array.isArray(servers)) return null;
   for (const server of servers) {
     if (!isRecord(server) || typeof server.url !== 'string') continue;
-    const parsed = parseUpstreamUrl(server.url);
+    const expanded = expandServerUrl(server);
+    const parsed = expanded === null ? null : parseUpstreamUrl(expanded);
     if (parsed) return parsed;
-    // A relative URL is valid OpenAPI but unusable as a backend; keep looking
-    // in case a later entry is absolute.
   }
   return null;
 }
@@ -634,8 +663,21 @@ export function resolveUpstream(spec: ParsedSpec, explicit?: string | null): Spe
     return parsed;
   }
   if (spec.defaultUpstream) return spec.defaultUpstream;
+  const servers = spec.document.servers;
+  if (
+    Array.isArray(servers) &&
+    servers.some(
+      (server) =>
+        isRecord(server) && typeof server.url === 'string' && expandServerUrl(server) === null,
+    )
+  ) {
+    throw specInvalid(
+      'OpenAPI server variables could not be expanded: provide valid string defaults or an explicit upstream_url',
+      { field: 'servers', reason: 'invalid_server_variables' },
+    );
+  }
   throw specInvalid(
-    "No upstream could be determined: supply 'upstream_url', or give the document an absolute 'servers[0].url'",
+    "No upstream could be determined: supply 'upstream_url', or give the document an absolute 'servers[].url'",
     { field: 'upstream_url' },
   );
 }
