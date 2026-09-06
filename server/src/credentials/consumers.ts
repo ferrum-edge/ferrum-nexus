@@ -85,6 +85,11 @@ export interface ConsumerProvisionerDeps {
   edge: FerrumAdminClient;
 }
 
+/** Stable provisioning key, disjoint from gateway-assigned consumer ids. */
+export function canonicalConsumerLockKey(namespace: string, username: string): string {
+  return `consumer-name:${JSON.stringify([namespace, username])}`;
+}
+
 /** Build the consumer provisioner. */
 export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): ConsumerProvisioner {
   const { config, store, edge } = deps;
@@ -96,22 +101,27 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
     },
 
     async ensureConsumer(user): Promise<ConsumerRecord> {
-      const cached = await store.consumers.findByUserAndNamespace(user.id, namespace);
-      if (cached) return cached;
-
+      // The id does not exist yet. Use a namespace/name key until the remote
+      // identity and local mapping are both durable, then release it before
+      // callers take the canonical consumer-id mutation key.
       const username = consumerUsernameForUser(user.id);
-      // Reconciliation path: a consumer can exist on the gateway without a
-      // Nexus row after a database restore, and re-creating it would 409.
-      const existing = await edge.consumers.getByUsername(username);
-      const consumer =
-        existing ??
-        (await edge.consumers.create({ username, custom_id: user.id, acl_groups: [] }, user.id));
+      return edge.serializePerKey(canonicalConsumerLockKey(namespace, username), async () => {
+        const cached = await store.consumers.findByUserAndNamespace(user.id, namespace);
+        if (cached) return cached;
 
-      return store.consumers.create({
-        user_id: user.id,
-        namespace,
-        ferrum_consumer_id: consumer.id,
-        ferrum_username: consumer.username,
+        // Reconciliation path: a consumer can exist on the gateway without a
+        // Nexus row after a database restore, and re-creating it would 409.
+        const existing = await edge.consumers.getByUsername(username);
+        const consumer =
+          existing ??
+          (await edge.consumers.create({ username, custom_id: user.id, acl_groups: [] }, user.id));
+
+        return store.consumers.create({
+          user_id: user.id,
+          namespace,
+          ferrum_consumer_id: consumer.id,
+          ferrum_username: consumer.username,
+        });
       });
     },
 
