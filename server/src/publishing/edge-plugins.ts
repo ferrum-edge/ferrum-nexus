@@ -84,6 +84,13 @@ export interface EdgePluginBinder {
    * taking the same key twice deadlocks until the outer wait times out.
    */
   withProxy<T>(proxyId: string, fn: () => Promise<T>): Promise<T>;
+  /** Composed operations for callers already holding this proxy's lease. */
+  associateLocked: EdgePluginBinder['associate'];
+  disassociateLocked: EdgePluginBinder['disassociate'];
+  restorePluginsLocked: EdgePluginBinder['restorePlugins'];
+  undoAttachLocked: EdgePluginBinder['undoAttach'];
+  undoRemovalLocked: EdgePluginBinder['undoRemoval'];
+  reconcileOptionalPluginLocked: EdgePluginBinder['reconcileOptionalPlugin'];
   /** Read one proxy, change it, write the **whole** document back. */
   mutateProxy(
     proxyId: string,
@@ -226,7 +233,11 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
      * that would change nothing is skipped.
      */
     async associate(proxyId, configIds, subject) {
-      await binder.mutateProxy(
+      return binder.withProxy(proxyId, () => binder.associateLocked(proxyId, configIds, subject));
+    },
+
+    async associateLocked(proxyId, configIds, subject) {
+      await binder.mutateProxyLocked(
         proxyId,
         (proxy) => {
           const current = associatedIds(proxy);
@@ -245,7 +256,11 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
      * list never names a row that has already gone.
      */
     async disassociate(proxyId, configIds, subject) {
-      await binder.mutateProxy(
+      return binder.withProxy(proxyId, () => binder.disassociateLocked(proxyId, configIds, subject));
+    },
+
+    async disassociateLocked(proxyId, configIds, subject) {
+      await binder.mutateProxyLocked(
         proxyId,
         (proxy) => {
           const current = associatedIds(proxy);
@@ -258,6 +273,10 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
     },
 
     async restorePlugins(proxyId, configs, subject) {
+      return binder.withProxy(proxyId, () => binder.restorePluginsLocked(proxyId, configs, subject));
+    },
+
+    async restorePluginsLocked(proxyId, configs, subject) {
       const ids: string[] = [];
       for (const config of configs) {
         await edge.pluginConfigs.create(
@@ -281,7 +300,7 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
       // makes one: until the proxy names them these configs are inert, and the
       // window in which the API is live but ungated should be one round trip
       // rather than one per plugin.
-      if (ids.length > 0) await binder.associate(proxyId, ids, subject);
+      if (ids.length > 0) await binder.associateLocked(proxyId, ids, subject);
     },
 
     /**
@@ -290,8 +309,12 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
      * is a no-op.
      */
     undoAttach(proxyId, configId, subject) {
+      return () => binder.withProxy(proxyId, binder.undoAttachLocked(proxyId, configId, subject));
+    },
+
+    undoAttachLocked(proxyId, configId, subject) {
       return async () => {
-        await binder.disassociate(proxyId, [configId], subject);
+        await binder.disassociateLocked(proxyId, [configId], subject);
         await edge.pluginConfigs.delete(configId, subject);
       };
     },
@@ -304,6 +327,10 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
      * trigger, would widen what the gateway runs.
      */
     undoRemoval(proxyId, config, subject) {
+      return () => binder.withProxy(proxyId, binder.undoRemovalLocked(proxyId, config, subject));
+    },
+
+    undoRemovalLocked(proxyId, config, subject) {
       return async () => {
         const survivor = await edge.pluginConfigs.get(config.id);
         const id = survivor
@@ -314,7 +341,7 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
                 trigger: config.trigger ?? null,
               })
             ).id;
-        await binder.associate(proxyId, [id], subject);
+        await binder.associateLocked(proxyId, [id], subject);
       };
     },
 
@@ -333,10 +360,37 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
       undo,
       options,
     ) {
+      const lockedUndo: (() => Promise<void>)[] = [];
+      try {
+        await binder.withProxy(proxyId, () =>
+          binder.reconcileOptionalPluginLocked(
+            proxyId,
+            existing,
+            pluginName,
+            pluginSettings,
+            subject,
+            lockedUndo,
+            options,
+          ),
+        );
+      } finally {
+        undo.push(...lockedUndo.map((step) => () => binder.withProxy(proxyId, step)));
+      }
+    },
+
+    async reconcileOptionalPluginLocked(
+      proxyId,
+      existing,
+      pluginName,
+      pluginSettings,
+      subject,
+      undo,
+      options,
+    ) {
       if (pluginSettings === null) {
         if (!existing) return;
-        undo.push(binder.undoRemoval(proxyId, existing, subject));
-        await binder.disassociate(proxyId, [existing.id], subject);
+        undo.push(binder.undoRemovalLocked(proxyId, existing, subject));
+        await binder.disassociateLocked(proxyId, [existing.id], subject);
         await edge.pluginConfigs.delete(existing.id, subject);
         return;
       }
@@ -361,8 +415,8 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
       }
 
       const attached = await binder.attach(proxyId, pluginName, pluginSettings, subject, options);
-      undo.push(binder.undoAttach(proxyId, attached.id, subject));
-      await binder.associate(proxyId, [attached.id], subject);
+      undo.push(binder.undoAttachLocked(proxyId, attached.id, subject));
+      await binder.associateLocked(proxyId, [attached.id], subject);
     },
   };
 
