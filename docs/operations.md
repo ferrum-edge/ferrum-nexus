@@ -706,6 +706,18 @@ takes effect on the next poll with no restart.
 
 ---
 
+### Atomic admin settings saves
+
+One `PUT /api/admin/settings` commits its section rows, encrypted SMTP/CAPTCHA
+values, and `admin.settings_update` audit record in the same store transaction.
+A later write or audit failure rolls the whole patch back. The audit records
+changed key names only. Gateway-origin cache invalidation follows commit.
+
+This uses the normal transaction guarantees of SQLite, PostgreSQL, MySQL, and
+MongoDB replica sets. The explicitly opted-in MongoDB standalone development
+mode still has no rollback guarantee; use a replica set for atomic settings
+updates, as for other multi-document operations.
+
 ## 7. Rotating `NEXUS_SECRET_KEY`
 
 `NEXUS_SECRET_KEY` is the master secret. Two independent subkeys are

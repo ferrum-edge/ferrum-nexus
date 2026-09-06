@@ -46,7 +46,11 @@ import {
 
 import { AuditAction, type AuditActor, type AuditService } from '../audit/service.js';
 import { CAPTCHA_SECRET_SETTINGS_KEY, CAPTCHA_SETTINGS_KEY } from '../auth/captcha.js';
-import { REGISTRATION_SETTINGS_KEY, type AuthService } from '../auth/service.js';
+import {
+  REGISTRATION_SETTINGS_KEY,
+  readRegistrationPolicy,
+  type AuthService,
+} from '../auth/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type { NexusStore } from '../db/store.js';
 import { DEFAULT_EMAIL_TEMPLATES, TEMPLATE_VARIABLES } from '../email/templates.js';
@@ -260,10 +264,10 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
     return { public_url: await getGatewayPublicUrl() };
   }
 
-  async function readCaptcha(): Promise<CaptchaAdminSettings> {
-    const row = await store.settings.get(CAPTCHA_SETTINGS_KEY);
+  async function readCaptcha(scoped: NexusStore = store): Promise<CaptchaAdminSettings> {
+    const row = await scoped.settings.get(CAPTCHA_SETTINGS_KEY);
     const value = asRecord(row?.value);
-    const secret = await store.settings.get(CAPTCHA_SECRET_SETTINGS_KEY);
+    const secret = await scoped.settings.get(CAPTCHA_SECRET_SETTINGS_KEY);
     return {
       enabled: value.enabled === true,
       provider: (str(value.provider) ?? 'none') as CaptchaProvider,
@@ -352,131 +356,137 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
         }
       }
 
-      const changed: string[] = [];
+      // Every settings row and its audit record share one transaction-scoped
+      // store. In particular, secret writes cannot split from their config.
+      await store.transaction(async (tx) => {
+        const changed: string[] = [];
 
-      if (patch.branding) {
-        const current = await readBranding(store);
-        const next: BrandingSettings = { ...current };
-        for (const [field, value] of Object.entries(patch.branding)) {
-          if (value === undefined) continue;
-          // Narrow through the known keys; unknown fields are dropped by zod.
-          (next as unknown as Record<string, unknown>)[field] = value;
-          changed.push(`branding.${field}`);
+        if (patch.branding) {
+          const current = await readBranding(tx);
+          const next: BrandingSettings = { ...current };
+          for (const [field, value] of Object.entries(patch.branding)) {
+            if (value === undefined) continue;
+            // Narrow through the known keys; unknown fields are dropped by zod.
+            (next as unknown as Record<string, unknown>)[field] = value;
+            changed.push(`branding.${field}`);
+          }
+          await tx.settings.set(BRANDING_SETTINGS_KEY, next, false);
         }
-        await store.settings.set(BRANDING_SETTINGS_KEY, next, false);
-      }
 
-      // Not privileged: a gateway address is what the catalog exists to
-      // publish. Normalised above rather than only in the route schema, so the
-      // stored value is an origin no matter who calls the service.
-      if (nextGatewayUrl !== undefined) {
-        await store.settings.set(GATEWAY_SETTINGS_KEY, { public_url: nextGatewayUrl }, false);
-        // The cached origin is now wrong; the next read re-resolves, which also
-        // picks the env default back up when the override was cleared.
-        gatewayUrlCache = null;
-        changed.push('gateway.public_url');
-      }
-
-      if (patch.captcha) {
-        const current = await readCaptcha();
-        const next = {
-          enabled: patch.captcha.enabled ?? current.enabled,
-          provider: patch.captcha.provider ?? current.provider,
-          site_key:
-            patch.captcha.site_key === undefined ? current.site_key : patch.captcha.site_key,
-        };
-        for (const field of ['enabled', 'provider', 'site_key'] as const) {
-          if (patch.captcha[field] !== undefined) changed.push(`captcha.${field}`);
+        // Not privileged: a gateway address is what the catalog exists to
+        // publish. Normalised above rather than only in the route schema, so the
+        // stored value is an origin no matter who calls the service.
+        if (nextGatewayUrl !== undefined) {
+          await tx.settings.set(GATEWAY_SETTINGS_KEY, { public_url: nextGatewayUrl }, false);
+          changed.push('gateway.public_url');
         }
-        await store.settings.set(CAPTCHA_SETTINGS_KEY, next, false);
 
-        if (patch.captcha.secret_key !== undefined) {
-          changed.push('captcha.secret_key');
-          if (patch.captcha.secret_key === null || patch.captcha.secret_key === '') {
-            await store.settings.delete(CAPTCHA_SECRET_SETTINGS_KEY);
-          } else {
-            await store.settings.set(
-              CAPTCHA_SECRET_SETTINGS_KEY,
-              crypto.encryptJson(patch.captcha.secret_key),
-              true,
-            );
+        if (patch.captcha) {
+          const current = await readCaptcha(tx);
+          const next = {
+            enabled: patch.captcha.enabled ?? current.enabled,
+            provider: patch.captcha.provider ?? current.provider,
+            site_key:
+              patch.captcha.site_key === undefined ? current.site_key : patch.captcha.site_key,
+          };
+          for (const field of ['enabled', 'provider', 'site_key'] as const) {
+            if (patch.captcha[field] !== undefined) changed.push(`captcha.${field}`);
+          }
+          await tx.settings.set(CAPTCHA_SETTINGS_KEY, next, false);
+
+          if (patch.captcha.secret_key !== undefined) {
+            changed.push('captcha.secret_key');
+            if (patch.captcha.secret_key === null || patch.captcha.secret_key === '') {
+              await tx.settings.delete(CAPTCHA_SECRET_SETTINGS_KEY);
+            } else {
+              await tx.settings.set(
+                CAPTCHA_SECRET_SETTINGS_KEY,
+                crypto.encryptJson(patch.captcha.secret_key),
+                true,
+              );
+            }
           }
         }
-      }
 
-      if (patch.smtp) {
-        const current = await readStoredSmtp(store);
-        const next: StoredSmtpSettings = {
-          ...EMPTY_SMTP,
-          ...current,
-          ...(patch.smtp.host !== undefined ? { host: patch.smtp.host } : {}),
-          ...(patch.smtp.port !== undefined ? { port: patch.smtp.port } : {}),
-          ...(patch.smtp.secure !== undefined ? { secure: patch.smtp.secure } : {}),
-          ...(patch.smtp.username !== undefined ? { username: patch.smtp.username } : {}),
-          ...(patch.smtp.from_address !== undefined
-            ? { from_address: patch.smtp.from_address }
-            : {}),
-        };
-        const connectionChanged =
-          (next.host ?? config.smtp.host ?? null) !== (current.host ?? config.smtp.host ?? null) ||
-          (next.port ?? config.smtp.port) !== (current.port ?? config.smtp.port) ||
-          (next.secure ?? config.smtp.secure) !== (current.secure ?? config.smtp.secure) ||
-          (next.username ?? config.smtp.user ?? null) !==
-            (current.username ?? config.smtp.user ?? null);
-        const passwordSet =
-          (await store.settings.get(SMTP_PASSWORD_SETTINGS_KEY)) !== null ||
-          config.smtp.password !== undefined;
-        if (connectionChanged && passwordSet && !patch.smtp.password) {
-          throw validationFailed(
-            'SMTP password is required when changing the SMTP connection settings',
+        if (patch.smtp) {
+          const current = await readStoredSmtp(tx);
+          const next: StoredSmtpSettings = {
+            ...EMPTY_SMTP,
+            ...current,
+            ...(patch.smtp.host !== undefined ? { host: patch.smtp.host } : {}),
+            ...(patch.smtp.port !== undefined ? { port: patch.smtp.port } : {}),
+            ...(patch.smtp.secure !== undefined ? { secure: patch.smtp.secure } : {}),
+            ...(patch.smtp.username !== undefined ? { username: patch.smtp.username } : {}),
+            ...(patch.smtp.from_address !== undefined
+              ? { from_address: patch.smtp.from_address }
+              : {}),
+          };
+          const connectionChanged =
+            (next.host ?? config.smtp.host ?? null) !==
+              (current.host ?? config.smtp.host ?? null) ||
+            (next.port ?? config.smtp.port) !== (current.port ?? config.smtp.port) ||
+            (next.secure ?? config.smtp.secure) !== (current.secure ?? config.smtp.secure) ||
+            (next.username ?? config.smtp.user ?? null) !==
+              (current.username ?? config.smtp.user ?? null);
+          const passwordSet =
+            (await tx.settings.get(SMTP_PASSWORD_SETTINGS_KEY)) !== null ||
+            config.smtp.password !== undefined;
+          if (connectionChanged && passwordSet && !patch.smtp.password) {
+            throw validationFailed(
+              'SMTP password is required when changing the SMTP connection settings',
+            );
+          }
+          for (const field of ['host', 'port', 'secure', 'username', 'from_address'] as const) {
+            if (patch.smtp[field] !== undefined) changed.push(`smtp.${field}`);
+          }
+          await tx.settings.set(SMTP_SETTINGS_KEY, next, false);
+
+          if (patch.smtp.password !== undefined) {
+            changed.push('smtp.password');
+            if (patch.smtp.password === null || patch.smtp.password === '') {
+              await tx.settings.delete(SMTP_PASSWORD_SETTINGS_KEY);
+            } else {
+              await tx.settings.set(
+                SMTP_PASSWORD_SETTINGS_KEY,
+                crypto.encryptJson(patch.smtp.password),
+                true,
+              );
+            }
+          }
+        }
+
+        if (patch.registration) {
+          const current = await readRegistrationPolicy(tx);
+          const next = {
+            open_registration: patch.registration.open_registration ?? current.open_registration,
+            require_email_verification:
+              patch.registration.require_email_verification ?? current.require_email_verification,
+            allowed_roles: (patch.registration.allowed_roles ?? current.allowed_roles) as Role[],
+          };
+          for (const field of [
+            'open_registration',
+            'require_email_verification',
+            'allowed_roles',
+          ] as const) {
+            if (patch.registration[field] !== undefined) changed.push(`registration.${field}`);
+          }
+          await tx.settings.set(REGISTRATION_SETTINGS_KEY, next, false);
+        }
+
+        // Only the *names* of the changed keys are recorded — never the values,
+        // which would put the SMTP password and CAPTCHA secret in the audit log.
+        await audit
+          .forStore(tx)
+          .record(
+            actor,
+            AuditAction.ADMIN_SETTINGS_UPDATE,
+            { type: 'settings', id: null },
+            { changed_keys: changed },
+            ip,
           );
-        }
-        for (const field of ['host', 'port', 'secure', 'username', 'from_address'] as const) {
-          if (patch.smtp[field] !== undefined) changed.push(`smtp.${field}`);
-        }
-        await store.settings.set(SMTP_SETTINGS_KEY, next, false);
-
-        if (patch.smtp.password !== undefined) {
-          changed.push('smtp.password');
-          if (patch.smtp.password === null || patch.smtp.password === '') {
-            await store.settings.delete(SMTP_PASSWORD_SETTINGS_KEY);
-          } else {
-            await store.settings.set(
-              SMTP_PASSWORD_SETTINGS_KEY,
-              crypto.encryptJson(patch.smtp.password),
-              true,
-            );
-          }
-        }
-      }
-
-      if (patch.registration) {
-        const current = await auth.getRegistrationPolicy();
-        const next = {
-          open_registration: patch.registration.open_registration ?? current.open_registration,
-          require_email_verification:
-            patch.registration.require_email_verification ?? current.require_email_verification,
-          allowed_roles: (patch.registration.allowed_roles ?? current.allowed_roles) as Role[],
-        };
-        for (const field of [
-          'open_registration',
-          'require_email_verification',
-          'allowed_roles',
-        ] as const) {
-          if (patch.registration[field] !== undefined) changed.push(`registration.${field}`);
-        }
-        await store.settings.set(REGISTRATION_SETTINGS_KEY, next, false);
-      }
-
-      // Only the *names* of the changed keys are recorded — never the values,
-      // which would put the SMTP password and CAPTCHA secret in the audit log.
-      await audit.record(
-        actor,
-        AuditAction.ADMIN_SETTINGS_UPDATE,
-        { type: 'settings', id: null },
-        { changed_keys: changed },
-        ip,
-      );
+      });
+      // Only committed updates invalidate the cached public origin.
+      if (nextGatewayUrl !== undefined) gatewayUrlCache = null;
 
       return snapshot();
     },

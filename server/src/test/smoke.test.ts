@@ -58,6 +58,7 @@ import {
 } from '../lib/keyed-serializer.js';
 import { faultInjectingStore } from './fault-injection.js';
 import { runPasswordChangeContract } from './password-change-contract.js';
+import { runSettingsTransactionContract } from './settings-transaction-contract.js';
 
 const SECRET = 'cross-adapter-smoke-secret-0123456789ab';
 
@@ -263,6 +264,7 @@ async function mongoTarget(baseUrl: string): Promise<SmokeTarget> {
  */
 function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): void {
   runPasswordChangeContract(label, makeStore);
+  runSettingsTransactionContract(label, makeStore);
   describe(`store contract — ${label}`, () => {
     let target: SmokeTarget;
     let store: NexusStore;
