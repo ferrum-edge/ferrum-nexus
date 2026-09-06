@@ -437,11 +437,12 @@ describe('API deletion and god mode', () => {
           send_email: true,
           ...(key ? { idempotency_key: key } : {}),
         };
-        const send = () => harness.authed(superAdmin, {
-          method: 'POST',
-          url: '/api/admin/god/broadcast',
-          payload,
-        });
+        const send = () =>
+          harness.authed(superAdmin, {
+            method: 'POST',
+            url: '/api/admin/god/broadcast',
+            payload,
+          });
         const first = await send();
         const second = await send();
         assert.equal(first.statusCode, 200, first.body);

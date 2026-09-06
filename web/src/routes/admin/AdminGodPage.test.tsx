@@ -91,7 +91,9 @@ describe('broadcast email campaign identity', () => {
       fireEvent.change(screen.getByLabelText(/^Message/), { target: { value: 'Sunday window' } });
       fireEvent.click(screen.getByRole('button', { name: 'Broadcast' }));
       const dialog = within(screen.getByRole('dialog'));
-      fireEvent.change(dialog.getByPlaceholderText('BROADCAST'), { target: { value: 'BROADCAST' } });
+      fireEvent.change(dialog.getByPlaceholderText('BROADCAST'), {
+        target: { value: 'BROADCAST' },
+      });
       fireEvent.click(dialog.getByRole('button', { name: 'Broadcast' }));
     };
     compose();
@@ -100,7 +102,9 @@ describe('broadcast email campaign identity', () => {
     // A failed mutation leaves the dialog open and the form intact.
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Broadcast' }));
     expect(sendBroadcast.mock.calls[1]![0].idempotency_key).toBe(firstKey);
-    act(() => sendBroadcast.mock.calls[1]![1].onSuccess({ notified: 1 }));
+    act(() => {
+      sendBroadcast.mock.calls[1]![1].onSuccess({ notified: 1 });
+    });
     compose();
     expect(sendBroadcast.mock.calls[2]![0].idempotency_key).not.toBe(firstKey);
   });
