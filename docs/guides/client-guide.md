@@ -97,7 +97,10 @@ name, version, owner and a badge for your relationship to it:
 | **Revoked** | Access you had was withdrawn.            |
 | **Owner**   | You published this one.                  |
 
-Filter by search text, by "accepts access requests", and by visibility.
+Search by name, slug, or description and use pagination to browse the results.
+The catalog page displays requestability and internal-visibility badges; it
+does not offer requestability or visibility filter controls. Those filters are
+available through the [catalog API](../api.md).
 
 ### Reading the documentation
 

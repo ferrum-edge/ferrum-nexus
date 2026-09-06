@@ -10,7 +10,7 @@ const SECRET_FIELDS: ReadonlyArray<{ key: keyof ShowOnceSecret; label: string }>
   { key: 'key', label: 'API key' },
   { key: 'username', label: 'Username' },
   { key: 'password', label: 'Password' },
-  { key: 'jwt_key', label: 'JWT key id (iss)' },
+  { key: 'jwt_key', label: 'JWT subject (sub) / consumer username' },
   { key: 'jwt_secret', label: 'JWT signing secret' },
 ];
 
@@ -76,6 +76,13 @@ export function ShowOnceSecretDialog({
         {fields.map((field) => (
           <CopyField key={field.key} label={field.label} value={String(secret[field.key])} />
         ))}
+
+        {secret.type === 'jwt' ? (
+          <p className="text-sm text-fg-muted">
+            For Nexus-published JWT APIs, put this consumer username in the token’s sub claim
+            and sign with the JWT signing secret.
+          </p>
+        ) : null}
 
         <label className="flex items-start gap-2.5 text-sm text-fg">
           <input

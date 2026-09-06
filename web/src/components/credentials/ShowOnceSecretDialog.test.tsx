@@ -58,13 +58,14 @@ describe('ShowOnceSecretDialog', () => {
     render(
       <ShowOnceSecretDialog
         open
-        secret={{ type: 'jwt', jwt_key: 'iss-1', jwt_secret: 'sig' }}
+        secret={{ type: 'jwt', jwt_key: 'nexus-user-42', jwt_secret: 'sig' }}
         consumerUsername="nexus-user-42"
         onAcknowledge={() => undefined}
       />,
     );
-    expect(screen.getByText('JWT key id (iss)')).toBeInTheDocument();
+    expect(screen.getByText('JWT subject (sub) / consumer username')).toBeInTheDocument();
     expect(screen.getByText('JWT signing secret')).toBeInTheDocument();
+    expect(screen.getByText(/put this consumer username in the token’s sub claim/)).toBeInTheDocument();
   });
 
   it('copies a field to the clipboard', async () => {
