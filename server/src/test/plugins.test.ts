@@ -324,6 +324,25 @@ describe('provider plugin palette', () => {
       assert.deepEqual(edgeConfig('response_caching').config, { ttl_seconds: 300 });
     });
 
+    for (const enabled of [true, false]) {
+      it(`repairs a missing palette association with enabled=${enabled}`, async () => {
+        await setPlugin('correlation_id', { config: {} });
+        const id = String(edgeConfig('correlation_id').id);
+        const proxy = harness.edge.proxies.get(`nexus/${proxyId}`)!;
+        proxy.plugins = associatedIds(harness, proxyId)
+          .filter((value) => value !== id)
+          .map((plugin_config_id) => ({ plugin_config_id }));
+        const response = await setPlugin('correlation_id', {
+          config: { header_name: 'x-trace-id' },
+          enabled,
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        assert.equal(String(edgeConfig('correlation_id').id), id);
+        assert.ok(associatedIds(harness, proxyId).includes(id));
+        assert.equal(effectiveNames(harness, proxyId).includes('correlation_id'), enabled);
+      });
+    }
+
     it('preserves created_at across a replace and moves updated_at', async () => {
       const first = (
         await setPlugin('correlation_id', { config: { echo_downstream: true } })
@@ -710,6 +729,22 @@ describe('provider plugin palette', () => {
       assert.equal(config.id, attachedId);
       assert.deepEqual(config.config, { ttl_seconds: 60 }, 'the previous settings were restored');
       assert.ok(effectiveNames(harness, proxyId).includes('response_caching'));
+    });
+
+    it('undoes a repaired association when the store rejects a replace', async () => {
+      await setPlugin('response_caching', { config: { ttl_seconds: 60 } });
+      const id = String(edgeConfig('response_caching').id);
+      const proxy = harness.edge.proxies.get(`nexus/${proxyId}`)!;
+      proxy.plugins = associatedIds(harness, proxyId)
+        .filter((value) => value !== id)
+        .map((plugin_config_id) => ({ plugin_config_id }));
+      const before = associatedIds(harness, proxyId);
+      failNextUpsert(harness, 'database unavailable');
+      const response = await setPlugin('response_caching', { config: { ttl_seconds: 300 } });
+      assert.equal(response.statusCode, 500);
+      assert.equal(String(edgeConfig('response_caching').id), id);
+      assert.deepEqual(edgeConfig('response_caching').config, { ttl_seconds: 60 });
+      assert.deepEqual(associatedIds(harness, proxyId), before);
     });
 
     it('removes every palette row when the API is deleted', async () => {

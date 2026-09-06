@@ -351,9 +351,9 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
 
     /**
      * `rate_limiting`, `cors` and every palette plugin are the same problem — an
-     * optional, replaceable, proxy-scoped config — so they share this. Note the
-     * asymmetry: a replace keeps the config id, so only the create and the
-     * delete touch the proxy's association list.
+     * optional, replaceable, proxy-scoped config — so they share this. A replace
+     * keeps the config id and repairs a missing association, while preserving
+     * the original association state if a later step needs compensation.
      */
     async reconcileOptionalPlugin(
       proxyId,
@@ -415,6 +415,17 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
             subject,
           );
         });
+        await binder.mutateProxyLocked(
+          proxyId,
+          (proxy) => {
+            const current = associatedIds(proxy);
+            if (current.includes(existing.id)) return null;
+            // Register before PUT: a lost response can still mean it landed.
+            undo.push(() => binder.disassociateLocked(proxyId, [existing.id], subject));
+            return { ...proxy, plugins: [...current, existing.id].map(association) };
+          },
+          subject,
+        );
         return;
       }
 

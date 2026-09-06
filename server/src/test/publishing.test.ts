@@ -948,6 +948,33 @@ describe('publishing', () => {
       assert.deepEqual(associatedIds(harness, proxyId), writtenIds(harness, proxyId));
     });
 
+    for (const [pluginName, settings] of [
+      ['rate_limiting', { rate_limit: { limit: 10, window_seconds: 60 } }],
+      ['cors', { cors: { allowed_origins: ['https://app.example.com'] } }],
+    ] as const) {
+      it(`repairs a missing ${pluginName} association on a first-class update`, async () => {
+        const first = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${apiId}`,
+          payload: settings,
+        });
+        assert.equal(first.statusCode, 200, first.body);
+        const id = String(harness.edge.pluginForProxy(proxyId, pluginName)!.id);
+        const proxy = harness.edge.proxies.get(`nexus/${proxyId}`)!;
+        proxy.plugins = associatedIds(harness, proxyId)
+          .filter((value) => value !== id)
+          .map((plugin_config_id) => ({ plugin_config_id }));
+        const saved = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${apiId}`,
+          payload: settings,
+        });
+        assert.equal(saved.statusCode, 200, saved.body);
+        assert.equal(String(harness.edge.pluginForProxy(proxyId, pluginName)!.id), id);
+        assert.ok(effectiveNames(harness, proxyId).includes(pluginName));
+      });
+    }
+
     it('creates, rewrites and deletes the rate_limiting plugin', async () => {
       assert.equal(harness.edge.pluginForProxy(proxyId, 'rate_limiting'), undefined);
 
