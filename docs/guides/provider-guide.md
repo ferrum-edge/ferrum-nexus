@@ -69,7 +69,15 @@ paths:
 The gateway needs to know where to forward. Two sources, in order:
 
 1. **`upstream_url`**, if you supply one explicitly;
-2. otherwise the document's first **absolute** `servers[].url`.
+2. otherwise the document's first usable **absolute** `servers[].url`, after
+   substituting each `{variable}` with its declared string `default`.
+
+For example, `https://{environment}.api.example.com/v1` with
+`variables.environment.default: prod` uses `https://prod.api.example.com/v1`.
+A default must belong to `enum` when one is declared. Entries with unresolved
+server variables are skipped; if no usable server remains, supply valid defaults
+or an explicit `upstream_url`. The destination policy checks the expanded host.
+See the [OpenAPI Server Variable Object](https://spec.openapis.org/oas/v3.1.0.html#server-variable-object).
 
 Relative server URLs (`/v2`, `./api`) are perfectly legal OpenAPI — they mean
 "same origin as wherever this document is served from" — but there is no origin

@@ -681,6 +681,28 @@ describe('publishing', () => {
       );
     });
 
+    it('publishes a default-expanded OpenAPI server to the gateway', async () => {
+      const spec = JSON.parse(SAMPLE_SPEC_JSON) as Record<string, unknown>;
+      spec.servers = [
+        {
+          url: 'https://{environment}.api.example.com/v1',
+          variables: { environment: { default: 'prod' } },
+        },
+      ];
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'expanded-server', spec: JSON.stringify(spec) }),
+      });
+      assert.equal(response.statusCode, 201, response.body);
+      const api = response.json<PublishApiResponse>().api;
+      assert.equal(api.upstream_url, 'https://prod.api.example.com:443/v1');
+      assert.equal(
+        storedProxy(harness, String(api.ferrum_proxy_id)).backend_host,
+        'prod.api.example.com',
+      );
+    });
+
     it('records an explicit upstream_url in preference to the document', async () => {
       const response = await harness.authed(provider, {
         method: 'POST',

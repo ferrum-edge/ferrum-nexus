@@ -606,3 +606,82 @@ describe('slugify', () => {
     assert.ok(slugify('x'.repeat(200)).length <= 60);
   });
 });
+
+describe('OpenAPI server variables', () => {
+  function withServers(servers: unknown[]) {
+    return parseOpenApiSpec(
+      JSON.stringify({
+        openapi: '3.1.0',
+        info: { title: 'Templated API', version: '1' },
+        paths: {},
+        servers,
+      }),
+    );
+  }
+
+  it('expands host, port and repeated path variables before applying destination policy', async () => {
+    const spec = withServers([
+      {
+        url: 'https://{environment}.api.example.com:{port}/{version}/{version}',
+        variables: {
+          environment: { default: 'prod' },
+          port: { default: '8443', enum: ['443', '8443'] },
+          version: { default: 'v1' },
+        },
+      },
+    ]);
+    const upstream = resolveUpstream(spec);
+    assert.equal(upstream.host, 'prod.api.example.com');
+    assert.equal(upstream.port, 8443);
+    assert.equal(upstream.basePath, '/v1/v1');
+    const queried: string[] = [];
+    await assertUpstreamAllowed(upstream, {
+      allowPrivate: false,
+      resolve: async (host) => {
+        queried.push(host);
+        return [{ address: '93.184.216.34', family: 4 }];
+      },
+    });
+    assert.deepEqual(queried, ['prod.api.example.com']);
+  });
+
+  it('allows an empty string default in a path', () => {
+    const spec = withServers([
+      { url: 'https://api.example.com/{base}', variables: { base: { default: '' } } },
+    ]);
+    assert.equal(resolveUpstream(spec).basePath, null);
+  });
+
+  it('skips unresolved entries and preserves explicit override precedence', () => {
+    const unresolved = { url: 'https://{environment}.example.com' };
+    const fallback = withServers([unresolved, { url: 'https://fallback.example.com' }]);
+    assert.equal(resolveUpstream(fallback).host, 'fallback.example.com');
+    assert.equal(
+      resolveUpstream(withServers([unresolved]), 'https://pinned.example.com').host,
+      'pinned.example.com',
+    );
+  });
+
+  it('names server variables when missing, invalid or recursively templated defaults cannot resolve', () => {
+    for (const variable of [undefined, {}, { default: 123 }, { default: '{other}' }]) {
+      const spec = withServers([
+        { url: 'https://{environment}.example.com', variables: { environment: variable } },
+      ]);
+      assert.equal(spec.defaultUpstream, null);
+      const failure = expectSpecInvalid(() => resolveUpstream(spec));
+      assert.match(failure.message, /server variables/);
+      assert.deepEqual(failure.details, { field: 'servers', reason: 'invalid_server_variables' });
+    }
+  });
+
+  it('rejects defaults outside a declared enum and never parses unresolved URL braces', () => {
+    const spec = withServers([
+      {
+        url: 'https://{environment}.example.com',
+        variables: { environment: { default: 'prod', enum: ['test'] } },
+      },
+    ]);
+    expectSpecInvalid(() => resolveUpstream(spec));
+    assert.equal(parseUpstreamUrl('https://{environment}.example.com'), null);
+  });
+});
