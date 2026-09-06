@@ -8,8 +8,8 @@
 -- `cors_json` means the gateway adds no CORS headers.
 --
 -- MySQL has no `ADD COLUMN IF NOT EXISTS` and no transactional DDL, so both
--- columns are added by a single ALTER: a half-applied migration would be left
--- pending by the runner and fail on the retry.
+-- columns are added by a single atomic ALTER. The runner verifies both column
+-- definitions when resuming after committed DDL with a missing ledger entry.
 
 ALTER TABLE apis
   ADD COLUMN upstream_url TEXT NULL,

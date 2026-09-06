@@ -17,7 +17,13 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
-      - run: npm run format:check
+      - name: Check formatting and show required changes
+        run: |
+          if ! npm run format:check; then
+            npm exec --no -- prettier --write .
+            git diff --no-ext-diff
+            exit 1
+          fi
       - run: npm run build
 
   store-contracts:
@@ -73,7 +79,7 @@ jobs:
           NEXUS_TEST_POSTGRES_URL: postgres://postgres:nexus_test@127.0.0.1:5432/postgres
           NEXUS_TEST_MYSQL_URL: mysql://root:nexus_test@127.0.0.1:3306/mysql
           NEXUS_TEST_MONGO_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
-        run: node --import tsx --test src/test/smoke.test.ts
+        run: node --import tsx --test src/test/smoke.test.ts src/test/mysql-migration-recovery.test.ts
 
   docker:
     runs-on: ubuntu-latest

@@ -437,6 +437,36 @@ NEXUS_DB_URL=mysql://nexus:secret@db.internal:3306/nexus
   server timezone settings cannot reinterpret them.
 - Use a `utf8mb4` database/collation.
 
+### Recovering an interrupted MySQL upgrade
+
+Keep all application writers stopped during an upgrade, including recovery.
+Take a backup before applying migrations. MySQL DDL commits independently of
+its migration ledger; wrapping an ALTER in a transaction cannot change that.
+The runner now holds a database-specific advisory lock on one dedicated
+connection for the whole migration pass. Another migrator waits up to 30
+seconds, then reports that migrations are busy and can be retried.
+
+`schema_migration_steps` records each completed statement with its hash. The
+credential ordinal backfill and its checkpoint commit in one transaction.
+Pending ALTER steps inspect their complete expected columns, defaults,
+nullability, collations, indexes and check constraint before proceeding. An
+already committed matching ALTER is recognized even when an older deployment
+left no step journal or migration ledger row. The migration ledger is written
+only after every step succeeds. Atomic `CREATE TABLE IF NOT EXISTS` steps
+retain their existing replay behavior.
+
+After an interrupted upgrade, keep writers stopped and restart the upgraded
+migration command. This also repairs the original migration 002 condition:
+both nullable TEXT columns already committed, but 002 missing from the ledger.
+No manual ledger insertion or column removal is needed. A partial or
+incompatible ALTER definition, or an edited checkpointed statement, stops
+migration with an explicit error. Preserve the database and its ledgers, compare
+the reported object with the shipped migration, and restore the pre-upgrade
+backup or have an operator review a forward schema repair. Do not suppress
+these errors or mark a migration complete based on one column's existence.
+New ALTER/backfill migrations must add reviewed recovery handling and hosted
+interruption tests; unrecognized non-idempotent steps are rejected.
+
 ### MongoDB
 
 ```bash

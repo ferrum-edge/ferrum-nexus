@@ -11,8 +11,8 @@
 -- adapter rather than a CHECK constraint.
 --
 -- MySQL has no `ADD COLUMN IF NOT EXISTS` and no transactional DDL, so all
--- three columns are added by a single ALTER: a half-applied migration would be
--- left pending by the runner and fail on the retry.
+-- three columns are added by a single atomic ALTER. The runner verifies all
+-- three definitions when recovering committed DDL with a missing ledger entry.
 
 ALTER TABLE apis
   ADD COLUMN allowed_methods_json TEXT    NULL,
