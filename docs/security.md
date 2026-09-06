@@ -643,9 +643,12 @@ booleans. The `admin.settings_update` audit row records the **names** of the
 changed keys and never their values, so the audit log stays readable by anyone
 allowed to read audit logs.
 
-Rotating `NEXUS_SECRET_KEY` makes both blobs undecryptable. There is no
-automated re-encryption flow; the manual procedure — and the failure modes to
-expect, including CAPTCHA failing closed — is in
+Before changing `NEXUS_SECRET_KEY`, stop all Nexus instances and run
+`npm run rotate-secret-key` with the previous and new keys in the environment.
+The command re-encrypts SMTP/CAPTCHA blobs and every other encrypted setting
+in one transaction, refusing all writes if any blob cannot be decrypted. A
+bare key swap without re-encryption leaves those settings unreadable and
+CAPTCHA fails closed. Follow the complete rotation and rollback procedure in
 [`operations.md`](operations.md#7-rotating-nexus_secret_key).
 
 ---
