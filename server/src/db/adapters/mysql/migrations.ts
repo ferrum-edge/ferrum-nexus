@@ -248,7 +248,8 @@ async function applyMigration(
         await checkpoint();
         await connection.commit();
       } catch (error) {
-        await connection.rollback().catch(() => undefined);
+        // A failed rollback must not return an uncertain transaction to the pool.
+        await connection.rollback().catch(() => connection.destroy());
         throw error;
       }
     } else {
