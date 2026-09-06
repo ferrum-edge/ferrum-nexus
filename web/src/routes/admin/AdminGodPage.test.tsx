@@ -51,7 +51,13 @@ describe('emergency targets beyond the first page', () => {
   it.each([
     { label: 'Grant ID', action: 'Revoke grant', phrase: 'REVOKE', field: 'grant_id', index: 0 },
     { label: 'API ID', action: 'Delete API', phrase: 'DELETE', field: 'api_id', index: 1 },
-    { label: 'Account ID', action: 'Disable account', phrase: 'DISABLE', field: 'user_id', index: 2 },
+    {
+      label: 'Account ID',
+      action: 'Disable account',
+      phrase: 'DISABLE',
+      field: 'user_id',
+      index: 2,
+    },
   ])('submits the unlisted 201st target through $label after confirmation', (entry) => {
     render(<AdminGodPage />);
     const send = [revoke, remove, disable][entry.index]!;
