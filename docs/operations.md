@@ -503,8 +503,10 @@ The image is a two-stage build on `node:22-bookworm-slim`. What it bakes in:
 - `NODE_ENV=production`, runs as the unprivileged `node` user
 - `server/src/db/migrations` copied explicitly (tsc does not copy `.sql`)
 
-There is no `HEALTHCHECK` in the image; wire your orchestrator to
-`GET /api/health` (see [§9](#9-health-checks)).
+The image includes a `HEALTHCHECK` against `GET /api/health` every 30 seconds,
+with a 5-second timeout, 20-second startup grace, and three retries. Database
+failure makes it unhealthy; a gateway outage reports degraded status without
+restarting Nexus. See [§9](#9-health-checks).
 
 ### Compose
 
@@ -517,15 +519,29 @@ export NEXUS_SECRET_KEY=$(openssl rand -hex 32)
 export NEXUS_DB_PASSWORD=$(openssl rand -hex 16)
 export FERRUM_ADMIN_JWT_SECRET=$(openssl rand -hex 32)
 export FERRUM_BASIC_AUTH_HMAC_SECRET=$(openssl rand -hex 32)
+# Replace with a complete image reference from a successfully published release.
+export FERRUM_EDGE_IMAGE='<published image tag or digest>'
 docker compose up -d
 ```
 
 All four are required — every one of them is declared `${VAR:?...}`, so compose
-refuses to start rather than falling back to a shipped default.
+refuses to start rather than falling back to a shipped default. The image
+reference is also required: choose a published version or immutable digest
+from the [Edge releases](https://github.com/ferrum-edge/ferrum-edge/releases).
+A source tag or chart version alone does not prove image publication, and
+historical `latest` images are no longer refreshed by Edge main CI.
 
 Portal on `http://127.0.0.1:8787`, gateway proxy listener on
 `http://127.0.0.1:8000`. Points worth understanding before adapting it:
 
+- The loopback HTTP example explicitly sets `NEXUS_COOKIE_SECURE=false` so
+  browser sessions work even though the image runs with `NODE_ENV=production`.
+  Before using a production TLS origin, set `NEXUS_PUBLIC_URL=https://...` and
+  `NEXUS_COOKIE_SECURE=true`; keep host ports bound to loopback behind the
+  reverse proxy. The production image's secure-cookie default is unchanged.
+- `FERRUM_GATEWAY_PUBLIC_URL` defaults to `http://127.0.0.1:8000`, so catalog
+  invoke URLs work for this local stack. Override it with the public gateway
+  origin when deploying elsewhere.
 - Both services read `FERRUM_ADMIN_JWT_SECRET` from the **same** shell
   variable. That shared value is the entire trust relationship — if they
   diverge, every Admin API call comes back `401`.

@@ -5,6 +5,7 @@
 #   export NEXUS_DB_PASSWORD=$(openssl rand -hex 16)
 #   export FERRUM_ADMIN_JWT_SECRET=$(openssl rand -hex 32)
 #   export FERRUM_BASIC_AUTH_HMAC_SECRET=$(openssl rand -hex 32)
+#   export FERRUM_EDGE_IMAGE='<published image tag or digest>'
 #   docker compose up -d
 #
 # All four are required and every one of them must be unique per deployment —
@@ -19,6 +20,10 @@
 # The portal is then on http://127.0.0.1:8787 and the gateway's proxy
 # listener on http://127.0.0.1:8000 — both published on loopback only, so
 # nothing is exposed to the network before the portal has been bootstrapped.
+# HTTP loopback uses non-Secure cookies explicitly. For production behind TLS,
+# set NEXUS_PUBLIC_URL=https://... and NEXUS_COOKIE_SECURE=true.
+# Select FERRUM_EDGE_IMAGE from a completed version release; historical latest
+# images are no longer refreshed by Edge main CI.
 
 services:
   nexus:
@@ -35,7 +40,9 @@ services:
       # super_admin. Leave it out and the container prints a generated one on
       # its first start (`docker compose logs nexus`).
       NEXUS_BOOTSTRAP_TOKEN: ${NEXUS_BOOTSTRAP_TOKEN:-}
-      NEXUS_PUBLIC_URL: http://127.0.0.1:8787
+      NEXUS_PUBLIC_URL: ${NEXUS_PUBLIC_URL:-http://127.0.0.1:8787}
+      NEXUS_COOKIE_SECURE: '${NEXUS_COOKIE_SECURE:-false}'
+      FERRUM_GATEWAY_PUBLIC_URL: ${FERRUM_GATEWAY_PUBLIC_URL:-http://127.0.0.1:8000}
       NEXUS_DB_DRIVER: postgres
       NEXUS_DB_URL: postgres://nexus:${NEXUS_DB_PASSWORD:?set NEXUS_DB_PASSWORD}@postgres:5432/nexus
       FERRUM_ADMIN_URL: http://ferrum-edge:9000
@@ -77,7 +84,7 @@ services:
     restart: 'no'
 
   ferrum-edge:
-    image: ferrumedge/ferrum-edge:latest
+    image: ${FERRUM_EDGE_IMAGE:?set FERRUM_EDGE_IMAGE to a published version or digest}
     command: run -m database
     environment:
       FERRUM_MODE: database
