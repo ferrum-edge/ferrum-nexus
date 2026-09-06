@@ -475,13 +475,15 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
 
         // Only the *names* of the changed keys are recorded — never the values,
         // which would put the SMTP password and CAPTCHA secret in the audit log.
-        await audit.forStore(tx).record(
-          actor,
-          AuditAction.ADMIN_SETTINGS_UPDATE,
-          { type: 'settings', id: null },
-          { changed_keys: changed },
-          ip,
-        );
+        await audit
+          .forStore(tx)
+          .record(
+            actor,
+            AuditAction.ADMIN_SETTINGS_UPDATE,
+            { type: 'settings', id: null },
+            { changed_keys: changed },
+            ip,
+          );
       });
       // Only committed updates invalidate the cached public origin.
       if (nextGatewayUrl !== undefined) gatewayUrlCache = null;
