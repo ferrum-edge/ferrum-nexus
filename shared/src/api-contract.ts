@@ -546,12 +546,12 @@ export type DeleteApiPluginResponse = OkResponse;
  *   Prometheus at Edge if you need rates or retention.
  * - **There are no per-consumer counts.** Edge's request counter is not labelled
  *   by consumer, so "who is using this API" cannot be answered from here.
- * - `available: false` means the gateway could not be read (unreachable, an
- *   error status, or an unparseable body), or the API has no proxy yet. The
- *   route still answers `200`: a gateway hiccup is not a portal failure.
+ * - `available: false` means the request-metrics scrape failed (unreachable,
+ *   error status, or unparseable body), or the API has no proxy yet. Independent
+ *   backend state may still be present. The route still answers `200`.
  */
 export interface ApiUsageResponse {
-  /** Whether the numbers below came from a successful gateway read. */
+  /** Whether request counters came from a successful gateway metrics scrape. */
   available: boolean;
   /** When Nexus produced this answer (a cached read may be up to 10s older). */
   sampled_at: IsoTimestamp;
