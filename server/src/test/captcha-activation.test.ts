@@ -67,7 +67,7 @@ describe('CAPTCHA activation admission', () => {
     });
   }
 
-  it('activates with a new secret, retains a stored secret, and rejects clearing active keys', async () => {
+  it('accepts new/stored secrets and refuses to clear active keys', async () => {
     assert.equal((await save(complete)).statusCode, 200);
     assert.deepEqual(await harness.services.captcha.getPublicConfig(), {
       enabled: true,
@@ -80,7 +80,10 @@ describe('CAPTCHA activation admission', () => {
     assert.equal((await save({ site_key: null })).statusCode, 400);
     assert.equal((await save({ secret_key: null })).statusCode, 400);
     assert.equal((await save({ provider: 'none' })).statusCode, 400);
-    assert.equal((await save({ enabled: false, secret_key: null, site_key: null })).statusCode, 200);
+    assert.equal(
+      (await save({ enabled: false, secret_key: null, site_key: null })).statusCode,
+      200,
+    );
     assert.equal((await harness.services.captcha.getPublicConfig()).enabled, false);
     await harness.services.captcha.verify(undefined);
     assert.equal(verified, 1);
@@ -90,22 +93,31 @@ describe('CAPTCHA activation admission', () => {
     assert.equal((await save(complete)).statusCode, 200);
     await harness.store.settings.set('captcha.secret_key', 'unreadable-encrypted-blob', true);
     assert.equal((await harness.services.captcha.getPublicConfig()).enabled, true);
-    await assert.rejects(harness.services.captcha.verify('synthetic-token'), /not fully configured/);
+    await assert.rejects(
+      harness.services.captcha.verify('synthetic-token'),
+      /not fully configured/,
+    );
     assert.equal(verified, 0);
     assert.equal((await save({ enabled: true })).statusCode, 400);
     assert.equal((await save({ secret_key: 'replacement-secret' })).statusCode, 200);
   });
 
-  it('does not advertise a widget for incomplete legacy settings or bypass verification', async () => {
+  it('hides incomplete legacy widgets and keeps verification closed', async () => {
     const legacy = { enabled: true, provider: 'turnstile', site_key: null };
     await harness.store.settings.set('captcha', legacy, false);
     await harness.store.settings.set('captcha.secret_key', 'legacy-secret', false);
     assert.equal((await harness.services.captcha.getPublicConfig()).enabled, false);
-    await assert.rejects(harness.services.captcha.verify('synthetic-token'), /not fully configured/);
+    await assert.rejects(
+      harness.services.captcha.verify('synthetic-token'),
+      /not fully configured/,
+    );
     await harness.store.settings.set('captcha', { ...legacy, site_key: 'public-site' }, false);
     await harness.store.settings.delete('captcha.secret_key');
     assert.equal((await harness.services.captcha.getPublicConfig()).enabled, false);
-    await assert.rejects(harness.services.captcha.verify('synthetic-token'), /not fully configured/);
+    await assert.rejects(
+      harness.services.captcha.verify('synthetic-token'),
+      /not fully configured/,
+    );
     assert.equal(verified, 0);
   });
 });
