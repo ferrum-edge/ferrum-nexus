@@ -47,7 +47,7 @@ function overlapProvisioning(h: TestApp, userId: string) {
   return { entered, queued, releaseRead, counts: () => ({ reads, creates }) };
 }
 
-it('orders concurrent first issuance through one canonical identity', { timeout: 20_000 }, async () => {
+it('orders first issuance through one canonical identity', { timeout: 20_000 }, async () => {
   const h = await buildTestApp();
   try {
     const user = await h.registerUser();
@@ -152,6 +152,9 @@ it('adopts the same remote identity after local mapping persistence fails', asyn
 });
 
 it('separates provisioning keys by namespace without delimiter collisions', () => {
-  assert.notEqual(canonicalConsumerLockKey('alpha', 'user'), canonicalConsumerLockKey('beta', 'user'));
+  assert.notEqual(
+    canonicalConsumerLockKey('alpha', 'user'),
+    canonicalConsumerLockKey('beta', 'user'),
+  );
   assert.notEqual(canonicalConsumerLockKey('a:b', 'c'), canonicalConsumerLockKey('a', 'b:c'));
 });
