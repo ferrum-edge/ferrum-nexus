@@ -113,13 +113,13 @@ function mismatch(table: string, name: string): never {
 }
 
 function checkExpression(value: string): string {
-  // MySQL decorates these literal-only IN checks with charset introducers,
-  // escaped literal delimiters, identifier quotes and parentheses in information_schema.
-  return value
-    .replace(/_utf8mb4/g, '')
-    .replace(/\\'/g, "'")
+  // Metadata escapes literal delimiters. Normalize only SQL decoration outside
+  // literals: case and whitespace inside the enum values are significant.
+  const parts = value.replace(/\\'/g, "'").match(/'[^']*'|[^']+/g) ?? [];
+  return parts.map((part) => part.startsWith("'") ? part : part
+    .replace(/_utf8mb4\b/g, '')
     .replace(/[\s`()]/g, '')
-    .toLowerCase();
+    .toLowerCase()).join('');
 }
 
 async function alreadyApplied(connection: mysql.PoolConnection, guard: Guard): Promise<boolean> {
@@ -199,7 +199,7 @@ async function applyMigration(
 ): Promise<void> {
   const statements = splitSqlStatements(migration.sql);
   for (const [step, statement] of statements.entries()) {
-    const hash = digest(normalizedSql(statement));
+    const hash = digest(statement);
     const [recorded] = await connection.execute<mysql.RowDataPacket[]>(
       `SELECT statement_hash FROM ${STEPS} WHERE migration_id = ? AND step = ?`,
       [migration.id, step],

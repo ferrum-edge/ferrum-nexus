@@ -276,16 +276,20 @@ describe('MySQL committed migration recovery', { skip: !adminUrl, timeout: 600_0
     }
   });
 
-  it('rejects a matching check name with different allowed values', async () => {
-    await fixture(async (pool) => {
-      await runMysqlMigrations(pool, migrations.slice(0, 4));
-      await pool.query(splitSqlStatements(migrations[4]!.sql)[0]!);
-      await pool.query('ALTER TABLE apis DROP CHECK ck_apis_spec_enforcement');
-      await pool.query(
-        "ALTER TABLE apis ADD CONSTRAINT ck_apis_spec_enforcement CHECK (spec_enforcement IN ('docs_only', 'routes', 'unexpected'))",
-      );
-      await assert.rejects(() => runMysqlMigrations(pool), /schema mismatch/);
-    });
+  it('rejects changed check values, including literal case and whitespace', async () => {
+    for (const clause of [
+      "spec_enforcement IN ('docs_only', 'routes', 'unexpected')",
+      "spec_enforcement IN ('DOCS_ONLY', 'routes')",
+      "spec_enforcement IN ('docs_ only', 'routes')",
+    ]) {
+      await fixture(async (pool) => {
+        await runMysqlMigrations(pool, migrations.slice(0, 4));
+        await pool.query(splitSqlStatements(migrations[4]!.sql)[0]!);
+        await pool.query('ALTER TABLE apis DROP CHECK ck_apis_spec_enforcement');
+        await pool.query(`ALTER TABLE apis ADD CONSTRAINT ck_apis_spec_enforcement CHECK (${clause})`);
+        await assert.rejects(() => runMysqlMigrations(pool), /schema mismatch/);
+      });
+    }
   });
 
   it('serializes two independent migrators and releases the lock after failure', async () => {
