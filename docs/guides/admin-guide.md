@@ -103,7 +103,11 @@ Re-enabling is setting the status back to active; they sign in again
 normally, and any queued revocation is cancelled. Disabling or re-enabling an
 `admin` or `super_admin` requires a `super_admin`; a plain `admin` may still
 disable and re-enable clients and providers. Their credentials are _not_
-restored — a revoked key is gone, and they issue a new one.
+restored — a revoked key is gone, and they issue a new one. Re-enabling restores
+ACL groups for every retained active grant; revoked grants and disposable test
+consumers are not recreated. If the gateway restoration fails, the request
+returns an error after the portal status has changed. Retry the same active
+status update to finish restoring access; it is safe to repeat.
 
 ---
 

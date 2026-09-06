@@ -202,7 +202,7 @@ export interface UsersServiceDeps {
   /** Issues the replacement session a password change needs. */
   auth: AuthService;
   /** Strips the gateway identity of an account being disabled. */
-  credentials: Pick<CredentialsService, 'disableGatewayAccess'>;
+  credentials: Pick<CredentialsService, 'disableGatewayAccess' | 'restoreGatewayAccess'>;
   /**
    * Store-level cross-instance lock, built in the composition root from
    * `store.leases`. Every transition that can shrink the active `super_admin`
@@ -445,7 +445,19 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
         changed.push('status');
       }
 
-      if (changed.length === 0) return { user: toPublicUser(target) };
+      if (
+        patch.status === 'active' &&
+        isElevated(target.role) &&
+        !roleAtLeast(actor.role, 'super_admin')
+      ) {
+        throw forbidden('Only a super admin can disable or re-enable an administrator');
+      }
+      if (changed.length === 0) {
+        // A gateway failure after the status commit is recoverable by repeating
+        // the same PATCH, even though the portal account is already active.
+        if (patch.status === 'active') await credentials.restoreGatewayAccess(target.id, actor.id);
+        return { user: toPublicUser(target) };
+      }
 
       // The last-super-admin rule is a count of *other* rows followed by a
       // write to this one, and the checks above ran long before the write. Two
@@ -557,6 +569,12 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
           '/profile',
         );
       }
+
+      // Outside the lifecycle lock: consumer mutations have their own key,
+      // and taking that key inside a lifecycle section would invert the
+      // identity-registration lock order. Teardown and restoration re-check
+      // account status after acquiring the consumer key.
+      if (patch.status === 'active') await credentials.restoreGatewayAccess(target.id, actor.id);
 
       return {
         user: toPublicUser(updated),

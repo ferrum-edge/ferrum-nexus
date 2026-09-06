@@ -523,7 +523,10 @@ Guards enforced in the service:
 - Disabling an account deletes every session it holds, and queues the gateway
   revocation as durable work inside the same transaction.
 - Re-enabling an account (`status: "active"`) cancels any queued revocation, so
-  a retry can never strip a live account's credentials.
+  a retry can never strip a live account's credentials. It then restores retained
+  active-grant ACL groups without restoring revoked credentials or test
+  consumers. A gateway failure returns `502 EDGE_ERROR` after the portal status
+  commit; repeat the same `status: "active"` PATCH to retry restoration.
 - `404 NOT_FOUND` when `org_id` names an organization that does not exist.
 
 ### `POST /api/users/:id/gateway-teardown/retry`
