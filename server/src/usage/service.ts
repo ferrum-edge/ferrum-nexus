@@ -20,8 +20,9 @@
  * ## Failure is a value, not an exception
  *
  * A provider opening an API page while the gateway is restarting must see the
- * page, not an error. Every gateway failure — unreachable, non-2xx, garbled
- * body — resolves to `available: false` with zeroed counters and HTTP `200`.
+ * page, not an error. A failed request-metrics scrape resolves to
+ * `available: false` with zeroed counters and HTTP `200`. Independent backend
+ * state may still be shown; its failure does not discard valid counters.
  * The only errors this service raises are the portal's own: `404` for an API
  * that does not exist and `403` for one the caller may not administer.
  */
@@ -181,7 +182,7 @@ function scopeOf(target: string | undefined): string {
  * circuit breaker only for a proxy that both *has* one configured and *has been
  * called*, so silence means "nothing to report", never "healthy".
  */
-function backendFrom(state: EdgeBackendState, hasTraffic: boolean): ApiUsageBackend {
+function backendFrom(state: EdgeBackendState, hasTraffic: boolean | null): ApiUsageBackend {
   if (!state.available) {
     return {
       status: 'unknown',
@@ -229,9 +230,12 @@ function backendFrom(state: EdgeBackendState, hasTraffic: boolean): ApiUsageBack
 
   return {
     status: 'unknown',
-    detail: hasTraffic
-      ? 'No circuit breaker is configured for this API, so the gateway reports no backend state.'
-      : 'No traffic has reached this API yet, so the gateway has no backend state to report.',
+    detail:
+      hasTraffic === null
+        ? 'Request metrics are unavailable and the gateway reports no backend state.'
+        : hasTraffic
+          ? 'No circuit breaker is configured for this API, so the gateway reports no backend state.'
+          : 'No traffic has reached this API yet, so the gateway has no backend state to report.',
   };
 }
 
@@ -277,13 +281,12 @@ export function createUsageService(deps: UsageServiceDeps): UsageService {
       ]);
 
       const requests = metrics.available ? requestsFrom(metrics) : emptyRequests();
-      const backend = backendFrom(backendState, requests.total > 0);
+      const backend = backendFrom(backendState, metrics.available ? requests.total > 0 : null);
 
       return {
-        // Either read succeeding is worth showing: a reachable gateway with an
-        // unreadable exposition still has a truthful backend verdict, and vice
-        // versa.
-        available: metrics.available || backendState.available,
+        // Availability describes the counters; independent backend state must
+        // not make missing traffic measurements look like measured zeroes.
+        available: metrics.available,
         sampled_at: sampledAt,
         ...(backendState.uptimeSeconds !== null
           ? { gateway_uptime_seconds: backendState.uptimeSeconds }

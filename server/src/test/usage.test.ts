@@ -199,6 +199,37 @@ describe('api usage', () => {
       }
     });
 
+    it('does not treat missing counters as zero traffic when backend state is readable', async () => {
+      const { apiId, proxyId } = await publishApi('usage-partial-counters');
+      harness.edge.recordRequests(proxyId, { method: 'GET', status: 200, count: 42 });
+      assert.equal((await usageFor(provider, apiId)).requests.total, 42);
+      harness.edgeClient.metrics.scrapeProxy = async () => ({
+        available: false,
+        requests: { byMethod: {}, byStatus: {}, total: 0 },
+        latency: { buckets: [], count: null, sum: null },
+      });
+      const usage = await usageFor(provider, apiId);
+      assert.equal(usage.available, false);
+      assert.equal(usage.requests.total, 0);
+      assert.equal(usage.latency_ms, null);
+      assert.equal(usage.gateway_uptime_seconds, 3_600);
+      assert.equal(usage.backend.status, 'unknown');
+      assert.match(String(usage.backend.detail), /Request metrics are unavailable/);
+      assert.doesNotMatch(String(usage.backend.detail), /No traffic/);
+    });
+
+    it('retains truthful counters when only the backend-state read fails', async () => {
+      const { apiId, proxyId } = await publishApi('usage-partial-backend');
+      harness.edge.recordRequests(proxyId, { method: 'GET', status: 200, count: 42 });
+      harness.edge.queueFailure(503, { error: 'unavailable' }, '/admin/metrics', 'GET');
+      const usage = await usageFor(provider, apiId);
+      assert.equal(usage.available, true);
+      assert.equal(usage.requests.total, 42);
+      assert.equal(usage.backend.status, 'unknown');
+      assert.match(String(usage.backend.detail), /could not be reached/);
+      assert.doesNotMatch(String(usage.backend.detail), /No traffic/);
+    });
+
     it('answers 200 with available:false when the metrics endpoints error', async () => {
       const { apiId } = await publishApi('usage-erroring');
       // The two scrapes run concurrently and the mock hands a request the

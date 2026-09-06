@@ -1267,10 +1267,13 @@ count**: `ferrum_requests_total` carries no consumer label, so neither can be
 answered honestly from the gateway.
 
 Errors: `403 FORBIDDEN` (not the owner and not an admin), `404 NOT_FOUND`. A
-gateway that is unreachable, erroring or serving an unparseable body is **not**
-an error — it answers `200` with `available: false`, zeroed counters,
-`latency_ms: null` and `backend.status: "unknown"`. A provider's overview page
-must not break because Edge is restarting.
+gateway request-metrics scrape that is unreachable, erroring or unparseable is
+**not** a portal error: the route answers `200` with `available: false`, zeroed
+counters and `latency_ms: null`. Those zeros represent missing measurements.
+A successful independent backend-state read may still populate `backend` and
+`gateway_uptime_seconds`; it cannot make `available` true. Conversely, if only
+backend state is unavailable, request counters remain valid and `backend.status`
+is `unknown`. A provider's overview page must not break because Edge is restarting.
 
 ```bash
 curl -sS -b cookies.txt http://127.0.0.1:8787/api/apis/$API_ID/usage | jq .

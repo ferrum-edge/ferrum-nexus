@@ -497,8 +497,11 @@ rotation, and the `since` line says when that started. **Recovering** means the
 breaker is half-open and letting probe traffic through to find out whether the
 backend is back.
 
-If the whole card says gateway metrics are unavailable, Nexus could not read the
-gateway — the API itself may well be serving traffic normally.
+If the card says gateway metrics are unavailable, Nexus could not read the
+request-counter scrape — the API itself may still be serving traffic normally.
+The displayed zero counters then mean missing measurements, not zero traffic.
+Independent backend state and gateway uptime can remain available. If only the
+backend-state read fails, counters remain valid and the backend is Unknown.
 
 ---
 
