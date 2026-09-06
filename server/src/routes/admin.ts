@@ -180,6 +180,7 @@ const godBroadcastBody = z.object({
     user_ids: z.array(z.string().trim().min(1).max(64)).max(5_000).optional(),
   }),
   send_email: z.boolean().optional(),
+  idempotency_key: z.string().trim().min(8).max(128).optional(),
 });
 
 /** `/api/admin` route plugin. */
@@ -339,6 +340,7 @@ export const adminRoutes: FastifyPluginAsync<AdminRoutesOptions> = async (app, o
         body: body.body,
         audience: body.audience,
         ...(body.send_email !== undefined ? { send_email: body.send_email } : {}),
+        ...(body.idempotency_key !== undefined ? { idempotency_key: body.idempotency_key } : {}),
       },
       clientIp(request),
     );

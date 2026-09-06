@@ -24,6 +24,8 @@
  * inside the transaction that writes the row.
  */
 
+import { createHash } from 'node:crypto';
+
 import {
   type GodBroadcastRequest,
   type GodBroadcastResponse,
@@ -284,6 +286,27 @@ export function createGodService(deps: GodServiceDeps): GodService {
       if (subject === '') throw validationFailed('A subject is required');
       if (body === '') throw validationFailed('A message body is required');
 
+      // Content and actor scope prevent unrelated campaigns sharing an outbox
+      // key. An explicit batch permits intentionally repeating the same text;
+      // legacy callers without one still get stable email retry behavior.
+      const batch = createHash('sha256')
+        .update(
+          JSON.stringify({
+            actor: actor.id,
+            key: input.idempotency_key ?? null,
+            subject,
+            body,
+            audience: {
+              scope: input.audience.scope,
+              roles: [...new Set(input.audience.roles ?? [])].sort(),
+              status: input.audience.status ?? null,
+              org_id: input.audience.org_id ?? null,
+              user_ids: [...new Set(input.audience.user_ids ?? [])].sort(),
+            },
+          }),
+        )
+        .digest('hex');
+
       const recipients = (await massEmail.resolveAudience(input.audience)).filter(
         (recipient) => recipient.id !== actor.id,
       );
@@ -327,6 +350,7 @@ export function createGodService(deps: GodServiceDeps): GodService {
             const queued = await email.enqueue({
               to: recipient.email,
               templateKey: 'mass',
+              idempotencyKey: `god-broadcast:${batch}:${recipient.id}`,
               rawHtmlVars: MASS_RAW_HTML_VARS,
               vars: {
                 recipient_name: recipient.display_name,
@@ -352,7 +376,7 @@ export function createGodService(deps: GodServiceDeps): GodService {
       await audit.record(
         { id: actor.id, role: actor.role },
         AuditAction.GOD_BROADCAST,
-        { type: 'broadcast', id: null },
+        { type: 'broadcast', id: batch },
         {
           reason: subject,
           audience_scope: input.audience.scope,

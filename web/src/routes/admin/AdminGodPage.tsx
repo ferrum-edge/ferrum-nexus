@@ -302,6 +302,7 @@ function BroadcastPanel(): ReactElement {
   const [body, setBody] = useState('');
   const [sendEmail, setSendEmail] = useState(false);
   const [open, setOpen] = useState(false);
+  const [emailBatch, setEmailBatch] = useState(() => crypto.randomUUID());
 
   return (
     <>
@@ -368,10 +369,12 @@ function BroadcastPanel(): ReactElement {
               body: body.trim(),
               audience: audienceFor(choice),
               send_email: sendEmail,
+              idempotency_key: emailBatch,
             },
             {
               onSuccess: (response) => {
                 setOpen(false);
+                setEmailBatch(crypto.randomUUID());
                 setSubject('');
                 setBody('');
                 toast.success('Broadcast sent', `${response.notified} account(s) notified.`);

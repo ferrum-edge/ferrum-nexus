@@ -978,6 +978,14 @@ account.
 
 Body `{ "subject": string (1–300), "body": string (1–20 000), "audience": MassEmailAudience, "send_email"?: boolean }`
 
+Optional `idempotency_key` (8–128 characters) identifies an email campaign.
+Reuse it when retrying; use a new key to deliberately resend identical content.
+Email deduplication is scoped to the actor, normalized subject/body, audience and
+recipient. Without a key, identical content and audience retain stable email
+retry behavior. Different content or a new key queues a new email. Replays report
+only newly created outbox rows in `emails_enqueued`. Notifications and inbox
+messages are still created for each call; this key deduplicates email only.
+
 ```json
 { "notified": 251, "emails_enqueued": 251, "threads_created": 88 }
 ```

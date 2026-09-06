@@ -1,12 +1,13 @@
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AdminGodPage } from './AdminGodPage';
 
-const { revoke, remove, disable, recent } = vi.hoisted(() => ({
+const { revoke, remove, disable, sendBroadcast, recent } = vi.hoisted(() => ({
   revoke: vi.fn(),
   remove: vi.fn(),
   disable: vi.fn(),
+  sendBroadcast: vi.fn(),
   recent: Array.from({ length: 200 }, (_, index) => ({
     id: `recent-${index}`,
     api_id: `api-${index}`,
@@ -33,7 +34,7 @@ vi.mock('../../hooks/useGodMode', () => ({
   useGodRevokeGrant: () => ({ mutate: revoke, isPending: false }),
   useGodDeleteApi: () => ({ mutate: remove, isPending: false }),
   useGodDisableUser: () => ({ mutate: disable, isPending: false }),
-  useGodBroadcast: () => ({ mutate: vi.fn(), isPending: false }),
+  useGodBroadcast: () => ({ mutate: sendBroadcast, isPending: false }),
 }));
 vi.mock('../../stores/toast', () => ({ useToast: () => ({ success: vi.fn() }) }));
 vi.mock('../../components/layout/RoleGuard', () => ({
@@ -79,5 +80,29 @@ describe('emergency targets beyond the first page', () => {
       expect.objectContaining({ [entry.field]: oldest, reason: 'Reviewed emergency request' }),
       expect.any(Object),
     );
+  });
+});
+
+
+describe('broadcast email campaign identity', () => {
+  it('keeps the retry key until success and starts a new campaign afterward', () => {
+    render(<AdminGodPage />);
+    const compose = () => {
+      fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'Maintenance' } });
+      fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'Sunday window' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Broadcast' }));
+      const dialog = within(screen.getByRole('dialog'));
+      fireEvent.change(dialog.getByPlaceholderText('BROADCAST'), { target: { value: 'BROADCAST' } });
+      fireEvent.click(dialog.getByRole('button', { name: 'Broadcast' }));
+    };
+    compose();
+    const firstKey = sendBroadcast.mock.calls[0]![0].idempotency_key;
+    expect(firstKey).toBeTruthy();
+    // A failed mutation leaves the dialog open and the form intact.
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Broadcast' }));
+    expect(sendBroadcast.mock.calls[1]![0].idempotency_key).toBe(firstKey);
+    act(() => sendBroadcast.mock.calls[1]![1].onSuccess({ notified: 1 }));
+    compose();
+    expect(sendBroadcast.mock.calls[2]![0].idempotency_key).not.toBe(firstKey);
   });
 });
