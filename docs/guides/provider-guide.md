@@ -714,7 +714,7 @@ These are very different operations and the difference matters.
   keep working. Integrations already in production carry on.
 - The API disappears from the catalog for everyone **except** its owner, its
   existing grantees and admins.
-- New access requests are refused.
+- New access requests and approvals of still-pending requests are refused.
 
 Retirement is how you say "stop onboarding onto this" without breaking the
 people already on it. It is reversible — set the status back to Published.

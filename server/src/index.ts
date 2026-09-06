@@ -360,6 +360,7 @@ export async function buildServer(
   });
   const access = createAccessService({
     config,
+    edge: deps.edge,
     store: deps.store,
     audit,
     notifications,
