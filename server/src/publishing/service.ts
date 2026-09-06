@@ -1116,7 +1116,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         const plugins = await pluginsOf(api);
         const proxyId = api.ferrum_proxy_id;
         if (proxyId !== initial.ferrum_proxy_id) {
-          throw conflict('The gateway proxy changed while this update was waiting; reload and retry');
+          throw conflict(
+            'The gateway proxy changed while this update was waiting; reload and retry',
+          );
         }
 
         // Edge has no cross-resource transaction, so every gateway mutation below
@@ -1300,7 +1302,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               patch.circuit_breaker !== undefined &&
               patch.circuit_breaker !== api.circuit_breaker
             ) {
-              proxySettings.circuit_breaker = patch.circuit_breaker ? DEFAULT_CIRCUIT_BREAKER : null;
+              proxySettings.circuit_breaker = patch.circuit_breaker
+                ? DEFAULT_CIRCUIT_BREAKER
+                : null;
             }
             if (patch.cors !== undefined) proxySettings.allowed_ws_origins = wsOriginsFor(nextCors);
 

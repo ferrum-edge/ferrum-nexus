@@ -256,7 +256,9 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
      * list never names a row that has already gone.
      */
     async disassociate(proxyId, configIds, subject) {
-      return binder.withProxy(proxyId, () => binder.disassociateLocked(proxyId, configIds, subject));
+      return binder.withProxy(proxyId, () =>
+        binder.disassociateLocked(proxyId, configIds, subject),
+      );
     },
 
     async disassociateLocked(proxyId, configIds, subject) {
@@ -273,7 +275,9 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
     },
 
     async restorePlugins(proxyId, configs, subject) {
-      return binder.withProxy(proxyId, () => binder.restorePluginsLocked(proxyId, configs, subject));
+      return binder.withProxy(proxyId, () =>
+        binder.restorePluginsLocked(proxyId, configs, subject),
+      );
     },
 
     async restorePluginsLocked(proxyId, configs, subject) {
