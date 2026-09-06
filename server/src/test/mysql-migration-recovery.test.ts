@@ -44,6 +44,11 @@ async function fixture<T>(body: (pool: mysql.Pool, url: string) => Promise<T>): 
   const pool = mysql.createPool(target.toString());
   try {
     return await body(pool, target.toString());
+  } catch (error) {
+    const [checks] = await pool.query(`SELECT CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS
+      WHERE CONSTRAINT_SCHEMA = DATABASE() AND CONSTRAINT_NAME = 'ck_apis_spec_enforcement'`);
+    console.error('Disposable fixture check constraint:', checks);
+    throw error;
   } finally {
     await pool.end();
     await admin.query(`DROP DATABASE \`${database}\``);
