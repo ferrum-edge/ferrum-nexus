@@ -65,7 +65,7 @@ describe('ShowOnceSecretDialog', () => {
     );
     expect(screen.getByText('JWT subject (sub) / consumer username')).toBeInTheDocument();
     expect(screen.getByText('JWT signing secret')).toBeInTheDocument();
-    expect(screen.getByText(/put this consumer username in the token’s sub claim/)).toBeInTheDocument();
+    expect(screen.getByText(/set sub to this username/)).toBeInTheDocument();
   });
 
   it('copies a field to the clipboard', async () => {

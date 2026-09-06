@@ -79,8 +79,7 @@ export function ShowOnceSecretDialog({
 
         {secret.type === 'jwt' ? (
           <p className="text-sm text-fg-muted">
-            For Nexus-published JWT APIs, put this consumer username in the token’s sub claim
-            and sign with the JWT signing secret.
+            For Nexus-published JWT APIs, set sub to this username. Sign with the JWT secret.
           </p>
         ) : null}
 
