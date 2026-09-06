@@ -389,6 +389,17 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
             site_key:
               patch.captcha.site_key === undefined ? current.site_key : patch.captcha.site_key,
           };
+          if (next.enabled) {
+            const secret =
+              patch.captcha.secret_key === undefined
+                ? await readEncryptedSetting(tx, crypto, CAPTCHA_SECRET_SETTINGS_KEY)
+                : patch.captcha.secret_key;
+            if (next.provider === 'none' || !next.site_key?.trim() || !secret?.trim()) {
+              throw validationFailed(
+                'Enabling CAPTCHA requires a provider, a site key, and a usable secret key',
+              );
+            }
+          }
           for (const field of ['enabled', 'provider', 'site_key'] as const) {
             if (patch.captcha[field] !== undefined) changed.push(`captcha.${field}`);
           }

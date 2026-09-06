@@ -118,7 +118,8 @@ export function createCaptchaService(deps: CaptchaServiceDeps): CaptchaService {
     return {
       enabled: value.enabled === true,
       provider: (value.provider ?? 'none') as CaptchaProvider,
-      site_key: typeof value.site_key === 'string' ? value.site_key : null,
+      site_key:
+        typeof value.site_key === 'string' && value.site_key.trim() ? value.site_key.trim() : null,
     };
   }
 
@@ -134,14 +135,22 @@ export function createCaptchaService(deps: CaptchaServiceDeps): CaptchaService {
     }
   }
 
-  function isActive(settings: StoredCaptchaSettings): boolean {
+  function isConfigured(settings: StoredCaptchaSettings): boolean {
     return settings.enabled && settings.provider !== 'none';
+  }
+
+  async function isActive(settings: StoredCaptchaSettings): Promise<boolean> {
+    return (
+      isConfigured(settings) &&
+      settings.site_key !== null &&
+      (await deps.store.settings.get(CAPTCHA_SECRET_SETTINGS_KEY)) !== null
+    );
   }
 
   return {
     async getPublicConfig(): Promise<CaptchaPublicConfig> {
       const settings = await readSettings();
-      const active = isActive(settings);
+      const active = await isActive(settings);
       return {
         enabled: active,
         provider: settings.provider,
@@ -155,15 +164,14 @@ export function createCaptchaService(deps: CaptchaServiceDeps): CaptchaService {
 
     async verify(token: string | undefined, remoteIp: string | null = null): Promise<void> {
       const settings = await readSettings();
-      if (!isActive(settings)) return;
-      if (!token || token.trim() === '') throw captchaFailed('CAPTCHA response is required');
-
+      if (!isConfigured(settings)) return;
       const secret = await readSecret();
-      if (!secret) {
+      if (!settings.site_key || !secret?.trim()) {
         // Configured as enabled but unusable — fail closed rather than letting
         // registrations through unverified.
         throw captchaFailed('CAPTCHA is enabled but not fully configured');
       }
+      if (!token || token.trim() === '') throw captchaFailed('CAPTCHA response is required');
 
       const url = CAPTCHA_VERIFY_URLS[settings.provider as Exclude<CaptchaProvider, 'none'>];
       const params = new URLSearchParams({ secret, response: token });

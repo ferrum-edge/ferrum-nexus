@@ -267,6 +267,9 @@ function CaptchaTab({ settings }: { settings: AdminSettingsResponse }): ReactEle
   const [provider, setProvider] = useState<CaptchaProvider>(settings.captcha.provider);
   const [siteKey, setSiteKey] = useState(settings.captcha.site_key ?? '');
   const [secretKey, setSecretKey] = useState('');
+  const captchaIncomplete =
+    enabled &&
+    (provider === 'none' || !siteKey.trim() || (!secretKey.trim() && !settings.captcha.secret_set));
   const [openRegistration, setOpenRegistration] = useState(settings.registration.open_registration);
   const [requireVerification, setRequireVerification] = useState(
     settings.registration.require_email_verification,
@@ -312,11 +315,17 @@ function CaptchaTab({ settings }: { settings: AdminSettingsResponse }): ReactEle
             onChange={(event) => setSecretKey(event.target.value)}
             hint="Leave blank to keep the stored value."
           />
+          {captchaIncomplete ? (
+            <p className="text-sm text-danger md:col-span-2" role="alert">
+              Choose a provider and enter a site key and secret key before enabling CAPTCHA.
+            </p>
+          ) : null}
           <div className="md:col-span-2">
             {canSuperAdmin ? (
               <Button
                 variant="primary"
                 loading={update.isPending}
+                disabled={captchaIncomplete}
                 onClick={() =>
                   update.mutate(
                     {

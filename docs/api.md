@@ -802,6 +802,17 @@ to the operator, and CAPTCHA is the registration brake.
 | `registration` | `open_registration`, `require_email_verification`, `allowed_roles` (array of roles)                                                                                                                                                                                                                                                                                                                          |
 | `gateway`      | `public_url` — absolute `http(s)` **origin** of the gateway's proxy listener, no path, query or credentials; a trailing slash is stripped. `null` or `""` clears the override and falls back to `FERRUM_GATEWAY_PUBLIC_URL`. Editable by any `admin`.                                                                                                                                                        |
 
+An enabled CAPTCHA configuration requires a provider other than `none`, a
+non-empty site key, and a usable secret (supplied now or already stored).
+`400 VALIDATION_FAILED` rejects the entire patch if any is missing; disable
+CAPTCHA in the same patch before clearing a required key. An unreadable stored
+secret must be replaced or re-encrypted before activation can be saved.
+
+The public CAPTCHA configuration advertises an active widget only with a site
+key and a stored secret. Incomplete legacy settings and unreadable secrets
+still fail verification closed; missing configuration never silently exempts
+sign-in or registration from a configured challenge.
+
 → the same shape as `GET /api/admin/settings`. The audit row records the
 **names** of the changed keys and never their values.
 
