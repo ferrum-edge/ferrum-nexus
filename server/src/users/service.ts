@@ -427,10 +427,10 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
 
       const statusChanged = patch.status !== undefined && patch.status !== target.status;
       if (statusChanged && patch.status) {
+        if (isElevated(target.role) && !roleAtLeast(actor.role, 'super_admin')) {
+          throw forbidden('Only a super admin can disable or re-enable an administrator');
+        }
         if (patch.status === 'disabled') {
-          if (isElevated(target.role) && !roleAtLeast(actor.role, 'super_admin')) {
-            throw forbidden('Only a super admin can disable an administrator');
-          }
           // Checked before the self-disable rule so the *reason* a lone founder
           // cannot switch themselves off is the one the UI should explain.
           if (
