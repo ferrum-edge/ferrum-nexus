@@ -54,6 +54,12 @@ function RevokeGrantPanel(): ReactElement {
             options={options}
             placeholder={options.length === 0 ? 'No active grants' : 'Select a grant…'}
           />
+          <LabeledInput
+            label="Grant ID"
+            value={grantId}
+            onChange={(event) => setGrantId(event.target.value.trim())}
+            hint="The picker lists recent records. Paste an exact ID to target a record beyond that page."
+          />
           <LabeledTextarea
             label="Reason"
             required
@@ -78,7 +84,7 @@ function RevokeGrantPanel(): ReactElement {
         open={open}
         onOpenChange={setOpen}
         title="Revoke this grant"
-        description="The consumer loses gateway access to the API as soon as Edge applies the change."
+        description={`Grant ${grantId} loses gateway access when Edge applies the change.}`}
         confirmLabel="Revoke grant"
         danger
         confirmPhrase="REVOKE"
@@ -131,6 +137,12 @@ function DeleteApiPanel(): ReactElement {
             }))}
             placeholder="Select an API…"
           />
+          <LabeledInput
+            label="API ID"
+            value={apiId}
+            onChange={(event) => setApiId(event.target.value.trim())}
+            hint="The picker lists recent records. Paste an exact ID to target a record beyond that page."
+          />
           <LabeledTextarea
             label="Reason"
             required
@@ -159,7 +171,7 @@ function DeleteApiPanel(): ReactElement {
         open={open}
         onOpenChange={setOpen}
         title={`Delete ${selected?.name ?? 'this API'}`}
-        description="This cannot be undone. Every consumer calling it starts receiving 404s from the gateway."
+        description={`API ${apiId} will be deleted. Calls will receive gateway 404s.}`}
         confirmLabel="Delete API"
         danger
         confirmPhrase={selected?.slug ?? 'DELETE'}
@@ -215,6 +227,12 @@ function DisableUserPanel(): ReactElement {
             }))}
             placeholder="Select an account…"
           />
+          <LabeledInput
+            label="Account ID"
+            value={userId}
+            onChange={(event) => setUserId(event.target.value.trim())}
+            hint="The picker lists recent records. Paste an exact ID to target a record beyond that page."
+          />
           <LabeledTextarea
             label="Reason"
             required
@@ -243,7 +261,7 @@ function DisableUserPanel(): ReactElement {
         open={open}
         onOpenChange={setOpen}
         title={`Disable ${selected?.display_name ?? 'this account'}`}
-        description="The user is signed out everywhere and can no longer sign in."
+        description={`Account ${userId} will be signed out and blocked from signing in.}`}
         confirmLabel="Disable account"
         danger
         confirmPhrase={selected?.email ?? 'DISABLE'}

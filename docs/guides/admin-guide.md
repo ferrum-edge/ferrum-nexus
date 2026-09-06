@@ -460,6 +460,13 @@ underlying operation (`access.revoke`, `api.delete`, …) and a `god.*` row
 carrying your reason. An emergency action leaves a trail of both what was done
 and why it was done this way.
 
+The grant, API, and account pickers list the most recent page (up to 200
+records). For a record outside that page, paste its exact identifier into
+**Grant ID**, **API ID**, or **Account ID**. Selecting a recent record fills the
+same field. The confirmation dialog displays the exact target ID; verify it
+before typing the confirmation phrase. Existing server-side role, self-disable,
+and last-super-admin restrictions apply equally to pasted IDs.
+
 ### Revoke grant
 
 **Blast radius: one user, one API.**
