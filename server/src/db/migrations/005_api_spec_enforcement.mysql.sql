@@ -8,8 +8,8 @@
 -- treatment of the other enum-valued text columns (`status`, `visibility`,
 -- `auth_plugin`).
 --
--- One ALTER statement: MySQL has no transactional DDL, so a migration that
--- needed two writes could be left half-applied and fail on the retry.
+-- One atomic ALTER keeps the column and check together. On recovery the
+-- runner verifies both definitions before recording the missing ledger entry.
 
 ALTER TABLE apis
   ADD COLUMN spec_enforcement VARCHAR(32) NOT NULL DEFAULT 'docs_only',

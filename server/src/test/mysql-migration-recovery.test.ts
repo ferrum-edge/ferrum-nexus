@@ -242,6 +242,40 @@ describe('MySQL committed migration recovery', { skip: !adminUrl, timeout: 600_0
     }
   });
 
+  it('rolls back interrupted backfills before the checkpoint transaction commits', async () => {
+    for (const afterCheckpoint of [false, true]) {
+      await fixture(async (pool) => {
+        await runMysqlMigrations(pool, migrations.slice(0, 10));
+        await seedCredentials(pool);
+        let fired = false;
+        const faulty = intercept(pool, (method, sql, params, after) => {
+          const boundary = afterCheckpoint
+            ? method === 'execute' && sql.startsWith('INSERT INTO schema_migration_steps ') &&
+              (params as unknown[])[0] === '011_credential_ordinal' && (params as unknown[])[1] === 1
+            : method === 'query' && sql.startsWith('UPDATE credential_metadata AS cm');
+          if (!fired && after && boundary) {
+            fired = true;
+            throw new Error(interruption);
+          }
+        });
+        await assert.rejects(() => runMysqlMigrations(faulty), new RegExp(interruption));
+        const [rows] = await pool.query<mysql.RowDataPacket[]>(
+          'SELECT edge_ordinal FROM credential_metadata',
+        );
+        assert.ok(rows.every((row) => row.edge_ordinal === null));
+        const [steps] = await pool.query<mysql.RowDataPacket[]>(
+          "SELECT step FROM schema_migration_steps WHERE migration_id = '011_credential_ordinal' AND step = 1",
+        );
+        assert.equal(steps.length, 0);
+        await runMysqlMigrations(pool);
+        const [assigned] = await pool.query<mysql.RowDataPacket[]>(
+          "SELECT edge_ordinal FROM credential_metadata WHERE ferrum_consumer_id = 'ordered' ORDER BY id",
+        );
+        assert.deepEqual(assigned.map((row) => row.edge_ordinal), [1, 2]);
+      });
+    }
+  });
+
   it('rejects a matching check name with different allowed values', async () => {
     await fixture(async (pool) => {
       await runMysqlMigrations(pool, migrations.slice(0, 4));
