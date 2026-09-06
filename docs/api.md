@@ -514,7 +514,7 @@ Guards enforced in the service:
 - **Only a `super_admin` may confer or remove admin power.** A plain `admin`
   can move accounts between `client` and `provider` and nothing else — neither
   promoting to `admin` nor demoting an existing one → `403 FORBIDDEN`.
-- Only a `super_admin` may disable an `admin` or `super_admin` →
+- Only a `super_admin` may disable or re-enable an `admin` or `super_admin` →
   `403 FORBIDDEN`.
 - Demoting or disabling the **last active `super_admin`** →
   `409 LAST_SUPER_ADMIN`. This is checked before the self-disable rule, so it is

@@ -348,4 +348,49 @@ describe('users and organizations', () => {
     const listed = await harness.authed(admin, { method: 'GET', url: '/api/organizations' });
     assert.equal(listed.json<Paginated<Organization>>().total, 1);
   });
+
+  it('guards elevated reactivation without blocking ordinary account recovery', async () => {
+    for (const role of ['client', 'provider', 'admin', 'super_admin'] as const) {
+      const target = await harness.registerUser({ email: `reactivate-${role}@example.test` });
+      if (role !== 'client') {
+        const promotion = await harness.authed(founder, {
+          method: 'PATCH',
+          url: `/api/users/${target.user.id}`,
+          payload: { role },
+        });
+        assert.equal(promotion.statusCode, 200, promotion.body);
+      }
+      const disabled = await harness.authed(founder, {
+        method: 'PATCH',
+        url: `/api/users/${target.user.id}`,
+        payload: { status: 'disabled' },
+      });
+      assert.equal(disabled.statusCode, 200, disabled.body);
+      const pendingBefore = await harness.store.gatewayTeardownJobs.findByUser(target.user.id);
+      const reactivated = await harness.authed(admin, {
+        method: 'PATCH',
+        url: `/api/users/${target.user.id}`,
+        payload: { status: 'active' },
+      });
+      if (role === 'admin' || role === 'super_admin') {
+        assert.equal(reactivated.statusCode, 403, reactivated.body);
+        assert.equal(errorCode(reactivated.body), 'FORBIDDEN');
+        assert.equal((await harness.store.users.findById(target.user.id))?.status, 'disabled');
+        assert.deepEqual(
+          await harness.store.gatewayTeardownJobs.findByUser(target.user.id),
+          pendingBefore,
+        );
+        const allowed = await harness.authed(founder, {
+          method: 'PATCH',
+          url: `/api/users/${target.user.id}`,
+          payload: { status: 'active' },
+        });
+        assert.equal(allowed.statusCode, 200, allowed.body);
+        assert.equal(allowed.json<{ user: User }>().user.role, role);
+      } else {
+        assert.equal(reactivated.statusCode, 200, reactivated.body);
+      }
+      assert.equal((await harness.store.users.findById(target.user.id))?.status, 'active');
+    }
+  });
 });

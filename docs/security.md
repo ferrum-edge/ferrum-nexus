@@ -277,12 +277,12 @@ the route, while "is this your API" is a property of the row.
 | Read the audit log                                |   —    |    —     |   ✓   |      ✓      |
 | Portal settings: **SMTP and CAPTCHA**             |   —    |    —     | **—** |      ✓      |
 | Grant or revoke `admin` / `super_admin`           |   —    |    —     | **—** |      ✓      |
-| Disable an `admin` or `super_admin`               |   —    |    —     | **—** |      ✓      |
+| Disable or re-enable an `admin` or `super_admin`  |   —    |    —     | **—** |      ✓      |
 | God mode (4 endpoints)                            |   —    |    —     |   —   |      ✓      |
 
 The three bolded gaps are the point of the `super_admin` tier: an `admin` has
 broad authority over content and users but **cannot escalate itself or another
-account**, cannot switch off an administrator, and cannot take over the
+account**, cannot disable or re-enable an administrator, and cannot take over the
 platform's mail.
 
 `smtp` and `captcha` are `super_admin`-only because they are escalation paths

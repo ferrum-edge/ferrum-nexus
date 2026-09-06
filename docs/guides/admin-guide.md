@@ -99,8 +99,10 @@ button per account.
 Use **god mode → Disable user with "revoke grants"** when you also want the
 approvals themselves torn down rather than preserved for a re-enable.
 
-Re-enabling is just setting the status back to active; they sign in again
-normally, and any queued revocation is cancelled. Their credentials are _not_
+Re-enabling is setting the status back to active; they sign in again
+normally, and any queued revocation is cancelled. Disabling or re-enabling an
+`admin` or `super_admin` requires a `super_admin`; a plain `admin` may still
+disable and re-enable clients and providers. Their credentials are _not_
 restored — a revoked key is gone, and they issue a new one.
 
 ---
