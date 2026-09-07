@@ -116,11 +116,13 @@ describe('gateway teardown after an invalid HTTP response', () => {
 
       intercept = false;
       assert.ok(pending);
+      const nextAttemptAt = pending.next_attempt_at;
+      assert.ok(nextAttemptAt, 'a failed attempt must schedule a retry');
       const recovered = createTeardownWorker({
         store: harness.store,
         credentials: harness.services.credentials,
         audit: harness.services.audit,
-        now: () => new Date(pending.next_attempt_at),
+        now: () => new Date(nextAttemptAt),
       });
       const retried = await recovered.tick();
       assert.equal(retried.completed, 1);
