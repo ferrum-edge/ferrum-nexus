@@ -253,10 +253,16 @@ describe('API route security over a listening socket', () => {
       const captcha = await socketRequest(port, 'GET', `${prefix}/auth/captcha`);
       assert.equal(captcha.statusCode, 200, captcha.body);
       assert.equal(captcha.headers['cache-control'], 'no-store');
-      const login = await socketRequest(port, 'POST', `${prefix}/auth/login`, {}, {
-        email: client.user.email,
-        password: TEST_PASSWORD,
-      });
+      const login = await socketRequest(
+        port,
+        'POST',
+        `${prefix}/auth/login`,
+        {},
+        {
+          email: client.user.email,
+          password: TEST_PASSWORD,
+        },
+      );
       assert.equal(login.statusCode, 200, login.body);
       assert.equal(login.headers['cache-control'], 'no-store');
     }
