@@ -2862,6 +2862,12 @@ class MongoStore implements NexusStore {
     list: async (filter, options) => {
       const query: Record<string, unknown> = {};
       if (filter.status !== undefined) query.status = filter.status;
+      if (filter.statuses !== undefined) {
+        query.status = {
+          $in: filter.statuses,
+          ...(filter.status !== undefined ? { $eq: filter.status } : {}),
+        };
+      }
       return this.paginate(
         COLLECTIONS.gatewayTeardownJobs,
         query as Filter<NexusDoc>,
@@ -2944,6 +2950,14 @@ class MongoStore implements NexusStore {
     deleteByUser: async (userId) => {
       const result = await this.col(COLLECTIONS.gatewayTeardownJobs).deleteOne(
         { user_id: userId } as Filter<NexusDoc>,
+        this.opts,
+      );
+      return result.deletedCount > 0;
+    },
+
+    deleteClaimed: async (id) => {
+      const result = await this.col(COLLECTIONS.gatewayTeardownJobs).deleteOne(
+        { _id: id, status: 'sending' } as Filter<NexusDoc>,
         this.opts,
       );
       return result.deletedCount > 0;

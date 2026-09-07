@@ -2375,6 +2375,7 @@ class SqliteStore implements NexusStore {
     list: async (filter, options) => {
       const where = new WhereBuilder()
         .add(filter.status, 'status = ?', filter.status ?? null)
+        .addIn('status', filter.statuses)
         .build();
       const { limit, offset } = page(options);
       const total = queryCount(
@@ -2446,6 +2447,11 @@ class SqliteStore implements NexusStore {
 
     deleteByUser: async (userId) =>
       execute(this.db, 'DELETE FROM gateway_teardown_jobs WHERE user_id = ?', [userId]) > 0,
+
+    deleteClaimed: async (id) =>
+      execute(this.db, "DELETE FROM gateway_teardown_jobs WHERE id = ? AND status = 'sending'", [
+        id,
+      ]) > 0,
   };
 
   /* ── auditLogs ────────────────────────────────────────────────────────── */

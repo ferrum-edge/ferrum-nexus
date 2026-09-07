@@ -453,6 +453,8 @@ export interface EmailOutboxFilter {
 /** Filters for `gatewayTeardownJobs.list`. */
 export interface GatewayTeardownJobFilter {
   status?: GatewayTeardownJobStatus;
+  /** Match any of these statuses, including in-flight work in backlog counts. */
+  statuses?: GatewayTeardownJobStatus[];
 }
 
 /** Filters for `auditLogs.list`. */
@@ -964,6 +966,12 @@ export interface GatewayTeardownJobRepo {
   claimDue(now: IsoTimestamp, limit: number): Promise<GatewayTeardownJobRecord[]>;
   /** Edge confirmed the revocation: `status = 'done'`, `completed_at = at`. */
   markDone(id: Uuid, at: IsoTimestamp): Promise<void>;
+  /**
+   * Delete only this row while it is `sending`. IDs are reused by upsertPending:
+   * the worker must also recheck account status under the lifecycle lease and
+   * inside a transaction before cancelling. Pending replacement work is retained.
+   */
+  deleteClaimed(id: Uuid): Promise<boolean>;
   /** The attempt failed: back to `pending` with a backoff stamp and the reason. */
   reschedule(id: Uuid, nextAttemptAt: IsoTimestamp, lastError: string): Promise<void>;
   /** Return `sending` rows stuck since before `olderThan` to `pending` (crash recovery). */

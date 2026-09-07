@@ -42,12 +42,18 @@ function GatewayTeardownBadge({ userId }: { userId: string }): ReactElement | nu
     <span className="mt-1 flex items-center gap-1.5">
       <Tooltip
         label={
-          teardown.last_error
-            ? `Last attempt failed: ${teardown.last_error}`
-            : 'Queued; the gateway teardown worker is retrying.'
+          teardown.status === 'sending'
+            ? 'Revocation is in progress. Interrupted attempts are recovered automatically; Retry re-drives it now.'
+            : teardown.last_error
+              ? `Last attempt failed: ${teardown.last_error}`
+              : 'Queued; the gateway teardown worker is retrying.'
         }
       >
-        <Badge tone="warning">Gateway revocation pending</Badge>
+        <Badge tone="warning">
+          {teardown.status === 'sending'
+            ? 'Gateway revocation in progress'
+            : 'Gateway revocation pending'}
+        </Badge>
       </Tooltip>
       <Button
         size="sm"

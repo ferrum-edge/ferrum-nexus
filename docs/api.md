@@ -462,8 +462,9 @@ organization.
 
 _admin_ — `Paginated<User>` plus `pending_gateway_teardowns`: the portal-wide
 count of disabled accounts whose gateway credentials have **not** been revoked
-yet. Anything above zero means the teardown worker is still retrying against
-Edge.
+yet. Includes both `pending` jobs (queued or waiting for retry backoff) and
+`sending` jobs (in progress or awaiting stale-claim recovery); excludes `done`.
+The count is independent of user-list filtering and pagination.
 
 | Query             | Type                                                        |
 | ----------------- | ----------------------------------------------------------- |

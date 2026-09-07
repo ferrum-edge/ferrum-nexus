@@ -256,7 +256,8 @@ export interface ListUsersResponse extends Paginated<User> {
   /**
    * Disabled accounts whose gateway credentials have not been revoked yet,
    * across the whole portal rather than this page. Anything above zero means
-   * the teardown worker is still retrying against Edge.
+   * revocation is outstanding: queued/backed-off (`pending`) or in flight
+   * (`sending`), including claims awaiting crash recovery. `done` is excluded.
    */
   pending_gateway_teardowns: number;
 }
