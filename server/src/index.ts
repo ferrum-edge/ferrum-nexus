@@ -66,8 +66,13 @@ import {
 import { buildLoggerOptions, type LoggerOptions } from './lib/logger.js';
 import { createMessagingService, type MessagingService } from './messaging/service.js';
 import { registerAuthPlugin } from './middleware/auth-plugin.js';
+import { isApiRequest } from './middleware/api-route.js';
 import { userOrIpKey } from './middleware/rate-limit-keys.js';
-import { registerErrorHandler } from './middleware/error-handler.js';
+import {
+  handleFrameworkError,
+  registerApiNotFoundRoutes,
+  registerErrorHandler,
+} from './middleware/error-handler.js';
 import { createNotificationsService, type NotificationsService } from './notifications/service.js';
 import { createApiPluginsService, type ApiPluginsService } from './plugins/service.js';
 import { createUpstreamResolver, type UpstreamResolver } from './publishing/oas.js';
@@ -225,6 +230,7 @@ export async function buildServer(
     logger: deps.logger ?? buildLoggerOptions(config),
     trustProxy: fastifyTrustProxy(config.trustedProxies),
     bodyLimit: 4 * 1024 * 1024,
+    frameworkErrors: handleFrameworkError,
   });
 
   /* ── COMPOSITION — services ─────────────────────────────────────────────
@@ -437,7 +443,10 @@ export async function buildServer(
           spaFallback: (_request, reply) =>
             // no-cache: browsers must revalidate the shell so a fresh deploy's
             // hashed asset references are picked up immediately.
-            reply.type('text/html').header('cache-control', 'no-cache').sendFile('index.html'),
+            reply
+              .type('text/html')
+              .header('cache-control', 'no-cache')
+              .sendFile('index.html', { cacheControl: false }),
         }
       : {}),
   });
@@ -483,7 +492,7 @@ export async function buildServer(
   });
 
   app.addHook('onSend', async (request, reply, payload) => {
-    if (request.url.startsWith('/api') && !reply.hasHeader('cache-control')) {
+    if (isApiRequest(request) && !reply.hasHeader('cache-control')) {
       reply.header('cache-control', 'no-store');
     }
     return payload;
@@ -582,6 +591,8 @@ export async function buildServer(
   await app.register(async (scope) => scope.register(credentialsRoutes, { credentials }), {
     prefix: '/api/credentials',
   });
+
+  registerApiNotFoundRoutes(app);
 
   /* ── COMPOSITION — static SPA (production) ──────────────────────────── */
   if (webDist) {

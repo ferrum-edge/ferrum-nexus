@@ -231,10 +231,21 @@ read it to echo it back.
 Enforcement covers every non-`GET`/`HEAD`/`OPTIONS` request under `/api` that
 carries a session. Exempt paths are only the pre-session ones:
 `/api/auth/login`, `/api/auth/register`, `/api/auth/verify-email`,
-`/api/auth/captcha`. **`POST /api/auth/logout` is not exempt** — forcing a
+`/api/auth/resend-verification`, `/api/auth/forgot-password`,
+`/api/auth/reset-password`, `/api/auth/captcha`.
+**`POST /api/auth/logout` is not exempt** — forcing a
 sign-out is a state change like any other. An anonymous mutation is rejected by
 the route's own guard with `401`, not by the CSRF hook, because there is no
 session-bound token to compare against yet.
+
+CSRF scope, exemptions and API cache controls use Fastify's matched route
+identity. API catch-all routes return JSON errors for unknown `/api` paths,
+including `/api` itself, instead of serving the SPA. Authenticated unsafe
+requests to those catch-all routes also require CSRF; with a valid token they
+return `404`. Router-rejected malformed paths return a non-cacheable JSON `400`.
+These controls do not rewrite URLs or change the router's case-sensitive path
+matching, encoded-separator handling or query-string semantics. The `/apix`
+boundary remains outside the API namespace.
 
 Defence in depth: `SameSite=Lax` on both cookies, `frame-ancestors: 'none'` and
 `X-Frame-Options: DENY` (no clickjacking), `formAction: 'self'`.
