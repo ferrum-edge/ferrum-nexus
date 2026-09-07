@@ -17,7 +17,7 @@ const consumer = {
   credentials: { keyauth: [{ key: '[REDACTED]' }] },
   acl_groups: ['approved'],
 };
-const proxy = { id: 'proxy-1', namespace: 'nexus', listen_path: '/billing' };
+const proxy = { id: 'proxy-1', namespace: 'nexus', listen_path: '/billing', plugins: [] };
 const plugin = {
   id: 'plugin-1',
   namespace: 'nexus',
@@ -121,6 +121,47 @@ describe('Edge response contracts over HTTP sockets', () => {
       assert.ok(!JSON.stringify(logs).includes('private-canary'));
     });
   }
+
+  it('requires complete proxy associations while preserving non-HTTP fields', async (t) => {
+    const { client, reply } = await fixture(t);
+    for (const plugins of [
+      undefined,
+      null,
+      {},
+      'not-an-array',
+      [null],
+      ['plugin-1'],
+      [{}],
+      [{ plugin_config_id: null }],
+      [{ plugin_config_id: 1 }],
+      [{ plugin_config_id: '' }],
+      [{ plugin_config_id: 'plugin-1' }, {}],
+    ]) {
+      const incomplete = { ...proxy, plugins };
+      reply.body = JSON.stringify(incomplete);
+      await assert.rejects(() => client.proxies.get(proxy.id), protocolFailure);
+      reply.body = JSON.stringify({
+        data: [incomplete],
+        pagination: { offset: 0, limit: 100, total: 1 },
+      });
+      await assert.rejects(() => client.proxies.list(), protocolFailure);
+    }
+
+    for (const plugins of [[], [{ plugin_config_id: 'plugin-1' }]]) {
+      const streamProxy = {
+        ...proxy,
+        listen_path: null,
+        backend_scheme: 'tcp',
+        backend_host: 'stream.internal',
+        backend_port: 9000,
+        listen_port: 9001,
+        plugins,
+        operator_extension: { preserve: true },
+      };
+      reply.body = JSON.stringify(streamProxy);
+      assert.deepEqual(await client.proxies.get(proxy.id), streamProxy);
+    }
+  });
 
   it('refuses malformed consumer fields rather than inferring missing credentials', async (t) => {
     const { client, reply } = await fixture(t);

@@ -1855,6 +1855,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
           id: newId,
           namespace,
           strip_listen_path: body.strip_listen_path ?? true,
+          plugins: body.plugins ?? [],
           created_at: nowIso(),
           updated_at: nowIso(),
         };
@@ -1889,6 +1890,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         ...body,
         id,
         namespace,
+        plugins: body.plugins === undefined ? existing.plugins : body.plugins,
         // Server-owned like the timestamps: only the spec importer sets or
         // clears the ownership tag, so a replace can neither adopt a proxy into
         // a spec nor orphan one out of it.

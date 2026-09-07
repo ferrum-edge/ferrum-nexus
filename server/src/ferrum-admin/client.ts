@@ -391,9 +391,8 @@ function isProxyBody(value: unknown): boolean {
     (value.hosts === undefined || isStringArray(value.hosts)) &&
     (value.backend_host === undefined || isString(value.backend_host)) &&
     (value.backend_port === undefined || isCount(value.backend_port)) &&
-    (value.plugins === undefined ||
-      (Array.isArray(value.plugins) &&
-        value.plugins.every((item) => isRecord(item) && isIdentifier(item.plugin_config_id))))
+    Array.isArray(value.plugins) &&
+    value.plugins.every((item) => isRecord(item) && isIdentifier(item.plugin_config_id))
   );
 }
 

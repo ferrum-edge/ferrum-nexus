@@ -55,6 +55,13 @@ projections in `src/config/types.rs`.
   unreachable probe. No failure is resource absence.
 
 Resource validation preserves unmodelled fields for whole-resource replacement.
+Proxy responses must include a valid `plugins` association array, including `[]`
+when no plugins are associated. Missing, null or malformed snapshots fail before
+the binder can construct a replacement that drops existing security associations.
+Edge always serializes this array; nullable `listen_path` on non-HTTP proxies and
+unrelated wire fields remain accepted. This response requirement is distinct from
+Edge's PUT behavior: omitting `plugins` preserves associations, while an explicit
+empty array clears them.
 Plugin configurations may legitimately be `null` on Edge for plugins without
 settings; response and write types accept these values. Binder attach, proxy-rebuild
 restore and rollback preserve the operator's actual `null` config. Composed
@@ -67,6 +74,9 @@ hidden by Edge's response projection are not required to appear in the map.
 The socket response matrix lives in
 `server/src/ferrum-admin/client.protocol.test.ts`; binder restoration and rollback
 of nullable configs over HTTP are covered in `server/src/ferrum-admin/client.test.ts`.
+That suite also uses the mock Edge behind an HTTP relay to omit only `plugins`
+from a stored proxy snapshot, proving association fails before any proxy PUT and
+the original security associations remain effective, then succeeds on a complete read.
 The separate
 `server/src/test/gateway-protocol-teardown.test.ts` checks pending work and recovery
 through the existing teardown service and worker. These tests run in hosted CI;

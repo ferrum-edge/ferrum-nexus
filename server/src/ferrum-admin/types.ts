@@ -177,7 +177,8 @@ export interface EdgeProxy {
    */
   allowed_ws_origins?: string[];
   circuit_breaker?: EdgeCircuitBreakerConfig | null;
-  plugins?: EdgePluginAssociation[];
+  /** Always serialized by Edge, including an explicit empty association list. */
+  plugins: EdgePluginAssociation[];
   api_spec_id?: string | null;
   created_at?: string;
   updated_at?: string;
@@ -248,8 +249,8 @@ export interface EdgeProxyReplace {
   /**
    * Which plugin configs this proxy runs. A proxy-scoped config is inert until
    * its id appears here (`plugin_cache.rs`
-   * `scoped_plugin_config_applies_to_proxy`), and an omitted or empty list
-   * detaches every one of them.
+   * `scoped_plugin_config_applies_to_proxy`). An explicit empty list detaches
+   * every association; omitting the field preserves the stored list on Edge.
    */
   plugins?: EdgePluginAssociation[];
   /** Every other field, copied verbatim from the preceding `GET`. */

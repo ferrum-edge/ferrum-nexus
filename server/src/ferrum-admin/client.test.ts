@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { createServer, request } from 'node:http';
 import { after, afterEach, before, describe, it } from 'node:test';
 
 import { SignJWT } from 'jose';
@@ -179,6 +180,101 @@ describe('ferrum admin client', () => {
     await client.proxies.delete('proxy-1');
     assert.equal(await client.proxies.get('proxy-1'), null);
     assert.equal((await client.pluginConfigs.listByProxy('proxy-1')).length, 0);
+  });
+
+  it('refuses incomplete HTTP proxy snapshots before replacing security associations', async (t) => {
+    const proxyId = 'association-snapshot';
+    const proxyPath = `/proxies/${proxyId}`;
+    const binder = createEdgePluginBinder(client);
+    const created = await client.proxies.create({
+      id: proxyId,
+      listen_path: '/association-snapshot',
+      backend_host: 'billing.internal',
+      backend_port: 443,
+    });
+    assert.deepEqual(created.plugins, [], 'an explicit empty snapshot is valid');
+    const auth = await binder.attach(proxyId, 'key_auth', {}, 'operator');
+    const acl = await binder.attach(
+      proxyId,
+      'access_control',
+      { allowed_groups: [aclGroupForApi('api-1')] },
+      'operator',
+    );
+    await binder.associate(proxyId, [auth.id, acl.id], 'operator');
+    const addition = await binder.attach(proxyId, 'basic_auth', null, 'operator');
+    const original = await client.proxies.get(proxyId);
+    assert.ok(original);
+    assert.deepEqual(original.plugins, [
+      { plugin_config_id: auth.id },
+      { plugin_config_id: acl.id },
+    ]);
+    const effectiveIds = () => edge.effectivePluginsForProxy(proxyId).map((config) => config.id);
+    assert.deepEqual(effectiveIds(), [auth.id, acl.id]);
+    const proxyWrites = () =>
+      edge.requests.filter((entry) => entry.method === 'PUT' && entry.path === proxyPath).length;
+    const writesBefore = proxyWrites();
+
+    let omitPlugins = true;
+    let interceptedReads = 0;
+    let relayWrites = 0;
+    const relay = createServer((req, res) => {
+      if (req.method === 'PUT' && req.url === proxyPath) relayWrites += 1;
+      if (omitPlugins && req.method === 'GET' && req.url === proxyPath) {
+        interceptedReads += 1;
+        req.resume();
+        // Copy the actual stored proxy, omitting only its association snapshot.
+        const stored = edge.proxies.get(`nexus/${proxyId}`);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ...stored, plugins: undefined }));
+        return;
+      }
+      const upstream = request(
+        new URL(req.url ?? '/', edge.url),
+        { method: req.method, headers: req.headers },
+        (response) => {
+          res.writeHead(response.statusCode ?? 502, response.headers);
+          response.pipe(res);
+        },
+      );
+      upstream.on('error', () => res.destroy());
+      req.pipe(upstream);
+    });
+    await new Promise<void>((resolve) => relay.listen(0, '127.0.0.1', resolve));
+    const address = relay.address();
+    assert.ok(address && typeof address !== 'string');
+    const relayed = createFerrumAdminClient(configFor(`http://127.0.0.1:${address.port}`));
+    t.after(async () => {
+      await relayed.close();
+      await new Promise<void>((resolve, reject) => {
+        relay.close((error) => (error ? reject(error) : resolve()));
+        relay.closeAllConnections();
+      });
+    });
+    const relayedBinder = createEdgePluginBinder(relayed);
+    await assert.rejects(
+      () => relayedBinder.associate(proxyId, [addition.id], 'operator'),
+      (error: unknown) => {
+        assert.ok(isNexusError(error));
+        assert.equal(error.code, 'EDGE_PROTOCOL_ERROR');
+        assert.equal(error.statusCode, 502);
+        return true;
+      },
+    );
+    assert.equal(interceptedReads, 1);
+    assert.equal(relayWrites, 0, 'no proxy PUT was attempted');
+    assert.equal(proxyWrites(), writesBefore);
+    assert.deepEqual(edge.proxies.get(`nexus/${proxyId}`), original);
+    assert.deepEqual(effectiveIds(), [auth.id, acl.id]);
+
+    omitPlugins = false;
+    await relayedBinder.associate(proxyId, [addition.id], 'operator');
+    assert.equal(relayWrites, 1);
+    assert.equal(proxyWrites(), writesBefore + 1);
+    assert.deepEqual(edge.proxies.get(`nexus/${proxyId}`)?.plugins, [
+      ...original.plugins,
+      { plugin_config_id: addition.id },
+    ]);
+    assert.deepEqual(effectiveIds(), [auth.id, acl.id, addition.id]);
   });
 
   it('preserves null basic_auth config over HTTP through binder restore and rollback', async () => {
