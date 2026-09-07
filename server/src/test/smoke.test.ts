@@ -59,6 +59,7 @@ import {
 import { faultInjectingStore } from './fault-injection.js';
 import { runPasswordChangeContract } from './password-change-contract.js';
 import { runSettingsTransactionContract } from './settings-transaction-contract.js';
+import { runTeardownCancellationContract } from './teardown-cancellation-contract.js';
 
 const SECRET = 'cross-adapter-smoke-secret-0123456789ab';
 
@@ -265,6 +266,7 @@ async function mongoTarget(baseUrl: string): Promise<SmokeTarget> {
 function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): void {
   runPasswordChangeContract(label, makeStore);
   runSettingsTransactionContract(label, makeStore);
+  runTeardownCancellationContract(label, makeStore);
   describe(`store contract — ${label}`, () => {
     let target: SmokeTarget;
     let store: NexusStore;
@@ -2119,6 +2121,54 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         ),
         true,
       );
+    });
+
+    it('gatewayTeardownJobs: cancellation is scoped to a sending row', async () => {
+      const user = await makeUser();
+      const other = await makeUser();
+      const job = await store.gatewayTeardownJobs.upsertPending(user.id, null, nowIso());
+      const unrelated = await store.gatewayTeardownJobs.upsertPending(other.id, null, nowIso());
+      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(job.id), false);
+      await store.gatewayTeardownJobs.claimDue(nowIso(), 100);
+      const reset = await store.gatewayTeardownJobs.upsertPending(user.id, null, nowIso());
+      assert.equal(reset.id, job.id, 'upsert retains the claimed ID');
+      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(job.id), false);
+      assert.deepEqual(await store.gatewayTeardownJobs.findByUser(user.id), reset);
+      await store.gatewayTeardownJobs.claimDue(nowIso(), 100);
+      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(job.id), true);
+      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(job.id), false);
+      assert.equal((await store.gatewayTeardownJobs.findByUser(other.id))?.id, unrelated.id);
+      await store.gatewayTeardownJobs.markDone(unrelated.id, nowIso());
+      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(unrelated.id), false);
+      await store.gatewayTeardownJobs.deleteByUser(other.id);
+    });
+
+    it('gatewayTeardownJobs: filters include sending and backed-off retries', async () => {
+      const users = await Promise.all([makeUser(), makeUser(), makeUser()]);
+      const jobs = await Promise.all(
+        users.map((user) => store.gatewayTeardownJobs.upsertPending(user.id, null, nowIso())),
+      );
+      const [pending, sending, done] = jobs;
+      assert.ok(pending && sending && done);
+      await store.gatewayTeardownJobs.claimDue(nowIso(), 100);
+      await store.gatewayTeardownJobs.reschedule(pending.id, isoInSeconds(600), 'retry later');
+      await store.gatewayTeardownJobs.markDone(done.id, nowIso());
+      const page = await store.gatewayTeardownJobs.list({ statuses: ['pending', 'sending'] });
+      assert.ok(page.items.some((job) => job.id === pending.id));
+      assert.ok(page.items.some((job) => job.id === sending.id));
+      assert.ok(!page.items.some((job) => job.id === done.id));
+      const small = await store.gatewayTeardownJobs.list(
+        { statuses: ['pending', 'sending'] },
+        { limit: 1 },
+      );
+      assert.equal(small.total, page.total);
+      assert.equal((await store.gatewayTeardownJobs.list({ statuses: [] })).total, 0);
+      const intersection = await store.gatewayTeardownJobs.list({
+        status: 'done',
+        statuses: ['pending', 'sending'],
+      });
+      assert.equal(intersection.total, 0);
+      for (const user of users) await store.gatewayTeardownJobs.deleteByUser(user.id);
     });
 
     it('gatewayTeardownJobs: releaseStale returns stuck claims to pending', async () => {

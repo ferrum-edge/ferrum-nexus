@@ -338,7 +338,10 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
     async countPendingGatewayTeardowns(): Promise<number> {
       // Only the total matters here, so the smallest page the store will serve
       // is enough — `total` ignores pagination.
-      const page = await store.gatewayTeardownJobs.list({ status: 'pending' }, { limit: 1 });
+      const page = await store.gatewayTeardownJobs.list(
+        { statuses: ['pending', 'sending'] },
+        { limit: 1 },
+      );
       return page.total;
     },
 
