@@ -65,6 +65,7 @@
 
 import { AuditAction, SYSTEM_ACTOR, type AuditService } from '../audit/service.js';
 import type { GatewayTeardownJobRecord, NexusStore } from '../db/store.js';
+import { createKeyedSerializer, userLifecycleLockKey } from '../lib/keyed-serializer.js';
 import { runGatewayTeardown, type CredentialsService } from './service.js';
 
 /** Poll interval, matching the outbox worker's. */
@@ -175,17 +176,31 @@ export function createTeardownWorker(deps: TeardownWorkerDeps): TeardownWorker {
   const batchSize = deps.batchSize ?? TEARDOWN_BATCH_SIZE;
   const now = deps.now ?? ((): Date => new Date());
   const random = deps.random ?? Math.random;
+  const locks = createKeyedSerializer({ leases: store.leases });
 
   let timer: NodeJS.Timeout | null = null;
   let inFlight: Promise<TeardownTickResult> | null = null;
+
+  async function cancelJob(job: GatewayTeardownJobRecord): Promise<boolean> {
+    // Upserts reuse the row ID. Identity alone cannot distinguish a later
+    // disable, so order the decision with account transitions and re-read
+    // inside the transaction. Acquire the lease before opening the transaction.
+    return locks(userLifecycleLockKey(job.user_id), () =>
+      store.transaction(async (tx) => {
+        const current = await tx.users.findById(job.user_id);
+        if (current?.status === 'disabled') return false;
+        await tx.gatewayTeardownJobs.deleteClaimed(job.id);
+        return true;
+      }),
+    );
+  }
 
   async function runJob(result: TeardownTickResult, job: GatewayTeardownJobRecord): Promise<void> {
     const user = await store.users.findById(job.user_id);
     if (!user || user.status !== 'disabled') {
       // Re-enabled (or deleted) between the claim and now. Stripping the
       // consumer of a live account would be a fresh outage, not a fix.
-      await store.gatewayTeardownJobs.deleteByUser(job.user_id);
-      result.cancelled += 1;
+      if (await cancelJob(job)) result.cancelled += 1;
       return;
     }
 
@@ -209,8 +224,7 @@ export function createTeardownWorker(deps: TeardownWorkerDeps): TeardownWorker {
       // would only queue another refusal, so re-read and drop the job instead.
       const settled = await store.users.findById(job.user_id);
       if (!settled || settled.status !== 'disabled') {
-        await store.gatewayTeardownJobs.deleteByUser(job.user_id);
-        result.cancelled += 1;
+        if (await cancelJob(job)) result.cancelled += 1;
         return;
       }
 

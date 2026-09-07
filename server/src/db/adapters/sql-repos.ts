@@ -2328,6 +2328,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     list: async (filter, options) => {
       const where = new SqlWhereBuilder()
         .add(filter.status, 'status = ?', filter.status ?? null)
+        .addIn('status', filter.statuses)
         .build();
       const { limit, offset } = page(options);
       const total = await queryCount(
@@ -2401,6 +2402,13 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
     deleteByUser: async (userId) =>
       (await execute(exec, 'DELETE FROM gateway_teardown_jobs WHERE user_id = ?', [userId])) > 0,
+
+    deleteClaimed: async (id) =>
+      (await execute(
+        exec,
+        "DELETE FROM gateway_teardown_jobs WHERE id = ? AND status = 'sending'",
+        [id],
+      )) > 0,
   };
 
   /* ── auditLogs ──────────────────────────────────────────────────────── */

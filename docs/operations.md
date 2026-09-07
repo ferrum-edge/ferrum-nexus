@@ -1221,6 +1221,9 @@ Edge lease keeps two instances from running it at the same instant.
 
 There is one row per account (`user_id` is unique), so re-disabling an account
 resets the outstanding job rather than queueing a second revocation.
+The row ID is reused. Worker cancellation rechecks account status under the
+same lifecycle lease as disable/re-enable, inside a transaction, and deletes
+only its `sending` row. A newer disable's pending work remains queued.
 
 ### Which identities a teardown finds
 
@@ -1265,7 +1268,13 @@ SELECT gi.user_id, gi.ferrum_username, gi.ferrum_consumer_id, gi.updated_at
 
 `GET /api/users` (admin) also reports the portal-wide backlog as
 `pending_gateway_teardowns`, and `GET /api/users/:id` carries the per-account
-`gateway_teardown` state.
+`gateway_teardown` state. The backlog includes `pending` and `sending`, including
+backed-off retries and claims awaiting recovery; it excludes `done`. The admin
+Users page retains the badge and **Retry** control during an in-flight attempt,
+labelled _Gateway revocation in progress_. Pending attempts show
+_Gateway revocation pending_ and expose the last failure in the tooltip.
+Teardown jobs have no dead-letter state: repeated failures remain visible and
+retry indefinitely.
 
 **Alert on this `warn` line:**
 
