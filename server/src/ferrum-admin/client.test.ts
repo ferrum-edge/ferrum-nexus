@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { createServer, request } from 'node:http';
 import { after, afterEach, before, describe, it } from 'node:test';
 
 import { SignJWT } from 'jose';
@@ -8,6 +9,8 @@ import { aclGroupForApi } from '@ferrum-nexus/shared';
 
 import type { EdgeConfig } from '../config/index.js';
 import { isNexusError } from '../lib/errors.js';
+import { createEdgePluginBinder } from '../publishing/edge-plugins.js';
+import { handOwnedPlugins } from '../publishing/spec-document.js';
 import { createMockFerrumEdge, type MockFerrumEdge } from '../test/mock-ferrum-edge.js';
 import {
   CONSUMER_SCAN_LIMIT,
@@ -177,6 +180,163 @@ describe('ferrum admin client', () => {
     await client.proxies.delete('proxy-1');
     assert.equal(await client.proxies.get('proxy-1'), null);
     assert.equal((await client.pluginConfigs.listByProxy('proxy-1')).length, 0);
+  });
+
+  it('refuses incomplete HTTP proxy snapshots before replacing security associations', async (t) => {
+    const proxyId = 'association-snapshot';
+    const proxyPath = `/proxies/${proxyId}`;
+    const binder = createEdgePluginBinder(client);
+    const created = await client.proxies.create({
+      id: proxyId,
+      listen_path: '/association-snapshot',
+      backend_host: 'billing.internal',
+      backend_port: 443,
+    });
+    assert.deepEqual(created.plugins, [], 'an explicit empty snapshot is valid');
+    const auth = await binder.attach(proxyId, 'key_auth', {}, 'operator');
+    const acl = await binder.attach(
+      proxyId,
+      'access_control',
+      { allowed_groups: [aclGroupForApi('api-1')] },
+      'operator',
+    );
+    await binder.associate(proxyId, [auth.id, acl.id], 'operator');
+    const addition = await binder.attach(proxyId, 'basic_auth', null, 'operator');
+    const original = await client.proxies.get(proxyId);
+    assert.ok(original);
+    assert.deepEqual(original.plugins, [
+      { plugin_config_id: auth.id },
+      { plugin_config_id: acl.id },
+    ]);
+    const effectiveIds = () => edge.effectivePluginsForProxy(proxyId).map((config) => config.id);
+    assert.deepEqual(effectiveIds(), [auth.id, acl.id]);
+    const proxyWrites = () =>
+      edge.requests.filter((entry) => entry.method === 'PUT' && entry.path === proxyPath).length;
+    const writesBefore = proxyWrites();
+
+    let omitPlugins = true;
+    let interceptedReads = 0;
+    let relayWrites = 0;
+    const relay = createServer((req, res) => {
+      if (req.method === 'PUT' && req.url === proxyPath) relayWrites += 1;
+      if (omitPlugins && req.method === 'GET' && req.url === proxyPath) {
+        interceptedReads += 1;
+        req.resume();
+        // Copy the actual stored proxy, omitting only its association snapshot.
+        const stored = edge.proxies.get(`nexus/${proxyId}`);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ...stored, plugins: undefined }));
+        return;
+      }
+      const upstream = request(
+        new URL(req.url ?? '/', edge.url),
+        { method: req.method, headers: req.headers },
+        (response) => {
+          res.writeHead(response.statusCode ?? 502, response.headers);
+          response.pipe(res);
+        },
+      );
+      upstream.on('error', () => res.destroy());
+      req.pipe(upstream);
+    });
+    await new Promise<void>((resolve) => relay.listen(0, '127.0.0.1', resolve));
+    const address = relay.address();
+    assert.ok(address && typeof address !== 'string');
+    const relayed = createFerrumAdminClient(configFor(`http://127.0.0.1:${address.port}`));
+    t.after(async () => {
+      await relayed.close();
+      await new Promise<void>((resolve, reject) => {
+        relay.close((error) => (error ? reject(error) : resolve()));
+        relay.closeAllConnections();
+      });
+    });
+    const relayedBinder = createEdgePluginBinder(relayed);
+    await assert.rejects(
+      () => relayedBinder.associate(proxyId, [addition.id], 'operator'),
+      (error: unknown) => {
+        assert.ok(isNexusError(error));
+        assert.equal(error.code, 'EDGE_PROTOCOL_ERROR');
+        assert.equal(error.statusCode, 502);
+        return true;
+      },
+    );
+    assert.equal(interceptedReads, 1);
+    assert.equal(relayWrites, 0, 'no proxy PUT was attempted');
+    assert.equal(proxyWrites(), writesBefore);
+    assert.deepEqual(edge.proxies.get(`nexus/${proxyId}`), original);
+    assert.deepEqual(effectiveIds(), [auth.id, acl.id]);
+
+    omitPlugins = false;
+    await relayedBinder.associate(proxyId, [addition.id], 'operator');
+    assert.equal(relayWrites, 1);
+    assert.equal(proxyWrites(), writesBefore + 1);
+    assert.deepEqual(edge.proxies.get(`nexus/${proxyId}`)?.plugins, [
+      ...original.plugins,
+      { plugin_config_id: addition.id },
+    ]);
+    assert.deepEqual(effectiveIds(), [auth.id, acl.id, addition.id]);
+  });
+
+  it('preserves null basic_auth config over HTTP through binder restore and rollback', async () => {
+    const binder = createEdgePluginBinder(client);
+    const proxyBody = {
+      id: 'null-config-proxy',
+      listen_path: '/null-config',
+      backend_host: 'billing.internal',
+      backend_port: 443,
+    };
+    await client.proxies.create(proxyBody);
+    const created = await binder.attach(proxyBody.id, 'basic_auth', null, 'operator');
+    await binder.associate(proxyBody.id, [created.id], 'operator');
+    const fetched = await client.pluginConfigs.get(created.id);
+    assert.ok(fetched);
+    assert.equal(fetched.config, null);
+    const snapshots = handOwnedPlugins(await binder.listByProxy(proxyBody.id));
+    assert.equal(snapshots.length, 1);
+    assert.equal(snapshots[0]?.config, null);
+
+    // A proxy rebuild cascades its configs. Restore must echo the actual null,
+    // keep the config id and make the plugin effective on the recreated proxy.
+    await client.proxies.delete(proxyBody.id);
+    await client.proxies.create(proxyBody);
+    await binder.restorePlugins(proxyBody.id, snapshots, 'operator');
+    assert.equal((await client.pluginConfigs.get(created.id))?.config, null);
+    assert.equal(edge.effectivePluginsForProxy(proxyBody.id)[0]?.id, created.id);
+    assert.equal(edge.effectivePluginsForProxy(proxyBody.id)[0]?.config, null);
+
+    // Object settings mean replace; compensation restores the saved null via
+    // PUT instead of treating it as the optional-plugin removal sentinel.
+    const replaceUndo: (() => Promise<void>)[] = [];
+    await binder.reconcileOptionalPlugin(
+      proxyBody.id,
+      fetched,
+      'basic_auth',
+      {},
+      'operator',
+      replaceUndo,
+    );
+    assert.deepEqual((await client.pluginConfigs.get(created.id))?.config, {});
+    for (const undo of replaceUndo.reverse()) await undo();
+    assert.equal((await client.pluginConfigs.get(created.id))?.config, null);
+
+    // The optional null argument still means remove. Its undo recreates and
+    // associates the saved resource with a null config, rather than deleting it.
+    const removeUndo: (() => Promise<void>)[] = [];
+    await binder.reconcileOptionalPlugin(
+      proxyBody.id,
+      fetched,
+      'basic_auth',
+      null,
+      'operator',
+      removeUndo,
+    );
+    assert.equal(await client.pluginConfigs.get(created.id), null);
+    assert.deepEqual(edge.effectivePluginsForProxy(proxyBody.id), []);
+    for (const undo of removeUndo.reverse()) await undo();
+    const restored = await binder.listByProxy(proxyBody.id);
+    assert.equal(restored.length, 1);
+    assert.equal(restored[0]?.config, null);
+    assert.equal(edge.effectivePluginsForProxy(proxyBody.id)[0]?.config, null);
   });
 
   it('rejects a proxy body carrying an unknown field (Edge denies unknown fields)', async () => {

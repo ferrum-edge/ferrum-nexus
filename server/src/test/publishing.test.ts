@@ -848,6 +848,7 @@ describe('publishing', () => {
         id: noiseProxyId,
         namespace: 'nexus',
         listen_path: '/nexus/pagination-noise',
+        plugins: [],
         backend_host: 'noise.internal',
         backend_port: 443,
       });
@@ -3164,6 +3165,7 @@ describe('publishing', () => {
         name: 'operator-owned',
         namespace: 'nexus',
         listen_path: '/nexus/stage-fail-cutover',
+        plugins: [],
         backend_scheme: 'https',
         backend_host: 'elsewhere.example.com',
         backend_port: 443,

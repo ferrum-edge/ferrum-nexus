@@ -112,7 +112,7 @@ export interface EdgePluginBinder {
   attach(
     proxyId: string,
     pluginName: string,
-    pluginConfig: EdgePluginSettings,
+    pluginConfig: EdgePluginSettings | null,
     subject: string,
     options?: EdgePluginOptions,
   ): Promise<EdgePluginConfig>;
@@ -138,7 +138,11 @@ export interface EdgePluginBinder {
   undoAttach(proxyId: string, configId: string, subject: string): () => Promise<void>;
   /** Undo step for "an associated config was removed": put it back, re-associate. */
   undoRemoval(proxyId: string, config: EdgePluginConfig, subject: string): () => Promise<void>;
-  /** Bring one optional plugin to `pluginSettings`, or remove it when `null`. */
+  /**
+   * Bring one optional plugin to object settings, or remove it when `null`.
+   * This sentinel is distinct from a resource's nullable `config`: restoration
+   * uses attach/replace directly so an operator's null config survives.
+   */
   reconcileOptionalPlugin(
     proxyId: string,
     existing: EdgePluginConfig | undefined,
@@ -156,7 +160,7 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
   function writeBody(
     proxyId: string,
     pluginName: string,
-    pluginConfig: EdgePluginSettings,
+    pluginConfig: EdgePluginSettings | null,
     options: EdgePluginOptions | undefined,
   ): EdgePluginConfigWrite {
     const trigger = options?.trigger ?? null;

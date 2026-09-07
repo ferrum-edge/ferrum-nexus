@@ -133,6 +133,12 @@ validation issues, a conflicting slug, an Edge status).
 | `OUTBOX_FAILURE`     | 500  | Email could not be enqueued, or exhausted its outbox retries.                                                                                                                                                                                                                                                                                                                                                                 |
 | `INTERNAL`           | 500  | Unexpected server-side failure.                                                                                                                                                                                                                                                                                                                                                                                               |
 
+An invalid Edge HTTP/JSON response returns `502 EDGE_PROTOCOL_ERROR` with
+`details: { status, kind: "protocol_error", reason }`. The fixed reason identifies
+the contract violation (for example `invalid_utf8`); response bytes and parser
+exceptions are never included. This can occur on any endpoint calling Edge and
+is not repeated in the per-endpoint notes. See [Edge response contracts](edge-response-contracts.md).
+
 `UNAUTHORIZED`, `FORBIDDEN`, `CSRF_MISMATCH`, `USER_DISABLED` and
 `VALIDATION_FAILED` can come back from any endpoint and are not repeated in the
 per-endpoint notes below.
