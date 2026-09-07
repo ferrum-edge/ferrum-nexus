@@ -43,6 +43,7 @@ import type { NexusStore, SessionRecord, UserRecord } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
 import { csrfMismatch, forbidden, unauthorized, userDisabled } from '../lib/errors.js';
 import { isoInSeconds } from '../lib/ids.js';
+import { isApiRequest } from './api-route.js';
 import { setSessionCookies } from './session-cookies.js';
 
 declare module 'fastify' {
@@ -92,12 +93,6 @@ function safeEqual(a: string | undefined, b: string | undefined): boolean {
     return false;
   }
   return timingSafeEqual(ab, bb);
-}
-
-/** Path of the request without its query string. */
-function pathOf(request: FastifyRequest): string {
-  const index = request.url.indexOf('?');
-  return index === -1 ? request.url : request.url.slice(0, index);
 }
 
 function headerValue(request: FastifyRequest, name: string): string | undefined {
@@ -159,9 +154,9 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (app, options) =
 
   app.addHook('onRequest', async (request: FastifyRequest) => {
     if (SAFE_METHODS.has(request.method)) return;
-    const path = pathOf(request);
-    if (!path.startsWith('/api')) return;
-    if (CSRF_EXEMPT_PATHS.includes(path)) return;
+    if (!isApiRequest(request)) return;
+    // Both scope and exemptions follow the handler Fastify actually selected.
+    if (CSRF_EXEMPT_PATHS.includes(request.routeOptions.url ?? '')) return;
     // Anonymous mutations are rejected by the route's own auth guard with 401;
     // there is no session-bound token to compare against yet.
     if (!request.session) return;
