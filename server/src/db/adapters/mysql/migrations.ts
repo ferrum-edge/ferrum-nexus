@@ -206,19 +206,29 @@ async function applyMigration(
   const statements = splitSqlStatements(migration.sql);
   for (const [step, statement] of statements.entries()) {
     const hash = digest(statement);
+    const legacyHash = digest(normalizedSql(statement));
     const [recorded] = await connection.execute<mysql.RowDataPacket[]>(
       `SELECT statement_hash FROM ${STEPS} WHERE migration_id = ? AND step = ?`,
       [migration.id, step],
     );
     const guard = guards.find((entry) => normalizedSql(entry.sql) === normalizedSql(statement));
     if (recorded[0]) {
-      if (recorded[0].statement_hash !== hash) {
+      const legacyCheckpoint = recorded[0].statement_hash === legacyHash;
+      if (recorded[0].statement_hash !== hash && !legacyCheckpoint) {
         throw new Error(
           `MySQL migration ${migration.id} step ${step} changed after it was applied`,
         );
       }
       if (guard && !(await alreadyApplied(connection, guard)))
         mismatch(guard.table, 'recorded step');
+      // Releases before raw statement hashing checkpointed normalized SQL. Upgrade
+      // that recognized format after validating the statement and its postcondition.
+      if (legacyCheckpoint && legacyHash !== hash) {
+        await connection.execute(
+          `UPDATE ${STEPS} SET statement_hash = ? WHERE migration_id = ? AND step = ?`,
+          [hash, migration.id, step],
+        );
+      }
       continue;
     }
     const checkpoint = () =>

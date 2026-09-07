@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { describe, it } from 'node:test';
 import mysql from 'mysql2/promise';
 import { runMysqlMigrations } from '../db/adapters/mysql/migrations.js';
@@ -137,6 +137,29 @@ async function restartAndVerify(
 }
 
 describe('MySQL committed migration recovery', { skip: !adminUrl, timeout: 600_000 }, () => {
+  it('accepts and upgrades checkpoints written with normalized statement hashes', async () => {
+    await fixture(async (pool) => {
+      await runMysqlMigrations(pool, migrations.slice(0, 1));
+      const migration = migrations[1]!;
+      const statement = splitSqlStatements(migration.sql)[0]!;
+      await pool.query(statement);
+      const legacyHash = createHash('sha256').update(normalize(statement)).digest('hex');
+      await pool.execute(
+        `INSERT INTO schema_migration_steps
+          (migration_id, step, statement_hash, applied_at) VALUES (?, 0, ?, '2026-01-01')`,
+        [migration.id, legacyHash],
+      );
+
+      await runMysqlMigrations(pool, migrations.slice(0, 2));
+
+      const [steps] = await pool.execute<mysql.RowDataPacket[]>(
+        'SELECT statement_hash FROM schema_migration_steps WHERE migration_id = ? AND step = 0',
+        [migration.id],
+      );
+      assert.equal(steps[0]?.statement_hash, createHash('sha256').update(statement).digest('hex'));
+    });
+  });
+
   it('resumes every shipped DDL/backfill boundary and missing ledger without losing rows', async () => {
     const expected = await fixture(async (pool) => {
       await runMysqlMigrations(pool);
