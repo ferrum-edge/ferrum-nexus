@@ -1,0 +1,64 @@
+# Edge client response contracts
+
+The Admin API client validates the status and JSON shape before returning data.
+Protocol failures are `NexusError` instances with code `EDGE_ERROR`, HTTP status
+502, and `details.kind: "protocol_error"`. Diagnostics contain the upstream status
+and a fixed reason, never response bytes, redirect locations or parser messages.
+JSON responses are limited to 16 MiB. Redirects are not followed. The client does
+not retry writes: a failed acknowledgement does not establish whether a write
+was applied.
+
+The contracts were checked against Ferrum Edge commit
+`46782aa7d585357297a20cd63bbce5687fed81cb`: `src/admin/crud.rs` resource handlers,
+`src/admin/mod.rs` credential/namespace/probe handlers,
+`src/admin/api_specs/handlers.rs`, `src/admin/metrics.rs`, and the response
+projections in `src/config/types.rs`.
+
+- `consumers.get`, `proxies.get`, `pluginConfigs.get`: 200 with a resource of the
+  expected shape, identity and namespace. Only HTTP 404 returns `null`; 204,
+  empty/invalid JSON, JSON `null` and other shapes throw.
+- Resource lists and `listNamespaces`: 200 with typed `data` entries and coherent
+  `pagination` counters. Only a valid empty page is empty.
+- `consumers.getByUsername`: valid consumer pages, scanned to completion or a
+  match. `null` requires a completed scan without a match; malformed pages and
+  the existing scan cap throw.
+- `pluginConfigs.listByProxy`: valid plugin pages filtered by proxy. Empty
+  results require valid pages; the existing 50-page scan cap is unchanged.
+- `apiSpecs.findByProxy`: 200 with typed `items`, coherent flat counters and
+  matching `proxy_id`. Only a valid empty filtered page returns `null`; Edge
+  uses `items`, not `data`.
+- Resource/spec/namespace create: 201 with the corresponding resource or spec
+  reference. Empty bodies are invalid. Namespace setup alone tolerates 409/501.
+- Resource/spec replace: 200 with the corresponding resource or spec reference.
+  Empty bodies are invalid.
+- Credential append, replace, delete by index: 200 with a consumer. Even DELETE
+  by index requires a body.
+- Resource delete and whole credential-type delete: 204 with no content. Proxy,
+  plugin and spec deletes additionally tolerate 404; consumer and credential
+  deletes retain their existing error on 404.
+- `health`: 200 or 503 with a health object. A health-shaped 503 means reachable
+  but not ready; malformed responses throw.
+- `live`: 200 with `{"status":"ok"}` or an empty status-only acknowledgement.
+  404 is `false`; invalid bodies and other statuses throw. Current Edge emits
+  the JSON object.
+- `version`: 200 with a nonempty version string. 404/405 return `null` because
+  current Edge has no version endpoint. Other malformed responses throw.
+- `ensureNamespace` lookup: 200 with a namespace object. Only 404 starts
+  creation. Failures remain logged and swallowed because resource writes
+  implicitly create namespaces.
+- Metrics and combined probe: valid telemetry/health response. Their public
+  best-effort contracts remain: failures become unavailable telemetry or an
+  unreachable probe. No failure is resource absence.
+
+Resource validation preserves unmodelled fields for whole-resource replacement.
+Plugin configurations may legitimately be `null` on Edge for plugins without
+settings; these are accepted. The existing `EdgePluginConfig.config` TypeScript
+declaration models only objects and should be widened separately when its callers
+are audited. Consumer credential types hidden by Edge's response projection are
+not required to appear in the map.
+
+The socket response matrix lives in
+`server/src/ferrum-admin/client.protocol.test.ts`. The separate
+`server/src/test/gateway-protocol-teardown.test.ts` checks pending work and recovery
+through the existing teardown service and worker. These tests run in hosted CI;
+no local project execution was used to prepare this change.

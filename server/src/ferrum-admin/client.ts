@@ -4,9 +4,9 @@
  * Everything above it deals in domain objects and `NexusError`s. Failures are
  * classified into exactly two codes:
  *
- * - `EDGE_UNAVAILABLE` — DNS, connect, TLS, socket or timeout. Nothing reached
- *   the gateway.
- * - `EDGE_ERROR` — the gateway answered with a non-2xx status.
+ * - `EDGE_UNAVAILABLE` — DNS, connect, TLS, socket or timeout. A write may
+ *   already have reached the gateway; the client never retries it.
+ * - `EDGE_ERROR` — a refused request or an invalid protocol response.
  *
  * Edge's flat `{"error": "..."}` text is always logged. Whether it is *also*
  * echoed to the caller depends on who the message is about:
@@ -332,6 +332,186 @@ const MAX_PLUGIN_CONFIG_SCAN_PAGES = 50;
 /** Longest Edge validation text echoed back to the caller. */
 const MAX_GATEWAY_MESSAGE = 500;
 
+/** Bound all JSON responses, including intermediary error pages and resource lists. */
+export const ADMIN_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
+
+type BodyValidator = (value: unknown) => boolean;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === 'string';
+}
+
+function isIdentifier(value: unknown): boolean {
+  return isString(value) && value.length > 0;
+}
+
+function isStringArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every(isString);
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isConsumerBody(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isIdentifier(value.id) &&
+    isIdentifier(value.namespace) &&
+    isIdentifier(value.username) &&
+    (value.custom_id == null || isString(value.custom_id)) &&
+    isRecord(value.credentials) &&
+    Object.entries(value.credentials).every(([type, entries]) => {
+      if (!Array.isArray(entries) || entries.length === 0 || !entries.every(isRecord)) return false;
+      if (type === 'keyauth') return entries.every((entry) => isString(entry.key));
+      if (type === 'jwt' || type === 'hmac_auth') {
+        return entries.every((entry) => isString(entry.secret));
+      }
+      if (type === 'mtls_auth') return entries.every((entry) => isString(entry.identity));
+      return true;
+    }) &&
+    isStringArray(value.acl_groups)
+  );
+}
+
+function isProxyBody(value: unknown): boolean {
+  // Preserve unmodelled Edge fields for whole-resource PUTs. Validate the
+  // identity and fields Nexus interprets, without imposing HTTP-only routing.
+  return (
+    isRecord(value) &&
+    isIdentifier(value.id) &&
+    isIdentifier(value.namespace) &&
+    (value.listen_path == null || isString(value.listen_path)) &&
+    (value.hosts === undefined || isStringArray(value.hosts)) &&
+    (value.backend_host === undefined || isString(value.backend_host)) &&
+    (value.backend_port === undefined || isCount(value.backend_port)) &&
+    (value.plugins === undefined ||
+      (Array.isArray(value.plugins) &&
+        value.plugins.every((item) => isRecord(item) && isIdentifier(item.plugin_config_id))))
+  );
+}
+
+function isPluginBody(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isIdentifier(value.id) &&
+    isIdentifier(value.namespace) &&
+    isIdentifier(value.plugin_name) &&
+    isString(value.scope) &&
+    ['global', 'proxy', 'proxy_group'].includes(value.scope) &&
+    (value.proxy_id == null || isIdentifier(value.proxy_id)) &&
+    typeof value.enabled === 'boolean' &&
+    // Edge permits null for plugins with no settings (e.g. basic_auth).
+    (value.config === null || isRecord(value.config))
+  );
+}
+
+function isSpecRefBody(value: unknown): boolean {
+  return isRecord(value) && isIdentifier(value.id) && isIdentifier(value.proxy_id);
+}
+
+function isPageBody(value: unknown, item: BodyValidator): boolean {
+  if (!isRecord(value) || !Array.isArray(value.data) || !value.data.every(item)) return false;
+  const page = value.pagination;
+  return (
+    isRecord(page) &&
+    isCount(page.offset) &&
+    isCount(page.limit) &&
+    page.limit > 0 &&
+    isCount(page.total) &&
+    value.data.length <= page.limit &&
+    value.data.length === Math.min(page.limit, Math.max(0, page.total - page.offset))
+  );
+}
+
+interface ResponseContract {
+  statuses: number[];
+  body: BodyValidator;
+  /** Only an acknowledged no-content write or the status-only liveness probe. */
+  empty?: 'void' | 'live';
+}
+
+/** Endpoint contracts checked against Edge's admin handlers, not generic HTTP success. */
+function responseContract(method: string, path: string): ResponseContract {
+  const parts = path.split('/').slice(1);
+  const resource = parts[0];
+  const credentials = resource === 'consumers' && parts[2] === 'credentials';
+  if (method === 'DELETE' && !(credentials && parts.length === 5)) {
+    return { statuses: [204], body: () => false, empty: 'void' };
+  }
+  let body: BodyValidator;
+  switch (resource) {
+    case 'consumers':
+      body = isConsumerBody;
+      break;
+    case 'proxies':
+      body = isProxyBody;
+      break;
+    case 'plugins':
+      body = isPluginBody;
+      break;
+    case 'namespaces':
+      body = (value) => isRecord(value) && isIdentifier(value.name);
+      break;
+    case 'api-specs':
+      body = isSpecRefBody;
+      if (method === 'GET') {
+        body = (value) =>
+          isRecord(value) &&
+          Array.isArray(value.items) &&
+          value.items.every(isSpecRefBody) &&
+          isCount(value.limit) &&
+          value.limit > 0 &&
+          isCount(value.offset) &&
+          isCount(value.total) &&
+          value.items.length <= value.limit &&
+          value.items.length === Math.min(value.limit, Math.max(0, value.total - value.offset));
+      }
+      break;
+    case 'health':
+      return {
+        statuses: [200, 503],
+        body: (value) =>
+          isRecord(value) &&
+          isIdentifier(value.status) &&
+          (value.ready === undefined || typeof value.ready === 'boolean') &&
+          (value.mode === undefined || isString(value.mode)) &&
+          (value.admin_writes_enabled === undefined ||
+            typeof value.admin_writes_enabled === 'boolean'),
+      };
+    case 'live':
+      return {
+        statuses: [200],
+        body: (value) => isRecord(value) && value.status === 'ok',
+        empty: 'live',
+      };
+    case 'version':
+      return { statuses: [200], body: (value) => isRecord(value) && isIdentifier(value.version) };
+    case 'admin':
+      return {
+        statuses: [200],
+        body: (value) =>
+          isRecord(value) &&
+          isRecord(value.gateway) &&
+          Array.isArray(value.circuit_breakers) &&
+          isRecord(value.health_check) &&
+          Array.isArray(value.health_check.unhealthy_targets),
+      };
+    default:
+      throw internal('Missing Ferrum Edge response contract');
+  }
+  const list = method === 'GET' && parts.length === (resource === 'plugins' ? 2 : 1);
+  if (list && resource !== 'api-specs') {
+    const item = resource === 'namespaces' ? isString : body;
+    body = (value) => isPageBody(value, item);
+  }
+  return { statuses: [method === 'POST' && !credentials ? 201 : 200], body };
+}
+
 /**
  * How long a metrics read is reused before Edge is asked again.
  *
@@ -359,12 +539,14 @@ interface CacheEntry<T> {
   expiresAt: number;
 }
 
+class ResponseTooLargeError extends Error {}
+
 async function readBoundedBody(body: AsyncIterable<Uint8Array>, maxBytes: number): Promise<string> {
   const chunks: Uint8Array[] = [];
   let bytes = 0;
   for await (const chunk of body) {
     bytes += chunk.byteLength;
-    if (bytes > maxBytes) throw new Error(`response exceeded ${maxBytes} bytes`);
+    if (bytes > maxBytes) throw new ResponseTooLargeError('Response exceeded the byte limit');
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString('utf8');
@@ -492,6 +674,7 @@ export function createFerrumAdminClient(
     path: string,
     options: CallOptions = {},
   ): Promise<T | null> {
+    const contract = responseContract(method, path);
     const token = await minter.getToken(options.subject ?? DEFAULT_ADMIN_SUBJECT);
     const url = urlFor(path, options.query);
     const headers: Record<string, string> = {
@@ -502,21 +685,26 @@ export function createFerrumAdminClient(
     const hasBody = options.body !== undefined;
     if (hasBody) headers['content-type'] = 'application/json';
 
-    let statusCode: number;
+    let statusCode = 0;
     let raw: string;
     try {
       const response = await request(url, {
         method,
         headers,
         dispatcher,
+        // undici.request does not follow redirects; do not install a redirect interceptor.
         ...(hasBody ? { body: JSON.stringify(options.body) } : {}),
         signal: AbortSignal.timeout(config.timeoutMs),
       });
       statusCode = response.statusCode;
-      raw = options.maxResponseBytes
-        ? await readBoundedBody(response.body, options.maxResponseBytes)
-        : await response.body.text();
+      raw = await readBoundedBody(
+        response.body,
+        options.maxResponseBytes ?? ADMIN_RESPONSE_MAX_BYTES,
+      );
     } catch (cause) {
+      if (cause instanceof ResponseTooLargeError) {
+        throw protocolError(statusCode, 'response_too_large', method, path);
+      }
       logger.error(
         { method, path, code: (cause as NodeJS.ErrnoException).code ?? null },
         'Ferrum Edge Admin API is unreachable',
@@ -526,24 +714,80 @@ export function createFerrumAdminClient(
     }
 
     if (statusCode === 404 && options.allow404) return null;
-    if (statusCode === 204 || raw.trim() === '') {
-      if (statusCode >= 400 && !(options.tolerate ?? []).includes(statusCode)) {
-        throw classify(statusCode, null, method, path);
-      }
+    // These are explicit best-effort namespace/version exceptions, never
+    // resource reads. Health's 503 must still satisfy its full body contract.
+    if ((options.tolerate ?? []).includes(statusCode) && !contract.statuses.includes(statusCode)) {
       return null;
     }
-
-    let parsed: unknown;
+    if (statusCode < 200 || (statusCode >= 300 && statusCode < 400)) {
+      throw protocolError(statusCode, 'unexpected_status', method, path);
+    }
+    let parsed: unknown = null;
+    let validJson = false;
     try {
       parsed = JSON.parse(raw);
+      validJson = true;
     } catch {
-      parsed = null;
+      // Only error-status classification may inspect an absent JSON body.
     }
-
-    if (statusCode >= 400 && !(options.tolerate ?? []).includes(statusCode)) {
+    if (statusCode >= 400 && !contract.statuses.includes(statusCode)) {
       throw classify(statusCode, parsed, method, path);
     }
+    if (!contract.statuses.includes(statusCode)) {
+      throw protocolError(statusCode, 'unexpected_status', method, path);
+    }
+    if (raw.trim() === '') {
+      if (contract.empty === 'void') return null;
+      if (contract.empty === 'live') return { status: 'ok' } as T;
+      throw protocolError(statusCode, 'empty_body', method, path);
+    }
+    if (!validJson) throw protocolError(statusCode, 'invalid_json', method, path);
+    if (!contract.body(parsed)) {
+      throw protocolError(statusCode, 'invalid_body', method, path);
+    }
+    if (isRecord(parsed)) {
+      const scoped = /^\/(consumers|proxies|plugins\/config)(?:\/|$)/.exec(path);
+      if (scoped) {
+        const rows = Array.isArray(parsed.data) ? parsed.data : [parsed];
+        const id = path.slice(scoped[1]!.length + 2).split('/')[0];
+        if (
+          rows.some((row: unknown) => !isRecord(row) || row.namespace !== namespace) ||
+          (id && parsed.id !== decodeURIComponent(id))
+        ) {
+          throw protocolError(statusCode, 'resource_mismatch', method, path);
+        }
+      }
+      if (method === 'GET' && isRecord(parsed.pagination)) {
+        if (parsed.pagination.offset !== (options.query?.offset ?? 0)) {
+          throw protocolError(statusCode, 'page_mismatch', method, path);
+        }
+      }
+      if (path === '/api-specs' && method === 'GET' && Array.isArray(parsed.items)) {
+        if (
+          parsed.offset !== (options.query?.offset ?? 0) ||
+          parsed.items.some(
+            (item: unknown) => isRecord(item) && item.proxy_id !== options.query?.proxy_id,
+          )
+        ) {
+          throw protocolError(statusCode, 'page_mismatch', method, path);
+        }
+      }
+    }
     return parsed as T;
+  }
+
+  function protocolError(status: number, reason: string, method: string, path: string): Error {
+    // Never log response bytes, Location, parser exceptions, JWTs or request
+    // bodies. Even a bounded prefix can expose credentials or an HTML login.
+    logger.error(
+      { method, path, status, reason },
+      'Ferrum Edge Admin API returned an invalid protocol response',
+    );
+    return edgeError('The gateway returned an invalid protocol response', {
+      status,
+      kind: 'protocol_error',
+      reason,
+    });
   }
 
   function classify(status: number, parsed: unknown, method: string, path: string): Error {
@@ -731,37 +975,26 @@ export function createFerrumAdminClient(
       const result = await callRequired<EdgePage<T>>('GET', path, {
         query: { limit: pageSize, offset },
       });
-      const items = Array.isArray(result.data) ? result.data : [];
+      // Both scan sizes are within Edge's documented cap. A different size
+      // would make the next offset skip rows and could falsely imply absence.
+      if (result.pagination.limit !== pageSize) {
+        throw protocolError(200, 'page_mismatch', 'GET', path);
+      }
+      const items = result.data;
       if (!visit(items)) return true;
       if (items.length === 0 || items.length < pageSize) return true;
-      const total = result.pagination?.total ?? items.length;
+      const total = result.pagination.total;
       if (offset + items.length >= total) return true;
     }
     return false;
-  }
-
-  /** Whether an Edge response body is a `HealthResponse` and not an error. */
-  function isHealthBody(value: unknown): value is EdgeHealth {
-    return (
-      typeof value === 'object' &&
-      value !== null &&
-      typeof (value as { status?: unknown }).status === 'string'
-    );
   }
 
   return {
     namespace,
 
     async health(): Promise<EdgeHealth> {
-      // `503` + a full payload is Edge saying "reachable, not ready"; a `503`
-      // carrying anything else is a real failure and still classifies.
-      const parsed = await call<unknown>('GET', '/health', { tolerate: [503] });
-      if (isHealthBody(parsed)) return parsed;
-      logger.error(
-        { path: '/health', upstream: (parsed as { error?: unknown } | null)?.error ?? null },
-        'Ferrum Edge health endpoint returned an unrecognised body',
-      );
-      throw edgeError('The gateway health endpoint did not return a health payload');
+      // `503` is reachable-but-not-ready only with a valid health payload.
+      return callRequired<EdgeHealth>('GET', '/health');
     },
 
     async live(): Promise<boolean> {
@@ -817,7 +1050,7 @@ export function createFerrumAdminClient(
       const page = await callRequired<EdgePage<string>>('GET', '/namespaces', {
         query: { limit: 1000 },
       });
-      return Array.isArray(page.data) ? page.data : [];
+      return page.data;
     },
 
     async ensureNamespace(description?: string): Promise<void> {
@@ -1038,7 +1271,7 @@ export function createFerrumAdminClient(
         const page = await callRequired<EdgeApiSpecPage>('GET', '/api-specs', {
           query: { proxy_id: proxyId, limit: 1 },
         });
-        return (Array.isArray(page.items) ? page.items[0] : undefined) ?? null;
+        return page.items[0] ?? null;
       },
       async delete(id: string, subject?: string): Promise<void> {
         await call('DELETE', `/api-specs/${encodeURIComponent(id)}`, { subject, allow404: true });
