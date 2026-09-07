@@ -29,7 +29,12 @@ const plugin = {
 };
 
 async function fixture(t: TestContext) {
-  const reply = { status: 200, body: '', location: '/redirect-target', disconnect: false };
+  const reply: { status: number; body: string | Buffer; location: string; disconnect: boolean } = {
+    status: 200,
+    body: '',
+    location: '/redirect-target',
+    disconnect: false,
+  };
   const requests: string[] = [];
   const logs: unknown[] = [];
   const server = createServer((req, res) => {
@@ -78,7 +83,7 @@ async function fixture(t: TestContext) {
 
 function protocolFailure(error: unknown): boolean {
   assert.ok(isNexusError(error));
-  assert.equal(error.code, 'EDGE_ERROR');
+  assert.equal(error.code, 'EDGE_PROTOCOL_ERROR');
   assert.equal(error.statusCode, 502);
   assert.equal((error.details as { kind: string }).kind, 'protocol_error');
   return true;
@@ -203,11 +208,14 @@ describe('Edge response contracts over HTTP sockets', () => {
     await client.proxies.delete('proxy-1');
     await client.pluginConfigs.delete('plugin-1');
     await client.apiSpecs.delete('spec-1');
-    await assert.rejects(() => client.consumers.delete('consumer-1'), (error: unknown) => {
-      assert.ok(isNexusError(error));
-      assert.equal(error.code, 'EDGE_ERROR');
-      return true;
-    });
+    await assert.rejects(
+      () => client.consumers.delete('consumer-1'),
+      (error: unknown) => {
+        assert.ok(isNexusError(error));
+        assert.equal(error.code, 'EDGE_ERROR');
+        return true;
+      },
+    );
   });
 
   it('requires write acknowledgements and never replays uncertain writes', async (t) => {
@@ -278,16 +286,85 @@ describe('Edge response contracts over HTTP sockets', () => {
     assert.equal((await client.metrics.backendState('proxy-1')).available, false);
   });
 
+  it('rejects invalid UTF-8 credentials without exposure or replay', async (t) => {
+    const { client, reply, requests, logs } = await fixture(t);
+    const prefix = JSON.stringify(consumer).replace('[REDACTED]', 'private-canary');
+    const position = prefix.indexOf('private-canary') + 'private-canary'.length;
+    reply.body = Buffer.concat([
+      Buffer.from(prefix.slice(0, position)),
+      Buffer.from([0xff]),
+      Buffer.from(prefix.slice(position)),
+    ]);
+    for (const operation of [
+      () => client.consumers.get('consumer-1'),
+      () => client.consumers.addCredential('consumer-1', 'keyauth', { key: 'request-canary' }),
+    ]) {
+      const before = requests.length;
+      await assert.rejects(operation, (error: unknown) => {
+        protocolFailure(error);
+        assert.ok(isNexusError(error));
+        assert.deepEqual(error.details, {
+          status: 200,
+          kind: 'protocol_error',
+          reason: 'invalid_utf8',
+        });
+        assert.equal(error.cause, undefined, 'decoder exceptions must not escape');
+        assert.ok(!JSON.stringify(error.toBody()).includes('canary'));
+        return true;
+      });
+      assert.equal(requests.length, before + 1, 'no automatic replay after a bad acknowledgement');
+    }
+    assert.ok(!JSON.stringify(logs).includes('canary'));
+  });
+
+  it('preserves UTF-8 and JSON escapes, safe absence and text metrics compatibility', async (t) => {
+    const { client, reply } = await fixture(t);
+    const valid = { ...consumer, username: 'alice-\u00e9-\ud83d\udd11-\ufffd' };
+    reply.body = Buffer.from(JSON.stringify(valid));
+    assert.deepEqual(await client.consumers.get('consumer-1'), valid);
+    reply.body = JSON.stringify(consumer).replace('alice', 'alice-\\ud800');
+    assert.equal((await client.consumers.get('consumer-1'))?.username, 'alice-\ud800');
+
+    reply.body = Buffer.from([0xff]);
+    reply.status = 404;
+    assert.equal(await client.consumers.get('consumer-1'), null);
+    assert.equal(await client.live(), false);
+    await client.pluginConfigs.delete('plugin-1');
+    reply.status = 405;
+    assert.equal(await client.version(), null);
+
+    reply.status = 200;
+    reply.body = Buffer.concat([
+      Buffer.from('# comment '),
+      Buffer.from([0xff]),
+      Buffer.from('\nferrum_requests_total{proxy_id="proxy-1",method="GET",status_code="200"} 3\n'),
+    ]);
+    const metrics = await client.metrics.scrapeProxy('proxy-1');
+    assert.equal(metrics.available, true);
+    assert.equal(metrics.requests.total, 3);
+
+    reply.status = 503;
+    reply.body = Buffer.concat([
+      Buffer.from('{"status":"draining'),
+      Buffer.from([0xff]),
+      Buffer.from('","ready":false}'),
+    ]);
+    await assert.rejects(() => client.health(), protocolFailure);
+  });
+
   it('bounds JSON buffering and emits only sanitized protocol diagnostics', async (t) => {
     const { client, reply, logs } = await fixture(t);
     reply.body = 'private-canary'.padEnd(ADMIN_RESPONSE_MAX_BYTES + 1, 'x');
-    await assert.rejects(() => client.consumers.get('consumer-1'), (error: unknown) => {
-      protocolFailure(error);
-      assert.ok(isNexusError(error));
-      assert.equal((error.details as { reason: string }).reason, 'response_too_large');
-      assert.ok(!JSON.stringify(error.toBody()).includes('private-canary'));
-      return true;
-    });
+    await assert.rejects(
+      () => client.consumers.get('consumer-1'),
+      (error: unknown) => {
+        protocolFailure(error);
+        assert.ok(isNexusError(error));
+        assert.equal((error.details as { reason: string }).reason, 'response_too_large');
+        assert.ok(!JSON.stringify(error.toBody()).includes('private-canary'));
+        return true;
+      },
+    );
     assert.ok(!JSON.stringify(logs).includes('private-canary'));
   });
 });

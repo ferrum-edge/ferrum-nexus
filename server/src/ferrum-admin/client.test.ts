@@ -8,6 +8,8 @@ import { aclGroupForApi } from '@ferrum-nexus/shared';
 
 import type { EdgeConfig } from '../config/index.js';
 import { isNexusError } from '../lib/errors.js';
+import { createEdgePluginBinder } from '../publishing/edge-plugins.js';
+import { handOwnedPlugins } from '../publishing/spec-document.js';
 import { createMockFerrumEdge, type MockFerrumEdge } from '../test/mock-ferrum-edge.js';
 import {
   CONSUMER_SCAN_LIMIT,
@@ -177,6 +179,68 @@ describe('ferrum admin client', () => {
     await client.proxies.delete('proxy-1');
     assert.equal(await client.proxies.get('proxy-1'), null);
     assert.equal((await client.pluginConfigs.listByProxy('proxy-1')).length, 0);
+  });
+
+  it('preserves null basic_auth config over HTTP through binder restore and rollback', async () => {
+    const binder = createEdgePluginBinder(client);
+    const proxyBody = {
+      id: 'null-config-proxy',
+      listen_path: '/null-config',
+      backend_host: 'billing.internal',
+      backend_port: 443,
+    };
+    await client.proxies.create(proxyBody);
+    const created = await binder.attach(proxyBody.id, 'basic_auth', null, 'operator');
+    await binder.associate(proxyBody.id, [created.id], 'operator');
+    const fetched = await client.pluginConfigs.get(created.id);
+    assert.ok(fetched);
+    assert.equal(fetched.config, null);
+    const snapshots = handOwnedPlugins(await binder.listByProxy(proxyBody.id));
+    assert.equal(snapshots.length, 1);
+    assert.equal(snapshots[0]?.config, null);
+
+    // A proxy rebuild cascades its configs. Restore must echo the actual null,
+    // keep the config id and make the plugin effective on the recreated proxy.
+    await client.proxies.delete(proxyBody.id);
+    await client.proxies.create(proxyBody);
+    await binder.restorePlugins(proxyBody.id, snapshots, 'operator');
+    assert.equal((await client.pluginConfigs.get(created.id))?.config, null);
+    assert.equal(edge.effectivePluginsForProxy(proxyBody.id)[0]?.id, created.id);
+    assert.equal(edge.effectivePluginsForProxy(proxyBody.id)[0]?.config, null);
+
+    // Object settings mean replace; compensation restores the saved null via
+    // PUT instead of treating it as the optional-plugin removal sentinel.
+    const replaceUndo: (() => Promise<void>)[] = [];
+    await binder.reconcileOptionalPlugin(
+      proxyBody.id,
+      fetched,
+      'basic_auth',
+      {},
+      'operator',
+      replaceUndo,
+    );
+    assert.deepEqual((await client.pluginConfigs.get(created.id))?.config, {});
+    for (const undo of replaceUndo.reverse()) await undo();
+    assert.equal((await client.pluginConfigs.get(created.id))?.config, null);
+
+    // The optional null argument still means remove. Its undo recreates and
+    // associates the saved resource with a null config, rather than deleting it.
+    const removeUndo: (() => Promise<void>)[] = [];
+    await binder.reconcileOptionalPlugin(
+      proxyBody.id,
+      fetched,
+      'basic_auth',
+      null,
+      'operator',
+      removeUndo,
+    );
+    assert.equal(await client.pluginConfigs.get(created.id), null);
+    assert.deepEqual(edge.effectivePluginsForProxy(proxyBody.id), []);
+    for (const undo of removeUndo.reverse()) await undo();
+    const restored = await binder.listByProxy(proxyBody.id);
+    assert.equal(restored.length, 1);
+    assert.equal(restored[0]?.config, null);
+    assert.equal(edge.effectivePluginsForProxy(proxyBody.id)[0]?.config, null);
   });
 
   it('rejects a proxy body carrying an unknown field (Edge denies unknown fields)', async () => {

@@ -2,11 +2,12 @@
  * The only module in Nexus that speaks the Ferrum Edge Admin API's HTTP shape.
  *
  * Everything above it deals in domain objects and `NexusError`s. Failures are
- * classified into exactly two codes:
+ * classified into three codes:
  *
  * - `EDGE_UNAVAILABLE` — DNS, connect, TLS, socket or timeout. A write may
  *   already have reached the gateway; the client never retries it.
- * - `EDGE_ERROR` — a refused request or an invalid protocol response.
+ * - `EDGE_ERROR` — a refused request.
+ * - `EDGE_PROTOCOL_ERROR` — an invalid HTTP/JSON response.
  *
  * Edge's flat `{"error": "..."}` text is always logged. Whether it is *also*
  * echoed to the caller depends on who the message is about:
@@ -28,6 +29,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { TextDecoder } from 'node:util';
 
 import { Agent, request, type Dispatcher } from 'undici';
 
@@ -35,7 +37,7 @@ import type { EdgeCredentialType } from '@ferrum-nexus/shared';
 
 import type { EdgeConfig } from '../config/index.js';
 import type { LeaseRepo } from '../db/store.js';
-import { conflict, edgeError, edgeUnavailable, internal } from '../lib/errors.js';
+import { conflict, edgeError, edgeUnavailable, internal, NexusError } from '../lib/errors.js';
 import { createKeyedSerializer, type KeyedSerializer } from '../lib/keyed-serializer.js';
 import { createAdminTokenMinter, DEFAULT_ADMIN_SUBJECT, type AdminTokenMinter } from './jwt.js';
 import { parsePrometheusText, type PrometheusSample } from './prometheus.js';
@@ -541,7 +543,7 @@ interface CacheEntry<T> {
 
 class ResponseTooLargeError extends Error {}
 
-async function readBoundedBody(body: AsyncIterable<Uint8Array>, maxBytes: number): Promise<string> {
+async function readBoundedBody(body: AsyncIterable<Uint8Array>, maxBytes: number): Promise<Buffer> {
   const chunks: Uint8Array[] = [];
   let bytes = 0;
   for await (const chunk of body) {
@@ -549,7 +551,7 @@ async function readBoundedBody(body: AsyncIterable<Uint8Array>, maxBytes: number
     if (bytes > maxBytes) throw new ResponseTooLargeError('Response exceeded the byte limit');
     chunks.push(chunk);
   }
-  return Buffer.concat(chunks).toString('utf8');
+  return Buffer.concat(chunks);
 }
 
 /** An unavailable scrape: zeroed rather than absent, so callers never branch. */
@@ -686,7 +688,7 @@ export function createFerrumAdminClient(
     if (hasBody) headers['content-type'] = 'application/json';
 
     let statusCode = 0;
-    let raw: string;
+    let bytes: Buffer;
     try {
       const response = await request(url, {
         method,
@@ -697,7 +699,7 @@ export function createFerrumAdminClient(
         signal: AbortSignal.timeout(config.timeoutMs),
       });
       statusCode = response.statusCode;
-      raw = await readBoundedBody(
+      bytes = await readBoundedBody(
         response.body,
         options.maxResponseBytes ?? ADMIN_RESPONSE_MAX_BYTES,
       );
@@ -721,6 +723,21 @@ export function createFerrumAdminClient(
     }
     if (statusCode < 200 || (statusCode >= 300 && statusCode < 400)) {
       throw protocolError(statusCode, 'unexpected_status', method, path);
+    }
+    let raw: string;
+    if (contract.statuses.includes(statusCode)) {
+      try {
+        // Decode only after absence/tolerated-status handling, and outside the
+        // transport catch. Replacement characters could rewrite credentials or
+        // identities. Keep BOM handling unchanged: JSON.parse still rejects it.
+        raw = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+      } catch {
+        throw protocolError(statusCode, 'invalid_utf8', method, path);
+      }
+    } else {
+      // Preserve existing diagnostics for rejected requests; no resource body
+      // from this branch can be returned as a successful acknowledgement.
+      raw = bytes.toString('utf8');
     }
     let parsed: unknown = null;
     let validJson = false;
@@ -776,18 +793,18 @@ export function createFerrumAdminClient(
     return parsed as T;
   }
 
-  function protocolError(status: number, reason: string, method: string, path: string): Error {
+  function protocolError(status: number, reason: string, method: string, path: string): NexusError {
     // Never log response bytes, Location, parser exceptions, JWTs or request
     // bodies. Even a bounded prefix can expose credentials or an HTML login.
     logger.error(
       { method, path, status, reason },
       'Ferrum Edge Admin API returned an invalid protocol response',
     );
-    return edgeError('The gateway returned an invalid protocol response', {
-      status,
-      kind: 'protocol_error',
-      reason,
-    });
+    return new NexusError(
+      'EDGE_PROTOCOL_ERROR',
+      'The gateway returned an invalid protocol response',
+      { status, kind: 'protocol_error', reason },
+    );
   }
 
   function classify(status: number, parsed: unknown, method: string, path: string): Error {
@@ -858,7 +875,7 @@ export function createFerrumAdminClient(
       });
       return {
         statusCode: response.statusCode,
-        body: await readBoundedBody(response.body, METRICS_RESPONSE_MAX_BYTES),
+        body: (await readBoundedBody(response.body, METRICS_RESPONSE_MAX_BYTES)).toString('utf8'),
       };
     } catch (cause) {
       logger.warn(

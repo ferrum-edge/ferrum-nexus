@@ -996,6 +996,12 @@ this namespace`. A provider cannot fix a publish they cannot read the reason
 The split is enforced in one place — `classify()` in `ferrum-admin/client.ts`.
 Nothing else in the codebase reads an Edge error body.
 
+Invalid HTTP/JSON responses instead use `EDGE_PROTOCOL_ERROR`. These diagnostics
+contain only the upstream status and a fixed reason; response bytes and parser
+or decoder exceptions are never logged or returned. Successful JSON responses
+are decoded as strict UTF-8 so malformed bytes cannot silently rewrite an identity
+or credential field. See [Edge response contracts](edge-response-contracts.md).
+
 ---
 
 ## 10. Audit event catalog

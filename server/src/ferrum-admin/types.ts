@@ -415,7 +415,7 @@ export interface EdgeOpenapiValidatorConfig {
   };
 }
 
-/** Any plugin config body Nexus writes. */
+/** Object settings Nexus composes; optional-plugin reconciliation reserves null for removal. */
 export type EdgePluginSettings =
   | EdgeKeyAuthConfig
   | EdgeBasicAuthConfig
@@ -450,7 +450,8 @@ export interface EdgePluginConfig {
   id: string;
   namespace: string;
   plugin_name: string;
-  config: Record<string, unknown>;
+  /** Edge permits null for plugins without settings, including basic_auth. */
+  config: Record<string, unknown> | null;
   scope: EdgePluginScope;
   proxy_id?: string | null;
   enabled: boolean;
@@ -471,7 +472,8 @@ export interface EdgePluginConfigWrite {
   /** Required when `scope === 'proxy'`; must be absent otherwise. */
   proxy_id?: string | null;
   enabled: boolean;
-  config: EdgePluginSettings;
+  /** Preserve a null config when echoing or restoring an Edge resource. */
+  config: EdgePluginSettings | null;
   /**
    * Execution priority override. Nexus never *chooses* one — the plugin
    * ordering is the gateway's — but a proxy rebuild has to carry an operator's

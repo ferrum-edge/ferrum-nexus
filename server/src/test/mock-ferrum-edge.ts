@@ -2275,7 +2275,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
           id: typeof body.id === 'string' && body.id !== '' ? body.id : randomUUID(),
           namespace,
           enabled: body.enabled ?? true,
-          config: body.config ?? {},
+          config: body.config === undefined ? {} : body.config,
           created_at: nowIso(),
           updated_at: nowIso(),
         };

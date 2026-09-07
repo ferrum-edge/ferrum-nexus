@@ -1,9 +1,13 @@
 # Edge client response contracts
 
 The Admin API client validates the status and JSON shape before returning data.
-Protocol failures are `NexusError` instances with code `EDGE_ERROR`, HTTP status
+Protocol failures are `NexusError` instances with code `EDGE_PROTOCOL_ERROR`, HTTP status
 502, and `details.kind: "protocol_error"`. Diagnostics contain the upstream status
 and a fixed reason, never response bytes, redirect locations or parser messages.
+Successful JSON responses must contain valid UTF-8 bytes; decoding fails closed
+instead of replacing malformed bytes inside identities or credentials. Legal JSON
+Unicode escapes retain their existing semantics. Safe absence and tolerated-status
+exceptions run before decoding; text metrics retain their existing decoding.
 JSON responses are limited to 16 MiB. Redirects are not followed. The client does
 not retry writes: a failed acknowledgement does not establish whether a write
 was applied.
@@ -52,13 +56,18 @@ projections in `src/config/types.rs`.
 
 Resource validation preserves unmodelled fields for whole-resource replacement.
 Plugin configurations may legitimately be `null` on Edge for plugins without
-settings; these are accepted. The existing `EdgePluginConfig.config` TypeScript
-declaration models only objects and should be widened separately when its callers
-are audited. Consumer credential types hidden by Edge's response projection are
-not required to appear in the map.
+settings; response and write types accept these values. Binder attach, proxy-rebuild
+restore and rollback preserve the operator's actual `null` config. Composed
+`EdgePluginSettings` remain object-only: optional-plugin reconciliation uses a
+separate `null` argument to mean removal, while restoration writes the saved config
+directly. The palette reads its settings from Nexus storage, and the publishing
+spec filter carries Edge configs through unchanged. Consumer credential types
+hidden by Edge's response projection are not required to appear in the map.
 
 The socket response matrix lives in
-`server/src/ferrum-admin/client.protocol.test.ts`. The separate
+`server/src/ferrum-admin/client.protocol.test.ts`; binder restoration and rollback
+of nullable configs over HTTP are covered in `server/src/ferrum-admin/client.test.ts`.
+The separate
 `server/src/test/gateway-protocol-teardown.test.ts` checks pending work and recovery
 through the existing teardown service and worker. These tests run in hosted CI;
 no local project execution was used to prepare this change.
