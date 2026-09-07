@@ -443,7 +443,10 @@ export async function buildServer(
           spaFallback: (_request, reply) =>
             // no-cache: browsers must revalidate the shell so a fresh deploy's
             // hashed asset references are picked up immediately.
-            reply.type('text/html').header('cache-control', 'no-cache').sendFile('index.html'),
+            reply
+              .type('text/html')
+              .header('cache-control', 'no-cache')
+              .sendFile('index.html', { cacheControl: false }),
         }
       : {}),
   });
