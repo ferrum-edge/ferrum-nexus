@@ -351,15 +351,24 @@ describe('API route security over a listening socket', () => {
     assert.deepEqual(await snapshot(), before);
   });
 
-  it('rejects malformed path escapes without persistent side effects', async () => {
+  it('rejects malformed paths before API or SPA handling with any credentials', async () => {
     const before = await snapshot();
+    const credentials: Record<string, string>[] = [
+      {},
+      { cookie: admin.cookieHeader },
+      { cookie: admin.cookieHeader, [CSRF_HEADER]: admin.csrfToken },
+    ];
+    // Router errors must fail closed independently of session/CSRF hooks.
+    // Include anonymous reads and authorized mutations so neither an auth
+    // rejection nor missing CSRF can mask a routing regression.
     for (const path of ['/%', '/api/%GG', '/%61pi/%', '/api/%C0%AF', '/api/users/%FF']) {
-      for (const method of ['GET', 'PATCH']) {
-        assertError(
-          await socketRequest(port, method, path, { cookie: admin.cookieHeader }),
-          400,
-          'VALIDATION_FAILED',
-        );
+      for (const method of ['GET', 'PATCH', 'DELETE']) {
+        for (const headers of credentials) {
+          const response = await socketRequest(port, method, path, headers);
+          assertError(response, 400, 'VALIDATION_FAILED');
+          assert.equal(response.headers['set-cookie'], undefined);
+          assert.equal(response.body.includes(SPA), false);
+        }
       }
     }
     assert.deepEqual(await snapshot(), before);
