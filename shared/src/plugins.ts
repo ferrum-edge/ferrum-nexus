@@ -670,11 +670,12 @@ export const PROVIDER_PLUGINS: readonly ProviderPluginDescriptor[] = [
     category: 'traffic',
     label: 'Idempotency keys',
     summary:
-      'Makes a retried write safe: the first call with a given key runs, and an identical retry ' +
-      'replays the first response instead of charging the card twice.',
+      'Uses an idempotency key to replay completed backend responses within the configured ' +
+      'retention window. Pending requests and uncertain backend outcomes return 409 on retry.',
     consumer_recipe:
-      'Consumers send a unique key per logical operation in the header below and may safely ' +
-      'retry. Reusing a key with a different body is answered with 409 Conflict.',
+      'Send a unique key per logical operation and keep that key when retrying the same request. ' +
+      'A pending operation, an uncertain outcome, or a different request using the same key ' +
+      'returns 409 Conflict while its record remains active. Do not switch keys to bypass it.',
     supports_trigger: true,
     fields: [
       {

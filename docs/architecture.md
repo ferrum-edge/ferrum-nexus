@@ -762,7 +762,17 @@ Three further points of fidelity:
   the same key execute up to N times — the same failure `rate_limiting` has,
   stamped from the same operator setting (`FERRUM_RATE_LIMIT_SYNC_MODE`). The
   Redis-only keys are _rejected_ outside `sync_mode: 'redis'`, so nothing is
-  sent at all in the local case.
+  sent at all in the local case. Completed backend responses, including error
+  responses, can be replayed within the configured retention window. A gateway
+  failure proven to occur before dispatch releases the key for another attempt;
+  a failure after possible backend execution retains the in-flight lease and
+  returns 409 to retries while that lease remains active. A gateway-generated
+  dispatch error is not stored as a completed backend response. Consumers must
+  retain the same key when retrying the same operation; changing keys bypasses
+  this protection. Expiration also ends the protection, so an uncertain outcome
+  may require application-level reconciliation before retrying. This behavior
+  requires the Edge dispatch provenance fix in
+  [ferrum-edge#4844](https://github.com/ferrum-edge/ferrum-edge/pull/4844).
 
 The `api_plugins` row is written last but **inside** the compensated block, so a
 store failure rolls the gateway back: a `request_termination` left running with
