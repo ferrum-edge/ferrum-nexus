@@ -256,6 +256,17 @@ included — and the portal rewrites the document's server base to your listen
 path before handing it over so they line up. Your own `servers[0]` keeps doing
 its other job: naming the upstream the gateway forwards to.
 
+**A `servers` on a path or an operation is ignored too.** OpenAPI lets you
+override `servers` on a path item, on a single operation, or on a reusable path
+item under `components.pathItems`, and the nearest one wins. Any of those would
+override the rewrite above and produce rules for a path no client can send, so
+the portal removes them from the copy it submits — every declared operation
+would otherwise answer `400`. Nothing is removed from the document you uploaded:
+the catalog, the docs viewer and `docs_only` publication all still show it
+exactly as you wrote it, nested `servers` included. A `servers` inside a
+`callbacks` object is left alone, because a callback describes a request your
+service makes outbound rather than one this API serves.
+
 #### CORS preflights
 
 Nothing to do. A browser's `OPTIONS` preflight targets a path with no `options`

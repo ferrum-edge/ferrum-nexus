@@ -1134,6 +1134,19 @@ message threads.
 `HttpMethod` is `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`,
 `TRACE` or `CONNECT` — Edge's own enum.
 
+**`routes` mode rewrites the document Edge receives, and only that copy.** The
+submitted document has its root `servers` replaced with the API's listen path,
+so the operation matchers Edge generates cover the path clients actually send —
+and every `servers` **below** the root is stripped along with it: on a path
+item, on an operation, and on a `components.pathItems` entry that a `$ref`'d
+path resolves to. OpenAPI resolves `servers` nearest-first, so a nested one left
+in place would override the rewrite and generate a matcher for a path no client
+can reach, which `fail_on_unknown_operation` turns into a `400` on every
+declared operation. `servers` inside a `callbacks` object is left alone — it
+describes a request the provider's own service makes outbound, not one this
+proxy serves. The provider's stored revision is never modified: it is what the
+catalog, the docs viewer and `docs_only` publication all hand over unchanged.
+
 An API's CORS origins are additionally mirrored onto the proxy's
 `allowed_ws_origins`, which is the Cross-Site WebSocket Hijacking check: an
 HTTP proxy on Edge also accepts WebSocket upgrades on the same listen path, and
@@ -1331,12 +1344,15 @@ when `routes` is asked for and the current revision declares nothing to allow),
 > Nothing else does this: a spec revision, a CORS change and every runtime
 > setting are all in-place writes.
 
-Enforcement conversion, runtime PATCH, and spec revision use the same per-proxy
-database lease. The conversion holds it across the fresh proxy/spec reads,
-rebuild, compensation, and catalog update. A waiting mutation re-reads catalog
-state after acquiring the lease so it uses the current enforcement mode and
-backend. If the API's proxy identity changed while waiting, the request returns
-`409 CONFLICT`; reload the API before retrying.
+Enforcement conversion, runtime PATCH, spec revision **and deletion** use the
+same per-proxy database lease. The conversion holds it across the fresh
+proxy/spec reads, rebuild, compensation, and catalog update; the delete holds it
+across the gateway teardown _and_ the row delete, so a conversion cannot
+re-create the proxy against rows that are on their way out. A waiting mutation
+re-reads catalog state after acquiring the lease so it uses the current
+enforcement mode and backend. If the API's proxy identity changed while waiting,
+the request returns `409 CONFLICT`; reload the API before retrying, and a
+conversion whose API has been deleted rebuilds nothing.
 
 ### `DELETE /api/apis/:id`
 
@@ -1349,6 +1365,14 @@ and proxy-scoped plugin configs; any config the cascade missed is swept up
 after. Then the ACL group is stripped from every grantee's consumer, then the
 grants, requests, spec revisions and the API row are deleted in one store
 transaction. Grantees get a notification.
+
+All of that runs under the API's per-proxy lease, teardown and row delete
+together, and the `api.delete` audit row is written only once it has. A
+`spec_enforcement` conversion is a delete-and-recreate, so an unserialised
+teardown could commit in the middle of one and leave the conversion's rebuild
+serving an API with no portal record — reachable, un-removable, and holding the
+slug against every future publish. Returns `409 CONFLICT` if the API's proxy
+identity changed while the delete waited for the lease.
 
 ### `PUT /api/apis/:id/spec`
 

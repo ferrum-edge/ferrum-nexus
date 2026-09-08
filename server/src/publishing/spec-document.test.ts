@@ -134,6 +134,127 @@ describe('routesSpecDocument', () => {
     assert.deepEqual(source.servers, [{ url: 'https://billing.example.com:8443/v2' }]);
     assert.equal(source['x-ferrum-proxy'], undefined);
   });
+
+  it('strips servers from path items and operations', () => {
+    // OpenAPI resolves `servers` at three levels and the nearest wins, so a
+    // path-level or operation-level entry survives the root rewrite and Edge
+    // builds the matcher from it — `^/other/invoices$` for an API published at
+    // `/nexus/billing`. With `fail_on_unknown_operation` that is a `400` on
+    // every declared operation of an API the publish just reported as live.
+    const submitted = routesSpecDocument(
+      document({
+        paths: {
+          '/invoices': {
+            servers: [{ url: '/other' }],
+            get: { responses: { '200': { description: 'OK' } } },
+            post: {
+              servers: [{ url: 'https://writes.example.com/v9' }],
+              responses: { '201': { description: 'Created' } },
+            },
+          },
+        },
+      }),
+      { listenPath: '/nexus/billing', proxy: { id: 'proxy-1' } },
+    );
+
+    const paths = submitted.paths as Record<string, Record<string, unknown>>;
+    const item = paths['/invoices'] as Record<string, unknown>;
+    assert.deepEqual(submitted.servers, [{ url: '/nexus/billing' }]);
+    assert.equal('servers' in item, false);
+    assert.equal('servers' in (item.post as Record<string, unknown>), false);
+    // Everything else about the operations is the provider's, untouched.
+    assert.deepEqual(item.get, { responses: { '200': { description: 'OK' } } });
+    assert.deepEqual(item.post, { responses: { '201': { description: 'Created' } } });
+  });
+
+  it('strips servers from a $ref-able component path item', () => {
+    // A path template that is a `$ref` to one of these produces exactly the
+    // same operation-table entry, so it has exactly the same exposure.
+    const submitted = routesSpecDocument(
+      document({
+        paths: { '/invoices': { $ref: '#/components/pathItems/Invoices' } },
+        components: {
+          schemas: { Invoice: { type: 'object' } },
+          pathItems: {
+            Invoices: {
+              servers: [{ url: '/other' }],
+              get: {
+                servers: [{ url: '/elsewhere' }],
+                responses: { '200': { description: 'OK' } },
+              },
+            },
+          },
+        },
+      }),
+      { listenPath: '/nexus/billing', proxy: { id: 'proxy-1' } },
+    );
+
+    const components = submitted.components as Record<string, Record<string, unknown>>;
+    const item = components.pathItems?.Invoices as Record<string, unknown>;
+    assert.equal('servers' in item, false);
+    assert.equal('servers' in (item.get as Record<string, unknown>), false);
+    // The rest of `components` rides through on the same object.
+    assert.deepEqual(components.schemas, { Invoice: { type: 'object' } });
+  });
+
+  it('leaves callbacks and non-path-item keys alone', () => {
+    // A callback describes a request the provider's own service makes to the
+    // client's URL. This proxy never serves it and Edge builds no listen-path
+    // matcher from it, so its `servers` is genuinely the provider's.
+    const callbacks = {
+      onPaid: {
+        '{$request.body#/callbackUrl}': {
+          servers: [{ url: 'https://client.example.com' }],
+          post: { responses: { '200': { description: 'OK' } } },
+        },
+      },
+    };
+    const source = document({
+      paths: {
+        '/invoices': { get: { callbacks, responses: { '200': { description: 'OK' } } } },
+        'x-path-notes': { servers: [{ url: '/not-a-path-item' }] },
+      },
+    });
+
+    const submitted = routesSpecDocument(source, {
+      listenPath: '/nexus/billing',
+      proxy: { id: 'proxy-1' },
+    });
+
+    assert.deepEqual(submitted.paths, source.paths);
+  });
+
+  it('hands an untouched document through by identity', () => {
+    // The strip only copies nodes that carried a `servers` key, so a document
+    // with none is submitted exactly as it was uploaded — the property the old
+    // shallow copy relied on, kept.
+    const source = document({ components: { schemas: { Invoice: { type: 'object' } } } });
+
+    const submitted = routesSpecDocument(source, {
+      listenPath: '/nexus/billing',
+      proxy: { id: 'proxy-1' },
+    });
+
+    assert.equal(submitted.paths, source.paths);
+    assert.equal(submitted.components, source.components);
+  });
+
+  it('does not mutate a document that carries nested servers', () => {
+    const source = document({
+      paths: {
+        '/invoices': {
+          servers: [{ url: '/other' }],
+          get: { servers: [{ url: '/elsewhere' }], responses: { '200': { description: 'OK' } } },
+        },
+      },
+    });
+
+    routesSpecDocument(source, { listenPath: '/nexus/billing', proxy: { id: 'proxy-1' } });
+
+    const item = (source.paths as Record<string, Record<string, unknown>>)['/invoices'];
+    assert.deepEqual(item?.servers, [{ url: '/other' }]);
+    assert.deepEqual((item?.get as Record<string, unknown>).servers, [{ url: '/elsewhere' }]);
+  });
 });
 
 describe('submittableProxyBody', () => {

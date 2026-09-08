@@ -57,6 +57,17 @@
  * actually send. Leave it alone and every request 400s as an unknown
  * operation — including the declared ones.
  *
+ * Replacing the root is not enough on its own. OpenAPI resolves `servers` at
+ * three levels — root, Path Item, Operation — and the **nearest one wins**, so
+ * a document that overrides `servers` on a path or an operation keeps that
+ * override through the rewrite and Edge builds the matcher from it. The result
+ * is a matcher describing a path no client can send (`^/other/one$` for an API
+ * published at `/nexus/relserver`), and with
+ * `fail_on_unknown_operation: true` that is a `400` on every declared
+ * operation of an API the portal just reported as published. So every nested
+ * `servers` is **stripped** as well — see {@link routesSpecDocument} for the
+ * exact reach of that walk.
+ *
  * ## CORS preflights need nothing here
  *
  * `cors` runs at priority 100 and `openapi_validator` at 2960
@@ -150,6 +161,74 @@ export function submittableProxyBody(proxy: EdgeProxy): Record<string, unknown> 
   return body;
 }
 
+/**
+ * The Path Item keys that hold an Operation Object.
+ *
+ * OpenAPI's fixed set, and the only place below a Path Item where `servers` can
+ * appear. Everything else under a path item (`parameters`, `summary`, `$ref`,
+ * vendor extensions) is left exactly as uploaded.
+ */
+const OPENAPI_OPERATION_KEYS = [
+  'get',
+  'put',
+  'post',
+  'delete',
+  'options',
+  'head',
+  'patch',
+  'trace',
+] as const;
+
+/** A plain object, i.e. something that could be an OpenAPI node. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A Path Item with `servers` gone from itself and from every operation under
+ * it, or the node itself when it declared none.
+ *
+ * Returns the input by identity when nothing changed, which is what lets the
+ * callers leave an untouched document byte-for-byte identical to today's
+ * output rather than deep-copying the whole `paths` tree on every publish.
+ */
+function pathItemWithoutServers(item: unknown): unknown {
+  if (!isRecord(item)) return item;
+  let copy: Record<string, unknown> | null = null;
+  const edited = (): Record<string, unknown> => (copy ??= { ...item });
+  if ('servers' in item) delete edited().servers;
+  for (const method of OPENAPI_OPERATION_KEYS) {
+    const operation = item[method];
+    if (!isRecord(operation) || !('servers' in operation)) continue;
+    const withoutServers = { ...operation };
+    delete withoutServers.servers;
+    edited()[method] = withoutServers;
+  }
+  return copy ?? item;
+}
+
+/**
+ * Every Path Item in a container, with nested `servers` stripped.
+ *
+ * `holdsPathItem` is what keeps the walk explicit: a Paths Object mixes path
+ * templates with `^x-` specification extensions, and only the templates are
+ * Path Items. A `components.pathItems` map has no such mixture.
+ */
+function pathItemsWithoutServers(
+  container: unknown,
+  holdsPathItem: (key: string) => boolean,
+): unknown {
+  if (!isRecord(container)) return container;
+  let copy: Record<string, unknown> | null = null;
+  for (const [key, item] of Object.entries(container)) {
+    if (!holdsPathItem(key)) continue;
+    const rewritten = pathItemWithoutServers(item);
+    if (rewritten === item) continue;
+    (copy ??= { ...container })[key] = rewritten;
+  }
+  return copy ?? container;
+}
+
 /** Inputs beyond the provider's document. */
 export interface RoutesSpecDocumentOptions {
   /** The proxy's listen path, e.g. `/nexus/billing`. */
@@ -172,11 +251,32 @@ export interface RoutesSpecDocumentOptions {
  *    rejects outright — would make the upload fail for a reason no provider
  *    could act on;
  * 2. `servers` is replaced with the listen path, so the generated operation
- *    matchers cover the path clients actually send (see the module docblock);
+ *    matchers cover the path clients actually send (see the module docblock),
+ *    and every **nested** `servers` is stripped so nothing can override that
+ *    replacement back to a path no client can reach;
  * 3. `x-ferrum-proxy` and `x-ferrum-validate` are stamped on.
  *
- * The copy is shallow because only root keys move: `paths`, `components` and
- * everything under them are handed to Edge exactly as uploaded.
+ * ## What the `servers` strip reaches, and what it deliberately does not
+ *
+ * An explicit shallow walk, not an arbitrary recursion — the point is that the
+ * set of nodes Nexus rewrites is knowable by reading this function:
+ *
+ * - **`paths.<template>`** and **`paths.<template>.<method>`**, the two nested
+ *   levels OpenAPI resolves `servers` at. Only keys that are path templates are
+ *   walked; a Paths Object's `^x-` extensions are data, not Path Items;
+ * - **`components.pathItems.<name>`** and its operations, because a path
+ *   template that is a `$ref` to one of those produces exactly the same
+ *   operation table entry, and therefore exactly the same unreachable matcher;
+ * - **not** callbacks (`paths.*.<method>.callbacks.*`). A callback describes a
+ *   request the *provider's* service makes to the client's URL. It is not
+ *   served by this proxy, Edge's extractor does not build listen-path matchers
+ *   from it, and a `servers` there is genuinely the provider's own — rewriting
+ *   it would corrupt documentation to no enforcement benefit. Webhooks are out
+ *   of scope for the same reason.
+ *
+ * Only nodes that actually carried a `servers` key are copied; everything else
+ * is passed through by identity, so a document with no nested `servers` is
+ * submitted exactly as it was uploaded.
  */
 export function routesSpecDocument(
   document: Record<string, unknown>,
@@ -188,6 +288,13 @@ export function routesSpecDocument(
     submitted[key] = value;
   }
   submitted.servers = [{ url: options.listenPath }];
+  const paths = pathItemsWithoutServers(submitted.paths, (key) => key.startsWith('/'));
+  if (paths !== submitted.paths) submitted.paths = paths;
+  const components = submitted.components;
+  if (isRecord(components)) {
+    const pathItems = pathItemsWithoutServers(components.pathItems, () => true);
+    if (pathItems !== components.pathItems) submitted.components = { ...components, pathItems };
+  }
   submitted['x-ferrum-proxy'] = options.proxy;
   submitted['x-ferrum-validate'] = { ...ROUTES_VALIDATE_EXTENSION };
   return submitted;
