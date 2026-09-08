@@ -516,6 +516,50 @@ place, and you can end up with a grant row whose ACL group was never written
 Collections and indexes are created in code on `init()`; there are no `.sql`
 files for Mongo, but the same `schema_migrations` bookkeeping applies.
 
+### Transactions and contention retries
+
+Every write that has to be atomic runs inside `store.transaction`. Within one
+instance those bodies are **serialised** — one at a time, on every driver — but
+that says nothing about the instance next to it, and each engine can roll a
+transaction back purely because two of them collided:
+
+| Engine     | What it reports                                                    | What it means         |
+| ---------- | ------------------------------------------------------------------ | --------------------- |
+| MySQL      | `ER_LOCK_DEADLOCK` (1213) / `ER_LOCK_WAIT_TIMEOUT` (1205), `40001` | Rolled back, retry it |
+| PostgreSQL | `40001` serialization failure, `40P01` deadlock detected           | Rolled back, retry it |
+| MongoDB    | `WriteConflict` (112), labelled `TransientTransactionError`        | Rolled back, retry it |
+| SQLite     | nothing — one connection, one body at a time                       | Cannot arise          |
+
+Nexus **re-runs the body** in those cases rather than failing the request:
+
+- **Budget.** On MySQL and PostgreSQL, up to 5 attempts, with exponential
+  backoff jittered between 5 ms and 200 ms. On MongoDB the budget is wall
+  clock instead — 5 seconds of contention, on the same backoff — because that
+  engine fails the loser of a contended document immediately rather than
+  blocking it on a lock, so the retry loop is the only thing that waits for the
+  transaction that won; an attempt count would be spent in microseconds and
+  fail the loser while the winner was still committing. The whole MongoDB
+  transaction, that wait included, is capped at 15 seconds (the driver's own
+  default envelope is two minutes, far longer than an HTTP request should
+  wait).
+- **Outcome when it still cannot commit.** `409 CONFLICT` with
+  `details.reason = "transaction_contention"` and the attempt count. A driver
+  error type never reaches a response or a client; a retried request that
+  succeeds looks like any other success.
+- **What is _not_ retried.** A uniqueness violation, a validation failure, a
+  lost connection, or anything a service threw on purpose. Only the contention
+  classes above.
+- **Nothing is applied twice.** A retried attempt starts from a rolled-back
+  state: the failed attempt's rows are gone before the next one begins, and
+  every side effect a body has goes through the transaction. Emails, gateway
+  calls, audit rows for gateway work and notifications all happen _outside_ the
+  transaction, after it commits.
+
+Seeing occasional retries is normal under load. A sustained stream of
+`transaction_contention` conflicts in the logs means real hot-row contention —
+usually many writers on one message thread or one account — and is worth
+investigating rather than raising the budget.
+
 ---
 
 ## 3. Docker
@@ -1435,6 +1479,31 @@ read in the same critical section. Nexus itself can no longer break the
 agreement — a rotation revokes the row it retired the moment Edge confirms the
 delete, and an append whose row cannot be written is deleted again — so a
 mismatch means the consumer was edited **outside Nexus**.
+
+### Consumer identity recovery
+
+New canonical consumers use a stable derived UUID and persist the mapping in
+`consumers`; provider test consumers persist their current id in
+`gateway_identities`. Normal provisioning does not list the namespace, even
+above 10,000 consumers. Keep these tables with the rest of the Nexus database
+in backups. Do not change a consumer's id or canonical username on Edge.
+
+Older gateway identities without a portal mapping are adopted after a create
+conflict using a logged scan of at most 20 pages of 500 consumers. An incomplete
+scan returns `EDGE_ERROR` with a recovery instruction, never “no consumer”.
+Teardown retains its pending registration/job on this error.
+
+If this legacy limit is reached, pause provisioning and teardown workers during
+maintenance and restore the affected mapping from a consistent Nexus backup.
+Verify the gateway resource with `GET /consumers/{id}` in the configured
+`X-Ferrum-Namespace`: its username must exactly match `nexus-user-<user_id>` or
+the registered `nexus-test-<api_id>`. Restore the canonical `consumers` row or
+the registered identity's `ferrum_consumer_id`, preserving the correct owner
+and namespace. If no mapping backup exists, an administrator must inventory
+the gateway with paginated Admin API reads and reconstruct the mapping after
+verifying those same fields. Back up the portal database before this repair;
+do not delete gateway identities or credentials to make the scan shorter.
+Resume Nexus and retry the provisioning operation or pending teardown job.
 
 ### What a drifted consumer looks like
 

@@ -8,7 +8,7 @@ import {
   TEARDOWN_STALE_AFTER_MS,
   type TeardownTickResult,
 } from '../credentials/teardown-worker.js';
-import type { GatewayTeardownJobRecord, NexusStore } from '../db/store.js';
+import type { GatewayTeardownJobRecord, NexusStore, TransactionOptions } from '../db/store.js';
 import { userLifecycleLockKey } from '../lib/keyed-serializer.js';
 import { buildTestApp } from './helpers.js';
 
@@ -116,7 +116,10 @@ export function runTeardownCancellationContract(
             const workerStore = new Proxy(store, {
               get(base, property, receiver) {
                 if (property === 'transaction') {
-                  return async <T>(fn: (tx: NexusStore) => Promise<T>): Promise<T> => {
+                  return async <T>(
+                    fn: (tx: NexusStore) => Promise<T>,
+                    options?: TransactionOptions,
+                  ): Promise<T> => {
                     // A second owner must be excluded before the cancellation
                     // transaction opens, including on the single-connection adapter.
                     const acquired = await base.leases.acquire(
@@ -126,7 +129,7 @@ export function runTeardownCancellationContract(
                       new Date().toISOString(),
                     );
                     assert.equal(acquired, false, 'cancellation holds the account lifecycle lease');
-                    return base.transaction(fn);
+                    return base.transaction(fn, options);
                   };
                 }
                 const value: unknown = Reflect.get(base, property, receiver);

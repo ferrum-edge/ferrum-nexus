@@ -8,6 +8,7 @@ import { Button } from '../components/ui/Button';
 import { Card, CardBody, CardHeader, DetailRow, PageHeader } from '../components/ui/Card';
 import { LabeledInput } from '../components/ui/Input';
 import { RoleBadge, StatusPill } from '../components/ui/StatusPill';
+import { FormNotice } from '../components/auth/AuthShell';
 
 /** Self-service profile and password management. */
 export function ProfilePage(): ReactElement {
@@ -88,6 +89,9 @@ export function ProfilePage(): ReactElement {
             <CardHeader title="Contact details" />
             <CardBody>
               <form className="flex flex-col gap-4" onSubmit={saveProfile}>
+                {updateProfile.error && updateProfile.variables?.display_name !== undefined ? (
+                  <FormNotice>{updateProfile.error.message}</FormNotice>
+                ) : null}
                 <LabeledInput
                   label="Display name"
                   required
@@ -118,6 +122,9 @@ export function ProfilePage(): ReactElement {
             <CardHeader title="Change password" />
             <CardBody>
               <form className="flex flex-col gap-4" onSubmit={savePassword}>
+                {updateProfile.error && updateProfile.variables?.new_password !== undefined ? (
+                  <FormNotice>{updateProfile.error.message}</FormNotice>
+                ) : null}
                 <LabeledInput
                   label="Current password"
                   type="password"

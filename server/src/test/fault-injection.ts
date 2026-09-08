@@ -7,7 +7,7 @@
  * write *after* this one fails?" — the founder's seat above all.
  */
 
-import type { NexusStore } from '../db/store.js';
+import type { NexusStore, TransactionOptions } from '../db/store.js';
 
 /** A store whose repository calls can be made to fail on demand. */
 export interface FaultInjectingStore {
@@ -66,8 +66,10 @@ export function faultInjectingStore(base: NexusStore): FaultInjectingStore {
     return new Proxy(store, {
       get(target, property, receiver) {
         if (property === 'transaction') {
-          return <T>(fn: (tx: NexusStore) => Promise<T>): Promise<T> =>
-            target.transaction((tx) => fn(wrapStore(tx)));
+          return <T>(
+            fn: (tx: NexusStore) => Promise<T>,
+            options?: TransactionOptions,
+          ): Promise<T> => target.transaction((tx) => fn(wrapStore(tx)), options);
         }
         const value: unknown = Reflect.get(target, property, receiver);
         // Store-level methods (init, migrate, close, healthCheck) run against
