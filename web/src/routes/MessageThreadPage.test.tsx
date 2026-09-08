@@ -215,7 +215,7 @@ describe('thread page cursors', () => {
     };
 
     expect(adoptOlderPageCursors(cursors, held, page)).toEqual({
-      headCursor: 'm16',
+      headCursor: null,
       headGapCursor: null,
       olderCursor: 'm11',
     });

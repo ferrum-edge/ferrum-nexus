@@ -76,6 +76,48 @@ export function adoptNewestPageCursors(
   };
 }
 
+/** True when an older window reconnects a mid-session head gap to held history. */
+function olderPageClosesHeadGap(
+  heldBeforeMerge: Message[],
+  headGapCursor: string,
+  page: Pick<MessagePage, 'items' | 'next_before'>,
+): boolean {
+  if (
+    page.items.some((message) => heldBeforeMerge.some((held) => held.id === message.id))
+  ) {
+    return true;
+  }
+
+  if (page.items.length === 0) return false;
+
+  const anchor = heldBeforeMerge.find((message) => message.id === headGapCursor);
+  if (!anchor) return false;
+
+  const stale = heldBeforeMerge.filter((message) => message.created_at < anchor.created_at);
+  if (stale.length === 0) return false;
+
+  const tailNewest = stale.reduce((latest, message) =>
+    message.created_at > latest.created_at ? message : latest,
+  );
+  const pageOldest = page.items.reduce((oldest, message) =>
+    message.created_at < oldest.created_at ? message : oldest,
+  );
+  const pageNewest = page.items.reduce((latest, message) =>
+    message.created_at > latest.created_at ? message : latest,
+  );
+
+  if (pageNewest.created_at <= tailNewest.created_at) return false;
+  if (pageOldest.created_at > anchor.created_at) return false;
+
+  const heldBetweenTailAndPage = heldBeforeMerge.some(
+    (message) =>
+      message.created_at > tailNewest.created_at &&
+      message.created_at < pageOldest.created_at,
+  );
+
+  return !heldBetweenTailAndPage;
+}
+
 /** Fold one manually fetched older window into the cursor state. */
 export function adoptOlderPageCursors(
   cursors: ThreadPageCursors,
@@ -83,15 +125,16 @@ export function adoptOlderPageCursors(
   page: Pick<MessagePage, 'items' | 'next_before'>,
 ): ThreadPageCursors {
   if (!cursors.headGapCursor) {
-    return { ...cursors, olderCursor: page.next_before };
+    return {
+      ...cursors,
+      headCursor: null,
+      olderCursor: page.next_before,
+    };
   }
 
-  const closesGap = page.items.some((message) =>
-    heldBeforeMerge.some((held) => held.id === message.id),
-  );
-  if (closesGap) {
+  if (olderPageClosesHeadGap(heldBeforeMerge, cursors.headGapCursor, page)) {
     return {
-      headCursor: cursors.headCursor,
+      headCursor: null,
       headGapCursor: null,
       olderCursor: page.next_before,
     };
