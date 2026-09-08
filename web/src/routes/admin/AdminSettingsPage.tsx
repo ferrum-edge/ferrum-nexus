@@ -258,6 +258,94 @@ function GatewayTab({ settings }: { settings: AdminSettingsResponse }): ReactEle
   );
 }
 
+/**
+ * Who may create an account, and how.
+ *
+ * `allowed_roles` is bound to the stored policy rather than to the
+ * `REGISTRABLE_ROLES` constant: the server enforces the stored list on every
+ * registration and `GET /api/branding` publishes it to the sign-up form, so a
+ * card that advertised the constant contradicted whichever administrator had
+ * narrowed it. Exported for its test; rendered beneath the CAPTCHA card.
+ */
+export function RegistrationCard({ settings }: { settings: AdminSettingsResponse }): ReactElement {
+  const update = useUpdateAdminSettings();
+  const toast = useToast();
+  const [openRegistration, setOpenRegistration] = useState(settings.registration.open_registration);
+  const [requireVerification, setRequireVerification] = useState(
+    settings.registration.require_email_verification,
+  );
+  const [allowedRoles, setAllowedRoles] = useState<RegistrableRole[]>(() =>
+    REGISTRABLE_ROLES.filter((role) => settings.registration.allowed_roles.includes(role)),
+  );
+  const toggleRole = (role: RegistrableRole, checked: boolean): void => {
+    setAllowedRoles((current) =>
+      REGISTRABLE_ROLES.filter((value) => {
+        if (value === role) return checked;
+        return current.includes(value);
+      }),
+    );
+  };
+
+  return (
+    <Card>
+      <CardHeader title="Registration" description="Who may create an account, and how." />
+      <CardBody className="flex flex-col gap-4">
+        <Checkbox
+          label="Allow self-service registration"
+          checked={openRegistration}
+          onChange={(event) => setOpenRegistration(event.target.checked)}
+        />
+        <Checkbox
+          label="Require email verification before sign-in"
+          checked={requireVerification}
+          onChange={(event) => setRequireVerification(event.target.checked)}
+        />
+        <Field
+          label="Self-selectable roles"
+          hint="Which roles the sign-up form offers. Registration with any other role is refused with a 403."
+        >
+          <div className="flex flex-col gap-2">
+            {REGISTRABLE_ROLES.map((role) => (
+              <Checkbox
+                key={role}
+                label={ROLE_LABELS[role]}
+                checked={allowedRoles.includes(role)}
+                onChange={(event) => toggleRole(role, event.target.checked)}
+              />
+            ))}
+          </div>
+        </Field>
+        {allowedRoles.length === 0 ? (
+          <p className="text-sm text-danger" role="alert">
+            With no self-selectable role, self-service registration cannot complete at all. Turn off
+            open registration instead if that is what you mean.
+          </p>
+        ) : null}
+        <div>
+          <Button
+            variant="primary"
+            loading={update.isPending}
+            onClick={() =>
+              update.mutate(
+                {
+                  registration: {
+                    open_registration: openRegistration,
+                    require_email_verification: requireVerification,
+                    allowed_roles: allowedRoles,
+                  },
+                },
+                { onSuccess: () => toast.success('Registration settings saved') },
+              )
+            }
+          >
+            Save registration settings
+          </Button>
+        </div>
+      </CardBody>
+    </Card>
+  );
+}
+
 function CaptchaTab({ settings }: { settings: AdminSettingsResponse }): ReactElement {
   const update = useUpdateAdminSettings();
   const toast = useToast();
@@ -270,24 +358,6 @@ function CaptchaTab({ settings }: { settings: AdminSettingsResponse }): ReactEle
   const captchaIncomplete =
     enabled &&
     (provider === 'none' || !siteKey.trim() || (!secretKey.trim() && !settings.captcha.secret_set));
-  const [openRegistration, setOpenRegistration] = useState(settings.registration.open_registration);
-  const [requireVerification, setRequireVerification] = useState(
-    settings.registration.require_email_verification,
-  );
-  // Bound to the stored policy rather than to REGISTRABLE_ROLES: the server
-  // enforces this list on every registration, so a card that advertised the
-  // constant contradicted whichever administrator had narrowed it.
-  const [allowedRoles, setAllowedRoles] = useState<RegistrableRole[]>(() =>
-    REGISTRABLE_ROLES.filter((role) => settings.registration.allowed_roles.includes(role)),
-  );
-  const toggleRole = (role: RegistrableRole, checked: boolean): void => {
-    setAllowedRoles((current) =>
-      REGISTRABLE_ROLES.filter((value) => {
-        if (value === role) return checked;
-        return current.includes(value);
-      }),
-    );
-  };
 
   return (
     <div className="flex flex-col gap-6">
@@ -368,62 +438,7 @@ function CaptchaTab({ settings }: { settings: AdminSettingsResponse }): ReactEle
         </CardBody>
       </Card>
 
-      <Card>
-        <CardHeader title="Registration" description="Who may create an account, and how." />
-        <CardBody className="flex flex-col gap-4">
-          <Checkbox
-            label="Allow self-service registration"
-            checked={openRegistration}
-            onChange={(event) => setOpenRegistration(event.target.checked)}
-          />
-          <Checkbox
-            label="Require email verification before sign-in"
-            checked={requireVerification}
-            onChange={(event) => setRequireVerification(event.target.checked)}
-          />
-          <Field
-            label="Self-selectable roles"
-            hint="Which roles the sign-up form offers. Registration with any other role is refused with a 403."
-          >
-            <div className="flex flex-col gap-2">
-              {REGISTRABLE_ROLES.map((role) => (
-                <Checkbox
-                  key={role}
-                  label={ROLE_LABELS[role]}
-                  checked={allowedRoles.includes(role)}
-                  onChange={(event) => toggleRole(role, event.target.checked)}
-                />
-              ))}
-            </div>
-          </Field>
-          {allowedRoles.length === 0 ? (
-            <p className="text-sm text-danger" role="alert">
-              With no self-selectable role, self-service registration cannot complete at all. Turn
-              off open registration instead if that is what you mean.
-            </p>
-          ) : null}
-          <div>
-            <Button
-              variant="primary"
-              loading={update.isPending}
-              onClick={() =>
-                update.mutate(
-                  {
-                    registration: {
-                      open_registration: openRegistration,
-                      require_email_verification: requireVerification,
-                      allowed_roles: allowedRoles,
-                    },
-                  },
-                  { onSuccess: () => toast.success('Registration settings saved') },
-                )
-              }
-            >
-              Save registration settings
-            </Button>
-          </div>
-        </CardBody>
-      </Card>
+      <RegistrationCard settings={settings} />
     </div>
   );
 }

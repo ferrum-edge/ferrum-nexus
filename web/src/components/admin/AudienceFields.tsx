@@ -22,6 +22,7 @@
 import { useState, type ReactElement } from 'react';
 import {
   ELEVATED_ROLES,
+  MAX_PAGE_SIZE,
   ROLE_LABELS,
   ROLE_ORDER,
   type MassEmailAudience,
@@ -51,6 +52,8 @@ export interface AudienceDraft {
   roles: readonly Role[];
   status: UserStatus;
   orgId: string | null;
+  /** Name of {@link AudienceDraft.orgId}, kept so the confirmation can say it. */
+  orgName: string | null;
   recipients: readonly RecipientChoice[];
 }
 
@@ -60,6 +63,7 @@ export const EVERYONE: AudienceDraft = {
   roles: [],
   status: 'active',
   orgId: null,
+  orgName: null,
   recipients: [],
 };
 
@@ -84,7 +88,7 @@ export function audienceReady(draft: AudienceDraft): boolean {
 }
 
 /** One line naming the audience, for the confirmation dialog. */
-export function describeAudience(draft: AudienceDraft, orgName?: string | null): string {
+export function describeAudience(draft: AudienceDraft): string {
   if (draft.scope === 'all') return 'every active account';
   if (draft.scope === 'explicit') {
     const names = draft.recipients.map((recipient) => recipient.label).join(', ');
@@ -97,7 +101,7 @@ export function describeAudience(draft: AudienceDraft, orgName?: string | null):
   }
   const roles = labels.length === 0 ? 'every role' : labels.join(', ');
   const status = draft.status === 'active' ? 'active' : 'disabled';
-  const where = orgName ? ` in ${orgName}` : '';
+  const where = draft.orgName ? ` in ${draft.orgName}` : '';
   return `${status} accounts with ${roles}${where}`;
 }
 
@@ -199,7 +203,7 @@ export function AudienceFields({
 }: AudienceFieldsProps): ReactElement {
   const [search, setSearch] = useState('');
   const term = search.trim();
-  const organizations = useOrganizations({ limit: 200 }, value.scope === 'filtered');
+  const organizations = useOrganizations({ limit: MAX_PAGE_SIZE }, value.scope === 'filtered');
   const matches = useUsers(
     { q: term, limit: 10, status: 'active' },
     value.scope === 'explicit' && term.length > 0,
@@ -224,6 +228,15 @@ export function AudienceFields({
 
   const removeRecipient = (id: string): void => {
     onChange({ ...value, recipients: value.recipients.filter((entry) => entry.id !== id) });
+  };
+
+  const chooseOrg = (next: string): void => {
+    if (next === ANY_ORG) {
+      onChange({ ...value, orgId: null, orgName: null });
+      return;
+    }
+    const org = orgs.find((entry) => entry.id === next);
+    onChange({ ...value, orgId: next, orgName: org?.name ?? next });
   };
 
   return (
@@ -290,7 +303,7 @@ export function AudienceFields({
           <LabeledSelect
             label="Organization"
             value={value.orgId ?? ANY_ORG}
-            onValueChange={(next) => onChange({ ...value, orgId: next === ANY_ORG ? null : next })}
+            onValueChange={chooseOrg}
             options={[
               { value: ANY_ORG, label: 'Every organization' },
               ...orgs.map((org) => ({ value: org.id, label: org.name })),
