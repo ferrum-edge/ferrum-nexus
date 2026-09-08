@@ -523,7 +523,11 @@ Drop `NEXUS_BOOTSTRAP_TOKEN` and the container prints a generated one on its
 first start (`docker logs`); see
 [First run](#first-run-and-the-bootstrap-token).
 
-The image is a two-stage build on `node:22-bookworm-slim`. What it bakes in:
+The image is a two-stage build on current `node:22-bookworm-slim`, above the
+Node 22.14 minimum required by SQLite's Node-API 10 binding. Both stages use
+the same base. better-sqlite3 13 bundles the Linux x64/arm64 binaries, so SQLite
+does not need an install script or compiler in this image. Hosted CI opens,
+queries and closes SQLite in the final production image. What it bakes in:
 
 - `NEXUS_HOST=0.0.0.0`, `NEXUS_PORT=8787`
 - `NEXUS_SQLITE_PATH=/app/data/nexus.sqlite`, with `/app/data` declared as a

@@ -8,11 +8,15 @@ on:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.14.0', '22', '24']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version-file: .nvmrc
+          node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
       - run: npm run typecheck
@@ -89,3 +93,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build image
         run: docker build -t ferrum-nexus:ci -f docker/Dockerfile .
+      - name: Verify SQLite in the production image
+        run: >-
+          docker run --rm ferrum-nexus:ci node --input-type=module -e
+          "import assert from 'node:assert/strict';
+          import Database from 'better-sqlite3';
+          assert.ok(Number(process.versions.napi) >= 10);
+          const db = new Database(':memory:');
+          assert.deepEqual(db.prepare('SELECT 1 AS ok').get(), { ok: 1 });
+          db.close();"

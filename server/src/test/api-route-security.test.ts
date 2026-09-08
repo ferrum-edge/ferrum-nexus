@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { channel } from 'node:diagnostics_channel';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { request, type IncomingHttpHeaders } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,6 +21,7 @@ import { buildTestApp, TEST_PASSWORD, type TestApp, type TestSession } from './h
 
 const API_PREFIXES = ['/api', '/%61pi', '/a%70i', '/ap%69', '/%61%70%69'];
 const SPA = '<!doctype html><title>Nexus test shell</title>';
+const ASSET = 'console.log("Nexus public asset");\n';
 const EXEMPT_POSTS = [
   '/api/auth/login',
   '/api/auth/register',
@@ -99,6 +100,8 @@ describe('API route security over a listening socket', () => {
   before(async () => {
     webDist = await mkdtemp(join(tmpdir(), 'nexus-api-routing-'));
     await writeFile(join(webDist, 'index.html'), SPA);
+    await mkdir(join(webDist, 'assets'));
+    await writeFile(join(webDist, 'assets', 'app-test.js'), ASSET);
 
     // Observe actual route registration through Fastify's initialization
     // channel, so new mutations join the sweep without a production test seam.
@@ -147,6 +150,72 @@ describe('API route security over a listening socket', () => {
       edgeRequests: [...harness.edge.requests],
     };
   }
+
+  it('delivers public assets with HEAD, ranges and cache revalidation', async () => {
+    const credentials: Record<string, string>[] = [{}, { cookie: admin.cookieHeader }];
+    for (const headers of credentials) {
+      const asset = await socketRequest(port, 'GET', '/assets/app-test.js?v=1', headers);
+      assert.equal(asset.statusCode, 200);
+      assert.equal(asset.body, ASSET);
+      assert.match(String(asset.headers['content-type']), /javascript/);
+      assert.equal(asset.headers['cache-control'], 'public, max-age=0');
+      assert.equal(asset.headers['set-cookie'], undefined);
+      assert.ok(asset.headers.etag);
+
+      const head = await socketRequest(port, 'HEAD', '/assets/app-test.js', headers);
+      assert.equal(head.statusCode, 200);
+      assert.equal(head.body, '');
+      assert.equal(head.headers['content-length'], String(Buffer.byteLength(ASSET)));
+      assert.equal(head.headers.etag, asset.headers.etag);
+
+      const cached = await socketRequest(port, 'GET', '/assets/app-test.js', {
+        ...headers,
+        'if-none-match': asset.headers.etag,
+      });
+      assert.equal(cached.statusCode, 304);
+      assert.equal(cached.body, '');
+      assert.equal(cached.headers['cache-control'], asset.headers['cache-control']);
+
+      const range = await socketRequest(port, 'GET', '/assets/app-test.js', {
+        ...headers,
+        range: 'bytes=0-6',
+      });
+      assert.equal(range.statusCode, 206);
+      assert.equal(range.body, ASSET.slice(0, 7));
+      assert.equal(range.headers['content-range'], `bytes 0-6/${Buffer.byteLength(ASSET)}`);
+    }
+  });
+
+  it('keeps noncanonical asset targets out of explicit static routes', async () => {
+    // Nexus registers discovered files, not a static wildcard. These targets
+    // must not be normalized into the asset by the plugin or SPA fallback.
+    for (const path of [
+      '/other/../assets/app-test.js',
+      '/other/%2e%2e/assets/app-test.js',
+      '/assets/./app-test.js',
+      '/assets//app-test.js',
+      '/assets%2fapp-test.js',
+      '/assets%5capp-test.js',
+      '/assets/%252e%252e/app-test.js',
+      '/assets/missing.js',
+      '/api/assets/app-test.js',
+    ]) {
+      assertError(await socketRequest(port, 'GET', path), 404, 'NOT_FOUND');
+      const head = await socketRequest(port, 'HEAD', path);
+      assert.equal(head.statusCode, 404, path);
+      assert.equal(head.body, '', path);
+      assert.equal(head.headers['cache-control'], 'no-store', path);
+    }
+    for (const path of ['/assets/%', '/assets/%GG', '/assets/%FF.js']) {
+      assertError(await socketRequest(port, 'GET', path), 400, 'VALIDATION_FAILED');
+    }
+    for (const path of ['/', '/dashboard', '/assets/']) {
+      const shell = await socketRequest(port, 'GET', path);
+      assert.equal(shell.statusCode, 200, path);
+      assert.equal(shell.body, SPA, path);
+      assert.equal(shell.headers['cache-control'], 'no-cache', path);
+    }
+  });
 
   it('rejects missing and mismatched CSRF before a profile mutation can persist', async () => {
     const before = await snapshot();
