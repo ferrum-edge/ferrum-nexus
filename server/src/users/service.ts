@@ -367,13 +367,30 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
       // Re-queue first, so a job that had somehow gone missing (or already
       // completed against a gateway that has since drifted) is re-driven rather
       // than silently skipped.
-      const job = await store.gatewayTeardownJobs.upsertPending(target.id, actor.id, nowIso());
+      const job = await locks(userLifecycleLockKey(target.id), () =>
+        store.transaction(async (tx) => {
+          const current = await tx.users.findById(target.id);
+          if (!current) throw notFound('User', target.id);
+          if (current.status !== 'disabled') {
+            throw conflict('Only a disabled account has a gateway revocation to retry');
+          }
+          // Take a conditional write on the user as well as the job. This
+          // orders queue creation with status writers even if a lease expires.
+          const matched = await tx.users.updateIfMatches(
+            current.id,
+            { role: current.role, status: 'disabled' },
+            { status: 'disabled' },
+          );
+          if (!matched) throw conflict('That account changed while retrying its revocation');
+          return tx.gatewayTeardownJobs.upsertPending(target.id, actor.id, nowIso());
+        }),
+      );
       const attempt = await runGatewayTeardown({
         credentials,
         store,
         userId: target.id,
         subject: actor.id,
-        jobId: job.id,
+        job,
         ...(deps.log ? { log: deps.log } : {}),
       });
 
@@ -484,7 +501,10 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
         target.role === 'super_admin' &&
         ((roleChanged && target.status === 'active') || update.status === 'disabled');
 
-      const transition = async (): Promise<{ row: UserRecord | null; jobId: Uuid | null }> =>
+      const transition = async (): Promise<{
+        row: UserRecord | null;
+        job: GatewayTeardownJobRecord | null;
+      }> =>
         store.transaction(async (tx) => {
           if (guardsLastSuperAdmin && (await tx.users.countActiveSuperAdmins(target.id)) === 0) {
             throw lastSuperAdmin();
@@ -494,18 +514,18 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
             { role: target.role, status: target.status },
             update,
           );
-          if (!row) return { row: null, jobId: null };
+          if (!row) return { row: null, job: null };
           // The revocation the disable owes is committed *with* the disable, so
           // the two can never disagree: there is no window in which the account
           // is off and nothing remembers that its gateway credentials are live.
           if (update.status === 'disabled') {
             const job = await tx.gatewayTeardownJobs.upsertPending(target.id, actor.id, nowIso());
-            return { row, jobId: job.id };
+            return { row, job };
           }
           // Re-enabling cancels any queued revocation — a retry must never strip
           // the credentials of an account that is live again.
           if (update.status === 'active') await tx.gatewayTeardownJobs.deleteByUser(target.id);
-          return { row, jobId: null };
+          return { row, job: null };
         });
 
       // A status flip is also taken under the account's own lifecycle key, the
@@ -514,7 +534,7 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
       // could pass its "owner is active" check, be disabled, and only then be
       // registered — after the teardown had already enumerated nothing. Inside
       // the super-admin key, never around it, so the lock order is fixed.
-      const lifecycle = (): Promise<{ row: UserRecord | null; jobId: Uuid | null }> =>
+      const lifecycle = (): ReturnType<typeof transition> =>
         statusChanged ? locks(userLifecycleLockKey(target.id), transition) : transition();
       const result = guardsLastSuperAdmin
         ? await locks(SUPER_ADMIN_LOCK_KEY, lifecycle)
@@ -536,7 +556,7 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
           store,
           userId: target.id,
           subject: actor.id,
-          jobId: result.jobId,
+          job: result.job,
           ...(deps.log ? { log: deps.log } : {}),
         });
       }

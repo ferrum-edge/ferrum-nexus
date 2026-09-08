@@ -1202,7 +1202,7 @@ disable as finished. See
 | Status    | Meaning                                                                    |
 | --------- | -------------------------------------------------------------------------- |
 | `pending` | Owed and due (or waiting for `next_attempt_at`). **Credentials are live.** |
-| `sending` | Claimed by a worker. The claim is atomic and increments `attempts`.        |
+| `sending` | Claimed by an inline request or worker; increments `attempts`.             |
 | `done`    | Edge confirmed the revocation; `completed_at` says when.                   |
 
 There is **no terminal failure state**. Retries back off `10s · 2^attempts`,
@@ -1219,15 +1219,37 @@ are claimed one at a time, and one job is five Edge round trips bounded by
 `FERRUM_ADMIN_TIMEOUT_MS` (5 s by default) plus at most a 30-second wait for the
 consumer's lease — about 55 seconds — so five minutes leaves ample headroom.
 Raising `FERRUM_ADMIN_TIMEOUT_MS` towards its 60-second ceiling pushes that
-worst case towards 5.5 minutes; raise the threshold with it. Recovery is safe to
-repeat in any case: the revocation is a clear-and-delete, and the consumer's own
-Edge lease keeps two instances from running it at the same instant.
+worst case towards 5.5 minutes; raise the threshold with it. Reclaiming changes
+the job's ownership token, so the previous attempt cannot settle the reclaimed
+job. This protects database bookkeeping; it does not fence HTTP writes already
+in flight to Edge if a shared lifecycle or consumer lease expires.
 
 There is one row per account (`user_id` is unique), so re-disabling an account
 resets the outstanding job rather than queueing a second revocation.
-The row ID is reused. Worker cancellation rechecks account status under the
-same lifecycle lease as disable/re-enable, inside a transaction, and deletes
-only its `sending` row. A newer disable's pending work remains queued.
+The row ID is reused. An internal `generation` token changes on every enqueue
+and claim, including inline disable, manual retry, and crash recovery. Completion,
+rescheduling, and worker cancellation require the claimed ID, token, and `sending`
+status. A superseded attempt cannot change the replacement job or its timestamps.
+Worker cancellation also rechecks account status under the same lifecycle lease
+as disable/re-enable, inside a transaction. Inline failures return their own claim
+to `pending`; a failed queue write leaves `sending` for stale recovery.
+
+### Upgrading teardown ownership (migration 013)
+
+Drain and stop **all** Nexus application instances and workers before upgrading.
+Run the normal migrations, then start only the new version. Do not mix old and
+new writers: old binaries can still settle jobs by row ID without checking the
+new token. This is an additive schema migration, not a safe mixed-version rolling
+deployment. The same drain requirement applies before rolling back binaries.
+
+SQLite and PostgreSQL add the column transactionally. MySQL uses its existing
+resumable DDL journal and verifies the column definition on restart. MongoDB
+backfills only documents missing the field and preserves immutable `_id` values.
+Existing jobs retain their ID, state, counters, and timestamps; their initial empty
+token is replaced when claimed or requeued. Existing `sending` jobs recover through
+the normal stale sweep. No job data needs to be discarded. API response shapes
+are unchanged; the token is internal, and `attempts` includes inline attempts as
+specified by the shared contract.
 
 ### Which identities a teardown finds
 

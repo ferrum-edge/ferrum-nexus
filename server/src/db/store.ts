@@ -231,6 +231,8 @@ export interface EmailOutboxRecord extends EmailOutboxEntry {
  */
 export interface GatewayTeardownJobRecord extends GatewayTeardownState {
   id: Uuid;
+  /** Opaque ownership token, replaced on every enqueue and every claim. Internal only. */
+  generation: string;
   user_id: Uuid;
   /** The admin who disabled the account, or `null` once that account is gone. */
   requested_by: Uuid | null;
@@ -491,7 +493,8 @@ export interface UserRepo {
    *
    * Returns the updated row, or `null` when the user is gone or has already
    * moved on — the caller lost the race and must not treat its earlier read as
-   * still true.
+   * still true. Matching same-value patches also succeed. An empty patch is a
+   * guarded read in the caller's read view and leaves `updated_at` untouched.
    *
    * This exists for the last-super-admin invariant, which is a check on *other*
    * rows followed by a write to this one. `countActiveSuperAdmins` and this
@@ -944,8 +947,8 @@ export interface GatewayTeardownJobRepo {
    *
    * `user_id` is unique, so an account already carrying a job has that row
    * reset to `pending` with `attempts = 0` and `next_attempt_at = now` instead
-   * of gaining a second one. Re-disabling an account therefore re-drives the
-   * outstanding work rather than duplicating it.
+   * of gaining a second one. A fresh opaque generation invalidates every old
+   * pending snapshot and claim, even when the ID and attempt count are reused.
    */
   upsertPending(
     userId: Uuid,
@@ -960,20 +963,26 @@ export interface GatewayTeardownJobRepo {
   /**
    * Atomically claim up to `limit` rows that are `pending` with
    * `next_attempt_at <= now`, flipping them to `sending` and incrementing
-   * `attempts`. Two concurrent workers never claim the same row — the same
-   * contract as {@link EmailOutboxRepo.claimDue}.
+   * `attempts` and replacing `generation`. Concurrent workers cannot both win
+   * the same pending generation.
    */
   claimDue(now: IsoTimestamp, limit: number): Promise<GatewayTeardownJobRecord[]>;
-  /** Edge confirmed the revocation: `status = 'done'`, `completed_at = at`. */
-  markDone(id: Uuid, at: IsoTimestamp): Promise<void>;
+  /** Claim precisely this pending generation for an inline attempt, ignoring backoff. */
+  claimPending(job: GatewayTeardownJobRecord): Promise<GatewayTeardownJobRecord | null>;
+  /** Settle only the supplied sending generation; false means ownership was lost. */
+  markDone(job: GatewayTeardownJobRecord, at: IsoTimestamp): Promise<boolean>;
   /**
-   * Delete only this row while it is `sending`. IDs are reused by upsertPending:
+   * Delete only this generation while it is `sending`. IDs are reused by upsertPending:
    * the worker must also recheck account status under the lifecycle lease and
    * inside a transaction before cancelling. Pending replacement work is retained.
    */
-  deleteClaimed(id: Uuid): Promise<boolean>;
-  /** The attempt failed: back to `pending` with a backoff stamp and the reason. */
-  reschedule(id: Uuid, nextAttemptAt: IsoTimestamp, lastError: string): Promise<void>;
+  deleteClaimed(job: GatewayTeardownJobRecord): Promise<boolean>;
+  /** Return only this sending generation to pending; false means ownership was lost. */
+  reschedule(
+    job: GatewayTeardownJobRecord,
+    nextAttemptAt: IsoTimestamp,
+    lastError: string,
+  ): Promise<boolean>;
   /** Return `sending` rows stuck since before `olderThan` to `pending` (crash recovery). */
   releaseStale(olderThan: IsoTimestamp): Promise<number>;
   /**

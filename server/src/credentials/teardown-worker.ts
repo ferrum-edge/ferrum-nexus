@@ -43,12 +43,10 @@
  * stay live for good. The same sweep is what recovers a job whose store write
  * failed after the claim, with no restart involved at all.
  *
- * The threshold is safe because a claim's lifetime is bounded: rows are claimed
- * singly, and one job is ~55 seconds at worst (see
- * {@link TEARDOWN_JOB_BUDGET_MS}). Recovery is idempotent in any case — the
- * revocation is a clear-and-delete, so a job run twice is wasted work rather
- * than damage, and the consumer's own Edge lease keeps two instances from
- * running it at the same instant.
+ * Rows are claimed singly; the default timing estimate is documented at
+ * {@link TEARDOWN_JOB_BUDGET_MS}. Recovery replaces the ownership token, so
+ * a delayed attempt cannot settle a reclaimed job. This database fence does
+ * not fence HTTP writes already in flight after a shared Edge lease expires.
  *
  * ## Why there is no `failed` state
  *
@@ -189,7 +187,7 @@ export function createTeardownWorker(deps: TeardownWorkerDeps): TeardownWorker {
       store.transaction(async (tx) => {
         const current = await tx.users.findById(job.user_id);
         if (current?.status === 'disabled') return false;
-        await tx.gatewayTeardownJobs.deleteClaimed(job.id);
+        await tx.gatewayTeardownJobs.deleteClaimed(job);
         return true;
       }),
     );
@@ -211,7 +209,7 @@ export function createTeardownWorker(deps: TeardownWorkerDeps): TeardownWorker {
       // No admin is on the other end of a retry, so the Edge write is attributed
       // to the account it is revoking.
       subject: job.requested_by ?? job.user_id,
-      jobId: job.id,
+      job,
       // The per-attempt `warn` line lives in `runGatewayTeardown`; this one adds
       // the attempt count an operator needs to see the retry loop working.
       log: (obj, message) => log({ ...obj, attempts: job.attempts }, message),
@@ -229,11 +227,12 @@ export function createTeardownWorker(deps: TeardownWorkerDeps): TeardownWorker {
       }
 
       const nextAt = new Date(now().getTime() + teardownBackoffMs(job.attempts, random));
-      await store.gatewayTeardownJobs.reschedule(
-        job.id,
+      const rescheduled = await store.gatewayTeardownJobs.reschedule(
+        job,
         nextAt.toISOString(),
         attempt.error ?? 'unknown error',
       );
+      if (!rescheduled) return;
       result.rescheduled += 1;
       log(
         {
