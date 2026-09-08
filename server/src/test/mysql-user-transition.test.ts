@@ -107,7 +107,11 @@ describe('MySQL conditional user transitions', { skip: !adminUrl, timeout: 30_00
                               ]);
                               // Execute the real predicate, with no injected
                               // miss or fabricated result.
-                              conditionalResult = await scoped.users.updateIfMatches(id, expected, patch);
+                              conditionalResult = await scoped.users.updateIfMatches(
+                                id,
+                                expected,
+                                patch,
+                              );
                               return conditionalResult;
                             },
                           };
