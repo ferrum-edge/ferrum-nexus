@@ -104,7 +104,10 @@ New child-process regressions exercise production SQLite query helpers under for
 rollback, retained statements, explicit close and natural exit with an open database.
 They require successful process exit as well as completed assertions, so a destructor abort
 after the assertions still fails CI. The unchanged Node 24 suite remains the original
-reproducer, and the hosted four-adapter contracts and Docker checks remain required.
+reproducer, and the hosted four-adapter contracts and Docker checks run on every pull request.
+They are **required**: the `main` ruleset ("Main required checks") pins `checks (22.14.0)`,
+`checks (22)`, `checks (24)`, `store-contracts` and `docker`, with no bypass actors, so a failing
+or missing job blocks every merge (see issue #181).
 
 ## Published advisory coverage and Nexus reachability
 
@@ -151,8 +154,9 @@ an as-of-date published-advisory check, not proof that every dependency is vulne
 
 The lockfile was edited from registry JSON without a local install or lockfile regeneration.
 Local validation is limited to static review, JSON/metadata checks and `git diff --check`.
-Hosted `npm ci` is the authoritative lock consistency/integrity and installation gate;
-hosted test/typecheck/build results must be reviewed before merge.
+Hosted `npm ci` is the authoritative lock consistency/integrity and installation gate, and
+hosted test/typecheck/build results must still be reviewed before merge; the ruleset above makes
+them required rather than advisory.
 
 The earlier 606b028 head passed hosted Node 22.12/current 22, four-store contracts and Docker
 checks; its Node 24 failure above prompted the SQLite repair. Those earlier green results

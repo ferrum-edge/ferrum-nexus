@@ -1,0 +1,5 @@
+-- God-mode broadcast subjects reach 300 characters at the route. PostgreSQL
+-- stores `notifications.title` and `message_threads.subject` as unbounded TEXT,
+-- so nothing is widened here. The migration exists only to keep the id shared
+-- across the three dialect files: MySQL widens both columns from VARCHAR(255)
+-- to VARCHAR(300).

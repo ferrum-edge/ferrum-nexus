@@ -44,7 +44,9 @@ depends on:
 - `paths` is an object.
 
 Everything else — schema correctness, `$ref` resolution, operation shape — is
-left alone. Maximum document size is **2 MiB**.
+left alone. Maximum document size is **2 MiB**, with at most **200 nested
+object/array levels** (the root is level one). Excessive nesting is refused at
+upload in both enforcement modes, before contacting the gateway.
 
 A minimal document that publishes cleanly:
 
@@ -77,6 +79,9 @@ For example, `https://{environment}.api.example.com/v1` with
 A default must belong to `enum` when one is declared. Entries with unresolved
 server variables are skipped; if no usable server remains, supply valid defaults
 or an explicit `upstream_url`. The destination policy checks the expanded host.
+The expanded URL must fit the same **2,000-character** limit as typed
+`upstream_url`. An oversized value is refused at upload with a message naming
+the server URL field, such as `servers[0].url`.
 See the [OpenAPI Server Variable Object](https://spec.openapis.org/oas/v3.1.0.html#server-variable-object).
 
 Relative server URLs (`/v2`, `./api`) are perfectly legal OpenAPI — they mean
@@ -88,6 +93,12 @@ with a clear error naming `upstream_url`.
 Scheme, host, port and base path are all taken from that URL. It must be
 resolvable **from the gateway**: `localhost` on your laptop is not the
 gateway's localhost.
+
+If the gateway rejects a spec's structure or validation during publish, revision,
+or enforcement conversion, Nexus returns `400 EDGE_REJECTED_SPEC` with the
+gateway's explanation, capped at 500 characters. `details.gateway_code` carries
+the gateway's machine-readable code when present. Other gateway failures remain
+502; operators can find the complete bounded rejection response in server logs.
 
 ### Name, slug and listen path
 
