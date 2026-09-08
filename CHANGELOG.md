@@ -119,11 +119,45 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **A test consumer whose creation was applied but never acknowledged was
+  orphaned on the gateway.** When Edge stored the `nexus-test-<api_id>` consumer
+  and then failed to answer, the caller held no id for it, so the compensation
+  skipped its delete and dropped the `gateway_identities` registration anyway —
+  leaving a consumer carrying the API's `nexus:api:<id>:approved` group with
+  nothing in the portal that could ever find it again. Every consumer Nexus
+  creates now carries a caller-assigned id derived from its namespace and
+  username, so the compensation re-reads the gateway by that id (with the
+  bounded username scan as the fallback) and deletes what it finds. A lookup or
+  delete that *fails* now keeps the registration, which is the only thing that
+  leads back to an orphan.
+- **Deleting an API left its test consumer, key and ACL group on the gateway.**
+  `DELETE /api/apis/:id` tore down the proxy and every portal row but never the
+  API's own `nexus-test-<api_id>` identity — and once the API row was gone,
+  nothing could look it up by name again, so the leak was permanent. The
+  deletion now runs the same teardown the account-disable path uses, between the
+  proxy delete and the row delete, revoking the credential mirror and consuming
+  the registration. A consumer that is already gone is not an error; a gateway
+  failure answers `502 EDGE_ERROR` and leaves the API in the catalog to be
+  deleted again rather than reporting success over a stranded identity. The
+  `api.delete` audit row gains `test_consumer_id` and
+  `test_consumer_revoked_credentials` when there was one to collect.
+- **A failed recovery-link mint spent the throttle window and leaked account
+  existence.** `POST /api/auth/forgot-password` and
+  `POST /api/auth/resend-verification` committed the issue claim before, and
+  outside, the transaction that minted the token, so a transient store failure
+  burned the recipient's ten-minute window on nothing: the retry took the
+  throttle's early return, answered the uniform `200`, and sent no link.
+  Meanwhile the escaping `500` was an existence oracle — only an address with an
+  account reaches the mint, so a partially failing store answered `500` for a
+  real address and `200` for an unknown one. The claim is now the first write of
+  the minting transaction, so it rolls back with a failed mint, and both
+  endpoints answer the documented `200 { "ok": true }` whatever happens, logging
+  the fault at `warn` instead.
 - **A palette save deleted an operator's hand-made plugin config of the same
   name.** Ownership was inferred from the plugin name, so every other config
   of that name on the proxy looked like a leftover duplicate and was removed —
   including a per-path deny gate Nexus never created. `api_plugins` now records
-  the Edge config id it produced (migration `014_api_plugin_config_id`) and
+  the Edge config id it produced (migration `015_api_plugin_config_id`) and
   saves, removals and reconciliation act on that config alone; a row written
   before the column adopts a single name match on its next save and never
   deletes the rest. The `api.plugin_set` and `api.plugin_remove` audit rows name

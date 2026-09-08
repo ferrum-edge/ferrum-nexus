@@ -215,7 +215,11 @@ import type {
   NexusStore,
   UserRecord,
 } from '../db/store.js';
-import { gatewayIdentityLockKey, type CredentialsService } from '../credentials/service.js';
+import {
+  gatewayIdentityLockKey,
+  type CredentialsService,
+  type TeardownGatewayIdentityResult,
+} from '../credentials/service.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import type {
   EdgeCircuitBreakerConfig,
@@ -1708,7 +1712,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // `LEASE_WAIT_MS` each under a credential burst. Every concurrent write
       // on the API would answer `409` for the duration, for a step that cannot
       // affect what the gateway serves.
-      const apply = async (): Promise<{ grants: GrantRecord[]; api: ApiRecord }> => {
+      const apply = async (): Promise<{
+        grants: GrantRecord[];
+        api: ApiRecord;
+        testConsumer: TeardownGatewayIdentityResult;
+      }> => {
         // Re-read under the lease: whatever held it may have moved the proxy or
         // the enforcement mode, and the teardown has to act on what is there
         // now rather than on the snapshot that waited.
@@ -1742,7 +1750,31 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           }
         }
 
-        // 2. Drop the rows. The store's delete helpers are the cascade, and the
+        // 2. Collect the API's own gateway identity: the disposable
+        //    `nexus-test-<api_id>` consumer, its credential, and the API's
+        //    approval group it carries. Nothing else ever will — the consumer
+        //    is named after an API that is about to stop existing, so no
+        //    account teardown and no reconciliation has anything left to find
+        //    it by (issue #136).
+        //
+        //    After the proxy, deliberately: the proxy is what the credential
+        //    could reach, so by the time the key is deleted there has been no
+        //    moment where a live proxy had an unauthenticatable one. Before
+        //    the rows, because a failure here must leave the API in the portal
+        //    for the delete to be retried against — a `200` over a stranded
+        //    identity is what `GHSA-8vxw-j3wc-w6vm` was filed for, so this
+        //    throws rather than logging.
+        //
+        //    The teardown takes the identity's own name key, which is the key
+        //    `createTestConsumer` holds for the whole of its work, so a
+        //    deletion racing a creation waits for it and then undoes it rather
+        //    than interleaving. It is disjoint from the proxy lease held here.
+        const testConsumer = await credentials.teardownGatewayIdentity(
+          testConsumerUsername(api.id),
+          actor.id,
+        );
+
+        // 3. Drop the rows. The store's delete helpers are the cascade, and the
         //    grant list is read a moment before it because the ACL strip and
         //    the notifications that follow the lease both need it — a line
         //    later there is nothing left to read it from.
@@ -1761,18 +1793,18 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           await tx.apis.delete(api.id);
         });
 
-        return { grants, api };
+        return { grants, api, testConsumer };
       };
       // The ACL strip, the audit row and the grantee notifications are all
       // written outside the lease, so it is held for the teardown and the row
       // delete and nothing else — and they run only after `apply` returned,
       // which is what makes `api.delete` mean "the gateway teardown held"
       // rather than "a delete was attempted".
-      const { grants, api } = initial.ferrum_proxy_id
+      const { grants, api, testConsumer } = initial.ferrum_proxy_id
         ? await binder.withProxy(initial.ferrum_proxy_id, apply)
         : await apply();
 
-      // 3. Strip the ACL group from every grantee. The group is already inert —
+      // 4. Strip the ACL group from every grantee. The group is already inert —
       //    the proxy that consulted it is gone — but leaving 500-capped junk on
       //    consumers is not okay. A failure here cannot make the gateway serve
       //    anything, so it does not fail the request; it is logged, because
@@ -1790,7 +1822,20 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         { id: actor.id, role: actor.role },
         AuditAction.API_DELETE,
         { type: 'api', id: api.id },
-        { slug: api.slug, proxy_id: api.ferrum_proxy_id, revoked_grants: grants.length },
+        {
+          slug: api.slug,
+          proxy_id: api.ferrum_proxy_id,
+          revoked_grants: grants.length,
+          // Only when there was one: an API that never had a test consumer
+          // must not leave a row that reads as though its teardown was
+          // skipped rather than unnecessary.
+          ...(testConsumer.consumer_id !== null || testConsumer.registration_removed
+            ? {
+                test_consumer_id: testConsumer.consumer_id,
+                test_consumer_revoked_credentials: testConsumer.revoked_credentials,
+              }
+            : {}),
+        },
         ip,
       );
 
@@ -1880,10 +1925,20 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             }
           }
 
+          // The replacement carries the *derived* id, exactly as `ensure`'s
+          // own create does. Letting the gateway assign one would make the new
+          // consumer unfindable from its name alone, which is the only thing
+          // the compensation below has when a create is applied and its
+          // acknowledgement is lost (issue #139).
           const consumer = resolved.created
             ? resolved.consumer
             : await edge.consumers.create(
-                { username, custom_id: `nexus-test:${api.id}`, acl_groups: [group] },
+                {
+                  id: edge.consumers.derivedId(username),
+                  username,
+                  custom_id: `nexus-test:${api.id}`,
+                  acl_groups: [group],
+                },
                 actor.id,
               );
           consumerId = consumer.id;

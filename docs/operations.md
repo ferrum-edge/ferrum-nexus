@@ -1478,16 +1478,28 @@ provider's `nexus-test-<api_id>` consumer — is found in two places:
   waits for the append on the identity's name lease (`test-consumer:<username>`)
   rather than missing it. A registration bound to its consumer's id resolves
   the consumer by id; one that never got that far — the creation stopped
-  before the id was recorded — is resolved by username, a paged scan that
-  fails the attempt (job `pending`, registration kept) rather than answering
-  "no consumer" on a namespace larger than it reads. A registration is deleted
-  once its consumer is gone.
+  before the id was recorded — is resolved by the id its username derives to
+  (every consumer Nexus creates carries that caller-assigned id), falling back
+  to a paged username scan that fails the attempt (job `pending`, registration
+  kept) rather than answering "no consumer" on a namespace larger than it
+  reads. A registration is deleted once its consumer is gone.
 - `credential_metadata` rows that are still live, for consumers created before
   that table existed.
 
 A registration that outlives the account's job means a compensating delete
 failed after the disable had already closed the job; the credentials service
 reopens the job for it, and the worker takes the consumer down on the next tick.
+
+`DELETE /api/apis/:id` runs the same teardown for the API's own
+`nexus-test-<api_id>` identity, and it is the only thing that ever will: once
+the API row is gone nothing can look the consumer up by name again. It runs
+after the proxy delete and before the portal rows are dropped, so a gateway
+failure there answers `502 EDGE_ERROR` and leaves the API in the catalog to be
+deleted again rather than reporting success over a stranded consumer. A
+retryable failure needs no operator action beyond retrying the delete; the
+`api.delete` audit row names `test_consumer_id` and
+`test_consumer_revoked_credentials` when there was an identity to collect, and
+neither key when there was not.
 
 ### Monitoring
 
@@ -1532,6 +1544,37 @@ disabled account still holds working gateway credentials. The worker also logs
 `Gateway teardown job was abandoned mid-flight; it is recovered by the stale sweep`,
 `Could not release stale gateway teardown claims` and
 `Gateway teardown tick failed`.
+
+**Also alert on these two `warn` lines**, emitted by the credentials service
+when a compensating delete could not finish:
+
+```
+an abandoned gateway identity could not be resolved; its registration was kept for teardown
+an abandoned gateway identity could not be deleted; its registration was kept for teardown
+```
+
+They carry `user_id`, `consumer_username`, `error`, and — for the second —
+`consumer_id`. The request that triggered them failed for its own reason, so
+nothing in the response says the gateway may still be carrying a
+`nexus-test-<api_id>` consumer; these lines are the only signal. The
+registration is deliberately kept in both cases, so the identity is collected by
+the account teardown or by deleting the API, and a retry of the original request
+normally clears it. A line that keeps repeating for the same
+`consumer_username` means a consumer is stranded on the gateway carrying an
+API's approval group.
+
+**And on this one**, from the recovery endpoints, which are forbidden to report
+a failure to their caller:
+
+```
+an email token could not be issued; the caller was answered uniformly
+```
+
+It carries `purpose` (`password_reset` or `email_verification`) and `error`. The
+caller got the documented `200 { "ok": true }` and no link. Nothing is stranded
+— the throttle claim rolls back with the mint, so the user pressing the button
+again issues the link — but a repeating line means self-service recovery is
+silently unavailable.
 
 ### Re-driving one by hand
 

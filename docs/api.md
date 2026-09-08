@@ -1415,10 +1415,20 @@ Destructive and ordered deliberately: the Edge proxy is deleted **first** (so
 nothing stays reachable-but-untracked, and so the API never spends the teardown
 live with its auth plugin already gone), which cascades its plugin associations
 and proxy-scoped plugin configs; any config the cascade missed is swept up
-after. Then the grants, requests, spec revisions and the API row are deleted in
-one store transaction. Only then is the ACL group stripped from every grantee's
-consumer — the group is inert the moment the proxy is gone — and grantees get a
+after. Next the API's own gateway identity — the disposable
+`nexus-test-<api_id>` consumer, its credential and the `nexus:api:<id>:approved`
+group it carries — is torn down, because nothing else ever could: it is named
+after an API that is about to stop existing. Then the grants, requests, spec
+revisions and the API row are deleted in one store transaction. Only then is the
+ACL group stripped from every grantee's consumer — the group is inert the moment the proxy is gone — and grantees get a
 notification.
+
+A test consumer that is already gone — or an API that never had one — is not an
+error, and the `api.delete` audit row then names no `test_consumer_id` at all
+rather than claiming a teardown that was never needed. A teardown the gateway
+refuses fails the request with `502 EDGE_ERROR`, leaving the API in the catalog
+so the delete can be retried; the identity stays registered, which is what makes
+it findable.
 
 The gateway teardown and the row delete run under the API's per-proxy lease, and
 the `api.delete` audit row is written only once they have. A `spec_enforcement`
@@ -1495,6 +1505,15 @@ administrator recreating a provider's, say — moves its registration and the
 attribution of its credential to the caller, and it is the caller's disabling
 that takes it down. `403 USER_DISABLED` when the caller was disabled while the
 request was in flight; nothing is created.
+
+A create the gateway applied but failed to acknowledge answers `502 EDGE_ERROR`
+and leaves nothing behind: the consumer id is derived from the username, so the
+compensation re-reads the gateway by that id and deletes the consumer it finds
+before releasing the registration. Only if that compensating delete cannot run
+does the registration survive — deliberately, because it is the one thing that
+leads back to the consumer, and deleting the API later collects both.
+
+Deleting the API deletes this consumer with it; see `DELETE /api/apis/:id`.
 
 ---
 

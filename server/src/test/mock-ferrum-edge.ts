@@ -218,6 +218,24 @@ export interface MockFerrumEdge {
     skip?: number,
   ): void;
   /**
+   * Let the next matching request be **applied**, then answer it with
+   * `status` and `body` instead of its real response.
+   *
+   * The lost acknowledgement: Edge did the write, the caller never learned
+   * that it did. Distinct from {@link MockFerrumEdge.queueFailure}, which
+   * refuses the request before it touches anything — the whole point of this
+   * one is that the gateway's state moved and the client's rejection is no
+   * evidence it did not (issue #139). Matched and one-shot exactly like a
+   * queued failure, so {@link MockFerrumEdge.clearInjections} disarms it.
+   */
+  queueLostAck(
+    status?: number,
+    body?: unknown,
+    pathContains?: string,
+    method?: string,
+    skip?: number,
+  ): void;
+  /**
    * Hold the next request whose path contains `pathContains` for `ms` *before*
    * it is handled, then forget the entry.
    *
@@ -1321,6 +1339,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   const namespaces = new Map<string, { name: string; description: string | null }>();
   const requests: RecordedRequest[] = [];
   const failures: QueuedFailure[] = [];
+  const lostAcks: QueuedFailure[] = [];
   const delays: QueuedDelay[] = [];
 
   /** `<namespace>|<proxy_id>|<method>|<status>` → cumulative count. */
@@ -1507,6 +1526,26 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
   function fail(res: ServerResponse, status: number, message: string): void {
     send(res, status, { error: message });
+  }
+
+  /**
+   * A response object that accepts everything and sends nothing.
+   *
+   * What a lost acknowledgement is made of: the handler runs to completion
+   * against it, so every stored resource moves, and the answer it wrote goes
+   * nowhere. Only `writeHead`/`end`/`setHeader` are ever called on a response
+   * here — `send` and `sendText` are the only writers — so the cast is to the
+   * three methods this mock actually uses, not to a working `ServerResponse`.
+   */
+  function discardingResponse(): ServerResponse {
+    const sink = {
+      writeHead: (): unknown => sink,
+      end: (): unknown => sink,
+      setHeader: (): unknown => sink,
+    };
+    // Escape hatch: a stand-in for the three response methods this mock
+    // calls, never handed back to Node.
+    return sink as unknown as ServerResponse;
   }
 
   function paginate<T>(items: T[], query: URLSearchParams): Record<string, unknown> {
@@ -2544,65 +2583,87 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
     }
 
-    switch (segments[0]) {
-      case 'health':
-      case 'status':
-        // Edge serves the *complete* payload with a 503 while it is
-        // `starting`, `draining` or `unavailable` — not an error body.
-        return send(res, health.ready === false ? 503 : 200, health);
-      case 'version':
-        // Real Edge has no /version; the mock answers 404 so the client's
-        // tolerant probe is exercised.
-        return fail(res, 404, 'Not found');
-      case 'metrics':
-        // Authenticated like every other admin surface. Series are labelled by
-        // namespace rather than scoped by the request header, exactly as the
-        // process-global Prometheus exporter does.
-        if (method !== 'GET') return fail(res, 405, 'Method not allowed');
-        return sendText(res, 200, renderMetrics());
-      case 'admin':
-        if (segments[1] !== 'metrics') return fail(res, 404, 'Not found');
-        if (method !== 'GET') return fail(res, 405, 'Method not allowed');
-        return send(res, 200, renderAdminMetrics());
-      case 'namespaces':
-        return handleNamespaces(res, method, segments, body, url.searchParams);
-      case 'consumers':
-        return handleConsumers(res, method, segments, namespace, body, url.searchParams);
-      case 'proxies':
-        return handleProxies(res, method, segments, namespace, body, url.searchParams);
-      case 'api-specs':
-        return handleApiSpecs(res, method, segments, namespace, body, url.searchParams);
-      case 'plugins':
-        if (segments[1] === 'config') {
-          return handlePluginConfigs(res, method, segments, namespace, body, url.searchParams);
-        }
-        if (method === 'GET') {
-          // The plugins Nexus writes: the six first-class ones plus every
-          // member of the provider palette. Real Edge lists ~75; anything not
-          // here is one Nexus never names.
-          return send(res, 200, [
-            'key_auth',
-            'basic_auth',
-            'jwt_auth',
-            'access_control',
-            'cors',
-            'rate_limiting',
-            'openapi_validator',
-            'security_headers',
-            'request_size_limiting',
-            'response_size_limiting',
-            'ip_restriction',
-            'bot_detection',
-            'correlation_id',
-            'compression',
-            'response_caching',
-            'request_deduplication',
-            'request_termination',
-          ]);
-        }
-        return fail(res, 404, 'Not found');
-      default:
-        return fail(res, 404, 'Not found');
+    const lostAck = lostAcks.find(
+      (entry) =>
+        (entry.pathContains === undefined || url.pathname.includes(entry.pathContains)) &&
+        (entry.method === undefined || entry.method === method),
+    );
+    if (lostAck) {
+      if (lostAck.skip > 0) {
+        lostAck.skip -= 1;
+      } else {
+        lostAcks.splice(lostAcks.indexOf(lostAck), 1);
+        // Route into a sink so the write lands exactly as it normally would,
+        // then throw its real answer away and send the injected one instead.
+        await route(discardingResponse());
+        return send(res, lostAck.status, lostAck.body ?? { error: 'Injected lost acknowledgement' });
+      }
+    }
+
+    return route(res);
+
+    /** Everything the request would normally do, against a given response. */
+    async function route(res: ServerResponse): Promise<void> {
+      switch (segments[0]) {
+        case 'health':
+        case 'status':
+          // Edge serves the *complete* payload with a 503 while it is
+          // `starting`, `draining` or `unavailable` — not an error body.
+          return send(res, health.ready === false ? 503 : 200, health);
+        case 'version':
+          // Real Edge has no /version; the mock answers 404 so the client's
+          // tolerant probe is exercised.
+          return fail(res, 404, 'Not found');
+        case 'metrics':
+          // Authenticated like every other admin surface. Series are labelled by
+          // namespace rather than scoped by the request header, exactly as the
+          // process-global Prometheus exporter does.
+          if (method !== 'GET') return fail(res, 405, 'Method not allowed');
+          return sendText(res, 200, renderMetrics());
+        case 'admin':
+          if (segments[1] !== 'metrics') return fail(res, 404, 'Not found');
+          if (method !== 'GET') return fail(res, 405, 'Method not allowed');
+          return send(res, 200, renderAdminMetrics());
+        case 'namespaces':
+          return handleNamespaces(res, method, segments, body, url.searchParams);
+        case 'consumers':
+          return handleConsumers(res, method, segments, namespace, body, url.searchParams);
+        case 'proxies':
+          return handleProxies(res, method, segments, namespace, body, url.searchParams);
+        case 'api-specs':
+          return handleApiSpecs(res, method, segments, namespace, body, url.searchParams);
+        case 'plugins':
+          if (segments[1] === 'config') {
+            return handlePluginConfigs(res, method, segments, namespace, body, url.searchParams);
+          }
+          if (method === 'GET') {
+            // The plugins Nexus writes: the six first-class ones plus every
+            // member of the provider palette. Real Edge lists ~75; anything not
+            // here is one Nexus never names.
+            return send(res, 200, [
+              'key_auth',
+              'basic_auth',
+              'jwt_auth',
+              'access_control',
+              'cors',
+              'rate_limiting',
+              'openapi_validator',
+              'security_headers',
+              'request_size_limiting',
+              'response_size_limiting',
+              'ip_restriction',
+              'bot_detection',
+              'correlation_id',
+              'compression',
+              'response_caching',
+              'request_deduplication',
+              'request_termination',
+            ]);
+          }
+          return fail(res, 404, 'Not found');
+        default:
+          return fail(res, 404, 'Not found');
+      }
     }
   }
 
@@ -2647,6 +2708,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       namespaces.clear();
       requests.length = 0;
       failures.length = 0;
+      lostAcks.length = 0;
       delays.length = 0;
       requestCounters.clear();
       requestDurations.clear();
@@ -2655,6 +2717,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
     clearInjections(): void {
       failures.length = 0;
+      lostAcks.length = 0;
       delays.length = 0;
     },
 
@@ -2672,6 +2735,22 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       failures.push({
         status,
         body: body ?? { error: 'Injected failure' },
+        skip,
+        ...(pathContains === undefined ? {} : { pathContains }),
+        ...(method === undefined ? {} : { method }),
+      });
+    },
+
+    queueLostAck(
+      status = 503,
+      body?: unknown,
+      pathContains?: string,
+      method?: string,
+      skip = 0,
+    ): void {
+      lostAcks.push({
+        status,
+        body: body ?? { error: 'Injected lost acknowledgement' },
         skip,
         ...(pathContains === undefined ? {} : { pathContains }),
         ...(method === undefined ? {} : { method }),
