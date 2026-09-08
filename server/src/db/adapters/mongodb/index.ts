@@ -152,7 +152,7 @@ import type {
   VerificationTokenRecord,
   VerificationTokenRepo,
 } from '../../store.js';
-import { SPEC_HISTORY_PRUNE_BATCH } from '../../store.js';
+import { assertLeaseKeyLength, SPEC_HISTORY_PRUNE_BATCH } from '../../store.js';
 
 /* ── Collection names (identical to the SQL table names) ────────────────── */
 
@@ -3238,6 +3238,7 @@ class MongoStore implements NexusStore {
 
   readonly leases: LeaseRepo = {
     acquire: async (key, owner, expiresAt, now) => {
+      assertLeaseKeyLength(key);
       const stamp = nowIso();
       try {
         // The filter is the free-or-expired test and the upsert is the claim,
