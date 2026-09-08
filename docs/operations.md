@@ -57,6 +57,15 @@ are. A relative `NEXUS_SQLITE_PATH` resolves from `server/`.
 | `NEXUS_WEB_DIST`                      | _(unset)_                                    | Directory of the built SPA to serve. When unset, the server looks for `../../web/dist` relative to itself and then `./web/dist` under the CWD; if neither has an `index.html`, static serving is disabled and only the API is exposed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `NEXUS_BOOTSTRAP_TOKEN`               | _(unset)_                                    | Secret the founding registration must present to become the portal's `super_admin` (see [First run](#first-run-and-the-bootstrap-token)). Minimum 16 characters when set; generate with `openssl rand -hex 32`. When unset the server generates one **per process** and prints it at `warn` while the portal has no active super admin — so set it for any deployment running more than one instance. Ignored once an active `super_admin` exists.                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
+Health deadline configuration: `NEXUS_HEALTH_PROBE_TIMEOUT_MS` defaults to `1500`
+milliseconds and accepts integers from `100` to `5000`. It bounds the health
+route's combined Edge health and optional version calls independently of
+`FERRUM_ADMIN_TIMEOUT_MS`. Configuration rejects larger values to leave at least
+5 seconds of headroom under the shipped image's 10-second healthcheck. Nexus
+cannot inspect Docker or orchestrator timeout overrides: keep their timeout
+strictly above this budget plus database and HTTP overhead. Database probes
+retain their driver's own timeout; a stalled database can still fail healthchecks.
+
 ### Database
 
 | Variable                    | Default               | Notes                                                                                    |
@@ -576,7 +585,7 @@ queries and closes SQLite in the final production image. What it bakes in:
 - `server/src/db/migrations` copied explicitly (tsc does not copy `.sql`)
 
 The image includes a `HEALTHCHECK` against `GET /api/health` every 30 seconds,
-with a 5-second timeout, 20-second startup grace, and three retries. Database
+with a 10-second timeout, 20-second startup grace, and three retries. Database
 failure makes it unhealthy; a gateway outage reports degraded status without
 restarting Nexus. See [§9](#9-health-checks).
 
@@ -1174,6 +1183,23 @@ scrape_configs:
       credentials_file: /etc/prometheus/ferrum-metrics-token
 ```
 
+At startup Nexus ensures a namespace-global `prometheus_metrics` plugin config
+exists, with `enabled: true` and default settings (`config: {}`). This enables
+the request counters and latency histogram for subsequent traffic; it cannot
+recover traffic from before the plugin was enabled. Any existing global config
+is preserved, including an operator's settings or disabled state. A proxy-scoped
+config does not satisfy the namespace prerequisite. Creation emits the warning
+`Created the Ferrum Edge namespace-global metrics config` and the system audit
+event `gateway.metrics_enable`. Reconciliation failures are logged and do not
+block portal startup; restart Nexus after restoring gateway access to retry.
+
+An API without a valid `ferrum_requests_total` series for its own `proxy_id`
+reports `available: false` and an `unavailable_reason`; the Usage card shows
+that explanation without zero counters. Headers, other proxies' series and
+unrelated metrics do not prove this API was measured. An explicit zero-valued
+request series does count as a measurement. Independent backend state remains
+visible even when request metrics are unavailable.
+
 Correlating a dashboard back to a portal API is the `proxy_id` label: it is the
 `ferrum_proxy_id` on the Nexus `apis` row, shown as **Edge proxy id** on the API
 detail page.
@@ -1188,11 +1214,11 @@ endpoints for one proxy and reshapes them: request counts by status class and
 method, the `429`/`401`/`403` totals, interpolated p50/p95/p99 latency, and a
 backend verdict derived from the proxy's circuit breaker and any ejected target.
 
-| Layer   | Cache                                               |
-| ------- | --------------------------------------------------- |
-| Edge    | 5 s, on its own rendering of both endpoints         |
-| Nexus   | 10 s, in-process, **per proxy**, per server process |
-| The SPA | refetches every 30 s while an API page is open      |
+| Layer   | Cache                                           |
+| ------- | ----------------------------------------------- |
+| Edge    | 5 s, on its own rendering of both endpoints     |
+| Nexus   | 10 s, shared across proxies, per server process |
+| The SPA | refetches every 30 s while an API page is open  |
 
 So a figure on the card can be up to about 15 seconds behind reality, and a
 horizontally scaled Nexus keeps one cache per process — two browser tabs served
@@ -1202,7 +1228,7 @@ not.
 
 Operational consequences worth knowing:
 
-- **A scrape is one HTTP GET per proxy per 10 s**, at worst. Edge's own 5-second
+- **A scrape is one HTTP GET per Nexus process per 10 s**, at worst. Edge's own 5-second
   cache absorbs the rendering cost, so the load is a request, not a computation.
 - **The route never returns 5xx for a gateway problem.** An unreachable,
   erroring or unparseable gateway produces `200` with `available: false`. The

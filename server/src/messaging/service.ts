@@ -300,6 +300,13 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
           body,
           `/messages/${thread.id}`,
         );
+      } catch (error) {
+        deps.log?.(
+          { user_id: recipient.id, error: error instanceof Error ? error.message : String(error) },
+          'Could not write an in-app notification',
+        );
+      }
+      try {
         await email.enqueue({
           to: recipient.email,
           templateKey: 'message_received',

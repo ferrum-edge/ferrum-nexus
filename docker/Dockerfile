@@ -50,7 +50,8 @@ EXPOSE 8787
 # /api/health answers 503 only when the database is unreachable; a gateway
 # outage is reported in the body as `degraded` but keeps the container healthy,
 # so an orchestrator does not restart the portal because Edge is down.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+# NEXUS_HEALTH_PROBE_TIMEOUT_MS defaults to 1500 and is capped at 5000; leave headroom.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:' + (process.env.NEXUS_PORT || 8787) + '/api/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
 
 CMD ["node", "server/dist/index.js"]

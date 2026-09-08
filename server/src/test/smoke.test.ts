@@ -2278,6 +2278,35 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
 
     /* ── audit logs ───────────────────────────────────────────────────── */
 
+    it('audit service: normalizes time bounds and decorates actors on every adapter', async () => {
+      const actor = await makeUser({ role: 'admin' });
+      const audit = createAuditService(store);
+      for (const created_at of ['2026-09-08T01:46:15.000Z', '2026-09-08T01:46:15.816Z']) {
+        await store.auditLogs.create({
+          actor_user_id: actor.id,
+          actor_role: actor.role,
+          action: 'test.precision',
+          target_type: 'user',
+          details: {},
+          created_at,
+        });
+      }
+      for (const bound of ['2026-09-08T01:46:15Z', '2026-09-08T01:46:15.000Z']) {
+        const filter = { actor_user_id: actor.id, from: bound };
+        const page = await audit.list(filter);
+        assert.equal(page.total, 2);
+        assert.equal(await audit.count(filter), 2);
+        assert.deepEqual(page.items[0]?.actor, {
+          id: actor.id,
+          email: actor.email,
+          display_name: actor.display_name,
+          role: actor.role,
+        });
+        assert.equal((await audit.list({ actor_user_id: actor.id, to: bound })).total, 0);
+        assert.equal(await audit.count({ actor_user_id: actor.id, to: bound }), 0);
+      }
+    });
+
     it('auditLogs: appends structured details and filters every way', async () => {
       const actor = await makeUser({ role: 'admin' });
       const from = nowIso();
