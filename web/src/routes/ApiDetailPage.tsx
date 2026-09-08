@@ -48,6 +48,7 @@ import {
   timeoutDraftFrom,
   type TimeoutDraft,
 } from '../components/publishing/AdvancedProxySettings';
+import { StartThreadDialog } from '../components/messaging/StartThreadDialog';
 import { PluginsTab } from '../components/plugins/PluginsTab';
 import { SpecEditor, isSpecValid } from '../components/publishing/SpecEditor';
 import { Badge, type BadgeTone } from '../components/ui/Badge';
@@ -523,6 +524,9 @@ export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
     kind: 'approve' | 'deny';
   } | null>(null);
   const [note, setNote] = useState('');
+  // The provider guide's first use of Messages is clarifying a thin
+  // justification *before* deciding, so the entry point sits on the row.
+  const [messageTarget, setMessageTarget] = useState<AccessRequest | null>(null);
 
   const requests = query.data?.items ?? [];
 
@@ -580,6 +584,16 @@ export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
                   </div>
                   <div className="flex items-center gap-2">
                     <StatusPill status={request.status} />
+                    {request.requester ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label={`Message ${request.requester.display_name}`}
+                        onClick={() => setMessageTarget(request)}
+                      >
+                        Message
+                      </Button>
+                    ) : null}
                     {request.status === 'pending' ? (
                       <>
                         <Button
@@ -653,6 +667,20 @@ export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
           hint="Shared with the requester by email and in-app notification."
         />
       </ConfirmDialog>
+
+      {messageTarget?.requester ? (
+        <StartThreadDialog
+          key={messageTarget.id}
+          open
+          onOpenChange={(next) => {
+            if (!next) setMessageTarget(null);
+          }}
+          recipientUserId={messageTarget.requester.id}
+          apiId={apiId}
+          defaultSubject="About your access request"
+          recipientLabel={messageTarget.requester.display_name}
+        />
+      ) : null}
     </>
   );
 }
@@ -675,6 +703,9 @@ export function GrantsTab({ apiId }: { apiId: string }): ReactElement {
   const toast = useToast();
   const [revoking, setRevoking] = useState<Grant | null>(null);
   const [reason, setReason] = useState('');
+  // The other two uses the guide names — warning grantees of a breaking change,
+  // and explaining a decline — both start from a grantee.
+  const [messageTarget, setMessageTarget] = useState<Grant | null>(null);
 
   const grants = query.data?.items ?? [];
 
@@ -719,6 +750,16 @@ export function GrantsTab({ apiId }: { apiId: string }): ReactElement {
                 </div>
                 <div className="flex items-center gap-2">
                   <StatusPill status={grant.status} />
+                  {grant.user ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      aria-label={`Message ${grant.user.display_name}`}
+                      onClick={() => setMessageTarget(grant)}
+                    >
+                      Message
+                    </Button>
+                  ) : null}
                   {grant.status === 'active' ? (
                     <Button
                       size="sm"
@@ -774,6 +815,20 @@ export function GrantsTab({ apiId }: { apiId: string }): ReactElement {
           onChange={(event) => setReason(event.target.value)}
         />
       </ConfirmDialog>
+
+      {messageTarget?.user ? (
+        <StartThreadDialog
+          key={messageTarget.id}
+          open
+          onOpenChange={(next) => {
+            if (!next) setMessageTarget(null);
+          }}
+          recipientUserId={messageTarget.user.id}
+          apiId={apiId}
+          defaultSubject="About your access to this API"
+          recipientLabel={messageTarget.user.display_name}
+        />
+      ) : null}
     </>
   );
 }

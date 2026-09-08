@@ -19,10 +19,13 @@
  * systems with no transaction between them, so they are handled as two distinct
  * failures:
  *
- * - **the transport rejected** — nothing was delivered, retry on the backoff;
- * - **the transport accepted but the acknowledgement failed** — the relay
- *   already has the message, and a retry would deliver a second copy. The row
- *   is taken out of the retry loop and parked as `failed` with
+ * - **the transport rejected before the message was fully written** — nothing
+ *   was delivered, retry on the backoff;
+ * - **the transport accepted but the acknowledgement failed**, or the attempt
+ *   was cut off *after* the whole body reached the relay (a socket timeout, a
+ *   reset, or the enforced {@link OUTBOX_SEND_BUDGET_MS} deadline) — the relay
+ *   may already have the message, and a retry would deliver a second copy. The
+ *   row is taken out of the retry loop and parked as `failed` with
  *   {@link OUTBOX_DELIVERED_UNACKNOWLEDGED} at the front of `last_error`, so an
  *   operator can tell it apart from mail that never left.
  *
@@ -31,6 +34,14 @@
  * a duplicate goes out. That residual duplicate is the reason delivery is
  * documented as at-least-once rather than exactly-once: exact deduplication
  * needs the relay to honour a `Message-ID`, which Nexus cannot assume.
+ *
+ * ## A claim is owned, not just taken
+ *
+ * `claimDue` stamps an opaque generation on the row, and every settling write
+ * matches on `id + generation + status = 'sending'`. A worker whose claim was
+ * reclaimed by another instance's `releaseStale` therefore cannot overwrite the
+ * new owner's outcome — it loses the write, counts it in `lost` and logs it,
+ * rather than resurrecting a row that has already been settled.
  *
  * Two operational rules:
  *
@@ -48,7 +59,12 @@
 import { OUTBOX_MAX_ATTEMPTS, OUTBOX_POLL_INTERVAL_MS } from '@ferrum-nexus/shared';
 
 import type { EmailOutboxRecord, NexusStore } from '../db/store.js';
-import type { MailTransport, MailTransportFactory } from './service.js';
+import {
+  isDeliveredUnacknowledged,
+  SMTP_SEND_BUDGET_MS,
+  type MailTransport,
+  type MailTransportFactory,
+} from './service.js';
 
 /** Rows claimed per poll. Small enough that one slow relay cannot stall a tick. */
 export const OUTBOX_BATCH_SIZE = 20;
@@ -63,26 +79,32 @@ export const OUTBOX_MAX_BACKOFF_MS = 60 * 60_000;
  * A `sending` row untouched for this long is assumed to be a crashed worker's
  * and is released back to `pending`.
  *
- * Five minutes against a per-message ceiling of {@link OUTBOX_SEND_BUDGET_MS},
- * and rows are claimed one at a time, so a row a live worker is actually
- * delivering is never anywhere near it.
+ * Five minutes against an *enforced* per-message ceiling of
+ * {@link OUTBOX_SEND_BUDGET_MS}, and rows are claimed one at a time, so a row a
+ * live worker is actually delivering is never anywhere near it. Should a
+ * reclaim still race a live attempt, the claim's generation is what stops the
+ * loser from overwriting the winner's outcome.
  */
 export const OUTBOX_STALE_AFTER_MS = 5 * 60_000;
 
 /**
- * How long one delivery attempt can legitimately take.
+ * Hard ceiling on one delivery attempt.
  *
- * `createSmtpTransport` pins nodemailer's three timeouts — 10 s to connect,
- * 10 s for the greeting, 30 s of socket inactivity — so a single `send` cannot
- * run past ~50 seconds however badly the relay behaves. (Nodemailer's own
- * defaults are 2 min / 30 s / 10 min, which would put a hung message well past
- * {@link OUTBOX_STALE_AFTER_MS} and let a second worker deliver a duplicate of
- * a message still in flight.)
+ * `createSmtpTransport` races every `send` against this deadline, so the number
+ * is a bound rather than an estimate. Pinning nodemailer's three timeouts
+ * (10 s to connect, 10 s for the greeting, 30 s of socket inactivity) is worth
+ * doing but is *not* a total: `socketTimeout` measures inactivity between
+ * reads, so a relay that answers every command just inside it — or dribbles
+ * legal multi-line continuations — can hold one `send` open indefinitely. That
+ * is what used to let an attempt outlive {@link OUTBOX_STALE_AFTER_MS} and have
+ * its claim reclaimed while the message was still in flight.
  *
- * Nothing enforces this number; it exists to be compared against the stale
- * threshold, which must stay comfortably above it.
+ * An attempt cut off by the deadline is *not* an ordinary failure: if the body
+ * had already reached the relay it may well be queued there, so the row is
+ * parked as {@link OUTBOX_DELIVERED_UNACKNOWLEDGED} instead of being retried
+ * into a duplicate.
  */
-export const OUTBOX_SEND_BUDGET_MS = 60_000;
+export const OUTBOX_SEND_BUDGET_MS = SMTP_SEND_BUDGET_MS;
 
 /**
  * Prefix written to `last_error` when SMTP accepted a message but the
@@ -104,8 +126,10 @@ export interface OutboxTickResult {
   sent: number;
   rescheduled: number;
   failed: number;
-  /** Delivered by SMTP, but the `markSent` write did not land. */
+  /** Delivered by SMTP, but the acknowledgement could not be persisted. */
   unacknowledged: number;
+  /** Settling writes refused because the claim had been reclaimed meanwhile. */
+  lost: number;
   /** Rows whose handling threw; recovered by a later tick's stale sweep. */
   abandoned: number;
   /** True when the tick delivered nothing because SMTP is not configured. */
@@ -118,6 +142,7 @@ const EMPTY_TICK: Omit<OutboxTickResult, 'released'> = {
   rescheduled: 0,
   failed: 0,
   unacknowledged: 0,
+  lost: 0,
   abandoned: 0,
   skipped: true,
 };
@@ -186,10 +211,20 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
         text: entry.body_text,
       });
     } catch (error) {
+      if (isDeliveredUnacknowledged(error)) {
+        // The attempt was cut off after the relay had the whole message — a
+        // socket timeout past end-of-data, or the send budget. Retrying it is
+        // exactly how the same password reset arrives five times.
+        await parkUnacknowledged(result, entry, error);
+        return;
+      }
       // Nothing was delivered: the retry loop is safe.
       const message = error instanceof Error ? error.message : String(error);
       if (entry.attempts >= OUTBOX_MAX_ATTEMPTS) {
-        await store.emailOutbox.markFailed(entry.id, message);
+        if (!(await store.emailOutbox.markFailed(entry, message))) {
+          lostClaim(result, entry, 'markFailed');
+          return;
+        }
         result.failed += 1;
         log(
           { id: entry.id, attempts: entry.attempts, error: message },
@@ -198,7 +233,10 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
         return;
       }
       const nextAt = new Date(now().getTime() + backoffDelayMs(entry.attempts, random));
-      await store.emailOutbox.reschedule(entry.id, nextAt.toISOString(), message);
+      if (!(await store.emailOutbox.reschedule(entry, nextAt.toISOString(), message))) {
+        lostClaim(result, entry, 'reschedule');
+        return;
+      }
       result.rescheduled += 1;
       log(
         { id: entry.id, attempts: entry.attempts, next_attempt_at: nextAt.toISOString() },
@@ -210,11 +248,33 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
     // Past this point the relay has the message. Anything that fails now is an
     // acknowledgement problem, and rescheduling would deliver a second copy.
     try {
-      await store.emailOutbox.markSent(entry.id, now().toISOString());
-      result.sent += 1;
+      if (await store.emailOutbox.markSent(entry, now().toISOString())) {
+        result.sent += 1;
+      } else {
+        lostClaim(result, entry, 'markSent');
+      }
     } catch (error) {
       await parkUnacknowledged(result, entry, error);
     }
+  }
+
+  /**
+   * Record a settling write that was refused because the claim moved on.
+   *
+   * The row now belongs to whichever worker reclaimed it after the stale sweep,
+   * so this attempt has no say in its outcome. Overwriting it anyway is what
+   * used to resurrect an already-`sent` row into another delivery.
+   */
+  function lostClaim(
+    result: OutboxTickResult,
+    entry: EmailOutboxRecord,
+    write: 'markSent' | 'markFailed' | 'reschedule',
+  ): void {
+    result.lost += 1;
+    log(
+      { id: entry.id, to: entry.to_email, attempts: entry.attempts, write },
+      'Outbox claim was reclaimed by another worker; this attempt did not settle the row',
+    );
   }
 
   /**
@@ -234,10 +294,14 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
     const message = cause instanceof Error ? cause.message : String(cause);
     result.unacknowledged += 1;
     try {
-      await store.emailOutbox.markFailed(
-        entry.id,
+      const parked = await store.emailOutbox.markFailed(
+        entry,
         `${OUTBOX_DELIVERED_UNACKNOWLEDGED}: ${message}`,
       );
+      if (!parked) {
+        lostClaim(result, entry, 'markFailed');
+        return;
+      }
       log(
         { id: entry.id, to: entry.to_email, error: message },
         'Outbox message was delivered but could not be marked sent; parked to avoid a duplicate',
@@ -279,6 +343,7 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
       rescheduled: 0,
       failed: 0,
       unacknowledged: 0,
+      lost: 0,
       abandoned: 0,
       skipped: false,
     };

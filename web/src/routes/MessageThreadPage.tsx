@@ -1,6 +1,6 @@
 import { Link, useParams } from '@tanstack/react-router';
-import { useEffect, useRef, useState, type FormEvent, type ReactElement } from 'react';
-import type { Message } from '@ferrum-nexus/shared';
+import { useEffect, useState, type FormEvent, type ReactElement } from 'react';
+import type { Message, MessagePage } from '@ferrum-nexus/shared';
 import { formatDateTime } from '../lib/format';
 import { useOlderMessages, useSendMessage, useThread } from '../hooks/useThreads';
 import { useAuth } from '../stores/auth';
@@ -31,6 +31,78 @@ export function mergeMessages(current: Message[], incoming: Message[]): Message[
   });
 }
 
+/** Where the next "Load older" request should start. */
+export interface ThreadPageCursors {
+  /** Cursor from the live newest window; moves forward as replies arrive. */
+  headCursor: string | null;
+  /** Unfinished windows, newest gap first and original history last. */
+  olderCursors: string[];
+}
+
+export function initialThreadPageCursors(): ThreadPageCursors {
+  return { headCursor: null, olderCursors: [] };
+}
+
+/** Pick the cursor the load-older button should use. */
+export function loadOlderCursor(cursors: ThreadPageCursors): string | null {
+  return cursors.olderCursors[0] ?? null;
+}
+
+/**
+ * Fold a refetched newest window into the cursor state.
+ *
+ * The live query's `next_before` always describes that window. Adopting it once
+ * was wrong: when more than a page of replies lands mid-session the refetched
+ * window starts newer than the retained cursor and the messages in between
+ * become unreachable. Overlap means the head still connects; a non-overlapping
+ * refetch opens a gap that must be closed before tail pagination continues.
+ */
+export function adoptNewestPageCursors(
+  cursors: ThreadPageCursors,
+  heldBeforeMerge: Message[],
+  page: Pick<MessagePage, 'items' | 'next_before'>,
+): ThreadPageCursors {
+  const heldIds = new Set(heldBeforeMerge.map((message) => message.id));
+  const overlaps = page.items.some((message) => heldIds.has(message.id));
+  let olderCursors = cursors.olderCursors;
+  if (page.next_before === null) {
+    olderCursors = [];
+  } else if (!overlaps && !olderCursors.includes(page.next_before)) {
+    olderCursors = [page.next_before, ...olderCursors];
+  }
+
+  return {
+    headCursor: page.next_before,
+    olderCursors,
+  };
+}
+
+/** Fold one manually fetched older window into the cursor state. */
+export function adoptOlderPageCursors(
+  cursors: ThreadPageCursors,
+  heldBeforeMerge: Message[],
+  page: Pick<MessagePage, 'items' | 'next_before'>,
+  requestedCursor: string | null = loadOlderCursor(cursors),
+): ThreadPageCursors {
+  if (requestedCursor === null) return cursors;
+  const index = cursors.olderCursors.indexOf(requestedCursor);
+  if (index === -1) return cursors;
+  const heldIds = new Set(heldBeforeMerge.map((message) => message.id));
+  const overlaps = page.items.some((message) => heldIds.has(message.id));
+  const olderCursors = [...cursors.olderCursors];
+
+  // A response may arrive after another newest window opened a higher-priority gap.
+  // Advance only its requested cursor, leaving any newer gaps intact.
+  if (page.next_before === null) {
+    olderCursors.splice(index);
+  } else if (overlaps) {
+    olderCursors.splice(index, 1);
+  } else {
+    olderCursors[index] = page.next_before;
+  }
+  return { ...cursors, olderCursors };
+}
+
 /** One conversation with its messages and a reply composer. */
 export function MessageThreadPage(): ReactElement {
   const params = useParams({ strict: false });
@@ -42,26 +114,27 @@ export function MessageThreadPage(): ReactElement {
   const [body, setBody] = useState('');
 
   // Everything fetched so far, and where the next older window starts.
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [nextBefore, setNextBefore] = useState<string | null>(null);
-  const anchored = useRef(false);
+  const [history, setHistory] = useState(() => ({
+    threadId,
+    messages: [] as Message[],
+    cursors: initialThreadPageCursors(),
+    total: 0,
+  }));
+  const { messages, cursors } = history;
 
   useEffect(() => {
-    anchored.current = false;
-    setMessages([]);
-    setNextBefore(null);
+    setHistory({ threadId, messages: [], cursors: initialThreadPageCursors(), total: 0 });
   }, [threadId]);
 
   useEffect(() => {
     const page = query.data?.messages;
     if (!page) return;
-    setMessages((current) => mergeMessages(current, page.items));
-    // Adopt the server's cursor once. After that the older windows we have
-    // fetched ourselves are the newer truth about where history continues.
-    if (!anchored.current) {
-      anchored.current = true;
-      setNextBefore(page.next_before);
-    }
+    setHistory((current) => ({
+      ...current,
+      cursors: adoptNewestPageCursors(current.cursors, current.messages, page),
+      messages: mergeMessages(current.messages, page.items),
+      total: Math.max(current.total, page.total),
+    }));
   }, [query.data]);
 
   if (query.isLoading) return <LoadingPanel label="Loading conversation" />;
@@ -92,14 +165,23 @@ export function MessageThreadPage(): ReactElement {
     send.mutate({ id: thread.id, body: { body: trimmed } }, { onSuccess: () => setBody('') });
   };
 
+  const nextBefore = loadOlderCursor(cursors);
+
   const older = (): void => {
-    if (!nextBefore) return;
+    if (!nextBefore || loadOlder.isPending) return;
     loadOlder.mutate(
       { id: thread.id, before: nextBefore },
       {
         onSuccess: (page) => {
-          setMessages((current) => mergeMessages(current, page.items));
-          setNextBefore(page.next_before);
+          setHistory((current) => {
+            if (current.threadId !== thread.id) return current;
+            return {
+              ...current,
+              cursors: adoptOlderPageCursors(current.cursors, current.messages, page, nextBefore),
+              messages: mergeMessages(current.messages, page.items),
+              total: Math.max(current.total, page.total),
+            };
+          });
         },
       },
     );
@@ -124,16 +206,16 @@ export function MessageThreadPage(): ReactElement {
 
       <Card className="flex flex-col overflow-hidden">
         <div className="flex flex-col gap-4 px-5 py-5">
-          {nextBefore ? (
-            <div className="flex flex-col items-center gap-1">
+          <div className="flex flex-col items-center gap-1">
+            {nextBefore ? (
               <Button type="button" variant="ghost" loading={loadOlder.isPending} onClick={older}>
                 Load older messages
               </Button>
-              <span className="text-xs text-fg-subtle">
-                Showing {messages.length} of {thread.messages.total} messages
-              </span>
-            </div>
-          ) : null}
+            ) : null}
+            <span className="text-xs text-fg-subtle">
+              Showing {messages.length} of {Math.max(history.total, thread.messages.total)} messages
+            </span>
+          </div>
 
           {messages.length === 0 ? (
             <p className="text-sm text-fg-muted">No messages in this conversation yet.</p>

@@ -2711,6 +2711,126 @@ describe('publishing', () => {
       assert.equal(storedProxy(harness, proxyId).backend_host, 'billing.example.com');
     });
 
+    /**
+     * A document that overrides `servers` below the root.
+     *
+     * OpenAPI resolves `servers` at three levels — root, Path Item, Operation —
+     * and the nearest one wins, so each of these overrides used to survive the
+     * root rewrite untouched.
+     */
+    function nestedServersSpec(version = '1.0.0'): string {
+      return JSON.stringify({
+        openapi: '3.1.0',
+        info: { title: 'Billing API', version },
+        servers: [{ url: 'https://billing.example.com:8443/v2' }],
+        paths: {
+          '/invoices': {
+            servers: [{ url: '/other' }],
+            get: { responses: { '200': { description: 'OK' } } },
+            post: {
+              servers: [{ url: 'https://writes.example.com/elsewhere' }],
+              responses: { '201': { description: 'Created' } },
+            },
+          },
+          '/payments': { get: { responses: { '200': { description: 'OK' } } } },
+        },
+      });
+    }
+
+    /** Every `servers` key anywhere under `paths`, as `<where>` labels. */
+    function nestedServerSites(document: Record<string, unknown>): string[] {
+      const sites: string[] = [];
+      const paths = (document.paths ?? {}) as Record<string, Record<string, unknown>>;
+      for (const [template, item] of Object.entries(paths)) {
+        if ('servers' in item) sites.push(template);
+        for (const [key, value] of Object.entries(item)) {
+          if (value !== null && typeof value === 'object' && 'servers' in value) {
+            sites.push(`${template}.${key}`);
+          }
+        }
+      }
+      return sites.sort();
+    }
+
+    it('strips path-level and operation-level servers before submitting', async () => {
+      // The whole point of the root rewrite is that the listen path is the base
+      // for every operation. A nested `servers` overrides it and Edge builds
+      // `^/other/invoices$` — a matcher nothing arriving at
+      // `/nexus/enf-nested/invoices` can hit, which
+      // `fail_on_unknown_operation` turns into a `400` on a publish that
+      // answered `201`.
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'enf-nested',
+          spec: nestedServersSpec(),
+          spec_enforcement: 'routes',
+        }),
+      });
+      assert.equal(response.statusCode, 201, response.body);
+      const proxyId = String(response.json<PublishApiResponse>().api.ferrum_proxy_id);
+
+      const document = submittedDocument(proxyId);
+      assert.deepEqual(document.servers, [{ url: '/nexus/enf-nested' }]);
+      assert.deepEqual(nestedServerSites(document), []);
+      assert.deepEqual(operationLabels(proxyId), [
+        'GET /nexus/enf-nested/invoices',
+        'GET /nexus/enf-nested/payments',
+        'POST /nexus/enf-nested/invoices',
+      ]);
+    });
+
+    it('keeps a routes API serving when a revision introduces nested servers', async () => {
+      // The worse entry point: a `PUT` on a live API, which answers `200` and
+      // would otherwise take a working API to a total outage with nothing in
+      // the portal indicating anything is wrong.
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'enf-nested-rev', spec_enforcement: 'routes' }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
+
+      const revised = await harness.authed(provider, {
+        method: 'PUT',
+        url: `/api/apis/${apiId}/spec`,
+        payload: { spec: nestedServersSpec('2.0.0') },
+      });
+      assert.equal(revised.statusCode, 200, revised.body);
+      assert.deepEqual(nestedServerSites(submittedDocument(proxyId)), []);
+      assert.deepEqual(operationLabels(proxyId), [
+        'GET /nexus/enf-nested-rev/invoices',
+        'GET /nexus/enf-nested-rev/payments',
+        'POST /nexus/enf-nested-rev/invoices',
+      ]);
+    });
+
+    it('leaves the provider revision itself untouched, nested servers included', async () => {
+      // Only the copy submitted to Edge is rewritten. The stored revision is
+      // what the catalog and the docs viewer show, and what a `docs_only` API
+      // publishes — the provider's document, as they wrote it.
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'enf-nested-docs',
+          spec: nestedServersSpec(),
+          spec_enforcement: 'docs_only',
+        }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const api = published.json<PublishApiResponse>().api;
+      assert.equal(harness.edge.apiSpecForProxy(String(api.ferrum_proxy_id)), undefined);
+
+      const stored = await harness.store.apiSpecs.findCurrentByApi(api.id);
+      assert.ok(stored);
+      const document = JSON.parse(stored.raw_spec) as Record<string, unknown>;
+      assert.deepEqual(nestedServerSites(document), ['/invoices', '/invoices.post']);
+    });
+
     it('declares no OPTIONS operations for an API with a CORS policy', async () => {
       // `cors` runs at priority 100 and `openapi_validator` at 2960, and
       // `preflight_continue` defaults to false, so the preflight is answered

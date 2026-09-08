@@ -582,6 +582,7 @@ function mapNotification(row: Row): NotificationRecord {
 function mapOutbox(row: Row): EmailOutboxRecord {
   return {
     id: str(row._id),
+    generation: str(row.generation ?? ''),
     to_email: str(row.to_email),
     subject: str(row.subject),
     body_html: str(row.body_html),
@@ -1185,6 +1186,14 @@ const MONGO_MIGRATIONS: { id: string; apply: (db: Db) => Promise<void> }[] = [
     // is recorded anyway so `schema_migrations` means the same thing here.
     id: '015_api_plugin_config_id',
     apply: async (): Promise<void> => undefined,
+  },
+  {
+    id: '016_outbox_generation',
+    apply: async (db: Db): Promise<void> => {
+      await db
+        .collection('email_outbox')
+        .updateMany({ generation: { $exists: false } }, { $set: { generation: '' } });
+    },
   },
 ];
 
@@ -2764,6 +2773,7 @@ class MongoStore implements NexusStore {
             body_text: input.body_text,
             status: 'pending',
             attempts: 0,
+            generation: '',
             next_attempt_at: input.next_attempt_at ?? meta.created_at,
             last_error: null,
             idempotency_key: key,
@@ -2816,6 +2826,7 @@ class MongoStore implements NexusStore {
             {
               $set: {
                 status: 'sending',
+                generation: newId(),
                 updated_at: nowIso(),
                 attempts: { $add: [{ $ifNull: ['$attempts', 0] }, 1] },
               },
@@ -2834,17 +2845,21 @@ class MongoStore implements NexusStore {
       return claimed;
     },
 
-    markSent: async (id, at) => {
-      await this.col(COLLECTIONS.emailOutbox).updateOne(
-        { _id: id },
+    // Settling matches the claimed generation while it is still `sending`, so a
+    // worker whose claim was reclaimed mid-delivery cannot overwrite the new
+    // owner's outcome.
+    markSent: async (entry, at) => {
+      const result = await this.col(COLLECTIONS.emailOutbox).updateOne(
+        { _id: entry.id, generation: entry.generation, status: 'sending' } as Filter<NexusDoc>,
         { $set: { status: 'sent', next_attempt_at: null, last_error: null, updated_at: at } },
         this.opts,
       );
+      return result.modifiedCount > 0;
     },
 
-    reschedule: async (id, nextAttemptAt, lastError) => {
-      await this.col(COLLECTIONS.emailOutbox).updateOne(
-        { _id: id },
+    reschedule: async (entry, nextAttemptAt, lastError) => {
+      const result = await this.col(COLLECTIONS.emailOutbox).updateOne(
+        { _id: entry.id, generation: entry.generation, status: 'sending' } as Filter<NexusDoc>,
         {
           $set: {
             status: 'pending',
@@ -2855,11 +2870,12 @@ class MongoStore implements NexusStore {
         },
         this.opts,
       );
+      return result.modifiedCount > 0;
     },
 
-    markFailed: async (id, lastError) => {
-      await this.col(COLLECTIONS.emailOutbox).updateOne(
-        { _id: id },
+    markFailed: async (entry, lastError) => {
+      const result = await this.col(COLLECTIONS.emailOutbox).updateOne(
+        { _id: entry.id, generation: entry.generation, status: 'sending' } as Filter<NexusDoc>,
         {
           $set: {
             status: 'failed',
@@ -2870,6 +2886,7 @@ class MongoStore implements NexusStore {
         },
         this.opts,
       );
+      return result.modifiedCount > 0;
     },
 
     releaseStale: async (olderThan) => {

@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { MassEmailRequest, MassEmailResponse } from '@ferrum-nexus/shared';
-import { adminApi } from '../../lib/api';
+import { adminApi, organizationsApi, usersApi } from '../../lib/api';
 import { AdminMassEmailPage } from './AdminMassEmailPage';
 
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), push: vi.fn() }));
@@ -11,6 +11,10 @@ const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), push: vi.fn(
 vi.mock('../../stores/toast', () => ({ useToast: () => toast }));
 vi.mock('../../components/layout/RoleGuard', () => ({
   RoleGuard: ({ children }: { children: ReactNode }) => children,
+}));
+// The composer offers the signed-in account as a one-click explicit recipient.
+vi.mock('../../stores/auth', () => ({
+  useAuth: () => ({ user: { id: 'me-1', display_name: 'Fran Founder' } }),
 }));
 
 function renderComposer(subject = 'Announcement'): void {
@@ -113,5 +117,76 @@ describe('mass email campaign IDs', () => {
       ),
     );
     expect(toast.success).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The audience the composer can express.
+ *
+ * It used to emit one shape — `{ scope: 'filtered', roles: [oneRole], status:
+ * 'active' }` — so "Administrator" meant `roles: ['admin']` and skipped every
+ * super admin, and the guide's mandatory pre-send step (an explicit audience of
+ * one, addressed to yourself) could not be composed at all.
+ */
+describe('mass email audiences', () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+  });
+
+  function stubDirectory(): void {
+    vi.spyOn(organizationsApi, 'list').mockResolvedValue({ items: [], total: 0 });
+    vi.spyOn(usersApi, 'list').mockResolvedValue({
+      items: [],
+      total: 0,
+      pending_gateway_teardowns: 0,
+    });
+  }
+
+  it('aims a filtered send at every administrative role, super admins included', async () => {
+    stubDirectory();
+    const send = vi.spyOn(adminApi, 'massEmail').mockResolvedValue({ enqueued: 2, recipients: 2 });
+    renderComposer();
+
+    fireEvent.click(screen.getByLabelText('Filtered'));
+    fireEvent.click(await screen.findByRole('button', { name: 'All administrative roles' }));
+    expect(screen.getByLabelText('Admin')).toBeChecked();
+    expect(screen.getByLabelText('Super Admin')).toBeChecked();
+
+    await submit();
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(send.mock.calls[0]?.[0].audience).toEqual({
+      scope: 'filtered',
+      status: 'active',
+      roles: ['admin', 'super_admin'],
+    });
+  });
+
+  it('composes the documented explicit audience of one', async () => {
+    stubDirectory();
+    const send = vi.spyOn(adminApi, 'massEmail').mockResolvedValue({ enqueued: 1, recipients: 1 });
+    renderComposer();
+
+    fireEvent.click(screen.getByLabelText('Specific accounts'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Add myself' }));
+    expect(screen.getByRole('button', { name: 'Remove Fran Founder' })).toBeInTheDocument();
+
+    await submit();
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(send.mock.calls[0]?.[0].audience).toEqual({
+      scope: 'explicit',
+      user_ids: ['me-1'],
+    });
+  });
+
+  it('refuses to send an explicit audience with nobody in it', async () => {
+    stubDirectory();
+    const send = vi.spyOn(adminApi, 'massEmail').mockResolvedValue({ enqueued: 0, recipients: 0 });
+    renderComposer();
+
+    fireEvent.click(screen.getByLabelText('Specific accounts'));
+    expect(screen.getByRole('button', { name: 'Review and send' })).toBeDisabled();
+    expect(send).not.toHaveBeenCalled();
   });
 });
