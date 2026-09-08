@@ -79,6 +79,14 @@ function multiTagSpec(count: number, includeLastGroup = false): string {
   });
 }
 
+/**
+ * The 250-operation case renders and pages 500 tag entries through jsdom. It
+ * finished in ~7 s on a slow hosted runner, past vitest's 5 s default, so it
+ * gets an explicit budget rather than a shorter fixture that would no longer
+ * cross the 200-entry page boundary twice.
+ */
+const PAGING_TEST_TIMEOUT_MS = 30_000;
+
 describe('OpenApiView multi-tag paging', () => {
   it('reveals a final group after 100 operations appearing under both A and B', () => {
     const { container } = render(<OpenApiView text={multiTagSpec(100, true)} />);
@@ -129,7 +137,7 @@ describe('OpenApiView multi-tag paging', () => {
     expect(renderedPaths).toEqual([...expectedPaths, ...expectedPaths]);
     expect(screen.queryByRole('button', { name: /Show .* more/ })).not.toBeInTheDocument();
     expect(screen.queryByText(/Showing/)).not.toBeInTheDocument();
-  });
+  }, PAGING_TEST_TIMEOUT_MS);
 });
 
 describe('OpenApiView', () => {
