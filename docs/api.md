@@ -440,9 +440,18 @@ before a session exists.
   "tagline": "APIs for partners",
   "support_email": "api-support@acme.example",
   "captcha": { "enabled": false, "provider": "none", "site_key": null },
+  "registration": { "open_registration": true, "allowed_roles": ["client", "provider"] },
   "bootstrap_required": false
 }
 ```
+
+`registration` is the public slice of the registration policy, so the sign-up
+form does not offer a role the server will refuse. `allowed_roles` is the stored
+policy narrowed to the self-selectable roles — an elevated role left in the
+setting never appears here, because `POST /api/auth/register` accepts only
+`client` and `provider` in the first place. Both fields are already observable
+by attempting a registration, and the server re-checks the policy on every one;
+this only saves the visitor a `403`.
 
 `bootstrap_required` is `true` only while the portal has no active
 `super_admin`: the next registration is seated as one and must therefore send

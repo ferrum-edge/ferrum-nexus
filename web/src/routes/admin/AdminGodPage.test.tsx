@@ -29,6 +29,8 @@ vi.mock('../../hooks/useApis', () => ({
 }));
 vi.mock('../../hooks/useUsers', () => ({
   useUsers: () => ({ data: { items: recent, total: 201 } }),
+  // The audience selector offers an organization filter.
+  useOrganizations: () => ({ data: { items: [], total: 0 } }),
 }));
 vi.mock('../../hooks/useGodMode', () => ({
   useGodRevokeGrant: () => ({ mutate: revoke, isPending: false }),
@@ -109,5 +111,33 @@ describe('broadcast email campaign identity', () => {
     });
     compose();
     expect(sendBroadcast.mock.calls[2]![0].idempotency_key).not.toBe(firstKey);
+  });
+});
+
+/**
+ * The broadcast audience.
+ *
+ * `docs/api.md` calls god-mode broadcast the channel for "anything people must
+ * not miss", and the guide says its audience works exactly like mass email's.
+ * The panel used to send `{ scope: 'filtered', roles: [oneRole] }`, so the one
+ * audience an operator reaches for in an incident skipped every super admin.
+ */
+describe('broadcast audience', () => {
+  it('reaches both administrative roles when the shortcut is used', () => {
+    render(<AdminGodPage />);
+    fireEvent.click(screen.getByLabelText('Filtered'));
+    fireEvent.click(screen.getByRole('button', { name: 'All administrative roles' }));
+    fireEvent.change(screen.getByLabelText(/^Subject/), { target: { value: 'Rotate now' } });
+    fireEvent.change(screen.getByLabelText(/^Message/), { target: { value: 'Within an hour' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Broadcast' }));
+    const dialog = within(screen.getByRole('dialog'));
+    fireEvent.change(dialog.getByPlaceholderText('BROADCAST'), { target: { value: 'BROADCAST' } });
+    fireEvent.click(dialog.getByRole('button', { name: 'Broadcast' }));
+
+    expect(sendBroadcast.mock.calls[0]![0].audience).toEqual({
+      scope: 'filtered',
+      status: 'active',
+      roles: ['admin', 'super_admin'],
+    });
   });
 });

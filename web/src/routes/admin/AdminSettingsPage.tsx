@@ -7,6 +7,7 @@ import {
   type AdminSettingsResponse,
   type CaptchaProvider,
   type EmailTemplateKey,
+  type RegistrableRole,
   type ThemePreference,
 } from '@ferrum-nexus/shared';
 import {
@@ -19,7 +20,6 @@ import {
 import { useAuth } from '../../stores/auth';
 import { useToast } from '../../stores/toast';
 import { RoleGuard } from '../../components/layout/RoleGuard';
-import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
 import { Card, CardBody, CardHeader, PageHeader } from '../../components/ui/Card';
 import { Icon } from '../../components/ui/Icon';
@@ -274,6 +274,20 @@ function CaptchaTab({ settings }: { settings: AdminSettingsResponse }): ReactEle
   const [requireVerification, setRequireVerification] = useState(
     settings.registration.require_email_verification,
   );
+  // Bound to the stored policy rather than to REGISTRABLE_ROLES: the server
+  // enforces this list on every registration, so a card that advertised the
+  // constant contradicted whichever administrator had narrowed it.
+  const [allowedRoles, setAllowedRoles] = useState<RegistrableRole[]>(() =>
+    REGISTRABLE_ROLES.filter((role) => settings.registration.allowed_roles.includes(role)),
+  );
+  const toggleRole = (role: RegistrableRole, checked: boolean): void => {
+    setAllowedRoles((current) =>
+      REGISTRABLE_ROLES.filter((value) => {
+        if (value === role) return checked;
+        return current.includes(value);
+      }),
+    );
+  };
 
   return (
     <div className="flex flex-col gap-6">
@@ -367,14 +381,27 @@ function CaptchaTab({ settings }: { settings: AdminSettingsResponse }): ReactEle
             checked={requireVerification}
             onChange={(event) => setRequireVerification(event.target.checked)}
           />
-          <p className="text-sm text-fg-muted">
-            Self-selectable roles:{' '}
-            {REGISTRABLE_ROLES.map((role) => (
-              <Badge key={role} className="mr-1">
-                {ROLE_LABELS[role]}
-              </Badge>
-            ))}
-          </p>
+          <Field
+            label="Self-selectable roles"
+            hint="Which roles the sign-up form offers. Registration with any other role is refused with a 403."
+          >
+            <div className="flex flex-col gap-2">
+              {REGISTRABLE_ROLES.map((role) => (
+                <Checkbox
+                  key={role}
+                  label={ROLE_LABELS[role]}
+                  checked={allowedRoles.includes(role)}
+                  onChange={(event) => toggleRole(role, event.target.checked)}
+                />
+              ))}
+            </div>
+          </Field>
+          {allowedRoles.length === 0 ? (
+            <p className="text-sm text-danger" role="alert">
+              With no self-selectable role, self-service registration cannot complete at all. Turn
+              off open registration instead if that is what you mean.
+            </p>
+          ) : null}
           <div>
             <Button
               variant="primary"
@@ -385,6 +412,7 @@ function CaptchaTab({ settings }: { settings: AdminSettingsResponse }): ReactEle
                     registration: {
                       open_registration: openRegistration,
                       require_email_verification: requireVerification,
+                      allowed_roles: allowedRoles,
                     },
                   },
                   { onSuccess: () => toast.success('Registration settings saved') },

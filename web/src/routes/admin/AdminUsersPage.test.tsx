@@ -1,9 +1,9 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import type { ReactNode } from 'react';
+import type { ReactElement, ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { GatewayTeardownState, User } from '@ferrum-nexus/shared';
-import { usersApi } from '../../lib/api';
+import type { GatewayTeardownState, Organization, User } from '@ferrum-nexus/shared';
+import { organizationsApi, usersApi } from '../../lib/api';
 import { TooltipProvider } from '../../components/ui/Tooltip';
 import { AdminUsersPage } from './AdminUsersPage';
 
@@ -13,6 +13,40 @@ vi.mock('../../components/layout/RoleGuard', () => ({
 vi.mock('../../stores/toast', () => ({
   useToast: () => ({ success: vi.fn(), error: vi.fn() }),
 }));
+// Radix Select cannot be driven under jsdom (no layout, no pointer capture).
+// Both pickers here are plain value pickers, so stand in native <select>s that
+// keep the same props contract and accessible names.
+vi.mock('../../components/ui/Select', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../components/ui/Select')>();
+  function NativeSelect({
+    label,
+    value,
+    onValueChange,
+    options,
+    'aria-label': ariaLabel,
+  }: {
+    label?: string;
+    value: string;
+    onValueChange: (value: never) => void;
+    options: ReadonlyArray<{ value: string; label: string }>;
+    'aria-label'?: string;
+  }): ReactElement {
+    return (
+      <select
+        aria-label={ariaLabel ?? label}
+        value={value}
+        onChange={(event) => onValueChange(event.target.value as never)}
+      >
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    );
+  }
+  return { ...actual, Select: NativeSelect, LabeledSelect: NativeSelect };
+});
 
 const user: User = {
   id: 'disabled-user',
@@ -40,7 +74,11 @@ function job(status: GatewayTeardownState['status']): GatewayTeardownState {
   };
 }
 
-function renderUsers(): void {
+function renderUsers(organizations: Organization[] = []): void {
+  vi.spyOn(organizationsApi, 'list').mockResolvedValue({
+    items: organizations,
+    total: organizations.length,
+  });
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -117,5 +155,97 @@ describe('gateway revocation visibility', () => {
       expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
       expect(screen.queryByText(/^Gateway revocation/)).not.toBeInTheDocument();
     });
+  });
+});
+
+const ACME: Organization = {
+  id: 'org-1',
+  name: 'Acme',
+  description: null,
+  created_at: '2026-09-07T12:00:00.000Z',
+  updated_at: '2026-09-07T12:00:00.000Z',
+};
+
+const GLOBEX: Organization = { ...ACME, id: 'org-2', name: 'Globex' };
+
+const member: User = {
+  ...user,
+  id: 'member-1',
+  email: 'member@example.test',
+  display_name: 'Ada Member',
+  status: 'active',
+  org_id: ACME.id,
+};
+
+/**
+ * The admin guide's organization procedure is "create an organization, then
+ * assign accounts by editing the user's org_id", and its account section
+ * promises filters by status and organization. Neither had a control:
+ * `org_id` appeared nowhere in this page.
+ */
+describe('organization and status management', () => {
+  const page = { items: [member], total: 1, pending_gateway_teardowns: 0 };
+
+  it('shows the organization each account belongs to', async () => {
+    vi.spyOn(usersApi, 'list').mockResolvedValue(page);
+    renderUsers([ACME, GLOBEX]);
+    expect(await screen.findByText('Acme')).toBeInTheDocument();
+  });
+
+  it('filters the directory by organization and by status', async () => {
+    const list = vi.spyOn(usersApi, 'list').mockResolvedValue(page);
+    renderUsers([ACME, GLOBEX]);
+    await screen.findByText(member.email);
+
+    fireEvent.change(screen.getByLabelText('Filter by status'), {
+      target: { value: 'disabled' },
+    });
+    await waitFor(() =>
+      expect(list).toHaveBeenCalledWith(expect.objectContaining({ status: 'disabled' })),
+    );
+
+    fireEvent.change(screen.getByLabelText('Filter by organization'), {
+      target: { value: GLOBEX.id },
+    });
+    await waitFor(() =>
+      expect(list).toHaveBeenCalledWith(expect.objectContaining({ org_id: GLOBEX.id })),
+    );
+  });
+
+  it('assigns an account to another organization and renames it', async () => {
+    vi.spyOn(usersApi, 'list').mockResolvedValue(page);
+    const update = vi.spyOn(usersApi, 'update').mockResolvedValue({ user: member });
+    renderUsers([ACME, GLOBEX]);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit Ada Member' }));
+    const dialog = within(await screen.findByRole('dialog'));
+    fireEvent.change(dialog.getByLabelText(/^Display name/), { target: { value: 'Ada Lovelace' } });
+    fireEvent.change(dialog.getByLabelText('Organization'), { target: { value: GLOBEX.id } });
+    fireEvent.click(dialog.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(update).toHaveBeenCalledWith(member.id, {
+        display_name: 'Ada Lovelace',
+        org_id: GLOBEX.id,
+      }),
+    );
+  });
+
+  it('clears an organization from an account', async () => {
+    vi.spyOn(usersApi, 'list').mockResolvedValue(page);
+    const update = vi.spyOn(usersApi, 'update').mockResolvedValue({ user: member });
+    renderUsers([ACME, GLOBEX]);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit Ada Member' }));
+    const dialog = within(await screen.findByRole('dialog'));
+    fireEvent.change(dialog.getByLabelText('Organization'), { target: { value: '__none__' } });
+    fireEvent.click(dialog.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(update).toHaveBeenCalledWith(member.id, {
+        display_name: member.display_name,
+        org_id: null,
+      }),
+    );
   });
 });

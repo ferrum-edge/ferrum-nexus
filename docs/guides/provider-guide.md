@@ -711,9 +711,13 @@ catalog page; you can reply, and start threads yourself.
 
 Use it for:
 
-- clarifying a thin justification before you decide;
-- warning grantees about a breaking change or a maintenance window;
-- explaining a decline in more detail than the note allowed.
+- clarifying a thin justification before you decide — **Message** on the row in
+  **My APIs → the API → Requests**, which reaches the requester without leaving
+  the decision;
+- warning grantees about a breaking change or a maintenance window — the same
+  **Message** control on each row of the **Grants** tab;
+- explaining a decline in more detail than the note allowed — the request row
+  keeps its **Message** control after the decision.
 
 Threads about the same API with the same client continue rather than
 fragmenting, so the history stays in one place. Both sides get in-app
