@@ -323,6 +323,12 @@ export const MAX_CORS_ORIGINS = 64;
 /** Maximum size in bytes of an uploaded OpenAPI document. */
 export const MAX_SPEC_BYTES = 2 * 1024 * 1024;
 
+/** Maximum object/array nesting, counting the document root as level one. */
+export const MAX_SPEC_DEPTH = 200;
+
+/** Maximum upstream URL length, whether typed or expanded from an OpenAPI server. */
+export const MAX_UPSTREAM_URL_LENGTH = 2_000;
+
 /**
  * Maximum number of path items an uploaded OpenAPI document may declare.
  *

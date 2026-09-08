@@ -1953,31 +1953,51 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
    */
   function apiSpecProblem(
     body: unknown,
-  ): { error: string; status: number } | { proxy: Record<string, unknown> } {
-    if (!isRecord(body)) return { error: 'Request body must be a JSON object', status: 400 };
+  ):
+    | { error: string; code: string; details: string; status: number }
+    | { proxy: Record<string, unknown> } {
+    const parseError = (code: string, details: string, status = 400) => ({
+      error: 'Spec parse failed',
+      code,
+      details,
+      status,
+    });
+    if (!isRecord(body)) return parseError('InvalidJson', 'Request body must be a JSON object');
+    if (typeof body.openapi !== 'string' || !/^3\./.test(body.openapi)) {
+      return parseError('UnknownVersion', 'unknown spec version (expected openapi: 3.x.y)');
+    }
     if (body['x-ferrum-consumers'] !== undefined) {
-      return { error: 'x-ferrum-consumers is not allowed in spec documents', status: 400 };
+      return parseError(
+        'ConsumerExtensionNotAllowed',
+        'x-ferrum-consumers is not allowed in spec documents',
+        422,
+      );
     }
     const proxy = body['x-ferrum-proxy'];
     if (!isRecord(proxy)) {
-      return { error: 'Spec document must contain an x-ferrum-proxy object', status: 400 };
+      return parseError(
+        'MissingProxyExtension',
+        'Spec document must contain an x-ferrum-proxy object',
+      );
     }
     if (proxy.api_spec_id !== undefined) {
-      return { error: 'api_spec_id is server-managed and must be omitted', status: 422 };
+      return parseError('MalformedExtension', 'api_spec_id is server-managed and must be omitted');
     }
     for (const field of Object.keys(proxy)) {
-      if (!PROXY_KEYS.has(field)) return { error: `unknown field: ${field}`, status: 400 };
+      if (!PROXY_KEYS.has(field)) {
+        return parseError('MalformedExtension', `malformed x-ferrum-proxy: unknown field: ${field}`);
+      }
     }
     const validate = body['x-ferrum-validate'];
     if (isRecord(validate)) {
       for (const field of Object.keys(validate)) {
         if (!FERRUM_VALIDATE_KEYS.has(field)) {
-          return { error: `unknown x-ferrum-validate field: ${field}`, status: 400 };
+          return parseError('MalformedExtension', `unknown x-ferrum-validate field: ${field}`);
         }
       }
     }
     const settingsProblem = validateProxySettings(proxy);
-    if (settingsProblem) return { error: settingsProblem, status: 400 };
+    if (settingsProblem) return parseError('MalformedExtension', settingsProblem);
     return { proxy };
   }
 
@@ -2084,7 +2104,10 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       if (method !== 'POST') return fail(res, 405, 'Method not allowed');
 
       const checked = apiSpecProblem(body);
-      if ('error' in checked) return fail(res, checked.status, checked.error);
+      if ('error' in checked) {
+        const { status, ...rejection } = checked;
+        return send(res, status, rejection);
+      }
       const document = body as Record<string, unknown>;
       const proxyBody = checked.proxy;
 
@@ -2097,7 +2120,17 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         return fail(res, 409, `Proxy '${proxyId}' already exists in this namespace`);
       }
       if (listenPathTaken(namespace, proxyBody.listen_path)) {
-        return fail(res, 409, 'listen_path already exists in this namespace');
+        return send(res, 422, {
+          error: 'Spec validation failed',
+          spec_version: document.openapi,
+          failures: [
+            {
+              resource_type: 'proxy',
+              id: proxyId,
+              errors: ['A proxy with overlapping hosts and listen_path already exists'],
+            },
+          ],
+        });
       }
       if (specForProxy(namespace, proxyId)) {
         return fail(res, 409, `A spec already exists for proxy '${proxyId}'`);
@@ -2130,7 +2163,10 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     if (method === 'PUT') {
       if (!existing) return fail(res, 404, 'API spec not found');
       const checked = apiSpecProblem(body);
-      if ('error' in checked) return fail(res, checked.status, checked.error);
+      if ('error' in checked) {
+        const { status, ...rejection } = checked;
+        return send(res, status, rejection);
+      }
       const document = body as Record<string, unknown>;
       const proxyBody = checked.proxy;
       if (typeof proxyBody.id === 'string' && proxyBody.id !== existing.proxy_id) {
@@ -2143,7 +2179,17 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       // spec-owned proxy is cut over onto the real path — so the uniqueness
       // check applies here too, excluding the proxy being re-inserted.
       if (listenPathTaken(namespace, proxyBody.listen_path, existing.proxy_id)) {
-        return fail(res, 409, 'listen_path already exists in this namespace');
+        return send(res, 422, {
+          error: 'Spec validation failed',
+          spec_version: document.openapi,
+          failures: [
+            {
+              resource_type: 'proxy',
+              id: existing.proxy_id,
+              errors: ['A proxy with overlapping hosts and listen_path already exists'],
+            },
+          ],
+        });
       }
       const proxy = proxies.get(key(namespace, existing.proxy_id));
       existing.document = document;

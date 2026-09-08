@@ -1089,6 +1089,14 @@ caller in `EDGE_ERROR.details.gateway_message`; for `401`/`403` and every `5xx`
 it is deliberately **only** in the log, so this is where you look when a
 provider reports an unexplained `EDGE_ERROR`.
 
+API-spec parse/validation rejections use `400 EDGE_REJECTED_SPEC` for upstream
+4xx responses other than 401/403. Their bounded explanation and machine code
+are in `details.gateway_message` and `details.gateway_code`. The Edge client's
+error log includes the complete parsed response as `gateway_response`, bounded
+by its 16 MiB response limit, including `details` and `failures` omitted from the
+public summary. Serialization failures log `request serialization failed` and
+surface as `500 INTERNAL`; they do not indicate an unreachable gateway.
+
 ### Shutdown
 
 `SIGINT`/`SIGTERM` trigger a graceful shutdown: the outbox and gateway-teardown

@@ -22,6 +22,7 @@ import {
   MAX_RATE_LIMIT_REQUESTS,
   MAX_RATE_LIMIT_WINDOW_SECONDS,
   MAX_SPEC_BYTES,
+  MAX_UPSTREAM_URL_LENGTH,
   SPEC_ENFORCEMENT_LEVELS,
   type ApiUsageResponse,
   MIN_BACKEND_TIMEOUT_MS,
@@ -176,7 +177,7 @@ const publishBody = z.object({
   // Optional here even though the shared DTO marks it required: a document with
   // an absolute `servers[0].url` already names its upstream, and demanding the
   // provider retype it is friction with no safety benefit.
-  upstream_url: z.string().trim().max(2_000).optional(),
+  upstream_url: z.string().trim().max(MAX_UPSTREAM_URL_LENGTH).optional(),
   spec: specField,
   auth_plugin: z.enum(AUTH_PLUGIN_TYPES),
   requestable: z.boolean(),
@@ -193,7 +194,7 @@ const updateBody = z.object({
   name: z.string().trim().min(1).max(200).optional(),
   description: z.string().trim().max(4_000).nullish(),
   version: z.string().trim().max(60).optional(),
-  upstream_url: z.string().trim().max(2_000).optional(),
+  upstream_url: z.string().trim().max(MAX_UPSTREAM_URL_LENGTH).optional(),
   auth_plugin: z.enum(AUTH_PLUGIN_TYPES).optional(),
   requestable: z.boolean().optional(),
   visibility: z.enum(['public', 'internal']).optional(),
