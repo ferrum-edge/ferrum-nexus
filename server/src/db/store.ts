@@ -88,6 +88,8 @@ import type {
   Uuid,
 } from '@ferrum-nexus/shared';
 
+import { NexusError } from '../lib/errors.js';
+
 /* ── Generic helpers ────────────────────────────────────────────────────── */
 
 /** Pagination accepted by every `list` method. */
@@ -1139,6 +1141,26 @@ export interface LeaseRepo {
   renew(key: string, owner: string, expiresAt: IsoTimestamp): Promise<boolean>;
   /** Housekeeping sweep of leases nobody can hold any more. */
   deleteExpired(now: IsoTimestamp): Promise<number>;
+}
+
+/**
+ * `edge_leases.key` is `VARCHAR(255)` on MySQL — the narrowest width any adapter
+ * stores. MySQL's `INSERT IGNORE` acquisition silently truncates an over-long
+ * key rather than rejecting it, so a future key-construction change could report
+ * "acquired" for a key it did not store faithfully, wedging the lock forever and
+ * letting two keys that differ only past character 255 collide. Every adapter
+ * refuses such a key up front so they stay behaviourally interchangeable.
+ */
+export const LEASE_KEY_MAX_LENGTH = 255;
+
+/** Refuse a lease key that cannot be stored faithfully on every adapter. */
+export function assertLeaseKeyLength(key: string): void {
+  if (key.length > LEASE_KEY_MAX_LENGTH) {
+    throw new NexusError(
+      'INTERNAL',
+      `Lease key is ${key.length} characters; the maximum is ${LEASE_KEY_MAX_LENGTH}`,
+    );
+  }
 }
 
 /* ── The store ──────────────────────────────────────────────────────────── */

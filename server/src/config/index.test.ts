@@ -27,6 +27,16 @@ function expectConfigError(env: EnvRecord, needle: string): void {
 }
 
 describe('loadConfig', () => {
+  it('bounds the independent health deadline below the image healthcheck budget', () => {
+    assert.equal(loadConfig(baseEnv()).healthProbeTimeoutMs, 1_500);
+    assert.equal(
+      loadConfig(baseEnv({ NEXUS_HEALTH_PROBE_TIMEOUT_MS: '5000' })).healthProbeTimeoutMs,
+      5_000,
+    );
+    for (const value of ['0', '99', '5001', '10000', 'bad']) {
+      expectConfigError(baseEnv({ NEXUS_HEALTH_PROBE_TIMEOUT_MS: value }), 'NEXUS_HEALTH_PROBE');
+    }
+  });
   it('applies every documented default', () => {
     const config = loadConfig(baseEnv());
 
@@ -159,6 +169,14 @@ describe('loadConfig', () => {
   it('rejects an invalid namespace and an out-of-range JWT TTL', () => {
     expectConfigError(baseEnv({ FERRUM_NAMESPACE: '-bad-' }), 'FERRUM_NAMESPACE');
     expectConfigError(baseEnv({ FERRUM_ADMIN_JWT_TTL: '99999' }), 'FERRUM_ADMIN_JWT_TTL');
+  });
+
+  it('caps FERRUM_NAMESPACE at 128 characters', () => {
+    // The MySQL namespace columns are VARCHAR(128); a longer value would pass
+    // validation yet fail every publish on that adapter alone.
+    const boundary = 'a'.repeat(128);
+    assert.equal(loadConfig(baseEnv({ FERRUM_NAMESPACE: boundary })).edge.namespace, boundary);
+    expectConfigError(baseEnv({ FERRUM_NAMESPACE: 'a'.repeat(129) }), 'at most 128 characters');
   });
 
   it('disables rate limiting in the test environment', () => {

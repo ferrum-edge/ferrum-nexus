@@ -133,6 +133,18 @@ validation issues, a conflicting slug, an Edge status).
 | `OUTBOX_FAILURE`     | 500  | Email could not be enqueued, or exhausted its outbox retries.                                                                                                                                                                                                                                                                                                                                                                 |
 | `INTERNAL`           | 500  | Unexpected server-side failure.                                                                                                                                                                                                                                                                                                                                                                                               |
 
+An Edge API-spec write rejected with a 4xx `Spec parse failed` or
+`Spec validation failed` category returns `400 EDGE_REJECTED_SPEC` (except
+401/403, which remain gateway credential errors). Its `details` contains the
+upstream `status`, a `gateway_message` capped at 500 characters, and
+`gateway_code` when Edge supplies a string `code` (also capped at 500 characters).
+The message includes string `details` and a summary of each failure's
+`resource_type` and first error, within the same cap. The complete response is
+logged server-side within the Edge client's response-size bound; it is not
+reflected into the public error details. Other categories remain `502 EDGE_ERROR`,
+and gateway 5xx diagnostics remain opaque. This applies to publish, spec revision,
+and enforcement conversion.
+
 An invalid Edge HTTP/JSON response returns `502 EDGE_PROTOCOL_ERROR` with
 `details: { status, kind: "protocol_error", reason }`. The fixed reason identifies
 the contract violation (for example `invalid_utf8`); response bytes and parser
@@ -1188,6 +1200,14 @@ then persists.
 { "api": { … }, "spec": { … } }
 ```
 
+Uploads accept at most 200 nested object/array levels, counting the root as level
+one, in either enforcement mode. Deeper documents return `400 SPEC_INVALID` with
+`details: { reason: "nesting_too_deep", limit: 200 }` before a gateway call.
+The derived upstream URL, after server-variable expansion, must fit the same
+2,000-character limit as typed `upstream_url`. An oversized derived URL returns
+`400 SPEC_INVALID` naming `servers[0].url` (or the selected server's index) and
+`details.limit: 2000`. These limits also apply to spec revisions.
+
 Errors: `400 SPEC_INVALID` (unparseable, Swagger 2.0, missing
 `openapi`/`info.title`/`info.version`/`paths`, oversized, no upstream
 determinable, or — unless `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` — an upstream
@@ -1292,6 +1312,11 @@ Errors: `403 FORBIDDEN` (not the owner and not an admin), `404 NOT_FOUND`. A
 gateway request-metrics scrape that is unreachable, erroring or unparseable is
 **not** a portal error: the route answers `200` with `available: false`, zeroed
 counters and `latency_ms: null`. Those zeros represent missing measurements.
+The same applies when no valid `ferrum_requests_total` series belongs to this
+API's proxy, even if the scrape contains other metrics. `unavailable_reason`
+is an optional explanation suitable for display. Clients must hide unmeasured
+counters when `available` is false; an explicit zero request series still
+reports `available: true`.
 A successful independent backend-state read may still populate `backend` and
 `gateway_uptime_seconds`; it cannot make `available` true. Conversely, if only
 backend state is unavailable, request counters remain valid and `backend.status`

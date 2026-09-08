@@ -5,6 +5,7 @@ import type { LightMyRequestResponse } from 'fastify';
 
 import {
   aclGroupForApi,
+  MAX_SPEC_DEPTH,
   type ApiErrorBody,
   type CatalogListResponse,
   type CreateTestConsumerResponse,
@@ -155,6 +156,88 @@ describe('publishing', () => {
   describe('publish', () => {
     beforeEach(() => {
       harness.edge.reset();
+    });
+
+    it('refuses oversized derived URLs and excessive nesting before any gateway call', async () => {
+      const deep = SAMPLE_SPEC_JSON.replace(
+        /}\s*$/,
+        `,"x-deep":${'{"child":'.repeat(MAX_SPEC_DEPTH)}0${'}'.repeat(MAX_SPEC_DEPTH)}}`,
+      );
+      const expanded = JSON.parse(SAMPLE_SPEC_JSON) as Record<string, unknown>;
+      expanded.servers = [
+        {
+          url: 'https://backend.example.com/{base}{base}',
+          variables: { base: { default: 'x'.repeat(1_000) } },
+        },
+      ];
+      const specs = [
+        specWithServer(`https://backend.example.com/${'x'.repeat(3_000)}`),
+        JSON.stringify(expanded),
+        deep,
+      ];
+      const before = harness.edge.requests.length;
+      for (const spec_enforcement of ['docs_only', 'routes']) {
+        for (const spec of specs) {
+          const response = await harness.authed(provider, {
+            method: 'POST',
+            url: '/api/apis',
+            payload: publishPayload({ slug: 'bounded-spec', spec, spec_enforcement }),
+          });
+          assert.equal(response.statusCode, 400, response.body);
+          assert.equal(errorCode(response.body), 'SPEC_INVALID');
+          assert.match(response.body, /servers\[0\]\.url|nesting limit/);
+        }
+      }
+      assert.equal(harness.edge.requests.length, before);
+    });
+
+    it('publishes at the nesting boundary and converts the document to routes', async () => {
+      const levels = MAX_SPEC_DEPTH - 1;
+      const spec = SAMPLE_SPEC_JSON.replace(
+        /}\s*$/,
+        `,"x-deep":${'{"child":'.repeat(levels)}0${'}'.repeat(levels)}}`,
+      );
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'depth-boundary', spec }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const converted = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { spec_enforcement: 'routes' },
+      });
+      assert.equal(converted.statusCode, 200, converted.body);
+      assert.equal(converted.json<UpdateApiResponse>().api.spec_enforcement, 'routes');
+    });
+
+    it('returns actionable API-spec rejection details to the provider', async () => {
+      harness.edge.queueFailure(
+        422,
+        {
+          error: 'Spec parse failed',
+          code: 'MalformedExtension',
+          details: 'malformed x-ferrum-proxy: unknown field upstream_url',
+        },
+        '/api-specs',
+        'POST',
+      );
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'spec-rejected', spec_enforcement: 'routes' }),
+      });
+      assert.equal(response.statusCode, 400, response.body);
+      const body = response.json<ApiErrorBody>();
+      assert.equal(body.error.code, 'EDGE_REJECTED_SPEC');
+      assert.match(body.error.message, /unknown field upstream_url/);
+      assert.equal(
+        (body.error.details as { gateway_code: string }).gateway_code,
+        'MalformedExtension',
+      );
+      assert.equal(harness.edge.proxies.size, 0);
     });
 
     it('creates the proxy and every plugin with the exact Edge bodies', async () => {

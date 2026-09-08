@@ -29,10 +29,10 @@ are. A relative `NEXUS_SQLITE_PATH` resolves from `server/`.
 
 ### Required
 
-| Variable                  | Notes                                                                                                                                                                                                                                                                                                                                   |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NEXUS_SECRET_KEY`        | **Required.** Minimum 32 characters. The master secret; the settings-encryption key and the session-token HMAC key are both HKDF-derived from it. Generate with `openssl rand -hex 32`. To change it, run `npm run rotate-secret-key` with the old value in `NEXUS_SECRET_KEY_PREVIOUS` first — see [§7](#7-rotating-nexus_secret_key). |
-| `FERRUM_ADMIN_JWT_SECRET` | **Required.** Minimum 32 characters. Must match the gateway's `FERRUM_ADMIN_JWT_SECRET` exactly.                                                                                                                                                                                                                                        |
+| Variable                  | Notes                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NEXUS_SECRET_KEY`        | **Required.** Minimum 32 characters. The master secret; the settings-encryption key and the session-token HMAC key are both HKDF-derived from it. Generate with `openssl rand -hex 32`. To change it, run `npm run rotate-secret-key` (in a built image: `node server/dist/db/rotate-key-cli.js`) with the old value in `NEXUS_SECRET_KEY_PREVIOUS` first — see [§7](#7-rotating-nexus_secret_key). |
+| `FERRUM_ADMIN_JWT_SECRET` | **Required.** Minimum 32 characters. Must match the gateway's `FERRUM_ADMIN_JWT_SECRET` exactly.                                                                                                                                                                                                                                                                                                    |
 
 ### Server
 
@@ -57,6 +57,15 @@ are. A relative `NEXUS_SQLITE_PATH` resolves from `server/`.
 | `NEXUS_WEB_DIST`                      | _(unset)_                                    | Directory of the built SPA to serve. When unset, the server looks for `../../web/dist` relative to itself and then `./web/dist` under the CWD; if neither has an `index.html`, static serving is disabled and only the API is exposed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `NEXUS_BOOTSTRAP_TOKEN`               | _(unset)_                                    | Secret the founding registration must present to become the portal's `super_admin` (see [First run](#first-run-and-the-bootstrap-token)). Minimum 16 characters when set; generate with `openssl rand -hex 32`. When unset the server generates one **per process** and prints it at `warn` while the portal has no active super admin — so set it for any deployment running more than one instance. Ignored once an active `super_admin` exists.                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
+Health deadline configuration: `NEXUS_HEALTH_PROBE_TIMEOUT_MS` defaults to `1500`
+milliseconds and accepts integers from `100` to `5000`. It bounds the health
+route's combined Edge health and optional version calls independently of
+`FERRUM_ADMIN_TIMEOUT_MS`. Configuration rejects larger values to leave at least
+5 seconds of headroom under the shipped image's 10-second healthcheck. Nexus
+cannot inspect Docker or orchestrator timeout overrides: keep their timeout
+strictly above this budget plus database and HTTP overhead. Database probes
+retain their driver's own timeout; a stalled database can still fail healthchecks.
+
 ### Database
 
 | Variable                    | Default               | Notes                                                                                    |
@@ -74,7 +83,7 @@ are. A relative `NEXUS_SQLITE_PATH` resolves from `server/`.
 | `FERRUM_ADMIN_JWT_TTL`             | `60`                    | Admin JWT lifetime in seconds, 5 – 3600. Edge caps it at 3600. Short is correct — tokens are minted per call and cached.                                                                                                                                                                                                                                                                         |
 | `FERRUM_ADMIN_JWT_ISSUER`          | `ferrum-edge`           | The `iss` claim. **Must equal the gateway's configured issuer** or every call is rejected.                                                                                                                                                                                                                                                                                                       |
 | `FERRUM_ADMIN_JWT_AUDIENCE`        | _(unset)_               | Only set when the gateway configures an audience. An unexpected `aud` claim is rejected by the gateway, so Nexus omits it entirely by default.                                                                                                                                                                                                                                                   |
-| `FERRUM_NAMESPACE`                 | `nexus`                 | Namespace Nexus manages, sent as `X-Ferrum-Namespace` on every call. Must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, ≤ 254 chars. Also becomes the first segment of every listen path (`/<namespace>/<slug>`).                                                                                                                                                                                        |
+| `FERRUM_NAMESPACE`                 | `nexus`                 | Namespace Nexus manages, sent as `X-Ferrum-Namespace` on every call. Must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, ≤ 128 chars (the MySQL namespace columns are `VARCHAR(128)`; longer values fail publish on that adapter alone). Also becomes the first segment of every listen path (`/<namespace>/<slug>`).                                                                                     |
 | `FERRUM_GATEWAY_PUBLIC_URL`        | _(unset)_               | Public origin of the gateway's **proxy listener** — where clients send API traffic. Absolute `http(s)` origin, no path/query/credentials; a trailing slash is stripped. Feeds each API's `invoke_url` in the catalog. Distinct from `FERRUM_ADMIN_URL` (control plane) and `NEXUS_PUBLIC_URL` (the portal). The `gateway.public_url` setting overrides it; with neither, `invoke_url` is `null`. |
 | `FERRUM_ADMIN_CA_FILE`             | _(unset)_               | Path to a PEM CA bundle for a TLS-protected Admin API. An unreadable file fails startup.                                                                                                                                                                                                                                                                                                         |
 | `FERRUM_ADMIN_ALLOW_INSECURE_HTTP` | `false`                 | Permits plaintext `http://` Admin URLs on non-loopback hosts. Container-network-only deployments are the intended use.                                                                                                                                                                                                                                                                           |
@@ -369,14 +378,26 @@ For deployments that prefer a separate schema step:
 
 ```bash
 npm run migrate                      # from the repo root
-# or, from a built image:
-node server/dist/db/migrate-cli.ts   # (tsx in dev: npx tsx src/db/migrate-cli.ts)
+# or, from a built image (the compiled entry point — `.js`, not `.ts`):
+node server/dist/db/migrate-cli.js   # (tsx in dev: npx tsx src/db/migrate-cli.ts)
 ```
 
 Run the **root** script, not `npm run migrate --workspace server`: the server
 resolves `@ferrum-nexus/shared` through that workspace's `dist/`, and only the
 root script builds it first. On a clean clone the workspace-level script fails
 until you have run `npm run build --workspace shared` yourself.
+
+The root script is **not available inside the runtime image**, for the same
+reason: the image is built with `npm ci --omit=dev` and its runtime stage copies
+only `shared/dist`, `server/dist`, `web/dist` and `server/src/db/migrations`, so
+neither `tsc` nor the workspace source is present. Inside a container the
+compiled entry point is the only path — as the container's own command, or as a
+one-shot run with the same environment:
+
+```bash
+docker exec <container> node server/dist/db/migrate-cli.js
+docker run --rm --env-file .env <image> node server/dist/db/migrate-cli.js
+```
 
 The CLI loads the same env, applies pending migrations, prints
 `Migrations applied (driver: postgres).` and exits. It exits non-zero on
@@ -513,11 +534,16 @@ docker run --rm -p 127.0.0.1:8787:8787 \
   -e NEXUS_SECRET_KEY="$(openssl rand -hex 32)" \
   -e NEXUS_BOOTSTRAP_TOKEN="$(openssl rand -hex 32)" \
   -e FERRUM_ADMIN_URL=http://host.docker.internal:9000 \
+  -e FERRUM_ADMIN_ALLOW_INSECURE_HTTP=true \
   -e FERRUM_ADMIN_JWT_SECRET=change-me-at-least-32-characters-long \
   -e NEXUS_PUBLIC_URL=https://portal.example.com \
   -v nexus-data:/app/data \
   ferrum-nexus
 ```
+
+`FERRUM_ADMIN_ALLOW_INSECURE_HTTP=true` is required here because
+`FERRUM_ADMIN_URL` is plaintext `http://` to `host.docker.internal`, a
+non-loopback host; it is acceptable only because that traffic is in-network.
 
 Drop `NEXUS_BOOTSTRAP_TOKEN` and the container prints a generated one on its
 first start (`docker logs`); see
@@ -538,7 +564,7 @@ queries and closes SQLite in the final production image. What it bakes in:
 - `server/src/db/migrations` copied explicitly (tsc does not copy `.sql`)
 
 The image includes a `HEALTHCHECK` against `GET /api/health` every 30 seconds,
-with a 5-second timeout, 20-second startup grace, and three retries. Database
+with a 10-second timeout, 20-second startup grace, and three retries. Database
 failure makes it unhealthy; a gateway outage reports degraded status without
 restarting Nexus. See [§9](#9-health-checks).
 
@@ -797,6 +823,7 @@ that is not harmless:
   the secret.
 
 That is why the rotation is a two-key, offline step: `npm run rotate-secret-key`
+(in a built image: `node server/dist/db/rotate-key-cli.js`)
 re-encrypts every `app_settings` row with `encrypted = 1` from the previous key
 to the new one, in one transaction, and refuses to write anything if a single
 row does not open under the previous key. Both keys come from the environment
@@ -811,25 +838,45 @@ old HMAC key; password sign-in is unaffected.
 
 1. **Announce a short window.** Everyone will be signed out.
 2. Back up the database (see [§5](#5-backups)) and record the current
-   `NEXUS_SECRET_KEY` — it is your rollback.
+   `NEXUS_SECRET_KEY`. That is your rollback **before** the rotation runs; once
+   it has, the key that matters — and the one most likely to be lost — is the
+   new one, so persist it where the server reads its configuration (step 4) and
+   treat _that_ as the rollback from then on.
 3. **Stop every Nexus instance** (or run the step against a database no
    instance is using). A running server would keep writing blobs under the old
    key while you rotate.
-4. Re-encrypt the settings with both keys in the environment. With a `.env`
-   file, `NEXUS_SECRET_KEY` is read from it; put the previous key in the shell:
+4. Re-encrypt the settings, from the previous key to a new one. An exported
+   variable wins over `.env` (see [§1](#1-environment-variables)), so
+   re-encrypting to a key that only the shell knows while `.env` still names the
+   old one is a lockout: the restart in step 5 reads `.env`, cannot decrypt the
+   settings, and CAPTCHA fails closed. Generate the new key **first**, write it
+   to the place the server will read it from (`NEXUS_SECRET_KEY` in `.env`, or
+   the container environment), then export only the previous key:
 
    ```bash
+   # 1. Choose the new key and persist it where the server will load it on
+   #    restart (NEXUS_SECRET_KEY in .env, or the container environment).
+   openssl rand -hex 32          # copy this value in before you rotate
+
+   # 2. Then rotate, with only the previous key in the shell:
    export NEXUS_SECRET_KEY_PREVIOUS="<the key the database was last written with>"
-   export NEXUS_SECRET_KEY="$(openssl rand -hex 32)"     # or the value now in .env
-   npm run rotate-secret-key
+   npm run rotate-secret-key                  # from a checkout
+   # from a built image (the only form that runs there):
+   node server/dist/db/rotate-key-cli.js
    # Re-encrypted 2 setting(s) under the new NEXUS_SECRET_KEY (captcha.secret_key, smtp.password); …
    ```
 
-   The command exits non-zero and changes nothing if the previous key is wrong,
-   if the two keys are equal, or if it has already been run.
+   The CLI exits non-zero and changes nothing if the `.env` it loads declares a
+   different `NEXUS_SECRET_KEY` than the one it would rotate to — re-run with
+   `--allow-env-mismatch` only when that file is deliberately not this
+   deployment's configuration — and equally if the previous key is wrong, if the
+   two keys are equal, or if it has already been run.
 
 5. Start the server with the new `NEXUS_SECRET_KEY` (and without
-   `NEXUS_SECRET_KEY_PREVIOUS`).
+   `NEXUS_SECRET_KEY_PREVIOUS`). The new key must be in the same place the
+   server reads its configuration from — the `.env` file or container
+   environment you edited in step 4 — not just in the shell that ran the
+   rotation.
 6. Verify as a **super admin** (SMTP and CAPTCHA settings are super-admin-only):
    sign in — with CAPTCHA on, this is the proof the secret survived — then
    **Send test email** on the settings page returns `ok: true`.
@@ -840,9 +887,20 @@ old HMAC key; password sign-in is unaffected.
    DELETE FROM email_verification_tokens WHERE used_at IS NULL;
    ```
 
-   Users with an unused verification link will need a new one; the simplest
-   remedy is to mark them verified from **Admin → Users**, or have them
-   re-register.
+   Users with an unused verification link will need a new one. The remedy is
+   self-service: they click **Resend verification** on the sign-in page. There
+   is no administrator control that marks a user verified, and re-registering
+   an existing address is refused, so neither of those is available. A resend
+   is throttled to once per account per ten minutes, and the
+   `DELETE FROM email_verification_tokens` above does **not** clear the
+   issue-claim rows that drive that throttle; to let a user retry immediately,
+   clear those too:
+
+   ```sql
+   DELETE FROM email_token_issue_claims WHERE purpose = 'email_verification';
+   ```
+
+   A portal with email verification not required is unaffected.
 
 8. Watch the outbox for a few minutes: `SELECT status, count(*) FROM email_outbox
 GROUP BY status`. Any `failed` rows accumulated during the window can be
@@ -850,7 +908,10 @@ GROUP BY status`. Any `failed` rows accumulated during the window can be
 
 **Rollback** is the same command with the keys swapped (`NEXUS_SECRET_KEY_PREVIOUS`
 = the new key, `NEXUS_SECRET_KEY` = the old one), run before the server has
-re-saved anything under the new key; then restart with the old key.
+re-saved anything under the new key; then restart with the old key. Both keys
+must already be persisted wherever the server reads its configuration — a key
+that existed only in the shell that ran the rotation is lost the moment that
+shell closes, and rolling back to a lost key is not possible.
 
 **If you cannot run the command** (for example a hosted database you can only
 reach through the running portal), a super admin can avoid the lockout by
@@ -1089,6 +1150,14 @@ caller in `EDGE_ERROR.details.gateway_message`; for `401`/`403` and every `5xx`
 it is deliberately **only** in the log, so this is where you look when a
 provider reports an unexplained `EDGE_ERROR`.
 
+API-spec parse/validation rejections use `400 EDGE_REJECTED_SPEC` for upstream
+4xx responses other than 401/403. Their bounded explanation and machine code
+are in `details.gateway_message` and `details.gateway_code`. The Edge client's
+error log includes the complete parsed response as `gateway_response`, bounded
+by its 16 MiB response limit, including `details` and `failures` omitted from the
+public summary. Serialization failures log `request serialization failed` and
+surface as `500 INTERNAL`; they do not indicate an unreachable gateway.
+
 ### Shutdown
 
 `SIGINT`/`SIGTERM` trigger a graceful shutdown: the outbox and gateway-teardown
@@ -1136,6 +1205,23 @@ scrape_configs:
       credentials_file: /etc/prometheus/ferrum-metrics-token
 ```
 
+At startup Nexus ensures a namespace-global `prometheus_metrics` plugin config
+exists, with `enabled: true` and default settings (`config: {}`). This enables
+the request counters and latency histogram for subsequent traffic; it cannot
+recover traffic from before the plugin was enabled. Any existing global config
+is preserved, including an operator's settings or disabled state. A proxy-scoped
+config does not satisfy the namespace prerequisite. Creation emits the warning
+`Created the Ferrum Edge namespace-global metrics config` and the system audit
+event `gateway.metrics_enable`. Reconciliation failures are logged and do not
+block portal startup; restart Nexus after restoring gateway access to retry.
+
+An API without a valid `ferrum_requests_total` series for its own `proxy_id`
+reports `available: false` and an `unavailable_reason`; the Usage card shows
+that explanation without zero counters. Headers, other proxies' series and
+unrelated metrics do not prove this API was measured. An explicit zero-valued
+request series does count as a measurement. Independent backend state remains
+visible even when request metrics are unavailable.
+
 Correlating a dashboard back to a portal API is the `proxy_id` label: it is the
 `ferrum_proxy_id` on the Nexus `apis` row, shown as **Edge proxy id** on the API
 detail page.
@@ -1150,11 +1236,11 @@ endpoints for one proxy and reshapes them: request counts by status class and
 method, the `429`/`401`/`403` totals, interpolated p50/p95/p99 latency, and a
 backend verdict derived from the proxy's circuit breaker and any ejected target.
 
-| Layer   | Cache                                               |
-| ------- | --------------------------------------------------- |
-| Edge    | 5 s, on its own rendering of both endpoints         |
-| Nexus   | 10 s, in-process, **per proxy**, per server process |
-| The SPA | refetches every 30 s while an API page is open      |
+| Layer   | Cache                                           |
+| ------- | ----------------------------------------------- |
+| Edge    | 5 s, on its own rendering of both endpoints     |
+| Nexus   | 10 s, shared across proxies, per server process |
+| The SPA | refetches every 30 s while an API page is open  |
 
 So a figure on the card can be up to about 15 seconds behind reality, and a
 horizontally scaled Nexus keeps one cache per process — two browser tabs served
@@ -1164,7 +1250,7 @@ not.
 
 Operational consequences worth knowing:
 
-- **A scrape is one HTTP GET per proxy per 10 s**, at worst. Edge's own 5-second
+- **A scrape is one HTTP GET per Nexus process per 10 s**, at worst. Edge's own 5-second
   cache absorbs the rendering cost, so the load is a request, not a computation.
 - **The route never returns 5xx for a gateway problem.** An unreachable,
   erroring or unparseable gateway produces `200` with `available: false`. The

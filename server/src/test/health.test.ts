@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { createServer as createHttpServer } from 'node:http';
+import { createServer, type Socket } from 'node:net';
 import { after, before, describe, it } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -6,6 +9,84 @@ import type { ApiErrorBody, AppHealth, EdgeHealth } from '@ferrum-nexus/shared';
 
 import { OPAQUE_ERROR } from '../routes/health.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
+
+describe('health probe deadline', () => {
+  it('bounds a hung version lookup and preserves normal admin deadlines', async (t) => {
+    const gateway = createHttpServer((request, response) => {
+      if (request.url !== '/health') return;
+      void delay(700).then(() => {
+        response.setHeader('content-type', 'application/json');
+        response.end(JSON.stringify({ status: 'ok', ready: true }));
+      });
+    });
+    t.after(async () => {
+      gateway.closeAllConnections();
+      await new Promise<void>((resolve) => gateway.close(() => resolve()));
+    });
+    await new Promise<void>((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+    const address = gateway.address();
+    assert.ok(address && typeof address !== 'string');
+    const harness = await buildTestApp({
+      env: {
+        FERRUM_ADMIN_URL: `http://127.0.0.1:${address.port}`,
+        FERRUM_ADMIN_TIMEOUT_MS: '60000',
+        NEXUS_HEALTH_PROBE_TIMEOUT_MS: '1000',
+      },
+    });
+    t.after(() => harness.close());
+    const started = Date.now();
+    const response = await harness.app.inject({ method: 'GET', url: '/api/health' });
+    const elapsed = Date.now() - started;
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json<AppHealth>().edge.status, 'ok');
+    assert.equal(response.json<AppHealth>().edge.edge_version, null);
+    assert.ok(elapsed < 1_500, `${elapsed} ms`);
+    // A shorter probe deadline must not change the separate Admin API health call.
+    assert.equal((await harness.edgeClient.probe(100)).reachable, false);
+    assert.equal((await harness.edgeClient.health()).ready, true);
+  });
+
+  for (const adminTimeout of ['5000', '60000']) {
+    it(`bounds a TCP black hole with a ${adminTimeout} ms admin timeout`, async (t) => {
+      const sockets = new Set<Socket>();
+      const gateway = createServer((socket) => {
+        sockets.add(socket);
+        socket.on('data', () => undefined);
+        socket.on('close', () => sockets.delete(socket));
+      });
+      t.after(async () => {
+        for (const socket of sockets) socket.destroy();
+        await new Promise<void>((resolve) => gateway.close(() => resolve()));
+      });
+      await new Promise<void>((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+      const address = gateway.address();
+      assert.ok(address && typeof address !== 'string');
+      const harness = await buildTestApp({
+        env: {
+          FERRUM_ADMIN_URL: `http://127.0.0.1:${address.port}`,
+          FERRUM_ADMIN_TIMEOUT_MS: adminTimeout,
+        },
+      });
+      t.after(() => harness.close());
+      const started = Date.now();
+      const response = await harness.app.inject({ method: 'GET', url: '/api/health' });
+      const elapsed = Date.now() - started;
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json<AppHealth>().status, 'degraded');
+      assert.equal(response.json<AppHealth>().edge.status, 'down');
+      assert.ok(elapsed >= harness.config.healthProbeTimeoutMs - 50);
+      // Allow CI scheduling overhead; the old 5 s / 60 s deadline fails this bound.
+      assert.ok(elapsed < harness.config.healthProbeTimeoutMs + 1_000, `${elapsed} ms`);
+      const dockerfile = await readFile(
+        new URL('../../../docker/Dockerfile', import.meta.url),
+        'utf8',
+      );
+      const timeout = /HEALTHCHECK[^\n]*--timeout=(\d+)s/.exec(dockerfile);
+      assert.ok(timeout);
+      assert.ok(5_000 < Number(timeout[1]) * 1_000, 'maximum probe budget needs headroom');
+    });
+  }
+});
 
 describe('health endpoints', () => {
   let harness: TestApp;

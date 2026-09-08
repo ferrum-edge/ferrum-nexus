@@ -655,7 +655,9 @@ changed keys and never their values, so the audit log stays readable by anyone
 allowed to read audit logs.
 
 Before changing `NEXUS_SECRET_KEY`, stop all Nexus instances and run
-`npm run rotate-secret-key` with the previous and new keys in the environment.
+`npm run rotate-secret-key` (in a built image:
+`node server/dist/db/rotate-key-cli.js`) with the previous and new keys in the
+environment.
 The command re-encrypts SMTP/CAPTCHA blobs and every other encrypted setting
 in one transaction, refusing all writes if any blob cannot be decrypted. A
 bare key swap without re-encryption leaves those settings unreadable and
@@ -1039,6 +1041,12 @@ ordinary reporting.
 > [`server/src/audit/service.ts`](../server/src/audit/service.ts) **and** to
 > this table. `CONTRIBUTING.md` makes that a review requirement; a new action
 > that is not documented here is an incomplete change.
+
+### Gateway startup
+
+| Action                   | Target type     | Description                                                           |
+| ------------------------ | --------------- | --------------------------------------------------------------------- |
+| `gateway.metrics_enable` | `plugin_config` | System created the global metrics config. Details name the namespace. |
 
 ### Authentication
 

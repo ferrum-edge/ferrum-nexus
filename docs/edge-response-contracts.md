@@ -72,8 +72,27 @@ spec filter carries Edge configs through unchanged. Consumer credential types
 hidden by Edge's response projection are not required to appear in the map.
 
 The socket response matrix lives in
-`server/src/ferrum-admin/client.protocol.test.ts`; binder restoration and rollback
-of nullable configs over HTTP are covered in `server/src/ferrum-admin/client.test.ts`.
+`server/src/ferrum-admin/client.protocol.test.ts`. API-spec error bodies follow
+Edge's `ApiSpecParseError` shape: `error` is the category, string `details` is
+the explanation, and `code` is the machine-readable discriminant. Validation
+failures instead contain `failures[]` with `resource_type` and `errors[]`.
+For POST/PUT API-spec writes, 4xx parse/validation categories map to
+`400 EDGE_REJECTED_SPEC`, except 401/403. Public summaries include string details
+and each resource's first error within 500 characters, with a separately bounded
+`gateway_code`. The full parsed structure stays in the server log, bounded by
+the existing 16 MiB response limit. Flat errors retain their previous mapping;
+5xx and authentication errors remain opaque 502 responses.
+
+The upload validator uses the typed upstream URL's 2,000-character limit for
+expanded server URLs too. This keeps one input rule regardless of source and
+leaves headroom below Edge's 2,048-character backend path ceiling. A 200-level
+object/array nesting limit leaves generous serialization stack headroom; the
+iterative check covers both JSON and YAML before persistence or gateway writes.
+Request serialization failures independently map to `INTERNAL`, outside the
+transport error handler.
+
+Binder restoration and rollback of nullable configs over HTTP are covered in
+`server/src/ferrum-admin/client.test.ts`.
 That suite also uses the mock Edge behind an HTTP relay to omit only `plugins`
 from a stored proxy snapshot, proving association fails before any proxy PUT and
 the original security associations remain effective, then succeeds on a complete read.

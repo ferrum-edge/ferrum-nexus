@@ -2,11 +2,12 @@
  * The only module in Nexus that speaks the Ferrum Edge Admin API's HTTP shape.
  *
  * Everything above it deals in domain objects and `NexusError`s. Failures are
- * classified into three codes:
+ * classified into four codes:
  *
  * - `EDGE_UNAVAILABLE` — DNS, connect, TLS, socket or timeout. A write may
  *   already have reached the gateway; the client never retries it.
  * - `EDGE_ERROR` — a refused request.
+ * - `EDGE_REJECTED_SPEC` — a 4xx API-spec parse/validation refusal (HTTP 400).
  * - `EDGE_PROTOCOL_ERROR` — an invalid HTTP/JSON response.
  *
  * Edge's flat `{"error": "..."}` text is always logged. Whether it is *also*
@@ -103,6 +104,8 @@ export {
 
 /** Options for one Admin API call. */
 interface CallOptions {
+  /** Shared deadline for a sequence of health-probe calls. */
+  signal?: AbortSignal;
   /** JSON request body. */
   body?: unknown;
   /** Query string parameters; `undefined` values are dropped. */
@@ -142,7 +145,7 @@ export interface FerrumAdminClient {
    */
   version(): Promise<string | null>;
   /** Combined reachability probe for `GET /api/health`; never throws. */
-  probe(): Promise<EdgeProbe>;
+  probe(timeoutMs?: number): Promise<EdgeProbe>;
 
   /** `GET /namespaces` — a list of name strings. */
   listNamespaces(): Promise<string[]>;
@@ -152,6 +155,8 @@ export interface FerrumAdminClient {
    * swallowed rather than blocking startup.
    */
   ensureNamespace(description?: string): Promise<void>;
+  /** Create the namespace-global metrics prerequisite if absent; return only a new config. */
+  ensureMetricsConfig(): Promise<EdgePluginConfig | null>;
 
   readonly consumers: {
     list(query?: EdgeListQuery): Promise<EdgePage<EdgeConsumer>>;
@@ -554,9 +559,12 @@ async function readBoundedBody(body: AsyncIterable<Uint8Array>, maxBytes: number
 }
 
 /** An unavailable scrape: zeroed rather than absent, so callers never branch. */
-function emptyProxyMetrics(): EdgeProxyMetrics {
+function emptyProxyMetrics(
+  reason = 'The gateway request metrics could not be read.',
+): EdgeProxyMetrics {
   return {
     available: false,
+    reason,
     requests: { byMethod: {}, byStatus: {}, total: 0 },
     latency: { buckets: [], count: null, sum: null },
   };
@@ -686,6 +694,14 @@ export function createFerrumAdminClient(
     const hasBody = options.body !== undefined;
     if (hasBody) headers['content-type'] = 'application/json';
 
+    let serializedBody: string | undefined;
+    try {
+      serializedBody = hasBody ? JSON.stringify(options.body) : undefined;
+    } catch (cause) {
+      logger.error({ method, path }, 'Ferrum Edge Admin API request serialization failed');
+      throw internal(`Could not serialize Ferrum Edge request ${method} ${path}`, cause);
+    }
+
     let statusCode = 0;
     let bytes: Buffer;
     try {
@@ -694,8 +710,8 @@ export function createFerrumAdminClient(
         headers,
         dispatcher,
         // undici.request does not follow redirects; do not install a redirect interceptor.
-        ...(hasBody ? { body: JSON.stringify(options.body) } : {}),
-        signal: AbortSignal.timeout(config.timeoutMs),
+        ...(hasBody ? { body: serializedBody } : {}),
+        signal: options.signal ?? AbortSignal.timeout(config.timeoutMs),
       });
       statusCode = response.statusCode;
       bytes = await readBoundedBody(
@@ -807,10 +823,28 @@ export function createFerrumAdminClient(
   }
 
   function classify(status: number, parsed: unknown, method: string, path: string): Error {
-    const body = (parsed ?? {}) as { error?: unknown; applied?: unknown; reason?: unknown };
+    const body = (parsed ?? {}) as {
+      error?: unknown;
+      applied?: unknown;
+      reason?: unknown;
+      details?: unknown;
+      code?: unknown;
+      failures?: unknown;
+    };
+    const isApiSpecWrite =
+      (method === 'POST' || method === 'PUT') && /^\/api-specs(?:\/[^/]+)?$/.test(path);
     const upstream = typeof body.error === 'string' ? body.error : `HTTP ${status}`;
     logger.error(
-      { method, path, status, upstream, reason: body.reason ?? null },
+      {
+        method,
+        path,
+        status,
+        upstream,
+        reason: body.reason ?? null,
+        // readBoundedBody caps this structure before JSON parsing. Keep the full
+        // diagnostics server-side; never reflect the raw document to the caller.
+        ...(isApiSpecWrite ? { gateway_response: parsed } : {}),
+      },
       'Ferrum Edge Admin API returned an error',
     );
 
@@ -822,6 +856,39 @@ export function createFerrumAdminClient(
     }
     if (status === 401 || status === 403) {
       return edgeError('The gateway rejected the Nexus admin credentials', { status });
+    }
+    if (
+      isApiSpecWrite &&
+      status >= 400 &&
+      status < 500 &&
+      (body.error === 'Spec parse failed' || body.error === 'Spec validation failed')
+    ) {
+      let gatewayMessage: string = body.error;
+      if (typeof body.details === 'string' && body.details.trim() !== '') {
+        gatewayMessage += `: ${body.details.trim().slice(0, MAX_GATEWAY_MESSAGE)}`;
+      }
+      if (Array.isArray(body.failures)) {
+        for (const failure of body.failures) {
+          if (gatewayMessage.length >= MAX_GATEWAY_MESSAGE) break;
+          if (!isRecord(failure) || typeof failure.resource_type !== 'string') continue;
+          const firstError = Array.isArray(failure.errors) ? failure.errors[0] : undefined;
+          if (typeof firstError !== 'string') continue;
+          const resource = failure.resource_type.slice(0, MAX_GATEWAY_MESSAGE);
+          gatewayMessage += `; ${resource}: ${firstError.slice(0, MAX_GATEWAY_MESSAGE)}`;
+        }
+      }
+      gatewayMessage = gatewayMessage.slice(0, MAX_GATEWAY_MESSAGE);
+      return new NexusError(
+        'EDGE_REJECTED_SPEC',
+        `The gateway rejected the spec: ${gatewayMessage}`,
+        {
+          status,
+          gateway_message: gatewayMessage,
+          ...(typeof body.code === 'string'
+            ? { gateway_code: body.code.slice(0, MAX_GATEWAY_MESSAGE) }
+            : {}),
+        },
+      );
     }
     // A validation refusal is about the body Nexus built from the caller's own
     // request, so the provider needs the gateway's reason to act on it.
@@ -914,6 +981,7 @@ export function createFerrumAdminClient(
     const byMethod: Record<string, number> = {};
     const byStatus: Record<string, number> = {};
     let total = 0;
+    let hasRequests = false;
     const buckets = new Map<number, number>();
     let count: number | null = null;
     let sum: number | null = null;
@@ -926,6 +994,7 @@ export function createFerrumAdminClient(
       if (sample.name === REQUESTS_FAMILY) {
         const value = counterValue(sample.value);
         if (value === null) continue;
+        hasRequests = true;
         // One (method, status) pair can appear several times — `error_class`
         // and `grpc_status` split it further — so these accumulate.
         if (labels.method !== undefined) {
@@ -955,6 +1024,10 @@ export function createFerrumAdminClient(
       if (sample.name === `${DURATION_FAMILY}_sum`) {
         sum = counterValue(sample.value);
       }
+    }
+
+    if (!hasRequests) {
+      return emptyProxyMetrics('The gateway has no request metrics for this API yet.');
     }
 
     const sorted: EdgeLatencyBucket[] = [...buckets.entries()]
@@ -1027,13 +1100,19 @@ export function createFerrumAdminClient(
       return typeof version === 'string' ? version : null;
     },
 
-    async probe(): Promise<EdgeProbe> {
+    async probe(timeoutMs = config.timeoutMs): Promise<EdgeProbe> {
       const started = Date.now();
+      const signal = AbortSignal.timeout(timeoutMs);
       try {
-        const health = await this.health();
+        const health = await callRequired<EdgeHealth>('GET', '/health', { signal });
         let version: string | null = null;
         try {
-          version = await this.version();
+          const result = await call<{ version?: unknown }>('GET', '/version', {
+            signal,
+            allow404: true,
+            tolerate: [404, 405],
+          });
+          version = typeof result?.version === 'string' ? result.version : null;
         } catch {
           version = null;
         }
@@ -1092,6 +1171,32 @@ export function createFerrumAdminClient(
           'Could not pre-create the Ferrum namespace; it will be created implicitly',
         );
       }
+    },
+
+    async ensureMetricsConfig(): Promise<EdgePluginConfig | null> {
+      return serializePerKey(`namespace:${namespace}:prometheus_metrics`, async () => {
+        let found = false;
+        const complete = await scanPages<EdgePluginConfig>(
+          '/plugins/config',
+          EDGE_MAX_PAGE_SIZE,
+          MAX_PLUGIN_CONFIG_SCAN_PAGES,
+          (items) => {
+            found = items.some(
+              (item) => item.plugin_name === 'prometheus_metrics' && item.scope === 'global',
+            );
+            return !found;
+          },
+        );
+        // Even a disabled operator config is intentional; never replace it.
+        if (found) return null;
+        if (!complete) throw edgeError('Could not scan all gateway plugin configs');
+        return this.pluginConfigs.create({
+          plugin_name: 'prometheus_metrics',
+          scope: 'global',
+          enabled: true,
+          config: {},
+        });
+      });
     },
 
     consumers: {
@@ -1303,7 +1408,15 @@ export function createFerrumAdminClient(
             let parsed: PrometheusSample[] | null = null;
             if (response && response.statusCode >= 200 && response.statusCode < 300) {
               parsed = parsePrometheusText(response.body);
-              if (parsed.length === 0) parsed = null;
+              if (parsed.length === 0) {
+                logger.warn({}, 'Ferrum Edge metrics scrape produced no parseable samples');
+                parsed = null;
+              }
+            } else if (response) {
+              logger.warn(
+                { status: response.statusCode },
+                'Ferrum Edge metrics scrape returned a non-2xx status',
+              );
             }
             scrapeCache = { value: parsed, expiresAt: Date.now() + METRICS_CACHE_TTL_MS };
             return parsed;
