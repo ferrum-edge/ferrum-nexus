@@ -176,10 +176,7 @@ describe('loadConfig', () => {
     // validation yet fail every publish on that adapter alone.
     const boundary = 'a'.repeat(128);
     assert.equal(loadConfig(baseEnv({ FERRUM_NAMESPACE: boundary })).edge.namespace, boundary);
-    expectConfigError(
-      baseEnv({ FERRUM_NAMESPACE: 'a'.repeat(129) }),
-      'at most 128 characters',
-    );
+    expectConfigError(baseEnv({ FERRUM_NAMESPACE: 'a'.repeat(129) }), 'at most 128 characters');
   });
 
   it('disables rate limiting in the test environment', () => {
