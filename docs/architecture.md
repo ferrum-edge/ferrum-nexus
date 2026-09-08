@@ -512,7 +512,7 @@ the same derived-id create/adopt path. Replacements receive a fresh Nexus-chosen
 id — the derived id belongs to the first consumer of the username and stays with
 it, so reusing it would make a replacement and the consumer it replaced one
 resource in every table keyed on the consumer id. That fresh id is bound in the
-registry *before* the create that uses it, so a create whose acknowledgement was
+registry _before_ the create that uses it, so a create whose acknowledgement was
 lost is still resolvable by one `GET /consumers/{id}`.
 The mapping lookup, username adoption/create, and mapping insert share a stable
 `consumer-name:[namespace,username]` lease. Concurrent first issuance and approval

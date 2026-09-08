@@ -1477,7 +1477,7 @@ provider's `nexus-test-<api_id>` consumer — is found in two places:
   while the identity's first credential is still being appended finds it and
   waits for the append on the identity's name lease (`test-consumer:<username>`)
   rather than missing it. A registration bound to its consumer's id resolves
-  the consumer by id — and the bound id is the id Nexus *asked* Edge to assign,
+  the consumer by id — and the bound id is the id Nexus _asked_ Edge to assign,
   a replacement's being written before the `POST` that uses it, so a creation
   interrupted anywhere after that point still leads straight to the consumer.
   One that stopped before even that (claimed, nothing asked for yet) is

@@ -129,11 +129,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   consumer it asks Edge to create, so the id of the create being compensated
   for is known even when no answer came back: the first consumer of a username
   takes an id derived from the namespace and that username, a replacement takes
-  a fresh one recorded on the `gateway_identities` row *before* the `POST`. The
+  a fresh one recorded on the `gateway_identities` row _before_ the `POST`. The
   compensation settles the question with one `GET /consumers/{id}` and deletes
   what it finds — no namespace-wide username scan, and no reuse of the replaced
   consumer's id, which the credential mirror is keyed on. A lookup or delete
-  that *fails* now keeps the registration, which is the only thing that leads
+  that _fails_ now keeps the registration, which is the only thing that leads
   back to an orphan.
 - **Deleting an API left its test consumer, key and ACL group on the gateway.**
   `DELETE /api/apis/:id` tore down the proxy and every portal row but never the
