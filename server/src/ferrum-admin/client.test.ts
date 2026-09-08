@@ -753,7 +753,10 @@ describe('ferrum admin client', () => {
               /proxy: overlapping listen_path; plugin_config: invalid config/,
             );
             assert.ok(!error.message.includes('not echoed'));
-            assert.equal((error.details as { gateway_message: string }).gateway_message.length, 500);
+            assert.equal(
+              (error.details as { gateway_message: string }).gateway_message.length,
+              500,
+            );
             return true;
           },
         );

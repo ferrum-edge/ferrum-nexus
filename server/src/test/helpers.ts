@@ -14,13 +14,12 @@ import {
   CSRF_HEADER,
   MAX_PAGE_SIZE,
   SESSION_COOKIE,
-  type AuditLog,
   type User,
 } from '@ferrum-nexus/shared';
 
 import { loadConfig, type EnvRecord, type NexusConfig } from '../config/index.js';
 import { createStore } from '../db/index.js';
-import type { EmailOutboxRecord, NexusStore } from '../db/store.js';
+import type { AuditLogRecord, EmailOutboxRecord, NexusStore } from '../db/store.js';
 import type { MailTransport, MailTransportFactory, OutboundMail } from '../email/service.js';
 import type { OutboxTickResult } from '../email/outbox-worker.js';
 import { createFerrumAdminClient, type FerrumAdminClient } from '../ferrum-admin/index.js';
@@ -223,7 +222,7 @@ export interface TestApp {
   /** Current `email_outbox` rows, oldest first. */
   outbox(): Promise<EmailOutboxRecord[]>;
   /** Audit rows, optionally filtered to one action, newest first. */
-  auditRows(action?: string): Promise<AuditLog[]>;
+  auditRows(action?: string): Promise<AuditLogRecord[]>;
   /** Register a new account and return its session. */
   registerUser(overrides?: Partial<RegisterPayload>): Promise<TestSession>;
   /** Sign in an existing account. */
@@ -338,7 +337,7 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
       return [...page.items].sort((a, b) => a.created_at.localeCompare(b.created_at));
     },
 
-    async auditRows(action?: string): Promise<AuditLog[]> {
+    async auditRows(action?: string): Promise<AuditLogRecord[]> {
       const page = await store.auditLogs.list(action === undefined ? {} : { action }, {
         limit: MAX_PAGE_SIZE,
       });

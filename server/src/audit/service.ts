@@ -1,14 +1,14 @@
 /**
  * Audit service — the only writer of `audit_logs`.
  *
- * Every state-changing endpoint must record exactly one row here. Actions are
+ * Every state-changing endpoint must record one row per event here. Actions are
  * dot-namespaced strings drawn from {@link AuditAction}; adding a new one means
  * appending to that catalog **and** to the table in `docs/security.md`.
  */
 
 import type { AuditLog, Paginated, Role, Uuid } from '@ferrum-nexus/shared';
 
-import type { AuditLogFilter, ListOptions, NexusStore } from '../db/store.js';
+import type { AuditLogFilter, AuditLogRecord, ListOptions, NexusStore } from '../db/store.js';
 
 /**
  * Catalog of every audit action Nexus emits.
@@ -17,6 +17,8 @@ import type { AuditLogFilter, ListOptions, NexusStore } from '../db/store.js';
  * namespaced `god.*` so they can be filtered out of ordinary reporting.
  */
 export const AuditAction = {
+  /** Startup created the namespace-global request metrics prerequisite. */
+  GATEWAY_METRICS_ENABLE: 'gateway.metrics_enable',
   /* auth */
   AUTH_REGISTER: 'auth.register',
   AUTH_LOGIN: 'auth.login',
@@ -38,6 +40,7 @@ export const AuditAction = {
   USER_UPDATE: 'user.update',
   USER_ROLE_CHANGE: 'user.role_change',
   USER_DISABLE: 'user.disable',
+  USER_ENABLE: 'user.enable',
   /**
    * The teardown worker finished the gateway revocation a disable had left
    * pending. Written by the system, so the actor is {@link SYSTEM_ACTOR}.
@@ -138,7 +141,7 @@ export interface AuditService {
     target: AuditTarget,
     details?: Record<string, unknown>,
     ip?: string | null,
-  ): Promise<AuditLog>;
+  ): Promise<AuditLogRecord>;
   /** Newest-first page with actor/action/target/time filters. */
   list(filter: AuditLogFilter, options?: ListOptions): Promise<Paginated<AuditLog>>;
   /** Count matching rows without fetching a page. */
@@ -168,6 +171,15 @@ export const ANONYMOUS_ACTOR: AuditActor = { id: null, role: null };
  */
 export const SYSTEM_ACTOR: AuditActor = { id: null, role: null };
 
+/** Compare every adapter's stored millisecond UTC timestamps with the same format. */
+function normalizeFilter(filter: AuditLogFilter): AuditLogFilter {
+  return {
+    ...filter,
+    ...(filter.from !== undefined ? { from: new Date(filter.from).toISOString() } : {}),
+    ...(filter.to !== undefined ? { to: new Date(filter.to).toISOString() } : {}),
+  };
+}
+
 /** Build the audit service. */
 export function createAuditService(store: NexusStore): AuditService {
   const service: AuditService = {
@@ -184,11 +196,27 @@ export function createAuditService(store: NexusStore): AuditService {
     },
 
     async list(filter, options) {
-      return store.auditLogs.list(filter, options);
+      const page = await store.auditLogs.list(normalizeFilter(filter), options);
+      const ids = [
+        ...new Set(page.items.flatMap((row) => (row.actor_user_id ? [row.actor_user_id] : []))),
+      ];
+      const users = new Map(
+        (await store.users.findManyByIds(ids)).map(({ id, email, display_name, role }) => [
+          id,
+          { id, email, display_name, role },
+        ]),
+      );
+      return {
+        ...page,
+        items: page.items.map((row) => ({
+          ...row,
+          actor: row.actor_user_id ? (users.get(row.actor_user_id) ?? null) : null,
+        })),
+      };
     },
 
     async count(filter) {
-      return store.auditLogs.count(filter);
+      return store.auditLogs.count(normalizeFilter(filter));
     },
 
     forStore(scoped) {
