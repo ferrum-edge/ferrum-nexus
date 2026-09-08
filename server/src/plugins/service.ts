@@ -128,6 +128,23 @@ export interface ApiPluginsServiceDeps {
   audit: AuditService;
   /** Reused for the owner-or-admin check, so there is one definition of it. */
   publishing: PublishingService;
+  /**
+   * Structured logger, at `error`, for a compensation step that could not undo
+   * what it was undoing.
+   *
+   * The same obligation `publishing/service.ts` documents: a swallowed undo
+   * failure is a divergence between the portal and the gateway that no response
+   * describes and no later request revisits, so it has to leave a trace
+   * somewhere. Only the error message is logged — a plugin config can carry a
+   * Content-Security-Policy or a partner IP allow-list, and neither belongs in
+   * a log line any more than in an audit row.
+   */
+  log?: (obj: Record<string, unknown>, message: string) => void;
+}
+
+/** A thrown value as a string, for a log line. */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /** Strip the row's storage-only columns down to the wire shape. */
@@ -322,8 +339,25 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
             });
             return { saved, replaced: existing !== undefined, configId: written?.id ?? null };
           } catch (error) {
+            // Best-effort by contract: the request is already failing and an
+            // undo step must not replace the failure the caller needs to see
+            // with its own. Every step here replays a plugin write or an
+            // association, so the gateway stays describable whichever way one
+            // goes — but a swallowed failure is a divergence between the
+            // `api_plugins` row and the proxy that nothing else will revisit,
+            // so it is logged.
             for (const step of undo.reverse()) {
-              await step().catch(() => undefined);
+              await step().catch((undoError: unknown) => {
+                deps.log?.(
+                  {
+                    api_id: target.apiId,
+                    proxy_id: target.proxyId,
+                    plugin_name: pluginName,
+                    error: errorMessage(undoError),
+                  },
+                  'a palette plugin compensation step failed; the gateway may not match the portal',
+                );
+              });
             }
             throw error;
           }
@@ -382,8 +416,20 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
             await store.apiPlugins.delete(target.apiId, pluginName);
             return existing?.id ?? null;
           } catch (error) {
+            // The same best-effort contract as `set` above, swallowed for the
+            // same reason and logged for the same one.
             for (const step of undo.reverse()) {
-              await step().catch(() => undefined);
+              await step().catch((undoError: unknown) => {
+                deps.log?.(
+                  {
+                    api_id: target.apiId,
+                    proxy_id: target.proxyId,
+                    plugin_name: pluginName,
+                    error: errorMessage(undoError),
+                  },
+                  'a palette plugin compensation step failed; the gateway may not match the portal',
+                );
+              });
             }
             throw error;
           }

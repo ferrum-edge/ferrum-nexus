@@ -122,6 +122,23 @@
  * in the safe direction and is documented at the call site: an API stays
  * reachable and authenticated rather than becoming open or orphaned.
  *
+ * **Compensation loops swallow, so undo steps must record.** A failing request
+ * unwinds its stack best-effort — an undo step that threw must not replace the
+ * failure the caller needs to see. The rule that makes that safe is a
+ * *step-side* obligation: an undo step that can leave the gateway in a state
+ * the portal does not describe writes its own durable record (today, an
+ * {@link AuditAction.API_GATEWAY_REPAIR_REQUIRED} row) before it throws. Steps
+ * that only replay a proxy write or a portal row have nothing to record. Adding
+ * a destructive step without that record is how a rollback silently takes an
+ * API off the gateway while its row still reads `published`.
+ *
+ * Every such loop additionally **logs** what it swallowed, error message only.
+ * The durable record is the step's job; the log line is what covers a step that
+ * had nothing to record and failed anyway — the gateway is describable either
+ * way, but it may no longer describe what the portal says, and the response the
+ * caller gets is about something else entirely. `plugins/service.ts` follows
+ * the same rule for the palette's two loops.
+ *
  * ## The listen path moves last
  *
  * That sequence used to have one window it could not compensate for. Edge
@@ -193,6 +210,7 @@ import type {
   ApiFilter,
   ApiRecord,
   ApiSpecRecord,
+  GrantRecord,
   ListOptions,
   NexusStore,
   UserRecord,
@@ -232,7 +250,12 @@ import {
   type UpstreamPolicy,
   type UpstreamResolver,
 } from './oas.js';
-import { handOwnedPlugins, routesSpecDocument, submittableProxyBody } from './spec-document.js';
+import {
+  assertRoutesSubmittable,
+  handOwnedPlugins,
+  routesSpecDocument,
+  submittableProxyBody,
+} from './spec-document.js';
 
 /** Result of {@link PublishingService.publish} and `updateSpec`. */
 export interface PublishResult {
@@ -295,9 +318,13 @@ export interface PublishingServiceDeps {
   /**
    * Structured logger, at `error`, for a gateway state no request can repair.
    *
-   * Only the unrepairable `spec_enforcement` conversion uses it: everything
-   * else either compensates silently or fails the request with a `NexusError`
-   * the route layer already logs.
+   * Three kinds of thing reach it, and nothing else does: the unrepairable
+   * `spec_enforcement` conversion, a compensation step that could not undo what
+   * it was undoing, and a delete whose ACL strip failed. What they have in
+   * common is that the response the caller gets cannot describe them — the
+   * request fails for its own reason, or succeeds — so an operator has no other
+   * way to learn the gateway drifted. Everything else either compensates
+   * cleanly or fails with a `NexusError` the route layer already logs.
    */
   log?: (obj: Record<string, unknown>, message: string) => void;
   /**
@@ -853,9 +880,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const circuitBreaker = input.circuit_breaker ?? false;
       const specEnforcement = input.spec_enforcement ?? DEFAULT_SPEC_ENFORCEMENT;
       // Checked before the first gateway write: a document with nothing to
-      // enforce must fail the request outright, not halfway through creating a
-      // proxy that would then have to be rolled back.
+      // enforce — or one whose paths point at a Path Item the submitted copy
+      // cannot rewrite — must fail the request outright, not halfway through
+      // creating a proxy that would then have to be rolled back.
       assertRoutesEnforceable(specEnforcement, parsed.paths);
+      assertRoutesSubmittable(specEnforcement, parsed.document);
 
       // Where the proxy is *born*. It stays here until every security plugin
       // is attached and associated, and the move to `listenPath` is the last
@@ -1290,19 +1319,24 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // gateway is not applying would make the portal claim something untrue.
           if (proxyId && enforcementMoved && patch.spec_enforcement !== undefined) {
             const current = await store.apiSpecs.findCurrentByApi(api.id);
+            const document = current ? safeSpecDocument(current.raw_spec) : {};
             // Refused before the proxy is torn down, not after: a document with
             // nothing to enforce would come back as a proxy that `400`s every
-            // request.
+            // request, and one the submitted copy cannot rewrite would come
+            // back as a proxy `400`ing the operations it does declare. Both
+            // checks belong here rather than inside the rebuild, which runs
+            // with the original proxy already deleted.
             assertRoutesEnforceable(
               patch.spec_enforcement,
               current ? safeSpecPaths(current.raw_spec) : [],
             );
+            assertRoutesSubmittable(patch.spec_enforcement, document);
             undo.push(
               await convertEnforcementLocked(
                 api,
                 proxyId,
                 patch.spec_enforcement,
-                current ? safeSpecDocument(current.raw_spec) : {},
+                document,
                 actor,
                 ip,
               ),
@@ -1400,8 +1434,24 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           if (!persisted) throw notFound('API', apiId);
           updated = persisted;
         } catch (error) {
+          // Compensation is best-effort by contract: the PATCH is already
+          // failing, and an undo step that throws must not replace the failure
+          // the caller needs to see with its own. That swallow is only safe
+          // because of the rule it depends on — **an undo step that can leave
+          // the gateway in a state the portal does not describe is responsible
+          // for its own durable record before it throws.** The enforcement
+          // conversion's step is the one that can (it deletes and rebuilds the
+          // proxy), and it writes an `api.gateway_repair_required` row itself;
+          // every other step here replays a proxy write or an association and
+          // leaves the gateway describable either way. Anything new pushed onto
+          // this stack has to satisfy that rule or the failure is invisible.
           for (const step of undo.reverse()) {
-            await step().catch(() => undefined);
+            await step().catch((undoError: unknown) => {
+              deps.log?.(
+                { api_id: api.id, proxy_id: proxyId, error: errorMessage(undoError) },
+                'an API PATCH compensation step failed; the gateway may not match the portal',
+              );
+            });
           }
           throw error;
         }
@@ -1483,6 +1533,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           backend = proxyId ? await followedUpstream(api, previous, parsed) : null;
         }
         assertRoutesEnforceable(api.spec_enforcement, parsed.paths);
+        assertRoutesSubmittable(api.spec_enforcement, parsed.document);
         const undo: (() => Promise<void>)[] = [];
         try {
           if (proxyId) {
@@ -1582,8 +1633,19 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             return { spec: revision, api: row };
           });
         } catch (error) {
+          // Best-effort by the same contract `update()` documents: the request
+          // is already failing and an undo step must not replace the failure
+          // the caller needs to see with its own. Every step here replays a
+          // proxy write or a spec replace, so the gateway stays describable
+          // whichever way one goes — but a swallowed failure is still a
+          // divergence nothing else will revisit, so it is logged.
           for (const step of undo.reverse()) {
-            await step().catch(() => undefined);
+            await step().catch((undoError: unknown) => {
+              deps.log?.(
+                { api_id: api.id, proxy_id: proxyId, error: errorMessage(undoError) },
+                'a spec revision compensation step failed; the gateway may not match the portal',
+              );
+            });
           }
           // A compensated failure leaves the row where it was, so the audit
           // details must not claim a move that has just been rewound.
@@ -1621,51 +1683,108 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     },
 
     async remove(actor, apiId, ip = null): Promise<{ revoked_grants: number }> {
-      const api = await loadApi(apiId);
-      assertCanAdminister(actor, api);
+      const initial = await loadApi(apiId);
+      assertCanAdminister(actor, initial);
 
-      // 1. Take the API off the gateway first: once the proxy is gone nobody can
-      //    call it, so a later failure cannot leave it reachable-but-untracked.
+      // The gateway teardown and the row delete are one canonical proxy
+      // operation, exactly as `update()` and `updateSpec()` are.
       //
-      //    The **proxy** goes first, before its plugin configs. Edge's
-      //    `DELETE /plugins/config/{id}` deletes the config's `proxy_plugins`
-      //    rows along with it rather than refusing while it is still
-      //    associated, so deleting the auth config first would leave a live
-      //    proxy fronting the provider's upstream with nothing authenticating
-      //    it for as long as the teardown took. Deleting the proxy cascades
-      //    both the association rows and every proxy-scoped config, so no
-      //    disassociation step is needed at all; the sweep afterwards only
-      //    exists in case a gateway ever leaves one behind, and 404s harmlessly
-      //    when the cascade did its job.
-      if (api.ferrum_proxy_id) {
-        const attached = await pluginsOf(api);
-        await edge.proxies.delete(api.ferrum_proxy_id, actor.id);
-        for (const plugin of attached) {
-          await edge.pluginConfigs.delete(plugin.id, actor.id).catch(() => undefined);
+      // Deleting a proxy is not the atomic act it looks like. A
+      // `spec_enforcement` conversion is a **delete-and-recreate**, so a
+      // teardown that ran unserialised could commit — rows and all — in the
+      // middle of one and leave the conversion's rebuild as the last writer to
+      // touch the gateway: a live proxy fronting the provider's upstream with
+      // no portal record, no way to remove it through the product, and a slug
+      // burned for good, because Edge answers every republish of it with
+      // `Proxy name already exists` (issue #135). The lease has to span the row
+      // delete too, not only the gateway calls: a conversion that acquired it
+      // in between would re-read an `apis` row that still existed and rebuild
+      // against it.
+      //
+      // It spans **nothing else**. The per-grantee ACL strip below needs no
+      // proxy serialization — the group is consumer-scoped, and each strip
+      // takes its own consumer key — and running it in here would hold
+      // `proxy:<id>` for as long as those consumer keys are contended, up to
+      // `LEASE_WAIT_MS` each under a credential burst. Every concurrent write
+      // on the API would answer `409` for the duration, for a step that cannot
+      // affect what the gateway serves.
+      const apply = async (): Promise<{ grants: GrantRecord[]; api: ApiRecord }> => {
+        // Re-read under the lease: whatever held it may have moved the proxy or
+        // the enforcement mode, and the teardown has to act on what is there
+        // now rather than on the snapshot that waited.
+        const api = await loadApi(apiId);
+        assertCanAdminister(actor, api);
+        if (api.ferrum_proxy_id !== initial.ferrum_proxy_id) {
+          throw conflict(
+            'The gateway proxy changed while this delete was waiting; reload and retry',
+          );
         }
-      }
 
-      // 2. Strip the ACL group from every grantee. The group would be inert with
-      //    the proxy gone, but leaving 500-capped junk on consumers is not okay.
-      const grants = await store.grants.listActiveByApi(api.id);
+        // 1. Take the API off the gateway first: once the proxy is gone nobody
+        //    can call it, so a later failure cannot leave it
+        //    reachable-but-untracked.
+        //
+        //    The **proxy** goes first, before its plugin configs. Edge's
+        //    `DELETE /plugins/config/{id}` deletes the config's `proxy_plugins`
+        //    rows along with it rather than refusing while it is still
+        //    associated, so deleting the auth config first would leave a live
+        //    proxy fronting the provider's upstream with nothing authenticating
+        //    it for as long as the teardown took. Deleting the proxy cascades
+        //    both the association rows and every proxy-scoped config, so no
+        //    disassociation step is needed at all; the sweep afterwards only
+        //    exists in case a gateway ever leaves one behind, and 404s
+        //    harmlessly when the cascade did its job.
+        if (api.ferrum_proxy_id) {
+          const attached = await pluginsOf(api);
+          await edge.proxies.delete(api.ferrum_proxy_id, actor.id);
+          for (const plugin of attached) {
+            await edge.pluginConfigs.delete(plugin.id, actor.id).catch(() => undefined);
+          }
+        }
+
+        // 2. Drop the rows. The store's delete helpers are the cascade, and the
+        //    grant list is read a moment before it because the ACL strip and
+        //    the notifications that follow the lease both need it — a line
+        //    later there is nothing left to read it from.
+        //
+        //    `api_plugins` needs no gateway step of its own: every palette
+        //    plugin is proxy-scoped, so deleting the proxy above already
+        //    cascaded both the configs and their association rows, and the
+        //    sweep that follows it covers anything a gateway left behind. Only
+        //    the portal's rows are left to remove here.
+        const grants = await store.grants.listActiveByApi(api.id);
+        await store.transaction(async (tx) => {
+          await tx.grants.deleteByApi(api.id);
+          await tx.accessRequests.deleteByApi(api.id);
+          await tx.apiPlugins.deleteByApi(api.id);
+          await tx.apiSpecs.deleteByApi(api.id);
+          await tx.apis.delete(api.id);
+        });
+
+        return { grants, api };
+      };
+      // The ACL strip, the audit row and the grantee notifications are all
+      // written outside the lease, so it is held for the teardown and the row
+      // delete and nothing else — and they run only after `apply` returned,
+      // which is what makes `api.delete` mean "the gateway teardown held"
+      // rather than "a delete was attempted".
+      const { grants, api } = initial.ferrum_proxy_id
+        ? await binder.withProxy(initial.ferrum_proxy_id, apply)
+        : await apply();
+
+      // 3. Strip the ACL group from every grantee. The group is already inert —
+      //    the proxy that consulted it is gone — but leaving 500-capped junk on
+      //    consumers is not okay. A failure here cannot make the gateway serve
+      //    anything, so it does not fail the request; it is logged, because
+      //    nothing else will ever revisit it.
       for (const grant of grants) {
-        await stripGroup(grant.user_id, api.id).catch(() => undefined);
+        await stripGroup(grant.user_id, api.id).catch((error: unknown) => {
+          deps.log?.(
+            { api_id: api.id, user_id: grant.user_id, error: errorMessage(error) },
+            'the ACL group of a deleted API could not be stripped from a grantee consumer',
+          );
+        });
       }
-
-      // 3. Drop the rows. The store's delete helpers are the cascade.
-      //
-      //    `api_plugins` needs no gateway step of its own: every palette plugin
-      //    is proxy-scoped, so deleting the proxy above already cascaded both
-      //    the configs and their association rows, and the sweep that follows
-      //    it covers anything a gateway left behind. Only the portal's rows are
-      //    left to remove here.
-      await store.transaction(async (tx) => {
-        await tx.grants.deleteByApi(api.id);
-        await tx.accessRequests.deleteByApi(api.id);
-        await tx.apiPlugins.deleteByApi(api.id);
-        await tx.apiSpecs.deleteByApi(api.id);
-        await tx.apis.delete(api.id);
-      });
 
       await audit.record(
         { id: actor.id, role: actor.role },
@@ -1969,8 +2088,16 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * an {@link AuditAction.API_GATEWAY_REPAIR_REQUIRED} row instead of being
    * dropped.
    *
+   * **The returned undo step carries the same guarantee.** It runs the same
+   * destructive `restore()`, and the caller's compensation loop swallows what
+   * an undo step throws, so a rollback that cannot rebuild would otherwise take
+   * the API off the gateway leaving the row `published` and no record anywhere
+   * (issue #141). It writes the repair row itself before rethrowing.
+   *
    * The caller holds the canonical proxy lease from its catalog re-read
    * through conversion and catalog persistence, including every undo step.
+   * Even so, no rebuild runs for an API whose row has disappeared — see
+   * {@link apiStillExists} inside.
    *
    * @returns the step that puts the proxy back in the mode it came from
    */
@@ -2017,6 +2144,25 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     };
 
     /**
+     * Whether the portal still has a row for this API.
+     *
+     * Checked before every rebuild, forward and back. Rebuilding for an API the
+     * portal no longer describes is the worst outcome this function has: a live
+     * proxy fronting the provider's upstream that nothing in the product can
+     * find or remove, and a slug that is burned for good because Edge answers
+     * every republish with `Proxy name already exists`. A vanished row
+     * therefore means *leave nothing serving*, which is the one end state a
+     * deleted API can safely have.
+     *
+     * `remove()` now takes the same proxy lease across its gateway teardown
+     * **and** its row delete, so an ordinary delete cannot interleave here at
+     * all (issue #135). This is the backstop for what a lease cannot cover: an
+     * expired lease under a stalled instance, or a row removed out of band.
+     */
+    const apiStillExists = async (): Promise<boolean> =>
+      (await store.apis.findById(api.id)) !== null;
+
+    /**
      * Throw away whatever is on the gateway under this proxy id and build
      * `level` back from the captured document.
      *
@@ -2028,6 +2174,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
      */
     const restore = async (level: SpecEnforcementLevel): Promise<void> => {
       await edge.proxies.delete(proxyId, subject).catch(() => undefined);
+      if (!(await apiStillExists())) return;
       await rebuild(level);
     };
 
@@ -2036,6 +2183,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     // from nothing whichever direction it runs in.
     await edge.proxies.delete(proxyId, subject);
     try {
+      if (!(await apiStillExists())) throw notFound('API', api.id);
       await rebuild(target);
     } catch (error) {
       // The original is already gone, and the caller has no undo step for this
@@ -2045,6 +2193,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       } catch (restoreError) {
         await reportUnrepairableProxy({
           api,
+          phase: 'conversion',
           target,
           proxyId,
           pluginNames: carried.map((plugin) => plugin.plugin_name).sort(),
@@ -2058,7 +2207,28 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     }
 
     return async () => {
-      await restore(api.spec_enforcement);
+      try {
+        await restore(api.spec_enforcement);
+      } catch (restoreError) {
+        // The same invariant as the forward path's `catch`, on the path that
+        // used to run bare: a proxy the portal could neither convert nor put
+        // back leaves a durable record, whichever direction the failure came
+        // from. It has to be written *here* rather than by the caller, because
+        // `update()`'s compensation loop swallows what an undo step throws —
+        // record first, then rethrow so the loop's log names it too.
+        await reportUnrepairableProxy({
+          api,
+          phase: 'rollback',
+          target,
+          proxyId,
+          pluginNames: carried.map((plugin) => plugin.plugin_name).sort(),
+          actor,
+          error: null,
+          restoreError,
+          ip,
+        });
+        throw restoreError;
+      }
     };
   }
 
@@ -2071,23 +2241,51 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * readable sinks. The `apis` row itself is deliberately not moved to a failed
    * state — the API's catalog entry, its grants and its credentials are all
    * still valid, and only the gateway objects need rebuilding.
+   *
+   * `phase` says which of the two failures produced the row so one PATCH cannot
+   * be mistaken for two incidents: `conversion` is a rebuild that failed and
+   * could not be undone, `rollback` a conversion that *succeeded* and was then
+   * unwound by a later failure in the same PATCH, whose unwind failed. Exactly
+   * one of them fires per conversion — the forward path never returns an undo
+   * step for a conversion that threw.
+   *
+   * It also decides how the two enforcement levels read. On a `conversion` row
+   * `attempted_spec_enforcement` is what the conversion was reaching for when
+   * it failed. On a `rollback` row that conversion had already *succeeded*, and
+   * what failed is the way back — so those rows carry `restore_target` as well,
+   * naming the level the failed restore was rebuilding outright rather than
+   * leaving an operator to infer it from `spec_enforcement`.
    */
   async function reportUnrepairableProxy(input: {
     api: ApiRecord;
+    phase: 'conversion' | 'rollback';
+    /**
+     * The level the conversion was moving *to*, whether or not it got there —
+     * logged as `attempted_spec_enforcement`. Never what the restore was
+     * rebuilding; that is always `api.spec_enforcement`, and on the `rollback`
+     * phase it is logged as `restore_target` so the pair cannot be misread.
+     */
     target: SpecEnforcementLevel;
     proxyId: string;
     pluginNames: string[];
     actor: UserRecord;
+    /**
+     * What made the restore necessary; `null` on the `rollback` phase, where
+     * the conversion itself succeeded and the caller's own failure is what the
+     * request reports.
+     */
     error: unknown;
     restoreError: unknown;
     ip: string | null;
   }): Promise<void> {
     const details = {
+      phase: input.phase,
       proxy_id: input.proxyId,
       plugin_names: input.pluginNames,
       spec_enforcement: input.api.spec_enforcement,
       attempted_spec_enforcement: input.target,
-      error: errorMessage(input.error),
+      ...(input.phase === 'rollback' ? { restore_target: input.api.spec_enforcement } : {}),
+      ...(input.error === null ? {} : { error: errorMessage(input.error) }),
       restore_error: errorMessage(input.restoreError),
     };
     deps.log?.(

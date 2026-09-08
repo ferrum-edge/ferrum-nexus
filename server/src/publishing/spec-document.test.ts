@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import type { EdgePluginConfig, EdgeProxy } from '../ferrum-admin/types.js';
+import { isNexusError } from '../lib/errors.js';
 import {
+  assertRoutesSubmittable,
   handOwnedPlugins,
   routesSpecDocument,
   submittableProxyBody,
@@ -18,6 +20,19 @@ function document(extra: Record<string, unknown> = {}): Record<string, unknown> 
     paths: { '/invoices': { get: { responses: { '200': { description: 'OK' } } } } },
     ...extra,
   };
+}
+
+/** Assert that `fn` throws `SPEC_INVALID`, returning the error for inspection. */
+function expectSpecInvalid(fn: () => unknown): { message: string; details: unknown } {
+  try {
+    fn();
+  } catch (error) {
+    assert.ok(isNexusError(error), `expected a NexusError, got ${String(error)}`);
+    assert.equal(error.code, 'SPEC_INVALID');
+    assert.equal(error.statusCode, 400);
+    return { message: error.message, details: error.details };
+  }
+  throw new assert.AssertionError({ message: 'expected the call to throw SPEC_INVALID' });
 }
 
 /** A plugin config as `GET /plugins/config` returns it. */
@@ -133,6 +148,250 @@ describe('routesSpecDocument', () => {
 
     assert.deepEqual(source.servers, [{ url: 'https://billing.example.com:8443/v2' }]);
     assert.equal(source['x-ferrum-proxy'], undefined);
+  });
+
+  it('strips servers from path items and operations', () => {
+    // OpenAPI resolves `servers` at three levels and the nearest wins, so a
+    // path-level or operation-level entry survives the root rewrite and Edge
+    // builds the matcher from it — `^/other/invoices$` for an API published at
+    // `/nexus/billing`. With `fail_on_unknown_operation` that is a `400` on
+    // every declared operation of an API the publish just reported as live.
+    const submitted = routesSpecDocument(
+      document({
+        paths: {
+          '/invoices': {
+            servers: [{ url: '/other' }],
+            get: { responses: { '200': { description: 'OK' } } },
+            post: {
+              servers: [{ url: 'https://writes.example.com/v9' }],
+              responses: { '201': { description: 'Created' } },
+            },
+          },
+        },
+      }),
+      { listenPath: '/nexus/billing', proxy: { id: 'proxy-1' } },
+    );
+
+    const paths = submitted.paths as Record<string, Record<string, unknown>>;
+    const item = paths['/invoices'] as Record<string, unknown>;
+    assert.deepEqual(submitted.servers, [{ url: '/nexus/billing' }]);
+    assert.equal('servers' in item, false);
+    assert.equal('servers' in (item.post as Record<string, unknown>), false);
+    // Everything else about the operations is the provider's, untouched.
+    assert.deepEqual(item.get, { responses: { '200': { description: 'OK' } } });
+    assert.deepEqual(item.post, { responses: { '201': { description: 'Created' } } });
+  });
+
+  it('strips servers from a $ref-able component path item', () => {
+    // A path template that is a `$ref` to one of these produces exactly the
+    // same operation-table entry, so it has exactly the same exposure.
+    const submitted = routesSpecDocument(
+      document({
+        paths: { '/invoices': { $ref: '#/components/pathItems/Invoices' } },
+        components: {
+          schemas: { Invoice: { type: 'object' } },
+          pathItems: {
+            Invoices: {
+              servers: [{ url: '/other' }],
+              get: {
+                servers: [{ url: '/elsewhere' }],
+                responses: { '200': { description: 'OK' } },
+              },
+            },
+          },
+        },
+      }),
+      { listenPath: '/nexus/billing', proxy: { id: 'proxy-1' } },
+    );
+
+    const components = submitted.components as Record<string, Record<string, unknown>>;
+    const item = components.pathItems?.Invoices as Record<string, unknown>;
+    assert.equal('servers' in item, false);
+    assert.equal('servers' in (item.get as Record<string, unknown>), false);
+    // The rest of `components` rides through on the same object.
+    assert.deepEqual(components.schemas, { Invoice: { type: 'object' } });
+  });
+
+  it('leaves callbacks and non-path-item keys alone', () => {
+    // A callback describes a request the provider's own service makes to the
+    // client's URL. This proxy never serves it and Edge builds no listen-path
+    // matcher from it, so its `servers` is genuinely the provider's.
+    const callbacks = {
+      onPaid: {
+        '{$request.body#/callbackUrl}': {
+          servers: [{ url: 'https://client.example.com' }],
+          post: { responses: { '200': { description: 'OK' } } },
+        },
+      },
+    };
+    const source = document({
+      paths: {
+        '/invoices': { get: { callbacks, responses: { '200': { description: 'OK' } } } },
+        'x-path-notes': { servers: [{ url: '/not-a-path-item' }] },
+      },
+    });
+
+    const submitted = routesSpecDocument(source, {
+      listenPath: '/nexus/billing',
+      proxy: { id: 'proxy-1' },
+    });
+
+    assert.deepEqual(submitted.paths, source.paths);
+  });
+
+  it('hands an untouched document through by identity', () => {
+    // The strip only copies nodes that carried a `servers` key, so a document
+    // with none is submitted exactly as it was uploaded — the property the old
+    // shallow copy relied on, kept.
+    const source = document({ components: { schemas: { Invoice: { type: 'object' } } } });
+
+    const submitted = routesSpecDocument(source, {
+      listenPath: '/nexus/billing',
+      proxy: { id: 'proxy-1' },
+    });
+
+    assert.equal(submitted.paths, source.paths);
+    assert.equal(submitted.components, source.components);
+  });
+
+  it('does not mutate a document that carries nested servers', () => {
+    const source = document({
+      paths: {
+        '/invoices': {
+          servers: [{ url: '/other' }],
+          get: { servers: [{ url: '/elsewhere' }], responses: { '200': { description: 'OK' } } },
+        },
+      },
+    });
+
+    routesSpecDocument(source, { listenPath: '/nexus/billing', proxy: { id: 'proxy-1' } });
+
+    const item = (source.paths as Record<string, Record<string, unknown>>)['/invoices'];
+    assert.deepEqual(item?.servers, [{ url: '/other' }]);
+    assert.deepEqual((item?.get as Record<string, unknown>).servers, [{ url: '/elsewhere' }]);
+  });
+
+  it('strips servers from a $ref-able webhook path item', () => {
+    // Edge indexes `webhooks` as a resolution target, so a path that is a
+    // `$ref` to one produces an ordinary operation-table entry — built from
+    // that webhook's `servers`. `^/other/invoices$` for an API published at
+    // `/nexus/billing`, and a `400` on the only operation it declares.
+    const submitted = routesSpecDocument(
+      document({
+        paths: { '/invoices': { $ref: '#/webhooks/Invoices' } },
+        webhooks: {
+          Invoices: {
+            servers: [{ url: '/other' }],
+            post: {
+              servers: [{ url: '/elsewhere' }],
+              responses: { '200': { description: 'OK' } },
+            },
+          },
+        },
+      }),
+      { listenPath: '/nexus/billing', proxy: { id: 'proxy-1' } },
+    );
+
+    const webhooks = submitted.webhooks as Record<string, Record<string, unknown>>;
+    const item = webhooks.Invoices as Record<string, unknown>;
+    assert.deepEqual(submitted.servers, [{ url: '/nexus/billing' }]);
+    assert.equal('servers' in item, false);
+    assert.equal('servers' in (item.post as Record<string, unknown>), false);
+  });
+
+  it('strips servers from a component callback path item', () => {
+    // The `callbacks` of an operation are left alone — see the module docblock
+    // — but a `components.callbacks` entry is a named container of Path Items
+    // addressable by pointer, so it is stripped like `components.pathItems`.
+    const submitted = routesSpecDocument(
+      document({
+        components: {
+          schemas: { Invoice: { type: 'object' } },
+          callbacks: {
+            onPaid: {
+              '{$request.body#/callbackUrl}': {
+                servers: [{ url: '/other' }],
+                post: { responses: { '200': { description: 'OK' } } },
+              },
+            },
+          },
+        },
+      }),
+      { listenPath: '/nexus/billing', proxy: { id: 'proxy-1' } },
+    );
+
+    const components = submitted.components as Record<string, Record<string, unknown>>;
+    const callback = components.callbacks?.onPaid as Record<string, Record<string, unknown>>;
+    assert.equal('servers' in (callback['{$request.body#/callbackUrl}'] ?? {}), false);
+    // The rest of `components` rides through on the same object.
+    assert.deepEqual(components.schemas, { Invoice: { type: 'object' } });
+  });
+
+  it('refuses a path that references a Path Item it cannot rewrite', () => {
+    // The general case the strip walk cannot cover: Edge resolves a Path Item
+    // `$ref` as an unrestricted same-document pointer, so a pointer into any
+    // other container would put a server base back that no walk over the three
+    // Path Item containers has been over. Chasing an arbitrary pointer means
+    // re-implementing Edge's resolver; refusing is the honest alternative.
+    const failure = expectSpecInvalid(() =>
+      routesSpecDocument(
+        document({
+          paths: { '/invoices': { $ref: '#/components/callbacks/onPaid/expression' } },
+        }),
+        { listenPath: '/nexus/billing', proxy: { id: 'proxy-1' } },
+      ),
+    );
+
+    assert.match(failure.message, /The path '\/invoices' is a \$ref/);
+    assert.deepEqual(failure.details, {
+      field: 'spec',
+      path: '/invoices',
+      reason: 'unresolvable_path_item_ref',
+    });
+  });
+});
+
+describe('assertRoutesSubmittable', () => {
+  it('accepts the three containers the strip walk covers', () => {
+    for (const reference of [
+      '#/paths/~1payments',
+      '#/components/pathItems/Invoices',
+      '#/webhooks/Invoices',
+    ]) {
+      assertRoutesSubmittable('routes', document({ paths: { '/invoices': { $ref: reference } } }));
+    }
+  });
+
+  it('refuses a reference to another document', () => {
+    // An external reference is refused for the same reason and one more: the
+    // portal never sees the document it points at, so there is nothing it could
+    // rewrite even in principle.
+    const failure = expectSpecInvalid(() =>
+      assertRoutesSubmittable(
+        'routes',
+        document({ paths: { '/invoices': { $ref: 'shared.yaml#/components/pathItems/X' } } }),
+      ),
+    );
+
+    assert.match(failure.message, /is a \$ref the gateway would resolve outside/);
+  });
+
+  it('leaves a docs_only document alone', () => {
+    // Edge generates no operation matchers from a `docs_only` document, so
+    // there is nothing a reference could make unreachable.
+    assertRoutesSubmittable(
+      'docs_only',
+      document({ paths: { '/invoices': { $ref: 'shared.yaml#/components/pathItems/X' } } }),
+    );
+  });
+
+  it('ignores specification extensions among the path templates', () => {
+    // A Paths Object mixes path templates with `^x-` extensions, and only the
+    // templates are Path Items — an extension holding a `$ref` is data.
+    assertRoutesSubmittable(
+      'routes',
+      document({ paths: { 'x-path-notes': { $ref: 'notes.yaml#/anything' } } }),
+    );
   });
 });
 

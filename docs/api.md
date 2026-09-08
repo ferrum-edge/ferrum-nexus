@@ -449,9 +449,18 @@ before a session exists.
   "tagline": "APIs for partners",
   "support_email": "api-support@acme.example",
   "captcha": { "enabled": false, "provider": "none", "site_key": null },
+  "registration": { "open_registration": true, "allowed_roles": ["client", "provider"] },
   "bootstrap_required": false
 }
 ```
+
+`registration` is the public slice of the registration policy, so the sign-up
+form does not offer a role the server will refuse. `allowed_roles` is the stored
+policy narrowed to the self-selectable roles — an elevated role left in the
+setting never appears here, because `POST /api/auth/register` accepts only
+`client` and `provider` in the first place. Both fields are already observable
+by attempting a registration, and the server re-checks the policy on every one;
+this only saves the visitor a `403`.
 
 `bootstrap_required` is `true` only while the portal has no active
 `super_admin`: the next registration is seated as one and must therefore send
@@ -1196,6 +1205,31 @@ message threads.
 `HttpMethod` is `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`,
 `TRACE` or `CONNECT` — Edge's own enum.
 
+**`routes` mode rewrites the document Edge receives, and only that copy.** The
+submitted document has its root `servers` replaced with the API's listen path,
+so the operation matchers Edge generates cover the path clients actually send —
+and every `servers` **below** the root is stripped along with it: on a path
+item, on an operation, and on every Path Item a `$ref`'d path can resolve to,
+which means `components.pathItems`, `webhooks` and `components.callbacks`
+entries too. OpenAPI resolves `servers` nearest-first, so a nested one left in
+place would override the rewrite and generate a matcher for a path no client can
+reach, which `fail_on_unknown_operation` turns into a `400` on every declared
+operation. `servers` inside the `callbacks` of an operation is left alone — it
+describes a request the provider's own service makes outbound, not one this
+proxy serves.
+
+Because Edge resolves a Path Item `$ref` as an unrestricted same-document JSON
+pointer, a `routes` document whose `paths` reference a Path Item **outside**
+`#/paths/`, `#/components/pathItems/` or `#/webhooks/` is refused with
+`400 SPEC_INVALID` on upload, naming the path. Chasing an arbitrary pointer
+would mean re-implementing Edge's resolver in the portal; refusing leaves the
+provider a document they can act on instead of an API that answers `201` and
+then rejects every request. `docs_only` documents are not checked — Edge
+generates no matchers from them.
+
+The provider's stored revision is never modified by any of this: it is what the
+catalog, the docs viewer and `docs_only` publication all hand over unchanged.
+
 An API's CORS origins are additionally mirrored onto the proxy's
 `allowed_ws_origins`, which is the Cross-Site WebSocket Hijacking check: an
 HTTP proxy on Edge also accepts WebSocket upgrades on the same listen path, and
@@ -1406,12 +1440,15 @@ when `routes` is asked for and the current revision declares nothing to allow),
 > Nothing else does this: a spec revision, a CORS change and every runtime
 > setting are all in-place writes.
 
-Enforcement conversion, runtime PATCH, and spec revision use the same per-proxy
-database lease. The conversion holds it across the fresh proxy/spec reads,
-rebuild, compensation, and catalog update. A waiting mutation re-reads catalog
-state after acquiring the lease so it uses the current enforcement mode and
-backend. If the API's proxy identity changed while waiting, the request returns
-`409 CONFLICT`; reload the API before retrying.
+Enforcement conversion, runtime PATCH, spec revision **and deletion** use the
+same per-proxy database lease. The conversion holds it across the fresh
+proxy/spec reads, rebuild, compensation, and catalog update; the delete holds it
+across the gateway teardown _and_ the row delete, so a conversion cannot
+re-create the proxy against rows that are on their way out. A waiting mutation
+re-reads catalog state after acquiring the lease so it uses the current
+enforcement mode and backend. If the API's proxy identity changed while waiting,
+the request returns `409 CONFLICT`; reload the API before retrying, and a
+conversion whose API has been deleted rebuilds nothing.
 
 ### `DELETE /api/apis/:id`
 
@@ -1421,9 +1458,25 @@ Destructive and ordered deliberately: the Edge proxy is deleted **first** (so
 nothing stays reachable-but-untracked, and so the API never spends the teardown
 live with its auth plugin already gone), which cascades its plugin associations
 and proxy-scoped plugin configs; any config the cascade missed is swept up
-after. Then the ACL group is stripped from every grantee's consumer, then the
-grants, requests, spec revisions and the API row are deleted in one store
-transaction. Grantees get a notification.
+after. Then the grants, requests, spec revisions and the API row are deleted in
+one store transaction. Only then is the ACL group stripped from every grantee's
+consumer — the group is inert the moment the proxy is gone — and grantees get a
+notification.
+
+The gateway teardown and the row delete run under the API's per-proxy lease, and
+the `api.delete` audit row is written only once they have. A `spec_enforcement`
+conversion is a delete-and-recreate, so an unserialised teardown could commit in
+the middle of one and leave the conversion's rebuild serving an API with no
+portal record — reachable, un-removable, and holding the slug against every
+future publish. Returns `409 CONFLICT` if the API's proxy identity changed while
+the delete waited for the lease.
+
+The ACL strip is deliberately **outside** that lease. Each grantee's consumer
+has a lease of its own, so a strip can wait on a credential write for that
+account; holding the proxy lease across all of them would answer `409` to every
+concurrent write on the API for as long as the slowest grantee took, for a step
+that cannot change what the gateway serves. A strip that fails is logged rather
+than retried — there is nothing left for the group to authorise.
 
 ### `PUT /api/apis/:id/spec`
 

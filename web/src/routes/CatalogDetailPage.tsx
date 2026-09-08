@@ -8,6 +8,7 @@ import {
 import { formatDateTime } from '../lib/format';
 import { useCatalogApi, useCatalogSpec } from '../hooks/useCatalog';
 import { useCancelAccessRequest, useCreateAccessRequest } from '../hooks/useAccessRequests';
+import { useAuth } from '../stores/auth';
 import { useToast } from '../stores/toast';
 import { CallApiPanel } from '../components/catalog/CallApiPanel';
 import { OpenApiView } from '../components/openapi/OpenApiView';
@@ -248,6 +249,7 @@ export function CatalogDetailPage(): ReactElement {
   const slug = params.slug ?? '';
   const [tab, setTab] = useState('overview');
   const [messageOpen, setMessageOpen] = useState(false);
+  const { canAdmin } = useAuth();
   const query = useCatalogApi(slug);
 
   if (query.isLoading) return <LoadingPanel label="Loading API" />;
@@ -270,6 +272,11 @@ export function CatalogDetailPage(): ReactElement {
 
   const detail = query.data;
   const { api } = detail;
+  // An admin may approve, deny and revoke on any API through the ordinary
+  // routes — the guide's non-god-mode remedy — but the only link into the
+  // workspace was owner-gated, so the remedy had no click path. The owner keeps
+  // reaching it from the Access tab, which is why this covers the other case.
+  const canManage = canAdmin && api.access_state !== 'owner';
 
   return (
     <>
@@ -277,11 +284,22 @@ export function CatalogDetailPage(): ReactElement {
         title={api.name}
         description={api.description ?? undefined}
         actions={
-          api.owner && api.access_state !== 'owner' ? (
-            <Button variant="secondary" onClick={() => setMessageOpen(true)}>
-              Message provider
-            </Button>
-          ) : null
+          <>
+            {canManage ? (
+              <Link
+                to="/apis/$apiId"
+                params={{ apiId: api.id }}
+                className="inline-flex h-9 items-center rounded-md bg-accent px-3.5 text-sm font-medium text-accent-fg hover:bg-accent-hover"
+              >
+                Manage API
+              </Link>
+            ) : null}
+            {api.owner && api.access_state !== 'owner' ? (
+              <Button variant="secondary" onClick={() => setMessageOpen(true)}>
+                Message provider
+              </Button>
+            ) : null}
+          </>
         }
       />
 

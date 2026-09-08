@@ -40,9 +40,11 @@
  * - API specs: `POST`/`PUT /api-specs` create the proxy from `x-ferrum-proxy`,
  *   stamp `api_spec_id` on it, and generate an associated `openapi_validator`
  *   whose operation table is built from the document's paths prefixed by the
- *   `servers[]` pathnames — plus the admission rule that makes issue #49 fail
- *   here as loudly as it does on a real gateway: a hand-built
- *   `openapi_validator` on a proxy with no attached spec is a `400`.
+ *   `servers[]` pathnames — resolved the way OpenAPI defines it, with a Path
+ *   Item's or an Operation's own `servers` overriding the root's — plus the
+ *   admission rule that makes issue #49 fail here as loudly as it does on a
+ *   real gateway: a hand-built `openapi_validator` on a proxy with no attached
+ *   spec is a `400`.
  *
  *   Faithful about the **operation table**, which is what `routes` enforcement
  *   is. Real Edge additionally materializes request/response schemas into each
@@ -182,6 +184,18 @@ export interface MockFerrumEdge {
   stop(): Promise<void>;
   /** Clear stored resources, recorded requests and queued failures. */
   reset(): void;
+  /**
+   * Drop every armed {@link MockFerrumEdge.queueFailure} and
+   * {@link MockFerrumEdge.delay}, leaving stored resources alone.
+   *
+   * Both are one-shot and both are *matched*, so one that never met a matching
+   * request stays armed for the next test in the file and fires somewhere it
+   * was never meant to — a failure whose cause is two tests away from its
+   * symptom. Suites that arm either should clear them in an `afterEach`;
+   * {@link MockFerrumEdge.reset} does this too, but takes the whole gateway
+   * with it.
+   */
+  clearInjections(): void;
   /**
    * Replace the payload returned by `GET /health` and `GET /status`.
    *
@@ -659,6 +673,9 @@ function pathTemplateRegex(template: string): string {
  * is the trap Nexus avoids by rewriting `servers` to the listen path: a
  * document left with its upstream there generates `^/invoices$` and nothing
  * arriving at `/nexus/<slug>/invoices` can ever match it.
+ *
+ * Called once per level — see {@link generateOperations} — because the nearest
+ * declaration wins, not the union of all of them.
  */
 function serverBases(servers: unknown): string[] {
   if (!Array.isArray(servers) || servers.length === 0) return [''];
@@ -672,15 +689,31 @@ function serverBases(servers: unknown): string[] {
   return bases.length === 0 ? [''] : bases;
 }
 
-/** The operation table Edge's importer generates from a document. */
+/**
+ * The operation table Edge's importer generates from a document.
+ *
+ * `servers` is resolved the way OpenAPI defines it and Edge's extractor
+ * implements it: root, Path Item and Operation each may declare one, and the
+ * **nearest** declaration wins for the operation being extracted. Modelling
+ * only the root — which this fake used to do — makes it generate the correct
+ * matcher for a document the real gateway gets wrong, which is how issue #140
+ * survived a green suite: a nested `servers` produced `^/other/one$` on a live
+ * gateway and `400`ed every request while the mock reported the listen path.
+ */
 function generateOperations(document: Record<string, unknown>): Record<string, unknown>[] {
   const paths = isRecord(document.paths) ? document.paths : {};
-  const bases = serverBases(document.servers);
+  const rootBases = serverBases(document.servers);
   const operations: Record<string, unknown>[] = [];
   for (const [template, item] of Object.entries(paths)) {
     if (!isRecord(item)) continue;
+    const itemBases = item.servers === undefined ? rootBases : serverBases(item.servers);
     for (const method of OPENAPI_METHOD_KEYS) {
-      if (item[method] === undefined) continue;
+      const operation = item[method];
+      if (operation === undefined) continue;
+      const bases =
+        isRecord(operation) && operation.servers !== undefined
+          ? serverBases(operation.servers)
+          : itemBases;
       for (const base of bases) {
         operations.push({
           method: method.toUpperCase(),
@@ -2618,6 +2651,11 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       requestCounters.clear();
       requestDurations.clear();
       backendStates.clear();
+    },
+
+    clearInjections(): void {
+      failures.length = 0;
+      delays.length = 0;
     },
 
     setHealth(payload: Record<string, unknown>): void {

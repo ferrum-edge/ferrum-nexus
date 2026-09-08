@@ -382,6 +382,7 @@ export async function buildServer(
     edge: deps.edge,
     audit,
     publishing,
+    log: (obj, message) => app.log.error(obj, message),
   });
   const access = createAccessService({
     config,

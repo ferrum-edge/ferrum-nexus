@@ -1,10 +1,5 @@
 import { useState, type ReactElement } from 'react';
-import {
-  MAX_PAGE_SIZE,
-  ROLE_LABELS,
-  type MassEmailAudience,
-  type Role,
-} from '@ferrum-nexus/shared';
+import { MAX_PAGE_SIZE, ROLE_LABELS } from '@ferrum-nexus/shared';
 import { useApis } from '../../hooks/useApis';
 import { useGrants } from '../../hooks/useGrants';
 import { useUsers } from '../../hooks/useUsers';
@@ -15,6 +10,14 @@ import {
   useGodRevokeGrant,
 } from '../../hooks/useGodMode';
 import { useToast } from '../../stores/toast';
+import {
+  AudienceFields,
+  EVERYONE,
+  audienceFrom,
+  audienceReady,
+  describeAudience,
+  type AudienceDraft,
+} from '../../components/admin/AudienceFields';
 import { RoleGuard } from '../../components/layout/RoleGuard';
 import { Button } from '../../components/ui/Button';
 import { Card, CardBody, CardHeader, PageHeader } from '../../components/ui/Card';
@@ -287,13 +290,6 @@ function DisableUserPanel(): ReactElement {
   );
 }
 
-type BroadcastChoice = 'all' | 'client' | 'provider' | 'admin';
-
-function audienceFor(choice: BroadcastChoice): MassEmailAudience {
-  if (choice === 'all') return { scope: 'all' };
-  return { scope: 'filtered', roles: [choice as Role], status: 'active' };
-}
-
 function broadcastEmailBatchId(): string {
   // getRandomValues also supports the portal's plain-HTTP deployments.
   const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -303,7 +299,7 @@ function broadcastEmailBatchId(): string {
 function BroadcastPanel(): ReactElement {
   const broadcast = useGodBroadcast();
   const toast = useToast();
-  const [choice, setChoice] = useState<BroadcastChoice>('all');
+  const [audience, setAudience] = useState<AudienceDraft>(EVERYONE);
   const [subject, setSubject] = useState('');
   const [body, setBody] = useState('');
   const [sendEmail, setSendEmail] = useState(false);
@@ -318,17 +314,8 @@ function BroadcastPanel(): ReactElement {
           description="Creates an in-app notification (and optionally an email) for every account in the audience."
         />
         <CardBody className="flex flex-col gap-4">
-          <LabeledSelect<BroadcastChoice>
-            label="Audience"
-            value={choice}
-            onValueChange={setChoice}
-            options={[
-              { value: 'all', label: 'Everyone' },
-              { value: 'client', label: ROLE_LABELS.client },
-              { value: 'provider', label: ROLE_LABELS.provider },
-              { value: 'admin', label: ROLE_LABELS.admin },
-            ]}
-          />
+          {/* No "add myself": the server excludes the acting super admin. */}
+          <AudienceFields name="broadcast" value={audience} onChange={setAudience} />
           <LabeledInput
             label="Subject"
             required
@@ -350,7 +337,9 @@ function BroadcastPanel(): ReactElement {
           <div>
             <Button
               variant="danger"
-              disabled={subject.trim().length === 0 || body.trim().length === 0}
+              disabled={
+                subject.trim().length === 0 || body.trim().length === 0 || !audienceReady(audience)
+              }
               onClick={() => setOpen(true)}
             >
               Broadcast
@@ -363,7 +352,7 @@ function BroadcastPanel(): ReactElement {
         open={open}
         onOpenChange={setOpen}
         title="Send this broadcast?"
-        description="Every account in the audience receives it. It cannot be recalled."
+        description={`This reaches ${describeAudience(audience)}, except you. It cannot be recalled.`}
         confirmLabel="Broadcast"
         danger
         confirmPhrase="BROADCAST"
@@ -373,7 +362,7 @@ function BroadcastPanel(): ReactElement {
             {
               subject: subject.trim(),
               body: body.trim(),
-              audience: audienceFor(choice),
+              audience: audienceFrom(audience),
               send_email: sendEmail,
               idempotency_key: emailBatch,
             },
