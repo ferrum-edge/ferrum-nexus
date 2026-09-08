@@ -329,6 +329,7 @@ function threadResponse(): CreateThreadResponse {
       thread_id: thread.id,
       sender_user_id: 'provider-1',
       body: 'Which integration needs this?',
+      broadcast: false,
       created_at: CREATED_AT,
       updated_at: CREATED_AT,
     },
