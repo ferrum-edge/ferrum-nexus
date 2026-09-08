@@ -261,7 +261,13 @@ describe('a routes spec revision racing a runtime PATCH', () => {
   const RUNTIME_PATCH = {
     allowed_methods: ['GET'],
     timeouts: { connect_ms: 1001, read_ms: 2002, write_ms: 3003 },
-    cors: { allowed_origins: ['https://app.example.com'], allow_credentials: false },
+    // WebSocket origin enforcement is opt-in since #151; the race still has to
+    // carry the derived `allowed_ws_origins` through the spec revision.
+    cors: {
+      allowed_origins: ['https://app.example.com'],
+      allow_credentials: false,
+      enforce_websocket_origins: true,
+    },
   };
 
   /**
