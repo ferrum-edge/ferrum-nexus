@@ -50,6 +50,11 @@ const guards: Guard[] = [
     columns: [{ name: 'generation', type: 'varchar(64)', nullable: false, default: '' }],
   },
   {
+    sql: "ALTER TABLE email_outbox ADD COLUMN generation VARCHAR(64) NOT NULL DEFAULT ''",
+    table: 'email_outbox',
+    columns: [{ name: 'generation', type: 'varchar(64)', nullable: false, default: '' }],
+  },
+  {
     sql: 'ALTER TABLE apis ADD COLUMN upstream_url TEXT NULL, ADD COLUMN cors_json TEXT NULL',
     table: 'apis',
     columns: [textColumn('upstream_url'), textColumn('cors_json')],

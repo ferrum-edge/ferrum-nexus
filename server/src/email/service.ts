@@ -16,6 +16,8 @@
  * the same key returns the existing row and inserts nothing.
  */
 
+import type { Readable } from 'node:stream';
+
 import nodemailer from 'nodemailer';
 
 import type { EmailTemplateKey } from '@ferrum-nexus/shared';
@@ -50,10 +52,34 @@ export interface OutboundMail {
 /**
  * Minimal mail sink. The default implementation wraps nodemailer; tests inject
  * a recording fake so no socket is ever opened.
+ *
+ * A `send` that rejects with {@link MailDeliveredUnacknowledgedError} means the
+ * relay may already hold the message, so the caller must not retry it.
  */
 export interface MailTransport {
   send(mail: OutboundMail): Promise<void>;
   close?(): Promise<void> | void;
+}
+
+/**
+ * The attempt ended without an answer, but the relay may already have the mail.
+ *
+ * SMTP hands a message over at the end-of-data marker: once the whole body has
+ * been written, a timeout, a reset or an enforced deadline says nothing about
+ * whether the relay queued it. Retrying such an attempt is what delivers a
+ * second copy, so the outbox parks the row instead — see
+ * `OUTBOX_DELIVERED_UNACKNOWLEDGED`.
+ */
+export class MailDeliveredUnacknowledgedError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'MailDeliveredUnacknowledgedError';
+  }
+}
+
+/** True when `error` means the relay may already hold the message. */
+export function isDeliveredUnacknowledged(error: unknown): boolean {
+  return error instanceof MailDeliveredUnacknowledgedError;
 }
 
 /**
@@ -75,21 +101,108 @@ export interface ResolvedSmtpSettings {
 }
 
 /**
- * Ceiling on one `send`, in milliseconds.
+ * Nodemailer's per-phase timeouts, pinned well below its own defaults (2 min /
+ * 30 s / 10 min).
  *
- * Nodemailer's defaults are 2 minutes to connect, 30 seconds for the greeting
- * and 10 minutes of socket inactivity, so a single unlucky message could hold
- * its outbox claim for a quarter of an hour — far past the worker's stale
- * threshold, at which point another worker re-queues a message that is still in
- * flight and the relay gets two copies. These are the numbers
- * `OUTBOX_SEND_BUDGET_MS` is derived from; keep the two in step.
+ * They are worth having, but they do **not** compose into a total: `socketTimeout`
+ * measures inactivity *between* reads, so a relay that answers every command
+ * just inside it holds one `send` open for as long as it likes. That is why the
+ * total is enforced separately by {@link SMTP_SEND_BUDGET_MS}.
  */
 const SMTP_CONNECTION_TIMEOUT_MS = 10_000;
 const SMTP_GREETING_TIMEOUT_MS = 10_000;
 const SMTP_SOCKET_TIMEOUT_MS = 30_000;
 
+/**
+ * Hard ceiling on one delivery attempt, in milliseconds.
+ *
+ * This is a deadline, not an estimate: {@link createSmtpTransport} races every
+ * `send` against it, so a claim's lifetime is bounded whatever the relay does.
+ * The outbox worker re-exports it as `OUTBOX_SEND_BUDGET_MS` and sizes its
+ * stale threshold against it — keep the two in step.
+ */
+export const SMTP_SEND_BUDGET_MS = 60_000;
+
+/** Options for {@link createSmtpTransport}. */
+export interface SmtpTransportOptions {
+  /** Ceiling on one `send`; defaults to {@link SMTP_SEND_BUDGET_MS}. */
+  budgetMs?: number;
+}
+
+/** Raised when a `send` outruns its budget. Never escapes this module. */
+class SmtpBudgetExceededError extends Error {
+  constructor(budgetMs: number) {
+    super(`SMTP delivery exceeded its ${budgetMs}ms budget`);
+    this.name = 'SmtpBudgetExceededError';
+  }
+}
+
+/**
+ * How far a delivery attempt got before it was cut off.
+ *
+ * - `unknown` — the message was never compiled, or nodemailer's shape changed
+ *   and the hook below never ran;
+ * - `before-data` — compiled, but the body was never streamed: the relay cannot
+ *   have the message;
+ * - `data-in-flight` — the body was partly written. SMTP only accepts a message
+ *   at the end-of-data marker, so this is still "not delivered";
+ * - `data-sent` — the whole body reached the socket. Whether the relay queued
+ *   it is now unknowable without an acknowledgement.
+ */
+type SendPhase = 'unknown' | 'before-data' | 'data-in-flight' | 'data-sent';
+
+/** Mutable per-attempt state the message-source hook writes to. */
+interface SendState {
+  phase: SendPhase;
+}
+
+/** The compiled MIME node, as far as this module needs it. */
+interface CompiledMessage {
+  createReadStream?: (...args: unknown[]) => Readable;
+}
+
+/** A protocol rejection carries the relay's reply; a timeout or a reset does not. */
+function hasServerResponse(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const answered = error as { responseCode?: unknown; response?: unknown };
+  return typeof answered.responseCode === 'number' || typeof answered.response === 'string';
+}
+
+/**
+ * Decide whether a failed attempt may nonetheless have delivered the message.
+ *
+ * A relay that answered — `5xx` on the envelope, `550` after the data — has
+ * definitively refused it, so those stay ordinary failures however far the
+ * attempt got. Everything else is judged on the phase: only a body that was
+ * written in full can be sitting in the relay's queue.
+ */
+function classifySendFailure(error: unknown, phase: SendPhase): unknown {
+  if (hasServerResponse(error)) return error;
+  const reason = error instanceof Error ? error.message : String(error);
+  if (phase === 'data-sent') {
+    return new MailDeliveredUnacknowledgedError(
+      `${reason}; the relay already had the whole message`,
+      { cause: error },
+    );
+  }
+  if (phase === 'unknown' && error instanceof SmtpBudgetExceededError) {
+    // The budget fired and nothing told us how far the message got. Parking is
+    // the safe side of that coin: a duplicate password reset is worse than a
+    // row an operator has to look at.
+    return new MailDeliveredUnacknowledgedError(
+      `${reason}; how far the message got could not be determined`,
+      { cause: error },
+    );
+  }
+  return error;
+}
+
 /** Build a nodemailer-backed transport for resolved settings. */
-export function createSmtpTransport(settings: ResolvedSmtpSettings): MailTransport {
+export function createSmtpTransport(
+  settings: ResolvedSmtpSettings,
+  options: SmtpTransportOptions = {},
+): MailTransport {
+  const budgetMs = options.budgetMs ?? SMTP_SEND_BUDGET_MS;
   const transporter = nodemailer.createTransport({
     host: settings.host ?? '',
     port: settings.port,
@@ -99,14 +212,90 @@ export function createSmtpTransport(settings: ResolvedSmtpSettings): MailTranspo
     socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
     ...(settings.user ? { auth: { user: settings.user, pass: settings.password ?? '' } } : {}),
   });
+
+  /** The attempt currently in flight, or `null` between attempts. */
+  let current: SendState | null = null;
+
+  // Nodemailer streams the compiled message into the `DATA` command, so the
+  // moment that source stream is fully consumed is the moment the relay has
+  // seen the end of the message. Wrapping it through the documented `stream`
+  // plugin step is what turns "the attempt timed out" into an answerable
+  // question; it changes nothing about the message itself, and if the hook ever
+  // stops firing the phase simply stays `unknown`.
+  transporter.use('stream', (mail, done) => {
+    const state = current;
+    const message = (mail as unknown as { message?: CompiledMessage }).message;
+    const createReadStream = message?.createReadStream;
+    if (state && message && typeof createReadStream === 'function') {
+      const create = createReadStream.bind(message);
+      state.phase = 'before-data';
+      message.createReadStream = (...args: unknown[]): Readable => {
+        state.phase = 'data-in-flight';
+        const stream = create(...args);
+        stream.once('end', () => {
+          state.phase = 'data-sent';
+        });
+        return stream;
+      };
+    }
+    done();
+  });
+
+  // One attempt at a time, so `current` is never ambiguous. The worker delivers
+  // its claims one at a time anyway; this only guards a caller that does not.
+  let queue: Promise<unknown> = Promise.resolve();
+  function serialize<T>(task: () => Promise<T>): Promise<T> {
+    const run = queue.then(task, task);
+    queue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
   return {
     async send(mail) {
-      await transporter.sendMail({
-        from: settings.from,
-        to: mail.to,
-        subject: mail.subject,
-        html: mail.html,
-        text: mail.text,
+      await serialize(async () => {
+        const state: SendState = { phase: 'unknown' };
+        current = state;
+        let timer: NodeJS.Timeout | undefined;
+        const attempt = transporter
+          .sendMail({
+            from: settings.from,
+            to: mail.to,
+            subject: mail.subject,
+            html: mail.html,
+            text: mail.text,
+          })
+          .then((): void => undefined);
+        try {
+          // The race is what makes the budget a bound rather than a comment:
+          // nodemailer's three timeouts are per-phase, so a conforming relay
+          // that answers slowly can otherwise outlive the stale threshold and
+          // have its claim reclaimed mid-flight.
+          await new Promise<void>((resolve, reject) => {
+            timer = setTimeout(() => reject(new SmtpBudgetExceededError(budgetMs)), budgetMs);
+            timer.unref?.();
+            // Attaching both handlers here is also what keeps an abandoned
+            // attempt from surfacing as an unhandled rejection.
+            attempt.then(resolve, reject);
+          });
+        } catch (error) {
+          if (error instanceof SmtpBudgetExceededError) {
+            // Nodemailer has no per-send abort. `close()` is the only lever, and
+            // a connection it cannot reach is left to the socket-inactivity
+            // timeout — the claim, which is what mattered, is already released.
+            try {
+              transporter.close();
+            } catch {
+              // Closing must never mask the delivery outcome.
+            }
+          }
+          throw classifySendFailure(error, state.phase);
+        } finally {
+          if (timer) clearTimeout(timer);
+          current = null;
+        }
       });
     },
     close() {

@@ -3,17 +3,16 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 
 import { OUTBOX_MAX_ATTEMPTS } from '@ferrum-nexus/shared';
 
-import { buildTestApp, type TestApp } from '../test/helpers.js';
+import { isoInSeconds } from '../lib/ids.js';
+import { buildTestApp, createTestMailbox, type TestApp } from '../test/helpers.js';
 import {
   backoffDelayMs,
+  createOutboxWorker,
   OUTBOX_BASE_BACKOFF_MS,
   OUTBOX_DELIVERED_UNACKNOWLEDGED,
+  OUTBOX_MAX_BACKOFF_MS,
 } from './outbox-worker.js';
-
-/** Push a row's next attempt into the past so the next tick claims it again. */
-async function makeDue(harness: TestApp, id: string): Promise<void> {
-  await harness.store.emailOutbox.reschedule(id, new Date(Date.now() - 1000).toISOString(), 'due');
-}
+import { MailDeliveredUnacknowledgedError } from './service.js';
 
 /** Make the next `emailOutbox.markSent(...)` reject, then restore the real one. */
 function failNextMarkSent(harness: TestApp, message: string): void {
@@ -52,14 +51,14 @@ describe('outbox worker', () => {
   });
 
   // Each case owns the queue: anything a previous case left pending is retired
-  // so a tick only ever claims the row under test.
+  // so a tick only ever claims the row under test. Settling a row now needs the
+  // claim that owns it, and a far-future clock makes backed-off rows due.
   beforeEach(async () => {
     harness.mailbox.clear();
     harness.mailbox.unconfigured = false;
-    for (const row of await harness.outbox()) {
-      if (row.status === 'pending' || row.status === 'sending') {
-        await harness.store.emailOutbox.markSent(row.id, new Date().toISOString());
-      }
+    await harness.store.emailOutbox.releaseStale(isoInSeconds(3_600));
+    for (const claim of await harness.store.emailOutbox.claimDue(isoInSeconds(3_600), 100)) {
+      await harness.store.emailOutbox.markSent(claim, new Date().toISOString());
     }
   });
 
@@ -143,12 +142,24 @@ describe('outbox worker', () => {
       vars: { subject: 'Doomed', body_html: '<p>x</p>', body_text: 'x' },
       idempotencyKey: 'worker:doomed',
     });
-    harness.mailbox.failure = new Error('mailbox does not exist');
+
+    // Retrying is now the backoff's job rather than a hand-written reschedule:
+    // settling a claim needs the claim, and forging one would inflate the very
+    // attempt counter this case is asserting on. So the case owns a worker with
+    // a clock it can move past each backoff.
+    const { mailbox, factory } = createTestMailbox();
+    mailbox.failure = new Error('mailbox does not exist');
+    let ms = Date.now();
+    const worker = createOutboxWorker({
+      store: harness.store,
+      transportFactory: factory,
+      now: () => new Date(ms),
+    });
 
     for (let attempt = 1; attempt <= OUTBOX_MAX_ATTEMPTS; attempt += 1) {
-      await makeDue(harness, entry.id);
-      const result = await harness.tick();
+      const result = await worker.tick();
       assert.equal(result.claimed, 1, `attempt ${attempt} claims the row`);
+      ms += OUTBOX_MAX_BACKOFF_MS * 2;
     }
 
     const stored = await harness.store.emailOutbox.findById(entry.id);
@@ -158,8 +169,8 @@ describe('outbox worker', () => {
     assert.equal(stored?.last_error, 'mailbox does not exist');
 
     // A failed row is never claimed again.
-    harness.mailbox.failure = null;
-    const quiet = await harness.tick();
+    mailbox.failure = null;
+    const quiet = await worker.tick();
     assert.equal(quiet.claimed, 0);
   });
 
@@ -197,6 +208,75 @@ describe('outbox worker', () => {
     const quiet = await harness.tick();
     assert.equal(quiet.claimed, 0);
     assert.equal(harness.mailbox.sent.length, 1, 'exactly one message reached the relay');
+  });
+
+  it('parks a send that was cut off after the relay had the whole message', async () => {
+    const { entry } = await harness.services.email.enqueue({
+      to: 'unacked-timeout@example.test',
+      templateKey: 'mass',
+      vars: { subject: 'Cut off', body_html: '<p>x</p>', body_text: 'x' },
+      idempotencyKey: 'worker:timeout-unacked',
+    });
+
+    // A socket timeout past end-of-data, or the send budget firing there: the
+    // relay may have queued the message, so retrying it is what used to put
+    // five copies of a password reset in somebody's inbox.
+    harness.mailbox.failure = new MailDeliveredUnacknowledgedError(
+      'Timeout; the relay already had the whole message',
+    );
+
+    const result = await harness.tick();
+    assert.equal(result.claimed, 1);
+    assert.equal(result.unacknowledged, 1);
+    assert.equal(result.rescheduled, 0, 'an ambiguous timeout is never retried');
+    assert.equal(result.failed, 0);
+    assert.equal(result.lost, 0);
+
+    const stored = await harness.store.emailOutbox.findById(entry.id);
+    assert.equal(stored?.status, 'failed');
+    assert.equal(stored?.attempts, 1, 'the retries were not burned through');
+    assert.equal(stored?.next_attempt_at, null);
+    assert.ok(
+      stored?.last_error?.startsWith(OUTBOX_DELIVERED_UNACKNOWLEDGED),
+      `parked as delivered-unacknowledged: ${String(stored?.last_error)}`,
+    );
+
+    harness.mailbox.failure = null;
+    const quiet = await harness.tick();
+    assert.equal(quiet.claimed, 0, 'the row is out of the retry loop for good');
+  });
+
+  it('refuses to settle a claim another worker has taken over', async () => {
+    const { entry } = await harness.services.email.enqueue({
+      to: 'reclaimed@example.test',
+      templateKey: 'mass',
+      vars: { subject: 'Reclaimed', body_html: '<p>x</p>', body_text: 'x' },
+      idempotencyKey: 'worker:reclaimed',
+    });
+
+    // The stale sweep of another instance re-queues the row mid-delivery, and
+    // that instance settles it first. This worker's `markSent` must not land.
+    const real = harness.store.emailOutbox.markSent.bind(harness.store.emailOutbox);
+    const stolen: string[] = [];
+    harness.store.emailOutbox.markSent = async (claim, at) => {
+      harness.store.emailOutbox.markSent = real;
+      await harness.store.emailOutbox.releaseStale(isoInSeconds(60));
+      const [reclaim] = await harness.store.emailOutbox.claimDue(isoInSeconds(60), 1);
+      assert.ok(reclaim);
+      stolen.push(reclaim.generation);
+      assert.equal(await real(reclaim, at), true);
+      return real(claim, at);
+    };
+
+    const result = await harness.tick();
+    assert.equal(result.claimed, 1);
+    assert.equal(result.sent, 0);
+    assert.equal(result.lost, 1, 'the superseded claim was refused');
+    assert.equal(result.unacknowledged, 0);
+
+    const stored = await harness.store.emailOutbox.findById(entry.id);
+    assert.equal(stored?.status, 'sent');
+    assert.equal(stored?.generation, stolen[0], 'the new owner still owns the row');
   });
 
   it('claims nothing while SMTP is unconfigured', async () => {

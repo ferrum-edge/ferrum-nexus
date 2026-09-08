@@ -401,6 +401,7 @@ function mapNotification(row: Row): NotificationRecord {
 function mapOutbox(row: Row): EmailOutboxRecord {
   return {
     id: text(row.id),
+    generation: text(row.generation),
     to_email: text(row.to_email),
     subject: text(row.subject),
     body_html: text(row.body_html),
@@ -2206,9 +2207,9 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         await execute(
           tx,
           `UPDATE email_outbox
-           SET status = 'sending', attempts = attempts + 1, updated_at = ?
+           SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?
            WHERE id IN (${placeholders(ids.length)}) AND status = 'pending'`,
-          [nowIso(), ...ids],
+          [nowIso(), newId(), ...ids],
         );
         const rows = await queryAll(
           tx,
@@ -2218,32 +2219,32 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         return rows.map(mapOutbox);
       }),
 
-    markSent: async (id, at) => {
-      await execute(
+    // Every settling write moves the row out of `sending`, so a matching row
+    // always changes and MySQL's CLIENT_FOUND_ROWS count is still an ownership
+    // signal.
+    markSent: async (entry, at) =>
+      (await execute(
         exec,
         `UPDATE email_outbox SET status = 'sent', next_attempt_at = NULL, last_error = NULL,
-           updated_at = ? WHERE id = ?`,
-        [at, id],
-      );
-    },
+           updated_at = ? WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [at, entry.id, entry.generation],
+      )) > 0,
 
-    reschedule: async (id, nextAttemptAt, lastError) => {
-      await execute(
+    reschedule: async (entry, nextAttemptAt, lastError) =>
+      (await execute(
         exec,
         `UPDATE email_outbox SET status = 'pending', next_attempt_at = ?, last_error = ?,
-           updated_at = ? WHERE id = ?`,
-        [nextAttemptAt, lastError, nowIso(), id],
-      );
-    },
+           updated_at = ? WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [nextAttemptAt, lastError, nowIso(), entry.id, entry.generation],
+      )) > 0,
 
-    markFailed: async (id, lastError) => {
-      await execute(
+    markFailed: async (entry, lastError) =>
+      (await execute(
         exec,
         `UPDATE email_outbox SET status = 'failed', next_attempt_at = NULL, last_error = ?,
-           updated_at = ? WHERE id = ?`,
-        [lastError, nowIso(), id],
-      );
-    },
+           updated_at = ? WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [lastError, nowIso(), entry.id, entry.generation],
+      )) > 0,
 
     releaseStale: async (olderThan) =>
       execute(
