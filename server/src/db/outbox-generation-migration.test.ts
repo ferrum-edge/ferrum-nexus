@@ -4,11 +4,11 @@ import { it } from 'node:test';
 import { openSqliteDatabase } from './adapters/sqlite/index.js';
 import { loadMigrations } from './migrate.js';
 
-it('015 preserves legacy pending, sending, sent and failed outbox rows', () => {
+it('016 preserves legacy pending, sending, sent and failed outbox rows', () => {
   const db = openSqliteDatabase(':memory:');
   try {
     const migrations = loadMigrations('sqlite');
-    const migration = migrations.find((entry) => entry.id === '015_outbox_generation');
+    const migration = migrations.find((entry) => entry.id === '016_outbox_generation');
     assert.ok(migration);
     for (const entry of migrations.filter((entry) => entry.id < migration.id)) db.exec(entry.sql);
     const at = '2026-09-01T00:00:00.000Z';
