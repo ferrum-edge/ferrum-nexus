@@ -212,6 +212,12 @@ export interface MockFerrumEdge {
    * models the other half: the mutation lands, the caller is told it did not,
    * and the two sides are left disagreeing with nothing on the wire to say so.
    * Narrowed by `pathContains`, `method` and `skip` exactly as failures are.
+   *
+   * It is armed before the request is dispatched and applied by {@link send},
+   * so it covers **every** verb the mock handles — a credential `POST` whose
+   * entry is appended and whose answer is lost reads to the client exactly
+   * like the refusal it is not, which is the shape that leaves a live gateway
+   * entry with no portal row at all.
    */
   queueLostAck(
     status: number,

@@ -1772,10 +1772,15 @@ If it is instead the **delete** that fails below the cap, the replacement that
 was already appended is taken back — its show-once secret was never returned,
 so leaving it would spend a cap slot on a credential nobody holds — and the
 original error is reported unchanged, leaving the account as the rotation found
-it. Should that compensating delete fail too, the response says _the previous
-credential could not be removed … and the replacement … could not be taken
-back_ and carries `details.stranded_credential_id`: both sides still agree, so
-revoking that credential is ordinary self-service.
+it. Should that compensating delete fail too, the response says which state the
+gateway array proved and always carries `details.stranded_credential_id` and
+`details.retired_credential_id`: _the gateway did not acknowledge removing the
+previous credential and no longer holds it_ (the delete landed after all; the
+portal settles the pending row on the next call), _both … the portal holds a
+live row for each_ (the two views agree, so revoking the named credential is
+ordinary self-service), or _an administrator must reconcile this consumer_ when
+the array could not be read back at all. Only the last needs an administrator;
+see [`operations.md`](operations.md#12-the-credential-mirror) §12.
 
 An **admin may rotate another account's credential**, and doing so does not
 transfer it: the replacement keeps the original `user_id` and consumer, the

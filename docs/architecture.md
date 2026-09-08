@@ -951,11 +951,14 @@ POST /api/credentials/:id/rotate
          old row -> status 'retiring'           the intent, before the act
          DELETE /consumers/{id}/credentials/{type}/{position}
               (POST appends, so the old entry's index is unchanged)
-              on failure: take the append back, put the old row back, and
-              report the original error — the account is as it was found
+              on failure: take the append back, put the old row back when the
+              array proves the delete never applied, and report the original
+              error — the account is as it was found
        else:                                    already at the gateway cap
          old row -> status 'retiring'
          DELETE /consumers/{id}/credentials/{type}/{position}
+              on failure: put the old row back when the array proves the
+              delete never applied — nothing has been appended yet
          POST   /consumers/{id}/credentials/{type}   -> new secret, returned once
 
        old row -> status 'revoked', new row -> rotated_from_id = old id,

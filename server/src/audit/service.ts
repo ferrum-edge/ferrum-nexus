@@ -101,10 +101,15 @@ export const AuditAction = {
    * An append this portal made had to be taken back; records whether it went.
    *
    * Written whenever an issue or a rotation fails *after* Edge accepted the
-   * new entry. `withdrawn: false` means the entry is still on the gateway —
-   * either the compensating delete failed, or the array no longer looked the
-   * way the append left it and deleting by index would have taken somebody
-   * else's live key — and `stranded_credential_id` names what to clean up.
+   * new entry — including when the acceptance itself was never acknowledged,
+   * where `suspected: true` says the orphan could not be confirmed.
+   * `withdrawn: false` means the entry is still on the gateway — either the
+   * compensating delete failed, or the array no longer looked the way the
+   * append left it (and `basicauth` never looks like anything, so it is never
+   * deleted by index) — and `stranded_credential_id` names what to clean up,
+   * with `last4` and `append_index` naming the entry itself. A rotation whose
+   * confirmed delete could not be recorded writes one too, carrying
+   * `retired_credential_id`: the row it left `retiring` for a later call.
    */
   CREDENTIAL_APPEND_ROLLBACK: 'credential.append_rollback',
   /**

@@ -26,7 +26,10 @@
  *
  * The negatives matter as much as the repairs: genuine out-of-band drift must
  * still refuse, because acting on a stale index is how somebody else's live
- * key dies.
+ * key dies. And a `retiring` row is only ever allowed to outlive its call when
+ * the entry behind it *might* be gone: where the array proves the delete never
+ * applied, the intent is withdrawn, because a `retiring` row over a live entry
+ * is what would make a later settlement pick the wrong row.
  */
 
 import assert from 'node:assert/strict';
@@ -125,6 +128,18 @@ describe('credential durability across a lost gateway write', () => {
     return (consumer?.credentials.keyauth ?? []).map((entry) => String(entry.key));
   }
 
+  /**
+   * The basicauth material live on the mock gateway, in array order.
+   *
+   * Read straight off the stored consumer, not through a projection: Edge
+   * omits `basicauth` from every response, which is exactly why the portal
+   * cannot identify one of its entries.
+   */
+  function livePasswords(userId: string): string[] {
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(userId));
+    return (consumer?.credentials.basicauth ?? []).map((entry) => String(entry.password));
+  }
+
   async function statusOf(credentialId: string): Promise<string | undefined> {
     return (await harness.store.credentials.findById(credentialId))?.status;
   }
@@ -182,6 +197,19 @@ describe('credential durability across a lost gateway write', () => {
     assert.equal(liveKeys(user.user.id).length, 1, 'one Edge entry against two live rows');
     assert.equal(await statusOf(original.credential.id), 'retiring');
 
+    // The rotation mutated the gateway and no `credential.rotate` row is ever
+    // coming, so it leaves a trail of its own naming both halves: the
+    // replacement whose secret was never delivered, and the row left pending.
+    const replacementRow = replacement.items.find((row) => row.id !== original.credential.id);
+    assert.ok(replacementRow);
+    assert.equal((await rowsFor('credential.rotate', consumerId)).length, 0);
+    const trail = await rowsFor('credential.append_rollback', consumerId);
+    assert.equal(trail.length, 1);
+    assert.equal(trail[0]?.details.withdrawn, false);
+    assert.equal(trail[0]?.details.operation, 'rotate');
+    assert.equal(trail[0]?.details.stranded_credential_id, replacementRow.id);
+    assert.equal(trail[0]?.details.retired_credential_id, original.credential.id);
+
     // The cap is not spent on a row whose entry is already gone.
     const fresh = await issue(user, 'after the drift');
     assert.equal(await statusOf(original.credential.id), 'revoked');
@@ -189,9 +217,7 @@ describe('credential durability across a lost gateway write', () => {
     assert.equal((await rowsFor('credential.settle', consumerId)).length, 1);
 
     // …and everything still live is revocable.
-    const survivor = replacement.items.find((row) => row.id !== original.credential.id);
-    assert.ok(survivor);
-    assert.equal((await revoke(user, survivor.id)).statusCode, 200);
+    assert.equal((await revoke(user, replacementRow.id)).statusCode, 200);
     assert.equal((await revoke(user, fresh.credential.id)).statusCode, 200);
     assert.deepEqual(liveKeys(user.user.id), []);
   });
@@ -221,6 +247,57 @@ describe('credential durability across a lost gateway write', () => {
     const fresh = await issue(user, 'after the drift');
     assert.equal(liveKeys(user.user.id).length, 2);
     assert.equal((await revoke(user, fresh.credential.id)).statusCode, 200);
+  });
+
+  it('puts the row back when a revoke’s delete never reached the gateway', async () => {
+    const user = await client();
+    const first = await issue(user, 'first');
+    const second = await issue(user, 'second');
+    const consumerId = first.credential.ferrum_consumer_id;
+
+    // Refused *before* Edge touched the array, so the entry is still live. A
+    // row left `retiring` over it is the one input that could later make a
+    // settlement pick the wrong row and a positional delete take the survivor.
+    harness.edge.queueFailure(503, { error: 'down' }, '/credentials/keyauth/', 'DELETE');
+    const failed = await revoke(user, first.credential.id);
+    assert.equal(failed.statusCode, 502, failed.body);
+
+    assert.equal(await statusOf(first.credential.id), 'active', 'the intent was withdrawn');
+    assert.equal(liveKeys(user.user.id).length, 2, 'nothing was deleted');
+    assert.equal((await rowsFor('credential.settle', consumerId)).length, 0);
+
+    // Which leaves an ordinary retry rather than a consumer to reconcile.
+    const retried = await revoke(user, first.credential.id);
+    assert.equal(retried.statusCode, 200, retried.body);
+    assert.deepEqual(liveKeys(user.user.id), [String(second.secret.key)]);
+    assert.equal(await statusOf(first.credential.id), 'revoked');
+  });
+
+  it('puts the row back when an at-cap rotation’s delete never reached the gateway', async () => {
+    const user = await client();
+    const first = await issue(user, 'first');
+    const second = await issue(user, 'second');
+    const consumerId = first.credential.ferrum_consumer_id;
+
+    // At the cap the delete comes first and nothing has been appended yet, so
+    // a refusal leaves the account exactly as the rotation found it.
+    harness.edge.queueFailure(503, { error: 'down' }, '/credentials/keyauth/', 'DELETE');
+    const failed = await rotate(user, first.credential.id);
+    assert.equal(failed.statusCode, 502, failed.body);
+    assert.ok(!('secret' in JSON.parse(failed.body)), 'no secret was handed out');
+
+    assert.equal(await statusOf(first.credential.id), 'active', 'the intent was withdrawn');
+    assert.deepEqual(liveKeys(user.user.id), [String(first.secret.key), String(second.secret.key)]);
+    assert.equal((await rowsFor('credential.rotate', consumerId)).length, 0);
+    assert.equal((await rowsFor('credential.settle', consumerId)).length, 0);
+
+    // The cap slot is still this credential's own, so the retry is an ordinary
+    // rotation instead of a 409 against a row nobody can use.
+    const retried = await rotate(user, first.credential.id);
+    assert.equal(retried.statusCode, 200, retried.body);
+    const body = retried.json<RotateCredentialResponse>();
+    assert.equal(await statusOf(first.credential.id), 'revoked');
+    assert.deepEqual(liveKeys(user.user.id), [String(second.secret.key), String(body.secret.key)]);
   });
 
   it('still refuses drift that no pending retirement explains', async () => {
@@ -299,6 +376,76 @@ describe('credential durability across a lost gateway write', () => {
     assert.equal((await revoke(user, fresh.credential.id)).statusCode, 200);
   });
 
+  it('takes back the replacement when the retirement cannot even be recorded', async () => {
+    const user = await client();
+    const original = await issue(user, 'production');
+    const consumerId = original.credential.ferrum_consumer_id;
+
+    // Below the cap the replacement is appended first, so a store error on the
+    // write that records the retirement strands it exactly as a failed delete
+    // does — #132's end state reached by a different fault, before the gateway
+    // is touched a second time.
+    failUpdateAfter(harness, 0);
+    const rotated = await rotate(user, original.credential.id);
+    assert.ok(rotated.statusCode >= 500, rotated.body);
+
+    // The account is exactly as the rotation found it.
+    assert.deepEqual(liveKeys(user.user.id), [String(original.secret.key)]);
+    const rows = await harness.store.credentials.list({ user_id: user.user.id });
+    assert.equal(rows.total, 1, 'the undelivered replacement left no row behind');
+    assert.equal(await statusOf(original.credential.id), 'active');
+
+    const rollback = await rowsFor('credential.append_rollback', consumerId);
+    assert.equal(rollback.length, 1);
+    assert.equal(rollback[0]?.details.operation, 'rotate');
+    assert.equal(rollback[0]?.details.withdrawn, true);
+    assert.equal((await rowsFor('credential.rotate', consumerId)).length, 0);
+
+    // The cap slot was never spent, so the owner recovers unaided.
+    const fresh = await issue(user, 'replacement');
+    assert.equal(liveKeys(user.user.id).length, 2);
+    assert.equal((await revoke(user, fresh.credential.id)).statusCode, 200);
+  });
+
+  it('does not send an operator to reconcile a rotation that settles itself', async () => {
+    const user = await client();
+    const original = await issue(user, 'production');
+    const consumerId = original.credential.ferrum_consumer_id;
+
+    // Below the cap: append, retire, delete — and Edge applies the delete and
+    // loses the answer. The previous entry really is gone, the mirror is one
+    // row too long, and the next call on this pair settles it. Telling the
+    // operator to reconcile — which empties the type on both sides — would
+    // destroy a state that repairs itself.
+    harness.edge.queueLostAck(503, { error: 'timeout' }, '/credentials/keyauth/', 'DELETE');
+    const rotated = await rotate(user, original.credential.id);
+    assert.equal(rotated.statusCode, 502, rotated.body);
+    const error = errorOf(rotated.body);
+    assert.doesNotMatch(
+      error.message,
+      /reconcile/,
+      'no destructive steer for a self-healing state',
+    );
+    assert.match(error.message, /no longer holds it/);
+    const details = error.details as Record<string, unknown> | undefined;
+    const stranded = details?.stranded_credential_id;
+    assert.ok(typeof stranded === 'string', 'the error names the credential to revoke');
+    assert.equal(details?.retired_credential_id, original.credential.id);
+
+    assert.equal(await statusOf(original.credential.id), 'retiring');
+    assert.equal(liveKeys(user.user.id).length, 1, 'one entry against two live rows');
+
+    // The next call settles the drift rather than refusing it, and everything
+    // left behind is ordinary self-service.
+    const fresh = await issue(user, 'after the lost acknowledgement');
+    assert.equal(await statusOf(original.credential.id), 'revoked');
+    assert.equal((await rowsFor('credential.settle', consumerId)).length, 1);
+    assert.equal(liveKeys(user.user.id).length, 2);
+    assert.equal((await revoke(user, stranded)).statusCode, 200);
+    assert.equal((await revoke(user, fresh.credential.id)).statusCode, 200);
+    assert.deepEqual(liveKeys(user.user.id), []);
+  });
+
   it('names the stranded replacement when it cannot be taken back either', async () => {
     const user = await client();
     const original = await issue(user, 'production');
@@ -357,6 +504,47 @@ describe('credential durability across a lost gateway write', () => {
     assert.equal(rollback[0]?.details.withdrawn, true);
   });
 
+  it('never deletes a basicauth entry, which no read can identify', async () => {
+    const user = await client();
+    const response = await harness.authed(user, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'basicauth' },
+    });
+    assert.equal(response.statusCode, 201, response.body);
+    const restored = response.json<IssueCredentialResponse>();
+    const consumerId = restored.credential.ferrum_consumer_id;
+    const preRestore = livePasswords(user.user.id);
+    assert.equal(preRestore.length, 1);
+
+    // The same Nexus-only restore as above. `basicauth` appears in no read
+    // projection, so there is no array to check an index against and the only
+    // index available is one counted off the mirror — which now points at the
+    // pre-restore password rather than at the orphan the append created.
+    await harness.store.credentials.update(restored.credential.id, { status: 'revoked' });
+
+    failNextCreate(harness);
+    const issued = await harness.authed(user, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'basicauth' },
+    });
+    assert.ok(issued.statusCode >= 500, issued.body);
+
+    const passwords = livePasswords(user.user.id);
+    assert.equal(passwords.length, 2, 'nothing was deleted on the mirror’s word');
+    assert.equal(passwords[0], preRestore[0], 'the pre-restore password survived');
+
+    // What identifies the orphan instead: where it went, and what it ends in.
+    const rollback = await rowsFor('credential.append_rollback', consumerId);
+    assert.equal(rollback.length, 1);
+    assert.equal(rollback[0]?.details.withdrawn, false, 'the orphan is recorded, not guessed at');
+    assert.equal(rollback[0]?.details.credential_type, 'basicauth');
+    assert.equal(rollback[0]?.details.append_index, 0);
+    assert.equal(rollback[0]?.details.last4, passwords[1]?.slice(-4));
+    assert.equal(rollback[0]?.ip, '127.0.0.1', 'and the address that caused it');
+  });
+
   it('deletes nothing when the array moved under an in-flight append', async () => {
     const user = await client();
     const original = await issue(user, 'mine');
@@ -388,6 +576,50 @@ describe('credential durability across a lost gateway write', () => {
     const rollback = await rowsFor('credential.append_rollback', consumerId);
     assert.equal(rollback.length, 1);
     assert.equal(rollback[0]?.details.withdrawn, false, 'the orphan is recorded, not guessed at');
+  });
+
+  it('takes back an append whose own acknowledgement was lost', async () => {
+    const user = await client();
+    const original = await issue(user, 'first');
+    const consumerId = original.credential.ferrum_consumer_id;
+
+    // A refusal Edge really did refuse: the array never grew, so there is no
+    // orphan to take back and nothing to put in front of an operator.
+    harness.edge.queueFailure(503, { error: 'down' }, '/credentials/keyauth', 'POST');
+    const refused = await harness.authed(user, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth' },
+    });
+    assert.equal(refused.statusCode, 502, refused.body);
+    assert.deepEqual(liveKeys(user.user.id), [String(original.secret.key)]);
+    assert.equal((await rowsFor('credential.append_rollback', consumerId)).length, 0);
+
+    // The same answer on the wire with the entry actually created. Nothing
+    // local records it, so no later call could ever settle it: the mirror
+    // would be one row *shorter* than the array for good.
+    harness.edge.queueLostAck(503, { error: 'timeout' }, '/credentials/keyauth', 'POST');
+    const lost = await harness.authed(user, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth' },
+    });
+    assert.equal(lost.statusCode, 502, lost.body);
+
+    assert.deepEqual(liveKeys(user.user.id), [String(original.secret.key)], 'the orphan went');
+    assert.equal((await harness.store.credentials.list({ user_id: user.user.id })).total, 1);
+    const rollback = await rowsFor('credential.append_rollback', consumerId);
+    assert.equal(rollback.length, 1);
+    assert.equal(rollback[0]?.details.operation, 'issue');
+    assert.equal(rollback[0]?.details.withdrawn, true);
+    assert.equal(rollback[0]?.details.append_index, 1);
+    assert.equal(rollback[0]?.details.suspected, undefined, 'the array said it landed');
+    assert.equal(rollback[0]?.ip, '127.0.0.1');
+
+    // …and the cap slot it would have spent is free.
+    const fresh = await issue(user, 'after the lost acknowledgement');
+    assert.equal(liveKeys(user.user.id).length, 2);
+    assert.equal((await revoke(user, fresh.credential.id)).statusCode, 200);
   });
 
   it('removes only its own append when the mirror is longer than the array', async () => {
