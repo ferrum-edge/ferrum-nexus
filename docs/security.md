@@ -943,20 +943,23 @@ the proxy's own `allowed_ws_origins`, whose default (`[]`) is _no check at all_.
 A page on any origin could otherwise open a socket to a published API and ride
 a logged-in browser's ambient credentials.
 
-Nexus mirrors the API's CORS origins into `allowed_ws_origins` at publish time
-and whenever the CORS policy changes: a provider who named the browser origins
-allowed to call the API has already answered the question. Only plain
-`scheme://host[:port]` origins are mirrored, because the upgrade check is an
-exact, case-insensitive string comparison and a wildcard pattern would silently
-never match. An API with **no CORS policy, or a `*` one, gets `[]`** — a
-half-populated allow-list would be worse than none, and an API deliberately open
-to every browser origin gains nothing from one.
+Nexus mirrors exact HTTP(S) CORS origins into `allowed_ws_origins` only when
+`cors.enforce_websocket_origins` is explicitly `true`. Wildcards are refused in
+this mode. Edge has no option to allow a missing Origin while enforcing this
+list: an origin-less upgrade is rejected along with an unlisted origin.
 
-The consequence is worth stating plainly: **an API with no CORS policy accepts
-WebSocket upgrades from any origin.** Authentication still applies — the auth
-plugin and the ACL group run on the upgrade request — so this is a CSRF-shaped
-risk against browser-borne credentials, not an open door. Providers fronting a
-WebSocket backend from a browser should list their origins.
+The toggle defaults to **false** so adding a browser CORS policy does not break
+non-browser WebSocket clients. With it off, upgrades from any origin pass the
+origin gate. Authentication and ACLs still apply, but browser-borne credentials
+can be exposed to CSWSH. Providers of browser-only WebSocket APIs should enable
+the toggle and list their trusted origins. Mixed-client APIs need an upstream
+origin policy if they require both origin-less clients and browser CSWSH
+protection. Removing CORS clears the origin gate.
+
+No startup migration rewrites existing gateway proxies. Their previous origin
+lists remain until the provider saves CORS; the Settings toggle makes the new
+choice explicit. Review browser-only APIs when upgrading and opt in before
+saving to retain their existing CSWSH protection.
 
 ### CAPTCHA
 
@@ -1264,7 +1267,7 @@ Before going live:
       than one Ferrum Edge data-plane replica — otherwise every provider's
       quota is multiplied by the replica count.
 - [ ] Providers fronting a browser-facing WebSocket backend have listed their
-      CORS origins, which is what populates the proxy's `allowed_ws_origins`.
+      CORS origins and enabled `cors.enforce_websocket_origins`.
 - [ ] `NEXUS_ALLOW_PRIVATE_UPSTREAMS` is left at `false` unless the portal is
       meant to front internal services, in which case gateway egress is
       restricted at the network layer.

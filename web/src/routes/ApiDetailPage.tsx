@@ -96,6 +96,10 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
   );
   const [corsOrigins, setCorsOrigins] = useState(api.cors?.allowed_origins.join('\n') ?? '');
   const [corsCredentials, setCorsCredentials] = useState(api.cors?.allow_credentials ?? false);
+  const [corsWebsocketOrigins, setCorsWebsocketOrigins] = useState(
+    api.cors?.enforce_websocket_origins ?? false,
+  );
+  const [corsHeaders, setCorsHeaders] = useState(api.cors?.allowed_headers?.join('\n') ?? '');
   const [methods, setMethods] = useState<HttpMethod[]>(api.allowed_methods ?? []);
   const [timeouts, setTimeouts] = useState<TimeoutDraft>(timeoutDraftFrom(api.timeouts));
   const [circuitBreaker, setCircuitBreaker] = useState(api.circuit_breaker);
@@ -145,7 +149,14 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
     }
     // Clearing the box sends `null`, which removes the plugin from the proxy.
     const cors: CorsConfig | null =
-      origins.length > 0 ? { allowed_origins: origins, allow_credentials: corsCredentials } : null;
+      origins.length > 0
+        ? {
+            allowed_origins: origins,
+            allow_credentials: corsCredentials,
+            allowed_headers: parseCorsOrigins(corsHeaders),
+            enforce_websocket_origins: corsWebsocketOrigins,
+          }
+        : null;
 
     const parsedTimeouts = timeoutsChanged ? parseTimeoutDraft(timeouts) : undefined;
     if (typeof parsedTimeouts === 'string') {
@@ -312,6 +323,19 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
                 description="Lets browsers send cookies and Authorization headers cross-origin. Ignored when no origins are listed."
                 checked={corsCredentials}
                 onChange={(event) => setCorsCredentials(event.target.checked)}
+              />
+              <Checkbox
+                label="Enforce WebSocket origins"
+                description="Requires a listed Origin on every upgrade. Rejects clients without Origin. Enable for browser-only WebSocket APIs."
+                checked={corsWebsocketOrigins}
+                onChange={(event) => setCorsWebsocketOrigins(event.target.checked)}
+              />
+              <LabeledTextarea
+                label="Additional CORS request headers"
+                rows={2}
+                value={corsHeaders}
+                onChange={(event) => setCorsHeaders(event.target.value)}
+                hint="One header name per line. Authentication headers are included automatically."
               />
             </div>
             <div className="border-t border-border pt-4 md:col-span-2">

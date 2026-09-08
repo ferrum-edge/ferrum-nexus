@@ -80,7 +80,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `FERRUM_RATE_LIMIT_REDIS_TLS`) stamps Redis counter sync onto every rate
   limit Nexus writes; the operations guide warns that quotas are otherwise
   enforced per gateway process.
-- Exact CORS origins are mirrored onto the proxy's `allowed_ws_origins`, so
+- With WebSocket origin enforcement enabled, exact CORS origins are mirrored
+  onto the proxy's `allowed_ws_origins`, so
   a browser cannot open a cross-site WebSocket to an API whose CORS policy
   would refuse it.
 - **Provider plugin palette** (`GET`/`PUT`/`DELETE /api/apis/:id/plugins/:name`
@@ -137,6 +138,18 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   tabs; and the portal-wide API list opens the management workspace, with the
   same **Manage API** link on the catalog page for administrators, so an admin
   can act on somebody else's API without god mode.
+- CORS preflights now include authentication and custom request headers and
+  follow the API's method list. Auth/method changes reconcile the plugin while
+  retaining operator settings and extra headers (#149).
+- WebSocket origin enforcement is explicit via `cors.enforce_websocket_origins`
+  (default false), allowing origin-less clients unless providers opt into the
+  browser-only CSWSH gate. Existing proxies change when CORS is saved (#151).
+- Compression and request deduplication receive compatible default priorities;
+  operator overrides are preserved and incompatible orders get a clear 400.
+  Response caching is removed from the offered palette because its default
+  template cannot enable authenticated storage without backend shared-cache
+  opt-in; existing installations remain removable (#170).
+
 - **A palette save deleted an operator's hand-made plugin config of the same
   name.** Ownership was inferred from the plugin name, so every other config
   of that name on the proxy looked like a leftover duplicate and was removed —

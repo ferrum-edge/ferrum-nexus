@@ -97,6 +97,19 @@ describe('<PluginsTab>', () => {
     for (const category of new Set(PROVIDER_PLUGINS.map((plugin) => plugin.category))) {
       expect(screen.getByText(PLUGIN_CATEGORY_LABELS[category])).toBeInTheDocument();
     }
+    expect(screen.queryByText('Response caching')).toBeNull();
+  });
+
+  it('offers only removal for an existing retired cache', async () => {
+    stubPlugins([{ ...SAVED, plugin_name: 'response_caching', enabled: true }]);
+    renderTab();
+    const title = await screen.findByText('Response caching (retired)');
+    const card = title.closest('.fx-card');
+    expect(card).not.toBeNull();
+    expect(
+      within(card as HTMLElement).getByRole('button', { name: 'Remove response caching' }),
+    ).toBeVisible();
+    expect(within(card as HTMLElement).queryByRole('checkbox')).toBeNull();
   });
 
   it('marks a saved-but-switched-off plugin as paused, and opens it configured', async () => {

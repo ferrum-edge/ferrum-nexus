@@ -187,8 +187,8 @@ API may need its limit re-saved.
 
 ### CORS
 
-Optional, and only relevant if a **browser** calls your API directly. Server-to-
-server clients are unaffected by any of this.
+Optional for browsers calling your API directly. HTTP server-to-server clients
+are unaffected; the separate WebSocket option below also affects socket clients.
 
 List the origins allowed to call you, one per line — `https://app.example.com`,
 scheme and host (and port, if it is not the default), no path. Up to 64 of them.
@@ -205,14 +205,21 @@ Note that CORS is a browser rule, not an access control: it decides which web
 pages may read your responses, and nothing else. What actually protects the data
 is the authentication plugin and the ACL group.
 
-**Your CORS origins also guard WebSocket.** Publishing an HTTP API on Ferrum
-Edge publishes WebSocket on the same path — the gateway passes upgrades through
-transparently — and the CORS plugin does not run on an upgrade. The portal
-mirrors the exact origins you list onto the proxy's WebSocket origin check, so
-a page on any other origin is refused the socket. List `*`, or leave the box
-empty, and there is **no** origin check on upgrades: anyone's page can open a
-socket, and only your authentication plugin stands between it and your backend.
-If your backend speaks WebSocket to browsers, list your origins.
+Nexus automatically allows the authentication header (`X-API-Key` for API keys,
+`Authorization` for JWT and Basic auth), along with standard browser headers.
+Use **Additional CORS request headers** for custom headers, one name per line.
+The advertised methods follow your API's method list, with `OPTIONS` included
+for preflight. Operator-added gateway headers survive a portal save.
+
+**Enforce WebSocket origins** is a separate, opt-in control, off by default.
+Edge accepts WebSocket upgrades on HTTP API paths, and its CORS plugin does not
+run on upgrades. Enable this option for browser-only WebSocket APIs to reject
+pages from origins outside your list (CSWSH protection). It requires exact
+HTTP(S) origins; wildcards are not accepted. Edge also rejects clients that send
+**no Origin header**, so leave it off if your non-browser clients omit Origin.
+When off, upgrades from any origin pass this gate; authentication and ACLs still
+apply. Clearing CORS removes the gate too. Existing APIs retain their gateway
+policy until CORS is saved; review this option when saving an older API.
 
 ### Enforcement level
 
@@ -403,18 +410,17 @@ change nothing is saved on either side.
 
 ### What is on offer
 
-| Plugin                   | What it does                                                                                                                                        | What your consumers see                                                                                |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| **Security headers**     | Adds the browser hardening headers to every response and strips the ones that advertise your stack                                                  | Nothing changes in how the API is called                                                               |
-| **Request size limit**   | Rejects an upload over your ceiling with `413`, before a byte reaches your backend                                                                  | `413 Payload Too Large` — document the ceiling next to any upload endpoint                             |
-| **Response size limit**  | Refuses to relay a backend response over your ceiling, answering `502` instead                                                                      | `502 Bad Gateway` — paginate anything that can grow without bound                                      |
-| **IP allow / deny list** | Restricts who may call the API by source address. A deny match always beats an allow match                                                          | Callers from an unlisted address are rejected before authentication                                    |
-| **Bot filter**           | Blocks requests whose `User-Agent` matches a pattern you list                                                                                       | Legitimate SDKs should send a recognisable `User-Agent`; the allow list is checked first               |
-| **Correlation ID**       | Gives every call a stable id, forwards it to your backend and echoes it back                                                                        | They may send their own id, or read the one the gateway minted, and quote it in a support ticket       |
-| **Response compression** | Compresses responses when the caller asks for it                                                                                                    | A compressed body when they send `Accept-Encoding`; every mainstream client handles it                 |
-| **Response caching**     | Serves a repeated read from the gateway instead of your backend. Each caller keeps its own partition, so one consumer never sees another's response | `X-Cache-Status` and `Age` headers; `Cache-Control: no-cache` bypasses the cache                       |
-| **Idempotency keys**     | Makes a retried write safe: the first call with a given key runs, an identical retry replays the first response                                     | They send a unique key per operation and may safely retry; a reused key with a different body is `409` |
-| **Maintenance / sunset** | Answers with a canned response instead of calling your backend                                                                                      | The status and message you choose — `503` for a maintenance window, `410` for a retired endpoint       |
+| Plugin                   | What it does                                                                                                    | What your consumers see                                                                                |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| **Security headers**     | Adds the browser hardening headers to every response and strips the ones that advertise your stack              | Nothing changes in how the API is called                                                               |
+| **Request size limit**   | Rejects an upload over your ceiling with `413`, before a byte reaches your backend                              | `413 Payload Too Large` — document the ceiling next to any upload endpoint                             |
+| **Response size limit**  | Refuses to relay a backend response over your ceiling, answering `502` instead                                  | `502 Bad Gateway` — paginate anything that can grow without bound                                      |
+| **IP allow / deny list** | Restricts who may call the API by source address. A deny match always beats an allow match                      | Callers from an unlisted address are rejected before authentication                                    |
+| **Bot filter**           | Blocks requests whose `User-Agent` matches a pattern you list                                                   | Legitimate SDKs should send a recognisable `User-Agent`; the allow list is checked first               |
+| **Correlation ID**       | Gives every call a stable id, forwards it to your backend and echoes it back                                    | They may send their own id, or read the one the gateway minted, and quote it in a support ticket       |
+| **Response compression** | Compresses responses when the caller asks for it                                                                | A compressed body when they send `Accept-Encoding`; every mainstream client handles it                 |
+| **Idempotency keys**     | Makes a retried write safe: the first call with a given key runs, an identical retry replays the first response | They send a unique key per operation and may safely retry; a reused key with a different body is `409` |
+| **Maintenance / sunset** | Answers with a canned response instead of calling your backend                                                  | The status and message you choose — `503` for a maintenance window, `410` for a retired endpoint       |
 
 The **bot filter is a coarse filter, not bot defence**: the `User-Agent` is
 client-controlled and trivially spoofed. It keeps casual scrapers off a public
@@ -423,6 +429,19 @@ catalog API; it will not stop anyone who is trying.
 **Security headers: HSTS is the one to think about.** Turning it on tells
 browsers to use HTTPS for your whole domain, including every subdomain, for a
 year. Only switch it on when that is true.
+
+**Compression and idempotency keys work together.** Nexus sets compatible
+execution priorities so request headers are finalized before an idempotency
+fingerprint is taken. It preserves operator overrides; if those conflict, the
+save explains which priorities your gateway operator must adjust.
+
+**Response caching has been retired from the palette.** The default template
+cannot promise cache hits on authenticated APIs. Edge requires explicit backend
+shared-cache permission (`Cache-Control: public`, `must-revalidate`, or
+`s-maxage`), and consumer key settings do not grant it. Nexus does not override
+your backend's cache policy. Existing installations remain visible with a
+**Remove response caching** action; they are not silently deleted or disabled.
+An operator can configure caching directly after reviewing the backend policy.
 
 ### Restricting a plugin to some requests
 
@@ -440,7 +459,7 @@ only ever silently fail to match.
 
 **Not every plugin can be restricted.** The cards without the option are ones
 the gateway applies to a whole proxy or not at all: security headers, the two
-size limits, compression, correlation IDs and response caching. Their effect is
+size limits, compression and correlation IDs. Their effect is
 decided once for the proxy rather than per request, so a per-request condition
 could only be half applied — the gateway rejects it rather than pretend.
 
@@ -548,7 +567,7 @@ API, but two of them have consequences worth reading first.
 | Visibility                 | Listing only. Existing grants and calls are unaffected.                                                                    |
 | Upstream URL               | Re-points the gateway's backend. Takes effect immediately, and the upstream shown on the API page updates with it.         |
 | Rate limit                 | Attaches, updates, or (cleared) removes the quota.                                                                         |
-| CORS                       | Attaches, replaces, or (cleared) removes the browser CORS policy — and with it the WebSocket origin check.                 |
+| CORS                       | Attaches, replaces, or (cleared) removes the browser CORS policy and its opt-in WebSocket origin check.                    |
 | Allowed methods            | Takes effect immediately. Untick everything to accept every method again.                                                  |
 | Timeouts, circuit breaker  | Take effect immediately. Clearing the timeout boxes restores the gateway defaults.                                         |
 | **Requestable → off**      | ⚠️ Removes the access gate. **Every authenticated consumer can now call this API.** Existing grants stay but become inert. |
