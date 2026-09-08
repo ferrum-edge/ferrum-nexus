@@ -457,6 +457,7 @@ function mapOutbox(row: Row): EmailOutboxRecord {
 function mapTeardownJob(row: Row): GatewayTeardownJobRecord {
   return {
     id: text(row.id),
+    generation: text(row.generation),
     user_id: text(row.user_id),
     status: text(row.status) as GatewayTeardownJobStatus,
     attempts: int(row.attempts),
@@ -2346,9 +2347,10 @@ class SqliteStore implements NexusStore {
         this.db,
         `INSERT INTO gateway_teardown_jobs
            (id, user_id, status, attempts, next_attempt_at, last_error, requested_by,
-            created_at, updated_at, completed_at)
-         VALUES (?, ?, 'pending', 0, ?, NULL, ?, ?, ?, NULL)
+            created_at, updated_at, completed_at, generation)
+         VALUES (?, ?, 'pending', 0, ?, NULL, ?, ?, ?, NULL, ?)
          ON CONFLICT (user_id) DO UPDATE SET
+           generation = excluded.generation,
            status = 'pending',
            attempts = 0,
            next_attempt_at = excluded.next_attempt_at,
@@ -2356,7 +2358,7 @@ class SqliteStore implements NexusStore {
            requested_by = excluded.requested_by,
            updated_at = excluded.updated_at,
            completed_at = NULL`,
-        [newId(), userId, now, requestedBy, now, now],
+        [newId(), userId, now, requestedBy, now, now, newId()],
       );
       const job = await this.gatewayTeardownJobs.findByUser(userId);
       if (!job) {
@@ -2405,9 +2407,10 @@ class SqliteStore implements NexusStore {
         execute(
           this.db,
           `UPDATE gateway_teardown_jobs
-           SET status = 'sending', attempts = attempts + 1, updated_at = ?
+           SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?,
+               completed_at = NULL
            WHERE id IN (${ids.map(() => '?').join(', ')}) AND status = 'pending'`,
-          [nowIso(), ...ids],
+          [nowIso(), newId(), ...ids],
         );
         return queryAll(
           this.db,
@@ -2418,24 +2421,46 @@ class SqliteStore implements NexusStore {
       return claim();
     },
 
-    markDone: async (id, at) => {
+    claimPending: async (job) => {
+      const generation = newId();
+      const at = nowIso();
+      const changed = execute(
+        this.db,
+        `UPDATE gateway_teardown_jobs
+         SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?,
+             completed_at = NULL
+         WHERE id = ? AND generation = ? AND status = 'pending'`,
+        [at, generation, job.id, job.generation],
+      );
+      return changed > 0
+        ? {
+            ...job,
+            generation,
+            status: 'sending',
+            attempts: job.attempts + 1,
+            updated_at: at,
+            completed_at: null,
+          }
+        : null;
+    },
+
+    markDone: async (job, at) =>
       execute(
         this.db,
         `UPDATE gateway_teardown_jobs
          SET status = 'done', next_attempt_at = NULL, last_error = NULL, completed_at = ?,
-             updated_at = ? WHERE id = ?`,
-        [at, at, id],
-      );
-    },
+             updated_at = ? WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [at, at, job.id, job.generation],
+      ) > 0,
 
-    reschedule: async (id, nextAttemptAt, lastError) => {
+    reschedule: async (job, nextAttemptAt, lastError) =>
       execute(
         this.db,
         `UPDATE gateway_teardown_jobs
-         SET status = 'pending', next_attempt_at = ?, last_error = ?, updated_at = ? WHERE id = ?`,
-        [nextAttemptAt, lastError, nowIso(), id],
-      );
-    },
+         SET status = 'pending', next_attempt_at = ?, last_error = ?, updated_at = ?,
+             completed_at = NULL WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [nextAttemptAt, lastError, nowIso(), job.id, job.generation],
+      ) > 0,
 
     releaseStale: async (olderThan) =>
       execute(
@@ -2448,10 +2473,12 @@ class SqliteStore implements NexusStore {
     deleteByUser: async (userId) =>
       execute(this.db, 'DELETE FROM gateway_teardown_jobs WHERE user_id = ?', [userId]) > 0,
 
-    deleteClaimed: async (id) =>
-      execute(this.db, "DELETE FROM gateway_teardown_jobs WHERE id = ? AND status = 'sending'", [
-        id,
-      ]) > 0,
+    deleteClaimed: async (job) =>
+      execute(
+        this.db,
+        "DELETE FROM gateway_teardown_jobs WHERE id = ? AND generation = ? AND status = 'sending'",
+        [job.id, job.generation],
+      ) > 0,
   };
 
   /* ── auditLogs ────────────────────────────────────────────────────────── */

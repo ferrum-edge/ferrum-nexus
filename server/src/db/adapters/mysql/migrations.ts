@@ -43,6 +43,11 @@ const textColumn = (name: string): Column => ({
 // recovery postconditions are reviewed too. Never swallow duplicate-name errors.
 const guards: Guard[] = [
   {
+    sql: "ALTER TABLE gateway_teardown_jobs ADD COLUMN generation VARCHAR(64) NOT NULL DEFAULT ''",
+    table: 'gateway_teardown_jobs',
+    columns: [{ name: 'generation', type: 'varchar(64)', nullable: false, default: '' }],
+  },
+  {
     sql: 'ALTER TABLE apis ADD COLUMN upstream_url TEXT NULL, ADD COLUMN cors_json TEXT NULL',
     table: 'apis',
     columns: [textColumn('upstream_url'), textColumn('cors_json')],

@@ -415,6 +415,7 @@ function mapOutbox(row: Row): EmailOutboxRecord {
 function mapTeardownJob(row: Row): GatewayTeardownJobRecord {
   return {
     id: text(row.id),
+    generation: text(row.generation),
     user_id: text(row.user_id),
     status: text(row.status) as GatewayTeardownJobStatus,
     attempts: int(row.attempts),
@@ -2277,46 +2278,50 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
   /* ── gatewayTeardownJobs ────────────────────────────────────────────── */
 
   const gatewayTeardownJobs: GatewayTeardownJobRepo = {
-    upsertPending: async (userId, requestedBy, now) => {
-      // The conflict target is `user_id`, not the primary key: an account that
-      // already owes a revocation has that row reset to `pending` rather than
-      // gaining a second one.
-      await execute(
-        exec,
-        upsertSql(
-          dialect,
-          'gateway_teardown_jobs',
-          [
-            'id',
+    upsertPending: async (userId, requestedBy, now) =>
+      inTransaction(async (tx) => {
+        // Keep the upsert and returned ownership token in one transaction.
+        // The affectedRows count of an upsert is never an ownership signal.
+        await execute(
+          tx,
+          upsertSql(
+            dialect,
+            'gateway_teardown_jobs',
+            [
+              'id',
+              'user_id',
+              'status',
+              'attempts',
+              'next_attempt_at',
+              'last_error',
+              'requested_by',
+              'created_at',
+              'updated_at',
+              'completed_at',
+              'generation',
+            ],
             'user_id',
-            'status',
-            'attempts',
-            'next_attempt_at',
-            'last_error',
-            'requested_by',
-            'created_at',
-            'updated_at',
-            'completed_at',
-          ],
-          'user_id',
-          [
-            'status',
-            'attempts',
-            'next_attempt_at',
-            'last_error',
-            'requested_by',
-            'updated_at',
-            'completed_at',
-          ],
-        ),
-        [newId(), userId, 'pending', 0, now, null, requestedBy, now, now, null],
-      );
-      const job = await gatewayTeardownJobs.findByUser(userId);
-      if (!job) {
-        throw new Error('gatewayTeardownJobs.upsertPending: row vanished immediately after upsert');
-      }
-      return job;
-    },
+            [
+              'status',
+              'attempts',
+              'next_attempt_at',
+              'last_error',
+              'requested_by',
+              'updated_at',
+              'completed_at',
+              'generation',
+            ],
+          ),
+          [newId(), userId, 'pending', 0, now, null, requestedBy, now, now, null, newId()],
+        );
+        const row = await queryOne(tx, 'SELECT * FROM gateway_teardown_jobs WHERE user_id = ?', [
+          userId,
+        ]);
+        if (!row) {
+          throw new Error('gatewayTeardownJobs.upsertPending: row vanished immediately after upsert');
+        }
+        return mapTeardownJob(row);
+      }),
 
     findByUser: async (userId) => {
       const row = await queryOne(exec, 'SELECT * FROM gateway_teardown_jobs WHERE user_id = ?', [
@@ -2361,9 +2366,10 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         await execute(
           tx,
           `UPDATE gateway_teardown_jobs
-           SET status = 'sending', attempts = attempts + 1, updated_at = ?
+           SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?,
+               completed_at = NULL
            WHERE id IN (${placeholders(ids.length)}) AND status = 'pending'`,
-          [nowIso(), ...ids],
+          [nowIso(), newId(), ...ids],
         );
         const rows = await queryAll(
           tx,
@@ -2373,24 +2379,48 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         return rows.map(mapTeardownJob);
       }),
 
-    markDone: async (id, at) => {
-      await execute(
+    claimPending: async (job) => {
+      const generation = newId();
+      const at = nowIso();
+      // A matching row always changes status and token, including with MySQL
+      // CLIENT_FOUND_ROWS. Upsert affectedRows is never an ownership signal.
+      const changed = await execute(
+        exec,
+        `UPDATE gateway_teardown_jobs
+         SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?,
+             completed_at = NULL
+         WHERE id = ? AND generation = ? AND status = 'pending'`,
+        [at, generation, job.id, job.generation],
+      );
+      return changed > 0
+        ? {
+            ...job,
+            generation,
+            status: 'sending',
+            attempts: job.attempts + 1,
+            updated_at: at,
+            completed_at: null,
+          }
+        : null;
+    },
+
+    markDone: async (job, at) =>
+      (await execute(
         exec,
         `UPDATE gateway_teardown_jobs
          SET status = 'done', next_attempt_at = NULL, last_error = NULL, completed_at = ?,
-             updated_at = ? WHERE id = ?`,
-        [at, at, id],
-      );
-    },
+             updated_at = ? WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [at, at, job.id, job.generation],
+      )) > 0,
 
-    reschedule: async (id, nextAttemptAt, lastError) => {
-      await execute(
+    reschedule: async (job, nextAttemptAt, lastError) =>
+      (await execute(
         exec,
         `UPDATE gateway_teardown_jobs
-         SET status = 'pending', next_attempt_at = ?, last_error = ?, updated_at = ? WHERE id = ?`,
-        [nextAttemptAt, lastError, nowIso(), id],
-      );
-    },
+         SET status = 'pending', next_attempt_at = ?, last_error = ?, updated_at = ?,
+             completed_at = NULL WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [nextAttemptAt, lastError, nowIso(), job.id, job.generation],
+      )) > 0,
 
     releaseStale: async (olderThan) =>
       execute(
@@ -2403,11 +2433,11 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     deleteByUser: async (userId) =>
       (await execute(exec, 'DELETE FROM gateway_teardown_jobs WHERE user_id = ?', [userId])) > 0,
 
-    deleteClaimed: async (id) =>
+    deleteClaimed: async (job) =>
       (await execute(
         exec,
-        "DELETE FROM gateway_teardown_jobs WHERE id = ? AND status = 'sending'",
-        [id],
+        "DELETE FROM gateway_teardown_jobs WHERE id = ? AND generation = ? AND status = 'sending'",
+        [job.id, job.generation],
       )) > 0,
   };
 

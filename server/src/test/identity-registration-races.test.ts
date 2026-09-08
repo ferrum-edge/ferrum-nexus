@@ -423,7 +423,9 @@ describe('first gateway identity versus disable', () => {
       founder.user.id,
       new Date().toISOString(),
     );
-    await harness.store.gatewayTeardownJobs.markDone(job.id, new Date().toISOString());
+    const claim = await harness.store.gatewayTeardownJobs.claimPending(job);
+    assert.ok(claim);
+    await harness.store.gatewayTeardownJobs.markDone(claim, new Date().toISOString());
 
     harness.edge.queueFailure(503, { error: 'down' }, `/consumers/${seeded.id}`, 'DELETE');
     await harness.services.credentials.abandonGatewayIdentity(identity, seeded.id, founder.user.id);

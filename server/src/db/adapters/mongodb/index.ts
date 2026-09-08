@@ -590,6 +590,7 @@ function mapGatewayIdentity(row: Row): GatewayIdentityRecord {
 function mapTeardownJob(row: Row): GatewayTeardownJobRecord {
   return {
     id: str(row._id),
+    generation: str(row.generation ?? ''),
     user_id: str(row.user_id),
     status: str(row.status) as GatewayTeardownJobStatus,
     attempts: num(row.attempts),
@@ -1148,6 +1149,14 @@ const MONGO_MIGRATIONS: { id: string; apply: (db: Db) => Promise<void> }[] = [
     // The unique name index is what makes `claim` a per-identity upsert; the
     // collection itself is created on the first insert.
     apply: (db: Db): Promise<void> => createIndexes(db, IDENTITY_INDEXES),
+  },
+  {
+    id: '013_teardown_generation',
+    apply: async (db: Db): Promise<void> => {
+      await db
+        .collection('gateway_teardown_jobs')
+        .updateMany({ generation: { $exists: false } }, { $set: { generation: '' } });
+    },
   },
 ];
 
@@ -2833,6 +2842,7 @@ class MongoStore implements NexusStore {
         { user_id: userId } as Filter<NexusDoc>,
         {
           $set: {
+            generation: newId(),
             status: 'pending',
             attempts: 0,
             next_attempt_at: now,
@@ -2892,6 +2902,8 @@ class MongoStore implements NexusStore {
             {
               $set: {
                 status: 'sending',
+                generation: newId(),
+                completed_at: null,
                 updated_at: nowIso(),
                 attempts: { $add: [{ $ifNull: ['$attempts', 0] }, 1] },
               },
@@ -2906,9 +2918,27 @@ class MongoStore implements NexusStore {
       return claimed;
     },
 
-    markDone: async (id, at) => {
-      await this.col(COLLECTIONS.gatewayTeardownJobs).updateOne(
-        { _id: id },
+    claimPending: async (job) => {
+      const doc = await this.col(COLLECTIONS.gatewayTeardownJobs).findOneAndUpdate(
+        { _id: job.id, generation: job.generation, status: 'pending' } as Filter<NexusDoc>,
+        {
+          $set: {
+            status: 'sending',
+            generation: newId(),
+            updated_at: nowIso(),
+            completed_at: null,
+          },
+          $inc: { attempts: 1 },
+        },
+        { ...this.opts, returnDocument: 'after' },
+      );
+      const row = asRow(doc);
+      return row ? mapTeardownJob(row) : null;
+    },
+
+    markDone: async (job, at) => {
+      const result = await this.col(COLLECTIONS.gatewayTeardownJobs).updateOne(
+        { _id: job.id, generation: job.generation, status: 'sending' } as Filter<NexusDoc>,
         {
           $set: {
             status: 'done',
@@ -2920,21 +2950,24 @@ class MongoStore implements NexusStore {
         },
         this.opts,
       );
+      return result.modifiedCount > 0;
     },
 
-    reschedule: async (id, nextAttemptAt, lastError) => {
-      await this.col(COLLECTIONS.gatewayTeardownJobs).updateOne(
-        { _id: id },
+    reschedule: async (job, nextAttemptAt, lastError) => {
+      const result = await this.col(COLLECTIONS.gatewayTeardownJobs).updateOne(
+        { _id: job.id, generation: job.generation, status: 'sending' } as Filter<NexusDoc>,
         {
           $set: {
             status: 'pending',
             next_attempt_at: nextAttemptAt,
             last_error: lastError,
             updated_at: nowIso(),
+            completed_at: null,
           },
         },
         this.opts,
       );
+      return result.modifiedCount > 0;
     },
 
     releaseStale: async (olderThan) => {
@@ -2955,9 +2988,9 @@ class MongoStore implements NexusStore {
       return result.deletedCount > 0;
     },
 
-    deleteClaimed: async (id) => {
+    deleteClaimed: async (job) => {
       const result = await this.col(COLLECTIONS.gatewayTeardownJobs).deleteOne(
-        { _id: id, status: 'sending' } as Filter<NexusDoc>,
+        { _id: job.id, generation: job.generation, status: 'sending' } as Filter<NexusDoc>,
         this.opts,
       );
       return result.deletedCount > 0;
