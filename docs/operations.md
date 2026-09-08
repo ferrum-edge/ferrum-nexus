@@ -832,7 +832,7 @@ old HMAC key; password sign-in is unaffected.
    `NEXUS_SECRET_KEY`. That is your rollback **before** the rotation runs; once
    it has, the key that matters — and the one most likely to be lost — is the
    new one, so persist it where the server reads its configuration (step 4) and
-   treat *that* as the rollback from then on.
+   treat _that_ as the rollback from then on.
 3. **Stop every Nexus instance** (or run the step against a database no
    instance is using). A running server would keep writing blobs under the old
    key while you rotate.
