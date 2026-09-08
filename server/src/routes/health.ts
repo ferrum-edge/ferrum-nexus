@@ -175,7 +175,7 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (app,
   });
 
   const probeEdge = memoizeProbe(config.healthCacheMs, async () => {
-    const result = await edge.probe();
+    const result = await edge.probe(config.healthProbeTimeoutMs);
     if (!result.reachable && result.error !== null) {
       app.log.error({ error: result.error }, 'Ferrum Edge health probe failed');
     }

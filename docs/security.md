@@ -1028,6 +1028,12 @@ ordinary reporting.
 > this table. `CONTRIBUTING.md` makes that a review requirement; a new action
 > that is not documented here is an incomplete change.
 
+### Gateway startup
+
+| Action                   | Target type     | Description                                                          |
+| ------------------------ | --------------- | -------------------------------------------------------------------- |
+| `gateway.metrics_enable` | `plugin_config` | System created the global metrics config. Details name the namespace. |
+
 ### Authentication
 
 | Action                        | Target type | Description                                                                                                                                                                                 |

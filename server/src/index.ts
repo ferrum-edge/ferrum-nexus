@@ -56,7 +56,8 @@ import {
   type MailTransportFactory,
 } from './email/service.js';
 import { createOutboxWorker, type OutboxWorker } from './email/outbox-worker.js';
-import { createFerrumAdmin, type FerrumAdminClient } from './ferrum-admin/index.js';
+import { createFerrumAdmin, type EdgeLogger, type FerrumAdminClient } from './ferrum-admin/index.js';
+import { reconcileGateway } from './ferrum-admin/reconcile.js';
 import { createCrypto, type NexusCrypto } from './lib/crypto.js';
 import { isNexusError } from './lib/errors.js';
 import {
@@ -775,16 +776,21 @@ export async function main(): Promise<void> {
   // The store is built first because the Edge client borrows its lease table:
   // that is what makes consumer and proxy read-modify-writes exclusive across
   // every Nexus instance, not just within this process.
-  const app = await buildServer(config, {
+  const edgeLogger: EdgeLogger = {
+    debug: (obj, message) => app.log.debug(obj, message),
+    warn: (obj, message) => app.log.warn(obj, message),
+    error: (obj, message) => app.log.error(obj, message),
+  };
+  const app: FastifyInstance = await buildServer(config, {
     store,
-    edge: createFerrumAdmin(config, undefined, store.leases),
+    edge: createFerrumAdmin(config, edgeLogger, store.leases),
   });
   if (envFile !== null) app.log.info({ file: envFile }, 'Loaded environment file');
   if (generatedBootstrapToken !== null && founderSeatOpen) {
     logGeneratedBootstrapToken(app, generatedBootstrapToken);
   }
-  // Best-effort: the namespace is also created implicitly by the first write.
-  void app.nexus.edge.ensureNamespace('Managed by Ferrum Nexus');
+  // Best-effort gateway prerequisites must not delay serving the portal.
+  void reconcileGateway(app.nexus.edge, app.nexus.services.audit, app.log);
 
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {

@@ -17,6 +17,8 @@ import type { AuditLogFilter, ListOptions, NexusStore } from '../db/store.js';
  * namespaced `god.*` so they can be filtered out of ordinary reporting.
  */
 export const AuditAction = {
+  /** Startup created the namespace-global request metrics prerequisite. */
+  GATEWAY_METRICS_ENABLE: 'gateway.metrics_enable',
   /* auth */
   AUTH_REGISTER: 'auth.register',
   AUTH_LOGIN: 'auth.login',

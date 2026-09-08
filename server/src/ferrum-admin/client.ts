@@ -103,6 +103,8 @@ export {
 
 /** Options for one Admin API call. */
 interface CallOptions {
+  /** Shared deadline for a sequence of health-probe calls. */
+  signal?: AbortSignal;
   /** JSON request body. */
   body?: unknown;
   /** Query string parameters; `undefined` values are dropped. */
@@ -142,7 +144,7 @@ export interface FerrumAdminClient {
    */
   version(): Promise<string | null>;
   /** Combined reachability probe for `GET /api/health`; never throws. */
-  probe(): Promise<EdgeProbe>;
+  probe(timeoutMs?: number): Promise<EdgeProbe>;
 
   /** `GET /namespaces` — a list of name strings. */
   listNamespaces(): Promise<string[]>;
@@ -152,6 +154,8 @@ export interface FerrumAdminClient {
    * swallowed rather than blocking startup.
    */
   ensureNamespace(description?: string): Promise<void>;
+  /** Create the namespace-global metrics prerequisite if absent; return only a new config. */
+  ensureMetricsConfig(): Promise<EdgePluginConfig | null>;
 
   readonly consumers: {
     list(query?: EdgeListQuery): Promise<EdgePage<EdgeConsumer>>;
@@ -554,9 +558,12 @@ async function readBoundedBody(body: AsyncIterable<Uint8Array>, maxBytes: number
 }
 
 /** An unavailable scrape: zeroed rather than absent, so callers never branch. */
-function emptyProxyMetrics(): EdgeProxyMetrics {
+function emptyProxyMetrics(
+  reason = 'The gateway request metrics could not be read.',
+): EdgeProxyMetrics {
   return {
     available: false,
+    reason,
     requests: { byMethod: {}, byStatus: {}, total: 0 },
     latency: { buckets: [], count: null, sum: null },
   };
@@ -695,7 +702,7 @@ export function createFerrumAdminClient(
         dispatcher,
         // undici.request does not follow redirects; do not install a redirect interceptor.
         ...(hasBody ? { body: JSON.stringify(options.body) } : {}),
-        signal: AbortSignal.timeout(config.timeoutMs),
+        signal: options.signal ?? AbortSignal.timeout(config.timeoutMs),
       });
       statusCode = response.statusCode;
       bytes = await readBoundedBody(
@@ -914,6 +921,7 @@ export function createFerrumAdminClient(
     const byMethod: Record<string, number> = {};
     const byStatus: Record<string, number> = {};
     let total = 0;
+    let hasRequests = false;
     const buckets = new Map<number, number>();
     let count: number | null = null;
     let sum: number | null = null;
@@ -926,6 +934,7 @@ export function createFerrumAdminClient(
       if (sample.name === REQUESTS_FAMILY) {
         const value = counterValue(sample.value);
         if (value === null) continue;
+        hasRequests = true;
         // One (method, status) pair can appear several times — `error_class`
         // and `grpc_status` split it further — so these accumulate.
         if (labels.method !== undefined) {
@@ -955,6 +964,10 @@ export function createFerrumAdminClient(
       if (sample.name === `${DURATION_FAMILY}_sum`) {
         sum = counterValue(sample.value);
       }
+    }
+
+    if (!hasRequests) {
+      return emptyProxyMetrics('The gateway has no request metrics for this API yet.');
     }
 
     const sorted: EdgeLatencyBucket[] = [...buckets.entries()]
@@ -1027,13 +1040,19 @@ export function createFerrumAdminClient(
       return typeof version === 'string' ? version : null;
     },
 
-    async probe(): Promise<EdgeProbe> {
+    async probe(timeoutMs = config.timeoutMs): Promise<EdgeProbe> {
       const started = Date.now();
+      const signal = AbortSignal.timeout(timeoutMs);
       try {
-        const health = await this.health();
+        const health = await callRequired<EdgeHealth>('GET', '/health', { signal });
         let version: string | null = null;
         try {
-          version = await this.version();
+          const result = await call<{ version?: unknown }>('GET', '/version', {
+            signal,
+            allow404: true,
+            tolerate: [404, 405],
+          });
+          version = typeof result?.version === 'string' ? result.version : null;
         } catch {
           version = null;
         }
@@ -1092,6 +1111,32 @@ export function createFerrumAdminClient(
           'Could not pre-create the Ferrum namespace; it will be created implicitly',
         );
       }
+    },
+
+    async ensureMetricsConfig(): Promise<EdgePluginConfig | null> {
+      return serializePerKey(`namespace:${namespace}:prometheus_metrics`, async () => {
+        let found = false;
+        const complete = await scanPages<EdgePluginConfig>(
+          '/plugins/config',
+          EDGE_MAX_PAGE_SIZE,
+          MAX_PLUGIN_CONFIG_SCAN_PAGES,
+          (items) => {
+            found = items.some(
+              (item) => item.plugin_name === 'prometheus_metrics' && item.scope === 'global',
+            );
+            return !found;
+          },
+        );
+        // Even a disabled operator config is intentional; never replace it.
+        if (found) return null;
+        if (!complete) throw edgeError('Could not scan all gateway plugin configs');
+        return this.pluginConfigs.create({
+          plugin_name: 'prometheus_metrics',
+          scope: 'global',
+          enabled: true,
+          config: {},
+        });
+      });
     },
 
     consumers: {
@@ -1303,7 +1348,15 @@ export function createFerrumAdminClient(
             let parsed: PrometheusSample[] | null = null;
             if (response && response.statusCode >= 200 && response.statusCode < 300) {
               parsed = parsePrometheusText(response.body);
-              if (parsed.length === 0) parsed = null;
+              if (parsed.length === 0) {
+                logger.warn({}, 'Ferrum Edge metrics scrape produced no parseable samples');
+                parsed = null;
+              }
+            } else if (response) {
+              logger.warn(
+                { status: response.statusCode },
+                'Ferrum Edge metrics scrape returned a non-2xx status',
+              );
             }
             scrapeCache = { value: parsed, expiresAt: Date.now() + METRICS_CACHE_TTL_MS };
             return parsed;
