@@ -63,7 +63,8 @@
  *   CORS policy, or every browser preflight would fail;
  * - the `cors` plugin does not run on a WebSocket upgrade at all, and an
  *   HTTP proxy on Edge accepts upgrades on the same listen path, so the CORS
- *   origins are mirrored into `allowed_ws_origins` as the CSWSH check.
+ *   origins are mirrored into `allowed_ws_origins` only when the provider opts
+ *   into the CSWSH check with `cors.enforce_websocket_origins`.
  *
  * The `apis` row stores the provider's own method list and nothing for the WS
  * origins; both derivations are recomputed whenever either input changes.
@@ -412,21 +413,33 @@ export function rateLimitConfig(
   };
 }
 
-/**
- * Config for `cors`.
- *
- * Exactly the two keys the portal models. Edge's `cors` accepts six more
- * (`allowed_methods`, `allowed_headers`, `exposed_headers`, `max_age`,
- * `preflight_continue`, `unmatched_preflights`) and every one of them has a
- * native default that is right for a portal-published API, so sending a key
- * Nexus cannot let the provider change would only freeze that default in place.
- * `allowed_origins` is required — there is no implicit wildcard — which is why
- * an API with no policy has no `cors` plugin at all rather than an empty one.
- */
-export function corsPluginConfig(cors: CorsConfig): EdgePluginSettings {
+/** Derive preflight policy from the same auth and method settings as the proxy. */
+export function corsPluginConfig(
+  cors: CorsConfig,
+  authPlugin: AuthPluginType,
+  methods: HttpMethod[] | null,
+): EdgePluginSettings {
   return {
     allowed_origins: [...cors.allowed_origins],
     allow_credentials: cors.allow_credentials,
+    allowed_headers: [
+      'Accept',
+      'Authorization',
+      'Content-Type',
+      'Origin',
+      'X-Requested-With',
+      ...(authPlugin === 'key_auth' ? ['X-API-Key'] : []),
+      ...(cors.allowed_headers ?? []),
+    ],
+    allowed_methods: proxyAllowedMethods(methods, cors) ?? [
+      'GET',
+      'HEAD',
+      'POST',
+      'PUT',
+      'PATCH',
+      'DELETE',
+      'OPTIONS',
+    ],
   };
 }
 
@@ -499,25 +512,11 @@ export function proxyAllowedMethods(
 }
 
 /**
- * The proxy's `allowed_ws_origins`, derived from the API's CORS policy.
- *
- * Edge treats WebSocket as transparent on an `http(s)` proxy, so publishing an
- * HTTP API also publishes WS on the same listen path — and the `cors` plugin
- * does **not** run on an upgrade. `allowed_ws_origins` is the separate origin
- * check that does, and its default (`[]`) is "no check at all", which is
- * Cross-Site WebSocket Hijacking waiting to happen.
- *
- * A provider who named the browser origins allowed to call the API has already
- * expressed the answer, so the same list is mirrored here. Anything that is not
- * a plain `scheme://host[:port]` origin — `*`, or one of Edge's wildcard/
- * `StringMatch` forms — is dropped, because the WS check is an exact,
- * case-insensitive string comparison and a pattern would silently never match.
- * No CORS policy, or a wildcard one, means `[]`: an API deliberately open to
- * every browser origin gains nothing from a WS allow-list, and a half-populated
- * one would be worse than none.
+ * Opt-in CSWSH protection. Edge has no allow-missing-Origin option: a nonempty
+ * list rejects origin-less clients too. Only exact origins can be mirrored.
  */
 export function wsOriginsFor(cors: CorsConfig | null): string[] {
-  if (cors === null) return [];
+  if (!cors?.enforce_websocket_origins) return [];
   if (cors.allowed_origins.includes('*')) return [];
   return cors.allowed_origins.filter((origin) =>
     /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^*\s]+$/.test(origin),
@@ -977,7 +976,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             const corsPlugin = await attach(
               proxy.id,
               CORS_PLUGIN,
-              corsPluginConfig(cors),
+              corsPluginConfig(cors, input.auth_plugin, methods),
               owner.id,
             );
             created.pluginIds.push(corsPlugin.id);
@@ -1259,9 +1258,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             next: T | null,
             current: T | null,
             settingsFor: (value: T) => EdgePluginSettings,
+            derivedChanged = false,
           ): Promise<boolean> => {
             const live = findPlugin(plugins, pluginName);
-            if (isDeepStrictEqual(next, current)) {
+            if (isDeepStrictEqual(next, current) && !derivedChanged) {
               if (next !== null && live) await associate(gatewayProxyId, [live.id], actor.id);
               return false;
             }
@@ -1269,7 +1269,13 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               gatewayProxyId,
               live,
               pluginName,
-              next === null ? null : mergeOperatorSettings(live, settingsFor(next)),
+              next === null
+                ? null
+                : mergeOperatorSettings(
+                    live,
+                    settingsFor(next),
+                    pluginName === CORS_PLUGIN ? api.cors?.allowed_headers : undefined,
+                  ),
               actor.id,
               undo,
             );
@@ -1290,16 +1296,28 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             }
           }
 
-          if (patch.cors !== undefined && proxyId) {
-            const written = await reconcilePluginSetting(
+          if (
+            proxyId &&
+            (patch.cors !== undefined ||
+              patch.auth_plugin !== undefined ||
+              patch.allowed_methods !== undefined)
+          ) {
+            const nextCors = patch.cors === undefined ? api.cors : patch.cors;
+            const nextAuth = patch.auth_plugin ?? api.auth_plugin;
+            const nextMethods =
+              patch.allowed_methods === undefined ? api.allowed_methods : patch.allowed_methods;
+            await reconcilePluginSetting(
               proxyId,
               CORS_PLUGIN,
-              patch.cors,
+              nextCors,
               api.cors,
-              corsPluginConfig,
+              (value) => corsPluginConfig(value, nextAuth, nextMethods),
+              nextCors !== null &&
+                (nextAuth !== api.auth_plugin ||
+                  !isDeepStrictEqual(nextMethods, api.allowed_methods)),
             );
-            if (written) {
-              update.cors = patch.cors;
+            if (!isDeepStrictEqual(nextCors, api.cors)) {
+              update.cors = nextCors;
               changed.push('cors');
             }
           }
@@ -1895,6 +1913,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             consumerUsername: consumer.username,
             credentialType: CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin],
             label: label ?? `Test consumer for ${api.slug}`,
+            ip,
           });
 
           return { consumer, issued, replacedExisting: existing !== null, revokedCredentials };

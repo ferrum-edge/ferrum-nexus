@@ -1610,6 +1610,91 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(next.edge_ordinal, 6, 'one past the highest ordinal still on file');
     });
 
+    /**
+     * The repair a lost gateway acknowledgement leaves behind, on every
+     * adapter.
+     *
+     * The credentials service writes the row it is retiring to `retiring`
+     * *before* the destructive Edge call, and settles it to `revoked`
+     * afterwards. When the acknowledgement is lost the settlement is done by a
+     * later call instead, in one transaction with the audit row that says so —
+     * a conditional update guarded by a re-read of the status, which is
+     * exactly the shape each dialect implements separately.
+     */
+    it('credentials: a retiring row settles with its audit row, or with neither', async () => {
+      const user = await makeUser();
+      const consumerId = `settle-${newId()}`;
+      const row = await store.credentials.create({
+        user_id: user.id,
+        ferrum_consumer_id: consumerId,
+        credential_type: 'keyauth',
+        ferrum_credential_id: `${consumerId}/credentials/keyauth`,
+        fingerprint: `fp-${newId()}`,
+        last4: 'gone',
+        status: 'retiring',
+      });
+      assert.equal(row.status, 'retiring', 'every dialect accepts the pending state');
+
+      // A settlement that cannot commit leaves the intent for the next caller.
+      await assert.rejects(
+        () =>
+          store.transaction(async (tx) => {
+            await tx.credentials.update(row.id, { status: 'revoked' });
+            await tx.auditLogs.create({
+              actor_user_id: user.id,
+              actor_role: 'client',
+              action: 'credential.settle',
+              target_type: 'credential',
+              target_id: row.id,
+              details: { consumer_id: consumerId },
+              ip: null,
+            });
+            throw new Error('settlement interrupted');
+          }),
+        /settlement interrupted/,
+      );
+      assert.equal((await store.credentials.findById(row.id))?.status, 'retiring');
+      assert.equal(
+        (await store.auditLogs.list({ target_type: 'credential', target_id: row.id })).total,
+        0,
+        'no trail for a repair that did not happen',
+      );
+
+      const settled = await store.transaction(async (tx) => {
+        const fresh = await tx.credentials.findById(row.id);
+        if (!fresh || fresh.status !== 'retiring') return false;
+        await tx.credentials.update(row.id, { status: 'revoked' });
+        await tx.auditLogs.create({
+          actor_user_id: user.id,
+          actor_role: 'client',
+          action: 'credential.settle',
+          target_type: 'credential',
+          target_id: row.id,
+          details: { consumer_id: consumerId, gateway_entries: 0 },
+          ip: null,
+        });
+        return true;
+      });
+      assert.equal(settled, true);
+      assert.equal((await store.credentials.findById(row.id))?.status, 'revoked');
+      assert.equal(
+        (await store.auditLogs.list({ target_type: 'credential', target_id: row.id })).total,
+        1,
+      );
+
+      // Idempotent: the guard sees a row that is no longer pending and the
+      // second caller writes nothing at all.
+      const again = await store.transaction(async (tx) => {
+        const fresh = await tx.credentials.findById(row.id);
+        return fresh?.status === 'retiring';
+      });
+      assert.equal(again, false);
+      assert.equal(
+        await store.credentials.count({ ferrum_consumer_id: consumerId, status: 'revoked' }),
+        1,
+      );
+    });
+
     /* ── threads and messages ─────────────────────────────────────────── */
 
     it('threads and messages: reuse, previews and cascade helper', async () => {

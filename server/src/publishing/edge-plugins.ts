@@ -98,7 +98,7 @@ const SERVER_OWNED_PLUGIN_FIELDS = new Set([
  *
  * `PUT /plugins/config/{id}` is a whole-resource replace, so omitting a field
  * is how it is removed. Only an operator can set an execution-order override
- * (the portal exposes no control for it), and losing it changes what the
+ * (palette defaults apply only when it is unset), and losing it changes what the
  * gateway runs and in what order — which is why it is carried rather than
  * rebuilt (issue #159).
  */
@@ -123,9 +123,8 @@ export function operatorOwnedFields(
  * The portal's settings written over the live ones, key by key.
  *
  * Only for a plugin whose portal view is a **fixed** key set — `rate_limiting`
- * and `cors`, whose bodies `publishing/service.ts` builds from the same two or
- * three fields every time. There any extra key can only have come from an
- * operator tuning the gateway directly (`allowed_headers`, `max_age`, a
+ * and `cors`, whose bodies `publishing/service.ts` derives from API settings.
+ * Extra keys can come from an operator tuning the gateway directly (`max_age`, a
  * hand-set `sync_mode` that makes a quota cluster-wide), so rebuilding the
  * object from scratch would silently discard it (issue #150).
  *
@@ -136,12 +135,31 @@ export function operatorOwnedFields(
 export function mergeOperatorSettings(
   live: EdgePluginConfig | undefined,
   settings: EdgePluginSettings,
+  previousHeaders: string[] = [],
 ): EdgePluginSettings {
   const current = live?.config;
   if (!current) return settings;
   // Both sides are plain JSON objects; the union in `EdgePluginSettings` only
   // records which plugin each shape belongs to, and a merge crosses no shape.
-  return { ...current, ...(settings as Record<string, unknown>) };
+  const merged: Record<string, unknown> = { ...current, ...settings };
+  // Required auth headers must coexist with operator-added CORS headers.
+  const before = (current as Record<string, unknown>).allowed_headers;
+  const after = (settings as Record<string, unknown>).allowed_headers;
+  if (Array.isArray(before) && Array.isArray(after)) {
+    const operatorHeaders = before.filter(
+      (value) =>
+        typeof value === 'string' &&
+        !previousHeaders.some((header) => header.toLowerCase() === value.toLowerCase()),
+    );
+    const headers = [...after, ...operatorHeaders].filter(
+      (value): value is string => typeof value === 'string',
+    );
+    merged.allowed_headers = headers.filter(
+      (value, index) =>
+        headers.findIndex((item) => item.toLowerCase() === value.toLowerCase()) === index,
+    );
+  }
+  return merged;
 }
 
 /** One entry of `Proxy.plugins`. */
@@ -162,6 +180,8 @@ export interface EdgePluginOptions {
    * omitting the key.
    */
   trigger?: EdgePluginTrigger | null;
+  /** Default execution order; a live operator override takes precedence. */
+  priorityOverride?: number;
 }
 
 /** Everything a caller needs to move plugin configs on and off a proxy. */
@@ -282,6 +302,9 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
   ): EdgePluginConfigWrite {
     const trigger = options?.trigger ?? null;
     return {
+      ...(options?.priorityOverride === undefined
+        ? {}
+        : { priority_override: options.priorityOverride }),
       ...operatorOwnedFields(live),
       plugin_name: pluginName,
       scope: 'proxy',

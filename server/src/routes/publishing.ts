@@ -109,13 +109,33 @@ const rateLimitSchema = z
  * An *empty* origin list is rejected rather than accepted as "no CORS": that is
  * what `null` means, and the two are different plugin states on the gateway.
  */
-const corsSchema = z.object({
-  allowed_origins: z
-    .array(z.string().trim().min(1).max(255).regex(/^\S+$/, 'An origin cannot contain whitespace'))
-    .min(1)
-    .max(MAX_CORS_ORIGINS),
-  allow_credentials: z.boolean().optional(),
-});
+const corsSchema = z
+  .object({
+    allowed_origins: z
+      .array(
+        z.string().trim().min(1).max(255).regex(/^\S+$/, 'An origin cannot contain whitespace'),
+      )
+      .min(1)
+      .max(MAX_CORS_ORIGINS),
+    allow_credentials: z.boolean().optional(),
+    allowed_headers: z
+      .array(
+        z
+          .string()
+          .min(1)
+          .max(128)
+          .regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/),
+      )
+      .max(64)
+      .optional(),
+    enforce_websocket_origins: z.boolean().optional(),
+  })
+  .refine(
+    (value) =>
+      !value.enforce_websocket_origins ||
+      value.allowed_origins.every((origin) => /^https?:\/\/[^*\s/]+$/.test(origin)),
+    { message: 'WebSocket origin enforcement requires exact HTTP(S) origins without wildcards' },
+  );
 
 /**
  * Apply the `allow_credentials` default and collapse "absent" onto `null`.
@@ -129,6 +149,10 @@ function corsOrNull(value: z.infer<typeof corsSchema> | null | undefined): CorsC
   return {
     allowed_origins: value.allowed_origins,
     allow_credentials: value.allow_credentials ?? false,
+    ...(value.allowed_headers === undefined ? {} : { allowed_headers: value.allowed_headers }),
+    ...(value.enforce_websocket_origins === undefined
+      ? {}
+      : { enforce_websocket_origins: value.enforce_websocket_origins }),
   };
 }
 

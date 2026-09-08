@@ -142,6 +142,68 @@ export interface MockFerrumEdgeOptions {
   requireNamespaceClaim?: boolean;
 }
 
+/** Native direct-plugin CORS defaults; omission is observably different from Nexus policy. */
+export function mockCorsPreflight(
+  config: Record<string, unknown> | undefined,
+): Record<string, string> {
+  if (!config) return {};
+  const headers = config.allowed_headers ?? [
+    'Accept',
+    'Authorization',
+    'Content-Type',
+    'Origin',
+    'X-Requested-With',
+  ];
+  const methods = config.allowed_methods ?? [
+    'GET',
+    'HEAD',
+    'POST',
+    'PUT',
+    'PATCH',
+    'DELETE',
+    'OPTIONS',
+  ];
+  return {
+    'access-control-allow-headers': (headers as string[]).join(', '),
+    'access-control-allow-methods': (methods as string[]).join(', '),
+  };
+}
+
+/** Edge's independent upgrade gate requires Origin whenever the list is nonempty. */
+export function mockWebsocketAllowed(proxy: Record<string, unknown>, origin?: string): boolean {
+  const origins = proxy.allowed_ws_origins;
+  if (!Array.isArray(origins) || origins.length === 0) return true;
+  return origins.some((allowed) => String(allowed).toLowerCase() === origin?.toLowerCase());
+}
+
+/** Key partitioning cannot override Edge's authenticated-response storage admission. */
+export function mockCacheStorageAllowed(authenticated: boolean, cacheControl = ''): boolean {
+  const directives = cacheControl.toLowerCase().split(/\s*,\s*/);
+  if (directives.some((value) => /^(private|no-store|no-cache)(=|$)/.test(value))) return false;
+  return (
+    !authenticated ||
+    directives.some((value) => /^(public|must-revalidate)$|^s-maxage=\d+$/.test(value))
+  );
+}
+
+/** Model the compression/deduplication composition rule, including equal priorities. */
+export function mockPaletteCompositionError(plugins: Record<string, unknown>[]): string | null {
+  const active = plugins.filter((plugin) => plugin.enabled !== false);
+  const compressors = active.filter((plugin) => plugin.plugin_name === 'compression');
+  const deduplicators = active.filter((plugin) => plugin.plugin_name === 'request_deduplication');
+  for (const compressor of compressors) {
+    for (const deduplicator of deduplicators) {
+      if (
+        Number(compressor.priority_override ?? 4_050) >=
+        Number(deduplicator.priority_override ?? 3_010)
+      ) {
+        return 'request mutation plugin compression must run before request_deduplication';
+      }
+    }
+  }
+  return null;
+}
+
 /** A queued synthetic delay, consumed by the next matching request. */
 interface QueuedDelay {
   /** Only delay requests whose path contains this substring. */
@@ -211,6 +273,29 @@ export interface MockFerrumEdge {
    * for an operation that makes the same call twice.
    */
   queueFailure(
+    status: number,
+    body?: unknown,
+    pathContains?: string,
+    method?: string,
+    skip?: number,
+  ): void;
+  /**
+   * Apply the next matching request normally, then answer it with `status` and
+   * `body` — the lost acknowledgement of a write Edge really did perform.
+   *
+   * {@link MockFerrumEdge.queueFailure} refuses a request *before* it touches
+   * the stored resource, which models a gateway that declined the write. This
+   * models the other half: the mutation lands, the caller is told it did not,
+   * and the two sides are left disagreeing with nothing on the wire to say so.
+   * Narrowed by `pathContains`, `method` and `skip` exactly as failures are.
+   *
+   * It is armed before the request is dispatched and applied by {@link send},
+   * so it covers **every** verb the mock handles — a credential `POST` whose
+   * entry is appended and whose answer is lost reads to the client exactly
+   * like the refusal it is not, which is the shape that leaves a live gateway
+   * entry with no portal row at all.
+   */
+  queueLostAck(
     status: number,
     body?: unknown,
     pathContains?: string,
@@ -1321,7 +1406,17 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   const namespaces = new Map<string, { name: string; description: string | null }>();
   const requests: RecordedRequest[] = [];
   const failures: QueuedFailure[] = [];
+  const lostAcks: QueuedFailure[] = [];
   const delays: QueuedDelay[] = [];
+  /**
+   * Responses whose acknowledgement is being dropped, keyed by the response
+   * object the handler will eventually write to.
+   *
+   * Armed before the request is dispatched and consumed by {@link send}, so
+   * every handler — and every status it might have chosen — is covered without
+   * any of them knowing.
+   */
+  const droppedAcks = new WeakMap<ServerResponse, { status: number; body: unknown }>();
 
   /** `<namespace>|<proxy_id>|<method>|<status>` → cumulative count. */
   const requestCounters = new Map<string, number>();
@@ -1495,6 +1590,11 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   }
 
   function send(res: ServerResponse, status: number, body?: unknown): void {
+    const dropped = droppedAcks.get(res);
+    if (dropped) {
+      droppedAcks.delete(res);
+      return send(res, dropped.status, dropped.body);
+    }
     if (body === undefined) {
       res.writeHead(status);
       res.end();
@@ -1842,6 +1942,12 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
     }
 
+    const composition = mockPaletteCompositionError(
+      [...seen]
+        .map((id) => pluginConfigs.get(key(namespace, id)))
+        .filter((config): config is Record<string, unknown> => config !== undefined),
+    );
+    if (composition) errors.push(composition);
     return errors.length === 0 ? null : `Invalid proxy plugin associations: ${errors.join('; ')}`;
   }
 
@@ -2419,6 +2525,19 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         created_at: existing.created_at,
         updated_at: nowIso(),
       };
+      for (const proxy of proxies.values()) {
+        if (proxy.namespace !== namespace || !Array.isArray(proxy.plugins)) continue;
+        const ids = proxy.plugins.filter(isRecord).map((entry) => String(entry.plugin_config_id));
+        if (!ids.includes(id)) continue;
+        const composition = mockPaletteCompositionError(
+          ids
+            .map((configId) =>
+              configId === id ? updated : pluginConfigs.get(key(namespace, configId)),
+            )
+            .filter((config): config is Record<string, unknown> => config !== undefined),
+        );
+        if (composition) return fail(res, 400, composition);
+      }
       pluginConfigs.set(key(namespace, id), updated);
       return send(res, 200, updated);
     }
@@ -2544,6 +2663,23 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
     }
 
+    // Armed, not applied: the request runs to completion against the stored
+    // resource and only its *answer* is replaced, which is what a lost
+    // acknowledgement looks like from the client's side.
+    const lost = lostAcks.find(
+      (entry) =>
+        (entry.pathContains === undefined || url.pathname.includes(entry.pathContains)) &&
+        (entry.method === undefined || entry.method === method),
+    );
+    if (lost) {
+      if (lost.skip > 0) {
+        lost.skip -= 1;
+      } else {
+        lostAcks.splice(lostAcks.indexOf(lost), 1);
+        droppedAcks.set(res, { status: lost.status, body: lost.body });
+      }
+    }
+
     switch (segments[0]) {
       case 'health':
       case 'status':
@@ -2647,6 +2783,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       namespaces.clear();
       requests.length = 0;
       failures.length = 0;
+      lostAcks.length = 0;
       delays.length = 0;
       requestCounters.clear();
       requestDurations.clear();
@@ -2672,6 +2809,22 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       failures.push({
         status,
         body: body ?? { error: 'Injected failure' },
+        skip,
+        ...(pathContains === undefined ? {} : { pathContains }),
+        ...(method === undefined ? {} : { method }),
+      });
+    },
+
+    queueLostAck(
+      status: number,
+      body?: unknown,
+      pathContains?: string,
+      method?: string,
+      skip = 0,
+    ): void {
+      lostAcks.push({
+        status,
+        body: body ?? { error: 'Acknowledgement dropped after the write landed' },
         skip,
         ...(pathContains === undefined ? {} : { pathContains }),
         ...(method === undefined ? {} : { method }),

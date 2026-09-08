@@ -1639,10 +1639,64 @@ part: two appends inside one millisecond, or a clock stepped backwards between
 two appends, used to reorder the mirror and send a revoke to the wrong entry.
 
 Every destructive call cross-checks that mirror against the live array length
-read in the same critical section. Nexus itself can no longer break the
-agreement — a rotation revokes the row it retired the moment Edge confirms the
-delete, and an append whose row cannot be written is deleted again — so a
-mismatch means the consumer was edited **outside Nexus**.
+read in the same critical section.
+
+### The `retiring` status: a retirement recorded before it is attempted
+
+Ordering the two sides is not enough on its own. A `DELETE` Edge **applied**
+whose acknowledgement never arrived, or a confirmed delete whose follow-up row
+update failed, would leave the mirror permanently one row longer than the
+array — and the cross-check above then refused every later rotate _and_ revoke
+of that type while the per-type cap blocked issuing a replacement. The account
+was left holding a live gateway credential nobody could revoke, which is the
+one operation an incident response cannot do without.
+
+So the row is moved to **`retiring`** _before_ the destructive call and settled
+to `revoked` after it. `retiring` is durable, still counts as a live slot for
+the cap and for positions, and means exactly _"the gateway entry behind this row
+may already be gone"_. A later rotate, revoke or issue on the same consumer and
+type reads it back and, **in the one shape that admits a single reading** —
+the mirror exactly one row longer than the array, and exactly one live row
+carrying the pending retirement — settles that row and carries on. The
+settlement writes a `credential.settle` audit row naming the credential, the
+consumer, and the two counts that disagreed.
+
+Retrying the delete is not an alternative: when the acknowledgement was lost the
+entry is already gone, so the retry addresses a different entry or `404`s.
+
+### Two kinds of `retiring` row, and how to tell them apart
+
+The status means one thing — _"the gateway entry behind this row may already be
+gone"_ — and it covers two states that need different handling:
+
+1. **The entry is gone and the acknowledgement was lost.** The mirror is
+   **exactly one row longer** than the Edge array for that `(consumer, type)`
+   pair, and exactly one live row is `retiring`. This is the only shape that
+   settles by itself: the next rotate, revoke or issue on the pair clears it and
+   writes `credential.settle`. Nothing has to be done to it.
+2. **The delete failed outright and the entry is still live.** The lengths
+   **agree** — the row still occupies its slot — so no settlement ever fires and
+   the row does not clear on its own. It is not damage: positions resolve
+   normally and the credential is still revocable. It is cleared by **retrying
+   the operation that left it**: revoke the credential again (or rotate it), and
+   the row goes to `revoked` the moment Edge confirms.
+
+Shape 2 is only ever reached when the outcome could not be proved. Every delete
+that reports failure re-reads the array inside the lease it still holds, and one
+that is still exactly as long as it was before the call proves the delete never
+applied — there the portal withdraws the intent itself and puts the row back to
+`active`. What is left is the unprovable remainder: a gateway that could not be
+read back at all, a `basicauth` type no read projection shows, or an array whose
+length changed for some other reason. Recognise it with the `retiring` query
+under [_What a drifted consumer looks like_](#what-a-drifted-consumer-looks-like):
+a row whose pair's mirror and array lengths **agree** is shape 2 and needs the
+retry; a pair that differs by **exactly one** is shape 1 and the next call
+handles it.
+
+`basicauth` is outside the settlement entirely: Edge omits it from every read
+projection, so its array length is unknowable, the mirror is the only word on
+its positions, and its lengths can never be seen to differ. A `retiring`
+`basicauth` row is therefore always shape 2 — retry the revoke.
 
 ### Consumer identity recovery
 
@@ -1671,7 +1725,9 @@ Resume Nexus and retry the provisioning operation or pending teardown job.
 
 ### What a drifted consumer looks like
 
-Rotate or revoke returns `502 EDGE_ERROR`:
+Drift that no single pending retirement explains — a consumer edited **outside
+Nexus**, or two rows retiring at once — still refuses. Rotate or revoke returns
+`502 EDGE_ERROR`:
 
 > The gateway credential list does not match the portal. An administrator must
 > reconcile this consumer …
@@ -1680,6 +1736,25 @@ with `details: { expected, actual }` — `expected` is the number of live portal
 rows, `actual` the length of the Edge array. The one case that is not an error
 is a single live row: a revoke then degrades to deleting the whole credential
 type, which is what a revoke asked for anyway.
+
+The refusal is deliberate and is not weakened by the self-healing above: acting
+on a stale index is how somebody else's live key gets deleted. To see whether a
+consumer is drifting for a reason the portal can settle, look for a pending
+retirement:
+
+```sql
+SELECT ferrum_consumer_id, credential_type, COUNT(*) AS retiring
+  FROM credential_metadata
+  WHERE status = 'retiring'
+  GROUP BY ferrum_consumer_id, credential_type;
+```
+
+One such row for the pair is shape 1 or shape 2 above: compare the count of live
+rows for the pair with `GET /consumers/{id}`'s array for that type, and if the
+mirror is one longer the next rotate, revoke or issue settles it by itself,
+while equal lengths mean the delete never landed and the operation has to be
+retried. More than one such row — or none, with the lengths still disagreeing —
+means the reconciliation below.
 
 ### What an ambiguous legacy consumer looks like
 
@@ -1742,3 +1817,47 @@ entry is deleted before the replacement is appended (there is no room for both),
 so if the append fails the response says so plainly — _the previous credential
 was removed … issue a new credential_ — the retired row is already `revoked`,
 and everything still live remains revocable.
+
+A failed rotation **below the cap** needs none of it either. The replacement is
+appended first, so a delete that fails leaves an entry whose show-once plaintext
+was never handed to anyone; the portal takes that entry back and deletes its row
+before returning the original error, and the account is left as the rotation
+found it. Both outcomes are recorded as `credential.append_rollback`. When the
+replacement cannot be taken back the message says which of three states the
+array proved, and only the last of them is an administrator's problem:
+
+> The gateway did not acknowledge removing the previous credential and no longer
+> holds it; the replacement created in its place is live but its secret was
+> never delivered — revoke the credential named here and issue a new one
+
+The delete **applied**; only its answer was lost. The row it left `retiring` is
+shape 1 above and the next call settles it. Nothing here needs reconciling —
+running the reconciliation would destroy a state that repairs itself.
+
+> The previous credential could not be removed from the gateway and the
+> replacement created for it could not be taken back; the portal holds a live
+> row for each — revoke the credential named here and try again
+
+Both sides agree — one extra entry, one extra row — so the account holder
+revokes the named credential themselves; no administrator is needed.
+
+> The previous credential could not be removed from the gateway and the
+> replacement created for it could not be taken back; an administrator must
+> reconcile this consumer
+
+The array could not be read back, or no longer matches anything the call did.
+That one is genuine drift and needs the reconciliation above.
+
+All three carry `details.stranded_credential_id` and
+`details.retired_credential_id`. The audit row carries the same ids, so a
+`credential.append_rollback` with `withdrawn: false` is the query that finds
+gateway entries nobody holds — including the ones the portal only _suspects_,
+marked `suspected: true`, where an append's own `POST` failed and the array
+could not be shown to have grown by it:
+
+```sql
+SELECT created_at, target_id AS consumer_id, details
+  FROM audit_logs
+  WHERE action = 'credential.append_rollback'
+  ORDER BY created_at DESC;
+```

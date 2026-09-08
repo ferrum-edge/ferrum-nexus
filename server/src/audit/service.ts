@@ -88,6 +88,31 @@ export const AuditAction = {
   CREDENTIAL_ROTATE: 'credential.rotate',
   CREDENTIAL_REVOKE: 'credential.revoke',
   /**
+   * A retirement Edge applied but the portal never recorded, settled by a
+   * later call on the same consumer and type.
+   *
+   * The row was moved to `retiring` before the gateway delete and the delete's
+   * acknowledgement never landed — or the write that follows it failed — so
+   * the mirror was one row longer than the array. The next operation settles
+   * it instead of refusing, and this is the row that says it happened.
+   */
+  CREDENTIAL_SETTLE: 'credential.settle',
+  /**
+   * An append this portal made had to be taken back; records whether it went.
+   *
+   * Written whenever an issue or a rotation fails *after* Edge accepted the
+   * new entry — including when the acceptance itself was never acknowledged,
+   * where `suspected: true` says the orphan could not be confirmed.
+   * `withdrawn: false` means the entry is still on the gateway — either the
+   * compensating delete failed, or the array no longer looked the way the
+   * append left it (and `basicauth` never looks like anything, so it is never
+   * deleted by index) — and `stranded_credential_id` names what to clean up,
+   * with `last4` and `append_index` naming the entry itself. A rotation whose
+   * confirmed delete could not be recorded writes one too, carrying
+   * `retired_credential_id`: the row it left `retiring` for a later call.
+   */
+  CREDENTIAL_APPEND_ROLLBACK: 'credential.append_rollback',
+  /**
    * An admin emptied one credential type on a gateway consumer and revoked its
    * portal rows — the repair for positions that can no longer be trusted.
    */
