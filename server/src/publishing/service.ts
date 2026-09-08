@@ -1091,15 +1091,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           const name = patch.name.trim();
           if (name === '') throw validationFailed('An API name is required');
           update.name = name;
-          changed.push('name');
+          if (!isDeepStrictEqual(update.name, api.name)) changed.push('name');
         }
         if (patch.description !== undefined) {
           update.description = patch.description;
-          changed.push('description');
+          if (!isDeepStrictEqual(update.description, api.description)) changed.push('description');
         }
         if (patch.version !== undefined && patch.version.trim() !== '') {
           update.version = patch.version.trim();
-          changed.push('version');
+          if (!isDeepStrictEqual(update.version, api.version)) changed.push('version');
         }
         if (patch.visibility !== undefined && patch.visibility !== api.visibility) {
           update.visibility = patch.visibility;
@@ -1144,7 +1144,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             // The row records where the gateway is now pointed, normalized rather
             // than however the provider typed it.
             update.upstream_url = formatUpstreamUrl(upstream);
-            changed.push('upstream_url');
+            if (!isDeepStrictEqual(update.upstream_url, api.upstream_url))
+              changed.push('upstream_url');
             details.upstream = `${upstream.scheme}://${upstream.host}:${upstream.port}`;
           }
 
@@ -1214,7 +1215,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               undo,
             );
             update.rate_limit = patch.rate_limit;
-            changed.push('rate_limit');
+            if (!isDeepStrictEqual(update.rate_limit, api.rate_limit)) changed.push('rate_limit');
           }
 
           if (patch.cors !== undefined && proxyId) {
@@ -1227,7 +1228,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               undo,
             );
             update.cors = patch.cors;
-            changed.push('cors');
+            if (!isDeepStrictEqual(update.cors, api.cors)) changed.push('cors');
           }
 
           // ── OpenAPI enforcement ─────────────────────────────────────────
@@ -1331,11 +1332,13 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               // The row keeps the provider's list; the gateway's copy may carry an
               // extra `OPTIONS` that belongs to the CORS policy, not to this field.
               update.allowed_methods = patch.allowed_methods;
-              changed.push('allowed_methods');
+              if (!isDeepStrictEqual(update.allowed_methods, api.allowed_methods)) {
+                changed.push('allowed_methods');
+              }
             }
             if (patch.timeouts !== undefined) {
               update.timeouts = patch.timeouts;
-              changed.push('timeouts');
+              if (!isDeepStrictEqual(update.timeouts, api.timeouts)) changed.push('timeouts');
             }
             if (
               patch.circuit_breaker !== undefined &&

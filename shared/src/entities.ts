@@ -497,6 +497,8 @@ export interface EmailTemplate {
 
 /* ── Audit ──────────────────────────────────────────────────────────────── */
 
+export type ActorSummary = UserSummary;
+
 /** An append-only audit record written for every state-changing request. */
 export interface AuditLog {
   id: Uuid;
@@ -510,7 +512,7 @@ export interface AuditLog {
   details: Record<string, unknown>;
   ip: string | null;
   created_at: IsoTimestamp;
-  actor?: UserSummary | null;
+  actor: ActorSummary | null;
 }
 
 /* ── Settings, branding, captcha ────────────────────────────────────────── */

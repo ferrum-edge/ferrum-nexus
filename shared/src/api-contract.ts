@@ -548,10 +548,13 @@ export type DeleteApiPluginResponse = OkResponse;
  * - **There are no per-consumer counts.** Edge's request counter is not labelled
  *   by consumer, so "who is using this API" cannot be answered from here.
  * - `available: false` means the request-metrics scrape failed (unreachable,
- *   error status, or unparseable body), or the API has no proxy yet. Independent
- *   backend state may still be present. The route still answers `200`.
+ *   error status, unparseable body, or no request series for this proxy), or the
+ *   API has no proxy yet. Independent backend state may still be present.
+ *   The route still answers `200`.
  */
 export interface ApiUsageResponse {
+  /** Safe explanation when request measurements are unavailable. */
+  unavailable_reason?: string;
   /** Whether request counters came from a successful gateway metrics scrape. */
   available: boolean;
   /** When Nexus produced this answer (a cached read may be up to 10s older). */
@@ -990,9 +993,9 @@ export interface ListAuditLogsQuery extends ListQuery {
   action?: string;
   target_type?: string;
   target_id?: string;
-  /** Inclusive lower bound (ISO-8601). */
+  /** Inclusive lower bound (ISO-8601 UTC, normalized to milliseconds). */
   from?: IsoTimestamp;
-  /** Exclusive upper bound (ISO-8601). */
+  /** Exclusive upper bound (ISO-8601 UTC, normalized to milliseconds). */
   to?: IsoTimestamp;
 }
 

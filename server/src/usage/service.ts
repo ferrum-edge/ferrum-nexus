@@ -264,6 +264,8 @@ export function createUsageService(deps: UsageServiceDeps): UsageService {
       if (!proxyId) {
         return {
           available: false,
+          unavailable_reason:
+            'This API has no proxy on the gateway, so there is nothing to measure.',
           sampled_at: sampledAt,
           requests: emptyRequests(),
           latency_ms: null,
@@ -287,6 +289,7 @@ export function createUsageService(deps: UsageServiceDeps): UsageService {
         // Availability describes the counters; independent backend state must
         // not make missing traffic measurements look like measured zeroes.
         available: metrics.available,
+        ...(!metrics.available && metrics.reason ? { unavailable_reason: metrics.reason } : {}),
         sampled_at: sampledAt,
         ...(backendState.uptimeSeconds !== null
           ? { gateway_uptime_seconds: backendState.uptimeSeconds }

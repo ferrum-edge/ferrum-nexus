@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import { after, afterEach, before, describe, it } from 'node:test';
+import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 
 import type { EdgeConfig } from '../config/index.js';
 import { createMockFerrumEdge, type MockFerrumEdge } from '../test/mock-ferrum-edge.js';
 import {
   createFerrumAdminClient,
   METRICS_RESPONSE_MAX_BYTES,
+  silentEdgeLogger,
   type FerrumAdminClient,
 } from './client.js';
 
@@ -55,6 +56,10 @@ describe('ferrum admin metrics', () => {
 
   afterEach(() => {
     edge.reset();
+  });
+
+  beforeEach(async () => {
+    await client.ensureMetricsConfig();
   });
 
   describe('scrapeProxy', () => {
@@ -112,15 +117,39 @@ describe('ferrum admin metrics', () => {
       assert.equal(latency.buckets.find((bucket) => bucket.le === 100)?.count, 3);
     });
 
-    it('reports zeros for a proxy the gateway has no series for', async () => {
+    it('reports unavailable when only other proxies and unrelated families have samples', async () => {
       edge.recordRequests('proxy-b', { method: 'GET', status: 200, count: 3 });
 
       const metrics = await freshClient().metrics.scrapeProxy('proxy-a');
 
-      // The scrape worked; this proxy simply has no traffic.
-      assert.equal(metrics.available, true);
+      assert.equal(metrics.available, false);
+      assert.match(metrics.reason ?? '', /no request metrics for this API/);
       assert.equal(metrics.requests.total, 0);
       assert.deepEqual(metrics.latency.buckets, []);
+    });
+
+    it('distinguishes an explicit zero request series from missing measurements', async () => {
+      edge.recordRequests('proxy-a', { method: 'GET', status: 200, count: 0 });
+      const metrics = await freshClient().metrics.scrapeProxy('proxy-a');
+      assert.equal(metrics.available, true);
+      assert.equal(metrics.requests.total, 0);
+    });
+
+    it('does not mistake headers and unrelated metrics for measured traffic', async () => {
+      edge.pluginConfigs.clear();
+      edge.recordRequests('proxy-a', { method: 'GET', status: 200, count: 96 });
+      const metrics = await freshClient().metrics.scrapeProxy('proxy-a');
+      assert.equal(metrics.available, false);
+      assert.match(metrics.reason ?? '', /no request metrics/);
+    });
+
+    it('ignores a matching proxy series in another namespace', async () => {
+      edge.queueFailure(
+        200,
+        'ferrum_requests_total{proxy_id="proxy-a",namespace="other"} 42\n',
+        '/metrics',
+      );
+      assert.equal((await freshClient().metrics.scrapeProxy('proxy-a')).available, false);
     });
 
     it('authenticates with the admin JWT like every other route', async () => {
@@ -139,6 +168,27 @@ describe('ferrum admin metrics', () => {
       assert.equal(metrics.requests.total, 0);
       assert.deepEqual(metrics.latency.buckets, []);
     });
+
+    for (const status of [403, 404, 200]) {
+      it(`logs the documented warning for a ${status} unusable scrape`, async () => {
+        const warnings: string[] = [];
+        const logged = createFerrumAdminClient(configFor(edge.url), {
+          ...silentEdgeLogger,
+          warn: (_fields, message) => warnings.push(message ?? ''),
+        });
+        try {
+          edge.queueFailure(status, '# TYPE ferrum_requests_total counter\n', '/metrics');
+          assert.equal((await logged.metrics.scrapeProxy('proxy-a')).available, false);
+          assert.deepEqual(warnings, [
+            status === 200
+              ? 'Ferrum Edge metrics scrape produced no parseable samples'
+              : 'Ferrum Edge metrics scrape returned a non-2xx status',
+          ]);
+        } finally {
+          await logged.close();
+        }
+      });
+    }
 
     it('returns an unavailable result when the gateway is unreachable', async () => {
       const offline = createFerrumAdminClient(configFor('http://127.0.0.1:1', { timeoutMs: 300 }));

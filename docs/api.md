@@ -927,6 +927,13 @@ _admin_ — `Paginated<AuditLog>`, newest first.
 | `to`              | ISO-8601 datetime, exclusive upper bound   |
 | `limit`, `offset` | pagination                                 |
 
+Bounds are normalized to UTC millisecond precision: `2026-09-08T01:46:15Z`
+means `2026-09-08T01:46:15.000Z` for both comparisons.
+Each row includes `actor` with the current user's `id`, `email`, `display_name`
+and `role`, or `null` when no user can be resolved. `actor_user_id` remains
+present; a non-null id with a null summary denotes an unknown user, while a
+null id denotes system or anonymous activity. `actor_role` is the historical role.
+
 The full action catalog is in [`security.md`](security.md#10-audit-event-catalog).
 
 ```bash
@@ -1285,6 +1292,11 @@ Errors: `403 FORBIDDEN` (not the owner and not an admin), `404 NOT_FOUND`. A
 gateway request-metrics scrape that is unreachable, erroring or unparseable is
 **not** a portal error: the route answers `200` with `available: false`, zeroed
 counters and `latency_ms: null`. Those zeros represent missing measurements.
+The same applies when no valid `ferrum_requests_total` series belongs to this
+API's proxy, even if the scrape contains other metrics. `unavailable_reason`
+is an optional explanation suitable for display. Clients must hide unmeasured
+counters when `available` is false; an explicit zero request series still
+reports `available: true`.
 A successful independent backend-state read may still populate `backend` and
 `gateway_uptime_seconds`; it cannot make `available` true. Conversely, if only
 backend state is unavailable, request counters remain valid and `backend.status`
