@@ -817,6 +817,10 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       const revokedAt = nowIso();
       let movedRequest: AccessRequestRecord | null = null;
       const updated = await store.transaction(async (tx) => {
+        // The body may be run again if the adapter retries it, so the only
+        // thing it writes outside the store starts each attempt cleared:
+        // a request moved by an attempt that rolled back was not moved.
+        movedRequest = null;
         const result = await tx.grants.updateIfStatus(grant.id, 'active', {
           status: 'revoked',
           revoked_by: actor.id,

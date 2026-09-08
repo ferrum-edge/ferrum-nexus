@@ -30,8 +30,17 @@
  * a standalone `mongod` cannot start a session transaction at all. {@link init}
  * therefore probes the deployment with `hello` and:
  *
- * - **replica set / mongos** — `transaction()` is a real session transaction:
- *   `startTransaction`, commit on resolve, `abortTransaction` on reject.
+ * - **replica set / mongos** — `transaction()` is a real session transaction,
+ *   driven by the driver's own `session.withTransaction()`: commit on resolve,
+ *   abort on reject, and — the reason it is the driver's loop rather than a
+ *   hand-rolled one — the body is **run again** when the server labels the
+ *   failure `TransientTransactionError`, and the commit is retried on
+ *   `UnknownTransactionCommitResult`. A write conflict is MongoDB asking for
+ *   exactly that; not retrying it lost the body's work behind a raw
+ *   `MongoServerError`. Retries are bounded by {@link TRANSACTION_RETRY_ATTEMPTS}
+ *   attempts and {@link MONGO_TRANSACTION_BUDGET_MS} of wall clock, after which
+ *   the caller gets a `CONFLICT`, never a driver error — and bodies must be
+ *   re-runnable, which is the contract `adapters/transaction-retry.ts` states.
  * - **standalone, `NEXUS_DB_ALLOW_STANDALONE` unset** — `init()` throws
  *   `NexusError('INTERNAL', …)` so the process refuses to start rather than
  *   silently losing atomicity. This is the documented default: credential
@@ -144,6 +153,7 @@ import type {
   StoreHealth,
   ThreadRecord,
   ThreadRepo,
+  TransactionOptions,
   UpdateInput,
   UserFilter,
   UserRecord,
@@ -153,6 +163,12 @@ import type {
   VerificationTokenRepo,
 } from '../../store.js';
 import { SPEC_HISTORY_PRUNE_BATCH } from '../../store.js';
+import {
+  isMongoTransactionContentionError,
+  MONGO_TRANSACTION_BUDGET_MS,
+  transactionContentionError,
+  TRANSACTION_RETRY_ATTEMPTS,
+} from '../transaction-retry.js';
 
 /* ── Collection names (identical to the SQL table names) ────────────────── */
 
@@ -1320,8 +1336,8 @@ class MongoStore implements NexusStore {
     }
   }
 
-  transaction<T>(fn: (tx: NexusStore) => Promise<T>): Promise<T> {
-    return this.inTransaction(fn);
+  transaction<T>(fn: (tx: NexusStore) => Promise<T>, options?: TransactionOptions): Promise<T> {
+    return this.inTransaction(fn, options);
   }
 
   /**
@@ -1333,29 +1349,64 @@ class MongoStore implements NexusStore {
    * documented behaviour is unchanged: bodies are serialised, a nested call
    * joins the open transaction, and a standalone deployment that opted in with
    * `NEXUS_DB_ALLOW_STANDALONE` degrades to sequential execution.
+   *
+   * The body runs under `session.withTransaction()`, which is the driver's own
+   * retry envelope: it re-runs the callback on a `TransientTransactionError`
+   * (a write conflict, above all) and re-commits on an
+   * `UnknownTransactionCommitResult`. Two bounds are put on it — an attempt
+   * count enforced here, and `timeoutMS`, which the driver applies to every
+   * operation the session runs — because the envelope otherwise keeps trying
+   * for two minutes, far longer than an HTTP request should wait.
    */
-  private inTransaction<T>(fn: (tx: MongoStore) => Promise<T>): Promise<T> {
+  private inTransaction<T>(
+    fn: (tx: MongoStore) => Promise<T>,
+    options?: TransactionOptions,
+  ): Promise<T> {
     // Already inside a transaction body — join it rather than nesting.
     if (this.session) return fn(this);
+
+    // `retry: false` still gets the envelope, bounded to a single attempt: the
+    // body runs exactly once and the driver's error is still translated.
+    const maxAttempts = options?.retry === false ? 1 : TRANSACTION_RETRY_ATTEMPTS;
 
     const run = async (): Promise<T> => {
       if (!this.ctx.supportsTransactions) {
         // Standalone deployment with NEXUS_DB_ALLOW_STANDALONE=true: run the
         // body sequentially. It is still serialised against other bodies, but
-        // there is no atomic commit and no rollback on throw.
+        // there is no atomic commit, no rollback on throw, and nothing to
+        // retry — a body that fails here has already left writes behind.
         return fn(new MongoStore(this.ctx, null));
       }
       const session = this.ctx.client.startSession();
+      let attempts = 0;
+      let lastError: unknown;
       try {
-        session.startTransaction();
-        try {
-          const result = await fn(new MongoStore(this.ctx, session));
-          await session.commitTransaction();
-          return result;
-        } catch (error) {
-          await session.abortTransaction().catch(() => undefined);
-          throw error;
+        return await session.withTransaction(
+          async () => {
+            attempts += 1;
+            if (attempts > maxAttempts) {
+              // Not a `MongoError`, so `withTransaction` stops retrying and
+              // rethrows it rather than looping until the budget expires.
+              throw transactionContentionError('mongodb', maxAttempts, lastError);
+            }
+            try {
+              return await fn(new MongoStore(this.ctx, session));
+            } catch (error) {
+              lastError = error;
+              throw error;
+            }
+          },
+          { timeoutMS: MONGO_TRANSACTION_BUDGET_MS },
+        );
+      } catch (error) {
+        // A body's own `NexusError` — including the one thrown just above —
+        // reaches the caller unchanged; a driver error that the envelope gave
+        // up on becomes the same `CONFLICT` the SQL adapters raise.
+        if (error instanceof NexusError) throw error;
+        if (isMongoTransactionContentionError(error)) {
+          throw transactionContentionError('mongodb', attempts, error);
         }
+        throw error;
       } finally {
         await session.endSession();
       }
