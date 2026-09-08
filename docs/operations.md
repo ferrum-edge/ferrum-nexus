@@ -520,10 +520,16 @@ transaction back purely because two of them collided:
 
 Nexus **re-runs the body** in those cases rather than failing the request:
 
-- **Budget.** Up to 5 attempts, with exponential backoff jittered between 5 ms
-  and 200 ms. MongoDB additionally caps the whole envelope at 15 seconds of
-  wall clock (the driver's own default is two minutes, far longer than an HTTP
-  request should wait).
+- **Budget.** On MySQL and PostgreSQL, up to 5 attempts, with exponential
+  backoff jittered between 5 ms and 200 ms. On MongoDB the budget is wall
+  clock instead — 5 seconds of contention, on the same backoff — because that
+  engine fails the loser of a contended document immediately rather than
+  blocking it on a lock, so the retry loop is the only thing that waits for the
+  transaction that won; an attempt count would be spent in microseconds and
+  fail the loser while the winner was still committing. The whole MongoDB
+  transaction, that wait included, is capped at 15 seconds (the driver's own
+  default envelope is two minutes, far longer than an HTTP request should
+  wait).
 - **Outcome when it still cannot commit.** `409 CONFLICT` with
   `details.reason = "transaction_contention"` and the attempt count. A driver
   error type never reaches a response or a client; a retried request that

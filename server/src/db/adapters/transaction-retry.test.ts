@@ -21,9 +21,12 @@ import type { StoreHealth } from '../store.js';
 import type { SqlExecutor } from './sql-common.js';
 import { createSqlStore, type SqlStoreBackend } from './sql-repos.js';
 import {
+  createMongoContentionGate,
   isMongoTransactionContentionError,
   isMysqlRetryableTransactionError,
   isPostgresRetryableTransactionError,
+  MONGO_CONTENTION_BUDGET_MS,
+  type MongoContentionGate,
   runWithTransactionRetry,
   TRANSACTION_RETRY_ATTEMPTS,
   TRANSACTION_RETRY_BASE_DELAY_MS,
@@ -39,6 +42,15 @@ function mysqlDeadlock(): Error {
     new Error('Deadlock found when trying to get lock; try restarting transaction'),
     { code: 'ER_LOCK_DEADLOCK', errno: 1213, sqlState: '40001' },
   );
+}
+
+/** What the server sends the loser of a contended document. */
+function mongoWriteConflict(): Error {
+  return new MongoServerError({
+    message: 'Write conflict during plan execution',
+    code: 112,
+    errorLabels: ['TransientTransactionError'],
+  });
 }
 
 /** What `pg` raises for a serialization failure. */
@@ -118,12 +130,7 @@ describe('transaction retry — classification', () => {
   });
 
   it('MongoDB: transient labels, write conflicts and an expired budget are contention', () => {
-    const conflictError = new MongoServerError({
-      message: 'Write conflict during plan execution',
-      code: 112,
-      errorLabels: ['TransientTransactionError'],
-    });
-    assert.equal(isMongoTransactionContentionError(conflictError), true);
+    assert.equal(isMongoTransactionContentionError(mongoWriteConflict()), true);
     assert.equal(
       isMongoTransactionContentionError(new MongoServerError({ message: 'conflict', code: 112 })),
       true,
@@ -158,8 +165,14 @@ describe('transaction retry — backoff', () => {
         TRANSACTION_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1),
         TRANSACTION_RETRY_MAX_DELAY_MS,
       );
-      assert.equal(transactionRetryDelayMs(attempt, () => 0), Math.round(step / 2));
-      assert.equal(transactionRetryDelayMs(attempt, () => 1), step);
+      assert.equal(
+        transactionRetryDelayMs(attempt, () => 0),
+        Math.round(step / 2),
+      );
+      assert.equal(
+        transactionRetryDelayMs(attempt, () => 1),
+        step,
+      );
       const middle = transactionRetryDelayMs(attempt, () => 0.5);
       assert.ok(middle >= step / 2 && middle <= step, `attempt ${attempt} stays in the band`);
     }
@@ -169,6 +182,149 @@ describe('transaction retry — backoff', () => {
     const first = transactionRetryDelayMs(3, () => 0.1);
     const second = transactionRetryDelayMs(3, () => 0.9);
     assert.notEqual(first, second);
+  });
+});
+
+/* ── MongoDB's envelope ─────────────────────────────────────────────────── */
+
+/** A clock the test moves by hand, and the backoffs charged against it. */
+interface FakeClock {
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+  advance: (ms: number) => void;
+  readonly slept: number[];
+}
+
+function fakeClock(): FakeClock {
+  let millis = 1_000;
+  const slept: number[] = [];
+  return {
+    now: () => millis,
+    sleep: async (ms: number) => {
+      slept.push(ms);
+      millis += ms;
+    },
+    advance: (ms: number) => {
+      millis += ms;
+    },
+    slept,
+  };
+}
+
+/**
+ * MongoDB's half of the retry policy, without a server.
+ *
+ * `session.withTransaction()` re-runs its callback with no pause of its own,
+ * and MongoDB fails the loser of a contended document instead of blocking it,
+ * so the gate is the only thing that waits for the transaction that won. What
+ * the adapter contributes on top — a real session, a real write conflict — is
+ * covered by the cross-adapter suite; the policy is provable here.
+ */
+describe("transaction retry — MongoDB's envelope", () => {
+  /** Drive a gate until it refuses, and hand back what it refused with. */
+  async function exhaust(gate: MongoContentionGate, cause: unknown): Promise<unknown> {
+    for (let run = 0; run < 1_000; run += 1) {
+      try {
+        await gate.beforeAttempt(cause);
+      } catch (error) {
+        return error;
+      }
+    }
+    return null;
+  }
+
+  it('lets the first run of a body straight through', async () => {
+    const clock = fakeClock();
+    const gate = createMongoContentionGate({
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+
+    await gate.beforeAttempt(undefined);
+
+    assert.equal(gate.attempts, 1);
+    assert.deepEqual(clock.slept, [], 'nothing has contended yet');
+  });
+
+  it('waits before every re-run, on the backoff the SQL adapters use', async () => {
+    const clock = fakeClock();
+    const gate = createMongoContentionGate({
+      now: clock.now,
+      sleep: clock.sleep,
+      random: () => 0.5,
+    });
+
+    for (let run = 0; run < 4; run += 1) {
+      await gate.beforeAttempt(mongoWriteConflict());
+    }
+
+    const expected = [1, 2, 3].map((attempt) => transactionRetryDelayMs(attempt, () => 0.5));
+    assert.equal(gate.attempts, 4);
+    assert.deepEqual(clock.slept, expected, 'one wait per re-run, none before the first run');
+  });
+
+  it('gives up on a wall-clock budget, not on an attempt count', async () => {
+    const clock = fakeClock();
+    const started = clock.now();
+    const cause = mongoWriteConflict();
+    const gate = createMongoContentionGate({
+      now: clock.now,
+      sleep: clock.sleep,
+      random: () => 0.5,
+      budgetMs: 400,
+    });
+
+    await gate.beforeAttempt(undefined);
+    const outcome = await exhaust(gate, cause);
+
+    assert.ok(
+      gate.attempts > TRANSACTION_RETRY_ATTEMPTS,
+      'an attempt budget would have been spent in microseconds, before the winner committed',
+    );
+    assert.ok(clock.now() - started >= 400, 'the budget was waited out before giving up');
+    assert.ok(isNexusError(outcome), 'no driver error reaches the caller');
+    assert.equal((outcome as NexusError).code, 'CONFLICT');
+    assert.deepEqual((outcome as NexusError).details, {
+      reason: 'transaction_contention',
+      driver: 'mongodb',
+      attempts: gate.attempts,
+    });
+    assert.equal((outcome as NexusError).cause, cause);
+  });
+
+  it('starts the budget at the first re-run, so a slow body is still retried', async () => {
+    const clock = fakeClock();
+    const gate = createMongoContentionGate({
+      now: clock.now,
+      sleep: clock.sleep,
+      budgetMs: 400,
+    });
+
+    // The body itself took far longer than the budget before anything
+    // contended; that time is the body's, not the contention loop's.
+    await gate.beforeAttempt(undefined);
+    clock.advance(MONGO_CONTENTION_BUDGET_MS * 2);
+    await gate.beforeAttempt(mongoWriteConflict());
+
+    assert.equal(gate.attempts, 2, 'the re-run happened rather than being refused');
+  });
+
+  it('runs a body exactly once under { retry: false }', async () => {
+    const clock = fakeClock();
+    const cause = mongoWriteConflict();
+    const gate = createMongoContentionGate({
+      retry: false,
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+
+    await gate.beforeAttempt(undefined);
+    const outcome = await exhaust(gate, cause);
+
+    assert.equal(gate.attempts, 1, 'the body ran once and was not re-run');
+    assert.deepEqual(clock.slept, [], 'and nothing was waited out on its behalf');
+    assert.ok(isNexusError(outcome), 'the driver error is still translated');
+    assert.equal((outcome as NexusError).code, 'CONFLICT');
   });
 });
 

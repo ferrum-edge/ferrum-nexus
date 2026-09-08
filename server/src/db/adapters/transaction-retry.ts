@@ -35,7 +35,11 @@ import type { DbDriver } from '@ferrum-nexus/shared';
 
 import { NexusError } from '../../lib/errors.js';
 
-/** Attempts a contended body gets before the caller is told to try again. */
+/**
+ * Attempts a contended body gets on the SQL engines before the caller is told
+ * to try again. MongoDB is bounded by {@link MONGO_CONTENTION_BUDGET_MS}
+ * instead, for the reason given there.
+ */
 export const TRANSACTION_RETRY_ATTEMPTS = 5;
 
 /** First backoff step; doubles per attempt up to {@link TRANSACTION_RETRY_MAX_DELAY_MS}. */
@@ -46,6 +50,21 @@ export const TRANSACTION_RETRY_MAX_DELAY_MS = 200;
 
 /** Wall-clock budget for MongoDB's own retry envelope; see the adapter. */
 export const MONGO_TRANSACTION_BUDGET_MS = 15_000;
+
+/**
+ * How long MongoDB goes on re-running a body that keeps losing the document.
+ *
+ * MongoDB does not queue on a lock inside a transaction: the loser of a
+ * contended document is failed with a write conflict straight away rather than
+ * made to wait for the winner, so on this engine the retry loop *is* the wait.
+ * A budget counted in attempts is therefore spent in microseconds, while the
+ * transaction that won is still working — which is why this one is counted in
+ * wall clock, from the first re-run. It stays well below
+ * {@link MONGO_TRANSACTION_BUDGET_MS}, which bounds the whole transaction
+ * including this wait, and well below what a caller holding an HTTP request
+ * open will tolerate.
+ */
+export const MONGO_CONTENTION_BUDGET_MS = 5_000;
 
 /**
  * Backoff before re-running a body, in milliseconds.
@@ -148,6 +167,83 @@ export async function runWithTransactionRetry<T>(
       await wait(transactionRetryDelayMs(attempt, random));
     }
   }
+}
+
+/* ── MongoDB's envelope ─────────────────────────────────────────────────── */
+
+/** How {@link createMongoContentionGate} should treat one transaction. */
+export interface MongoContentionGateOptions {
+  /** `false` runs the body exactly once; see the module docblock. */
+  retry?: boolean;
+  /** Contention budget; defaults to {@link MONGO_CONTENTION_BUDGET_MS}. */
+  budgetMs?: number;
+  /** Injectable clock, for tests. */
+  now?: () => number;
+  /** Injectable jitter source, for tests. */
+  random?: () => number;
+  /** Injectable backoff, for tests. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** The per-attempt gate {@link createMongoContentionGate} hands the adapter. */
+export interface MongoContentionGate {
+  /** How many times the body has been started. */
+  readonly attempts: number;
+  /**
+   * Called at the top of every run of the `withTransaction` callback.
+   *
+   * The first run returns immediately. A re-run backs off first, and once the
+   * budget is spent throws the terminal `CONFLICT`, carrying `lastError` — the
+   * driver error the previous run failed with — as its cause. Throwing
+   * something that is not a `MongoError` is also what stops the driver
+   * retrying: it aborts and rethrows rather than looping on by itself.
+   */
+  beforeAttempt(lastError: unknown): Promise<void>;
+}
+
+/**
+ * The wait MongoDB's retry envelope does not do for itself.
+ *
+ * `session.withTransaction()` re-runs its callback the instant the server
+ * reports a `TransientTransactionError`, with no pause in between. That suits
+ * the driver, whose own envelope runs for two minutes, and breaks a bounded
+ * one: with no pause, a handful of runs are spent in microseconds and the body
+ * that lost the document is failed while the body that won it is still
+ * committing. This puts the SQL adapters' backoff, and a wall-clock budget,
+ * in front of every re-run so that the envelope actually waits.
+ *
+ * Nothing is held while it does. `startTransaction` is client-side
+ * bookkeeping — the server-side transaction begins with the body's first
+ * operation — and the driver has already aborted the failed attempt by the
+ * time it enters the callback again.
+ */
+export function createMongoContentionGate(
+  options: MongoContentionGateOptions = {},
+): MongoContentionGate {
+  const budget = options.budgetMs ?? MONGO_CONTENTION_BUDGET_MS;
+  const budgetMs = options.retry === false ? 0 : budget;
+  const now = options.now ?? Date.now;
+  const wait = options.sleep ?? sleep;
+  const random = options.random ?? Math.random;
+
+  let attempts = 0;
+  let deadline = 0;
+
+  return {
+    get attempts(): number {
+      return attempts;
+    },
+    async beforeAttempt(lastError: unknown): Promise<void> {
+      if (attempts > 0) {
+        // Started at the first re-run, so a body that spent a while working
+        // before anything contended is not charged for that time.
+        if (attempts === 1) deadline = now() + budgetMs;
+        if (now() >= deadline) throw transactionContentionError('mongodb', attempts, lastError);
+        await wait(transactionRetryDelayMs(attempts, random));
+      }
+      attempts += 1;
+    },
+  };
 }
 
 /* ── Driver classification ──────────────────────────────────────────────── */

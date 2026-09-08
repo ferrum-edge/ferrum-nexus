@@ -273,9 +273,14 @@ Transactions run through the driver's own `session.withTransaction()`, which
 re-runs the body on a `TransientTransactionError` and re-commits on an
 `UnknownTransactionCommitResult` — the retry MongoDB expects of a client, and
 the reason an ordinary concurrent write no longer turns a body into a lost
-write behind a `500`. It is bounded to the same five attempts as the SQL
-adapters plus a 15-second wall-clock budget, well short of the driver's
-two-minute default.
+write behind a `500`. The driver re-runs with no pause between runs, and
+MongoDB fails the loser of a contended document immediately rather than
+blocking it on a lock, so the adapter puts the SQL adapters' backoff in front
+of every re-run and bounds the loop by wall clock — 5 seconds of contention —
+rather than by an attempt count, which would be spent in microseconds while the
+transaction that won was still committing. The transaction as a whole, that
+wait included, is capped at 15 seconds, well short of the driver's two-minute
+default.
 
 **Replica set required.** `init()` probes with `hello` and refuses to start
 against a standalone `mongod` unless `NEXUS_DB_ALLOW_STANDALONE=true`, because
