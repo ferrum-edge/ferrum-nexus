@@ -627,7 +627,7 @@ transaction spanning them, so one lost write used to be enough to put them
 permanently out of step: a `DELETE` Edge applied whose acknowledgement never
 arrived, or a confirmed delete whose follow-up row update failed, left the
 mirror one row longer than the array. The length check above then refused every
-later rotate *and* revoke of that type, and the per-type cap blocked issuing a
+later rotate _and_ revoke of that type, and the per-type cap blocked issuing a
 replacement — an account holding a live gateway credential nobody could kill,
 which is precisely the operation an incident response needs first.
 

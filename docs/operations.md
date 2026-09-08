@@ -1378,12 +1378,12 @@ read in the same critical section.
 Ordering the two sides is not enough on its own. A `DELETE` Edge **applied**
 whose acknowledgement never arrived, or a confirmed delete whose follow-up row
 update failed, would leave the mirror permanently one row longer than the
-array — and the cross-check above then refused every later rotate *and* revoke
+array — and the cross-check above then refused every later rotate _and_ revoke
 of that type while the per-type cap blocked issuing a replacement. The account
 was left holding a live gateway credential nobody could revoke, which is the
 one operation an incident response cannot do without.
 
-So the row is moved to **`retiring`** *before* the destructive call and settled
+So the row is moved to **`retiring`** _before_ the destructive call and settled
 to `revoked` after it. `retiring` is durable, still counts as a live slot for
 the cap and for positions, and means exactly _"the gateway entry behind this row
 may already be gone"_. A later rotate, revoke or issue on the same consumer and
@@ -1399,7 +1399,7 @@ entry is already gone, so the retry addresses a different entry or `404`s.
 A row can also be left `retiring` when a delete failed **outright** and the
 entry is therefore still on the gateway. That is the safe reading of an unknown
 outcome: the lengths then agree, no settlement fires, positions resolve
-normally, and the credential stays revocable. Where the portal can *prove* the
+normally, and the credential stays revocable. Where the portal can _prove_ the
 delete did not apply — the array is still exactly as its own append left it —
 it withdraws the intent and puts the row back to `active`.
 
@@ -1503,7 +1503,7 @@ appended first, so a delete that fails leaves an entry whose show-once plaintext
 was never handed to anyone; the portal takes that entry back and deletes its row
 before returning the original error, and the account is left as the rotation
 found it. Both outcomes are recorded as `credential.append_rollback`. Only when
-the compensating delete *also* fails does the caller get
+the compensating delete _also_ fails does the caller get
 
 > The previous credential could not be removed from the gateway and the
 > replacement created for it could not be taken back …

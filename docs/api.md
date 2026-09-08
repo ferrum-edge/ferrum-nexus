@@ -1725,7 +1725,7 @@ the response says so plainly (`502 EDGE_ERROR`, _the previous credential was
 removed … issue a new credential_); everything still live stays revocable.
 
 Either way the credential being replaced passes through the `retiring` status
-before it settles at `revoked`: the retirement is written down *before* the
+before it settles at `revoked`: the retirement is written down _before_ the
 gateway delete, so an acknowledgement lost in flight leaves a row the next
 rotate, revoke or issue can settle rather than a mirror that silently disagrees
 with the gateway for good. A `previous` you read back from a **successful**
