@@ -161,6 +161,17 @@ describe('loadConfig', () => {
     expectConfigError(baseEnv({ FERRUM_ADMIN_JWT_TTL: '99999' }), 'FERRUM_ADMIN_JWT_TTL');
   });
 
+  it('caps FERRUM_NAMESPACE at 128 characters', () => {
+    // The MySQL namespace columns are VARCHAR(128); a longer value would pass
+    // validation yet fail every publish on that adapter alone.
+    const boundary = 'a'.repeat(128);
+    assert.equal(loadConfig(baseEnv({ FERRUM_NAMESPACE: boundary })).edge.namespace, boundary);
+    expectConfigError(
+      baseEnv({ FERRUM_NAMESPACE: 'a'.repeat(129) }),
+      'at most 128 characters',
+    );
+  });
+
   it('disables rate limiting in the test environment', () => {
     assert.equal(loadConfig(baseEnv({ NEXUS_ENV: 'test' })).rateLimitEnabled, false);
     assert.equal(loadConfig(baseEnv({ NEXUS_ENV: 'production' })).rateLimitEnabled, true);
