@@ -75,7 +75,8 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
 
   const acceptUser = useCallback(
     (next: User, nextCapabilities: Capabilities | null) => {
-      if (previousUserId.current && previousUserId.current !== next.id) {
+      // Also clear on sign-in after teardown, including anonymous cached data.
+      if (previousUserId.current !== next.id) {
         queryClient.clear();
       }
       previousUserId.current = next.id;
@@ -105,17 +106,14 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
       acceptUser(me.user, me.capabilities);
     } catch (error) {
       if (ApiError.is(error) && error.status === 401) {
-        previousUserId.current = null;
-        setUser(null);
-        setCapabilities(null);
-        setStatus('unauthenticated');
+        clearLocalSession();
         return;
       }
       // A transient failure with no prior principal is treated as signed out;
       // an already-authenticated session is kept so a blip does not log out.
       setStatus((current) => (current === 'authenticated' ? current : 'unauthenticated'));
     }
-  }, [acceptUser]);
+  }, [acceptUser, clearLocalSession]);
 
   useEffect(() => {
     void refresh();

@@ -754,11 +754,31 @@ inserts an `email_outbox` row; the worker polls every 5 seconds and drains it.
 | Status    | Meaning                                                                                |
 | --------- | -------------------------------------------------------------------------------------- |
 | `pending` | Queued and due (or waiting for `next_attempt_at`).                                     |
-| `sending` | Claimed by a worker. The claim is atomic and increments `attempts`.                    |
+| `sending` | Claimed by a worker. The claim is atomic, increments `attempts` and stamps an owner.   |
 | `sent`    | Delivered.                                                                             |
 | `failed`  | Terminal. Delivery failed on attempt 5 (`OUTBOX_MAX_ATTEMPTS`); `last_error` says why. |
 
 Retries back off `30s · 2^attempts`, capped at one hour, plus up to 10% jitter.
+
+### `failed` has two meanings — read `last_error`
+
+`failed` is the only terminal status the schema has, so it holds two different
+outcomes:
+
+- **Nothing was delivered.** Five attempts were refused, or refused permanently
+  by the relay. `last_error` is the relay's own complaint.
+- **Delivered, but unacknowledged.** `last_error` starts with
+  `delivered-unacknowledged:`. The message reached the relay in full and the
+  relay may well have queued it — Nexus simply never got an answer it could
+  record. That happens when the acknowledgement write fails after a successful
+  `send`, when the connection dies after end-of-data, or when the per-attempt
+  budget below cuts the attempt off there.
+
+The distinction matters because it decides what re-driving does. A row is parked
+in this state instead of retried precisely so the relay is not handed a second
+copy; **re-driving one delivers a duplicate.** SMTP hands a message over at the
+end-of-data marker, so an attempt cut off before that point is an ordinary
+failure and is retried normally.
 
 A `sending` row untouched for five minutes is assumed to belong to a crashed
 worker and is released back to `pending`. **That sweep runs at the top of every
@@ -772,11 +792,31 @@ all.
 
 Five minutes is safe because a claim's lifetime is bounded. Rows are claimed
 **one at a time** rather than as a batch — a batch's last row would otherwise
-sit `sending` for as long as every row ahead of it — and one delivery cannot run
-past about 50 seconds, because Nexus pins nodemailer's timeouts (10 s to
+sit `sending` for as long as every row ahead of it — and every `send` is raced
+against a hard 60-second deadline (`OUTBOX_SEND_BUDGET_MS`). That deadline is
+what makes the arithmetic true: Nexus also pins nodemailer's timeouts (10 s to
 connect, 10 s for the greeting, 30 s of socket inactivity) rather than taking
-its 2 min / 30 s / 10 min defaults. If you raise those, raise the threshold with
-them.
+its 2 min / 30 s / 10 min defaults, but those are **per phase**, not a total.
+`socketTimeout` measures inactivity between reads, so a relay that answers every
+command just inside it — or dribbles legal multi-line continuation replies — can
+otherwise hold one delivery open for minutes and outlive the stale threshold.
+An attempt the deadline cuts off is recorded as delivered-unacknowledged if the
+message had already been written in full, and retried normally if it had not.
+
+Nodemailer offers no way to abort a send in progress, so a connection cut off
+this way is left to its own socket-inactivity timeout. The claim — the thing the
+stale threshold is about — is released immediately either way.
+
+### Two workers, one row
+
+`releaseStale` decides on age alone, so on a bad day it can hand a row to a
+second worker while the first is still inside `send`. Every claim therefore
+carries an internal `generation` token: `markSent`, `reschedule` and `markFailed`
+all match on the claimed ID, that token and `status = 'sending'`. A worker whose
+claim was reclaimed loses its settling write and logs
+`Outbox claim was reclaimed by another worker`; it cannot flip an already-`sent`
+row back to `pending` and have it delivered again. The token is internal and
+never appears in an API response.
 
 ### The quiet failure mode to watch for
 
@@ -811,15 +851,46 @@ the worker is not ticking at all.
 
 The worker logs `Outbox message delivery failed, retrying later`,
 `Outbox message failed permanently`, `Released stale outbox claims`,
+`Outbox message was delivered but could not be marked sent; parked to avoid a duplicate`,
+`Outbox claim was reclaimed by another worker; this attempt did not settle the row`,
 `Outbox message was abandoned mid-flight; it is recovered by the stale sweep`,
 `Could not release stale outbox claims` and `Outbox tick failed` at `warn`.
 `Released stale outbox claims` carries a `released` count; a steady trickle of
 it means messages are being re-queued after somebody's crash, and a duplicate
-may have gone out.
+may have gone out. A steady trickle of reclaimed claims means the stale
+threshold is too close to how long deliveries actually take.
 
-To re-drive a `failed` row, set it back to `pending` with `attempts = 0` and
-`next_attempt_at = NULL`. Note that a row reinstated this way keeps its
-`idempotency_key`, so it will not be duplicated by a re-send from the UI.
+To re-drive a `failed` row, **first read its `last_error`**:
+
+```sql
+-- delivered, only unacknowledged: re-driving these sends a second copy
+SELECT to_email, attempts, last_error, updated_at
+  FROM email_outbox
+ WHERE status = 'failed' AND last_error LIKE 'delivered-unacknowledged:%';
+```
+
+Re-drive only the rows that are **not** in that state, by setting them back to
+`pending` with `attempts = 0` and `next_attempt_at = NULL`. A row reinstated this
+way keeps its `idempotency_key`, so it will not be duplicated by a re-send from
+the UI. A `delivered-unacknowledged:` row should be confirmed with the recipient
+or the relay's own logs before anything is re-sent; if you decide to re-send it
+anyway, expect the recipient to receive two copies.
+
+### Upgrading outbox ownership (migration 014)
+
+Drain and stop **all** Nexus application instances and workers before upgrading.
+Run the normal migrations, then start only the new version. Do not mix old and
+new writers: an old binary can still settle a row by ID without checking the new
+token. This is an additive schema migration, not a safe mixed-version rolling
+deployment, and the same drain requirement applies before rolling back binaries.
+
+SQLite and PostgreSQL add the column transactionally. MySQL uses its existing
+resumable DDL journal and verifies the column definition on restart. MongoDB
+backfills only documents missing the field. Existing rows keep their ID, status,
+counters, error and timestamps; their initial empty token is replaced the next
+time the row is claimed, and an existing `sending` row recovers through the
+normal stale sweep. No queued mail needs to be discarded, and no API response
+shape changes.
 
 SMTP settings are re-read on **every** tick, so an admin fixing them in the UI
 takes effect on the next poll with no restart.
