@@ -1,3 +1,4 @@
+import { auditActorLabel } from '../../lib/audit';
 import { useMemo, useState, type ReactElement } from 'react';
 import { DEFAULT_PAGE_SIZE, type AuditLog } from '@ferrum-nexus/shared';
 import { formatDateTime, humanize } from '../../lib/format';
@@ -70,7 +71,7 @@ function AuditTable(): ReactElement {
         cell: ({ row }) => (
           <span>
             <span className="block text-fg">
-              {row.original.actor?.display_name ?? row.original.actor_user_id ?? 'system'}
+              {auditActorLabel(row.original)}
             </span>
             {row.original.actor_role ? (
               <Badge className="mt-0.5">{row.original.actor_role}</Badge>

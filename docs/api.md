@@ -927,6 +927,13 @@ _admin_ — `Paginated<AuditLog>`, newest first.
 | `to`              | ISO-8601 datetime, exclusive upper bound   |
 | `limit`, `offset` | pagination                                 |
 
+Bounds are normalized to UTC millisecond precision: `2026-09-08T01:46:15Z`
+means `2026-09-08T01:46:15.000Z` for both comparisons.
+Each row includes `actor` with the current user's `id`, `email`, `display_name`
+and `role`, or `null` when no user can be resolved. `actor_user_id` remains
+present; a non-null id with a null summary denotes an unknown user, while a
+null id denotes system or anonymous activity. `actor_role` is the historical role.
+
 The full action catalog is in [`security.md`](security.md#10-audit-event-catalog).
 
 ```bash

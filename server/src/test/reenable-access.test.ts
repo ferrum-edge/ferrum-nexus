@@ -237,3 +237,52 @@ test('a concurrent grant revocation wins after an in-flight restoration', async 
     await h.close();
   }
 });
+
+test('notification failures do not skip approval mail or re-enable gateway restoration', async () => {
+  const h = await buildTestApp();
+  try {
+    const founder = await h.registerUser();
+    const provider = await h.registerUser({ role: 'provider' });
+    const client = await h.registerUser({ role: 'client' });
+    const apiId = await publish(h, provider, 'notification-failure');
+    const notify = h.services.notifications.notify;
+    h.services.notifications.notify = async () => {
+      throw new Error('Notification unavailable');
+    };
+    const before = (await h.outbox()).length;
+    await approve(h, provider, client, apiId);
+    assert.equal((await h.outbox()).length, before + 1);
+    const disabled = await h.authed(founder, {
+      method: 'PATCH',
+      url: `/api/users/${client.user.id}`,
+      payload: { status: 'disabled' },
+    });
+    assert.equal(disabled.statusCode, 200, disabled.body);
+    const mapping = await h.services.credentials.provisioner.findConsumer(client.user.id);
+    assert.ok(mapping);
+    const stripped = await h.edgeClient.consumers.get(mapping.ferrum_consumer_id);
+    assert.deepEqual(stripped?.acl_groups, []);
+    let notificationAttempted = false;
+    let restoredBeforeNotification = false;
+    h.services.notifications.notify = async () => {
+      notificationAttempted = true;
+      const live = await h.edgeClient.consumers.get(mapping.ferrum_consumer_id);
+      restoredBeforeNotification = live?.acl_groups?.includes(aclGroupForApi(apiId)) ?? false;
+      throw new Error('Notification unavailable');
+    };
+    const enabled = await h.authed(founder, {
+      method: 'PATCH',
+      url: `/api/users/${client.user.id}`,
+      payload: { status: 'active', role: 'provider' },
+    });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    assert.equal(notificationAttempted, true);
+    assert.equal(restoredBeforeNotification, true);
+    const live = await h.edgeClient.consumers.get(mapping.ferrum_consumer_id);
+    assert.deepEqual(live?.acl_groups, [aclGroupForApi(apiId)]);
+    assert.equal(enabled.json<UpdateUserResponse>().user.role, 'provider');
+    h.services.notifications.notify = notify;
+  } finally {
+    await h.close();
+  }
+});

@@ -987,9 +987,9 @@ export interface ListAuditLogsQuery extends ListQuery {
   action?: string;
   target_type?: string;
   target_id?: string;
-  /** Inclusive lower bound (ISO-8601). */
+  /** Inclusive lower bound (ISO-8601 UTC, normalized to milliseconds). */
   from?: IsoTimestamp;
-  /** Exclusive upper bound (ISO-8601). */
+  /** Exclusive upper bound (ISO-8601 UTC, normalized to milliseconds). */
   to?: IsoTimestamp;
 }
 
