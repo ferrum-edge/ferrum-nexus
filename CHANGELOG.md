@@ -157,6 +157,35 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `batch_id` on success and carries it in the failure body
   (`500 OUTBOX_FAILURE`, `details: { batch_id, recipients, enqueued }`) so the
   retry can reuse the key either way.
+- **A palette save deleted an operator's hand-made plugin config of the same
+  name.** Ownership was inferred from the plugin name, so every other config
+  of that name on the proxy looked like a leftover duplicate and was removed —
+  including a per-path deny gate Nexus never created. `api_plugins` now records
+  the Edge config id it produced (migration `014_api_plugin_config_id`) and
+  saves, removals and reconciliation act on that config alone; a row written
+  before the column adopts a single name match on its next save and never
+  deletes the rest. The `api.plugin_set` and `api.plugin_remove` audit rows name
+  the config id they touched.
+- **An ordinary portal save reset an operator's `priority_override`.** The body
+  sent to `PUT /plugins/config/{id}` was built from scratch, and that endpoint
+  is a whole-resource replace, so a field the portal has no control for was
+  cleared on every palette save and every `cors`/`rate_limit` reconcile. Write
+  bodies are now merged over the live resource, so every field the portal does
+  not own survives — including any Edge adds later.
+- **An unrelated API save rewrote the `cors` and `rate_limit` gateway
+  configs.** Both were reconciled on presence rather than on change, so a
+  description fix rebuilt them from the portal's two-field view — discarding an
+  operator's `allowed_headers`, `max_age` or a `sync_mode: redis` that made the
+  quota cluster-wide, re-enabling a config they had switched off, and naming two
+  unchanged fields in the audit row. They are now compared against the stored
+  value first, and a genuine change merges over the live config instead of
+  replacing it. A replay still repairs a dropped plugin association.
+- SPA validation failures now show the server message in an accessible error
+  toast, with inline errors on profile and gateway settings forms. Public auth
+  forms retain their inline-only error handling (#175).
+- Session refresh returning 401 now clears the query cache through the shared
+  sign-out path. Signing in after sign-out also clears cached data before
+  accepting the next principal (#177).
 - Upgrade better-sqlite3 to 13.0.3 to replace the native cleanup path that
   aborts on Node 24.20.0. Raise the Node minimum from 22.12 to 22.14 and
   retain hosted checks on the minimum and current Node 22/24 releases.
@@ -251,6 +280,23 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   it and losing its writes to the other's rollback. The remaining hazard, a
   bare root-store write issued while a body is open, is documented on the
   store contract.
+- **A transaction rolled back for contention is retried instead of losing its
+  work.** MongoDB drives transactions through the driver's
+  `session.withTransaction()`, backing off between runs and giving up after 5
+  seconds of contention (inside a 15-second cap on the transaction as a whole),
+  and the PostgreSQL and MySQL adapters re-run a body the engine rolled back
+  with a serialization failure or an InnoDB deadlock over up to 5 attempts,
+  backing off with jitter. A write conflict or a deadlock used to surface as
+  `500` with a raw driver error and the body's writes silently gone; contention
+  that outlives the budget is now `409 CONFLICT` with
+  `details.reason = "transaction_contention"`, and no driver error type reaches
+  a response. Transaction bodies are re-runnable by contract —
+  `{ retry: false }` opts one out.
+- **Two people replying to one thread at the same moment no longer deadlock on
+  MySQL.** A send now takes the thread row before inserting the message that
+  references it, so the foreign key's shared lock and the `last_message_at`
+  update cannot form a cycle; one of the two replies used to be rolled back as
+  the deadlock victim and lost behind a `500`.
 
 ### Security
 

@@ -151,6 +151,15 @@ the contract violation (for example `invalid_utf8`); response bytes and parser
 exceptions are never included. This can occur on any endpoint calling Edge and
 is not repeated in the per-endpoint notes. See [Edge response contracts](edge-response-contracts.md).
 
+A write the database rolled back because another one touched the same rows —
+an InnoDB deadlock, a PostgreSQL serialization failure, a MongoDB write
+conflict — is retried by the server (bounded, with backoff). If it still cannot
+commit, the endpoint answers `409 CONFLICT` with
+`details: { reason: "transaction_contention", driver, attempts }`. Nothing was
+applied, and the same request may simply be sent again. Like the above, this
+can happen on any state-changing endpoint and is not repeated in the
+per-endpoint notes.
+
 `UNAUTHORIZED`, `FORBIDDEN`, `CSRF_MISMATCH`, `USER_DISABLED` and
 `VALIDATION_FAILED` can come back from any endpoint and are not repeated in the
 per-endpoint notes below.
@@ -1546,6 +1555,12 @@ which the plugin is missing. The `api_plugins` row is written last but inside
 the same compensated block, so a store failure rolls the gateway back rather
 than leaving a plugin running that the portal has no row for.
 
+The save touches **only the config the portal created**, identified by the id
+recorded on the row. Ferrum Edge allows several configs of one plugin name on a
+proxy — with distinct triggers or execution priorities — so a second config an
+operator made by hand is left exactly where it is, and fields the portal does
+not model (`priority_override`) survive the replace.
+
 | Status | Code                | When                                                                                                                                                                                                                                                                                                                                                                          |
 | ------ | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `400`  | `VALIDATION_FAILED` | a config key, value or invariant the plugin does not accept; a trigger on a plugin Edge cannot gate; or a plugin Nexus manages from a first-class API field (`key_auth`/`basic_auth`/`jwt_auth` → `auth_plugin`, `access_control` → `requestable`, `rate_limiting` → `rate_limit`, `cors` → `cors`, `openapi_validator` → `spec_enforcement`), whose message names that field |
@@ -1558,8 +1573,10 @@ than leaving a plugin running that the portal has no row for.
 _provider_, owner-or-admin → `{ "ok": true }`.
 
 Disassociates the config from the proxy, deletes it, then removes the row —
-`404 NOT_FOUND` when the API never had that plugin. A gateway config an
-operator already removed by hand is tolerated: the row still goes.
+`404 NOT_FOUND` when the API never had that plugin. Only the config the portal
+created is deleted; another config of the same plugin name is an operator's and
+stays. A gateway config an operator already removed by hand is tolerated: the
+row still goes.
 
 Deleting the API removes every palette row with it; the gateway objects need no
 separate step, because they are proxy-scoped and the proxy delete cascades them.

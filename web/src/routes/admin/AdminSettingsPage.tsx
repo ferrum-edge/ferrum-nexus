@@ -27,6 +27,7 @@ import { Checkbox, Field, Input, LabeledInput, LabeledTextarea } from '../../com
 import { LabeledSelect } from '../../components/ui/Select';
 import { LoadingPanel } from '../../components/ui/Spinner';
 import { Tabs } from '../../components/ui/Tabs';
+import { FormNotice } from '../../components/auth/AuthShell';
 
 const THEME_OPTIONS: ReadonlyArray<{ value: ThemePreference; label: string }> = [
   { value: 'dark', label: 'Dark' },
@@ -227,6 +228,7 @@ function GatewayTab({ settings }: { settings: AdminSettingsResponse }): ReactEle
         description="The public address of the gateway's proxy listener, shown to clients in the catalog."
       />
       <CardBody className="flex flex-col gap-5">
+        {update.error ? <FormNotice>{update.error.message}</FormNotice> : null}
         <LabeledInput
           label="Public gateway URL"
           placeholder="https://api.example.com"

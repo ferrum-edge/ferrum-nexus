@@ -538,6 +538,50 @@ place, and you can end up with a grant row whose ACL group was never written
 Collections and indexes are created in code on `init()`; there are no `.sql`
 files for Mongo, but the same `schema_migrations` bookkeeping applies.
 
+### Transactions and contention retries
+
+Every write that has to be atomic runs inside `store.transaction`. Within one
+instance those bodies are **serialised** — one at a time, on every driver — but
+that says nothing about the instance next to it, and each engine can roll a
+transaction back purely because two of them collided:
+
+| Engine     | What it reports                                                    | What it means         |
+| ---------- | ------------------------------------------------------------------ | --------------------- |
+| MySQL      | `ER_LOCK_DEADLOCK` (1213) / `ER_LOCK_WAIT_TIMEOUT` (1205), `40001` | Rolled back, retry it |
+| PostgreSQL | `40001` serialization failure, `40P01` deadlock detected           | Rolled back, retry it |
+| MongoDB    | `WriteConflict` (112), labelled `TransientTransactionError`        | Rolled back, retry it |
+| SQLite     | nothing — one connection, one body at a time                       | Cannot arise          |
+
+Nexus **re-runs the body** in those cases rather than failing the request:
+
+- **Budget.** On MySQL and PostgreSQL, up to 5 attempts, with exponential
+  backoff jittered between 5 ms and 200 ms. On MongoDB the budget is wall
+  clock instead — 5 seconds of contention, on the same backoff — because that
+  engine fails the loser of a contended document immediately rather than
+  blocking it on a lock, so the retry loop is the only thing that waits for the
+  transaction that won; an attempt count would be spent in microseconds and
+  fail the loser while the winner was still committing. The whole MongoDB
+  transaction, that wait included, is capped at 15 seconds (the driver's own
+  default envelope is two minutes, far longer than an HTTP request should
+  wait).
+- **Outcome when it still cannot commit.** `409 CONFLICT` with
+  `details.reason = "transaction_contention"` and the attempt count. A driver
+  error type never reaches a response or a client; a retried request that
+  succeeds looks like any other success.
+- **What is _not_ retried.** A uniqueness violation, a validation failure, a
+  lost connection, or anything a service threw on purpose. Only the contention
+  classes above.
+- **Nothing is applied twice.** A retried attempt starts from a rolled-back
+  state: the failed attempt's rows are gone before the next one begins, and
+  every side effect a body has goes through the transaction. Emails, gateway
+  calls, audit rows for gateway work and notifications all happen _outside_ the
+  transaction, after it commits.
+
+Seeing occasional retries is normal under load. A sustained stream of
+`transaction_contention` conflicts in the logs means real hot-row contention —
+usually many writers on one message thread or one account — and is worth
+investigating rather than raising the budget.
+
 ---
 
 ## 3. Docker
@@ -732,11 +776,31 @@ inserts an `email_outbox` row; the worker polls every 5 seconds and drains it.
 | Status    | Meaning                                                                                |
 | --------- | -------------------------------------------------------------------------------------- |
 | `pending` | Queued and due (or waiting for `next_attempt_at`).                                     |
-| `sending` | Claimed by a worker. The claim is atomic and increments `attempts`.                    |
+| `sending` | Claimed by a worker. The claim is atomic, increments `attempts` and stamps an owner.   |
 | `sent`    | Delivered.                                                                             |
 | `failed`  | Terminal. Delivery failed on attempt 5 (`OUTBOX_MAX_ATTEMPTS`); `last_error` says why. |
 
 Retries back off `30s · 2^attempts`, capped at one hour, plus up to 10% jitter.
+
+### `failed` has two meanings — read `last_error`
+
+`failed` is the only terminal status the schema has, so it holds two different
+outcomes:
+
+- **Nothing was delivered.** Five attempts were refused, or refused permanently
+  by the relay. `last_error` is the relay's own complaint.
+- **Delivered, but unacknowledged.** `last_error` starts with
+  `delivered-unacknowledged:`. The message reached the relay in full and the
+  relay may well have queued it — Nexus simply never got an answer it could
+  record. That happens when the acknowledgement write fails after a successful
+  `send`, when the connection dies after end-of-data, or when the per-attempt
+  budget below cuts the attempt off there.
+
+The distinction matters because it decides what re-driving does. A row is parked
+in this state instead of retried precisely so the relay is not handed a second
+copy; **re-driving one delivers a duplicate.** SMTP hands a message over at the
+end-of-data marker, so an attempt cut off before that point is an ordinary
+failure and is retried normally.
 
 A `sending` row untouched for five minutes is assumed to belong to a crashed
 worker and is released back to `pending`. **That sweep runs at the top of every
@@ -750,11 +814,31 @@ all.
 
 Five minutes is safe because a claim's lifetime is bounded. Rows are claimed
 **one at a time** rather than as a batch — a batch's last row would otherwise
-sit `sending` for as long as every row ahead of it — and one delivery cannot run
-past about 50 seconds, because Nexus pins nodemailer's timeouts (10 s to
+sit `sending` for as long as every row ahead of it — and every `send` is raced
+against a hard 60-second deadline (`OUTBOX_SEND_BUDGET_MS`). That deadline is
+what makes the arithmetic true: Nexus also pins nodemailer's timeouts (10 s to
 connect, 10 s for the greeting, 30 s of socket inactivity) rather than taking
-its 2 min / 30 s / 10 min defaults. If you raise those, raise the threshold with
-them.
+its 2 min / 30 s / 10 min defaults, but those are **per phase**, not a total.
+`socketTimeout` measures inactivity between reads, so a relay that answers every
+command just inside it — or dribbles legal multi-line continuation replies — can
+otherwise hold one delivery open for minutes and outlive the stale threshold.
+An attempt the deadline cuts off is recorded as delivered-unacknowledged if the
+message had already been written in full, and retried normally if it had not.
+
+Nodemailer offers no way to abort a send in progress, so a connection cut off
+this way is left to its own socket-inactivity timeout. The claim — the thing the
+stale threshold is about — is released immediately either way.
+
+### Two workers, one row
+
+`releaseStale` decides on age alone, so on a bad day it can hand a row to a
+second worker while the first is still inside `send`. Every claim therefore
+carries an internal `generation` token: `markSent`, `reschedule` and `markFailed`
+all match on the claimed ID, that token and `status = 'sending'`. A worker whose
+claim was reclaimed loses its settling write and logs
+`Outbox claim was reclaimed by another worker`; it cannot flip an already-`sent`
+row back to `pending` and have it delivered again. The token is internal and
+never appears in an API response.
 
 ### A mass-email campaign is one transaction
 
@@ -814,15 +898,46 @@ the worker is not ticking at all.
 
 The worker logs `Outbox message delivery failed, retrying later`,
 `Outbox message failed permanently`, `Released stale outbox claims`,
+`Outbox message was delivered but could not be marked sent; parked to avoid a duplicate`,
+`Outbox claim was reclaimed by another worker; this attempt did not settle the row`,
 `Outbox message was abandoned mid-flight; it is recovered by the stale sweep`,
 `Could not release stale outbox claims` and `Outbox tick failed` at `warn`.
 `Released stale outbox claims` carries a `released` count; a steady trickle of
 it means messages are being re-queued after somebody's crash, and a duplicate
-may have gone out.
+may have gone out. A steady trickle of reclaimed claims means the stale
+threshold is too close to how long deliveries actually take.
 
-To re-drive a `failed` row, set it back to `pending` with `attempts = 0` and
-`next_attempt_at = NULL`. Note that a row reinstated this way keeps its
-`idempotency_key`, so it will not be duplicated by a re-send from the UI.
+To re-drive a `failed` row, **first read its `last_error`**:
+
+```sql
+-- delivered, only unacknowledged: re-driving these sends a second copy
+SELECT to_email, attempts, last_error, updated_at
+  FROM email_outbox
+ WHERE status = 'failed' AND last_error LIKE 'delivered-unacknowledged:%';
+```
+
+Re-drive only the rows that are **not** in that state, by setting them back to
+`pending` with `attempts = 0` and `next_attempt_at = NULL`. A row reinstated this
+way keeps its `idempotency_key`, so it will not be duplicated by a re-send from
+the UI. A `delivered-unacknowledged:` row should be confirmed with the recipient
+or the relay's own logs before anything is re-sent; if you decide to re-send it
+anyway, expect the recipient to receive two copies.
+
+### Upgrading outbox ownership (migration 014)
+
+Drain and stop **all** Nexus application instances and workers before upgrading.
+Run the normal migrations, then start only the new version. Do not mix old and
+new writers: an old binary can still settle a row by ID without checking the new
+token. This is an additive schema migration, not a safe mixed-version rolling
+deployment, and the same drain requirement applies before rolling back binaries.
+
+SQLite and PostgreSQL add the column transactionally. MySQL uses its existing
+resumable DDL journal and verifies the column definition on restart. MongoDB
+backfills only documents missing the field. Existing rows keep their ID, status,
+counters, error and timestamps; their initial empty token is replaced the next
+time the row is claimed, and an existing `sending` row recovers through the
+normal stale sweep. No queued mail needs to be discarded, and no API response
+shape changes.
 
 SMTP settings are re-read on **every** tick, so an admin fixing them in the UI
 takes effect on the next poll with no restart.
@@ -1482,6 +1597,31 @@ read in the same critical section. Nexus itself can no longer break the
 agreement — a rotation revokes the row it retired the moment Edge confirms the
 delete, and an append whose row cannot be written is deleted again — so a
 mismatch means the consumer was edited **outside Nexus**.
+
+### Consumer identity recovery
+
+New canonical consumers use a stable derived UUID and persist the mapping in
+`consumers`; provider test consumers persist their current id in
+`gateway_identities`. Normal provisioning does not list the namespace, even
+above 10,000 consumers. Keep these tables with the rest of the Nexus database
+in backups. Do not change a consumer's id or canonical username on Edge.
+
+Older gateway identities without a portal mapping are adopted after a create
+conflict using a logged scan of at most 20 pages of 500 consumers. An incomplete
+scan returns `EDGE_ERROR` with a recovery instruction, never “no consumer”.
+Teardown retains its pending registration/job on this error.
+
+If this legacy limit is reached, pause provisioning and teardown workers during
+maintenance and restore the affected mapping from a consistent Nexus backup.
+Verify the gateway resource with `GET /consumers/{id}` in the configured
+`X-Ferrum-Namespace`: its username must exactly match `nexus-user-<user_id>` or
+the registered `nexus-test-<api_id>`. Restore the canonical `consumers` row or
+the registered identity's `ferrum_consumer_id`, preserving the correct owner
+and namespace. If no mapping backup exists, an administrator must inventory
+the gateway with paginated Admin API reads and reconstruct the mapping after
+verifying those same fields. Back up the portal database before this repair;
+do not delete gateway identities or credentials to make the scan shorter.
+Resume Nexus and retry the provisioning operation or pending teardown job.
 
 ### What a drifted consumer looks like
 

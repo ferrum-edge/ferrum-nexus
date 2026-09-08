@@ -15,7 +15,11 @@
  * - `transaction()`, which is a real `BEGIN`/`COMMIT`/`ROLLBACK` on a
  *   dedicated client checked out of the pool for the duration of the body.
  *   Nested `transaction()` calls join the outer one, and bodies are serialised,
- *   both handled by the shared `SqlStore` shell.
+ *   both handled by the shared `SqlStore` shell;
+ * - the classification of the class-40 SQLSTATEs — `40001` serialization
+ *   failure and `40P01` deadlock detected — that PostgreSQL uses to say a
+ *   transaction was rolled back for contention and should be run again. The
+ *   shell retries those; see `adapters/transaction-retry.ts`.
  */
 
 import pg from 'pg';
@@ -35,6 +39,7 @@ import {
 import type { NexusStore, StoreHealth } from '../../store.js';
 import { formatSql, type Row, type SqlExecutor, type SqlParam } from '../sql-common.js';
 import { createSqlStore, type SqlStoreBackend } from '../sql-repos.js';
+import { isPostgresRetryableTransactionError } from '../transaction-retry.js';
 
 const { Pool } = pg;
 type PgPool = pg.Pool;
@@ -157,6 +162,10 @@ class PostgresBackend implements SqlStoreBackend {
     } finally {
       client.release();
     }
+  }
+
+  isRetryableTransactionError(error: unknown): boolean {
+    return isPostgresRetryableTransactionError(error);
   }
 }
 

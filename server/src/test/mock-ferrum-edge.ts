@@ -1575,6 +1575,14 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
     if (id === undefined) {
       if (method === 'GET') {
+        // Edge has no consumer filters (its parser currently ignores unknown
+        // keys). Reject them here so tests cannot mistake an unfiltered page
+        // for a supported username lookup.
+        for (const field of query.keys()) {
+          if (field !== 'offset' && field !== 'limit') {
+            return fail(res, 400, `unknown query parameter: ${field}`);
+          }
+        }
         send(res, 200, paginate(consumersIn(namespace).map(project), query));
         return;
       }

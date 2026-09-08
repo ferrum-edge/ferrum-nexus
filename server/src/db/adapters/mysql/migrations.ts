@@ -50,6 +50,11 @@ const guards: Guard[] = [
     columns: [{ name: 'generation', type: 'varchar(64)', nullable: false, default: '' }],
   },
   {
+    sql: "ALTER TABLE email_outbox ADD COLUMN generation VARCHAR(64) NOT NULL DEFAULT ''",
+    table: 'email_outbox',
+    columns: [{ name: 'generation', type: 'varchar(64)', nullable: false, default: '' }],
+  },
+  {
     sql: 'ALTER TABLE apis ADD COLUMN upstream_url TEXT NULL, ADD COLUMN cors_json TEXT NULL',
     table: 'apis',
     columns: [textColumn('upstream_url'), textColumn('cors_json')],
@@ -99,6 +104,13 @@ const guards: Guard[] = [
     sql: 'ALTER TABLE credential_metadata ADD COLUMN edge_ordinal INT DEFAULT NULL',
     table: 'credential_metadata',
     columns: [{ name: 'edge_ordinal', type: 'int', nullable: true, default: null }],
+  },
+  {
+    sql: 'ALTER TABLE api_plugins ADD COLUMN ferrum_plugin_config_id VARCHAR(64) DEFAULT NULL',
+    table: 'api_plugins',
+    columns: [
+      { name: 'ferrum_plugin_config_id', type: 'varchar(64)', nullable: true, default: null },
+    ],
   },
   {
     sql: 'ALTER TABLE credential_metadata ADD UNIQUE KEY ux_credentials_ordinal (ferrum_consumer_id, credential_type, edge_ordinal)',

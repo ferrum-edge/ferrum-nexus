@@ -26,6 +26,13 @@ projections in `src/config/types.rs`.
 - `consumers.getByUsername`: valid consumer pages, scanned to completion or a
   match. `null` requires a completed scan without a match; malformed pages and
   the existing scan cap throw.
+- `consumers.ensure`: direct GET by a stable derived UUID, then create on 404.
+  Only a create 409 permits legacy username reconciliation. Other errors are
+  propagated without a retry or scan. Existing ids must match the requested
+  username. The provisioner persists the returned id in its existing mapping.
+  Edge's OpenAPI exposes only offset/limit on `GET /consumers`; its parser
+  ignores unknown keys. The mock deliberately rejects unsupported filters to
+  catch accidental dependence on filtering while retaining real pagination.
 - `pluginConfigs.listByProxy`: valid plugin pages filtered by proxy. Empty
   results require valid pages; the existing 50-page scan cap is unchanged.
 - `apiSpecs.findByProxy`: 200 with typed `items`, coherent flat counters and

@@ -142,6 +142,7 @@ import type {
   StoreHealth,
   ThreadRecord,
   ThreadRepo,
+  TransactionOptions,
   UpdateInput,
   UserFilter,
   UserRecord,
@@ -320,6 +321,7 @@ function mapApiPlugin(row: Row): ApiPluginRecord {
     enabled: bool(row.enabled),
     config: json<Record<string, unknown>>(row.config_json, {}),
     trigger: json<ApiPluginTrigger | null>(row.trigger_json, null),
+    ferrum_plugin_config_id: textOrNull(row.ferrum_plugin_config_id),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -441,6 +443,7 @@ function mapNotification(row: Row): NotificationRecord {
 function mapOutbox(row: Row): EmailOutboxRecord {
   return {
     id: text(row.id),
+    generation: text(row.generation),
     to_email: text(row.to_email),
     subject: text(row.subject),
     body_html: text(row.body_html),
@@ -758,7 +761,14 @@ class SqliteStore implements NexusStore {
     return result;
   }
 
-  transaction<T>(fn: (tx: NexusStore) => Promise<T>): Promise<T> {
+  /**
+   * `options.retry` is accepted and ignored: there is one connection and every
+   * body is serialised onto it, so this adapter has no contention class to
+   * retry — no two of its transactions can deadlock or lose a write race with
+   * each other. A body still runs at most once here, whatever the caller asks
+   * for; the option exists for the pooled adapters, which do re-run bodies.
+   */
+  transaction<T>(fn: (tx: NexusStore) => Promise<T>, _options?: TransactionOptions): Promise<T> {
     if (this.ownsOpenTransaction()) {
       // This call is running inside the body of the transaction that currently
       // holds `BEGIN` — a genuine nested call, so join it. A caller that merely
@@ -1332,12 +1342,14 @@ class SqliteStore implements NexusStore {
         execute(
           this.db,
           `INSERT INTO api_plugins
-             (id, api_id, plugin_name, enabled, config_json, trigger_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             (id, api_id, plugin_name, enabled, config_json, trigger_json,
+              ferrum_plugin_config_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (api_id, plugin_name) DO UPDATE SET
              enabled = excluded.enabled,
              config_json = excluded.config_json,
              trigger_json = excluded.trigger_json,
+             ferrum_plugin_config_id = excluded.ferrum_plugin_config_id,
              updated_at = excluded.updated_at`,
           [
             meta.id,
@@ -1346,6 +1358,7 @@ class SqliteStore implements NexusStore {
             encodeBool(input.enabled),
             encodeJson(input.config) ?? '{}',
             encodeJson(input.trigger),
+            input.ferrum_plugin_config_id,
             meta.created_at,
             meta.updated_at,
           ],
@@ -2272,9 +2285,9 @@ class SqliteStore implements NexusStore {
         execute(
           this.db,
           `UPDATE email_outbox
-           SET status = 'sending', attempts = attempts + 1, updated_at = ?
+           SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?
            WHERE id IN (${ids.map(() => '?').join(', ')}) AND status = 'pending'`,
-          [nowIso(), ...ids],
+          [nowIso(), newId(), ...ids],
         );
         return queryAll(
           this.db,
@@ -2285,32 +2298,32 @@ class SqliteStore implements NexusStore {
       return claim();
     },
 
-    markSent: async (id, at) => {
+    // A settling write only lands on the exact claim it was issued for: the
+    // stale sweep can hand a row to another worker mid-delivery, and the
+    // previous holder must not overwrite the new owner's outcome.
+    markSent: async (entry, at) =>
       execute(
         this.db,
         `UPDATE email_outbox SET status = 'sent', next_attempt_at = NULL, last_error = NULL,
-           updated_at = ? WHERE id = ?`,
-        [at, id],
-      );
-    },
+           updated_at = ? WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [at, entry.id, entry.generation],
+      ) > 0,
 
-    reschedule: async (id, nextAttemptAt, lastError) => {
+    reschedule: async (entry, nextAttemptAt, lastError) =>
       execute(
         this.db,
         `UPDATE email_outbox SET status = 'pending', next_attempt_at = ?, last_error = ?,
-           updated_at = ? WHERE id = ?`,
-        [nextAttemptAt, lastError, nowIso(), id],
-      );
-    },
+           updated_at = ? WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [nextAttemptAt, lastError, nowIso(), entry.id, entry.generation],
+      ) > 0,
 
-    markFailed: async (id, lastError) => {
+    markFailed: async (entry, lastError) =>
       execute(
         this.db,
         `UPDATE email_outbox SET status = 'failed', next_attempt_at = NULL, last_error = ?,
-           updated_at = ? WHERE id = ?`,
-        [lastError, nowIso(), id],
-      );
-    },
+           updated_at = ? WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [lastError, nowIso(), entry.id, entry.generation],
+      ) > 0,
 
     releaseStale: async (olderThan) =>
       execute(
