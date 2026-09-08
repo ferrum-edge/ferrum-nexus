@@ -262,8 +262,8 @@ describe('MessageThreadPage', () => {
 
     vi.mocked(threadsApi.get).mockImplementation(async () => threadDetail(newestPage));
     vi.mocked(threadsApi.messages).mockImplementation(async (_id, query) => {
-      expect(query.before).toBeTruthy();
-      return pageMessages(all, limit, query.before);
+      expect(query?.before).toBeTruthy();
+      return pageMessages(all, limit, query?.before);
     });
 
     const { client } = renderThread();
@@ -300,7 +300,7 @@ describe('MessageThreadPage', () => {
 
     vi.mocked(threadsApi.get).mockResolvedValue(threadDetail(pageMessages(all, limit)));
     vi.mocked(threadsApi.messages).mockImplementation(async (_id, query) =>
-      pageMessages(all, limit, query.before),
+      pageMessages(all, limit, query?.before),
     );
 
     renderThread();
