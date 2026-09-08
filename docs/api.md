@@ -151,6 +151,15 @@ the contract violation (for example `invalid_utf8`); response bytes and parser
 exceptions are never included. This can occur on any endpoint calling Edge and
 is not repeated in the per-endpoint notes. See [Edge response contracts](edge-response-contracts.md).
 
+A write the database rolled back because another one touched the same rows —
+an InnoDB deadlock, a PostgreSQL serialization failure, a MongoDB write
+conflict — is retried by the server (bounded, with backoff). If it still cannot
+commit, the endpoint answers `409 CONFLICT` with
+`details: { reason: "transaction_contention", driver, attempts }`. Nothing was
+applied, and the same request may simply be sent again. Like the above, this
+can happen on any state-changing endpoint and is not repeated in the
+per-endpoint notes.
+
 `UNAUTHORIZED`, `FORBIDDEN`, `CSRF_MISMATCH`, `USER_DISABLED` and
 `VALIDATION_FAILED` can come back from any endpoint and are not repeated in the
 per-endpoint notes below.

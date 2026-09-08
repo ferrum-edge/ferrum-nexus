@@ -228,7 +228,20 @@ single portable SQL text; `sql-common.ts` absorbs the differences:
 Row decoding mirrors the SQLite adapter exactly: 0/1 becomes real booleans,
 `*_json` columns come back parsed, absent columns come back `null` (never
 `undefined`). Each adapter supplies only an executor (a pool, or a checked-out
-transaction connection) plus lifecycle; neither adds query logic.
+transaction connection), lifecycle, and its engine's classification of a
+rolled-back-for-contention error; neither adds query logic.
+
+Both engines can roll a transaction back purely because another one collided
+with it — an InnoDB deadlock victim (`ER_LOCK_DEADLOCK`), a PostgreSQL
+serialization failure (`40001`, `40P01`) — and both mean "nothing was applied,
+run it again". The shared shell does exactly that: up to five attempts with
+jittered backoff, inside the same queue slot so body ordering is unchanged,
+and a `CONFLICT` carrying `details.reason = "transaction_contention"` if the
+last attempt still cannot commit. A driver error never leaves the store. The
+price is that **a transaction body may run more than once**, so every effect it
+has must go through the transaction-scoped store or be idempotent; the policy
+and that contract live in
+[`adapters/transaction-retry.ts`](../server/src/db/adapters/transaction-retry.ts).
 
 The SQLite adapter deliberately does _not_ share these bodies — it is
 synchronous underneath, and wrapping every statement to fit a `Promise`-shaped
@@ -255,6 +268,19 @@ differences:
    it is lowercased on write, as in the SQL adapters.
 4. Partial unique indexes use `partialFilterExpression`, which lines up
    one-for-one with SQLite's `CREATE UNIQUE INDEX … WHERE …`.
+
+Transactions run through the driver's own `session.withTransaction()`, which
+re-runs the body on a `TransientTransactionError` and re-commits on an
+`UnknownTransactionCommitResult` — the retry MongoDB expects of a client, and
+the reason an ordinary concurrent write no longer turns a body into a lost
+write behind a `500`. The driver re-runs with no pause between runs, and
+MongoDB fails the loser of a contended document immediately rather than
+blocking it on a lock, so the adapter puts the SQL adapters' backoff in front
+of every re-run and bounds the loop by wall clock — 5 seconds of contention —
+rather than by an attempt count, which would be spent in microseconds while the
+transaction that won was still committing. The transaction as a whole, that
+wait included, is capped at 15 seconds, well short of the driver's two-minute
+default.
 
 **Replica set required.** `init()` probes with `hello` and refuses to start
 against a standalone `mongod` unless `NEXUS_DB_ALLOW_STANDALONE=true`, because

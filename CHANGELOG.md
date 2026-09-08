@@ -236,6 +236,23 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   it and losing its writes to the other's rollback. The remaining hazard, a
   bare root-store write issued while a body is open, is documented on the
   store contract.
+- **A transaction rolled back for contention is retried instead of losing its
+  work.** MongoDB drives transactions through the driver's
+  `session.withTransaction()`, backing off between runs and giving up after 5
+  seconds of contention (inside a 15-second cap on the transaction as a whole),
+  and the PostgreSQL and MySQL adapters re-run a body the engine rolled back
+  with a serialization failure or an InnoDB deadlock over up to 5 attempts,
+  backing off with jitter. A write conflict or a deadlock used to surface as
+  `500` with a raw driver error and the body's writes silently gone; contention
+  that outlives the budget is now `409 CONFLICT` with
+  `details.reason = "transaction_contention"`, and no driver error type reaches
+  a response. Transaction bodies are re-runnable by contract —
+  `{ retry: false }` opts one out.
+- **Two people replying to one thread at the same moment no longer deadlock on
+  MySQL.** A send now takes the thread row before inserting the message that
+  references it, so the foreign key's shared lock and the `last_message_at`
+  update cannot form a cycle; one of the two replies used to be rolled back as
+  the deadlock victim and lost behind a `500`.
 
 ### Security
 

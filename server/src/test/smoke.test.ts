@@ -62,6 +62,7 @@ import { runSettingsTransactionContract } from './settings-transaction-contract.
 import { runTeardownCancellationContract } from './teardown-cancellation-contract.js';
 import { runTeardownFencingContract } from './teardown-fencing-contract.js';
 import { runTeardownTransitionContract } from './teardown-transition-contract.js';
+import { runTransactionContentionContract } from './transaction-contention-contract.js';
 
 const SECRET = 'cross-adapter-smoke-secret-0123456789ab';
 
@@ -112,6 +113,17 @@ function candidate(
 interface SmokeTarget {
   store: NexusStore;
   teardown: () => Promise<void>;
+  /**
+   * Open a **second store over the same database** — its own pool, its own
+   * transaction queue: two Nexus instances, as a deployment has. The contention
+   * cases need one, because serialising bodies orders a single store object's
+   * transactions and says nothing about the instance next to it. The caller
+   * closes what this returns; the schema is already migrated.
+   *
+   * Absent for sqlite, which is one connection to `:memory:` and cannot have a
+   * second instance at all.
+   */
+  peer?: () => Promise<NexusStore>;
 }
 
 /**
@@ -159,6 +171,18 @@ function withDatabase(url: string, database: string): string {
 
 /* ── Targets ────────────────────────────────────────────────────────────── */
 
+/** Open a second store over an already-migrated database; see {@link SmokeTarget.peer}. */
+async function openPeer(config: ReturnType<typeof loadConfig>): Promise<NexusStore> {
+  const store = createStore(config);
+  try {
+    await store.init();
+  } catch (error) {
+    await store.close().catch(() => undefined);
+    throw error;
+  }
+  return store;
+}
+
 async function sqliteTarget(): Promise<SmokeTarget> {
   const store = createStore(testConfig('sqlite'));
   try {
@@ -180,7 +204,8 @@ async function postgresTarget(adminUrl: string): Promise<SmokeTarget> {
   await admin.query(`CREATE DATABASE "${database}"`);
   await admin.end();
 
-  const store = createStore(testConfig('postgres', withDatabase(adminUrl, database)));
+  const url = withDatabase(adminUrl, database);
+  const store = createStore(testConfig('postgres', url));
   try {
     await store.init();
     await store.migrate();
@@ -193,6 +218,7 @@ async function postgresTarget(adminUrl: string): Promise<SmokeTarget> {
 
   return {
     store,
+    peer: () => openPeer(testConfig('postgres', url)),
     teardown: async (): Promise<void> => {
       await store.close();
       const cleaner = new pg.Client({ connectionString: adminUrl });
@@ -209,7 +235,8 @@ async function mysqlTarget(adminUrl: string): Promise<SmokeTarget> {
   await admin.query(`CREATE DATABASE \`${database}\``);
   await admin.end();
 
-  const store = createStore(testConfig('mysql', withDatabase(adminUrl, database)));
+  const url = withDatabase(adminUrl, database);
+  const store = createStore(testConfig('mysql', url));
   try {
     await store.init();
     await store.migrate();
@@ -222,6 +249,7 @@ async function mysqlTarget(adminUrl: string): Promise<SmokeTarget> {
 
   return {
     store,
+    peer: () => openPeer(testConfig('mysql', url)),
     teardown: async (): Promise<void> => {
       await store.close();
       const cleaner = await mysql.createConnection(adminUrl);
@@ -233,7 +261,8 @@ async function mysqlTarget(adminUrl: string): Promise<SmokeTarget> {
 
 async function mongoTarget(baseUrl: string): Promise<SmokeTarget> {
   const database = throwawayDbName();
-  const store = createStore(testConfig('mongodb', withDatabase(baseUrl, database)));
+  const url = withDatabase(baseUrl, database);
+  const store = createStore(testConfig('mongodb', url));
   try {
     await store.init();
     await store.migrate();
@@ -246,6 +275,7 @@ async function mongoTarget(baseUrl: string): Promise<SmokeTarget> {
 
   return {
     store,
+    peer: () => openPeer(testConfig('mongodb', url)),
     teardown: async (): Promise<void> => {
       await store.close();
       const cleaner = new MongoClient(withDatabase(baseUrl, database));
@@ -271,6 +301,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
   runTeardownCancellationContract(label, makeStore);
   runTeardownFencingContract(label, makeStore);
   runTeardownTransitionContract(label, makeStore);
+  runTransactionContentionContract(label, makeStore);
   describe(`store contract — ${label}`, () => {
     let target: SmokeTarget;
     let store: NexusStore;

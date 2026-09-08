@@ -142,6 +142,7 @@ import type {
   StoreHealth,
   ThreadRecord,
   ThreadRepo,
+  TransactionOptions,
   UpdateInput,
   UserFilter,
   UserRecord,
@@ -758,7 +759,14 @@ class SqliteStore implements NexusStore {
     return result;
   }
 
-  transaction<T>(fn: (tx: NexusStore) => Promise<T>): Promise<T> {
+  /**
+   * `options.retry` is accepted and ignored: there is one connection and every
+   * body is serialised onto it, so this adapter has no contention class to
+   * retry — no two of its transactions can deadlock or lose a write race with
+   * each other. A body still runs at most once here, whatever the caller asks
+   * for; the option exists for the pooled adapters, which do re-run bodies.
+   */
+  transaction<T>(fn: (tx: NexusStore) => Promise<T>, _options?: TransactionOptions): Promise<T> {
     if (this.ownsOpenTransaction()) {
       // This call is running inside the body of the transaction that currently
       // holds `BEGIN` — a genuine nested call, so join it. A caller that merely
