@@ -140,6 +140,60 @@ export interface MockFerrumEdgeOptions {
   requireNamespaceClaim?: boolean;
 }
 
+/** Native direct-plugin CORS defaults; omission is observably different from Nexus policy. */
+export function mockCorsPreflight(
+  config: Record<string, unknown> | undefined,
+): Record<string, string> {
+  if (!config) return {};
+  const headers = config.allowed_headers ?? [
+    'Accept',
+    'Authorization',
+    'Content-Type',
+    'Origin',
+    'X-Requested-With',
+  ];
+  const methods = config.allowed_methods ?? ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
+  return {
+    'access-control-allow-headers': (headers as string[]).join(', '),
+    'access-control-allow-methods': (methods as string[]).join(', '),
+  };
+}
+
+/** Edge's independent upgrade gate requires Origin whenever the list is nonempty. */
+export function mockWebsocketAllowed(proxy: Record<string, unknown>, origin?: string): boolean {
+  const origins = proxy.allowed_ws_origins;
+  if (!Array.isArray(origins) || origins.length === 0) return true;
+  return origins.some((allowed) => String(allowed).toLowerCase() === origin?.toLowerCase());
+}
+
+/** Key partitioning cannot override Edge's authenticated-response storage admission. */
+export function mockCacheStorageAllowed(authenticated: boolean, cacheControl = ''): boolean {
+  const directives = cacheControl.toLowerCase().split(/\s*,\s*/);
+  if (directives.some((value) => /^(private|no-store|no-cache)(=|$)/.test(value))) return false;
+  return (
+    !authenticated ||
+    directives.some((value) => /^(public|must-revalidate)$|^s-maxage=\d+$/.test(value))
+  );
+}
+
+/** Model the compression/deduplication composition rule, including equal priorities. */
+export function mockPaletteCompositionError(plugins: Record<string, unknown>[]): string | null {
+  const active = plugins.filter((plugin) => plugin.enabled !== false);
+  const compressors = active.filter((plugin) => plugin.plugin_name === 'compression');
+  const deduplicators = active.filter((plugin) => plugin.plugin_name === 'request_deduplication');
+  for (const compressor of compressors) {
+    for (const deduplicator of deduplicators) {
+      if (
+        Number(compressor.priority_override ?? 4_050) >=
+        Number(deduplicator.priority_override ?? 3_010)
+      ) {
+        return 'request mutation plugin compression must run before request_deduplication';
+      }
+    }
+  }
+  return null;
+}
+
 /** A queued synthetic delay, consumed by the next matching request. */
 interface QueuedDelay {
   /** Only delay requests whose path contains this substring. */
@@ -1809,6 +1863,12 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
     }
 
+    const composition = mockPaletteCompositionError(
+      [...seen]
+        .map((id) => pluginConfigs.get(key(namespace, id)))
+        .filter((config): config is Record<string, unknown> => config !== undefined),
+    );
+    if (composition) errors.push(composition);
     return errors.length === 0 ? null : `Invalid proxy plugin associations: ${errors.join('; ')}`;
   }
 
@@ -2386,6 +2446,19 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         created_at: existing.created_at,
         updated_at: nowIso(),
       };
+      for (const proxy of proxies.values()) {
+        if (proxy.namespace !== namespace || !Array.isArray(proxy.plugins)) continue;
+        const ids = proxy.plugins.filter(isRecord).map((entry) => String(entry.plugin_config_id));
+        if (!ids.includes(id)) continue;
+        const composition = mockPaletteCompositionError(
+          ids
+            .map((configId) =>
+              configId === id ? updated : pluginConfigs.get(key(namespace, configId)),
+            )
+            .filter((config): config is Record<string, unknown> => config !== undefined),
+        );
+        if (composition) return fail(res, 400, composition);
+      }
       pluginConfigs.set(key(namespace, id), updated);
       return send(res, 200, updated);
     }

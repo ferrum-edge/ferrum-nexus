@@ -98,6 +98,10 @@ export interface CorsConfig {
   allowed_origins: string[];
   /** Whether the gateway sets `Access-Control-Allow-Credentials`. */
   allow_credentials: boolean;
+  /** Extra request headers, in addition to the headers required by authentication. */
+  allowed_headers?: string[];
+  /** Require an exact CORS origin on WebSocket upgrades, including non-browser clients. */
+  enforce_websocket_origins?: boolean;
 }
 
 /**

@@ -25,6 +25,7 @@ import {
   type SetApiPluginResponse,
 } from '@ferrum-nexus/shared';
 
+import { mockCacheStorageAllowed, mockPaletteCompositionError } from './mock-ferrum-edge.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
 function errorCode(body: string): string {
@@ -296,24 +297,101 @@ describe('provider plugin palette', () => {
       });
     });
 
-    it('response_caching: ttl, methods, statuses, keyspace and vary', async () => {
-      const response = await setPlugin('response_caching', {
-        config: {
-          ttl_seconds: 60,
-          cacheable_methods: ['GET', 'HEAD'],
-          cacheable_status_codes: [200, 404],
-          cache_key_include_query: true,
-          vary_by_headers: ['accept-language'],
-        },
+    for (const order of [
+      ['compression', 'request_deduplication'],
+      ['request_deduplication', 'compression'],
+    ]) {
+      it(`composes ${order.join(' then ')} with compatible priorities`, async () => {
+        for (const name of order) {
+          const response = await setPlugin(name, { config: {} });
+          assert.equal(response.statusCode, 200, response.body);
+        }
+        assert.equal(edgeConfig('compression').priority_override, 3_005);
+        assert.equal(edgeConfig('request_deduplication').priority_override, 4_060);
+        assert.equal(mockPaletteCompositionError(harness.edge.effectivePluginsForProxy(proxyId)), null);
       });
-      assert.equal(response.statusCode, 200);
-      assert.deepEqual(edgeConfig('response_caching').config, {
-        ttl_seconds: 60,
-        cacheable_methods: ['GET', 'HEAD'],
-        cacheable_status_codes: [200, 404],
-        cache_key_include_query: true,
-        vary_by_headers: ['accept-language'],
+    }
+
+    it('models the native composition refusal, including equal priorities', () => {
+      const compressor = { plugin_name: 'compression' };
+      const deduplicator = { plugin_name: 'request_deduplication' };
+      assert.ok(mockPaletteCompositionError([compressor, deduplicator]));
+      assert.ok(
+        mockPaletteCompositionError([{ ...compressor, priority_override: 3_010 }, deduplicator]),
+      );
+      assert.equal(
+        mockPaletteCompositionError([{ ...compressor, enabled: false }, deduplicator]),
+        null,
+      );
+    });
+
+    it('preserves a legacy compression config and orders new deduplication after it', async () => {
+      const operator = seedOperatorConfig('compression', 'operator-compression', {});
+      const response = await setPlugin('request_deduplication', { config: {} });
+      assert.equal(response.statusCode, 200, response.body);
+      assert.equal(operator.priority_override, undefined);
+      assert.equal(edgeConfig('request_deduplication').priority_override, 4_060);
+    });
+
+    it('refuses an incompatible operator override with an actionable 400', async () => {
+      const operator = seedOperatorConfig('compression', 'late-compression', {});
+      operator.priority_override = 5_000;
+      const response = await setPlugin('request_deduplication', { config: {} });
+      assert.equal(response.statusCode, 400, response.body);
+      assert.match(errorMessage(response.body), /compression.*request_deduplication/);
+      assert.match(errorMessage(response.body), /priority_override/);
+      assert.equal(operator.priority_override, 5_000);
+      assert.equal(harness.edge.pluginForProxy(proxyId, 'request_deduplication'), undefined);
+    });
+
+    it('serializes concurrent attachment of the composing pair', async () => {
+      const responses = await Promise.all([
+        setPlugin('compression', { config: {} }),
+        setPlugin('request_deduplication', { config: {} }),
+      ]);
+      for (const response of responses) assert.equal(response.statusCode, 200, response.body);
+      assert.equal(mockPaletteCompositionError(harness.edge.effectivePluginsForProxy(proxyId)), null);
+    });
+
+    it('models why a caller cache partition alone cannot enable authenticated storage', () => {
+      assert.equal(mockCacheStorageAllowed(false), true);
+      assert.equal(mockCacheStorageAllowed(true), false);
+      assert.equal(mockCacheStorageAllowed(true, 'public, max-age=60'), true);
+      assert.equal(mockCacheStorageAllowed(true, 'private, max-age=60'), false);
+    });
+
+    it('allows disabling and removing a retired response cache without touching operator configs', async () => {
+      const legacy = seedOperatorConfig('response_caching', 'legacy-cache', { ttl_seconds: 60 });
+      seedOperatorConfig('response_caching', 'operator-cache', { ttl_seconds: 900 });
+      await harness.store.apiPlugins.upsert({
+        api_id: apiId,
+        plugin_name: 'response_caching',
+        enabled: true,
+        config: { ttl_seconds: 60 },
+        trigger: null,
+        ferrum_plugin_config_id: String(legacy.id),
       });
+      const disabled = await setPlugin('response_caching', {
+        enabled: false,
+        config: { ttl_seconds: 60 },
+      });
+      assert.equal(disabled.statusCode, 200, disabled.body);
+      assert.equal(storedConfig('legacy-cache').enabled, false);
+      const removed = await harness.authed(provider, {
+        method: 'DELETE',
+        url: `/api/apis/${apiId}/plugins/response_caching`,
+      });
+      assert.equal(removed.statusCode, 200, removed.body);
+      assert.equal(harness.edge.pluginConfigs.has('nexus/legacy-cache'), false);
+      assert.equal(storedConfig('operator-cache').enabled, true);
+    });
+
+    it('retires response caching with an actionable error and no gateway write', async () => {
+      assert.equal(PROVIDER_PLUGINS.some((plugin) => plugin.name === 'response_caching'), false);
+      const response = await setPlugin('response_caching', { config: {} });
+      assert.equal(response.statusCode, 400);
+      assert.match(errorMessage(response.body), /backend Cache-Control/);
+      assert.equal(harness.edge.pluginForProxy(proxyId, 'response_caching'), undefined);
     });
 
     it('request_deduplication: idempotency header, ttl, methods and enforcement', async () => {
@@ -373,17 +451,17 @@ describe('provider plugin palette', () => {
     });
 
     it('keeps the config id across a replace, so the association is untouched', async () => {
-      await setPlugin('response_caching', { config: { ttl_seconds: 60 } });
-      const first = String(edgeConfig('response_caching').id);
+      await setPlugin('request_deduplication', { config: { ttl_seconds: 60 } });
+      const first = String(edgeConfig('request_deduplication').id);
       const associationsBefore = associatedIds(harness, proxyId);
 
-      const response = await setPlugin('response_caching', { config: { ttl_seconds: 300 } });
+      const response = await setPlugin('request_deduplication', { config: { ttl_seconds: 300 } });
       assert.equal(response.statusCode, 200);
       assert.equal(response.json<SetApiPluginResponse>().plugin.config.ttl_seconds, 300);
 
-      assert.equal(String(edgeConfig('response_caching').id), first, 'a replace reuses the id');
+      assert.equal(String(edgeConfig('request_deduplication').id), first, 'a replace reuses the id');
       assert.deepEqual(associatedIds(harness, proxyId), associationsBefore);
-      assert.deepEqual(edgeConfig('response_caching').config, { ttl_seconds: 300 });
+      assert.deepEqual(edgeConfig('request_deduplication').config, { ttl_seconds: 300 });
     });
 
     for (const enabled of [true, false]) {
@@ -600,7 +678,7 @@ describe('provider plugin palette', () => {
         400,
       );
       assert.equal(
-        (await setPlugin('response_caching', { config: { ttl_seconds: 999_999 } })).statusCode,
+        (await setPlugin('request_deduplication', { config: { ttl_seconds: 999_999 } })).statusCode,
         400,
       );
     });
@@ -622,7 +700,7 @@ describe('provider plugin palette', () => {
         400,
       );
       assert.equal(
-        (await setPlugin('response_caching', { config: { cacheable_methods: ['POST'] } }))
+        (await setPlugin('request_deduplication', { config: { applicable_methods: ['GET'] } }))
           .statusCode,
         400,
       );
@@ -780,32 +858,32 @@ describe('provider plugin palette', () => {
     });
 
     it('puts the previous config back when a replace cannot be saved', async () => {
-      await setPlugin('response_caching', { config: { ttl_seconds: 60 } });
-      const attachedId = String(edgeConfig('response_caching').id);
+      await setPlugin('request_deduplication', { config: { ttl_seconds: 60 } });
+      const attachedId = String(edgeConfig('request_deduplication').id);
 
       failNextUpsert(harness, 'database unavailable');
-      const response = await setPlugin('response_caching', { config: { ttl_seconds: 3_600 } });
+      const response = await setPlugin('request_deduplication', { config: { ttl_seconds: 3_600 } });
       assert.equal(response.statusCode, 500);
 
-      const config = edgeConfig('response_caching');
+      const config = edgeConfig('request_deduplication');
       assert.equal(config.id, attachedId);
       assert.deepEqual(config.config, { ttl_seconds: 60 }, 'the previous settings were restored');
-      assert.ok(effectiveNames(harness, proxyId).includes('response_caching'));
+      assert.ok(effectiveNames(harness, proxyId).includes('request_deduplication'));
     });
 
     it('undoes a repaired association when the store rejects a replace', async () => {
-      await setPlugin('response_caching', { config: { ttl_seconds: 60 } });
-      const id = String(edgeConfig('response_caching').id);
+      await setPlugin('request_deduplication', { config: { ttl_seconds: 60 } });
+      const id = String(edgeConfig('request_deduplication').id);
       const proxy = harness.edge.proxies.get(`nexus/${proxyId}`)!;
       proxy.plugins = associatedIds(harness, proxyId)
         .filter((value) => value !== id)
         .map((plugin_config_id) => ({ plugin_config_id }));
       const before = associatedIds(harness, proxyId);
       failNextUpsert(harness, 'database unavailable');
-      const response = await setPlugin('response_caching', { config: { ttl_seconds: 300 } });
+      const response = await setPlugin('request_deduplication', { config: { ttl_seconds: 300 } });
       assert.equal(response.statusCode, 500);
-      assert.equal(String(edgeConfig('response_caching').id), id);
-      assert.deepEqual(edgeConfig('response_caching').config, { ttl_seconds: 60 });
+      assert.equal(String(edgeConfig('request_deduplication').id), id);
+      assert.deepEqual(edgeConfig('request_deduplication').config, { ttl_seconds: 60 });
       assert.deepEqual(associatedIds(harness, proxyId), before);
     });
 
@@ -977,26 +1055,26 @@ describe('provider plugin palette', () => {
     });
 
     it('carries priority_override through a switch-off and back on', async () => {
-      await setPlugin('response_caching', { config: { ttl_seconds: 60 } });
-      const owned = await ownedConfigId('response_caching');
+      await setPlugin('request_deduplication', { config: { ttl_seconds: 60 } });
+      const owned = await ownedConfigId('request_deduplication');
       assert.ok(owned);
       storedConfig(owned).priority_override = 4_200;
 
-      await setPlugin('response_caching', { enabled: false, config: { ttl_seconds: 60 } });
+      await setPlugin('request_deduplication', { enabled: false, config: { ttl_seconds: 60 } });
       assert.equal(storedConfig(owned).priority_override, 4_200);
-      await setPlugin('response_caching', { enabled: true, config: { ttl_seconds: 60 } });
+      await setPlugin('request_deduplication', { enabled: true, config: { ttl_seconds: 60 } });
       assert.equal(storedConfig(owned).priority_override, 4_200);
       assert.equal(storedConfig(owned).enabled, true);
     });
 
     it('restores priority_override when the store rejects the save', async () => {
-      await setPlugin('response_caching', { config: { ttl_seconds: 60 } });
-      const owned = await ownedConfigId('response_caching');
+      await setPlugin('request_deduplication', { config: { ttl_seconds: 60 } });
+      const owned = await ownedConfigId('request_deduplication');
       assert.ok(owned);
       storedConfig(owned).priority_override = 4_200;
 
       failNextUpsert(harness, 'database unavailable');
-      const response = await setPlugin('response_caching', { config: { ttl_seconds: 3_600 } });
+      const response = await setPlugin('request_deduplication', { config: { ttl_seconds: 3_600 } });
       assert.equal(response.statusCode, 500);
 
       assert.equal(storedConfig(owned).priority_override, 4_200, 'the undo carries it too');

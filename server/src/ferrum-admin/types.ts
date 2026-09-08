@@ -344,8 +344,8 @@ export type EdgeCorsOrigin = string | { exact: string } | { prefix: string } | {
 /**
  * `cors` config — a closed key set with `allowed_origins` required and bounded
  * at 64 entries. `preflight_continue` and `unmatched_preflights` are mutually
- * exclusive. Nexus does not write this plugin today; the type exists so an
- * operator-managed CORS config read back off a proxy is not `unknown`.
+ * exclusive. Nexus derives preflight headers and methods from the API policy
+ * and carries operator settings when updating the live config.
  */
 export interface EdgeCorsConfig {
   /** Required, 1–64 entries. There is no implicit wildcard. */

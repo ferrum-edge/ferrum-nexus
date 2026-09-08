@@ -26,6 +26,18 @@ import {
   type TestSession,
 } from './helpers.js';
 
+import { mockCorsPreflight, mockWebsocketAllowed } from './mock-ferrum-edge.js';
+
+const CORS_HEADERS = [
+  'Accept',
+  'Authorization',
+  'Content-Type',
+  'Origin',
+  'X-Requested-With',
+  'X-API-Key',
+];
+const CORS_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
+
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
 }
@@ -348,7 +360,7 @@ describe('publishing', () => {
       assert.deepEqual(effectiveNames(harness, proxyId), ['key_auth']);
     });
 
-    it('attaches a cors plugin carrying exactly the two keys Edge needs', async () => {
+    it('attaches a cors plugin with auth-aware preflight defaults', async () => {
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -367,11 +379,12 @@ describe('publishing', () => {
       assert.ok(cors, 'expected a cors plugin config on the proxy');
       assert.equal(cors.scope, 'proxy');
       assert.equal(cors.enabled, true);
-      // Nothing beyond the two keys the portal models: every other `cors`
-      // field has a native default a provider cannot change from here.
+      // The plugin explicitly allows the headers authentication needs.
       assert.deepEqual(cors.config, {
         allowed_origins: ['https://app.example.com', 'https://admin.example.com'],
         allow_credentials: true,
+        allowed_methods: CORS_METHODS,
+        allowed_headers: CORS_HEADERS,
       });
 
       assert.deepEqual(effectiveNames(harness, proxyId), ['access_control', 'cors', 'key_auth']);
@@ -474,7 +487,7 @@ describe('publishing', () => {
       assert.deepEqual(api.allowed_methods, ['GET', 'POST'], 'the row keeps the provider’s list');
     });
 
-    it('mirrors exact CORS origins into allowed_ws_origins', async () => {
+    it('mirrors exact CORS origins into allowed_ws_origins only when opted in', async () => {
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -483,6 +496,7 @@ describe('publishing', () => {
           cors: {
             allowed_origins: ['https://app.example.com', 'https://admin.example.com:8443'],
             allow_credentials: true,
+            enforce_websocket_origins: true,
           },
         }),
       });
@@ -492,6 +506,109 @@ describe('publishing', () => {
         'https://app.example.com',
         'https://admin.example.com:8443',
       ]);
+    });
+
+    for (const authPlugin of ['key_auth', 'basic_auth', 'jwt_auth'] as const) {
+      it(`allows ${authPlugin} browser headers and only the proxy's methods`, async () => {
+        const response = await harness.authed(provider, {
+          method: 'POST',
+          url: '/api/apis',
+          payload: publishPayload({
+            slug: `cors-${authPlugin.replace('_', '-')}`,
+            auth_plugin: authPlugin,
+            allowed_methods: ['GET'],
+            cors: {
+              allowed_origins: ['https://app.example.com'],
+              allowed_headers: ['X-Tenant'],
+            },
+          }),
+        });
+        assert.equal(response.statusCode, 201, response.body);
+        const api = response.json<PublishApiResponse>().api;
+        const proxyId = String(api.ferrum_proxy_id);
+        const plugin = harness.edge.pluginForProxy(proxyId, 'cors');
+        const preflight = mockCorsPreflight(plugin?.config as Record<string, unknown>);
+        assert.match(
+          preflight['access-control-allow-headers'] ?? '',
+          authPlugin === 'key_auth' ? /X-API-Key/ : /Authorization/,
+        );
+        assert.match(preflight['access-control-allow-headers'] ?? '', /X-Tenant/);
+        assert.equal(preflight['access-control-allow-methods'], 'GET, OPTIONS');
+        assert.equal(mockWebsocketAllowed(storedProxy(harness, proxyId)), true);
+
+        // A method-only PATCH must also rebuild the CORS advertisement.
+        const changed = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${api.id}`,
+          payload: { allowed_methods: ['HEAD'] },
+        });
+        assert.equal(changed.statusCode, 200, changed.body);
+        const updated = harness.edge.pluginForProxy(proxyId, 'cors');
+        assert.equal(
+          mockCorsPreflight(updated?.config as Record<string, unknown>)['access-control-allow-methods'],
+          'HEAD, OPTIONS',
+        );
+      });
+    }
+
+    it('models native CORS defaults and absence independently of Nexus derivation', () => {
+      assert.doesNotMatch(mockCorsPreflight({})['access-control-allow-headers'] ?? '', /X-API-Key/);
+      assert.equal(mockCorsPreflight({})['access-control-allow-methods'], CORS_METHODS.join(', '));
+      assert.deepEqual(mockCorsPreflight(undefined), {});
+    });
+
+    it('makes the WebSocket origin gate an explicit opt-in and supports clearing it', async () => {
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'ws-opt-in',
+          cors: { allowed_origins: ['https://app.example.com'] },
+        }),
+      });
+      assert.equal(response.statusCode, 201, response.body);
+      const api = response.json<PublishApiResponse>().api;
+      const proxyId = String(api.ferrum_proxy_id);
+      for (const enforce of [false, true, false]) {
+        const saved = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${api.id}`,
+          payload: {
+            cors: {
+              allowed_origins: ['https://app.example.com'],
+              enforce_websocket_origins: enforce,
+            },
+          },
+        });
+        assert.equal(saved.statusCode, 200, saved.body);
+        const proxy = storedProxy(harness, proxyId);
+        assert.equal(mockWebsocketAllowed(proxy), !enforce);
+        assert.equal(mockWebsocketAllowed(proxy, 'https://evil.example.com'), !enforce);
+        assert.equal(mockWebsocketAllowed(proxy, 'https://APP.example.com'), true);
+      }
+      const cleared = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${api.id}`,
+        payload: { cors: null },
+      });
+      assert.equal(cleared.statusCode, 200, cleared.body);
+      assert.equal(mockWebsocketAllowed(storedProxy(harness, proxyId)), true);
+      assert.equal(harness.edge.pluginForProxy(proxyId, 'cors'), undefined);
+    });
+
+    it('rejects invalid custom headers and wildcard WebSocket enforcement', async () => {
+      for (const cors of [
+        { allowed_origins: ['*'], enforce_websocket_origins: true },
+        { allowed_origins: ['https://app.example.com'], allowed_headers: ['bad header'] },
+        { allowed_origins: ['https://app.example.com'], enforce_websocket_origins: 'true' },
+      ]) {
+        const response = await harness.authed(provider, {
+          method: 'POST',
+          url: '/api/apis',
+          payload: publishPayload({ slug: 'invalid-cors', cors }),
+        });
+        assert.equal(response.statusCode, 400, response.body);
+      }
     });
 
     it('leaves the WS origin check off for a wildcard CORS policy', async () => {
@@ -1150,6 +1267,8 @@ describe('publishing', () => {
       assert.deepEqual(harness.edge.pluginForProxy(proxyId, 'cors')?.config, {
         allowed_origins: ['https://app.example.com'],
         allow_credentials: false,
+        allowed_methods: CORS_METHODS,
+        allowed_headers: CORS_HEADERS,
       });
       assert.deepEqual(effectiveNames(harness, proxyId), ['access_control', 'cors', 'key_auth']);
       const corsId = String(harness.edge.pluginForProxy(proxyId, 'cors')?.id);
@@ -1169,6 +1288,8 @@ describe('publishing', () => {
       assert.deepEqual(harness.edge.pluginForProxy(proxyId, 'cors')?.config, {
         allowed_origins: ['https://app.example.com', 'https://ops.example.com'],
         allow_credentials: true,
+        allowed_methods: CORS_METHODS,
+        allowed_headers: CORS_HEADERS,
       });
       // Rewritten in place: same id, same association, one config.
       assert.equal(String(harness.edge.pluginForProxy(proxyId, 'cors')?.id), corsId);
@@ -1260,6 +1381,7 @@ describe('publishing', () => {
           allow_credentials: false,
           allowed_headers: ['x-tenant'],
           max_age: 600,
+          allowed_methods: CORS_METHODS,
         });
         assert.deepEqual(harness.edge.pluginForProxy(proxyId, 'rate_limiting')?.config, {
           limit_by: 'consumer',
@@ -1336,8 +1458,9 @@ describe('publishing', () => {
         assert.deepEqual(harness.edge.pluginForProxy(proxyId, 'cors')?.config, {
           allowed_origins: ['https://ops.example.com'],
           allow_credentials: true,
-          allowed_headers: ['x-tenant'],
+          allowed_headers: [...CORS_HEADERS, 'x-tenant'],
           max_age: 600,
+          allowed_methods: CORS_METHODS,
         });
 
         const rows = (await harness.auditRows('api.update')).filter(
@@ -1494,6 +1617,54 @@ describe('publishing', () => {
       assert.equal((await harness.auditRows('api.update')).length, auditsBeforeEnabledReplay);
     });
 
+    it('reconciles auth-only CORS changes and removes only portal-owned extra headers', async () => {
+      const configured = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: {
+          auth_plugin: 'basic_auth',
+          cors: {
+            allowed_origins: ['https://app.example.com'],
+            allowed_headers: ['X-Portal'],
+          },
+        },
+      });
+      assert.equal(configured.statusCode, 200, configured.body);
+      const plugin = harness.edge.pluginForProxy(proxyId, 'cors');
+      assert.ok(plugin);
+      const settings = plugin.config as Record<string, unknown>;
+      settings.allowed_headers = [...(settings.allowed_headers as string[]), 'X-Operator'];
+      settings.max_age = 600;
+      plugin.priority_override = 90;
+
+      const changed = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { auth_plugin: 'key_auth' },
+      });
+      assert.equal(changed.statusCode, 200, changed.body);
+      const authConfig = harness.edge.pluginForProxy(proxyId, 'cors')?.config;
+      assert.match(
+        mockCorsPreflight(authConfig as Record<string, unknown>)['access-control-allow-headers'] ?? '',
+        /X-API-Key/,
+      );
+
+      const cleared = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: {
+          cors: { allowed_origins: ['https://app.example.com'], allowed_headers: [] },
+        },
+      });
+      assert.equal(cleared.statusCode, 200, cleared.body);
+      const live = harness.edge.pluginForProxy(proxyId, 'cors');
+      const headers = mockCorsPreflight(live?.config as Record<string, unknown>);
+      assert.match(headers['access-control-allow-headers'] ?? '', /X-Operator/);
+      assert.doesNotMatch(headers['access-control-allow-headers'] ?? '', /X-Portal/);
+      assert.equal((live?.config as Record<string, unknown>).max_age, 600);
+      assert.equal(live?.priority_override, 90);
+    });
+
     it('re-derives OPTIONS and the WS origins when CORS arrives later and leaves', async () => {
       await harness.authed(provider, {
         method: 'PATCH',
@@ -1510,7 +1681,11 @@ describe('publishing', () => {
         method: 'PATCH',
         url: `/api/apis/${apiId}`,
         payload: {
-          cors: { allowed_origins: ['https://app.example.com'], allow_credentials: false },
+          cors: {
+            allowed_origins: ['https://app.example.com'],
+            allow_credentials: false,
+            enforce_websocket_origins: true,
+          },
         },
       });
       assert.equal(withCors.statusCode, 200, withCors.body);
