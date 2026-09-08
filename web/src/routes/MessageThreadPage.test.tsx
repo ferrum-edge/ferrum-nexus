@@ -203,11 +203,17 @@ describe('thread page cursors', () => {
       headCursor: 'm16',
       headGapCursor: 'm16',
       olderCursor: null,
+      olderPagingStarted: false,
     });
   });
 
   it('clears a head gap once an older fetch overlaps held messages', () => {
-    const cursors = { headCursor: 'm16', headGapCursor: 'm16', olderCursor: null };
+    const cursors = {
+      headCursor: 'm16',
+      headGapCursor: 'm16',
+      olderCursor: null,
+      olderPagingStarted: false,
+    };
     const held = [message('m8', at(8)), message('m9', at(9)), message('m16', at(16))];
     const page = {
       items: [message('m11', at(11)), message('m12', at(12)), message('m13', at(13))],
@@ -218,6 +224,7 @@ describe('thread page cursors', () => {
       headCursor: null,
       headGapCursor: null,
       olderCursor: 'm11',
+      olderPagingStarted: true,
     });
   });
 });

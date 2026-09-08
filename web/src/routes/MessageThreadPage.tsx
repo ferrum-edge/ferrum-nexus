@@ -39,15 +39,20 @@ export interface ThreadPageCursors {
   headGapCursor: string | null;
   /** Cursor from windows the reader has already paged backwards through. */
   olderCursor: string | null;
+  /** Once the reader pages backwards, the head cursor is retired for loading. */
+  olderPagingStarted: boolean;
 }
 
 export function initialThreadPageCursors(): ThreadPageCursors {
-  return { headCursor: null, headGapCursor: null, olderCursor: null };
+  return { headCursor: null, headGapCursor: null, olderCursor: null, olderPagingStarted: false };
 }
 
 /** Pick the cursor the load-older button should use. */
 export function loadOlderCursor(cursors: ThreadPageCursors): string | null {
-  return cursors.headGapCursor ?? cursors.olderCursor ?? cursors.headCursor;
+  if (cursors.headGapCursor) return cursors.headGapCursor;
+  if (cursors.olderCursor) return cursors.olderCursor;
+  if (cursors.olderPagingStarted) return null;
+  return cursors.headCursor;
 }
 
 /**
@@ -69,10 +74,11 @@ export function adoptNewestPageCursors(
     page.items.some((message) => heldBeforeMerge.some((held) => held.id === message.id));
 
   return {
-    headCursor: page.next_before,
+    headCursor: cursors.olderPagingStarted ? cursors.headCursor : page.next_before,
     headGapCursor:
       !overlaps && heldBeforeMerge.length > 0 && page.items.length > 0 ? page.next_before : null,
     olderCursor: cursors.olderCursor,
+    olderPagingStarted: cursors.olderPagingStarted,
   };
 }
 
@@ -129,6 +135,7 @@ export function adoptOlderPageCursors(
       ...cursors,
       headCursor: null,
       olderCursor: page.next_before,
+      olderPagingStarted: true,
     };
   }
 
@@ -137,10 +144,11 @@ export function adoptOlderPageCursors(
       headCursor: null,
       headGapCursor: null,
       olderCursor: page.next_before,
+      olderPagingStarted: true,
     };
   }
 
-  return { ...cursors, headGapCursor: page.next_before };
+  return { ...cursors, headGapCursor: page.next_before, olderPagingStarted: true };
 }
 
 /** One conversation with its messages and a reply composer. */
