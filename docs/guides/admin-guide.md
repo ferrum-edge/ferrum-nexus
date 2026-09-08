@@ -395,7 +395,15 @@ not at all — there is no state in which some of your audience was mailed and
 nothing recorded it. A failure answers `500` with
 `details: { batch_id, recipients, enqueued: 0 }`, and retrying with that
 `batch_id` as the campaign key is safe whether the failure was real or only a
-lost response.
+lost response. If the portal was simply too busy you get `409` instead, with the
+same `batch_id` — that one is only ever "try again".
+
+That is also why **one campaign has a recipient ceiling**:
+`NEXUS_MAX_MASS_EMAIL_RECIPIENTS`, 5 000 by default. Everything the campaign
+queues has to fit in one transaction, and on a MongoDB-backed portal a long body
+brings the real limit down sharply — roughly 800 recipients at 10 KB of message.
+An audience past the ceiling is refused before anything is queued, with a message
+naming the limit, the audience size and the setting for your operator to raise.
 
 ### Idempotency
 
@@ -568,6 +576,15 @@ the audience size and the setting to raise. Broadcast messages do **not** count
 against your own daily messaging allowance — one announcement writes a row per
 account, and charging those to you used to block your ordinary messages, support
 follow-ups included, for the rest of the day.
+
+The response says how far it got: `delivered` is the number of accounts whose
+inbox actually received it, and `failed` the number it could not reach. A single
+unreachable account never stops the rest of an emergency announcement, so those
+two are how a partial send tells you. A daily slot is spent the moment you
+confirm, whether the send then succeeds or not — the audit trail records the
+attempt (`god.broadcast`) separately from its outcome
+(`god.broadcast_complete`). An audience that matches nobody is refused outright
+and costs you nothing.
 
 _Use for_ incident notices, maintenance windows and forced credential
 rotations — anything people must not miss. For routine announcements, prefer

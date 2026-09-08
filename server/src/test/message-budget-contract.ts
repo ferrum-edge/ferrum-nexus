@@ -15,14 +15,17 @@
  * count-then-insert runs inside a per-sender lease held in the `edge_leases`
  * table, so it is one step across processes too.
  *
- * **Two apps over one store is what "two instances" means here**, as it does in
- * the password-change and teardown contracts: each `buildTestApp` composes its
- * own keyed serializer and therefore contends for the lease under its own
- * owner. A genuinely separate second store is not available on every adapter —
- * a second SQLite `:memory:` store is a different database, not the same one —
- * and the property under test is about the two lease owners, not the two pools.
- * On the pooled adapters the two transactions really do overlap, which is what
- * makes the boundary case able to fail if the lease is removed.
+ * **Two instances means two store objects**, and here that is load-bearing
+ * rather than a formality. Every adapter drains transaction bodies through a
+ * promise queue that belongs to one store object — `sql-repos.ts` for
+ * PostgreSQL and MySQL, the Mongo adapter's own, SQLite's single-connection
+ * mediator — so two apps sharing one store object are ordered by that queue
+ * whatever the lease does, and the contention case would pass with the lease
+ * deleted. The second app is therefore built over the {@link BudgetTarget.peer}
+ * store: a second pool against the same database, with a transaction queue of
+ * its own. `peer` is absent for SQLite, whose `:memory:` database cannot have a
+ * second connection at all, and the contention case is skipped there rather
+ * than run in a shape that cannot fail.
  */
 
 import assert from 'node:assert/strict';
@@ -43,15 +46,29 @@ const QUOTA = '3';
 /** Environment both instances are built with, so neither is the lenient one. */
 const ENV = { NEXUS_MAX_MESSAGES_PER_USER_PER_DAY: QUOTA };
 
+/** What a target must offer for this contract to run. */
+export interface BudgetTarget {
+  store: NexusStore;
+  teardown: () => Promise<void>;
+  /**
+   * A second store over the same database — two pools, two transaction queues,
+   * the shape a multi-instance deployment has. Absent when there cannot be one.
+   */
+  peer?: () => Promise<NexusStore>;
+}
+
 /** The real messaging routes, on two instances over one database. */
 export function runMessageBudgetContract(
   label: string,
-  makeStore: () => Promise<{ store: NexusStore; teardown: () => Promise<void> }>,
+  makeStore: () => Promise<BudgetTarget>,
 ): void {
   describe(`message budget contract — ${label}`, () => {
-    let target: Awaited<ReturnType<typeof makeStore>>;
+    let target: BudgetTarget;
     let harness: TestApp;
+    /** The second instance. Over `peer` when the adapter has one. */
     let other: TestApp;
+    /** The peer store, when one was opened — closed after both apps. */
+    let peer: NexusStore | null = null;
 
     before(async () => {
       target = await makeStore();
@@ -60,8 +77,9 @@ export function runMessageBudgetContract(
         env: ENV,
         deps: { startOutboxWorker: false },
       });
+      peer = target.peer ? await target.peer() : null;
       other = await buildTestApp({
-        store: target.store,
+        store: peer ?? target.store,
         edge: harness.edge,
         env: ENV,
         deps: { startOutboxWorker: false },
@@ -72,6 +90,7 @@ export function runMessageBudgetContract(
     after(async () => {
       await other?.close();
       await harness?.close();
+      if (peer) await peer.close();
       await target?.teardown();
     });
 
@@ -125,7 +144,12 @@ export function runMessageBudgetContract(
       );
     });
 
-    it('accepts exactly one of two instances contending for the last slot', async () => {
+    it('accepts exactly one of two instances contending for the last slot', async (t) => {
+      // Without a second store the two apps share one transaction queue, which
+      // orders the requests whatever the lease does — the case would pass with
+      // `spendBudget` deleted, so it is skipped rather than faked.
+      if (!peer) return t.skip('one connection: two transaction queues cannot contend');
+
       const sender = await harness.registerUser();
       // Spend two of three through one instance, so both requests below see
       // `used = quota - 1` if they are allowed to read it independently.
@@ -150,7 +174,7 @@ export function runMessageBudgetContract(
       );
     });
 
-    it('lets a different account through while one is contended', async () => {
+    it('keys the budget per sender, so an exhausted account blocks only itself', async () => {
       const spender = await harness.registerUser();
       const bystander = await harness.registerUser();
       for (const subject of ['One', 'Two', 'Three']) {

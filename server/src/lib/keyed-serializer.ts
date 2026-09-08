@@ -106,10 +106,11 @@ export function messageBudgetLockKey(senderUserId: string): string {
  * The per-administrator key a god-mode **broadcast** runs under.
  *
  * The per-day broadcast ceiling counts the actor's own `god.broadcast` audit
- * rows, and the row that makes the current broadcast countable is written at
- * the end of it — so without a key two instances would each count the same
- * history and both proceed. Holding it across the whole fan-out is also what
- * makes the count and the row it produces one step.
+ * rows, and the row that makes the current attempt countable is written inside
+ * the same section that did the counting — so without a key two instances would
+ * each count the same history and both proceed. Holding it across the whole
+ * fan-out is also what keeps a second broadcast from starting while the first
+ * one is still writing rows the count cannot yet see.
  *
  * Per administrator rather than portal-wide: the bound is per actor, and one
  * super admin's announcement has no reason to wait for another's.

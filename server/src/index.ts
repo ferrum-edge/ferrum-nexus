@@ -173,6 +173,16 @@ export interface BuildServerDeps {
   startTeardownWorker?: boolean;
   /** Serve the built SPA. Defaults to "yes when the dist directory exists". */
   serveStatic?: boolean;
+  /**
+   * How long an outbound send waits for the per-account key another instance is
+   * holding, in milliseconds. Defaults to the serializer's own
+   * `LEASE_WAIT_MS` (30 s).
+   *
+   * A seam for the tests that assert the *timeout* behaviour — the `409` a
+   * caller gets when the wait runs out — which are otherwise unreachable
+   * without waiting half a minute per case. Nothing in production sets it.
+   */
+  sendLockWaitMs?: number;
 }
 
 /** Rate limit applied to `/api/auth/*` when `config.rateLimitEnabled` is true. */
@@ -274,6 +284,7 @@ export async function buildServer(
   const sendLocks = createKeyedSerializer({
     leases: deps.store.leases,
     conflictMessage: SEND_LOCK_CONFLICT_MESSAGE,
+    ...(deps.sendLockWaitMs === undefined ? {} : { waitMs: deps.sendLockWaitMs }),
   });
 
   const audit = createAuditService(deps.store);
@@ -325,7 +336,7 @@ export async function buildServer(
     locks: sendLocks,
     log: warn,
   });
-  const massEmail = createMassEmailService({ store: deps.store, email, audit });
+  const massEmail = createMassEmailService({ config, store: deps.store, email, audit });
 
   // ── Gateway workflow ────────────────────────────────────────────────────
   // One consumer provisioner is shared by credentials and access so both

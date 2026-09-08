@@ -24,15 +24,24 @@
  * Rendering happens **before** the transaction opens: it reads the template and
  * the branding per recipient and does the string work, none of which needs to
  * be inside the atomic section. What the transaction holds is the inserts.
+ *
+ * **And the audience is bounded**, by `NEXUS_MAX_MASS_EMAIL_RECIPIENTS`,
+ * checked before any of that. Atomicity is not free: the inserts are what one
+ * transaction holds, and transaction bodies are serialised per store object, so
+ * an unbounded fan-out is also an unbounded stall for every other write on the
+ * instance. On MongoDB it is a hard wall rather than a stall — 16 MB per
+ * transaction, counted against each row's whole rendered HTML and text. The
+ * ceiling names itself in the refusal, exactly as the broadcast ceilings do.
  */
 
 import type { MassEmailAudience, MassEmailRequest, MassEmailResponse } from '@ferrum-nexus/shared';
 
 import { AuditAction, type AuditActor, type AuditService } from '../audit/service.js';
+import type { NexusConfig } from '../config/index.js';
 import type { EnqueueEmailInput, NexusStore, UserFilter, UserRecord } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
 import { MASS_RAW_HTML_VARS } from '../email/templates.js';
-import { NexusError, validationFailed } from '../lib/errors.js';
+import { NexusError, isNexusError, quotaExceeded, validationFailed } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
 
 /** Mass-email operations. */
@@ -49,6 +58,7 @@ export interface MassEmailService {
 
 /** Dependencies of {@link createMassEmailService}. */
 export interface MassEmailServiceDeps {
+  config: NexusConfig;
   store: NexusStore;
   email: EmailService;
   audit: AuditService;
@@ -56,7 +66,7 @@ export interface MassEmailServiceDeps {
 
 /** Build the mass-email service. */
 export function createMassEmailService(deps: MassEmailServiceDeps): MassEmailService {
-  const { store, email, audit } = deps;
+  const { config, store, email, audit } = deps;
 
   async function resolveAudience(audience: MassEmailAudience): Promise<UserRecord[]> {
     switch (audience.scope) {
@@ -91,6 +101,22 @@ export function createMassEmailService(deps: MassEmailServiceDeps): MassEmailSer
       }
 
       const recipients = await resolveAudience(request.audience);
+      // Before the rendering and before the transaction: an audience too large
+      // to queue atomically must cost nothing at all, not a full render pass
+      // and a rolled-back fan-out. Same refusal shape as the broadcast
+      // ceilings — the limit, what was asked for, and the variable to raise.
+      const recipientLimit = config.maxMassEmailRecipients;
+      if (recipientLimit > 0 && recipients.length > recipientLimit) {
+        throw quotaExceeded(
+          `This campaign addresses ${recipients.length} recipients, more than the maximum ` +
+            `of ${recipientLimit}. Narrow the audience, or ask an operator to raise the limit.`,
+          {
+            limit: recipientLimit,
+            recipients: recipients.length,
+            setting: 'NEXUS_MAX_MASS_EMAIL_RECIPIENTS',
+          },
+        );
+      }
       const batch = request.idempotency_key ?? newId();
 
       // Rendered outside the transaction: one template read, one branding read
@@ -142,6 +168,22 @@ export function createMassEmailService(deps: MassEmailServiceDeps): MassEmailSer
         });
         return { enqueued, recipients: recipients.length, batch_id: batch };
       } catch (cause) {
+        // Contention that outlived the pooled adapters' retry budget is a
+        // `CONFLICT`, not an outbox failure: the campaign is still queueable and
+        // the caller should retry it, which is a different instruction from
+        // "this send is broken". Keep the code — and therefore the `409` — and
+        // only add the batch id the retry needs.
+        if (isNexusError(cause) && cause.code === 'CONFLICT') {
+          throw new NexusError(
+            cause.code,
+            cause.message,
+            {
+              ...(typeof cause.details === 'object' && cause.details !== null ? cause.details : {}),
+              batch_id: batch,
+            },
+            { cause },
+          );
+        }
         // Nothing was queued and nothing was audited — but the admin still
         // needs the batch id, because a *lost response* to a campaign that did
         // commit is indistinguishable from this one at the browser, and reusing

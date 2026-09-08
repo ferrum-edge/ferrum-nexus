@@ -961,7 +961,20 @@ state in which part of your audience was mailed and nothing recorded it.
 lost response to a campaign that did commit looks exactly like one that did not.
 Either way, retry with that value as `idempotency_key` and nobody is mailed
 twice. A failure is `500 OUTBOX_FAILURE` with
-`details: { batch_id, recipients, enqueued: 0 }`.
+`details: { batch_id, recipients, enqueued: 0 }`. Contention that outlives the
+adapter's retry budget is `409 CONFLICT` instead, with `batch_id` in `details`
+and nothing queued — retry it with that key.
+
+**The audience is capped** by `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` (default 5 000,
+`0` disables), checked before anything is rendered or written, because the
+fan-out is what one transaction has to hold. Exceeding it is
+`429 QUOTA_EXCEEDED` with
+`details: { limit, recipients, setting: "NEXUS_MAX_MASS_EMAIL_RECIPIENTS" }`.
+
+Errors: `400 VALIDATION_FAILED` (empty subject/body, or an empty explicit
+recipient list), `429 QUOTA_EXCEEDED` (audience past the ceiling),
+`409 CONFLICT` (database contention — retry with the same `idempotency_key`),
+`500 OUTBOX_FAILURE` (nothing queued; retry with the same key).
 
 ### `GET /api/admin/audit-logs`
 
@@ -1051,7 +1064,7 @@ only newly created outbox rows in `emails_enqueued`. Notifications and inbox
 messages are still created for each call; this key deduplicates email only.
 
 ```json
-{ "notified": 251, "emails_enqueued": 251, "threads_created": 88 }
+{ "notified": 251, "emails_enqueued": 251, "threads_created": 88, "delivered": 251, "failed": 0 }
 ```
 
 Sends a bell notification to every recipient, drops the message into each
@@ -1072,6 +1085,23 @@ The message rows a broadcast writes carry `broadcast: true` and are deliberately
 be: one broadcast to a portal larger than that budget refused every ordinary
 message that administrator sent for the next 24 hours, while further broadcasts,
 checked against nothing, stayed available.
+
+`delivered` counts the recipients whose inbox message was actually written and
+`failed` the ones the fan-out could not reach. A per-recipient failure is logged
+and skipped rather than fatal — one bad account must not stop an emergency
+announcement — so these two are how a partial broadcast says so; the same pair
+lands in the audit trail.
+
+**The trail is two rows.** `god.broadcast` is written *before* the first
+recipient is touched, with `details.phase: "started"` and the audience size: it
+is what `NEXUS_MAX_BROADCASTS_PER_DAY` counts, so an attempt is charged whether
+or not it goes on to succeed. `god.broadcast_complete` follows the fan-out with
+`delivered`, `failed` and the notification/thread/email counts.
+
+Errors: `400 VALIDATION_FAILED` (empty subject/body, or an audience that matches
+nobody), `429 QUOTA_EXCEEDED` (either ceiling — `details` names the limit, the
+audience size and the setting), `409 CONFLICT` (another send from this account
+has held the per-administrator section for more than 30 seconds — retry).
 
 ---
 

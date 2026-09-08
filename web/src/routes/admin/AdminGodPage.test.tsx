@@ -38,7 +38,9 @@ vi.mock('../../hooks/useGodMode', () => ({
   useGodDisableUser: () => ({ mutate: disable, isPending: false }),
   useGodBroadcast: () => ({ mutate: sendBroadcast, isPending: false }),
 }));
-vi.mock('../../stores/toast', () => ({ useToast: () => ({ success: vi.fn() }) }));
+vi.mock('../../stores/toast', () => ({
+  useToast: () => ({ success: vi.fn(), error: vi.fn() }),
+}));
 vi.mock('../../components/layout/RoleGuard', () => ({
   RoleGuard: ({ children }: { children: ReactNode }) => children,
 }));
@@ -107,7 +109,13 @@ describe('broadcast email campaign identity', () => {
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Broadcast' }));
     expect(sendBroadcast.mock.calls[1]![0].idempotency_key).toBe(firstKey);
     act(() => {
-      sendBroadcast.mock.calls[1]![1].onSuccess({ notified: 1 });
+      sendBroadcast.mock.calls[1]![1].onSuccess({
+        notified: 1,
+        emails_enqueued: 0,
+        threads_created: 1,
+        delivered: 1,
+        failed: 0,
+      });
     });
     compose();
     expect(sendBroadcast.mock.calls[2]![0].idempotency_key).not.toBe(firstKey);

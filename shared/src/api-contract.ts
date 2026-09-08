@@ -1102,6 +1102,17 @@ export interface GodBroadcastResponse {
   notified: number;
   emails_enqueued: number;
   threads_created: number;
+  /**
+   * Recipients whose platform-inbox message was actually written.
+   *
+   * Not the audience size: per-recipient failures are logged and skipped so one
+   * bad account cannot stop an emergency announcement, which used to mean a
+   * broadcast that reached nobody reported exactly what one that reached
+   * everybody did.
+   */
+  delivered: number;
+  /** Recipients the fan-out could not deliver to. `0` on a clean broadcast. */
+  failed: number;
 }
 
 /* ── Public branding ────────────────────────────────────────────────────── */

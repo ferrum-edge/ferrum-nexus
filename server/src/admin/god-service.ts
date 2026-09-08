@@ -34,6 +34,14 @@
  * single row is written and both naming the setting an operator would raise:
  * `NEXUS_MAX_BROADCAST_RECIPIENTS` on one announcement's audience, and
  * `NEXUS_MAX_BROADCASTS_PER_DAY` on how many an administrator may send.
+ *
+ * The second of those counts `god.broadcast` audit rows, which is why that row
+ * is written **before** the fan-out rather than after it: a broadcast that
+ * reached the whole portal and then failed to record itself was uncharged
+ * against the ceiling and missing from the trail, and the `500` its caller got
+ * invited a retry that announced everything twice. `god.broadcast` is therefore
+ * one row per *attempt*, and `god.broadcast_complete` reports what the attempt
+ * achieved — `delivered` and `failed` per recipient, not the audience size.
  */
 
 import { createHash } from 'node:crypto';
@@ -136,8 +144,9 @@ export interface GodServiceDeps {
    * The serializer `broadcast` takes its per-actor key from — the same one
    * messaging spends the daily budget under, so a refused send says what is
    * actually in flight. It is what makes the per-day broadcast ceiling hold
-   * across instances: the audit row that makes a broadcast countable is written
-   * at the end of it. Defaults to the plain in-process ordering.
+   * across instances: the count and the `god.broadcast` row that makes this
+   * attempt countable are one step only inside it. Defaults to the plain
+   * in-process ordering.
    */
   broadcastLocks?: KeyedSerializer;
   log?: (obj: Record<string, unknown>, message: string) => void;
@@ -168,9 +177,11 @@ export function createGodService(deps: GodServiceDeps): GodService {
    * broadcast has to say how to send it anyway.
    *
    * The per-day count reads the actor's own `god.broadcast` audit rows rather
-   * than a counter of its own: the audit trail already records every broadcast
-   * exactly once, and an operator reading the number can see precisely which
-   * rows it refers to.
+   * than a counter of its own: the trail already records every broadcast
+   * *attempt* exactly once — that row is written before the first recipient is
+   * touched, and the delivery outcome is a separate `god.broadcast_complete`
+   * row — so an operator reading the number can see precisely which rows it
+   * refers to.
    */
   async function assertBroadcastWithinBounds(actorId: Uuid, audience: number): Promise<void> {
     const recipientLimit = deps.config.maxBroadcastRecipients;
@@ -421,15 +432,50 @@ export function createGodService(deps: GodServiceDeps): GodService {
       const recipients = (await massEmail.resolveAudience(input.audience)).filter(
         (recipient) => recipient.id !== actor.id,
       );
+      // An audience that resolves to nobody is a mistake, not a broadcast: it
+      // would pass both ceilings, write nothing, and still burn one of the
+      // administrator's twenty daily slots on a countable row describing an
+      // announcement nobody received. `resolveAudience` already refuses an
+      // empty explicit list; this is the same refusal for a filter or a
+      // `scope: 'all'` that matched only the sender.
+      if (recipients.length === 0) {
+        throw validationFailed(
+          'That audience matches nobody — every account it selects is inactive, or the only ' +
+            'match is you, and a broadcast never reaches its own sender',
+        );
+      }
 
       // Both ceilings and the whole fan-out run under one per-actor key. The
-      // per-day count reads the actor's own `god.broadcast` rows and the row
-      // that makes *this* broadcast countable is written at the end of it, so
-      // without the key two instances would each count the same history and
-      // both proceed. The key is taken outside every transaction — the lease
+      // per-day count reads the actor's own `god.broadcast` rows, so without
+      // the key two instances would each count the same history and both
+      // proceed. The key is taken outside every transaction — the lease
       // repository issues statements of its own.
       return broadcastLocks(broadcastLockKey(actor.id), async (): Promise<GodBroadcastResponse> => {
         await assertBroadcastWithinBounds(actor.id, recipients.length);
+
+        // The countable row goes in **before** the first recipient side effect,
+        // because it is what `assertBroadcastWithinBounds` counts. Written
+        // afterwards, an audit failure meant the announcement had already
+        // reached the whole portal while the attempt was uncharged against the
+        // daily ceiling and absent from the trail — the caller's `500` then
+        // invited a retry that broadcast a second time. One row per *attempt*,
+        // whatever the attempt goes on to do; the outcome is a second action.
+        await store.transaction(async (tx) => {
+          const scoped = audit.forStore(tx);
+          await scoped.record(
+            { id: actor.id, role: actor.role },
+            AuditAction.GOD_BROADCAST,
+            { type: 'broadcast', id: batch },
+            {
+              reason: subject,
+              audience_scope: input.audience.scope,
+              recipients: recipients.length,
+              send_email: input.send_email === true,
+              phase: 'started',
+            },
+            ip,
+          );
+        });
 
         const notified = (
           await notifications.notifyMany(
@@ -446,6 +492,12 @@ export function createGodService(deps: GodServiceDeps): GodService {
         // and any admin can follow up in the same thread.
         let threads = 0;
         let emails = 0;
+        // Counted, not merely logged. `recipients.length` is the audience, and
+        // reporting it as the delivery made a broadcast that reached nobody
+        // indistinguishable from one that reached everybody — in the response
+        // and in the audit row alike.
+        let delivered = 0;
+        let failed = 0;
         for (const recipient of recipients) {
           try {
             const existing = await store.threads.findExisting(recipient.id, null, null);
@@ -472,6 +524,10 @@ export function createGodService(deps: GodServiceDeps): GodService {
             });
             await store.threads.touchLastMessage(thread.id, nowIso());
             if (!existing) threads += 1;
+            // The inbox message is what "delivered" means: the notification is
+            // dismissable and the mail is optional, but the thread row is what
+            // the recipient can still read tomorrow.
+            delivered += 1;
 
             if (input.send_email) {
               const queued = await email.enqueue({
@@ -490,6 +546,7 @@ export function createGodService(deps: GodServiceDeps): GodService {
               if (queued.created) emails += 1;
             }
           } catch (error) {
+            failed += 1;
             deps.log?.(
               {
                 recipient_id: recipient.id,
@@ -500,23 +557,45 @@ export function createGodService(deps: GodServiceDeps): GodService {
           }
         }
 
-        await audit.record(
-          { id: actor.id, role: actor.role },
-          AuditAction.GOD_BROADCAST,
-          { type: 'broadcast', id: batch },
-          {
-            reason: subject,
-            audience_scope: input.audience.scope,
-            recipients: recipients.length,
-            notified,
-            threads_created: threads,
-            emails_enqueued: emails,
-            send_email: input.send_email === true,
-          },
-          ip,
-        );
+        const outcome: GodBroadcastResponse = {
+          notified,
+          emails_enqueued: emails,
+          threads_created: threads,
+          delivered,
+          failed,
+        };
 
-        return { notified, emails_enqueued: emails, threads_created: threads };
+        // Best effort, unlike the row above. The attempt is already durable,
+        // countable and named in the trail, so a failure to record what it
+        // achieved must not turn a delivered announcement into a `500` the
+        // administrator would answer by broadcasting again.
+        try {
+          await audit.record(
+            { id: actor.id, role: actor.role },
+            AuditAction.GOD_BROADCAST_COMPLETE,
+            { type: 'broadcast', id: batch },
+            {
+              reason: subject,
+              audience_scope: input.audience.scope,
+              recipients: recipients.length,
+              send_email: input.send_email === true,
+              ...outcome,
+            },
+            ip,
+          );
+        } catch (error) {
+          deps.log?.(
+            {
+              batch,
+              delivered,
+              failed,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            'A god-mode broadcast went out but its completion record could not be written',
+          );
+        }
+
+        return outcome;
       });
     },
   };

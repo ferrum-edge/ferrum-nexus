@@ -55,6 +55,7 @@ are. A relative `NEXUS_SQLITE_PATH` resolves from `server/`.
 | `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY` | `200`                                        | Messages one account may post in a rolling 24 hours; `0` disables the budget. Range 0 – 1 000 000. Exceeding it is `429 QUOTA_EXCEEDED`. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `NEXUS_MAX_BROADCAST_RECIPIENTS`      | `5000`                                       | How many recipients one god-mode broadcast may address; `0` removes the ceiling. Range 0 – 1 000 000. A broadcast writes a notification, a platform-inbox message and (with `send_email`) a queued mail per recipient, and those message rows deliberately do **not** draw on the sending admin’s daily budget — this is the bound instead. Set it above the portal’s account count for an announcement to reach everyone. Exceeding it is `429 QUOTA_EXCEEDED` before any row is written. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                       |
 | `NEXUS_MAX_BROADCASTS_PER_DAY`        | `20`                                         | How many god-mode broadcasts one administrator may send in a rolling 24 hours, counted from their own `god.broadcast` audit rows; `0` removes the ceiling. Range 0 – 100 000. The recipient ceiling bounds one announcement; this bounds a loop of them. Exceeding it is `429 QUOTA_EXCEEDED`. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `NEXUS_MAX_MASS_EMAIL_RECIPIENTS`     | `5000`                                       | How many recipients one mass-email campaign may address; `0` removes the ceiling. Range 0 – 1 000 000. The fan-out is one transaction, so the audience is what that transaction has to hold — and, because every adapter serialises transaction bodies per store object, what the instance stops writing for while the inserts run. On MongoDB it is a hard wall: 16 MB per transaction, counted against each row's whole rendered HTML and text (~800 recipients at a 10 KB body, ~80 at the 100 000-character ceiling). Exceeding it is `429 QUOTA_EXCEEDED` before any row is written. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                        |
 | `NEXUS_ALLOW_PRIVATE_UPSTREAMS`       | `false`                                      | Whether providers may publish an API whose upstream is a loopback, RFC 1918 / CGNAT / link-local address or a `.local` / `.internal` / `.localhost` / `.home.arpa` name. A proxy is an egress path from the gateway's network, so the default refuses them with `400 SPEC_INVALID` (`details.reason = private_upstream`). At `false` the portal also **resolves** every other upstream hostname (A + AAAA, ~5 s) and refuses it if any answer is private, or if the name cannot be resolved at all (`details.reason = unresolvable_upstream`) — so **the Nexus process must be able to resolve public DNS**, or nothing publishes. `true` skips all of it, including the lookup. Set `true` only for a portal that fronts internal services — and for local development, where the upstream is `host.docker.internal`. See [`security.md`](security.md#1-threat-model). |
 | `NEXUS_WEB_DIST`                      | _(unset)_                                    | Directory of the built SPA to serve. When unset, the server looks for `../../web/dist` relative to itself and then `./web/dist` under the CWD; if neither has an `index.html`, static serving is disabled and only the API is exposed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `NEXUS_BOOTSTRAP_TOKEN`               | _(unset)_                                    | Secret the founding registration must present to become the portal's `super_admin` (see [First run](#first-run-and-the-bootstrap-token)). Minimum 16 characters when set; generate with `openssl rand -hex 32`. When unset the server generates one **per process** and prints it at `warn` while the portal has no active super admin — so set it for any deployment running more than one instance. Ignored once an active `super_admin` exists.                                                                                                                                                                                                                                                                                                                                                                                                                      |
@@ -237,7 +238,9 @@ one. Portal messaging is the surface where one cheap request costs the most:
 every message durably writes a message row and an audit row, and a **platform
 thread** (no `recipient_user_id`) fans an in-app notification and a queued email
 out to _every_ active `admin` and `super_admin`. A god-mode broadcast does the
-same thing deliberately, once per account in the portal. Five bounds cap that.
+same thing deliberately, once per account in the portal, and a mass-email
+campaign queues one row per recipient in a single transaction. Six bounds cap
+that.
 
 | Bound                            | Value                                         | Where                                       |
 | -------------------------------- | --------------------------------------------- | ------------------------------------------- |
@@ -246,6 +249,7 @@ same thing deliberately, once per account in the portal. Five bounds cap that.
 | Messages per account             | **200 per rolling 24 h** (`0` = unlimited)    | `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY`       |
 | Broadcast recipients             | **5 000 per broadcast** (`0` = unlimited)     | `NEXUS_MAX_BROADCAST_RECIPIENTS`            |
 | Broadcasts per admin             | **20 per rolling 24 h** (`0` = unlimited)     | `NEXUS_MAX_BROADCASTS_PER_DAY`              |
+| Mass-email recipients            | **5 000 per campaign** (`0` = unlimited)      | `NEXUS_MAX_MASS_EMAIL_RECIPIENTS`           |
 | `message_received` email         | **1 per recipient per thread per 10 minutes** | Outbox idempotency key; not configurable    |
 
 Notes an operator needs:
@@ -282,6 +286,19 @@ Notes an operator needs:
   checked before the first row is written. Raise
   `NEXUS_MAX_BROADCAST_RECIPIENTS` above the portal's account count if an
   announcement has to reach everyone.
+- **A broadcast is charged when it is attempted, not when it succeeds.** The
+  `god.broadcast` audit row the daily count reads is written *before* the first
+  recipient is touched, so an announcement that reached the portal and then
+  failed to record its outcome is still one of the twenty — and still named in
+  the trail. What it achieved is a second row, `god.broadcast_complete`, with
+  `delivered` and `failed` per recipient; a `god.broadcast` with no completion
+  row beside it means the fan-out ran and the outcome record did not. An
+  audience that matches nobody is refused as a `400` and charged nothing.
+- **A mass-email campaign is bounded too**, by
+  `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` — for the transaction-size and
+  head-of-line reasons set out under
+  [A mass-email campaign is one transaction](#a-mass-email-campaign-is-one-transaction),
+  not for abuse: the endpoint is admin-only.
 - **The coalescing window is why the `message_received` mail no longer quotes a
   message.** Only the first message in each 10-minute window sends anything, so
   the default template announces activity and links to the thread. In-app
@@ -857,13 +874,28 @@ Two operational consequences:
   `idempotency_key`, and the rows are keyed `mass:<batch>:<user_id>` so the
   unique index makes the retry a no-op. The failure body is
   `500 OUTBOX_FAILURE` with `details: { batch_id, recipients, enqueued: 0 }`.
-- **A campaign is bounded by what one transaction will hold.** That is
-  comfortable on SQLite, PostgreSQL and MySQL. On **MongoDB** a transaction is
-  capped at 16 MB of oplog, and each outbox row stores the rendered HTML and
-  text: a very large audience combined with a body near the 100 000-character
-  ceiling can exceed it. The send then fails atomically — nothing queued,
-  nothing audited — and reports its batch id; narrow the audience or shorten the
-  body and send again.
+- **The audience is bounded, because one transaction has to hold it.**
+  `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` (default 5 000, `0` disables) is checked
+  before a row is rendered or written; exceeding it is `429 QUOTA_EXCEEDED` with
+  `details: { limit, recipients, setting }`. Two costs make the ceiling
+  necessary, and only one of them is a hard wall:
+
+  - **On MongoDB it is arithmetic.** A transaction is capped at 16 MB, and each
+    outbox row carries its whole rendered HTML *and* text — so the wall sits at
+    roughly `16 MB ÷ (rendered bytes per row)`: about **80 recipients** with a
+    body near the 100 000-character ceiling, about **1 600** at 5 KB, about
+    **800** at 10 KB. Past it the send fails atomically — nothing queued,
+    nothing audited — and reports its batch id.
+  - **On SQLite, PostgreSQL and MySQL it is head-of-line latency.** There is no
+    size wall, but every adapter drains transaction bodies through a queue that
+    belongs to one store object, so an N-recipient fan-out is N sequential
+    inserts during which *no other transaction on that instance runs*. A
+    five-figure audience is a visible stall for every other writer, not merely a
+    slow request for the administrator who started it.
+
+  Raise the ceiling deliberately for a portal that genuinely mails everyone at
+  once, and prefer a smaller audience with the same `idempotency_key` reused
+  across a few campaigns over one that has to be rolled back.
 
 ### The quiet failure mode to watch for
 

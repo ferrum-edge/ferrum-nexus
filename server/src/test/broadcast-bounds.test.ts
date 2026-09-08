@@ -72,7 +72,10 @@ describe('a broadcast does not spend the sender’s message budget', () => {
     });
     assert.equal(broadcast.statusCode, 200, broadcast.body);
     // Seven recipients, seven message rows — more than the whole budget.
-    assert.equal(broadcast.json<GodBroadcastResponse>().notified, 7);
+    const sent = broadcast.json<GodBroadcastResponse>();
+    assert.equal(sent.notified, 7);
+    assert.equal(sent.delivered, 7);
+    assert.equal(sent.failed, 0);
 
     const later = await harness.authed(founder, {
       method: 'POST',
@@ -254,6 +257,9 @@ describe('broadcast ceilings', () => {
     try {
       assert.equal(harness.config.maxBroadcastRecipients, 5_000);
       assert.equal(harness.config.maxBroadcastsPerDay, 20);
+      // The mass-email fan-out is one transaction too, and needs the same
+      // ceiling for the same reason — see `mass-email.test.ts`.
+      assert.equal(harness.config.maxMassEmailRecipients, 5_000);
     } finally {
       await harness.close();
     }

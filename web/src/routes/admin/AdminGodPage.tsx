@@ -372,7 +372,16 @@ function BroadcastPanel(): ReactElement {
                 setEmailBatch(broadcastEmailBatchId());
                 setSubject('');
                 setBody('');
-                toast.success('Broadcast sent', `${response.notified} account(s) notified.`);
+                // `delivered` is the audience the message actually reached;
+                // per-recipient failures are skipped rather than fatal, so a
+                // partial broadcast has to say so instead of reporting the
+                // audience size as a success.
+                const detail =
+                  response.failed > 0
+                    ? `${response.delivered} account(s) reached, ${response.failed} failed.`
+                    : `${response.delivered} account(s) notified.`;
+                if (response.failed > 0) toast.error('Broadcast partly delivered', detail);
+                else toast.success('Broadcast sent', detail);
               },
             },
           )
