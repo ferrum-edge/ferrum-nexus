@@ -29,10 +29,10 @@ are. A relative `NEXUS_SQLITE_PATH` resolves from `server/`.
 
 ### Required
 
-| Variable                  | Notes                                                                                                                                                                                                                                                                                                                                   |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NEXUS_SECRET_KEY`        | **Required.** Minimum 32 characters. The master secret; the settings-encryption key and the session-token HMAC key are both HKDF-derived from it. Generate with `openssl rand -hex 32`. To change it, run `npm run rotate-secret-key` with the old value in `NEXUS_SECRET_KEY_PREVIOUS` first — see [§7](#7-rotating-nexus_secret_key). |
-| `FERRUM_ADMIN_JWT_SECRET` | **Required.** Minimum 32 characters. Must match the gateway's `FERRUM_ADMIN_JWT_SECRET` exactly.                                                                                                                                                                                                                                        |
+| Variable                  | Notes                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NEXUS_SECRET_KEY`        | **Required.** Minimum 32 characters. The master secret; the settings-encryption key and the session-token HMAC key are both HKDF-derived from it. Generate with `openssl rand -hex 32`. To change it, run `npm run rotate-secret-key` (in a built image: `node server/dist/db/rotate-key-cli.js`) with the old value in `NEXUS_SECRET_KEY_PREVIOUS` first — see [§7](#7-rotating-nexus_secret_key). |
+| `FERRUM_ADMIN_JWT_SECRET` | **Required.** Minimum 32 characters. Must match the gateway's `FERRUM_ADMIN_JWT_SECRET` exactly.                                                                                                                                                                                                                                                                                                    |
 
 ### Server
 
@@ -378,14 +378,26 @@ For deployments that prefer a separate schema step:
 
 ```bash
 npm run migrate                      # from the repo root
-# or, from a built image:
-node server/dist/db/migrate-cli.ts   # (tsx in dev: npx tsx src/db/migrate-cli.ts)
+# or, from a built image (the compiled entry point — `.js`, not `.ts`):
+node server/dist/db/migrate-cli.js   # (tsx in dev: npx tsx src/db/migrate-cli.ts)
 ```
 
 Run the **root** script, not `npm run migrate --workspace server`: the server
 resolves `@ferrum-nexus/shared` through that workspace's `dist/`, and only the
 root script builds it first. On a clean clone the workspace-level script fails
 until you have run `npm run build --workspace shared` yourself.
+
+The root script is **not available inside the runtime image**, for the same
+reason: the image is built with `npm ci --omit=dev` and its runtime stage copies
+only `shared/dist`, `server/dist`, `web/dist` and `server/src/db/migrations`, so
+neither `tsc` nor the workspace source is present. Inside a container the
+compiled entry point is the only path — as the container's own command, or as a
+one-shot run with the same environment:
+
+```bash
+docker exec <container> node server/dist/db/migrate-cli.js
+docker run --rm --env-file .env <image> node server/dist/db/migrate-cli.js
+```
 
 The CLI loads the same env, applies pending migrations, prints
 `Migrations applied (driver: postgres).` and exits. It exits non-zero on
@@ -522,11 +534,16 @@ docker run --rm -p 127.0.0.1:8787:8787 \
   -e NEXUS_SECRET_KEY="$(openssl rand -hex 32)" \
   -e NEXUS_BOOTSTRAP_TOKEN="$(openssl rand -hex 32)" \
   -e FERRUM_ADMIN_URL=http://host.docker.internal:9000 \
+  -e FERRUM_ADMIN_ALLOW_INSECURE_HTTP=true \
   -e FERRUM_ADMIN_JWT_SECRET=change-me-at-least-32-characters-long \
   -e NEXUS_PUBLIC_URL=https://portal.example.com \
   -v nexus-data:/app/data \
   ferrum-nexus
 ```
+
+`FERRUM_ADMIN_ALLOW_INSECURE_HTTP=true` is required here because
+`FERRUM_ADMIN_URL` is plaintext `http://` to `host.docker.internal`, a
+non-loopback host; it is acceptable only because that traffic is in-network.
 
 Drop `NEXUS_BOOTSTRAP_TOKEN` and the container prints a generated one on its
 first start (`docker logs`); see
@@ -806,6 +823,7 @@ that is not harmless:
   the secret.
 
 That is why the rotation is a two-key, offline step: `npm run rotate-secret-key`
+(in a built image: `node server/dist/db/rotate-key-cli.js`)
 re-encrypts every `app_settings` row with `encrypted = 1` from the previous key
 to the new one, in one transaction, and refuses to write anything if a single
 row does not open under the previous key. Both keys come from the environment
@@ -820,25 +838,45 @@ old HMAC key; password sign-in is unaffected.
 
 1. **Announce a short window.** Everyone will be signed out.
 2. Back up the database (see [§5](#5-backups)) and record the current
-   `NEXUS_SECRET_KEY` — it is your rollback.
+   `NEXUS_SECRET_KEY`. That is your rollback **before** the rotation runs; once
+   it has, the key that matters — and the one most likely to be lost — is the
+   new one, so persist it where the server reads its configuration (step 4) and
+   treat _that_ as the rollback from then on.
 3. **Stop every Nexus instance** (or run the step against a database no
    instance is using). A running server would keep writing blobs under the old
    key while you rotate.
-4. Re-encrypt the settings with both keys in the environment. With a `.env`
-   file, `NEXUS_SECRET_KEY` is read from it; put the previous key in the shell:
+4. Re-encrypt the settings, from the previous key to a new one. An exported
+   variable wins over `.env` (see [§1](#1-environment-variables)), so
+   re-encrypting to a key that only the shell knows while `.env` still names the
+   old one is a lockout: the restart in step 5 reads `.env`, cannot decrypt the
+   settings, and CAPTCHA fails closed. Generate the new key **first**, write it
+   to the place the server will read it from (`NEXUS_SECRET_KEY` in `.env`, or
+   the container environment), then export only the previous key:
 
    ```bash
+   # 1. Choose the new key and persist it where the server will load it on
+   #    restart (NEXUS_SECRET_KEY in .env, or the container environment).
+   openssl rand -hex 32          # copy this value in before you rotate
+
+   # 2. Then rotate, with only the previous key in the shell:
    export NEXUS_SECRET_KEY_PREVIOUS="<the key the database was last written with>"
-   export NEXUS_SECRET_KEY="$(openssl rand -hex 32)"     # or the value now in .env
-   npm run rotate-secret-key
+   npm run rotate-secret-key                  # from a checkout
+   # from a built image (the only form that runs there):
+   node server/dist/db/rotate-key-cli.js
    # Re-encrypted 2 setting(s) under the new NEXUS_SECRET_KEY (captcha.secret_key, smtp.password); …
    ```
 
-   The command exits non-zero and changes nothing if the previous key is wrong,
-   if the two keys are equal, or if it has already been run.
+   The CLI exits non-zero and changes nothing if the `.env` it loads declares a
+   different `NEXUS_SECRET_KEY` than the one it would rotate to — re-run with
+   `--allow-env-mismatch` only when that file is deliberately not this
+   deployment's configuration — and equally if the previous key is wrong, if the
+   two keys are equal, or if it has already been run.
 
 5. Start the server with the new `NEXUS_SECRET_KEY` (and without
-   `NEXUS_SECRET_KEY_PREVIOUS`).
+   `NEXUS_SECRET_KEY_PREVIOUS`). The new key must be in the same place the
+   server reads its configuration from — the `.env` file or container
+   environment you edited in step 4 — not just in the shell that ran the
+   rotation.
 6. Verify as a **super admin** (SMTP and CAPTCHA settings are super-admin-only):
    sign in — with CAPTCHA on, this is the proof the secret survived — then
    **Send test email** on the settings page returns `ok: true`.
@@ -849,9 +887,20 @@ old HMAC key; password sign-in is unaffected.
    DELETE FROM email_verification_tokens WHERE used_at IS NULL;
    ```
 
-   Users with an unused verification link will need a new one; the simplest
-   remedy is to mark them verified from **Admin → Users**, or have them
-   re-register.
+   Users with an unused verification link will need a new one. The remedy is
+   self-service: they click **Resend verification** on the sign-in page. There
+   is no administrator control that marks a user verified, and re-registering
+   an existing address is refused, so neither of those is available. A resend
+   is throttled to once per account per ten minutes, and the
+   `DELETE FROM email_verification_tokens` above does **not** clear the
+   issue-claim rows that drive that throttle; to let a user retry immediately,
+   clear those too:
+
+   ```sql
+   DELETE FROM email_token_issue_claims WHERE purpose = 'email_verification';
+   ```
+
+   A portal with email verification not required is unaffected.
 
 8. Watch the outbox for a few minutes: `SELECT status, count(*) FROM email_outbox
 GROUP BY status`. Any `failed` rows accumulated during the window can be
@@ -859,7 +908,10 @@ GROUP BY status`. Any `failed` rows accumulated during the window can be
 
 **Rollback** is the same command with the keys swapped (`NEXUS_SECRET_KEY_PREVIOUS`
 = the new key, `NEXUS_SECRET_KEY` = the old one), run before the server has
-re-saved anything under the new key; then restart with the old key.
+re-saved anything under the new key; then restart with the old key. Both keys
+must already be persisted wherever the server reads its configuration — a key
+that existed only in the shell that ran the rotation is lost the moment that
+shell closes, and rolling back to a lost key is not possible.
 
 **If you cannot run the command** (for example a hosted database you can only
 reach through the running portal), a super admin can avoid the lockout by

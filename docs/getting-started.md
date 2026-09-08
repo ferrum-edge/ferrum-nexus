@@ -87,7 +87,10 @@ on a private network — see [`security.md`](security.md#9-ferrum-edge-admin-jwt
 Check it is alive:
 
 ```bash
-curl -sf http://127.0.0.1:8000/ >/dev/null && echo "proxy listener up"
+# The proxy listener has no route published yet, so a bare `/` answers 404.
+# `curl` without `-f` still returns success on a 4xx and fails only when nothing
+# is listening, so this passes on a healthy, freshly-started gateway.
+curl -s -o /dev/null http://127.0.0.1:8000/ && echo "proxy listener up"
 ```
 
 > **If your gateway uses a different issuer**, note it now: Nexus stamps
