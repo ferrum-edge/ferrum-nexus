@@ -57,6 +57,7 @@ import {
   SUPER_ADMIN_LOCK_CONFLICT_MESSAGE,
 } from '../lib/keyed-serializer.js';
 import { faultInjectingStore } from './fault-injection.js';
+import { runOutboxFencingContract } from './outbox-fencing-contract.js';
 import { runPasswordChangeContract } from './password-change-contract.js';
 import { runSettingsTransactionContract } from './settings-transaction-contract.js';
 import { runTeardownCancellationContract } from './teardown-cancellation-contract.js';
@@ -296,6 +297,7 @@ async function mongoTarget(baseUrl: string): Promise<SmokeTarget> {
  * whatever `makeStore` returns.
  */
 function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): void {
+  runOutboxFencingContract(label, makeStore);
   runPasswordChangeContract(label, makeStore);
   runSettingsTransactionContract(label, makeStore);
   runTeardownCancellationContract(label, makeStore);
@@ -2040,8 +2042,14 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         'a claimed row is not handed out twice',
       );
 
-      const id = mine[0]?.id ?? '';
-      await store.emailOutbox.reschedule(id, isoInSeconds(-1), 'smtp timeout');
+      const claim = mine[0];
+      assert.ok(claim);
+      assert.ok(claim.generation, 'a claim carries an ownership token');
+      const id = claim.id;
+      assert.equal(
+        await store.emailOutbox.reschedule(claim, isoInSeconds(-1), 'smtp timeout'),
+        true,
+      );
       const rescheduled = await store.emailOutbox.findById(id);
       assert.equal(rescheduled?.status, 'pending');
       assert.equal(rescheduled?.last_error, 'smtp timeout');
@@ -2050,13 +2058,16 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         'the backoff stamp is in the past, so the row is due again',
       );
 
+      // The spent claim cannot settle the row it no longer owns.
+      assert.equal(await store.emailOutbox.markSent(claim, nowIso()), false);
+
       const reclaimed = await store.emailOutbox.claimDue(nowIso(), 50);
       const retried = reclaimed.find((entry) => entry.id === id);
-      assert.equal(retried?.attempts, 2, 'the backoff reschedule makes the row claimable again');
+      assert.ok(retried);
+      assert.equal(retried.attempts, 2, 'the backoff reschedule makes the row claimable again');
+      assert.notEqual(retried.generation, claim.generation, 'reclaiming replaces the token');
 
-      assert.ok((await store.emailOutbox.releaseStale(isoInSeconds(60))) >= 0);
-
-      await store.emailOutbox.markFailed(id, 'gave up');
+      assert.equal(await store.emailOutbox.markFailed(retried, 'gave up'), true);
       const failed = await store.emailOutbox.findById(id);
       assert.equal(failed?.status, 'failed');
       assert.equal(failed?.next_attempt_at, null);
@@ -2074,8 +2085,12 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         body_text: 'x',
       });
       const at = nowIso();
-      await store.emailOutbox.markSent(entry.entry.id, at);
-      const sent = await store.emailOutbox.findById(entry.entry.id);
+      const claim = (await store.emailOutbox.claimDue(nowIso(), 200)).find(
+        (row) => row.id === entry.entry.id,
+      );
+      assert.ok(claim);
+      assert.equal(await store.emailOutbox.markSent(claim, at), true);
+      const sent = await store.emailOutbox.findById(claim.id);
       assert.equal(sent?.status, 'sent');
       assert.equal(sent?.next_attempt_at, null);
       assert.equal(sent?.last_error, null);
