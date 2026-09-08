@@ -392,6 +392,14 @@ const PROXY_KEYS = new Set([
  * without inspection, exactly as an unknown-to-Nexus plugin would be.
  */
 const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = {
+  prometheus_metrics: [
+    'cache_invalidation_min_age_ms',
+    'mesh_series_budget_per_family',
+    'render_cache_ttl_seconds',
+    'schema',
+    'schema_ref',
+    'stale_entry_ttl_seconds',
+  ],
   key_auth: ['key_location', 'hide_credentials'],
   // `basic_auth` accepts *no* fields at all — an empty list is the point.
   basic_auth: [],
@@ -2617,6 +2625,15 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     },
 
     recordRequests(proxyId, entry, namespace = 'nexus'): void {
+      // Edge records these families only when the namespace enables the plugin.
+      const enabled = [...pluginConfigs.values()].some(
+        (config) =>
+          config.namespace === namespace &&
+          config.plugin_name === 'prometheus_metrics' &&
+          config.scope === 'global' &&
+          config.enabled === true,
+      );
+      if (!enabled) return;
       const counterKey = `${namespace}|${proxyId}|${entry.method}|${String(entry.status)}`;
       requestCounters.set(counterKey, (requestCounters.get(counterKey) ?? 0) + entry.count);
       if (entry.durations && entry.durations.length > 0) {
