@@ -119,6 +119,29 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **A palette save deleted an operator's hand-made plugin config of the same
+  name.** Ownership was inferred from the plugin name, so every other config
+  of that name on the proxy looked like a leftover duplicate and was removed —
+  including a per-path deny gate Nexus never created. `api_plugins` now records
+  the Edge config id it produced (migration `014_api_plugin_config_id`) and
+  saves, removals and reconciliation act on that config alone; a row written
+  before the column adopts a single name match on its next save and never
+  deletes the rest. The `api.plugin_set` and `api.plugin_remove` audit rows name
+  the config id they touched.
+- **An ordinary portal save reset an operator's `priority_override`.** The body
+  sent to `PUT /plugins/config/{id}` was built from scratch, and that endpoint
+  is a whole-resource replace, so a field the portal has no control for was
+  cleared on every palette save and every `cors`/`rate_limit` reconcile. Write
+  bodies are now merged over the live resource, so every field the portal does
+  not own survives — including any Edge adds later.
+- **An unrelated API save rewrote the `cors` and `rate_limit` gateway
+  configs.** Both were reconciled on presence rather than on change, so a
+  description fix rebuilt them from the portal's two-field view — discarding an
+  operator's `allowed_headers`, `max_age` or a `sync_mode: redis` that made the
+  quota cluster-wide, re-enabling a config they had switched off, and naming two
+  unchanged fields in the audit row. They are now compared against the stored
+  value first, and a genuine change merges over the live config instead of
+  replacing it. A replay still repairs a dropped plugin association.
 - Upgrade better-sqlite3 to 13.0.3 to replace the native cleanup path that
   aborts on Node 24.20.0. Raise the Node minimum from 22.12 to 22.14 and
   retain hosted checks on the minimum and current Node 22/24 releases.

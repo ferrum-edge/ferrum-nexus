@@ -676,6 +676,20 @@ read-modify-write with one undo step. A PATCH that does not name a setting does
 not write it at all, so timeouts an operator tuned by hand on the proxy survive
 a provider changing something else.
 
+`cors` and `rate_limit` are held to the same rule on the **plugin** side. The
+SPA submits the whole settings block on every save, so their presence in a
+`PATCH` says nothing about intent; both are compared against the stored value
+with `isDeepStrictEqual` and reconciled only when they actually moved. A replay
+therefore leaves the gateway config exactly as the operator left it —
+`allowed_headers`, `max_age`, a `sync_mode: 'redis'` that makes the quota
+cluster-wide, an `enabled: false` they set deliberately — and does not name the
+field in the audit row. It does still repair an association an operator dropped,
+because putting an id back into `plugins[]` cannot lose anything. A genuine
+change merges the portal's keys over the live config rather than rebuilding it,
+so the operator's keys survive that too; the merge is safe here precisely
+because these two configs are built from a fixed key set, which is why palette
+plugins (whose optional fields a provider must be able to clear) do not use it.
+
 The single association write is what turns a stored plugin config into one the
 gateway runs. It happens while the proxy is still on its staging path, so the
 interval in which the proxy exists with no plugins is not observable at
@@ -778,6 +792,29 @@ Three further points of fidelity:
   may require application-level reconciliation before retrying. This behavior
   requires the Edge dispatch provenance fix in
   [ferrum-edge#4844](https://github.com/ferrum-edge/ferrum-edge/pull/4844).
+
+**The portal owns configs it created, by id.** The `api_plugins` row records the
+Edge plugin config id it produced (`ferrum_plugin_config_id`, migration 015),
+and a save or a removal acts on that config alone. Edge genuinely allows several
+configs of one plugin name on a proxy — distinct `trigger`s, distinct
+`priority_override`s — so a name is not an identity: an operator's hand-made
+per-path deny gate lives happily beside the palette's config of the same name,
+and the portal never replaces or deletes it. A row written before the column
+existed carries no id, so the next save backfills one by matching the plugin
+name, adopting a single match (or, when several exist, the first) and leaving
+every other config where it is. A recorded id that is no longer on the gateway
+means an operator removed it; the next save creates a fresh config and records
+the new id rather than adopting somebody else's.
+
+**A whole-resource `PUT` carries what the portal does not own.**
+`PUT /plugins/config/{id}` replaces the entire resource, so a body built from
+scratch resets every field the portal has no control for — `priority_override`
+is the one that exists today. `writeBody` in `publishing/edge-plugins.ts` merges
+the portal's fields (`plugin_name`, `scope`, `proxy_id`, `enabled`, `config`,
+`trigger`) over the live resource instead, which makes the rule structural
+rather than a checklist that has to be re-read whenever Edge grows a field. The
+same helper feeds the create, the replace, the undo step and the proxy-rebuild
+restore.
 
 The `api_plugins` row is written last but **inside** the compensated block, so a
 store failure rolls the gateway back: a `request_termination` left running with

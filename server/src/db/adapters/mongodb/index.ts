@@ -451,6 +451,9 @@ function mapApiPlugin(row: Row): ApiPluginRecord {
     // both sides of the store contract see the same parsed objects.
     config: (row.config ?? {}) as Record<string, unknown>,
     trigger: (row.trigger ?? null) as ApiPluginTrigger | null,
+    // Absent on every document written before 015, which is exactly the `null`
+    // the SQL dialects get from the new column.
+    ferrum_plugin_config_id: strOrNull(row.ferrum_plugin_config_id),
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
   };
@@ -1157,6 +1160,13 @@ const MONGO_MIGRATIONS: { id: string; apply: (db: Db) => Promise<void> }[] = [
         .collection('gateway_teardown_jobs')
         .updateMany({ generation: { $exists: false } }, { $set: { generation: '' } });
     },
+  },
+  {
+    // Nothing to do: the SQL dialects add a nullable column, and a document
+    // with no `ferrum_plugin_config_id` already maps to the same `null`. The id
+    // is recorded anyway so `schema_migrations` means the same thing here.
+    id: '015_api_plugin_config_id',
+    apply: async (): Promise<void> => undefined,
   },
 ];
 
@@ -1888,6 +1898,7 @@ class MongoStore implements NexusStore {
               enabled: input.enabled,
               config: input.config,
               trigger: input.trigger,
+              ferrum_plugin_config_id: input.ferrum_plugin_config_id,
               updated_at: meta.updated_at,
             },
             $setOnInsert: {

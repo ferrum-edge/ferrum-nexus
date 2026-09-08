@@ -320,6 +320,7 @@ function mapApiPlugin(row: Row): ApiPluginRecord {
     enabled: bool(row.enabled),
     config: json<Record<string, unknown>>(row.config_json, {}),
     trigger: json<ApiPluginTrigger | null>(row.trigger_json, null),
+    ferrum_plugin_config_id: textOrNull(row.ferrum_plugin_config_id),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -1331,12 +1332,14 @@ class SqliteStore implements NexusStore {
         execute(
           this.db,
           `INSERT INTO api_plugins
-             (id, api_id, plugin_name, enabled, config_json, trigger_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             (id, api_id, plugin_name, enabled, config_json, trigger_json,
+              ferrum_plugin_config_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (api_id, plugin_name) DO UPDATE SET
              enabled = excluded.enabled,
              config_json = excluded.config_json,
              trigger_json = excluded.trigger_json,
+             ferrum_plugin_config_id = excluded.ferrum_plugin_config_id,
              updated_at = excluded.updated_at`,
           [
             meta.id,
@@ -1345,6 +1348,7 @@ class SqliteStore implements NexusStore {
             encodeBool(input.enabled),
             encodeJson(input.config) ?? '{}',
             encodeJson(input.trigger),
+            input.ferrum_plugin_config_id,
             meta.created_at,
             meta.updated_at,
           ],
