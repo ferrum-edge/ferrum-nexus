@@ -155,7 +155,8 @@ export function mergeOperatorSettings(
       (value): value is string => typeof value === 'string',
     );
     merged.allowed_headers = headers.filter(
-      (value, index) => headers.findIndex((item) => item.toLowerCase() === value.toLowerCase()) === index,
+      (value, index) =>
+        headers.findIndex((item) => item.toLowerCase() === value.toLowerCase()) === index,
     );
   }
   return merged;

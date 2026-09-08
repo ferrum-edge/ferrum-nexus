@@ -308,7 +308,10 @@ describe('provider plugin palette', () => {
         }
         assert.equal(edgeConfig('compression').priority_override, 3_005);
         assert.equal(edgeConfig('request_deduplication').priority_override, 4_060);
-        assert.equal(mockPaletteCompositionError(harness.edge.effectivePluginsForProxy(proxyId)), null);
+        assert.equal(
+          mockPaletteCompositionError(harness.edge.effectivePluginsForProxy(proxyId)),
+          null,
+        );
       });
     }
 
@@ -350,7 +353,10 @@ describe('provider plugin palette', () => {
         setPlugin('request_deduplication', { config: {} }),
       ]);
       for (const response of responses) assert.equal(response.statusCode, 200, response.body);
-      assert.equal(mockPaletteCompositionError(harness.edge.effectivePluginsForProxy(proxyId)), null);
+      assert.equal(
+        mockPaletteCompositionError(harness.edge.effectivePluginsForProxy(proxyId)),
+        null,
+      );
     });
 
     it('models why a caller cache partition alone cannot enable authenticated storage', () => {
@@ -387,7 +393,10 @@ describe('provider plugin palette', () => {
     });
 
     it('retires response caching with an actionable error and no gateway write', async () => {
-      assert.equal(PROVIDER_PLUGINS.some((plugin) => plugin.name === 'response_caching'), false);
+      assert.equal(
+        PROVIDER_PLUGINS.some((plugin) => plugin.name === 'response_caching'),
+        false,
+      );
       const response = await setPlugin('response_caching', { config: {} });
       assert.equal(response.statusCode, 400);
       assert.match(errorMessage(response.body), /backend Cache-Control/);
@@ -459,7 +468,11 @@ describe('provider plugin palette', () => {
       assert.equal(response.statusCode, 200);
       assert.equal(response.json<SetApiPluginResponse>().plugin.config.ttl_seconds, 300);
 
-      assert.equal(String(edgeConfig('request_deduplication').id), first, 'a replace reuses the id');
+      assert.equal(
+        String(edgeConfig('request_deduplication').id),
+        first,
+        'a replace reuses the id',
+      );
       assert.deepEqual(associatedIds(harness, proxyId), associationsBefore);
       assert.deepEqual(edgeConfig('request_deduplication').config, { ttl_seconds: 300 });
     });

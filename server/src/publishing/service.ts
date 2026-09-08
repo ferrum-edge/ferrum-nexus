@@ -1284,7 +1284,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               api.cors,
               (value) => corsPluginConfig(value, nextAuth, nextMethods),
               nextCors !== null &&
-                (nextAuth !== api.auth_plugin || !isDeepStrictEqual(nextMethods, api.allowed_methods)),
+                (nextAuth !== api.auth_plugin ||
+                  !isDeepStrictEqual(nextMethods, api.allowed_methods)),
             );
             if (!isDeepStrictEqual(nextCors, api.cors)) {
               update.cors = nextCors;

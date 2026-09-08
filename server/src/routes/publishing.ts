@@ -112,12 +112,20 @@ const rateLimitSchema = z
 const corsSchema = z
   .object({
     allowed_origins: z
-      .array(z.string().trim().min(1).max(255).regex(/^\S+$/, 'An origin cannot contain whitespace'))
+      .array(
+        z.string().trim().min(1).max(255).regex(/^\S+$/, 'An origin cannot contain whitespace'),
+      )
       .min(1)
       .max(MAX_CORS_ORIGINS),
     allow_credentials: z.boolean().optional(),
     allowed_headers: z
-      .array(z.string().min(1).max(128).regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/))
+      .array(
+        z
+          .string()
+          .min(1)
+          .max(128)
+          .regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/),
+      )
       .max(64)
       .optional(),
     enforce_websocket_origins: z.boolean().optional(),

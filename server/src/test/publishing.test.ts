@@ -545,7 +545,9 @@ describe('publishing', () => {
         assert.equal(changed.statusCode, 200, changed.body);
         const updated = harness.edge.pluginForProxy(proxyId, 'cors');
         assert.equal(
-          mockCorsPreflight(updated?.config as Record<string, unknown>)['access-control-allow-methods'],
+          mockCorsPreflight(updated?.config as Record<string, unknown>)[
+            'access-control-allow-methods'
+          ],
           'HEAD, OPTIONS',
         );
       });
@@ -1645,7 +1647,8 @@ describe('publishing', () => {
       assert.equal(changed.statusCode, 200, changed.body);
       const authConfig = harness.edge.pluginForProxy(proxyId, 'cors')?.config;
       assert.match(
-        mockCorsPreflight(authConfig as Record<string, unknown>)['access-control-allow-headers'] ?? '',
+        mockCorsPreflight(authConfig as Record<string, unknown>)['access-control-allow-headers'] ??
+          '',
         /X-API-Key/,
       );
 

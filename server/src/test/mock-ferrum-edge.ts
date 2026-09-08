@@ -152,7 +152,15 @@ export function mockCorsPreflight(
     'Origin',
     'X-Requested-With',
   ];
-  const methods = config.allowed_methods ?? ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
+  const methods = config.allowed_methods ?? [
+    'GET',
+    'HEAD',
+    'POST',
+    'PUT',
+    'PATCH',
+    'DELETE',
+    'OPTIONS',
+  ];
   return {
     'access-control-allow-headers': (headers as string[]).join(', '),
     'access-control-allow-methods': (methods as string[]).join(', '),
