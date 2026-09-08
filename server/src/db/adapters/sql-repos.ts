@@ -104,7 +104,7 @@ import type {
   VerificationTokenRecord,
   VerificationTokenRepo,
 } from '../store.js';
-import { SPEC_HISTORY_PRUNE_BATCH } from '../store.js';
+import { assertLeaseKeyLength, SPEC_HISTORY_PRUNE_BATCH } from '../store.js';
 import {
   bool,
   encodeBool,
@@ -2705,6 +2705,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
   const leases: LeaseRepo = {
     acquire: async (key, owner, expiresAt, now) => {
+      assertLeaseKeyLength(key);
       const stamp = nowIso();
       if (dialect === 'pg') {
         // One statement, so "is it free?" and the claim cannot be split by

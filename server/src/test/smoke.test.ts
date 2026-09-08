@@ -1922,6 +1922,27 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.ok(await store.notifications.findById(target));
     });
 
+    it('messaging: stores the full 300-character broadcast subject', async () => {
+      // The god.broadcast route accepts a subject up to 300 chars and writes it
+      // into both `notifications.title` and `message_threads.subject`; MySQL
+      // used to cap both at VARCHAR(255) and fail only on that driver.
+      const broadcaster = await makeUser();
+      const recipient = await makeUser();
+      const subject = 'x'.repeat(300);
+
+      const [notification] = await store.notifications.createMany([
+        { user_id: recipient.id, type: 'system', title: subject, body: 'maintenance' },
+      ]);
+      assert.equal(notification?.title, subject);
+
+      const thread = await store.threads.create({
+        subject,
+        created_by: broadcaster.id,
+        participant_a: recipient.id,
+      });
+      assert.equal(thread.subject, subject);
+    });
+
     /* ── email outbox ─────────────────────────────────────────────────── */
 
     it('emailOutbox: idempotency keys suppress duplicate sends', async () => {
@@ -2675,6 +2696,24 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         ),
       );
       assert.equal(results.filter(Boolean).length, 1);
+    });
+
+    it('leases: refuses an over-long key instead of truncating it', async () => {
+      // `edge_leases.key` is VARCHAR(255) on MySQL; `INSERT IGNORE` would
+      // silently truncate and report "acquired" for a key it did not store.
+      const now = nowIso();
+      const future = isoInSeconds(600);
+
+      // Exactly the limit is stored faithfully and stays acquirable.
+      const boundary = 'k'.repeat(255);
+      assert.equal(await store.leases.acquire(boundary, 'instance-a', future, now), true);
+      assert.equal(await store.leases.release(boundary, 'instance-a'), true);
+
+      await assert.rejects(
+        () => store.leases.acquire('k'.repeat(256), 'instance-a', future, now),
+        (error: unknown) =>
+          isNexusError(error) && error.code === 'INTERNAL' && /Lease key/.test(error.message),
+      );
     });
 
     /* ── transactions ─────────────────────────────────────────────────── */
