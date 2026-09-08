@@ -642,9 +642,11 @@ export interface EdgeLatencyHistogram {
 
 /** What one `GET /metrics` scrape yielded for a single proxy. */
 export interface EdgeProxyMetrics {
+  /** Safe explanation when this proxy has no usable request measurements. */
+  reason?: string;
   /**
    * `false` when the scrape could not be completed or produced nothing usable
-   * (gateway unreachable, non-2xx, or a body with no recognisable samples). The
+   * (gateway unreachable, non-2xx, or no valid request series for this proxy). The
    * counters are then zeroed rather than absent, so callers never branch on
    * `undefined`.
    */

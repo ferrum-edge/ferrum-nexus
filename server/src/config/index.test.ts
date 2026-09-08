@@ -27,6 +27,16 @@ function expectConfigError(env: EnvRecord, needle: string): void {
 }
 
 describe('loadConfig', () => {
+  it('bounds the independent health deadline below the image healthcheck budget', () => {
+    assert.equal(loadConfig(baseEnv()).healthProbeTimeoutMs, 1_500);
+    assert.equal(
+      loadConfig(baseEnv({ NEXUS_HEALTH_PROBE_TIMEOUT_MS: '5000' })).healthProbeTimeoutMs,
+      5_000,
+    );
+    for (const value of ['0', '99', '5001', '10000', 'bad']) {
+      expectConfigError(baseEnv({ NEXUS_HEALTH_PROBE_TIMEOUT_MS: value }), 'NEXUS_HEALTH_PROBE');
+    }
+  });
   it('applies every documented default', () => {
     const config = loadConfig(baseEnv());
 

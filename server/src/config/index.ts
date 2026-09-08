@@ -8,7 +8,8 @@
  * Every variable documented in the repo-root `.env.example` is covered here
  * with the same default. A handful of extra variables exist for testing and
  * container deployment (`NEXUS_ENV`, `NEXUS_RATE_LIMIT_ENABLED`,
- * `NEXUS_HEALTH_CACHE_MS`, `NEXUS_WEB_DIST`, `NEXUS_ALLOW_PRIVATE_UPSTREAMS`,
+ * `NEXUS_HEALTH_CACHE_MS`, `NEXUS_HEALTH_PROBE_TIMEOUT_MS`,
+ * `NEXUS_WEB_DIST`, `NEXUS_ALLOW_PRIVATE_UPSTREAMS`,
  * `FERRUM_ADMIN_TIMEOUT_MS`, `FERRUM_MAX_CREDENTIALS_PER_TYPE`);
  * they are all optional and default to production-safe values.
  */
@@ -208,6 +209,8 @@ export interface NexusConfig {
    * flip dependency state between requests rely on.
    */
   healthCacheMs: number;
+  /** Shared deadline for the health route's Edge calls; below the 10 s image healthcheck. */
+  healthProbeTimeoutMs: number;
   /**
    * How many APIs one account may own at a time (`NEXUS_MAX_APIS_PER_OWNER`).
    * `0` disables the ceiling.
@@ -357,6 +360,9 @@ const envSchema = z.object({
   NEXUS_SESSION_TTL: intish(DEFAULT_SESSION_TTL_SECONDS, 60, 60 * 60 * 24 * 30),
   NEXUS_RATE_LIMIT_ENABLED: boolish(true),
   NEXUS_HEALTH_CACHE_MS: intish(5_000, 0, 60_000),
+  // Reserve at least 5 s for the database, scheduling and HTTP overhead in the
+  // shipped 10 s healthcheck. External healthcheck overrides cannot be verified here.
+  NEXUS_HEALTH_PROBE_TIMEOUT_MS: intish(1_500, 100, 5_000),
   NEXUS_MAX_APIS_PER_OWNER: intish(DEFAULT_MAX_APIS_PER_OWNER, 0, 100_000),
   NEXUS_SPEC_HISTORY_LIMIT: intish(DEFAULT_SPEC_HISTORY_LIMIT, 1, 10_000),
   NEXUS_MAX_MESSAGES_PER_USER_PER_DAY: intish(200, 0, 1_000_000),
@@ -550,6 +556,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     sessionTtlSeconds: raw.NEXUS_SESSION_TTL,
     rateLimitEnabled: nodeEnv === 'test' ? false : raw.NEXUS_RATE_LIMIT_ENABLED,
     healthCacheMs: raw.NEXUS_HEALTH_CACHE_MS,
+    healthProbeTimeoutMs: raw.NEXUS_HEALTH_PROBE_TIMEOUT_MS,
     maxApisPerOwner: raw.NEXUS_MAX_APIS_PER_OWNER,
     specHistoryLimit: raw.NEXUS_SPEC_HISTORY_LIMIT,
     maxMessagesPerUserPerDay: raw.NEXUS_MAX_MESSAGES_PER_USER_PER_DAY,
