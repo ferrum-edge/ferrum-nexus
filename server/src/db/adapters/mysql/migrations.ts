@@ -19,6 +19,8 @@ interface Column {
   type: string;
   nullable: boolean;
   default: string | null;
+  /** Pre-migration type a `MODIFY` guard accepts as "not yet applied". */
+  from?: string;
 }
 interface Index {
   name: string;
@@ -109,6 +111,26 @@ const guards: Guard[] = [
       },
     ],
   },
+  {
+    sql: 'ALTER TABLE notifications MODIFY COLUMN title VARCHAR(300) NOT NULL',
+    table: 'notifications',
+    columns: [
+      { name: 'title', type: 'varchar(300)', nullable: false, default: null, from: 'varchar(255)' },
+    ],
+  },
+  {
+    sql: 'ALTER TABLE message_threads MODIFY COLUMN subject VARCHAR(300) NOT NULL',
+    table: 'message_threads',
+    columns: [
+      {
+        name: 'subject',
+        type: 'varchar(300)',
+        nullable: false,
+        default: null,
+        from: 'varchar(255)',
+      },
+    ],
+  },
 ];
 
 function mismatch(table: string, name: string): never {
@@ -143,10 +165,18 @@ async function alreadyApplied(connection: mysql.PoolConnection, guard: Guard): P
       [guard.table, expected.name],
     );
     const row = rows[0];
-    present.push(row !== undefined);
-    if (!row) continue;
+    if (!row) {
+      present.push(false);
+      continue;
+    }
     const type = String(row.COLUMN_TYPE).replace(/^(tinyint|int)\(\d+\)$/, '$1');
     const columnDefault = row.COLUMN_DEFAULT == null ? null : String(row.COLUMN_DEFAULT);
+    // A `MODIFY` guard names the committed pre-migration type in `from`; a
+    // column still carrying it is the not-yet-applied state, not corruption.
+    if (expected.from !== undefined && type === expected.from) {
+      present.push(false);
+      continue;
+    }
     if (
       type !== expected.type ||
       (row.IS_NULLABLE === 'YES') !== expected.nullable ||
@@ -156,6 +186,7 @@ async function alreadyApplied(connection: mysql.PoolConnection, guard: Guard): P
     ) {
       mismatch(guard.table, expected.name);
     }
+    present.push(true);
   }
   for (const expected of guard.indexes ?? []) {
     const [rows] = await connection.execute<mysql.RowDataPacket[]>(

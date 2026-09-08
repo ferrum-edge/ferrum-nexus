@@ -150,7 +150,7 @@ import type {
   VerificationTokenRecord,
   VerificationTokenRepo,
 } from '../../store.js';
-import { SPEC_HISTORY_PRUNE_BATCH } from '../../store.js';
+import { assertLeaseKeyLength, SPEC_HISTORY_PRUNE_BATCH } from '../../store.js';
 import {
   bool,
   encodeBool,
@@ -2728,6 +2728,7 @@ class SqliteStore implements NexusStore {
 
   readonly leases: LeaseRepo = {
     acquire: async (key, owner, expiresAt, now) => {
+      assertLeaseKeyLength(key);
       // One statement, so the "is it free?" test and the claim cannot be split
       // by another writer. `DO UPDATE … WHERE` skips the update — and reports
       // zero changes — while the current holder's lease is still live, which is
