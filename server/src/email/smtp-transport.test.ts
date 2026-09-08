@@ -182,7 +182,10 @@ describe('real SMTP transport compatibility', { timeout: 30_000 }, () => {
       transport.send({ ...MAIL, to: `${'group: '.repeat(80)}reader@example.test;` }),
       { code: 'EENVELOPE' },
     );
-    assert.equal(relay.commands.some((line) => line.startsWith('RCPT TO:')), false);
+    assert.equal(
+      relay.commands.some((line) => line.startsWith('RCPT TO:')),
+      false,
+    );
     assert.equal(relay.messages.length, 0);
     await transport.send(MAIL);
     assert.equal(relay.messages.length, 1);
