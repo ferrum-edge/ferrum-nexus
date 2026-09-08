@@ -189,7 +189,10 @@ describe('organization and status management', () => {
   it('shows the organization each account belongs to', async () => {
     vi.spyOn(usersApi, 'list').mockResolvedValue(page);
     renderUsers([ACME, GLOBEX]);
-    expect(await screen.findByText('Acme')).toBeInTheDocument();
+    // The organization filter also lists "Acme" as an option; the directory
+    // row is the non-option rendering.
+    const acme = await screen.findAllByText('Acme');
+    expect(acme.some((element) => element.tagName !== 'OPTION')).toBe(true);
   });
 
   it('filters the directory by organization and by status', async () => {
