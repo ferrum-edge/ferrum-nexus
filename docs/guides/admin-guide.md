@@ -117,7 +117,11 @@ status update to finish restoring access; it is safe to repeat.
 optional description — used to tag accounts, mainly so mass email can target
 "everyone at Acme" and so user lists can be filtered by customer.
 
-Create one, then assign accounts to it by editing the user's `org_id`.
+Create one, then assign accounts to it from **Administration → Users**: press
+**Edit** on the row and pick the organization (the same dialog renames the
+account). The directory has an organization filter and a status filter beside
+the role filter, so "everyone at Acme" and "every disabled account" are both one
+click rather than a walk through the pages.
 Organizations carry no permissions of their own: membership never grants or
 restricts access to anything. Access is always decided per user, per API.
 
@@ -224,6 +228,11 @@ secret never leaves the server.
 | **Open registration**          | Off means no self-service sign-up at all; you create accounts.                             |
 | **Allowed roles**              | Which roles a visitor may self-select. Restrict to `client` if providers should be vetted. |
 | **Require email verification** | Users must click an emailed link before they can sign in.                                  |
+
+The sign-up form reads this policy from `GET /api/branding`, so it offers
+exactly the roles you allow and states the outcome plainly when only one is
+left. Clearing both leaves nobody able to register at all — close registration
+instead, which says so.
 
 > **Do not turn on email verification before SMTP works.** Verification links
 > go through the outbox; with no SMTP host configured they queue forever and
@@ -355,11 +364,21 @@ selected audience.
 
 ### Audience
 
-| Scope        | Reaches                                                                                  |
-| ------------ | ---------------------------------------------------------------------------------------- |
-| **All**      | Every **active** account. Other filters are ignored. Disabled accounts are never mailed. |
-| **Filtered** | Combine role, status and organization.                                                   |
-| **Explicit** | A specific list of accounts, up to 5000.                                                 |
+| Scope                 | Reaches                                                                                  |
+| --------------------- | ---------------------------------------------------------------------------------------- |
+| **Everyone**          | Every **active** account. Other filters are ignored. Disabled accounts are never mailed. |
+| **Filtered**          | Combine roles, status and organization.                                                  |
+| **Specific accounts** | A list you name, up to 5000.                                                             |
+
+Under **Filtered**, roles are a multi-select: tick as many as you mean, or leave
+them all clear for every role. **Administrators are two roles.** A send ticked
+only for _Admin_ does not reach a `super_admin`, so the incident audience you
+almost always want is the **All administrative roles** button, which ticks both.
+Status chooses between active and disabled accounts, and the organization
+picker narrows to one customer.
+
+Under **Specific accounts**, search by name or email and add each recipient;
+**Add myself** is the one-click version of the pre-send test below.
 
 ### How it sends
 
@@ -394,7 +413,8 @@ twice**.
 
 ### Before you press send
 
-- Send to yourself first with an **explicit** audience of one.
+- Send to yourself first: choose **Specific accounts**, press **Add myself**,
+  and send. That is an explicit audience of one and costs nothing to repeat.
 - Check the plain-text body as well as the HTML — plenty of clients render it.
 - Confirm SMTP is healthy; otherwise you are queueing thousands of messages
   against a relay that is not working.
@@ -520,7 +540,10 @@ message dropped into each recipient's **platform inbox thread** — so it surviv
 being dismissed from the bell, and any administrator can follow up in the same
 thread. Optionally enqueues an email as well.
 
-Audience selection works exactly like mass email (all / filtered / explicit).
+Audience selection works exactly like mass email (everyone / filtered /
+specific accounts), including the **All administrative roles** shortcut — which
+is the one you want for an incident, because ticking _Admin_ alone leaves every
+super admin out.
 The composer reuses its email campaign key after a failed request, so retrying
 unchanged content does not queue duplicate mail. A successful send starts a new
 campaign for the next composition. API callers can supply `idempotency_key`
@@ -582,7 +605,10 @@ disabling blocks the portal, not the gateway. Use god mode → Disable user with
 
 **"A provider is unresponsive and a client is blocked."** Any admin can approve,
 deny or revoke on any API through the ordinary routes — you do not need god
-mode for that, and the ordinary route leaves a cleaner trail.
+mode for that, and the ordinary route leaves a cleaner trail. Open
+**Administration → All APIs** and click the row: it takes you to that API's
+management workspace, requests and grants included, whoever owns it. The
+catalog page carries the same **Manage API** link for an administrator.
 
 **"Everything gateway-related is failing with a 502."** The Ferrum Edge Admin
 API is unreachable or rejecting Nexus's credentials. Check

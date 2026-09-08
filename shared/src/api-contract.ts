@@ -1097,11 +1097,33 @@ export interface GodBroadcastResponse {
 
 /* ── Public branding ────────────────────────────────────────────────────── */
 
+/**
+ * The part of the registration policy an unauthenticated visitor may see.
+ *
+ * The sign-up form needs it to avoid offering a role the server will refuse
+ * with a `403`: `allowed_roles` is enforced on every registration, so a form
+ * built from a hard-coded list contradicts the administrator who narrowed it.
+ * Nothing here is a secret — both facts are already observable by attempting a
+ * registration — and the server re-checks the policy regardless.
+ */
+export interface PublicRegistrationPolicy {
+  /** False when self-service sign-up is closed and accounts are created by an admin. */
+  open_registration: boolean;
+  /**
+   * Roles a visitor may self-select, narrowed to the self-selectable set: an
+   * elevated role stored in the policy is never offered, because
+   * `POST /api/auth/register` refuses one anyway.
+   */
+  allowed_roles: RegistrableRole[];
+}
+
 /** `GET /api/branding` — unauthenticated; drives the login page and theme. */
 export interface BrandingResponse extends BrandingSettings {
   /** Echoed so the SPA can bootstrap the theme before authenticating. */
   default_theme: ThemePreference;
   captcha: CaptchaPublicConfig;
+  /** What the sign-up form may offer; ignored while `bootstrap_required` is true. */
+  registration: PublicRegistrationPolicy;
   /**
    * True while the portal has no active `super_admin`: the next registration
    * is seated as one and must therefore carry `bootstrap_token`. Usually that
