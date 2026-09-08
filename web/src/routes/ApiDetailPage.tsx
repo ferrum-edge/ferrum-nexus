@@ -842,18 +842,34 @@ function count(value: number): string {
 }
 
 /** The counters themselves, once a response has arrived. */
-function UsageDetails({ usage }: { usage: ApiUsageResponse }): ReactElement {
+export function UsageDetails({ usage }: { usage: ApiUsageResponse }): ReactElement {
   const { requests, latency_ms: latency, backend } = usage;
   const classes = requests.by_status_class;
 
+  if (!usage.available) {
+    return (
+      <CardBody>
+        <p className="mb-4 text-sm text-fg-muted">
+          Gateway metrics are unavailable, so there are no counts to show.{' '}
+          {usage.unavailable_reason}
+        </p>
+        <dl>
+          <DetailRow label="Backend">
+            <Badge tone={BACKEND_TONES[backend.status]}>{BACKEND_LABELS[backend.status]}</Badge>{' '}
+            {backend.detail}
+            {backend.since ? (
+              <span className="mt-1 block text-xs text-fg-subtle">
+                Since {formatDateTime(backend.since)}
+              </span>
+            ) : null}
+          </DetailRow>
+        </dl>
+      </CardBody>
+    );
+  }
+
   return (
     <CardBody>
-      {usage.available ? null : (
-        <p className="mb-4 text-sm text-fg-muted">
-          Gateway metrics are unavailable, so there are no counts to show. {backend.detail}
-        </p>
-      )}
-
       <dl>
         <DetailRow label="Backend">
           <span className="flex flex-wrap items-center gap-2">

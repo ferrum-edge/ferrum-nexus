@@ -516,6 +516,13 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         notification.body,
         notification.link,
       );
+    } catch (error) {
+      deps.log?.(
+        { user_id: recipient.id, error: error instanceof Error ? error.message : String(error) },
+        'Could not write an in-app notification',
+      );
+    }
+    try {
       await email.enqueue({
         to: recipient.email,
         templateKey: mail.templateKey,
