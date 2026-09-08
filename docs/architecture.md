@@ -329,10 +329,12 @@ lifetime drops below `min(60, ttl / 4)` seconds. The namespace goes on every
 namespace-scoped call as `X-Ferrum-Namespace`, which overrides any `namespace`
 in the body.
 
-Failures classify into three codes: `EDGE_UNAVAILABLE` (DNS, connect, TLS,
+Failures classify into four codes: `EDGE_UNAVAILABLE` (DNS, connect, TLS,
 socket or timeout; a write may already have reached the gateway), `EDGE_ERROR`
-(the gateway refused the request), and `EDGE_PROTOCOL_ERROR` (an invalid
-HTTP/JSON response, including malformed UTF-8). Protocol diagnostics contain
+(the gateway refused the request), `EDGE_REJECTED_SPEC` (HTTP 400 for an API-spec
+4xx parse/validation category, excluding authentication failures), and
+`EDGE_PROTOCOL_ERROR` (an invalid HTTP/JSON response, including malformed UTF-8).
+Protocol diagnostics contain
 only the upstream status and fixed reason, never response bytes or decoder
 exceptions. A `503` carrying `applied: false` is special: the
 write **is durable**, it just is not live yet. It surfaces as `EDGE_ERROR` with
