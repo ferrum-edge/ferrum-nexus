@@ -14,7 +14,7 @@
  *   from anything user-editable.
  * - `custom_id` is the raw Nexus user id, giving operators a reverse lookup
  *   from the gateway back into the portal.
- * - Edge assigns the consumer `id`; Nexus caches it in the `consumers` table so
+ * - Nexus derives the consumer `id` and caches it in the `consumers` table so
  *   the hot paths never scan `GET /consumers`.
  *
  * ## Serialisation
@@ -109,12 +109,10 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
         const cached = await store.consumers.findByUserAndNamespace(user.id, namespace);
         if (cached) return cached;
 
-        // Reconciliation path: a consumer can exist on the gateway without a
-        // Nexus row after a database restore, and re-creating it would 409.
-        const existing = await edge.consumers.getByUsername(username);
-        const consumer =
-          existing ??
-          (await edge.consumers.create({ username, custom_id: user.id, acl_groups: [] }, user.id));
+        const { consumer } = await edge.consumers.ensure(
+          { username, custom_id: user.id, acl_groups: [] },
+          user.id,
+        );
 
         return store.consumers.create({
           user_id: user.id,

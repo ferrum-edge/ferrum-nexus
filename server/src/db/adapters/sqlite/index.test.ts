@@ -453,6 +453,7 @@ describe('sqlite store', () => {
         enabled: true,
         config: { ttl_seconds: 300, cacheable_status_codes: [200, 404] },
         trigger: null,
+        ferrum_plugin_config_id: null,
       });
       // The `*_json` columns are decoded at the adapter boundary: services see
       // real objects and real booleans, never JSON text or 0/1.
@@ -467,6 +468,7 @@ describe('sqlite store', () => {
         enabled: false,
         config: { ttl_seconds: 60 },
         trigger: { methods: ['GET'], path_prefix: '/nexus/palette/reports' },
+        ferrum_plugin_config_id: 'plugin-config-1',
       });
       assert.equal(replaced.id, created.id, 'ON CONFLICT updates rather than inserting a second');
       assert.equal(replaced.created_at, created.created_at);
@@ -482,6 +484,7 @@ describe('sqlite store', () => {
         enabled: true,
         config: {},
         trigger: null,
+        ferrum_plugin_config_id: null,
       });
       assert.equal((await store.apiPlugins.listByApi(api.id)).length, 2);
 
@@ -698,14 +701,27 @@ describe('sqlite store', () => {
       const again = await store.emailOutbox.claimDue(nowIso(), 10);
       assert.equal(again.filter((entry) => entry.to_email === marker).length, 0);
 
-      const id = mine[0]?.id ?? '';
-      await store.emailOutbox.reschedule(id, isoInSeconds(-1), 'smtp timeout');
-      const rescheduled = await store.emailOutbox.findById(id);
+      const claim = mine[0];
+      assert.ok(claim);
+      assert.ok(claim.generation, 'a claim carries an ownership token');
+      assert.equal(
+        await store.emailOutbox.reschedule(claim, isoInSeconds(-1), 'smtp timeout'),
+        true,
+      );
+      const rescheduled = await store.emailOutbox.findById(claim.id);
       assert.equal(rescheduled?.status, 'pending');
       assert.equal(rescheduled?.last_error, 'smtp timeout');
 
-      await store.emailOutbox.markFailed(id, 'gave up');
-      assert.equal((await store.emailOutbox.findById(id))?.status, 'failed');
+      // The settled claim is spent: it cannot settle the row a second time.
+      assert.equal(await store.emailOutbox.markFailed(claim, 'gave up'), false);
+
+      const retried = (await store.emailOutbox.claimDue(nowIso(), 10)).find(
+        (entry) => entry.id === claim.id,
+      );
+      assert.ok(retried);
+      assert.notEqual(retried.generation, claim.generation, 'reclaiming replaces the token');
+      assert.equal(await store.emailOutbox.markFailed(retried, 'gave up'), true);
+      assert.equal((await store.emailOutbox.findById(claim.id))?.status, 'failed');
     });
   });
 

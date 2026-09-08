@@ -28,7 +28,7 @@
  * of a create would `409`.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { TextDecoder } from 'node:util';
 
@@ -173,6 +173,11 @@ export interface FerrumAdminClient {
      * closing a teardown with the consumer still up — would be wrong.
      */
     getByUsername(username: string): Promise<EdgeConsumer | null>;
+    /** Direct stable-id lookup/create; only a legacy identity conflict scans. */
+    ensure(
+      body: EdgeConsumerWrite,
+      subject?: string,
+    ): Promise<{ consumer: EdgeConsumer; created: boolean }>;
     create(body: EdgeConsumerWrite, subject?: string): Promise<EdgeConsumer>;
     /**
      * Whole-resource replace. **Always build the body from a `get()` response** —
@@ -1211,6 +1216,7 @@ export function createFerrumAdminClient(
       },
 
       async getByUsername(username: string): Promise<EdgeConsumer | null> {
+        logger.warn({ username }, 'Scanning legacy consumer identity without a stored gateway id');
         let found: EdgeConsumer | null = null;
         const complete = await scanPages<EdgeConsumer>(
           '/consumers',
@@ -1231,12 +1237,55 @@ export function createFerrumAdminClient(
             { path: '/consumers', scanned: CONSUMER_SCAN_LIMIT, username },
             'Consumer lookup by username gave up before the end of the namespace',
           );
-          throw edgeError('The gateway holds more consumers than a username lookup can scan', {
-            scanned: CONSUMER_SCAN_LIMIT,
-            username,
-          });
+          throw edgeError(
+            'The gateway holds more consumers than a legacy username lookup can scan; an administrator must restore the consumer id mapping from backup after verifying its namespace and username (docs/operations.md, Consumer identity recovery)',
+            { scanned: CONSUMER_SCAN_LIMIT, username },
+          );
         }
         return found;
+      },
+
+      async ensure(body, subject): Promise<{ consumer: EdgeConsumer; created: boolean }> {
+        // UUIDv8: a domain-separated SHA-256 of the namespace and canonical name.
+        // Edge accepts caller-assigned ids. Keep this derivation stable across restores.
+        const bytes = createHash('sha256')
+          .update(JSON.stringify(['ferrum-nexus-consumer-v1', namespace, body.username]))
+          .digest();
+        bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x80;
+        bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+        const hex = bytes.subarray(0, 16).toString('hex');
+        const id = [
+          hex.slice(0, 8),
+          hex.slice(8, 12),
+          hex.slice(12, 16),
+          hex.slice(16, 20),
+          hex.slice(20),
+        ].join('-');
+        const existing = await this.get(id);
+        if (existing) {
+          if (existing.username !== body.username) {
+            throw edgeError(
+              'The derived consumer id belongs to another username; contact an administrator',
+            );
+          }
+          return { consumer: existing, created: false };
+        }
+        try {
+          return { consumer: await this.create({ ...body, id }, subject), created: true };
+        } catch (error) {
+          // A 409 is a refused write, never an uncertain acknowledgement. Do not
+          // parse an incumbent id out of Edge's free-form error text.
+          if (
+            !(error instanceof NexusError) ||
+            !isRecord(error.details) ||
+            error.details.status !== 409
+          ) {
+            throw error;
+          }
+          const legacy = await this.getByUsername(body.username);
+          if (!legacy) throw error;
+          return { consumer: legacy, created: false };
+        }
       },
 
       async create(body: EdgeConsumerWrite, subject?: string): Promise<EdgeConsumer> {
