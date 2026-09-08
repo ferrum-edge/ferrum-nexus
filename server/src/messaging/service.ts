@@ -40,6 +40,16 @@
  *    per thread per {@link COALESCE_WINDOW_MS}, via the outbox's idempotency
  *    key. In-app notifications stay one per message; they are cheap, and the
  *    first two bounds already cap how many there can be.
+ *
+ * ## Lock order
+ *
+ * A send touches the thread row before inserting the message that references
+ * it, never the other way round: the child insert takes a shared lock on the
+ * parent for the foreign key, so inserting first and touching afterwards let
+ * two simultaneous replies cycle S→X on one row and deadlock. Nothing outside
+ * the store happens inside the transaction — the audit row, the notification
+ * and the email all follow the commit — so the body is safely re-runnable if
+ * an adapter does have to retry it.
  */
 
 import {
@@ -473,13 +483,15 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
             participant_a: participantA,
             participant_b: participantB,
           }));
+        // The thread row is taken *before* the message that references it, for
+        // the reason spelled out in `sendMessage`.
+        const at = nowIso();
+        await tx.threads.touchLastMessage(thread.id, at);
         const message = await tx.messages.create({
           thread_id: thread.id,
           sender_user_id: input.actor.id,
           body,
         });
-        const at = nowIso();
-        await tx.threads.touchLastMessage(thread.id, at);
         return { existing, thread, message, at };
       });
 
@@ -553,13 +565,21 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
 
       const message = await store.transaction(async (tx) => {
         await assertWithinBudget(tx, user.id);
-        const created = await tx.messages.create({
+        // Touch the thread *first*, then insert the message that references it.
+        // The reverse order is what two people replying at the same moment
+        // deadlocked on: InnoDB takes a shared lock on the parent row for the
+        // `messages.thread_id` foreign key check, so each transaction held S
+        // and then asked for X on the same row, and one was rolled back as the
+        // deadlock victim. Taking the exclusive lock up front leaves the second
+        // reply waiting for the first instead of cycling with it — which is
+        // what serialising `last_message_at` per thread wanted anyway. The
+        // adapter's retry is the safety net, not the fix.
+        await tx.threads.touchLastMessage(thread.id, nowIso());
+        return tx.messages.create({
           thread_id: thread.id,
           sender_user_id: user.id,
           body: trimmed,
         });
-        await tx.threads.touchLastMessage(thread.id, nowIso());
-        return created;
       });
 
       await audit.record(
