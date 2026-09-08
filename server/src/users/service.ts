@@ -253,14 +253,16 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
       if (patch.display_name !== undefined) {
         const name = patch.display_name.trim();
         if (name === '') throw validationFailed('Display name cannot be empty');
-        update.display_name = name;
-        changed.push('display_name');
+        if (name !== user.display_name) {
+          update.display_name = name;
+          changed.push('display_name');
+        }
       }
-      if (patch.company !== undefined) {
+      if (patch.company !== undefined && patch.company !== user.company) {
         update.company = patch.company;
         changed.push('company');
       }
-      if (patch.phone !== undefined) {
+      if (patch.phone !== undefined && patch.phone !== user.phone) {
         update.phone = patch.phone;
         changed.push('phone');
       }
@@ -561,43 +563,51 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
         });
       }
 
-      const action = statusChanged
-        ? update.status === 'disabled'
-          ? AuditAction.USER_DISABLE
-          : AuditAction.USER_UPDATE
-        : roleChanged
-          ? AuditAction.USER_ROLE_CHANGE
-          : AuditAction.USER_UPDATE;
-
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        action,
-        { type: 'user', id: target.id },
-        {
-          changed_fields: changed,
-          ...(roleChanged ? { from_role: target.role, to_role: update.role } : {}),
-          ...(statusChanged ? { from_status: target.status, to_status: update.status } : {}),
-          ...(terminatedSessions > 0 ? { terminated_sessions: terminatedSessions } : {}),
-          ...(teardown?.details ?? {}),
-        },
-        ip,
-      );
-
-      if (roleChanged) {
-        await notifications.notify(
-          target.id,
-          'system',
-          'Your role changed',
-          `An administrator changed your role to ${update.role}.`,
-          '/profile',
+      const actions = [];
+      if (roleChanged) actions.push(AuditAction.USER_ROLE_CHANGE);
+      if (statusChanged) {
+        actions.push(
+          update.status === 'disabled' ? AuditAction.USER_DISABLE : AuditAction.USER_ENABLE,
+        );
+      }
+      if (actions.length === 0) actions.push(AuditAction.USER_UPDATE);
+      for (const action of actions) {
+        await audit.record(
+          { id: actor.id, role: actor.role },
+          action,
+          { type: 'user', id: target.id },
+          {
+            changed_fields: changed,
+            ...(roleChanged ? { from_role: target.role, to_role: update.role } : {}),
+            ...(statusChanged ? { from_status: target.status, to_status: update.status } : {}),
+            ...(terminatedSessions > 0 ? { terminated_sessions: terminatedSessions } : {}),
+            ...(teardown?.details ?? {}),
+          },
+          ip,
         );
       }
 
       // Outside the lifecycle lock: consumer mutations have their own key,
       // and taking that key inside a lifecycle section would invert the
-      // identity-registration lock order. Teardown and restoration re-check
-      // account status after acquiring the consumer key.
+      // identity-registration lock order. Restore before courtesy notifications.
       if (patch.status === 'active') await credentials.restoreGatewayAccess(target.id, actor.id);
+
+      if (roleChanged) {
+        try {
+          await notifications.notify(
+            target.id,
+            'system',
+            'Your role changed',
+            `An administrator changed your role to ${update.role}.`,
+            '/profile',
+          );
+        } catch (error) {
+          deps.log?.(
+            { user_id: target.id, error: error instanceof Error ? error.message : String(error) },
+            'Could not notify a role change',
+          );
+        }
+      }
 
       return {
         user: toPublicUser(updated),
@@ -635,10 +645,12 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
       if (patch.name !== undefined) {
         const name = patch.name.trim();
         if (name === '') throw validationFailed('An organization name is required');
-        update.name = name;
-        changed.push('name');
+        if (name !== existing.name) {
+          update.name = name;
+          changed.push('name');
+        }
       }
-      if (patch.description !== undefined) {
+      if (patch.description !== undefined && patch.description !== existing.description) {
         update.description = patch.description;
         changed.push('description');
       }

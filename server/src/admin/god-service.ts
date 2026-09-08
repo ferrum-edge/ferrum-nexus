@@ -267,6 +267,20 @@ export function createGodService(deps: GodServiceDeps): GodService {
 
       await audit.record(
         { id: actor.id, role: actor.role },
+        AuditAction.USER_DISABLE,
+        { type: 'user', id: target.id },
+        {
+          changed_fields: target.status === 'disabled' ? [] : ['status'],
+          from_status: target.status,
+          to_status: 'disabled',
+          terminated_sessions: terminated,
+          ...teardown.details,
+        },
+        ip,
+      );
+
+      await audit.record(
+        { id: actor.id, role: actor.role },
         AuditAction.GOD_DISABLE_USER,
         { type: 'user', id: target.id },
         {

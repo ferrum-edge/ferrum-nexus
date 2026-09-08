@@ -1,3 +1,4 @@
+import { auditActorLabel } from '../lib/audit';
 import { Link } from '@tanstack/react-router';
 import type { ReactElement, ReactNode } from 'react';
 import { formatRelative, humanize } from '../lib/format';
@@ -222,7 +223,7 @@ export function DashboardPage(): ReactElement {
                           {humanize(entry.action)}
                         </span>
                         <span className="block truncate text-xs text-fg-subtle">
-                          {entry.actor?.display_name ?? 'system'} · {entry.target_type}
+                          {auditActorLabel(entry)} · {entry.target_type}
                         </span>
                       </span>
                       <span className="text-xs text-fg-subtle">
