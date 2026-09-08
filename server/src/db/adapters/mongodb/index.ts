@@ -1160,7 +1160,7 @@ const MONGO_MIGRATIONS: { id: string; apply: (db: Db) => Promise<void> }[] = [
     },
   },
   {
-    id: '014_outbox_generation',
+    id: '015_outbox_generation',
     apply: async (db: Db): Promise<void> => {
       await db
         .collection('email_outbox')
