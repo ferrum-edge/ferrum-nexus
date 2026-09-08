@@ -1480,6 +1480,31 @@ agreement — a rotation revokes the row it retired the moment Edge confirms the
 delete, and an append whose row cannot be written is deleted again — so a
 mismatch means the consumer was edited **outside Nexus**.
 
+### Consumer identity recovery
+
+New canonical consumers use a stable derived UUID and persist the mapping in
+`consumers`; provider test consumers persist their current id in
+`gateway_identities`. Normal provisioning does not list the namespace, even
+above 10,000 consumers. Keep these tables with the rest of the Nexus database
+in backups. Do not change a consumer's id or canonical username on Edge.
+
+Older gateway identities without a portal mapping are adopted after a create
+conflict using a logged scan of at most 20 pages of 500 consumers. An incomplete
+scan returns `EDGE_ERROR` with a recovery instruction, never “no consumer”.
+Teardown retains its pending registration/job on this error.
+
+If this legacy limit is reached, pause provisioning and teardown workers during
+maintenance and restore the affected mapping from a consistent Nexus backup.
+Verify the gateway resource with `GET /consumers/{id}` in the configured
+`X-Ferrum-Namespace`: its username must exactly match `nexus-user-<user_id>` or
+the registered `nexus-test-<api_id>`. Restore the canonical `consumers` row or
+the registered identity's `ferrum_consumer_id`, preserving the correct owner
+and namespace. If no mapping backup exists, an administrator must inventory
+the gateway with paginated Admin API reads and reconstruct the mapping after
+verifying those same fields. Back up the portal database before this repair;
+do not delete gateway identities or credentials to make the scan shorter.
+Resume Nexus and retry the provisioning operation or pending teardown job.
+
 ### What a drifted consumer looks like
 
 Rotate or revoke returns `502 EDGE_ERROR`:

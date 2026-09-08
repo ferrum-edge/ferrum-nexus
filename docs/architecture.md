@@ -489,14 +489,25 @@ namespace:
   byte-for-byte.
 - `custom_id` = the raw Nexus user id, giving operators a reverse lookup from
   the gateway back into the portal.
-- `id` is assigned by Edge and cached in the `consumers` table, so the hot paths
-  never scan `GET /consumers`.
+- New `id` values are UUIDv8s derived from SHA-256 of the JSON array
+  `["ferrum-nexus-consumer-v1", namespace, username]` (first 128 bits, with UUID
+  version/variant bits set). The `consumers` table caches the id, including
+  original Edge-assigned ids adopted from older deployments.
 
 The provisioner is lazy: the consumer is created the first time a user is
 approved for an API _or_ issues a credential, whichever comes first. If a
 consumer exists on the gateway without a Nexus row — a database restore, say —
-`ensureConsumer` finds it by username and re-caches it rather than 409-ing on a
-re-create.
+`ensureConsumer` reads the derived id directly and re-caches it. If that id is
+absent, it creates the consumer with that id. Only a refused create (409) falls
+back to the bounded, logged legacy username scan, adopting an older identity
+without duplicating it. Edge has no consumer username filter or lookup route.
+New provisioning therefore uses one direct GET and one POST regardless of
+namespace size. Failed or malformed responses never authorize a create.
+Legacy scans still fail closed at 10,000 consumers; see **Consumer identity
+recovery** in `operations.md` for restoring a missing mapping.
+Provider test consumers resolve a stored `gateway_identities` id before using
+the same derived-id create/adopt path. Replacements receive a fresh Edge id,
+which is bound in that registry before credential issuance.
 The mapping lookup, username adoption/create, and mapping insert share a stable
 `consumer-name:[namespace,username]` lease. Concurrent first issuance and approval
 therefore initialize one canonical identity. A retry after local mapping failure

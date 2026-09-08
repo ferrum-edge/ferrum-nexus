@@ -120,11 +120,42 @@ describe('ferrum admin client', () => {
     await assert.rejects(
       () => client.consumers.getByUsername('nexus-user-zz'),
       (error: unknown) =>
-        isNexusError(error) && error.code === 'EDGE_ERROR' && /more consumers/i.test(error.message),
+        isNexusError(error) &&
+        error.code === 'EDGE_ERROR' &&
+        /more consumers/i.test(error.message) &&
+        /restore the consumer id mapping from backup/i.test(error.message),
     );
     // Exactly the cap is still a complete read.
     edge.consumers.delete('nexus/u-first');
     assert.equal(await client.consumers.getByUsername('nexus-user-zz'), null);
+  });
+
+  it('does not scan or create after a failed direct identity lookup', async () => {
+    edge.queueFailure(503, { error: 'unavailable' }, '/consumers/', 'GET');
+    await assert.rejects(() => client.consumers.ensure({ username: 'nexus-user-direct' }));
+    assert.equal(edge.callsTo('POST', '/consumers').length, 0);
+    assert.equal(
+      edge.callsTo('GET', '/consumers').filter((call) => call.path === '/consumers').length,
+      0,
+    );
+  });
+
+  it('does not scan after an uncertain create acknowledgement', async () => {
+    edge.queueFailure(503, { error: 'unavailable' }, '/consumers', 'POST');
+    await assert.rejects(() => client.consumers.ensure({ username: 'nexus-user-direct' }));
+    assert.equal(edge.callsTo('POST', '/consumers').length, 1);
+    assert.equal(
+      edge.callsTo('GET', '/consumers').filter((call) => call.path === '/consumers').length,
+      0,
+    );
+  });
+
+  it('rejects unsupported mock consumer filters instead of pretending to filter', async () => {
+    await assert.rejects(
+      // @ts-expect-error Edge does not support username filtering.
+      () => client.consumers.list({ username: 'missing' }),
+      (error: unknown) => isNexusError(error) && error.code === 'EDGE_ERROR',
+    );
   });
 
   it('appends and deletes credentials by index, capped by the gateway', async () => {
