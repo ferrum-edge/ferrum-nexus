@@ -208,8 +208,8 @@ it('provisions credentials, approvals and test consumers beyond 10,000 consumers
       payload: {},
     });
     assert.equal(approved.statusCode, 200, approved.body);
-    // Replacements must use the registry too, including the random id assigned
-    // by Edge on replacement. Exercise two replacements, not just first use.
+    // Replacements must use the registry too, including the fresh id Nexus
+    // assigns each replacement. Exercise two replacements, not just first use.
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const tested = await h.authed(provider, {
         method: 'POST',

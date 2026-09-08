@@ -1439,8 +1439,8 @@ after. Next the API's own gateway identity — the disposable
 group it carries — is torn down, because nothing else ever could: it is named
 after an API that is about to stop existing. Then the grants, requests, spec
 revisions and the API row are deleted in one store transaction. Only then is the
-ACL group stripped from every grantee's consumer — the group is inert the moment the proxy is gone — and grantees get a
-notification.
+ACL group stripped from every grantee's consumer — the group is inert the moment
+the proxy is gone — and grantees get a notification.
 
 A test consumer that is already gone — or an API that never had one — is not an
 error, and the `api.delete` audit row then names no `test_consumer_id` at all
@@ -1526,11 +1526,16 @@ that takes it down. `403 USER_DISABLED` when the caller was disabled while the
 request was in flight; nothing is created.
 
 A create the gateway applied but failed to acknowledge answers `502 EDGE_ERROR`
-and leaves nothing behind: the consumer id is derived from the username, so the
-compensation re-reads the gateway by that id and deletes the consumer it finds
-before releasing the registration. Only if that compensating delete cannot run
-does the registration survive — deliberately, because it is the one thing that
-leads back to the consumer, and deleting the API later collects both.
+and leaves nothing behind: Nexus names the consumer it asks Edge to create, so
+the compensation re-reads the gateway by that exact id and deletes the consumer
+it finds before releasing the registration. Only if that compensating delete
+cannot run does the registration survive — deliberately, because it is the one
+thing that leads back to the consumer, and deleting the API later collects both.
+
+Recreating a test consumer replaces it with a **distinct** consumer: the
+replacement carries a new id, and the replaced consumer's credential rows move
+to `revoked`. The two are never the same resource, because everything the
+portal records about a credential is keyed on the consumer id.
 
 Deleting the API deletes this consumer with it; see `DELETE /api/apis/:id`.
 

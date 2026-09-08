@@ -174,8 +174,9 @@ export interface FerrumAdminClient {
      */
     getByUsername(username: string): Promise<EdgeConsumer | null>;
     /**
-     * The id {@link ensure} assigns to `username` in the configured namespace,
-     * without touching the gateway. See {@link derivedConsumerId}.
+     * The id {@link ensure} assigns to the first consumer of `username` in the
+     * configured namespace, without touching the gateway. Not the id of a
+     * consumer that replaces it — see {@link derivedConsumerId}.
      */
     derivedId(username: string): string;
     /** Direct stable-id lookup/create; only a legacy identity conflict scans. */
@@ -338,15 +339,24 @@ const CONSUMER_SCAN_PAGE_SIZE = 500;
 export const CONSUMER_SCAN_LIMIT = MAX_CONSUMER_SCAN_PAGES * CONSUMER_SCAN_PAGE_SIZE;
 
 /**
- * The consumer id Nexus assigns to `username` in `namespace`.
+ * The consumer id Nexus assigns to the **first** consumer of `username` in
+ * `namespace`.
  *
  * UUIDv8: a domain-separated SHA-256 of the namespace and the canonical name.
- * Edge accepts caller-assigned ids, so every consumer Nexus creates carries
- * this one — which makes the id a *pure function of the name*, computable
- * without asking the gateway anything. That is what lets a create whose
- * acknowledgement was lost be resolved with a single `GET /consumers/{id}`
- * rather than a namespace-wide username scan (issue #139). Keep the derivation
- * stable across restores.
+ * Edge accepts caller-assigned ids, so {@link FerrumAdminClient.consumers}'
+ * `ensure` creates under this one — which makes it a *pure function of the
+ * name*, computable without asking the gateway anything, and lets a create
+ * whose acknowledgement was lost be resolved with a single
+ * `GET /consumers/{id}` rather than a namespace-wide username scan (issue
+ * #139). Keep the derivation stable across restores.
+ *
+ * It is deliberately **not** the id of a consumer that *replaces* one of the
+ * same name: a replacement must be a distinct resource, or the rows keyed on
+ * the replaced consumer's id (`credential_metadata.ferrum_consumer_id`, and
+ * every revocation and lookup that names it) would be indistinguishable from
+ * the replacement's. A replacement is named by its creator instead and the id
+ * recorded on `gateway_identities` before the `POST`, which buys the same
+ * single-`GET` recovery without the collision.
  */
 export function derivedConsumerId(namespace: string, username: string): string {
   const bytes = createHash('sha256')

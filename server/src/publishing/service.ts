@@ -224,6 +224,7 @@ import {
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import type {
   EdgeCircuitBreakerConfig,
+  EdgeConsumer,
   EdgePluginConfig,
   EdgePluginSettings,
   EdgeProxy,
@@ -1912,6 +1913,14 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // was never replaced would be torn down — the previous owner's live
         // key with it — the day the *actor* is disabled.
         let consumerId: string | null = null;
+        // The id of a `POST /consumers` whose outcome is *unknown*: Nexus
+        // names every consumer it asks Edge to create, so a rejected create
+        // that the gateway nonetheless applied is settled by one
+        // `GET /consumers/{id}` rather than a namespace-wide username scan
+        // (issue #139). It is set immediately before each create and cleared
+        // the moment an answer — any answer — arrives, so the compensation
+        // never deletes a consumer this attempt did not ask for.
+        let attemptedConsumerId: string | null = null;
         try {
           // Recreating replaces: a test consumer is disposable by definition,
           // and deleting it is the only way to reset its credentials show-once
@@ -1922,12 +1931,25 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           if (bound && bound.username !== username) {
             throw edgeError('The stored test consumer id belongs to another username');
           }
-          const resolved = bound
-            ? { consumer: bound, created: false }
-            : await edge.consumers.ensure(
-                { username, custom_id: `nexus-test:${api.id}`, acl_groups: [group] },
-                actor.id,
-              );
+          let resolved: { consumer: EdgeConsumer; created: boolean };
+          if (bound) {
+            resolved = { consumer: bound, created: false };
+          } else {
+            // `ensure`'s only write is a `POST` carrying the id the username
+            // derives to, and that id is a pure function of the username — so
+            // the first consumer of a name needs nothing persisted to be
+            // found again, by the compensation here or by a later teardown.
+            attemptedConsumerId = edge.consumers.derivedId(username);
+            resolved = await edge.consumers.ensure(
+              { username, custom_id: `nexus-test:${api.id}`, acl_groups: [group] },
+              actor.id,
+            );
+            // Answered, so nothing is in doubt any more: a create that landed
+            // is `consumerId` below, and `created: false` means either no
+            // write went out or Edge refused one with a `409`, which `ensure`
+            // never treats as an uncertain acknowledgement.
+            attemptedConsumerId = null;
+          }
           const existing = resolved.created ? null : resolved.consumer;
           let revokedCredentials = 0;
           if (existing) {
@@ -1943,22 +1965,37 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             }
           }
 
-          // The replacement carries the *derived* id, exactly as `ensure`'s
-          // own create does. Letting the gateway assign one would make the new
-          // consumer unfindable from its name alone, which is the only thing
-          // the compensation below has when a create is applied and its
-          // acknowledgement is lost (issue #139).
-          const consumer = resolved.created
-            ? resolved.consumer
-            : await edge.consumers.create(
-                {
-                  id: edge.consumers.derivedId(username),
-                  username,
-                  custom_id: `nexus-test:${api.id}`,
-                  acl_groups: [group],
-                },
-                actor.id,
-              );
+          // A replacement is a *distinct* consumer: it must not reuse the id
+          // of the one it replaced, because that id is what
+          // `credential_metadata.ferrum_consumer_id` and every revocation
+          // keyed on it name — the replaced consumer's rows and the
+          // replacement's would be one set. The derived id belongs to the
+          // first consumer of a username and stays with it, so the
+          // replacement takes a fresh one.
+          //
+          // Nexus still chooses it, and records it *before* the `POST`: the
+          // id is then known both to the compensation below and, across a
+          // crash in between, to the next teardown, which reads it off the
+          // registration. That is what a random id costs and what paying it
+          // buys — the same single-`GET` recovery the derived id gives the
+          // first create, without collapsing two consumers into one id.
+          let consumer: EdgeConsumer;
+          if (resolved.created) {
+            consumer = resolved.consumer;
+          } else {
+            attemptedConsumerId = newId();
+            await credentials.bindGatewayIdentity(identity, attemptedConsumerId);
+            consumer = await edge.consumers.create(
+              {
+                id: attemptedConsumerId,
+                username,
+                custom_id: `nexus-test:${api.id}`,
+                acl_groups: [group],
+              },
+              actor.id,
+            );
+            attemptedConsumerId = null;
+          }
           consumerId = consumer.id;
           await credentials.bindGatewayIdentity(identity, consumer.id);
 
@@ -1979,8 +2016,13 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // the registration with it; a delete that fails leaves the
           // registration for the teardown to find. A previous owner's consumer
           // that survived stays theirs: their live rows are what a teardown
-          // finds it by.
-          await credentials.abandonGatewayIdentity(identity, consumerId, actor.id);
+          // finds it by, and no create of this attempt ever named its id.
+          await credentials.abandonGatewayIdentity(
+            identity,
+            consumerId,
+            actor.id,
+            attemptedConsumerId,
+          );
           throw error;
         }
       });

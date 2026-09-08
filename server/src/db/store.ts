@@ -246,14 +246,25 @@ export type ConsumerRecord = Consumer;
  * account teardown can enumerate it even while its first credential is still
  * being appended and no `credential_metadata` row exists yet. `ferrum_username`
  * is the stable key — it is known before Edge is touched — and
- * `ferrum_consumer_id` is filled in once the gateway has assigned one.
+ * `ferrum_consumer_id` is the id Nexus asked Edge to assign the consumer.
  */
 export interface GatewayIdentityRecord {
   id: Uuid;
   user_id: Uuid;
   namespace: string;
   ferrum_username: string;
-  /** `null` until the consumer exists on Edge, or after a crash in between. */
+  /**
+   * The consumer id this identity names, or `null` before one has been asked
+   * for at all.
+   *
+   * Nexus chooses every consumer id it asks Edge to create. A *replacement*
+   * consumer's id is recorded here before its `POST` goes out, so a create
+   * whose acknowledgement never arrived is still resolvable by id; the first
+   * consumer of a username needs no record, its id being derived from the
+   * username. A non-null value therefore means "the consumer under this id, if
+   * the create landed" rather than "the consumer exists" — every reader
+   * tolerates a `GET` that answers 404 on it.
+   */
   ferrum_consumer_id: string | null;
   created_at: IsoTimestamp;
   updated_at: IsoTimestamp;
@@ -883,7 +894,11 @@ export interface GatewayIdentityRepo {
   findByUsername(namespace: string, ferrumUsername: string): Promise<GatewayIdentityRecord | null>;
   /** Every identity registered to `userId` in `namespace`, oldest first. */
   listByUser(userId: Uuid, namespace: string): Promise<GatewayIdentityRecord[]>;
-  /** Record the consumer id Edge assigned (or clear it when the consumer is gone). */
+  /**
+   * Record the consumer id this identity names — the id Nexus asked Edge to
+   * assign, written before the create that uses it when Nexus had to invent
+   * one — or clear it when the consumer is gone.
+   */
   bindConsumer(id: Uuid, ferrumConsumerId: string | null): Promise<GatewayIdentityRecord | null>;
   delete(id: Uuid): Promise<boolean>;
 }

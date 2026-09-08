@@ -551,16 +551,30 @@ it, and both disable paths flip `status` under the same key. Whichever wins:
 An append refused after the consumer was created is compensated: the consumer
 is deleted and the registration dropped. A create that was *refused* is
 compensated too, because a rejection is not proof the gateway did not apply the
-write — Edge may have stored the consumer and lost the acknowledgement, and the
-caller then holds no id for it. So the compensation asks the gateway before it
-discards anything: every consumer Nexus creates carries a caller-assigned id
-that is a pure function of its namespace and username (a domain-separated
-UUIDv8), so one `GET /consumers/{id}` settles the question, with the bounded
-username scan as the fallback for an identity that predates that derivation. A
-consumer that turns out to exist is deleted; only a lookup that answers "there
-is no such consumer" lets the registration go. A lookup that *fails* leaves the
-registration standing — a row over a consumer that is gone is reclaimable, an
-orphan with no row is not. If that delete fails, the registration
+write — Edge may have stored the consumer and lost the acknowledgement, and no
+answer carried its id back.
+
+What makes that recoverable is that **Nexus names every consumer it asks Edge
+to create**, so the id of the create being compensated for is known whether or
+not an answer arrived, and one `GET /consumers/{id}` settles the question with
+no namespace-wide scan. The first consumer of a username takes an id that is a
+pure function of its namespace and username (a domain-separated UUIDv8), so it
+needs nothing persisted to be found again. A consumer that *replaces* one of
+the same name takes a fresh id instead — reusing the derived one would make the
+replaced consumer and its replacement one resource, and `credential_metadata`,
+every revocation and the registration itself are all keyed on that id — and the
+fresh id is written to `gateway_identities.ferrum_consumer_id` before the
+`POST`, so a crash between the write and the compensation still leaves the
+consumer findable by id on the next teardown. The bounded username scan
+survives only as the fallback for an identity that predates the derivation.
+
+A consumer that turns out to exist is deleted; only a lookup that answers
+"there is no such consumer" lets the registration go. A lookup that *fails*
+leaves the registration standing — a row over a consumer that is gone is
+reclaimable, an orphan with no row is not. A consumer that was merely *found*
+rather than created — the one a replacement was about to take down — is never
+touched by the compensation: it stays its previous owner's until a replacement
+actually succeeds. If that delete fails, the registration
 stays — it is what the teardown enumerates — and, when the owner is no longer
 active, the teardown job that will strip the identity is made sure of: a
 `pending` or `sending` job is left alone, and a `done` one — closed by another

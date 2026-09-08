@@ -450,20 +450,29 @@ export interface CredentialsService {
    *
    * A `null` `consumerId` does **not** mean no consumer exists. A rejected
    * `POST /consumers` may be a write Edge applied and failed to acknowledge,
-   * and the caller has no id to hand over for one (issue #139). So the
-   * gateway is asked before anything is discarded: first by the id
-   * {@link FerrumAdminClient.consumers.derivedId} computes from the username,
-   * which is the id every consumer Nexus creates carries, then — for an
-   * identity that predates that derivation — by the bounded username scan.
-   * Only a lookup that answers "there is no such consumer" lets the
-   * registration go; a lookup that *fails* leaves it standing, because a row
-   * kept over a consumer that is gone is reclaimable and an orphan with no row
-   * is not.
+   * and the answer that would have carried the id never arrived (issue #139).
+   * That is what `attemptedConsumerId` is for: Nexus names every consumer it
+   * asks Edge to create, so the caller knows the id of the create it is
+   * compensating for even when nothing came back. One
+   * `GET /consumers/{attemptedConsumerId}` settles it — found means the write
+   * landed and the consumer comes down, absent means it never did — with no
+   * namespace-wide username scan anywhere in the path.
+   *
+   * A lookup that *fails* is neither: the registration is left standing,
+   * because a row kept over a consumer that is gone is reclaimable and an
+   * orphan with no row is not.
+   *
+   * `null` for both ids means no create of this attempt ever reached the
+   * gateway, and nothing is deleted. In particular a consumer that was found
+   * rather than created — the one a replacement was about to take down — is
+   * never touched here: it is the previous owner's until a replacement
+   * actually succeeds.
    */
   abandonGatewayIdentity(
     identity: GatewayIdentityRecord,
     consumerId: string | null,
     subject: string,
+    attemptedConsumerId?: string | null,
   ): Promise<void>;
   /**
    * Take one registered gateway identity down: delete its Edge consumer,
@@ -1318,19 +1327,21 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       await store.gatewayIdentities.bindConsumer(identity.id, consumerId);
     },
 
-    async abandonGatewayIdentity(identity, consumerId, subject): Promise<void> {
+    async abandonGatewayIdentity(
+      identity,
+      consumerId,
+      subject,
+      attemptedConsumerId = null,
+    ): Promise<void> {
       let created = consumerId;
-      if (created === null) {
+      if (created === null && attemptedConsumerId !== null) {
         // The create was rejected — but a rejection is not proof the gateway
         // did not apply it, and the caller only ever holds an id the *answer*
-        // gave it. Ask by the id the username derives to, which is the id
-        // every consumer Nexus creates carries, and fall back to the bounded
-        // scan for an identity created before that derivation existed.
+        // gave it. It does hold the id it *asked for*, though, because Nexus
+        // names every consumer it creates: one read of that id says which of
+        // the two happened.
         try {
-          const live =
-            (await edge.consumers.get(edge.consumers.derivedId(identity.ferrum_username))) ??
-            (await edge.consumers.getByUsername(identity.ferrum_username));
-          created = live?.id ?? null;
+          created = (await edge.consumers.get(attemptedConsumerId))?.id ?? null;
         } catch (error) {
           // The gateway cannot say whether the consumer exists, so neither can
           // this. Keep the registration: it is the only thing that will lead
@@ -1339,6 +1350,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             {
               user_id: identity.user_id,
               consumer_username: identity.ferrum_username,
+              consumer_id: attemptedConsumerId,
               error: error instanceof Error ? error.message : String(error),
             },
             'an abandoned gateway identity could not be resolved; its registration was kept for teardown',
@@ -2139,12 +2151,19 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       }
 
       // By id once the registration is bound: one read, on a gateway of any
-      // size. A registration whose creation stopped before `bind` — the
-      // consumer may or may not exist — is resolved by the id the username
-      // derives to, and only an identity older than that derivation falls
-      // through to the capped scan. Past the cap the scan throws rather than
-      // answering "not found", so the caller keeps the registration intact
-      // instead of closing over a consumer nobody looked at.
+      // size. The bound id is the id Nexus *asked* Edge to assign, and a
+      // replacement's is written before the `POST` that uses it, so a
+      // creation interrupted anywhere after that point still leads straight
+      // to the consumer and a `get` that answers "no such consumer" is proof
+      // the create never landed.
+      //
+      // A registration that stopped before even that — claimed, nothing asked
+      // for yet — is resolved by the id the username derives to, which is the
+      // id the *first* consumer of a name always carries, and only an identity
+      // older than that derivation falls through to the capped scan. Past the
+      // cap the scan throws rather than answering "not found", so the caller
+      // keeps the registration intact instead of closing over a consumer
+      // nobody looked at.
       //
       // No registration at all is still worth one derived-id read: it is what
       // an identity stranded before #139 was fixed looks like, and one `GET`

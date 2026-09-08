@@ -25,6 +25,7 @@ import {
   type PublishApiResponse,
 } from '@ferrum-nexus/shared';
 
+import { derivedConsumerId } from '../ferrum-admin/client.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
 function errorCode(body: string): string {
@@ -88,6 +89,21 @@ describe('test consumer lifecycle', () => {
     return harness.store.gatewayIdentities.findByUsername('nexus', username);
   }
 
+  /**
+   * The `id` the last `POST /consumers` asked Edge to assign — the id whose
+   * create the compensation has to settle when no answer came back. Exact
+   * path, so a credential append (`/consumers/:id/credentials/:type`) is not
+   * mistaken for a consumer create.
+   */
+  function lastRequestedConsumerId(): string | undefined {
+    const posts = harness.edge.callsTo('POST', '/consumers');
+    const posted = posts.filter((entry) => entry.path === '/consumers').at(-1);
+    const body = posted?.body;
+    return typeof body === 'object' && body !== null && 'id' in body
+      ? String((body as { id: unknown }).id)
+      : undefined;
+  }
+
   /* ── #139: the create that was applied but never acknowledged ─────────── */
 
   it('deletes a consumer whose create was applied but never acknowledged', async () => {
@@ -101,9 +117,14 @@ describe('test consumer lifecycle', () => {
     assert.equal(attempt.statusCode, 502, attempt.body);
     assert.equal(errorCode(attempt.body), 'EDGE_ERROR');
 
-    // Neither half of the orphan survives: the consumer was resolved by the id
-    // its username derives to and deleted, and only then was the registration
-    // released.
+    // Neither half of the orphan survives: the create asked for the id the
+    // username derives to, so the compensation resolved the consumer by that
+    // id and deleted it, and only then was the registration released.
+    assert.equal(
+      lastRequestedConsumerId(),
+      derivedConsumerId('nexus', username),
+      'the first consumer of a username is created under its derived id',
+    );
     assert.equal(
       harness.edge.consumerByUsername(username),
       undefined,
@@ -161,6 +182,92 @@ describe('test consumer lifecycle', () => {
 
     assert.equal(harness.edge.consumerByUsername(username), undefined);
     assert.equal(await registrationFor(username), null, 'no registration is leaked');
+  });
+
+  it('gives a replacement its own id and collects it there when the create is lost', async () => {
+    const api = await publish();
+    const username = `nexus-test-${api.id}`;
+
+    const first = await createTestConsumer(api.id);
+    assert.equal(first.statusCode, 201, first.body);
+    const firstCredentialId = first.json<CreateTestConsumerResponse>().credential.id;
+    const firstId = harness.edge.consumerByUsername(username)?.id;
+    assert.ok(firstId);
+    assert.equal(
+      firstId,
+      derivedConsumerId('nexus', username),
+      'the first consumer of the username holds the derived id',
+    );
+
+    // The replacement's create lands and its acknowledgement is lost. The id
+    // it asked for is the only thing the compensation has to go on.
+    const deletesBefore = harness.edge.callsTo('DELETE', '/consumers/').length;
+    harness.edge.queueLostAck(503, undefined, '/consumers', 'POST');
+    const replacement = await createTestConsumer(api.id);
+    assert.equal(replacement.statusCode, 502, replacement.body);
+    assert.equal(errorCode(replacement.body), 'EDGE_ERROR');
+
+    const attemptedId = lastRequestedConsumerId();
+    assert.ok(attemptedId);
+    assert.notEqual(
+      attemptedId,
+      firstId,
+      'a replacement is a distinct consumer, not the replaced one under its own id',
+    );
+    // Two deletes, in order: the consumer being replaced, then the
+    // unacknowledged replacement resolved by the id it was created under.
+    assert.equal(harness.edge.callsTo('DELETE', '/consumers/').length - deletesBefore, 2);
+    assert.equal(harness.edge.callsTo('DELETE', `/consumers/${attemptedId}`).length, 1);
+    assert.equal(harness.edge.consumers.has(`nexus/${attemptedId}`), false);
+    assert.equal(harness.edge.consumerByUsername(username), undefined);
+    assert.equal(await registrationFor(username), null, 'the registration is released');
+
+    // The two consumers stayed distinguishable throughout, which is the whole
+    // point of the fresh id: the replaced consumer's row is revoked, and the
+    // replacement — which never got one — leaves none behind.
+    assert.equal((await harness.store.credentials.findById(firstCredentialId))?.status, 'revoked');
+    assert.deepEqual(await harness.store.credentials.listByConsumer(attemptedId), []);
+    assert.equal((await harness.store.credentials.listByConsumer(firstId)).length, 1);
+    for (const consumer of harness.edge.consumers.values()) {
+      assert.ok(!consumer.acl_groups.includes(aclGroupForApi(api.id)));
+    }
+  });
+
+  it('leaves the consumer it could not replace, and its rows, exactly as they were', async () => {
+    const api = await publish();
+    const username = `nexus-test-${api.id}`;
+
+    const first = await createTestConsumer(api.id);
+    assert.equal(first.statusCode, 201, first.body);
+    const credentialId = first.json<CreateTestConsumerResponse>().credential.id;
+    const live = harness.edge.consumerByUsername(username);
+    assert.ok(live);
+
+    // The delete of the consumer being replaced fails, so no create is ever
+    // issued. The compensation has no attempted id, and must not go hunting
+    // for one — the consumer it would find is the one that is still in use.
+    const deletesBefore = harness.edge.callsTo('DELETE', '/consumers/').length;
+    harness.edge.queueFailure(503, { error: 'down' }, `/consumers/${live.id}`, 'DELETE');
+    const replacement = await createTestConsumer(api.id);
+    assert.equal(replacement.statusCode, 502, replacement.body);
+
+    assert.equal(harness.edge.callsTo('DELETE', '/consumers/').length - deletesBefore, 1);
+    assert.equal(harness.edge.consumerByUsername(username)?.id, live.id, 'the consumer survives');
+    assert.equal(harness.edge.consumerByUsername(username)?.credentials.keyauth?.length, 1);
+    assert.deepEqual(harness.edge.consumerByUsername(username)?.acl_groups, [
+      aclGroupForApi(api.id),
+    ]);
+    assert.equal(
+      (await harness.store.credentials.findById(credentialId))?.status,
+      'active',
+      'and so does the key the provider is still holding',
+    );
+
+    // Deleting the API collects it, registration or no registration.
+    const removed = await deleteApi(api.id);
+    assert.equal(removed.statusCode, 200, removed.body);
+    assert.equal(harness.edge.consumerByUsername(username), undefined);
+    assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'revoked');
   });
 
   /* ── #136: deleting the API collects the identity it created ──────────── */
