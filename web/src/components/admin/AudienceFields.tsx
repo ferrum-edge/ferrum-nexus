@@ -31,7 +31,7 @@ import {
 } from '@ferrum-nexus/shared';
 import { useOrganizations, useUsers } from '../../hooks/useUsers';
 import { Button } from '../ui/Button';
-import { Checkbox, Field, Input } from '../ui/Input';
+import { Checkbox, Field, FieldGroup, Input } from '../ui/Input';
 import { LabeledSelect } from '../ui/Select';
 
 /**
@@ -241,7 +241,7 @@ export function AudienceFields({
 
   return (
     <div className="flex flex-col gap-4">
-      <Field label="Audience">
+      <FieldGroup label="Audience">
         <div className="flex flex-col gap-2">
           {SCOPES.map((scope) => (
             <Radio
@@ -255,11 +255,11 @@ export function AudienceFields({
             />
           ))}
         </div>
-      </Field>
+      </FieldGroup>
 
       {value.scope === 'filtered' ? (
         <div className="flex flex-col gap-4 rounded-md border border-border bg-inset p-4">
-          <Field label="Roles" hint={ROLE_HINT}>
+          <FieldGroup label="Roles" hint={ROLE_HINT}>
             <div className="flex flex-col gap-2">
               {ROLE_ORDER.map((role) => (
                 <Checkbox
@@ -279,8 +279,8 @@ export function AudienceFields({
                 </Button>
               </div>
             </div>
-          </Field>
-          <Field label="Account status">
+          </FieldGroup>
+          <FieldGroup label="Account status">
             <div className="flex flex-col gap-2">
               <Radio
                 id={`${name}-status-active`}
@@ -299,7 +299,7 @@ export function AudienceFields({
                 onSelect={() => onChange({ ...value, status: 'disabled' })}
               />
             </div>
-          </Field>
+          </FieldGroup>
           <LabeledSelect
             label="Organization"
             value={value.orgId ?? ANY_ORG}
@@ -352,7 +352,7 @@ export function AudienceFields({
               ))}
             </ul>
           ) : null}
-          <Field label="Recipients">
+          <FieldGroup label="Recipients">
             {value.recipients.length === 0 ? (
               <p className="text-sm text-fg-subtle">Nobody selected yet.</p>
             ) : (
@@ -366,7 +366,7 @@ export function AudienceFields({
                 ))}
               </ul>
             )}
-          </Field>
+          </FieldGroup>
         </div>
       ) : null}
     </div>

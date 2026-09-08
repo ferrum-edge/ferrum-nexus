@@ -23,7 +23,14 @@ import { RoleGuard } from '../../components/layout/RoleGuard';
 import { Button } from '../../components/ui/Button';
 import { Card, CardBody, CardHeader, PageHeader } from '../../components/ui/Card';
 import { Icon } from '../../components/ui/Icon';
-import { Checkbox, Field, Input, LabeledInput, LabeledTextarea } from '../../components/ui/Input';
+import {
+  Checkbox,
+  Field,
+  FieldGroup,
+  Input,
+  LabeledInput,
+  LabeledTextarea,
+} from '../../components/ui/Input';
 import { LabeledSelect } from '../../components/ui/Select';
 import { LoadingPanel } from '../../components/ui/Spinner';
 import { Tabs } from '../../components/ui/Tabs';
@@ -302,7 +309,7 @@ export function RegistrationCard({ settings }: { settings: AdminSettingsResponse
           checked={requireVerification}
           onChange={(event) => setRequireVerification(event.target.checked)}
         />
-        <Field
+        <FieldGroup
           label="Self-selectable roles"
           hint="Which roles the sign-up form offers. Registration with any other role is refused with a 403."
         >
@@ -316,7 +323,7 @@ export function RegistrationCard({ settings }: { settings: AdminSettingsResponse
               />
             ))}
           </div>
-        </Field>
+        </FieldGroup>
         {allowedRoles.length === 0 ? (
           <p className="text-sm text-danger" role="alert">
             With no self-selectable role, self-service registration cannot complete at all. Turn off
