@@ -1165,7 +1165,7 @@ const MONGO_MIGRATIONS: { id: string; apply: (db: Db) => Promise<void> }[] = [
     // Nothing to do: the SQL dialects add a nullable column, and a document
     // with no `ferrum_plugin_config_id` already maps to the same `null`. The id
     // is recorded anyway so `schema_migrations` means the same thing here.
-    id: '014_api_plugin_config_id',
+    id: '015_api_plugin_config_id',
     apply: async (): Promise<void> => undefined,
   },
 ];
