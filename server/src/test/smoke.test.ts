@@ -1034,7 +1034,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       );
 
       // An operator deleted the gateway config by hand: the row survives with
-      // no claim, which is the same shape a pre-014 row has.
+      // no claim, which is the same shape a pre-015 row has.
       const orphaned = await store.apiPlugins.upsert({
         api_id: api.id,
         plugin_name: 'ip_restriction',

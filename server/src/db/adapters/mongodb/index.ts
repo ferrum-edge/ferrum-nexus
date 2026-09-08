@@ -451,7 +451,7 @@ function mapApiPlugin(row: Row): ApiPluginRecord {
     // both sides of the store contract see the same parsed objects.
     config: (row.config ?? {}) as Record<string, unknown>,
     trigger: (row.trigger ?? null) as ApiPluginTrigger | null,
-    // Absent on every document written before 014, which is exactly the `null`
+    // Absent on every document written before 015, which is exactly the `null`
     // the SQL dialects get from the new column.
     ferrum_plugin_config_id: strOrNull(row.ferrum_plugin_config_id),
     created_at: str(row.created_at),

@@ -884,7 +884,7 @@ describe('provider plugin palette', () => {
       await setPlugin('compression', { config: { algorithms: ['gzip'] } });
       const created = await ownedConfigId('compression');
       assert.ok(created);
-      // A pre-014 row: the gateway config exists, the claim on it does not.
+      // A pre-015 row: the gateway config exists, the claim on it does not.
       await harness.store.apiPlugins.upsert({
         api_id: apiId,
         plugin_name: 'compression',

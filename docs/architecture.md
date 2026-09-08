@@ -794,7 +794,7 @@ Three further points of fidelity:
   [ferrum-edge#4844](https://github.com/ferrum-edge/ferrum-edge/pull/4844).
 
 **The portal owns configs it created, by id.** The `api_plugins` row records the
-Edge plugin config id it produced (`ferrum_plugin_config_id`, migration 014),
+Edge plugin config id it produced (`ferrum_plugin_config_id`, migration 015),
 and a save or a removal acts on that config alone. Edge genuinely allows several
 configs of one plugin name on a proxy — distinct `trigger`s, distinct
 `priority_override`s — so a name is not an identity: an operator's hand-made
