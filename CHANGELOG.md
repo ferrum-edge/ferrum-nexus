@@ -119,6 +119,24 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **Five documented workflow steps the browser could not complete.** The
+  mass-email and god-mode broadcast composers emitted one audience shape
+  (`{ scope: 'filtered', roles: [oneRole], status: 'active' }`), so the
+  "Administrator" audience sent `roles: ['admin']` and silently skipped every
+  `super_admin`, and the guide's mandatory pre-send test — an explicit audience
+  of one, addressed to yourself — could not be composed. Both composers now
+  offer the audience model the server has always accepted: multi-select roles
+  with an **All administrative roles** shortcut, a status choice, an
+  organization filter, and a named recipient list with **Add myself**.
+  Alongside it: `GET /api/branding` now carries the public registration policy
+  so the sign-up form offers only roles the server accepts and the Settings card
+  edits the stored value instead of advertising a constant; the admin user
+  directory gained an organization column, organization and status filters, and
+  a row editor for `org_id` and `display_name`; providers can start a
+  conversation with a named requester or grantee from the Requests and Grants
+  tabs; and the portal-wide API list opens the management workspace, with the
+  same **Manage API** link on the catalog page for administrators, so an admin
+  can act on somebody else's API without god mode.
 - **A palette save deleted an operator's hand-made plugin config of the same
   name.** Ownership was inferred from the plugin name, so every other config
   of that name on the proxy looked like a leftover duplicate and was removed —

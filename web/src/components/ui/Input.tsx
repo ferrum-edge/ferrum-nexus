@@ -49,6 +49,40 @@ export function Field({
   );
 }
 
+export interface FieldGroupProps {
+  label: string;
+  hint?: ReactNode;
+  error?: string | null;
+  className?: string;
+  children: ReactNode;
+}
+
+/**
+ * Legend + grouped controls + hint/error wrapper for radio and checkbox sets,
+ * where no single control can carry the label's `htmlFor`.
+ */
+export function FieldGroup({
+  label,
+  hint,
+  error,
+  className,
+  children,
+}: FieldGroupProps): ReactElement {
+  return (
+    <fieldset className={cn('flex flex-col gap-1.5', className)}>
+      <legend className="text-sm font-medium text-fg">{label}</legend>
+      {children}
+      {error ? (
+        <p className="text-xs text-danger" role="alert">
+          {error}
+        </p>
+      ) : hint ? (
+        <p className="text-xs text-fg-subtle">{hint}</p>
+      ) : null}
+    </fieldset>
+  );
+}
+
 export interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
   invalid?: boolean;
 }

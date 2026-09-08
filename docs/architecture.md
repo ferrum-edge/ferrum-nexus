@@ -55,7 +55,9 @@ Three rules define the boundary, and every change has to keep all three true:
 The only unauthenticated read in the whole API is `GET /api/branding`, which
 exists so the login page can render with the right name, logo and colours
 before a session exists. It carries the CAPTCHA _site_ key and never the
-vendor secret.
+vendor secret, and the public slice of the registration policy — whether
+sign-up is open and which roles it may offer — so the register form does not
+offer a role the server answers with a `403`.
 
 ---
 

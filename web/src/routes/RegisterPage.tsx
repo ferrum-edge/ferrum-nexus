@@ -25,9 +25,21 @@ const ROLE_DESCRIPTIONS: Readonly<Record<RegistrableRole, string>> = {
 export function RegisterPage(): ReactElement {
   const { status, register } = useAuth();
   const { data: captcha } = useCaptchaConfig();
+  const branding = useBranding().data;
   // True only while the portal has no active super_admin: this registration
   // seats one, so it has to carry the operator's bootstrap token.
-  const bootstrapRequired = useBranding().data?.bootstrap_required === true;
+  const bootstrapRequired = branding?.bootstrap_required === true;
+  // The administrator can narrow which roles a visitor may self-select, and
+  // `POST /api/auth/register` answers 403 for one that is not on the list — so
+  // the form offers exactly what the policy allows rather than a constant. The
+  // founding registration bypasses the policy, and a server that predates the
+  // field leaves it undefined, so both fall back to the full set.
+  const policyRoles = branding?.registration?.allowed_roles;
+  const allowedRoles: ReadonlyArray<RegistrableRole> =
+    bootstrapRequired || policyRoles === undefined ? REGISTRABLE_ROLES : policyRoles;
+  // A policy that allows exactly one role has nothing to choose between, so the
+  // form states the outcome instead of offering a select with a single option.
+  const soleRole = allowedRoles.length === 1 ? allowedRoles[0] : undefined;
   const navigate = useNavigate();
 
   const [displayName, setDisplayName] = useState('');
@@ -48,6 +60,12 @@ export function RegisterPage(): ReactElement {
   useEffect(() => {
     if (status === 'authenticated') void navigate({ to: '/', replace: true });
   }, [status, navigate]);
+
+  // The policy can arrive after the first render, and can exclude the default.
+  useEffect(() => {
+    const fallback = allowedRoles[0];
+    if (fallback !== undefined && !allowedRoles.includes(role)) setRole(fallback);
+  }, [allowedRoles, role]);
 
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -155,17 +173,30 @@ export function RegisterPage(): ReactElement {
           value={password}
           onChange={(event) => setPassword(event.target.value)}
         />
-        <LabeledSelect<RegistrableRole>
-          label="Account type"
-          value={role}
-          onValueChange={setRole}
-          options={REGISTRABLE_ROLES.map((value) => ({
-            value,
-            label: ROLE_LABELS[value],
-            description: ROLE_DESCRIPTIONS[value],
-          }))}
-          hint="Administrator roles are granted by an existing admin."
-        />
+        {allowedRoles.length === 0 ? (
+          <FormNotice tone="warning">
+            This portal is not accepting self-service accounts of any type at the moment. Ask an
+            administrator to create one for you.
+          </FormNotice>
+        ) : soleRole ? (
+          <p className="rounded-md border border-border bg-inset p-3 text-sm text-fg-muted">
+            New accounts on this portal are created as{' '}
+            <strong className="font-medium text-fg">{ROLE_LABELS[soleRole]}</strong>.{' '}
+            {ROLE_DESCRIPTIONS[soleRole]}
+          </p>
+        ) : (
+          <LabeledSelect<RegistrableRole>
+            label="Account type"
+            value={role}
+            onValueChange={setRole}
+            options={allowedRoles.map((value) => ({
+              value,
+              label: ROLE_LABELS[value],
+              description: ROLE_DESCRIPTIONS[value],
+            }))}
+            hint="Administrator roles are granted by an existing admin."
+          />
+        )}
         <LabeledInput
           label="Company"
           autoComplete="organization"
@@ -182,7 +213,13 @@ export function RegisterPage(): ReactElement {
 
         <CaptchaWidget config={captcha} onToken={onToken} />
 
-        <Button type="submit" variant="primary" size="lg" loading={submitting}>
+        <Button
+          type="submit"
+          variant="primary"
+          size="lg"
+          loading={submitting}
+          disabled={allowedRoles.length === 0}
+        >
           Create account
         </Button>
       </form>

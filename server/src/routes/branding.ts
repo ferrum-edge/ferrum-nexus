@@ -6,12 +6,15 @@
  * CAPTCHA widget. Everything returned here is public by construction: the
  * CAPTCHA block carries the site key only, never the vendor secret, and
  * `bootstrap_required` says that the portal is empty without saying anything
- * about the token that guards it.
+ * about the token that guards it. The registration policy is here for the same
+ * reason: the sign-up form has to know which roles it may offer before it has
+ * a session, and both facts it carries are already observable by attempting a
+ * registration.
  */
 
 import type { FastifyPluginAsync } from 'fastify';
 
-import type { BrandingResponse } from '@ferrum-nexus/shared';
+import { REGISTRABLE_ROLES, type BrandingResponse } from '@ferrum-nexus/shared';
 
 import type { SettingsService } from '../admin/settings-service.js';
 import type { CaptchaService } from '../auth/captcha.js';
@@ -30,9 +33,17 @@ export const brandingRoutes: FastifyPluginAsync<BrandingRoutesOptions> = async (
 
   app.get('/', async (): Promise<BrandingResponse> => {
     const branding = await settings.getBranding();
+    const policy = await auth.getRegistrationPolicy();
     return {
       ...branding,
       captcha: await captcha.getPublicConfig(),
+      // Narrowed to the self-selectable roles: the register route only accepts
+      // those, so an elevated role left in the stored policy is not something
+      // the sign-up form could ever offer.
+      registration: {
+        open_registration: policy.open_registration,
+        allowed_roles: REGISTRABLE_ROLES.filter((role) => policy.allowed_roles.includes(role)),
+      },
       bootstrap_required: await auth.bootstrapRequired(),
     };
   });
