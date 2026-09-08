@@ -208,6 +208,7 @@ import type {
 } from '../ferrum-admin/types.js';
 import {
   conflict,
+  edgeError,
   forbidden,
   notFound,
   quotaExceeded,
@@ -1678,6 +1679,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // credential is still being appended when its owner is disabled is
         // found and waited for rather than missed — and an owner who is
         // already disabled is refused here, before anything is created.
+        const previous = await store.gatewayIdentities.findByUsername(edge.namespace, username);
         const identity = await credentials.claimGatewayIdentity(actor.id, username);
 
         // From here on the registration is the actor's, so everything that
@@ -1689,7 +1691,19 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // Recreating replaces: a test consumer is disposable by definition,
           // and deleting it is the only way to reset its credentials show-once
           // state.
-          const existing = await edge.consumers.getByUsername(username);
+          const bound = previous?.ferrum_consumer_id
+            ? await edge.consumers.get(previous.ferrum_consumer_id)
+            : null;
+          if (bound && bound.username !== username) {
+            throw edgeError('The stored test consumer id belongs to another username');
+          }
+          const resolved = bound
+            ? { consumer: bound, created: false }
+            : await edge.consumers.ensure(
+                { username, custom_id: `nexus-test:${api.id}`, acl_groups: [group] },
+                actor.id,
+              );
+          const existing = resolved.created ? null : resolved.consumer;
           let revokedCredentials = 0;
           if (existing) {
             await edge.consumers.delete(existing.id, actor.id);
@@ -1704,10 +1718,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             }
           }
 
-          const consumer = await edge.consumers.create(
-            { username, custom_id: `nexus-test:${api.id}`, acl_groups: [group] },
-            actor.id,
-          );
+          const consumer = resolved.created
+            ? resolved.consumer
+            : await edge.consumers.create(
+                { username, custom_id: `nexus-test:${api.id}`, acl_groups: [group] },
+                actor.id,
+              );
           consumerId = consumer.id;
           await credentials.bindGatewayIdentity(identity, consumer.id);
 
