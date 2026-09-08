@@ -70,9 +70,7 @@ function AuditTable(): ReactElement {
         header: 'Actor',
         cell: ({ row }) => (
           <span>
-            <span className="block text-fg">
-              {auditActorLabel(row.original)}
-            </span>
+            <span className="block text-fg">{auditActorLabel(row.original)}</span>
             {row.original.actor_role ? (
               <Badge className="mt-0.5">{row.original.actor_role}</Badge>
             ) : null}

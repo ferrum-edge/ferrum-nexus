@@ -266,30 +266,30 @@ the route, while "is this your API" is a property of the row.
 ### Capability matrix
 
 | Capability                                        | client | provider | admin | super_admin |
-| ------------------------------------------------- | :----: | :------: | :---: | :---------: |
-| Register, sign in, manage own profile             |   ✓    |    ✓     |   ✓   |      ✓      |
-| Browse catalog, read specs                        |   ✓    |    ✓     |   ✓   |      ✓      |
-| Request access, cancel own request                |   ✓    |    ✓     |   ✓   |      ✓      |
-| Issue / rotate / revoke **own** credentials       |   ✓    |    ✓     |   ✓   |      ✓      |
-| Messaging, notifications                          |   ✓    |    ✓     |   ✓   |      ✓      |
-| Publish an API, update own API/spec               |   —    |    ✓     |   ✓   |      ✓      |
-| Configure palette plugins on **own** API          |   —    |    ✓     |   ✓   |      ✓      |
-| Create a test consumer for own API                |   —    |    ✓     |   ✓   |      ✓      |
-| Approve / deny requests on **own** APIs           |   —    |    ✓     |   ✓   |      ✓      |
-| Revoke grants on **own** APIs                     |   —    |    ✓     |   ✓   |      ✓      |
-| Edit / delete **another** provider's API          |   —    |    —     |   ✓   |      ✓      |
-| Decide requests / revoke grants on **any** API    |   —    |    —     |   ✓   |      ✓      |
-| List all users; change `client` ⇄ `provider`      |   —    |    —     |   ✓   |      ✓      |
-| Manage organizations                              |   —    |    —     |   ✓   |      ✓      |
-| List another account's credential metadata        |   —    |    —     |   ✓   |      ✓      |
-| Read/reply in the platform inbox; read any thread |   —    |    —     |   ✓   |      ✓      |
-| Portal settings: branding, registration policy    |   —    |    —     |   ✓   |      ✓      |
-| Email templates, mass email                       |   —    |    —     |   ✓   |      ✓      |
-| Read the audit log                                |   —    |    —     |   ✓   |      ✓      |
-| Portal settings: **SMTP and CAPTCHA**             |   —    |    —     | **—** |      ✓      |
-| Grant or revoke `admin` / `super_admin`           |   —    |    —     | **—** |      ✓      |
-| Disable or re-enable an `admin` or `super_admin`  |   —    |    —     | **—** |      ✓      |
-| God mode (4 endpoints)                            |   —    |    —     |   —   |      ✓      |
+| ------------------------------------------------- | ------ | -------- | ----- | ----------- |
+| Register, sign in, manage own profile             | ✓      | ✓        | ✓     | ✓           |
+| Browse catalog, read specs                        | ✓      | ✓        | ✓     | ✓           |
+| Request access, cancel own request                | ✓      | ✓        | ✓     | ✓           |
+| Issue / rotate / revoke **own** credentials       | ✓      | ✓        | ✓     | ✓           |
+| Messaging, notifications                          | ✓      | ✓        | ✓     | ✓           |
+| Publish an API, update own API/spec               | —      | ✓        | ✓     | ✓           |
+| Configure palette plugins on **own** API          | —      | ✓        | ✓     | ✓           |
+| Create a test consumer for own API                | —      | ✓        | ✓     | ✓           |
+| Approve / deny requests on **own** APIs           | —      | ✓        | ✓     | ✓           |
+| Revoke grants on **own** APIs                     | —      | ✓        | ✓     | ✓           |
+| Edit / delete **another** provider's API          | —      | —        | ✓     | ✓           |
+| Decide requests / revoke grants on **any** API    | —      | —        | ✓     | ✓           |
+| List all users; change `client` ⇄ `provider`      | —      | —        | ✓     | ✓           |
+| Manage organizations                              | —      | —        | ✓     | ✓           |
+| List another account's credential metadata        | —      | —        | ✓     | ✓           |
+| Read/reply in the platform inbox; read any thread | —      | —        | ✓     | ✓           |
+| Portal settings: branding, registration policy    | —      | —        | ✓     | ✓           |
+| Email templates, mass email                       | —      | —        | ✓     | ✓           |
+| Read the audit log                                | —      | —        | ✓     | ✓           |
+| Portal settings: **SMTP and CAPTCHA**             | —      | —        | **—** | ✓           |
+| Grant or revoke `admin` / `super_admin`           | —      | —        | **—** | ✓           |
+| Disable or re-enable an `admin` or `super_admin`  | —      | —        | **—** | ✓           |
+| God mode (4 endpoints)                            | —      | —        | —     | ✓           |
 
 The three bolded gaps are the point of the `super_admin` tier: an `admin` has
 broad authority over content and users but **cannot escalate itself or another
@@ -1054,16 +1054,16 @@ ordinary reporting.
 
 ### Users and organizations
 
-| Action                           | Target type    | Description                                                                                                                                                                                                                                                                                                                                                                                            |
-| -------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `user.update`                    | `user`         | A profile or account field changed without a role/status change. `details.self` distinguishes self-service from an admin edit; `changed_fields` lists what moved (`password` appears as a field name, never a value). A self-service password change also ends every other session, counted in `terminated_sessions`.                                                                                  |
-| `user.role_change`               | `user`         | An admin changed an account's role. `details`: `from_role`, `to_role`.                                                                                                                                                                                                                                                                                                                                 |
+| Action                           | Target type    | Description                                                                                                                                                                                                                                                                                                                                                                                        |
+| -------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `user.update`                    | `user`         | A profile or account field changed without a role/status change. `details.self` distinguishes self-service from an admin edit; `changed_fields` lists what moved (`password` appears as a field name, never a value). A self-service password change also ends every other session, counted in `terminated_sessions`.                                                                              |
+| `user.role_change`               | `user`         | An admin changed an account's role. `details`: `from_role`, `to_role`.                                                                                                                                                                                                                                                                                                                             |
 | `user.enable`                    | `user`         | An admin re-enabled an account. `details`: `from_status`, `to_status`.                                                                                                                                                                                                                                                                                                                             |
-| `user.disable`                   | `user`         | An admin disabled an account via the ordinary or god-mode route. `details`: `from_status`, `to_status`, `terminated_sessions`, plus the gateway teardown: `gateway_teardown` (`ok` / `no_consumer` / `pending`), `gateway_consumer_id`, `revoked_credentials`, `removed_acl_groups`, `gateway_error`. `pending` means the revocation is queued and being retried — the credentials are still live.     |
-| `user.gateway_teardown_complete` | `user`         | The teardown worker finished a revocation a disable had left pending. Written by the system, so `actor_user_id` is `null`. `details`: `attempts`, `gateway_teardown`, `gateway_consumer_id`, `revoked_credentials`, `removed_acl_groups`.                                                                                                                                                              |
-| `user.gateway_teardown_retry`    | `user`         | An admin re-ran a pending gateway revocation by hand via `POST /api/users/:id/gateway-teardown/retry`. `details`: `attempts` so far, plus the same teardown fields.                                                                                                                                                                                                                                    |
-| `org.create`                     | `organization` | An organization was created. `details`: name.                                                                                                                                                                                                                                                                                                                                                          |
-| `org.update`                     | `organization` | An organization was edited. `details`: `changed_fields`.                                                                                                                                                                                                                                                                                                                                               |
+| `user.disable`                   | `user`         | An admin disabled an account via the ordinary or god-mode route. `details`: `from_status`, `to_status`, `terminated_sessions`, plus the gateway teardown: `gateway_teardown` (`ok` / `no_consumer` / `pending`), `gateway_consumer_id`, `revoked_credentials`, `removed_acl_groups`, `gateway_error`. `pending` means the revocation is queued and being retried — the credentials are still live. |
+| `user.gateway_teardown_complete` | `user`         | The teardown worker finished a revocation a disable had left pending. Written by the system, so `actor_user_id` is `null`. `details`: `attempts`, `gateway_teardown`, `gateway_consumer_id`, `revoked_credentials`, `removed_acl_groups`.                                                                                                                                                          |
+| `user.gateway_teardown_retry`    | `user`         | An admin re-ran a pending gateway revocation by hand via `POST /api/users/:id/gateway-teardown/retry`. `details`: `attempts` so far, plus the same teardown fields.                                                                                                                                                                                                                                |
+| `org.create`                     | `organization` | An organization was created. `details`: name.                                                                                                                                                                                                                                                                                                                                                      |
+| `org.update`                     | `organization` | An organization was edited. `details`: `changed_fields`.                                                                                                                                                                                                                                                                                                                                           |
 
 ### Publishing
 

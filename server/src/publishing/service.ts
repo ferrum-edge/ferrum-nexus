@@ -1144,7 +1144,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             // The row records where the gateway is now pointed, normalized rather
             // than however the provider typed it.
             update.upstream_url = formatUpstreamUrl(upstream);
-            if (!isDeepStrictEqual(update.upstream_url, api.upstream_url)) changed.push('upstream_url');
+            if (!isDeepStrictEqual(update.upstream_url, api.upstream_url))
+              changed.push('upstream_url');
             details.upstream = `${upstream.scheme}://${upstream.host}:${upstream.port}`;
           }
 
