@@ -1176,11 +1176,11 @@ endpoints for one proxy and reshapes them: request counts by status class and
 method, the `429`/`401`/`403` totals, interpolated p50/p95/p99 latency, and a
 backend verdict derived from the proxy's circuit breaker and any ejected target.
 
-| Layer   | Cache                                               |
-| ------- | --------------------------------------------------- |
-| Edge    | 5 s, on its own rendering of both endpoints         |
-| Nexus   | 10 s, shared across proxies, per server process      |
-| The SPA | refetches every 30 s while an API page is open      |
+| Layer   | Cache                                           |
+| ------- | ----------------------------------------------- |
+| Edge    | 5 s, on its own rendering of both endpoints     |
+| Nexus   | 10 s, shared across proxies, per server process |
+| The SPA | refetches every 30 s while an API page is open  |
 
 So a figure on the card can be up to about 15 seconds behind reality, and a
 horizontally scaled Nexus keeps one cache per process — two browser tabs served

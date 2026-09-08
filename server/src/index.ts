@@ -56,7 +56,11 @@ import {
   type MailTransportFactory,
 } from './email/service.js';
 import { createOutboxWorker, type OutboxWorker } from './email/outbox-worker.js';
-import { createFerrumAdmin, type EdgeLogger, type FerrumAdminClient } from './ferrum-admin/index.js';
+import {
+  createFerrumAdmin,
+  type EdgeLogger,
+  type FerrumAdminClient,
+} from './ferrum-admin/index.js';
 import { reconcileGateway } from './ferrum-admin/reconcile.js';
 import { createCrypto, type NexusCrypto } from './lib/crypto.js';
 import { isNexusError } from './lib/errors.js';

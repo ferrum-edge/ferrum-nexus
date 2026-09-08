@@ -264,7 +264,8 @@ export function createUsageService(deps: UsageServiceDeps): UsageService {
       if (!proxyId) {
         return {
           available: false,
-          unavailable_reason: 'This API has no proxy on the gateway, so there is nothing to measure.',
+          unavailable_reason:
+            'This API has no proxy on the gateway, so there is nothing to measure.',
           sampled_at: sampledAt,
           requests: emptyRequests(),
           latency_ms: null,
