@@ -63,6 +63,7 @@ import { runSettingsTransactionContract } from './settings-transaction-contract.
 import { runTeardownCancellationContract } from './teardown-cancellation-contract.js';
 import { runTeardownFencingContract } from './teardown-fencing-contract.js';
 import { runTeardownTransitionContract } from './teardown-transition-contract.js';
+import { runTransactionContentionContract } from './transaction-contention-contract.js';
 
 const SECRET = 'cross-adapter-smoke-secret-0123456789ab';
 
@@ -113,6 +114,17 @@ function candidate(
 interface SmokeTarget {
   store: NexusStore;
   teardown: () => Promise<void>;
+  /**
+   * Open a **second store over the same database** — its own pool, its own
+   * transaction queue: two Nexus instances, as a deployment has. The contention
+   * cases need one, because serialising bodies orders a single store object's
+   * transactions and says nothing about the instance next to it. The caller
+   * closes what this returns; the schema is already migrated.
+   *
+   * Absent for sqlite, which is one connection to `:memory:` and cannot have a
+   * second instance at all.
+   */
+  peer?: () => Promise<NexusStore>;
 }
 
 /**
@@ -160,6 +172,18 @@ function withDatabase(url: string, database: string): string {
 
 /* ── Targets ────────────────────────────────────────────────────────────── */
 
+/** Open a second store over an already-migrated database; see {@link SmokeTarget.peer}. */
+async function openPeer(config: ReturnType<typeof loadConfig>): Promise<NexusStore> {
+  const store = createStore(config);
+  try {
+    await store.init();
+  } catch (error) {
+    await store.close().catch(() => undefined);
+    throw error;
+  }
+  return store;
+}
+
 async function sqliteTarget(): Promise<SmokeTarget> {
   const store = createStore(testConfig('sqlite'));
   try {
@@ -181,7 +205,8 @@ async function postgresTarget(adminUrl: string): Promise<SmokeTarget> {
   await admin.query(`CREATE DATABASE "${database}"`);
   await admin.end();
 
-  const store = createStore(testConfig('postgres', withDatabase(adminUrl, database)));
+  const url = withDatabase(adminUrl, database);
+  const store = createStore(testConfig('postgres', url));
   try {
     await store.init();
     await store.migrate();
@@ -194,6 +219,7 @@ async function postgresTarget(adminUrl: string): Promise<SmokeTarget> {
 
   return {
     store,
+    peer: () => openPeer(testConfig('postgres', url)),
     teardown: async (): Promise<void> => {
       await store.close();
       const cleaner = new pg.Client({ connectionString: adminUrl });
@@ -210,7 +236,8 @@ async function mysqlTarget(adminUrl: string): Promise<SmokeTarget> {
   await admin.query(`CREATE DATABASE \`${database}\``);
   await admin.end();
 
-  const store = createStore(testConfig('mysql', withDatabase(adminUrl, database)));
+  const url = withDatabase(adminUrl, database);
+  const store = createStore(testConfig('mysql', url));
   try {
     await store.init();
     await store.migrate();
@@ -223,6 +250,7 @@ async function mysqlTarget(adminUrl: string): Promise<SmokeTarget> {
 
   return {
     store,
+    peer: () => openPeer(testConfig('mysql', url)),
     teardown: async (): Promise<void> => {
       await store.close();
       const cleaner = await mysql.createConnection(adminUrl);
@@ -234,7 +262,8 @@ async function mysqlTarget(adminUrl: string): Promise<SmokeTarget> {
 
 async function mongoTarget(baseUrl: string): Promise<SmokeTarget> {
   const database = throwawayDbName();
-  const store = createStore(testConfig('mongodb', withDatabase(baseUrl, database)));
+  const url = withDatabase(baseUrl, database);
+  const store = createStore(testConfig('mongodb', url));
   try {
     await store.init();
     await store.migrate();
@@ -247,6 +276,7 @@ async function mongoTarget(baseUrl: string): Promise<SmokeTarget> {
 
   return {
     store,
+    peer: () => openPeer(testConfig('mongodb', url)),
     teardown: async (): Promise<void> => {
       await store.close();
       const cleaner = new MongoClient(withDatabase(baseUrl, database));
@@ -273,6 +303,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
   runTeardownCancellationContract(label, makeStore);
   runTeardownFencingContract(label, makeStore);
   runTeardownTransitionContract(label, makeStore);
+  runTransactionContentionContract(label, makeStore);
   describe(`store contract — ${label}`, () => {
     let target: SmokeTarget;
     let store: NexusStore;
@@ -1004,6 +1035,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         enabled: true,
         config: { allow: ['203.0.113.0/24'], mode: 'allow_first' },
         trigger: { methods: ['POST'], path_prefix: '/nexus/orders' },
+        ferrum_plugin_config_id: 'edge-config-0001',
       });
       assert.equal(first.api_id, api.id);
       assert.equal(first.enabled, true);
@@ -1011,6 +1043,8 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       // as the JSON text the SQL adapters keep in their `*_json` columns.
       assert.deepEqual(first.config, { allow: ['203.0.113.0/24'], mode: 'allow_first' });
       assert.deepEqual(first.trigger, { methods: ['POST'], path_prefix: '/nexus/orders' });
+      // The portal's ownership claim on one gateway config (issue #153).
+      assert.equal(first.ferrum_plugin_config_id, 'edge-config-0001');
 
       // The PUT route saves the same pair again: one row, not a conflict.
       const replaced = await store.apiPlugins.upsert({
@@ -1019,14 +1053,32 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         enabled: false,
         config: { deny: ['198.51.100.4'] },
         trigger: null,
+        ferrum_plugin_config_id: 'edge-config-0002',
       });
       assert.equal(replaced.id, first.id, 'the pair is unique, so a save reuses the row');
       assert.equal(replaced.created_at, first.created_at, 'created_at survives a replace');
       assert.equal(replaced.enabled, false);
       assert.deepEqual(replaced.config, { deny: ['198.51.100.4'] });
       assert.equal(replaced.trigger, null);
+      assert.equal(
+        replaced.ferrum_plugin_config_id,
+        'edge-config-0002',
+        'a save that recreated the gateway config records the new id',
+      );
 
-      assert.deepEqual(await store.apiPlugins.find(api.id, 'ip_restriction'), replaced);
+      // An operator deleted the gateway config by hand: the row survives with
+      // no claim, which is the same shape a pre-015 row has.
+      const orphaned = await store.apiPlugins.upsert({
+        api_id: api.id,
+        plugin_name: 'ip_restriction',
+        enabled: false,
+        config: { deny: ['198.51.100.4'] },
+        trigger: null,
+        ferrum_plugin_config_id: null,
+      });
+      assert.equal(orphaned.ferrum_plugin_config_id, null);
+
+      assert.deepEqual(await store.apiPlugins.find(api.id, 'ip_restriction'), orphaned);
       assert.equal(await store.apiPlugins.find(api.id, 'compression'), null);
       assert.equal((await store.apiPlugins.listByApi(api.id)).length, 1);
     });
@@ -1042,6 +1094,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         enabled: true,
         config: {},
         trigger: null,
+        ferrum_plugin_config_id: 'edge-correlation-1',
       });
       await store.apiPlugins.upsert({
         api_id: api.id,
@@ -1049,14 +1102,17 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         enabled: true,
         config: { algorithms: ['gzip'] },
         trigger: null,
+        ferrum_plugin_config_id: 'edge-compression-1',
       });
-      // The same plugin name on a different API is a different row.
+      // The same plugin name on a different API is a different row, and carries
+      // its own gateway config id.
       await store.apiPlugins.upsert({
         api_id: other.id,
         plugin_name: 'compression',
         enabled: true,
         config: {},
         trigger: null,
+        ferrum_plugin_config_id: 'edge-compression-2',
       });
 
       const listed = await store.apiPlugins.listByApi(api.id);
@@ -1065,6 +1121,16 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         'compression',
         'correlation_id',
       ]);
+      assert.deepEqual(
+        [...listed].map((row) => row.ferrum_plugin_config_id).sort(),
+        ['edge-compression-1', 'edge-correlation-1'],
+        'each row keeps its own gateway config id',
+      );
+      assert.equal(
+        (await store.apiPlugins.find(other.id, 'compression'))?.ferrum_plugin_config_id,
+        'edge-compression-2',
+        'the same plugin name on another API owns a different config',
+      );
 
       assert.equal(await store.apiPlugins.delete(api.id, 'compression'), true);
       assert.equal(await store.apiPlugins.delete(api.id, 'compression'), false);

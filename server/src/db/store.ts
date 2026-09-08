@@ -50,6 +50,27 @@
  * Mongo session) and should keep the same observable behaviour: serialised
  * bodies, atomic commit, rollback on throw, no outside caller sharing a body's
  * fate.
+ *
+ * ## Transaction bodies are re-runnable
+ *
+ * The pooled adapters run several connections against one database, and every
+ * engine behind them can roll a transaction back for contention alone: an
+ * InnoDB deadlock victim, a PostgreSQL serialization failure, a MongoDB write
+ * conflict. Each of those means "nothing was applied, run it again", so the
+ * adapters **re-run the body** — bounded, with jitter — rather than losing its
+ * work behind a `500` carrying a driver error. A body that still cannot commit
+ * fails with `NexusError('CONFLICT', …)`; no driver error type ever escapes.
+ *
+ * The price is a contract every call site owes: **a body may run more than
+ * once**, so everything it does must either go through the transaction-scoped
+ * store — where the rollback undoes it — or be idempotent. Gateway calls,
+ * outbox enqueues whose idempotency key is minted inside the body, and
+ * in-memory counters do not belong in one. A body that cannot honour this
+ * passes `{ retry: false }`, which runs it exactly once and still translates
+ * the driver's error.
+ *
+ * `db/adapters/transaction-retry.ts` holds the policy; the sqlite adapter has
+ * one connection and no contention class, so it is unaffected.
  */
 
 import type {
@@ -120,6 +141,21 @@ export type CreateInput<T> = Omit<T, 'id' | 'created_at' | 'updated_at' | Nullab
 /** Update payload: any subset of the mutable columns. `updated_at` is set by the adapter. */
 export type UpdateInput<T> = Partial<Omit<T, 'id' | 'created_at' | 'updated_at'>>;
 
+/** How {@link NexusStore.transaction} should treat one body. */
+export interface TransactionOptions {
+  /**
+   * Whether the adapter may re-run the body after the engine rolled it back
+   * for contention. Defaults to `true`.
+   *
+   * Pass `false` only for a body that is genuinely not re-runnable — one whose
+   * effects do not all go through the transaction-scoped store and are not
+   * idempotent. Such a body runs exactly once and a contention failure reaches
+   * the caller as `CONFLICT` instead of being retried; it does not make the
+   * body atomic against anything it was not already.
+   */
+  readonly retry?: boolean;
+}
+
 /* ── Stored record shapes ───────────────────────────────────────────────── */
 
 /**
@@ -167,13 +203,26 @@ export type ApiSpecRecord = ApiSpec;
  *
  * The wire {@link ApiPlugin} carries no ids because the route addresses a
  * plugin by `(api, plugin_name)`; the row needs both, plus the API it belongs
- * to. The Ferrum plugin config id is deliberately absent: like `rate_limiting`
- * and `cors`, the gateway object is found by `proxy_id` + `plugin_name`, so an
- * operator who recreates one by hand reconciles automatically.
+ * to and the gateway config the portal created for it.
  */
 export interface ApiPluginRecord extends ApiPlugin {
   id: Uuid;
   api_id: Uuid;
+  /**
+   * The Edge plugin config id Nexus created for this plugin, or `null`.
+   *
+   * This is the portal's **ownership** claim. Edge lets a proxy carry several
+   * configs of one plugin name — distinct triggers, distinct
+   * `priority_override`s — so a name is not an identity, and a save that
+   * matched on the name alone replaced or deleted the operator's hand-made
+   * config as well (issue #153).
+   *
+   * `null` on a row written before the column existed, and on one whose gateway
+   * config an operator has since removed. `plugins/service.ts` backfills the
+   * first case by matching the plugin name on the proxy — the rule that
+   * resolved it then — and creates a fresh config for the second.
+   */
+  ferrum_plugin_config_id: string | null;
 }
 
 /** An `access_requests` row (without the denormalised joins the API adds). */
@@ -668,6 +717,12 @@ export interface UpsertApiPluginInput {
   enabled: boolean;
   config: Record<string, unknown>;
   trigger: ApiPluginTrigger | null;
+  /**
+   * The gateway config this save left behind, or `null` when there is none.
+   * Written on every save rather than only on a create: a config an operator
+   * deleted by hand is replaced by a new one with a new id.
+   */
+  ferrum_plugin_config_id: string | null;
 }
 
 /** Client requests for access to a requestable API. */
@@ -1210,8 +1265,14 @@ export interface NexusStore {
    * parked until the body has committed or rolled back. A body must therefore
    * never wait for another context's store call, which on SQLite would wait for
    * the body.
+   *
+   * **`fn` may run more than once**: a pooled adapter re-runs it when the
+   * engine rolls it back for contention, so every effect it has must go
+   * through `tx` or be idempotent. See "Transaction bodies are re-runnable" at
+   * the top of this module, and {@link TransactionOptions.retry} for the
+   * escape hatch.
    */
-  transaction<T>(fn: (tx: NexusStore) => Promise<T>): Promise<T>;
+  transaction<T>(fn: (tx: NexusStore) => Promise<T>, options?: TransactionOptions): Promise<T>;
 
   readonly users: UserRepo;
   readonly organizations: OrganizationRepo;

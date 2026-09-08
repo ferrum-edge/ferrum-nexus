@@ -228,7 +228,20 @@ single portable SQL text; `sql-common.ts` absorbs the differences:
 Row decoding mirrors the SQLite adapter exactly: 0/1 becomes real booleans,
 `*_json` columns come back parsed, absent columns come back `null` (never
 `undefined`). Each adapter supplies only an executor (a pool, or a checked-out
-transaction connection) plus lifecycle; neither adds query logic.
+transaction connection), lifecycle, and its engine's classification of a
+rolled-back-for-contention error; neither adds query logic.
+
+Both engines can roll a transaction back purely because another one collided
+with it — an InnoDB deadlock victim (`ER_LOCK_DEADLOCK`), a PostgreSQL
+serialization failure (`40001`, `40P01`) — and both mean "nothing was applied,
+run it again". The shared shell does exactly that: up to five attempts with
+jittered backoff, inside the same queue slot so body ordering is unchanged,
+and a `CONFLICT` carrying `details.reason = "transaction_contention"` if the
+last attempt still cannot commit. A driver error never leaves the store. The
+price is that **a transaction body may run more than once**, so every effect it
+has must go through the transaction-scoped store or be idempotent; the policy
+and that contract live in
+[`adapters/transaction-retry.ts`](../server/src/db/adapters/transaction-retry.ts).
 
 The SQLite adapter deliberately does _not_ share these bodies — it is
 synchronous underneath, and wrapping every statement to fit a `Promise`-shaped
@@ -255,6 +268,19 @@ differences:
    it is lowercased on write, as in the SQL adapters.
 4. Partial unique indexes use `partialFilterExpression`, which lines up
    one-for-one with SQLite's `CREATE UNIQUE INDEX … WHERE …`.
+
+Transactions run through the driver's own `session.withTransaction()`, which
+re-runs the body on a `TransientTransactionError` and re-commits on an
+`UnknownTransactionCommitResult` — the retry MongoDB expects of a client, and
+the reason an ordinary concurrent write no longer turns a body into a lost
+write behind a `500`. The driver re-runs with no pause between runs, and
+MongoDB fails the loser of a contended document immediately rather than
+blocking it on a lock, so the adapter puts the SQL adapters' backoff in front
+of every re-run and bounds the loop by wall clock — 5 seconds of contention —
+rather than by an attempt count, which would be spent in microseconds while the
+transaction that won was still committing. The transaction as a whole, that
+wait included, is capped at 15 seconds, well short of the driver's two-minute
+default.
 
 **Replica set required.** `init()` probes with `hello` and refuses to start
 against a standalone `mongod` unless `NEXUS_DB_ALLOW_STANDALONE=true`, because
@@ -676,6 +702,20 @@ read-modify-write with one undo step. A PATCH that does not name a setting does
 not write it at all, so timeouts an operator tuned by hand on the proxy survive
 a provider changing something else.
 
+`cors` and `rate_limit` are held to the same rule on the **plugin** side. The
+SPA submits the whole settings block on every save, so their presence in a
+`PATCH` says nothing about intent; both are compared against the stored value
+with `isDeepStrictEqual` and reconciled only when they actually moved. A replay
+therefore leaves the gateway config exactly as the operator left it —
+`allowed_headers`, `max_age`, a `sync_mode: 'redis'` that makes the quota
+cluster-wide, an `enabled: false` they set deliberately — and does not name the
+field in the audit row. It does still repair an association an operator dropped,
+because putting an id back into `plugins[]` cannot lose anything. A genuine
+change merges the portal's keys over the live config rather than rebuilding it,
+so the operator's keys survive that too; the merge is safe here precisely
+because these two configs are built from a fixed key set, which is why palette
+plugins (whose optional fields a provider must be able to clear) do not use it.
+
 The single association write is what turns a stored plugin config into one the
 gateway runs. It happens while the proxy is still on its staging path, so the
 interval in which the proxy exists with no plugins is not observable at
@@ -778,6 +818,29 @@ Three further points of fidelity:
   may require application-level reconciliation before retrying. This behavior
   requires the Edge dispatch provenance fix in
   [ferrum-edge#4844](https://github.com/ferrum-edge/ferrum-edge/pull/4844).
+
+**The portal owns configs it created, by id.** The `api_plugins` row records the
+Edge plugin config id it produced (`ferrum_plugin_config_id`, migration 015),
+and a save or a removal acts on that config alone. Edge genuinely allows several
+configs of one plugin name on a proxy — distinct `trigger`s, distinct
+`priority_override`s — so a name is not an identity: an operator's hand-made
+per-path deny gate lives happily beside the palette's config of the same name,
+and the portal never replaces or deletes it. A row written before the column
+existed carries no id, so the next save backfills one by matching the plugin
+name, adopting a single match (or, when several exist, the first) and leaving
+every other config where it is. A recorded id that is no longer on the gateway
+means an operator removed it; the next save creates a fresh config and records
+the new id rather than adopting somebody else's.
+
+**A whole-resource `PUT` carries what the portal does not own.**
+`PUT /plugins/config/{id}` replaces the entire resource, so a body built from
+scratch resets every field the portal has no control for — `priority_override`
+is the one that exists today. `writeBody` in `publishing/edge-plugins.ts` merges
+the portal's fields (`plugin_name`, `scope`, `proxy_id`, `enabled`, `config`,
+`trigger`) over the live resource instead, which makes the rule structural
+rather than a checklist that has to be re-read whenever Edge grows a field. The
+same helper feeds the create, the replace, the undo step and the proxy-rebuild
+restore.
 
 The `api_plugins` row is written last but **inside** the compensated block, so a
 store failure rolls the gateway back: a `request_termination` left running with

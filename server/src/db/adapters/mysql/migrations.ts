@@ -106,6 +106,13 @@ const guards: Guard[] = [
     columns: [{ name: 'edge_ordinal', type: 'int', nullable: true, default: null }],
   },
   {
+    sql: 'ALTER TABLE api_plugins ADD COLUMN ferrum_plugin_config_id VARCHAR(64) DEFAULT NULL',
+    table: 'api_plugins',
+    columns: [
+      { name: 'ferrum_plugin_config_id', type: 'varchar(64)', nullable: true, default: null },
+    ],
+  },
+  {
     sql: 'ALTER TABLE credential_metadata ADD UNIQUE KEY ux_credentials_ordinal (ferrum_consumer_id, credential_type, edge_ordinal)',
     table: 'credential_metadata',
     indexes: [

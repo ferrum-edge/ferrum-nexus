@@ -453,6 +453,7 @@ describe('sqlite store', () => {
         enabled: true,
         config: { ttl_seconds: 300, cacheable_status_codes: [200, 404] },
         trigger: null,
+        ferrum_plugin_config_id: null,
       });
       // The `*_json` columns are decoded at the adapter boundary: services see
       // real objects and real booleans, never JSON text or 0/1.
@@ -467,6 +468,7 @@ describe('sqlite store', () => {
         enabled: false,
         config: { ttl_seconds: 60 },
         trigger: { methods: ['GET'], path_prefix: '/nexus/palette/reports' },
+        ferrum_plugin_config_id: 'plugin-config-1',
       });
       assert.equal(replaced.id, created.id, 'ON CONFLICT updates rather than inserting a second');
       assert.equal(replaced.created_at, created.created_at);
@@ -482,6 +484,7 @@ describe('sqlite store', () => {
         enabled: true,
         config: {},
         trigger: null,
+        ferrum_plugin_config_id: null,
       });
       assert.equal((await store.apiPlugins.listByApi(api.id)).length, 2);
 
