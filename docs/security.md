@@ -266,30 +266,30 @@ the route, while "is this your API" is a property of the row.
 ### Capability matrix
 
 | Capability                                        | client | provider | admin | super_admin |
-| ------------------------------------------------- | :----: | :------: | :---: | :---------: |
-| Register, sign in, manage own profile             |   ✓    |    ✓     |   ✓   |      ✓      |
-| Browse catalog, read specs                        |   ✓    |    ✓     |   ✓   |      ✓      |
-| Request access, cancel own request                |   ✓    |    ✓     |   ✓   |      ✓      |
-| Issue / rotate / revoke **own** credentials       |   ✓    |    ✓     |   ✓   |      ✓      |
-| Messaging, notifications                          |   ✓    |    ✓     |   ✓   |      ✓      |
-| Publish an API, update own API/spec               |   —    |    ✓     |   ✓   |      ✓      |
-| Configure palette plugins on **own** API          |   —    |    ✓     |   ✓   |      ✓      |
-| Create a test consumer for own API                |   —    |    ✓     |   ✓   |      ✓      |
-| Approve / deny requests on **own** APIs           |   —    |    ✓     |   ✓   |      ✓      |
-| Revoke grants on **own** APIs                     |   —    |    ✓     |   ✓   |      ✓      |
-| Edit / delete **another** provider's API          |   —    |    —     |   ✓   |      ✓      |
-| Decide requests / revoke grants on **any** API    |   —    |    —     |   ✓   |      ✓      |
-| List all users; change `client` ⇄ `provider`      |   —    |    —     |   ✓   |      ✓      |
-| Manage organizations                              |   —    |    —     |   ✓   |      ✓      |
-| List another account's credential metadata        |   —    |    —     |   ✓   |      ✓      |
-| Read/reply in the platform inbox; read any thread |   —    |    —     |   ✓   |      ✓      |
-| Portal settings: branding, registration policy    |   —    |    —     |   ✓   |      ✓      |
-| Email templates, mass email                       |   —    |    —     |   ✓   |      ✓      |
-| Read the audit log                                |   —    |    —     |   ✓   |      ✓      |
-| Portal settings: **SMTP and CAPTCHA**             |   —    |    —     | **—** |      ✓      |
-| Grant or revoke `admin` / `super_admin`           |   —    |    —     | **—** |      ✓      |
-| Disable or re-enable an `admin` or `super_admin`  |   —    |    —     | **—** |      ✓      |
-| God mode (4 endpoints)                            |   —    |    —     |   —   |      ✓      |
+| ------------------------------------------------- | ------ | -------- | ----- | ----------- |
+| Register, sign in, manage own profile             | ✓      | ✓        | ✓     | ✓           |
+| Browse catalog, read specs                        | ✓      | ✓        | ✓     | ✓           |
+| Request access, cancel own request                | ✓      | ✓        | ✓     | ✓           |
+| Issue / rotate / revoke **own** credentials       | ✓      | ✓        | ✓     | ✓           |
+| Messaging, notifications                          | ✓      | ✓        | ✓     | ✓           |
+| Publish an API, update own API/spec               | —      | ✓        | ✓     | ✓           |
+| Configure palette plugins on **own** API          | —      | ✓        | ✓     | ✓           |
+| Create a test consumer for own API                | —      | ✓        | ✓     | ✓           |
+| Approve / deny requests on **own** APIs           | —      | ✓        | ✓     | ✓           |
+| Revoke grants on **own** APIs                     | —      | ✓        | ✓     | ✓           |
+| Edit / delete **another** provider's API          | —      | —        | ✓     | ✓           |
+| Decide requests / revoke grants on **any** API    | —      | —        | ✓     | ✓           |
+| List all users; change `client` ⇄ `provider`      | —      | —        | ✓     | ✓           |
+| Manage organizations                              | —      | —        | ✓     | ✓           |
+| List another account's credential metadata        | —      | —        | ✓     | ✓           |
+| Read/reply in the platform inbox; read any thread | —      | —        | ✓     | ✓           |
+| Portal settings: branding, registration policy    | —      | —        | ✓     | ✓           |
+| Email templates, mass email                       | —      | —        | ✓     | ✓           |
+| Read the audit log                                | —      | —        | ✓     | ✓           |
+| Portal settings: **SMTP and CAPTCHA**             | —      | —        | **—** | ✓           |
+| Grant or revoke `admin` / `super_admin`           | —      | —        | **—** | ✓           |
+| Disable or re-enable an `admin` or `super_admin`  | —      | —        | **—** | ✓           |
+| God mode (4 endpoints)                            | —      | —        | —     | ✓           |
 
 The three bolded gaps are the point of the `super_admin` tier: an `admin` has
 broad authority over content and users but **cannot escalate itself or another
