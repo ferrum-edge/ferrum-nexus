@@ -1107,6 +1107,208 @@ describe('publishing', () => {
       assert.deepEqual(associatedIds(harness, proxyId), writtenIds(harness, proxyId));
     });
 
+    /* ── Operator tuning on the two plugin-backed settings (issue #150) ── */
+
+    describe('cors and rate_limit are reconciled on change, not on presence', () => {
+      /**
+       * Publish an API that already carries both settings, then tune the two
+       * gateway configs the way an operator would.
+       *
+       * Published rather than PATCHed so the only `api.update` row in the
+       * store belongs to the save under test.
+       */
+      async function tunedByOperator(): Promise<{ cors: string; limiter: string }> {
+        const published = await harness.authed(provider, {
+          method: 'POST',
+          url: '/api/apis',
+          payload: publishPayload({
+            slug: `tuned-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            rate_limit: { limit: 100, window_seconds: 60 },
+            cors: { allowed_origins: ['https://app.example.com'], allow_credentials: false },
+          }),
+        });
+        assert.equal(published.statusCode, 201, published.body);
+        const body = published.json<PublishApiResponse>();
+        apiId = body.api.id;
+        proxyId = String(body.api.ferrum_proxy_id);
+
+        const cors = harness.edge.pluginForProxy(proxyId, 'cors');
+        const limiter = harness.edge.pluginForProxy(proxyId, 'rate_limiting');
+        assert.ok(cors);
+        assert.ok(limiter);
+        // Straight onto the stored resources, the way a hand-edit on the
+        // gateway would land: keys the portal does not model at all.
+        cors.config = {
+          ...(cors.config as Record<string, unknown>),
+          allowed_headers: ['x-tenant'],
+          max_age: 600,
+        };
+        limiter.config = {
+          ...(limiter.config as Record<string, unknown>),
+          sync_mode: 'redis',
+          redis_url: 'redis://limits.internal:6379',
+        };
+        return { cors: String(cors.id), limiter: String(limiter.id) };
+      }
+
+      it('leaves both gateway configs untouched when the SPA replays them', async () => {
+        const ids = await tunedByOperator();
+        const writesBefore = harness.edge.callsTo('PUT', '/plugins/config').length;
+
+        // Exactly what the form submits when a provider fixes a typo.
+        const saved = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${apiId}`,
+          payload: {
+            description: 'A typo, fixed.',
+            rate_limit: { limit: 100, window_seconds: 60 },
+            cors: { allowed_origins: ['https://app.example.com'], allow_credentials: false },
+          },
+        });
+        assert.equal(saved.statusCode, 200, saved.body);
+
+        assert.equal(
+          harness.edge.callsTo('PUT', '/plugins/config').length,
+          writesBefore,
+          'an unchanged setting must not rewrite its gateway config',
+        );
+        assert.deepEqual(harness.edge.pluginForProxy(proxyId, 'cors')?.config, {
+          allowed_origins: ['https://app.example.com'],
+          allow_credentials: false,
+          allowed_headers: ['x-tenant'],
+          max_age: 600,
+        });
+        assert.deepEqual(harness.edge.pluginForProxy(proxyId, 'rate_limiting')?.config, {
+          limit_by: 'consumer',
+          expose_headers: true,
+          limits: [{ scope: 'default', window_seconds: 60, max_requests: 100 }],
+          sync_mode: 'redis',
+          redis_url: 'redis://limits.internal:6379',
+        });
+        assert.equal(String(harness.edge.pluginForProxy(proxyId, 'cors')?.id), ids.cors);
+        assert.equal(
+          String(harness.edge.pluginForProxy(proxyId, 'rate_limiting')?.id),
+          ids.limiter,
+        );
+
+        // Filtered by target: audit rows accumulate across the whole file.
+        const rows = (await harness.auditRows('api.update')).filter(
+          (entry) => entry.target_id === apiId,
+        );
+        const row = rows[0];
+        assert.ok(row);
+        assert.deepEqual(
+          (row.details as { changed_fields?: unknown }).changed_fields,
+          ['description'],
+          'the log must not name two fields that did not move',
+        );
+      });
+
+      it('does not re-enable a config an operator switched off', async () => {
+        await tunedByOperator();
+        const limiter = harness.edge.pluginForProxy(proxyId, 'rate_limiting');
+        assert.ok(limiter);
+        limiter.enabled = false;
+
+        const saved = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${apiId}`,
+          payload: {
+            description: 'Still just a typo.',
+            rate_limit: { limit: 100, window_seconds: 60 },
+          },
+        });
+        assert.equal(saved.statusCode, 200, saved.body);
+        assert.equal(harness.edge.pluginForProxy(proxyId, 'rate_limiting')?.enabled, false);
+      });
+
+      it('applies a genuine change, audits it, and keeps the operator keys', async () => {
+        await tunedByOperator();
+
+        const saved = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${apiId}`,
+          payload: {
+            rate_limit: { limit: 500, window_seconds: 60 },
+            cors: { allowed_origins: ['https://ops.example.com'], allow_credentials: true },
+          },
+        });
+        assert.equal(saved.statusCode, 200, saved.body);
+        const api = saved.json<UpdateApiResponse>().api;
+        assert.deepEqual(api.rate_limit, { limit: 500, window_seconds: 60 });
+        assert.deepEqual(api.cors, {
+          allowed_origins: ['https://ops.example.com'],
+          allow_credentials: true,
+        });
+
+        // The portal's keys move; the operator's ride along (issue #150's
+        // "merge into the live config rather than replace it").
+        assert.deepEqual(harness.edge.pluginForProxy(proxyId, 'rate_limiting')?.config, {
+          limit_by: 'consumer',
+          expose_headers: true,
+          limits: [{ scope: 'default', window_seconds: 60, max_requests: 500 }],
+          sync_mode: 'redis',
+          redis_url: 'redis://limits.internal:6379',
+        });
+        assert.deepEqual(harness.edge.pluginForProxy(proxyId, 'cors')?.config, {
+          allowed_origins: ['https://ops.example.com'],
+          allow_credentials: true,
+          allowed_headers: ['x-tenant'],
+          max_age: 600,
+        });
+
+        const rows = (await harness.auditRows('api.update')).filter(
+          (entry) => entry.target_id === apiId,
+        );
+        const row = rows[0];
+        assert.ok(row);
+        const changed = (row.details as { changed_fields?: string[] }).changed_fields ?? [];
+        assert.ok(changed.includes('rate_limit'));
+        assert.ok(changed.includes('cors'));
+      });
+
+      it('still removes both plugins on null', async () => {
+        await tunedByOperator();
+
+        const cleared = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${apiId}`,
+          payload: { rate_limit: null, cors: null },
+        });
+        assert.equal(cleared.statusCode, 200, cleared.body);
+        assert.equal(cleared.json<UpdateApiResponse>().api.rate_limit, null);
+        assert.equal(cleared.json<UpdateApiResponse>().api.cors, null);
+        assert.equal(harness.edge.pluginForProxy(proxyId, 'rate_limiting'), undefined);
+        assert.equal(harness.edge.pluginForProxy(proxyId, 'cors'), undefined);
+        assert.deepEqual(effectiveNames(harness, proxyId), ['access_control', 'key_auth']);
+      });
+
+      it('carries an operator’s priority_override through a genuine change', async () => {
+        await tunedByOperator();
+        const limiter = harness.edge.pluginForProxy(proxyId, 'rate_limiting');
+        const cors = harness.edge.pluginForProxy(proxyId, 'cors');
+        assert.ok(limiter);
+        assert.ok(cors);
+        limiter.priority_override = 9_000;
+        cors.priority_override = 120;
+
+        const saved = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${apiId}`,
+          payload: {
+            rate_limit: { limit: 500, window_seconds: 60 },
+            cors: { allowed_origins: ['https://ops.example.com'], allow_credentials: true },
+          },
+        });
+        assert.equal(saved.statusCode, 200, saved.body);
+        assert.equal(
+          harness.edge.pluginForProxy(proxyId, 'rate_limiting')?.priority_override,
+          9_000,
+        );
+        assert.equal(harness.edge.pluginForProxy(proxyId, 'cors')?.priority_override, 120);
+      });
+    });
+
     it('applies the proxy settings and resets them to the gateway defaults on null', async () => {
       const applied = await harness.authed(provider, {
         method: 'PATCH',

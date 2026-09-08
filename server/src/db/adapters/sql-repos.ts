@@ -278,6 +278,7 @@ function mapApiPlugin(row: Row): ApiPluginRecord {
     enabled: bool(row.enabled),
     config: json<Record<string, unknown>>(row.config_json, {}),
     trigger: json<ApiPluginTrigger | null>(row.trigger_json, null),
+    ferrum_plugin_config_id: textOrNull(row.ferrum_plugin_config_id),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -1199,11 +1200,12 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       'enabled',
       'config_json',
       'trigger_json',
+      'ferrum_plugin_config_id',
       'created_at',
       'updated_at',
     ],
     'api_id, plugin_name',
-    ['enabled', 'config_json', 'trigger_json', 'updated_at'],
+    ['enabled', 'config_json', 'trigger_json', 'ferrum_plugin_config_id', 'updated_at'],
   );
 
   const apiPlugins: ApiPluginRepo = {
@@ -1237,6 +1239,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
           encodeBool(input.enabled),
           encodeJson(input.config) ?? '{}',
           encodeJson(input.trigger),
+          input.ferrum_plugin_config_id,
           meta.created_at,
           meta.updated_at,
         ]),

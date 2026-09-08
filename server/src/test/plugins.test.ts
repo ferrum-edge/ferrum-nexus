@@ -50,6 +50,11 @@ function associatedIds(harness: TestApp, proxyId: string): string[] {
   return plugins.map((entry) => String((entry as { plugin_config_id: unknown }).plugin_config_id));
 }
 
+/** Plugin config ids the gateway would actually execute for the proxy. */
+function effectiveIds(harness: TestApp, proxyId: string): string[] {
+  return harness.edge.effectivePluginsForProxy(proxyId).map((plugin) => String(plugin.id));
+}
+
 /** Make the next `store.apiPlugins.upsert(...)` reject, then restore it. */
 function failNextUpsert(harness: TestApp, message: string): void {
   const real = harness.store.apiPlugins.upsert.bind(harness.store.apiPlugins);
@@ -108,6 +113,63 @@ describe('provider plugin palette', () => {
     const config = harness.edge.pluginForProxy(proxyId, name);
     assert.ok(config, `expected an Edge plugin config for ${name}`);
     return config;
+  }
+
+  /** The stored Edge plugin config with this id. */
+  function storedConfig(id: string): Record<string, unknown> {
+    const config = harness.edge.pluginConfigs.get(`nexus/${id}`);
+    assert.ok(config, `expected a stored plugin config ${id}`);
+    return config;
+  }
+
+  /** Every config of `name` written against the current proxy, in creation order. */
+  function configsNamed(name: string): Record<string, unknown>[] {
+    return harness.edge.pluginsForProxy(proxyId).filter((plugin) => plugin.plugin_name === name);
+  }
+
+  /** The gateway config id the portal's `api_plugins` row claims, if any. */
+  async function ownedConfigId(name: string): Promise<string | null> {
+    return (await harness.store.apiPlugins.find(apiId, name))?.ferrum_plugin_config_id ?? null;
+  }
+
+  /**
+   * A second config of `name` on the proxy, created by hand the way an operator
+   * would — a per-path gate or a stricter ceiling — and associated so the
+   * gateway actually runs it. Nexus never created it and must never touch it.
+   */
+  function seedOperatorConfig(
+    name: string,
+    id: string,
+    config: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const seeded: Record<string, unknown> = {
+      id,
+      namespace: 'nexus',
+      plugin_name: name,
+      scope: 'proxy',
+      proxy_id: proxyId,
+      enabled: true,
+      config,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    harness.edge.pluginConfigs.set(`nexus/${id}`, seeded);
+    const proxy = harness.edge.proxies.get(`nexus/${proxyId}`);
+    assert.ok(proxy, 'expected the published proxy');
+    proxy.plugins = [...associatedIds(harness, proxyId), id].map((plugin_config_id) => ({
+      plugin_config_id,
+    }));
+    return seeded;
+  }
+
+  /** Detach and delete one config from the gateway, as an operator would. */
+  function removeConfigByHand(id: string): void {
+    harness.edge.pluginConfigs.delete(`nexus/${id}`);
+    const proxy = harness.edge.proxies.get(`nexus/${proxyId}`);
+    assert.ok(proxy, 'expected the published proxy');
+    proxy.plugins = associatedIds(harness, proxyId)
+      .filter((value) => value !== id)
+      .map((plugin_config_id) => ({ plugin_config_id }));
   }
 
   before(async () => {
@@ -764,6 +826,195 @@ describe('provider plugin palette', () => {
     });
   });
 
+  /* ── Ownership ─────────────────────────────────────────────────────────── */
+
+  describe('what the portal owns on a shared proxy', () => {
+    it('leaves an operator’s config of the same name alone on an identical re-save', async () => {
+      assert.equal(
+        (await setPlugin('request_size_limiting', { config: { max_bytes: 1_048_576 } })).statusCode,
+        200,
+      );
+      const owned = await ownedConfigId('request_size_limiting');
+      assert.ok(owned, 'the save records the config it created');
+
+      seedOperatorConfig('request_size_limiting', 'operator-owned-config-0001', {
+        max_bytes: 4_096,
+      });
+      assert.equal(configsNamed('request_size_limiting').length, 2);
+
+      // The byte-identical replay that used to delete the operator's config.
+      assert.equal(
+        (await setPlugin('request_size_limiting', { config: { max_bytes: 1_048_576 } })).statusCode,
+        200,
+      );
+
+      assert.equal(configsNamed('request_size_limiting').length, 2, 'nothing was purged');
+      assert.deepEqual(storedConfig('operator-owned-config-0001').config, { max_bytes: 4_096 });
+      assert.ok(
+        effectiveIds(harness, proxyId).includes('operator-owned-config-0001'),
+        'the gateway still runs the operator’s gate',
+      );
+      assert.equal(await ownedConfigId('request_size_limiting'), owned);
+      assert.deepEqual(storedConfig(owned).config, { max_bytes: 1_048_576 });
+    });
+
+    it('deletes only the config it owns when the plugin is removed', async () => {
+      await setPlugin('request_size_limiting', { config: { max_bytes: 1_048_576 } });
+      const owned = await ownedConfigId('request_size_limiting');
+      assert.ok(owned);
+      seedOperatorConfig('request_size_limiting', 'operator-owned-config-0002', {
+        max_bytes: 4_096,
+      });
+
+      const response = await harness.authed(provider, {
+        method: 'DELETE',
+        url: `/api/apis/${apiId}/plugins/request_size_limiting`,
+      });
+      assert.equal(response.statusCode, 200);
+
+      assert.deepEqual(
+        configsNamed('request_size_limiting').map((plugin) => String(plugin.id)),
+        ['operator-owned-config-0002'],
+      );
+      assert.ok(effectiveIds(harness, proxyId).includes('operator-owned-config-0002'));
+      assert.equal(harness.edge.pluginConfigs.get(`nexus/${owned}`), undefined);
+    });
+
+    it('backfills ownership by name for a row written before the id column', async () => {
+      await setPlugin('compression', { config: { algorithms: ['gzip'] } });
+      const created = await ownedConfigId('compression');
+      assert.ok(created);
+      // A pre-014 row: the gateway config exists, the claim on it does not.
+      await harness.store.apiPlugins.upsert({
+        api_id: apiId,
+        plugin_name: 'compression',
+        enabled: true,
+        config: { algorithms: ['gzip'] },
+        trigger: null,
+        ferrum_plugin_config_id: null,
+      });
+
+      assert.equal(
+        (await setPlugin('compression', { config: { algorithms: ['br'] } })).statusCode,
+        200,
+      );
+
+      assert.equal(configsNamed('compression').length, 1, 'the config was adopted, not duplicated');
+      assert.equal(await ownedConfigId('compression'), created);
+      assert.deepEqual(storedConfig(created).config, { algorithms: ['br'] });
+    });
+
+    it('adopts the first match and leaves the rest when a legacy row is ambiguous', async () => {
+      await setPlugin('compression', { config: { algorithms: ['gzip'] } });
+      const created = await ownedConfigId('compression');
+      assert.ok(created);
+      seedOperatorConfig('compression', 'operator-owned-config-0003', { algorithms: ['br'] });
+      await harness.store.apiPlugins.upsert({
+        api_id: apiId,
+        plugin_name: 'compression',
+        enabled: true,
+        config: { algorithms: ['gzip'] },
+        trigger: null,
+        ferrum_plugin_config_id: null,
+      });
+
+      assert.equal(
+        (await setPlugin('compression', { config: { algorithms: ['gzip', 'br'] } })).statusCode,
+        200,
+      );
+
+      assert.equal(configsNamed('compression').length, 2, 'ambiguity never deletes');
+      assert.deepEqual(storedConfig('operator-owned-config-0003').config, { algorithms: ['br'] });
+      assert.equal(await ownedConfigId('compression'), created, 'the first match is adopted');
+      assert.deepEqual(storedConfig(created).config, { algorithms: ['gzip', 'br'] });
+    });
+
+    it('creates a fresh config when the recorded one was removed by hand', async () => {
+      await setPlugin('compression', { config: { algorithms: ['gzip'] } });
+      const created = await ownedConfigId('compression');
+      assert.ok(created);
+      seedOperatorConfig('compression', 'operator-owned-config-0004', { algorithms: ['br'] });
+      removeConfigByHand(created);
+
+      assert.equal(
+        (await setPlugin('compression', { config: { algorithms: ['gzip'] } })).statusCode,
+        200,
+      );
+
+      const recorded = await ownedConfigId('compression');
+      assert.ok(recorded);
+      assert.notEqual(recorded, created, 'a deleted config is not resurrected under its old id');
+      assert.notEqual(
+        recorded,
+        'operator-owned-config-0004',
+        'a config the portal never created is not adopted in its place',
+      );
+      assert.deepEqual(storedConfig('operator-owned-config-0004').config, { algorithms: ['br'] });
+      assert.ok(effectiveIds(harness, proxyId).includes(recorded));
+    });
+  });
+
+  /* ── Operator-owned fields on the config the portal does own ───────────── */
+
+  describe('fields the portal does not own', () => {
+    it('carries an operator’s priority_override through a changed save', async () => {
+      await setPlugin('request_size_limiting', { config: { max_bytes: 1_048_576 } });
+      const owned = await ownedConfigId('request_size_limiting');
+      assert.ok(owned);
+      storedConfig(owned).priority_override = 9_000;
+
+      assert.equal(
+        (await setPlugin('request_size_limiting', { config: { max_bytes: 2_097_152 } })).statusCode,
+        200,
+      );
+
+      assert.equal(
+        storedConfig(owned).priority_override,
+        9_000,
+        'execution order is the operator’s; a portal save must not reset it',
+      );
+      assert.deepEqual(storedConfig(owned).config, { max_bytes: 2_097_152 });
+    });
+
+    it('carries priority_override through a switch-off and back on', async () => {
+      await setPlugin('response_caching', { config: { ttl_seconds: 60 } });
+      const owned = await ownedConfigId('response_caching');
+      assert.ok(owned);
+      storedConfig(owned).priority_override = 4_200;
+
+      await setPlugin('response_caching', { enabled: false, config: { ttl_seconds: 60 } });
+      assert.equal(storedConfig(owned).priority_override, 4_200);
+      await setPlugin('response_caching', { enabled: true, config: { ttl_seconds: 60 } });
+      assert.equal(storedConfig(owned).priority_override, 4_200);
+      assert.equal(storedConfig(owned).enabled, true);
+    });
+
+    it('restores priority_override when the store rejects the save', async () => {
+      await setPlugin('response_caching', { config: { ttl_seconds: 60 } });
+      const owned = await ownedConfigId('response_caching');
+      assert.ok(owned);
+      storedConfig(owned).priority_override = 4_200;
+
+      failNextUpsert(harness, 'database unavailable');
+      const response = await setPlugin('response_caching', { config: { ttl_seconds: 3_600 } });
+      assert.equal(response.statusCode, 500);
+
+      assert.equal(storedConfig(owned).priority_override, 4_200, 'the undo carries it too');
+      assert.deepEqual(storedConfig(owned).config, { ttl_seconds: 60 });
+    });
+
+    it('invents no priority_override for a config it creates', async () => {
+      await setPlugin('correlation_id', { config: {} });
+      const owned = await ownedConfigId('correlation_id');
+      assert.ok(owned);
+      assert.equal(
+        'priority_override' in storedConfig(owned),
+        false,
+        'a field the portal does not model is absent, not null',
+      );
+    });
+  });
+
   /* ── Audit ─────────────────────────────────────────────────────────────── */
 
   describe('audit', () => {
@@ -782,24 +1033,61 @@ describe('provider plugin palette', () => {
       assert.deepEqual(details.trigger, { methods: ['POST'] });
       assert.equal(details.replaced, false);
       assert.equal(
+        details.plugin_config_id,
+        await ownedConfigId('ip_restriction'),
+        'the row names the config that was written, not just the plugin name',
+      );
+      assert.equal(
         JSON.stringify(details).includes('203.0.113.9'),
         false,
         'an allow-list is not audit-log material',
       );
     });
 
-    it('records a removal', async () => {
+    it('records a removal, naming the config it deleted', async () => {
       await setPlugin('compression', { config: {} });
+      const owned = await ownedConfigId('compression');
+      assert.ok(owned);
       await harness.authed(provider, {
         method: 'DELETE',
         url: `/api/apis/${apiId}/plugins/compression`,
       });
-      const [row] = await harness.auditRows('api.plugin_remove');
+      // Filtered by target: audit rows accumulate across the whole file, and
+      // `beforeEach` publishes a fresh API for each test.
+      const rows = (await harness.auditRows('api.plugin_remove')).filter(
+        (entry) => entry.target_id === apiId,
+      );
+      const row = rows[0];
       assert.ok(row);
       assert.deepEqual(row.details, {
         plugin_name: 'compression',
         label: 'Response compression',
         was_attached: true,
+        plugin_config_id: owned,
+      });
+    });
+
+    it('records a removal of a plugin whose gateway config is already gone', async () => {
+      await setPlugin('compression', { config: {} });
+      const owned = await ownedConfigId('compression');
+      assert.ok(owned);
+      removeConfigByHand(owned);
+
+      const response = await harness.authed(provider, {
+        method: 'DELETE',
+        url: `/api/apis/${apiId}/plugins/compression`,
+      });
+      assert.equal(response.statusCode, 200);
+      const rows = (await harness.auditRows('api.plugin_remove')).filter(
+        (entry) => entry.target_id === apiId,
+      );
+      const row = rows[0];
+      assert.ok(row);
+      assert.deepEqual(row.details, {
+        plugin_name: 'compression',
+        label: 'Response compression',
+        was_attached: false,
+        plugin_config_id: null,
       });
     });
   });

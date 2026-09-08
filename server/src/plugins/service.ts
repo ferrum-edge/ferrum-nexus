@@ -16,14 +16,28 @@
  * ```
  *
  * The `api_plugins` row is the **portal's** record of what the provider asked
- * for; the gateway objects are the runtime truth. The Edge config id is
- * deliberately not stored — configs are looked up by `proxy_id` and
- * `plugin_name`, so an operator who recreates one by hand reconciles
- * automatically. That is the same trade `publishing/service.ts` makes, and both
- * modules drive the gateway through the one binder in `edge-plugins.ts`, which
- * matters: `PUT /proxies/{id}` is a whole-resource replace with no concurrency
- * token, so a second GET-merge-PUT implementation would mean a second lock key
- * and therefore no lock at all.
+ * for; the gateway objects are the runtime truth. Both modules drive the
+ * gateway through the one binder in `edge-plugins.ts`, which matters:
+ * `PUT /proxies/{id}` is a whole-resource replace with no concurrency token, so
+ * a second GET-merge-PUT implementation would mean a second lock key and
+ * therefore no lock at all.
+ *
+ * ## Ownership is a config id, not a plugin name
+ *
+ * The row records the Edge config id this service created
+ * (`ferrum_plugin_config_id`), and `set`/`remove` act on **that config alone**.
+ * Edge genuinely supports several configs of one plugin name on a proxy —
+ * distinct triggers, distinct `priority_override`s — so a name is not an
+ * identity, and an operator's hand-made per-path gate is not the portal's to
+ * replace or delete. Resolving by name did exactly that: an unchanged palette
+ * save deleted it, silently (issue #153).
+ *
+ * A row written before the column existed carries no id, so the first save or
+ * removal after the upgrade backfills one by matching the plugin name on the
+ * proxy — the rule that resolved it then. Exactly one match is adopted; when
+ * there are several the first is adopted and the rest are left alone. Adopting
+ * the wrong config is recoverable by hand; deleting somebody's security control
+ * is not.
  *
  * ## Ordering, and what a failure leaves behind
  *
@@ -65,7 +79,11 @@ import { AuditAction, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type { ApiPluginRecord, NexusStore, UserRecord } from '../db/store.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
-import type { EdgePluginSettings, EdgePluginTrigger } from '../ferrum-admin/types.js';
+import type {
+  EdgePluginConfig,
+  EdgePluginSettings,
+  EdgePluginTrigger,
+} from '../ferrum-admin/types.js';
 import { conflict, notFound, validationFailed } from '../lib/errors.js';
 import { createEdgePluginBinder } from '../publishing/edge-plugins.js';
 import type { PublishingService } from '../publishing/service.js';
@@ -216,6 +234,31 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
     };
   }
 
+  /**
+   * The gateway config this API's palette row owns, or `undefined` when there
+   * is none to reuse and a fresh one has to be created.
+   *
+   * The recorded id is the whole answer, with one exception: a row written
+   * before the column existed carries none, so it is backfilled by matching the
+   * plugin name — how ownership was resolved then. A single match is adopted;
+   * with several, the first is, and every other config of that name is left
+   * exactly where it is (issue #153).
+   *
+   * A recorded id that is no longer on the proxy means an operator deleted the
+   * config by hand. That is not an error and not a licence to adopt whatever
+   * else carries the name: the caller creates a new config and records its id.
+   */
+  function ownedConfig(
+    row: ApiPluginRecord | null,
+    onProxy: EdgePluginConfig[],
+    pluginName: string,
+  ): EdgePluginConfig | undefined {
+    if (!row) return undefined;
+    const named = onProxy.filter((plugin) => plugin.plugin_name === pluginName);
+    if (row.ferrum_plugin_config_id === null) return named[0];
+    return named.find((plugin) => plugin.id === row.ferrum_plugin_config_id);
+  }
+
   return {
     descriptorFor,
 
@@ -247,16 +290,18 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
       // different key, so queue and lease both grant it, and the order is
       // always name-then-proxy — never the reverse, which would invert the
       // lock order against another caller.
-      const { saved, replaced } = await edge.serializePerKey(
+      const { saved, replaced, configId } = await edge.serializePerKey(
         `proxy-plugin:${target.proxyId}:${pluginName}`,
         async () => {
-          const matches = (await binder.listByProxy(target.proxyId)).filter(
-            (plugin) => plugin.plugin_name === pluginName,
-          );
-          const [existing, ...duplicates] = matches;
+          const row = await store.apiPlugins.find(target.apiId, pluginName);
+          // Only the config this row owns. Every other config of the same name
+          // on the proxy belongs to an operator and is neither replaced nor
+          // deleted here — the purge that used to follow this line removed
+          // hand-made deny gates that Nexus had never created (issue #153).
+          const existing = ownedConfig(row, await binder.listByProxy(target.proxyId), pluginName);
           const undo: (() => Promise<void>)[] = [];
           try {
-            await binder.reconcileOptionalPlugin(
+            const written = await binder.reconcileOptionalPlugin(
               target.proxyId,
               existing,
               pluginName,
@@ -265,28 +310,17 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
               undo,
               { enabled: input.enabled, trigger },
             );
-            // Older concurrent writers may already have left duplicate configs.
-            // Remove every extra while holding the same name-level lock.
-            for (const duplicate of duplicates) {
-              await binder.reconcileOptionalPlugin(
-                target.proxyId,
-                duplicate,
-                pluginName,
-                null,
-                actor.id,
-                undo,
-              );
-            }
             // Written last but inside the compensated block, like every other
             // gateway-then-store sequence in the portal.
-            const row = await store.apiPlugins.upsert({
+            const saved = await store.apiPlugins.upsert({
               api_id: target.apiId,
               plugin_name: pluginName,
               enabled: input.enabled,
               config: input.config,
               trigger: input.trigger,
+              ferrum_plugin_config_id: written?.id ?? null,
             });
-            return { saved: row, replaced: existing !== undefined };
+            return { saved, replaced: existing !== undefined, configId: written?.id ?? null };
           } catch (error) {
             for (const step of undo.reverse()) {
               await step().catch(() => undefined);
@@ -308,6 +342,9 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
           config_keys: Object.keys(input.config).sort(),
           trigger: input.trigger,
           replaced,
+          // Which config was written, so the log says what was touched rather
+          // than only that something of this name was.
+          plugin_config_id: configId,
         },
         ip,
       );
@@ -319,20 +356,20 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
       const descriptor = descriptorFor(pluginName);
       const target = await loadTarget(actor, apiId);
       // Same key, same nesting contract as `set` above.
-      const wasAttached = await edge.serializePerKey(
+      const removedConfigId = await edge.serializePerKey(
         `proxy-plugin:${target.proxyId}:${pluginName}`,
         async () => {
           const row = await store.apiPlugins.find(target.apiId, pluginName);
           if (!row) throw notFound('Plugin', `${apiId}/${pluginName}`);
 
-          // Tolerant of configs an operator already removed by hand, while also
-          // cleaning up every duplicate a historical concurrent save left behind.
-          const matches = (await binder.listByProxy(target.proxyId)).filter(
-            (plugin) => plugin.plugin_name === pluginName,
-          );
+          // Exactly one config is deleted: the one this row owns. Tolerant of a
+          // config an operator already removed by hand (`undefined`), and of a
+          // second config of the same name that was never the portal's to
+          // delete in the first place (issue #153).
+          const existing = ownedConfig(row, await binder.listByProxy(target.proxyId), pluginName);
           const undo: (() => Promise<void>)[] = [];
           try {
-            for (const existing of matches) {
+            if (existing) {
               await binder.reconcileOptionalPlugin(
                 target.proxyId,
                 existing,
@@ -343,7 +380,7 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
               );
             }
             await store.apiPlugins.delete(target.apiId, pluginName);
-            return matches.length > 0;
+            return existing?.id ?? null;
           } catch (error) {
             for (const step of undo.reverse()) {
               await step().catch(() => undefined);
@@ -357,7 +394,12 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
         { id: actor.id, role: actor.role },
         AuditAction.API_PLUGIN_REMOVE,
         { type: 'api', id: target.apiId },
-        { plugin_name: pluginName, label: descriptor.label, was_attached: wasAttached },
+        {
+          plugin_name: pluginName,
+          label: descriptor.label,
+          was_attached: removedConfigId !== null,
+          plugin_config_id: removedConfigId,
+        },
         ip,
       );
     },

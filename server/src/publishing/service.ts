@@ -216,7 +216,7 @@ import {
 } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
-import { createEdgePluginBinder } from './edge-plugins.js';
+import { createEdgePluginBinder, mergeOperatorSettings } from './edge-plugins.js';
 import { presentApi, type GatewayUrlSource } from './present.js';
 import {
   assertUpstreamAllowed,
@@ -1202,32 +1202,75 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             changed.push('requestable');
           }
 
-          if (patch.rate_limit !== undefined && proxyId) {
+          // ── The two plugin-backed settings ──────────────────────────────
+          //
+          // Reconciled on **change**, not on presence. The SPA submits the whole
+          // settings block on every save, so presence says nothing about intent:
+          // a description fix used to rewrite both gateway configs from the
+          // portal's two-field view — discarding an operator's
+          // `allowed_headers`, `max_age`, or a `sync_mode: 'redis'` that made
+          // the quota cluster-wide, and re-enabling a config they had switched
+          // off — and to name two fields in the audit row that had not moved
+          // (issue #150). Every other field in this block already compares
+          // first, as does the proxy-document write below; these two were the
+          // only exception.
+          //
+          // A replay is not quite a no-op: it still repairs an association an
+          // operator dropped, which is the behaviour issue #109 asked for.
+          // Putting an id back into `plugins[]` cannot lose anything the config
+          // carries, whereas rewriting the config can and did.
+          //
+          // A genuine change merges over the live config rather than rebuilding
+          // it, so operator keys outside the portal's view survive that too.
+          const reconcilePluginSetting = async <T>(
+            gatewayProxyId: string,
+            pluginName: string,
+            next: T | null,
+            current: T | null,
+            settingsFor: (value: T) => EdgePluginSettings,
+          ): Promise<boolean> => {
+            const live = findPlugin(plugins, pluginName);
+            if (isDeepStrictEqual(next, current)) {
+              if (next !== null && live) await associate(gatewayProxyId, [live.id], actor.id);
+              return false;
+            }
             await reconcileOptionalPlugin(
-              proxyId,
-              findPlugin(plugins, RATE_LIMIT_PLUGIN),
-              RATE_LIMIT_PLUGIN,
-              patch.rate_limit === null
-                ? null
-                : rateLimitConfig(patch.rate_limit, config.edge.rateLimit),
+              gatewayProxyId,
+              live,
+              pluginName,
+              next === null ? null : mergeOperatorSettings(live, settingsFor(next)),
               actor.id,
               undo,
             );
-            update.rate_limit = patch.rate_limit;
-            changed.push('rate_limit');
+            return true;
+          };
+
+          if (patch.rate_limit !== undefined && proxyId) {
+            const written = await reconcilePluginSetting(
+              proxyId,
+              RATE_LIMIT_PLUGIN,
+              patch.rate_limit,
+              api.rate_limit,
+              (value) => rateLimitConfig(value, config.edge.rateLimit),
+            );
+            if (written) {
+              update.rate_limit = patch.rate_limit;
+              changed.push('rate_limit');
+            }
           }
 
           if (patch.cors !== undefined && proxyId) {
-            await reconcileOptionalPlugin(
+            const written = await reconcilePluginSetting(
               proxyId,
-              findPlugin(plugins, CORS_PLUGIN),
               CORS_PLUGIN,
-              patch.cors === null ? null : corsPluginConfig(patch.cors),
-              actor.id,
-              undo,
+              patch.cors,
+              api.cors,
+              corsPluginConfig,
             );
-            update.cors = patch.cors;
-            changed.push('cors');
+            if (written) {
+              update.cors = patch.cors;
+              changed.push('cors');
+            }
           }
 
           // ── OpenAPI enforcement ─────────────────────────────────────────

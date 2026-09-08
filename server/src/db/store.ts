@@ -165,13 +165,26 @@ export type ApiSpecRecord = ApiSpec;
  *
  * The wire {@link ApiPlugin} carries no ids because the route addresses a
  * plugin by `(api, plugin_name)`; the row needs both, plus the API it belongs
- * to. The Ferrum plugin config id is deliberately absent: like `rate_limiting`
- * and `cors`, the gateway object is found by `proxy_id` + `plugin_name`, so an
- * operator who recreates one by hand reconciles automatically.
+ * to and the gateway config the portal created for it.
  */
 export interface ApiPluginRecord extends ApiPlugin {
   id: Uuid;
   api_id: Uuid;
+  /**
+   * The Edge plugin config id Nexus created for this plugin, or `null`.
+   *
+   * This is the portal's **ownership** claim. Edge lets a proxy carry several
+   * configs of one plugin name — distinct triggers, distinct
+   * `priority_override`s — so a name is not an identity, and a save that
+   * matched on the name alone replaced or deleted the operator's hand-made
+   * config as well (issue #153).
+   *
+   * `null` on a row written before the column existed, and on one whose gateway
+   * config an operator has since removed. `plugins/service.ts` backfills the
+   * first case by matching the plugin name on the proxy — the rule that
+   * resolved it then — and creates a fresh config for the second.
+   */
+  ferrum_plugin_config_id: string | null;
 }
 
 /** An `access_requests` row (without the denormalised joins the API adds). */
@@ -664,6 +677,12 @@ export interface UpsertApiPluginInput {
   enabled: boolean;
   config: Record<string, unknown>;
   trigger: ApiPluginTrigger | null;
+  /**
+   * The gateway config this save left behind, or `null` when there is none.
+   * Written on every save rather than only on a create: a config an operator
+   * deleted by hand is replaced by a new one with a new id.
+   */
+  ferrum_plugin_config_id: string | null;
 }
 
 /** Client requests for access to a requestable API. */
