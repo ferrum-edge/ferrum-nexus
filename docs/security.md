@@ -795,7 +795,7 @@ rendered email out to every active `admin` and `super_admin`. Left unbounded,
 one low-privilege account could mail-bomb every administrator, exhaust the SMTP
 quota, and grow four tables without limit (GHSA-gwqc-w33p-5wx5).
 
-Three independent bounds close that, and none of them relies on the others:
+Five independent bounds close that, and none of them relies on the others:
 
 1. **Per-account burst limits** — 10 thread creations and 30 replies per minute.
    Keying on the account rather than the IP is the load-bearing choice: an
@@ -810,8 +810,23 @@ Three independent bounds close that, and none of them relies on the others:
    one allowance and a new conversation is not a fresh one. Exceeding it is
    `429 QUOTA_EXCEEDED` with `details: { limit, window, setting }`. Admins and
    super admins are subject to it too — carving out a role would put the whole
-   budget one privilege escalation away.
-3. **Email coalescing** — the `message_received` mail is enqueued with the
+   budget one privilege escalation away. The count and the insert share a
+   transaction **and** a per-sender lease in `edge_leases`, which is what makes
+   the check one step across instances as well as within one; see the note on
+   read-then-write below.
+3. **A per-broadcast recipient ceiling** — `NEXUS_MAX_BROADCAST_RECIPIENTS`
+   (default 5 000, `0` disables). A god-mode broadcast is the
+   highest-amplification path in the portal, and its message rows are flagged so
+   they do _not_ draw on the sending administrator's budget: charging them there
+   left the amplifying operation unbounded while the rows it wrote refused that
+   administrator's ordinary messaging for a day. Enforced before the first row,
+   with `details: { limit, recipients, setting }`.
+4. **A per-administrator daily broadcast count** — `NEXUS_MAX_BROADCASTS_PER_DAY`
+   (default 20, `0` disables), counted from that actor's own `god.broadcast`
+   audit rows under the same per-actor lease the broadcast runs in, so it holds
+   across instances. The ceiling above bounds one announcement; this bounds a
+   loop of them.
+5. **Email coalescing** — the `message_received` mail is enqueued with the
    idempotency key `message_received:<thread>:<recipient>:<bucket>`, where
    `bucket` is a 10-minute slice of wall-clock time. The outbox's unique index
    on `idempotency_key` turns every later message in the same window into a
@@ -820,13 +835,22 @@ Three independent bounds close that, and none of them relies on the others:
    _activity_ and links to the thread rather than quoting a body it cannot
    promise to keep delivering.
 
-Two limits on this, stated plainly: the per-minute counters are **in-process**,
-so N instances enforce N × those numbers (the daily budget, which counts durable
-rows, is exact on any number of instances); and the budget's read-then-write is
-not one atomic step, so two concurrent sends can both observe the same count and
-land at `limit + 1`. That race is bounded by the per-minute limiter and costs one
-row, which is the wrong order of magnitude to matter for a resource-exhaustion
-control.
+One limit on this, stated plainly: the per-minute counters are **in-process**,
+so N instances enforce N × those numbers. Put the real burst limit at the proxy
+if you run more than one instance.
+
+The daily budget is **not** in that category, though it used to be described as
+if counting durable rows were enough. It is not: the count and the insert are
+separate statements, and two instances over one database at `quota - 1` both
+read `used < limit` and both committed. What ordered them on a single instance
+was the store's in-process transaction queue, which no second process shares —
+so the single-process regression tests could not observe the gap at all. The
+whole count-and-insert now runs inside a per-sender lease
+(`messages:budget:<user>`) in the same `edge_leases` table the last-super-admin
+guard uses, and the cross-adapter contract suite exercises it with two instances
+over one database. A sender whose lease is held elsewhere longer than the 30 s
+wait gets `409 CONFLICT` and is asked to retry; it is never a silent overshoot.
+The lease is skipped entirely when the budget is switched off.
 
 ### Consumer quotas are per gateway process
 

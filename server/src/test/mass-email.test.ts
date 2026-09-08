@@ -40,7 +40,13 @@ describe('mass email', () => {
       },
     });
     assert.equal(response.statusCode, 200);
-    assert.deepEqual(response.json<MassEmailResponse>(), { enqueued: 2, recipients: 2 });
+    const body = response.json<MassEmailResponse>();
+    assert.equal(body.enqueued, 2);
+    assert.equal(body.recipients, 2);
+    // No `idempotency_key` was supplied, so the server generated the batch id
+    // and echoes it: without that, a retry after a lost response would mint a
+    // new one and mail everybody twice.
+    assert.ok(body.batch_id.length > 0);
 
     assert.equal(await outboxTo('client-a@example.test'), 1);
     assert.equal(await outboxTo('client-b@example.test'), 1);
@@ -50,8 +56,11 @@ describe('mass email', () => {
     const row = (await harness.outbox()).find((r) => r.to_email === 'client-a@example.test');
     assert.equal(row?.subject, 'Scheduled maintenance');
     assert.ok(row?.body_html.includes('<b>02:00 UTC</b>'), 'admin html is not escaped');
-    assert.ok(row?.idempotency_key?.startsWith('mass:'));
-    assert.ok(row?.idempotency_key?.endsWith(`:${clientA.user.id}`));
+    assert.equal(
+      row?.idempotency_key,
+      `mass:${body.batch_id}:${clientA.user.id}`,
+      'the echoed batch id is the one the outbox rows were keyed with',
+    );
   });
 
   it('is idempotent when the same key is replayed', async () => {
@@ -68,7 +77,11 @@ describe('mass email', () => {
       url: '/api/admin/mass-email',
       payload,
     });
-    assert.deepEqual(first.json<MassEmailResponse>(), { enqueued: 2, recipients: 2 });
+    assert.deepEqual(first.json<MassEmailResponse>(), {
+      enqueued: 2,
+      recipients: 2,
+      batch_id: 'campaign-2026-08',
+    });
 
     const replay = await harness.authed(founder, {
       method: 'POST',
@@ -77,7 +90,7 @@ describe('mass email', () => {
     });
     assert.deepEqual(
       replay.json<MassEmailResponse>(),
-      { enqueued: 0, recipients: 2 },
+      { enqueued: 0, recipients: 2, batch_id: 'campaign-2026-08' },
       'a replay matches the audience but queues nothing',
     );
 
@@ -109,7 +122,9 @@ describe('mass email', () => {
         audience: { scope: 'explicit', user_ids: [provider.user.id] },
       },
     });
-    assert.deepEqual(explicit.json<MassEmailResponse>(), { enqueued: 1, recipients: 1 });
+    const explicitBody = explicit.json<MassEmailResponse>();
+    assert.equal(explicitBody.enqueued, 1);
+    assert.equal(explicitBody.recipients, 1);
 
     const empty = await harness.authed(founder, {
       method: 'POST',
@@ -184,7 +199,11 @@ describe('mass email', () => {
       await harness.authed(founder, request);
       const retry = await harness.authed(founder, request);
       assert.equal(retry.statusCode, 200);
-      assert.deepEqual(retry.json<MassEmailResponse>(), { enqueued: 0, recipients: 2 });
+      assert.deepEqual(retry.json<MassEmailResponse>(), {
+        enqueued: 0,
+        recipients: 2,
+        batch_id: campaign.id,
+      });
 
       const rows = (await harness.outbox()).filter((row) =>
         row.idempotency_key?.startsWith(`mass:${campaign.id}:`),

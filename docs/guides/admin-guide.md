@@ -367,8 +367,16 @@ selected audience.
 and eventually fails on its own instead of taking the whole send down with it,
 and each recipient's delivery state is visible individually.
 
-The response tells you both numbers: `recipients` (how many matched) and
-`enqueued` (how many rows were actually created).
+The response tells you three things: `recipients` (how many matched),
+`enqueued` (how many rows were actually created) and `batch_id` (the campaign
+key those rows were filed under).
+
+**The whole fan-out is one transaction**, so a campaign either went out whole or
+not at all — there is no state in which some of your audience was mailed and
+nothing recorded it. A failure answers `500` with
+`details: { batch_id, recipients, enqueued: 0 }`, and retrying with that
+`batch_id` as the campaign key is safe whether the failure was real or only a
+lost response.
 
 ### Idempotency
 
@@ -528,6 +536,15 @@ campaign for the next composition. API callers can supply `idempotency_key`
 identical subject/body and audience are deduplicated per sender and recipient.
 This protection applies to email; in-app notifications/messages remain per call.
 You are excluded from your own broadcast.
+
+**Two ceilings bound a broadcast**, both checked before anything is written:
+`NEXUS_MAX_BROADCAST_RECIPIENTS` (default 5 000) on one announcement's audience,
+and `NEXUS_MAX_BROADCASTS_PER_DAY` (default 20) on how many you may send in a
+rolling 24 hours. Exceeding either is refused with a message naming the limit,
+the audience size and the setting to raise. Broadcast messages do **not** count
+against your own daily messaging allowance — one announcement writes a row per
+account, and charging those to you used to block your ordinary messages, support
+follow-ups included, for the rest of the day.
 
 _Use for_ incident notices, maintenance windows and forced credential
 rotations — anything people must not miss. For routine announcements, prefer

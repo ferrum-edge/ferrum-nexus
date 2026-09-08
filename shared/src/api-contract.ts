@@ -982,6 +982,15 @@ export interface MassEmailResponse {
   enqueued: number;
   /** Recipients matched by the audience selector. */
   recipients: number;
+  /**
+   * The campaign's batch id — the caller's `idempotency_key` when one was
+   * supplied, otherwise the one the server generated.
+   *
+   * Echoed so a retry can pass it back as `idempotency_key` and reach the same
+   * outbox rows instead of sending the campaign a second time. The failure
+   * body carries it too, in `details.batch_id`.
+   */
+  batch_id: string;
 }
 
 /** `GET /api/admin/audit-logs` */

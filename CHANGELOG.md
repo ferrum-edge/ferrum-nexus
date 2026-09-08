@@ -111,6 +111,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   for other admins.
 - `engines.node` is `>=22.14` (SQLite's Node-API 10 binding requires it); the
   Vite dev server binds `127.0.0.1` so the documented URL works everywhere.
+- Two wire fields were added, both additive: `Message.broadcast` (true for the
+  rows a god-mode broadcast writes) and `MassEmailResponse.batch_id` (the
+  campaign's idempotency key, generated when the caller supplies none).
 - The getting-started walkthrough and the compose example work on Linux
   out of the box: the Edge data volume is handed to the image's non-root
   user, `host.docker.internal` is defined for the gateway container, and
@@ -119,6 +122,41 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **A god-mode broadcast no longer spends the broadcasting admin's own message
+  budget, and is no longer exempt from every bound.** It writes one `messages`
+  row per recipient with the acting super admin as the sender, and the rolling
+  daily budget counted exactly those rows against them: one announcement to a
+  portal larger than the budget refused every ordinary message that
+  administrator sent for the next 24 hours — including the support follow-up an
+  incident broadcast generates — while further broadcasts, which were never
+  budget-checked at all, stayed available. Broadcast rows now carry a
+  `broadcast` flag the budget query skips, and the broadcast path carries two
+  explicit ceilings of its own, both enforced before the first row is written:
+  `NEXUS_MAX_BROADCAST_RECIPIENTS` (default 5 000) and
+  `NEXUS_MAX_BROADCASTS_PER_DAY` (default 20).
+- **The daily message budget is now exact across instances**, and
+  `docs/operations.md` no longer claims that counting durable rows made it so.
+  The count and the insert were separate statements on separate connections, so
+  two instances at quota − 1 both committed; what ordered them on a single
+  instance was the store's in-process transaction queue, which is why the
+  single-process regression tests could not fail. The whole count-and-insert
+  now runs inside a per-sender lease in `edge_leases`, exercised by a
+  cross-adapter contract with two instances over one database.
+- **Messaging records its audit row inside the transaction that writes the
+  message.** A failed audit write used to return `500` for a message that was
+  durably stored and visible to both participants, with no `message.send` row —
+  and the sender's natural retry stored a second copy. Thread creation and
+  replies now commit their rows and their records together.
+- **A mass-email fan-out that fails partway now queues nothing, and a retry is
+  safe.** Each recipient's row used to commit on its own with the
+  `admin.mass_email` row written after the loop, so a failure delivered to part
+  of the audience, recorded nothing, and answered with a bare `500`; because the
+  batch id was generated inside the call and never surfaced, the retry minted a
+  new one and mailed those recipients again. Every outbox row and the audit row
+  now commit in one transaction, and `POST /api/admin/mass-email` returns
+  `batch_id` on success and carries it in the failure body
+  (`500 OUTBOX_FAILURE`, `details: { batch_id, recipients, enqueued }`) so the
+  retry can reuse the key either way.
 - Upgrade better-sqlite3 to 13.0.3 to replace the native cleanup path that
   aborts on Node 24.20.0. Raise the Node minimum from 22.12 to 22.14 and
   retain hosted checks on the minimum and current Node 22/24 releases.

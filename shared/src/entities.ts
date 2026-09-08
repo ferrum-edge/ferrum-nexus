@@ -369,6 +369,16 @@ export interface Message {
   thread_id: Uuid;
   sender_user_id: Uuid;
   body: string;
+  /**
+   * True when a god-mode broadcast wrote this row into a platform inbox.
+   *
+   * A broadcast fans one administrator's action out across every recipient, so
+   * its rows are excluded from that administrator's rolling per-account message
+   * budget — the broadcast carries its own bound instead. The flag is what the
+   * budget query filters on, and it is surfaced so a reader can tell an
+   * announcement apart from a reply an administrator typed into that thread.
+   */
+  broadcast: boolean;
   created_at: IsoTimestamp;
   updated_at: IsoTimestamp;
   sender?: UserSummary;

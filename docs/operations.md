@@ -53,6 +53,8 @@ are. A relative `NEXUS_SQLITE_PATH` resolves from `server/`.
 | `NEXUS_MAX_APIS_PER_OWNER`            | `50`                                         | How many APIs one account may own at a time; `0` disables the ceiling. A publish past it is refused with `429 QUOTA_EXCEEDED` before any gateway write. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `NEXUS_SPEC_HISTORY_LIMIT`            | `10`                                         | Historical spec revisions kept per API, on top of the current one. Older non-current revisions are pruned in the transaction that makes a new revision current. Range 1 – 10 000. With `NEXUS_MAX_APIS_PER_OWNER` this is what bounds per-account spec storage: `MAX_SPEC_BYTES × (limit + 1) × NEXUS_MAX_APIS_PER_OWNER`. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY` | `200`                                        | Messages one account may post in a rolling 24 hours; `0` disables the budget. Range 0 – 1 000 000. Exceeding it is `429 QUOTA_EXCEEDED`. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `NEXUS_MAX_BROADCAST_RECIPIENTS`      | `5000`                                       | How many recipients one god-mode broadcast may address; `0` removes the ceiling. Range 0 – 1 000 000. A broadcast writes a notification, a platform-inbox message and (with `send_email`) a queued mail per recipient, and those message rows deliberately do **not** draw on the sending admin’s daily budget — this is the bound instead. Set it above the portal’s account count for an announcement to reach everyone. Exceeding it is `429 QUOTA_EXCEEDED` before any row is written. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                       |
+| `NEXUS_MAX_BROADCASTS_PER_DAY`        | `20`                                         | How many god-mode broadcasts one administrator may send in a rolling 24 hours, counted from their own `god.broadcast` audit rows; `0` removes the ceiling. Range 0 – 100 000. The recipient ceiling bounds one announcement; this bounds a loop of them. Exceeding it is `429 QUOTA_EXCEEDED`. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `NEXUS_ALLOW_PRIVATE_UPSTREAMS`       | `false`                                      | Whether providers may publish an API whose upstream is a loopback, RFC 1918 / CGNAT / link-local address or a `.local` / `.internal` / `.localhost` / `.home.arpa` name. A proxy is an egress path from the gateway's network, so the default refuses them with `400 SPEC_INVALID` (`details.reason = private_upstream`). At `false` the portal also **resolves** every other upstream hostname (A + AAAA, ~5 s) and refuses it if any answer is private, or if the name cannot be resolved at all (`details.reason = unresolvable_upstream`) — so **the Nexus process must be able to resolve public DNS**, or nothing publishes. `true` skips all of it, including the lookup. Set `true` only for a portal that fronts internal services — and for local development, where the upstream is `host.docker.internal`. See [`security.md`](security.md#1-threat-model). |
 | `NEXUS_WEB_DIST`                      | _(unset)_                                    | Directory of the built SPA to serve. When unset, the server looks for `../../web/dist` relative to itself and then `./web/dist` under the CWD; if neither has an `index.html`, static serving is disabled and only the API is exposed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `NEXUS_BOOTSTRAP_TOKEN`               | _(unset)_                                    | Secret the founding registration must present to become the portal's `super_admin` (see [First run](#first-run-and-the-bootstrap-token)). Minimum 16 characters when set; generate with `openssl rand -hex 32`. When unset the server generates one **per process** and prints it at `warn` while the portal has no active super admin — so set it for any deployment running more than one instance. Ignored once an active `super_admin` exists.                                                                                                                                                                                                                                                                                                                                                                                                                      |
@@ -234,13 +236,16 @@ Registration is open by default, so an authenticated account is not a trusted
 one. Portal messaging is the surface where one cheap request costs the most:
 every message durably writes a message row and an audit row, and a **platform
 thread** (no `recipient_user_id`) fans an in-app notification and a queued email
-out to _every_ active `admin` and `super_admin`. Three bounds cap that.
+out to _every_ active `admin` and `super_admin`. A god-mode broadcast does the
+same thing deliberately, once per account in the portal. Five bounds cap that.
 
 | Bound                            | Value                                         | Where                                       |
 | -------------------------------- | --------------------------------------------- | ------------------------------------------- |
 | `POST /api/threads`              | **10 per minute per account**                 | Fastify limiter, `NEXUS_RATE_LIMIT_ENABLED` |
 | `POST /api/threads/:id/messages` | **30 per minute per account**                 | Fastify limiter, `NEXUS_RATE_LIMIT_ENABLED` |
 | Messages per account             | **200 per rolling 24 h** (`0` = unlimited)    | `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY`       |
+| Broadcast recipients             | **5 000 per broadcast** (`0` = unlimited)     | `NEXUS_MAX_BROADCAST_RECIPIENTS`            |
+| Broadcasts per admin             | **20 per rolling 24 h** (`0` = unlimited)     | `NEXUS_MAX_BROADCASTS_PER_DAY`              |
 | `message_received` email         | **1 per recipient per thread per 10 minutes** | Outbox idempotency key; not configurable    |
 
 Notes an operator needs:
@@ -249,17 +254,34 @@ Notes an operator needs:
   anonymous request. Two colleagues behind one NAT do not share a bucket, and
   one account cannot buy itself more by rotating addresses. Counters are
   in-process, so N instances enforce N × the per-minute numbers — put the real
-  burst limit at the proxy if you run more than one. The **daily budget** counts
-  durable rows, so it is correct on every instance regardless.
-- **Refusals write nothing.** A `429` from either bound leaves no message, audit,
-  notification or outbox row. The limiter answers `RATE_LIMITED`; the budget
-  answers `QUOTA_EXCEEDED` with `details: { limit, window, setting }`.
+  burst limit at the proxy if you run more than one.
+- **The daily budget is exact on any number of instances**, and it is not the
+  row count that makes it so. Counting durable rows leaves the count and the
+  insert two statements on two connections, and two instances at quota − 1 both
+  committed; what orders them is a per-sender lease in `edge_leases`, taken for
+  the whole count-and-insert. It costs one extra lease row per accepted message
+  and nothing at all when the budget is switched off (`0`). A sender whose lease
+  is held elsewhere for longer than 30 s gets `409 CONFLICT` asking them to
+  retry, rather than a silent overshoot. The same mechanism bounds broadcasts.
+- **Refusals write nothing.** A `429` from any of these bounds leaves no message,
+  audit, notification or outbox row. The limiters answer `RATE_LIMITED`; the
+  budget and the two broadcast ceilings answer `QUOTA_EXCEEDED` with `details`
+  naming the limit and the variable you would raise.
 - **Admins are subject to the daily budget too.** An account that legitimately
   needs more than a few hundred messages a day is an integration, not a person;
   raise `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY` deliberately rather than carving
   out a role.
 - **Direct and platform threads share one budget** — it counts the sender, not
   the thread, so opening a new conversation is not a fresh allowance.
+- **A broadcast does not spend the sending admin's budget.** Its message rows are
+  flagged and the budget query skips them: a broadcast writes one row per
+  account, so charging them to one administrator meant a single announcement to
+  a portal larger than the budget refused every ordinary message they sent for
+  the next 24 hours — including the support follow-up an incident broadcast
+  generates. The two broadcast ceilings are the bound instead, and both are
+  checked before the first row is written. Raise
+  `NEXUS_MAX_BROADCAST_RECIPIENTS` above the portal's account count if an
+  announcement has to reach everyone.
 - **The coalescing window is why the `message_received` mail no longer quotes a
   message.** Only the first message in each 10-minute window sends anything, so
   the default template announces activity and links to the thread. In-app
@@ -733,6 +755,31 @@ past about 50 seconds, because Nexus pins nodemailer's timeouts (10 s to
 connect, 10 s for the greeting, 30 s of socket inactivity) rather than taking
 its 2 min / 30 s / 10 min defaults. If you raise those, raise the threshold with
 them.
+
+### A mass-email campaign is one transaction
+
+`POST /api/admin/mass-email` renders every recipient's message first and then
+inserts the whole fan-out **and** its `admin.mass_email` audit row in a single
+transaction. Enqueueing one row at a time and auditing afterwards meant a
+failure partway had already delivered to part of the audience, recorded nothing,
+and answered `500` — and because the batch id was generated inside the call, the
+retry minted a new one and mailed those recipients again.
+
+Two operational consequences:
+
+- **The response and the failure both carry `batch_id`.** A campaign that fails
+  has queued nothing, but a campaign whose _response_ was lost may have
+  committed; both cases are answered by retrying with the same
+  `idempotency_key`, and the rows are keyed `mass:<batch>:<user_id>` so the
+  unique index makes the retry a no-op. The failure body is
+  `500 OUTBOX_FAILURE` with `details: { batch_id, recipients, enqueued: 0 }`.
+- **A campaign is bounded by what one transaction will hold.** That is
+  comfortable on SQLite, PostgreSQL and MySQL. On **MongoDB** a transaction is
+  capped at 16 MB of oplog, and each outbox row stores the rendered HTML and
+  text: a very large audience combined with a body near the 100 000-character
+  ceiling can exceed it. The send then fails atomically — nothing queued,
+  nothing audited — and reports its batch id; narrow the audience or shorten the
+  body and send again.
 
 ### The quiet failure mode to watch for
 

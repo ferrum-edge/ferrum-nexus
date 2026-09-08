@@ -22,6 +22,18 @@
  * ordinary user-management route enforces, repeated here because god mode does
  * not go through it, and enforced the same way: the count that decides runs
  * inside the transaction that writes the row.
+ *
+ * ## The broadcast's own bounds
+ *
+ * `broadcast` is the one god-mode operation whose cost scales with the size of
+ * the portal, and its message rows are marked `broadcast` so they stay out of
+ * the acting administrator's rolling daily message budget — one announcement to
+ * a portal larger than that budget used to refuse every ordinary message they
+ * sent for the next day, while further broadcasts, checked against nothing,
+ * stayed available. Two explicit ceilings replace it, both enforced before a
+ * single row is written and both naming the setting an operator would raise:
+ * `NEXUS_MAX_BROADCAST_RECIPIENTS` on one announcement's audience, and
+ * `NEXUS_MAX_BROADCASTS_PER_DAY` on how many an administrator may send.
  */
 
 import { createHash } from 'node:crypto';
@@ -38,12 +50,20 @@ import {
 
 import type { AccessService } from '../access/service.js';
 import { AuditAction, type AuditService } from '../audit/service.js';
+import type { NexusConfig } from '../config/index.js';
 import { runGatewayTeardown, type CredentialsService } from '../credentials/service.js';
 import type { GatewayTeardownJobRecord, NexusStore, UserRecord } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
-import { conflict, lastSuperAdmin, notFound, validationFailed } from '../lib/errors.js';
+import {
+  conflict,
+  lastSuperAdmin,
+  notFound,
+  quotaExceeded,
+  validationFailed,
+} from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
 import {
+  broadcastLockKey,
   SUPER_ADMIN_LOCK_KEY,
   userLifecycleLockKey,
   type KeyedSerializer,
@@ -52,6 +72,12 @@ import type { NotificationsService } from '../notifications/service.js';
 import type { PublishingService } from '../publishing/service.js';
 import { escapeHtml, MASS_RAW_HTML_VARS } from '../email/templates.js';
 import type { MassEmailService } from './mass-email-service.js';
+
+/** Width of the rolling per-administrator broadcast budget, in milliseconds. */
+export const BROADCAST_BUDGET_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** Human label for {@link BROADCAST_BUDGET_WINDOW_MS}, echoed in the error details. */
+export const BROADCAST_BUDGET_WINDOW_LABEL = '24h';
 
 /** Public projection of a stored user (no password hash). */
 function toPublicUser(record: UserRecord): User {
@@ -89,6 +115,7 @@ export interface GodService {
 
 /** Dependencies of {@link createGodService}. */
 export interface GodServiceDeps {
+  config: NexusConfig;
   store: NexusStore;
   audit: AuditService;
   notifications: NotificationsService;
@@ -105,6 +132,14 @@ export interface GodServiceDeps {
    * race each other.
    */
   locks?: KeyedSerializer;
+  /**
+   * The serializer `broadcast` takes its per-actor key from — the same one
+   * messaging spends the daily budget under, so a refused send says what is
+   * actually in flight. It is what makes the per-day broadcast ceiling hold
+   * across instances: the audit row that makes a broadcast countable is written
+   * at the end of it. Defaults to the plain in-process ordering.
+   */
+  broadcastLocks?: KeyedSerializer;
   log?: (obj: Record<string, unknown>, message: string) => void;
 }
 
@@ -112,11 +147,66 @@ export interface GodServiceDeps {
 export function createGodService(deps: GodServiceDeps): GodService {
   const { store, audit, notifications, email, massEmail, access, publishing, credentials } = deps;
   const locks: KeyedSerializer = deps.locks ?? ((_key, fn) => fn());
+  const broadcastLocks: KeyedSerializer = deps.broadcastLocks ?? ((_key, fn) => fn());
 
   function requireReason(reason: string): string {
     const trimmed = reason.trim();
     if (trimmed === '') throw validationFailed('A reason is required for a god-mode action');
     return trimmed;
+  }
+
+  /**
+   * The broadcast path's own bounds, checked **before any row is written**.
+   *
+   * A broadcast is the highest-amplification operation in the portal — one
+   * request writes a notification row, a platform-inbox message and optionally
+   * a queued mail per active account — and its rows deliberately do not draw on
+   * the acting administrator's daily message budget. These two ceilings are
+   * what replaces it: one on the size of a single announcement, one on how many
+   * an administrator may send in a rolling 24 hours. Both name the limit and
+   * the setting an operator would raise, because a refused *emergency*
+   * broadcast has to say how to send it anyway.
+   *
+   * The per-day count reads the actor's own `god.broadcast` audit rows rather
+   * than a counter of its own: the audit trail already records every broadcast
+   * exactly once, and an operator reading the number can see precisely which
+   * rows it refers to.
+   */
+  async function assertBroadcastWithinBounds(actorId: Uuid, audience: number): Promise<void> {
+    const recipientLimit = deps.config.maxBroadcastRecipients;
+    if (recipientLimit > 0 && audience > recipientLimit) {
+      throw quotaExceeded(
+        `This broadcast addresses ${audience} recipients, more than the maximum of ` +
+          `${recipientLimit}. Narrow the audience, or ask an operator to raise the limit.`,
+        {
+          limit: recipientLimit,
+          recipients: audience,
+          setting: 'NEXUS_MAX_BROADCAST_RECIPIENTS',
+        },
+      );
+    }
+
+    const dailyLimit = deps.config.maxBroadcastsPerDay;
+    if (dailyLimit <= 0) return;
+    const since = new Date(Date.now() - BROADCAST_BUDGET_WINDOW_MS).toISOString();
+    const used = await audit.count({
+      actor_user_id: actorId,
+      action: AuditAction.GOD_BROADCAST,
+      from: since,
+    });
+    if (used < dailyLimit) return;
+    throw quotaExceeded(
+      `You have sent ${used} broadcasts in the last ${BROADCAST_BUDGET_WINDOW_LABEL}, ` +
+        `the maximum of ${dailyLimit}. Wait for the oldest of them to age out, or ask an ` +
+        'operator to raise the limit.',
+      {
+        limit: dailyLimit,
+        used,
+        recipients: audience,
+        window: BROADCAST_BUDGET_WINDOW_LABEL,
+        setting: 'NEXUS_MAX_BROADCASTS_PER_DAY',
+      },
+    );
   }
 
   return {
@@ -332,85 +422,102 @@ export function createGodService(deps: GodServiceDeps): GodService {
         (recipient) => recipient.id !== actor.id,
       );
 
-      const notified = (
-        await notifications.notifyMany(
-          recipients.map((recipient) => recipient.id),
-          'system',
-          subject,
-          body,
-          '/messages',
-        )
-      ).length;
+      // Both ceilings and the whole fan-out run under one per-actor key. The
+      // per-day count reads the actor's own `god.broadcast` rows and the row
+      // that makes *this* broadcast countable is written at the end of it, so
+      // without the key two instances would each count the same history and
+      // both proceed. The key is taken outside every transaction — the lease
+      // repository issues statements of its own.
+      return broadcastLocks(broadcastLockKey(actor.id), async (): Promise<GodBroadcastResponse> => {
+        await assertBroadcastWithinBounds(actor.id, recipients.length);
 
-      // The message also lands in each recipient's platform inbox
-      // (`participant_b = null`), so it survives being dismissed from the bell
-      // and any admin can follow up in the same thread.
-      let threads = 0;
-      let emails = 0;
-      for (const recipient of recipients) {
-        try {
-          const existing = await store.threads.findExisting(recipient.id, null, null);
-          const thread =
-            existing ??
-            (await store.threads.create({
-              subject,
-              api_id: null,
-              created_by: actor.id,
-              participant_a: recipient.id,
-              participant_b: null,
-            }));
-          await store.messages.create({
-            thread_id: thread.id,
-            sender_user_id: actor.id,
+        const notified = (
+          await notifications.notifyMany(
+            recipients.map((recipient) => recipient.id),
+            'system',
+            subject,
             body,
-          });
-          await store.threads.touchLastMessage(thread.id, nowIso());
-          if (!existing) threads += 1;
+            '/messages',
+          )
+        ).length;
 
-          if (input.send_email) {
-            const queued = await email.enqueue({
-              to: recipient.email,
-              templateKey: 'mass',
-              idempotencyKey: `god-broadcast:${batch}:${recipient.id}`,
-              rawHtmlVars: MASS_RAW_HTML_VARS,
-              vars: {
-                recipient_name: recipient.display_name,
-                recipient_email: recipient.email,
+        // The message also lands in each recipient's platform inbox
+        // (`participant_b = null`), so it survives being dismissed from the bell
+        // and any admin can follow up in the same thread.
+        let threads = 0;
+        let emails = 0;
+        for (const recipient of recipients) {
+          try {
+            const existing = await store.threads.findExisting(recipient.id, null, null);
+            const thread =
+              existing ??
+              (await store.threads.create({
                 subject,
-                body_html: `<p>${escapeHtml(body)}</p>`,
-                body_text: body,
-              },
+                api_id: null,
+                created_by: actor.id,
+                participant_a: recipient.id,
+                participant_b: null,
+              }));
+            await store.messages.create({
+              thread_id: thread.id,
+              sender_user_id: actor.id,
+              body,
+              // The one place this flag is ever set. It is what keeps a
+              // broadcast out of the acting admin's rolling daily message
+              // budget: the rows are the platform's announcement, not their
+              // personal correspondence, and charging hundreds of them to one
+              // account used to refuse every ordinary message it sent for the
+              // next 24 hours. The ceilings above are the bound instead.
+              broadcast: true,
             });
-            if (queued.created) emails += 1;
+            await store.threads.touchLastMessage(thread.id, nowIso());
+            if (!existing) threads += 1;
+
+            if (input.send_email) {
+              const queued = await email.enqueue({
+                to: recipient.email,
+                templateKey: 'mass',
+                idempotencyKey: `god-broadcast:${batch}:${recipient.id}`,
+                rawHtmlVars: MASS_RAW_HTML_VARS,
+                vars: {
+                  recipient_name: recipient.display_name,
+                  recipient_email: recipient.email,
+                  subject,
+                  body_html: `<p>${escapeHtml(body)}</p>`,
+                  body_text: body,
+                },
+              });
+              if (queued.created) emails += 1;
+            }
+          } catch (error) {
+            deps.log?.(
+              {
+                recipient_id: recipient.id,
+                error: error instanceof Error ? error.message : String(error),
+              },
+              'Could not deliver a god-mode broadcast to one recipient',
+            );
           }
-        } catch (error) {
-          deps.log?.(
-            {
-              recipient_id: recipient.id,
-              error: error instanceof Error ? error.message : String(error),
-            },
-            'Could not deliver a god-mode broadcast to one recipient',
-          );
         }
-      }
 
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.GOD_BROADCAST,
-        { type: 'broadcast', id: batch },
-        {
-          reason: subject,
-          audience_scope: input.audience.scope,
-          recipients: recipients.length,
-          notified,
-          threads_created: threads,
-          emails_enqueued: emails,
-          send_email: input.send_email === true,
-        },
-        ip,
-      );
+        await audit.record(
+          { id: actor.id, role: actor.role },
+          AuditAction.GOD_BROADCAST,
+          { type: 'broadcast', id: batch },
+          {
+            reason: subject,
+            audience_scope: input.audience.scope,
+            recipients: recipients.length,
+            notified,
+            threads_created: threads,
+            emails_enqueued: emails,
+            send_email: input.send_email === true,
+          },
+          ip,
+        );
 
-      return { notified, emails_enqueued: emails, threads_created: threads };
+        return { notified, emails_enqueued: emails, threads_created: threads };
+      });
     },
   };
 }

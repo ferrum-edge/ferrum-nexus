@@ -19,9 +19,12 @@
  * provider about the same API twice continues the existing conversation instead
  * of fragmenting it.
  *
- * Every posted message writes an audit row, notifies the counterparty in-app,
- * and enqueues a `message_received` email. Notification/email failures are
- * never allowed to fail the send — the message is already durable by then.
+ * Every posted message writes an audit row **in the same transaction as the
+ * message**, notifies the counterparty in-app, and enqueues a
+ * `message_received` email. Notification/email failures are never allowed to
+ * fail the send — the message is already durable by then. The audit row is not
+ * in that category: a message the log has no record of is a message that should
+ * not have been sent, so it rolls back with everything else.
  *
  * ## Abuse controls
  *
@@ -35,7 +38,11 @@
  * 2. **A rolling 24-hour budget** enforced here, *before any row is written*,
  *    so a refusal leaves no message, audit, notification or outbox row behind.
  *    Direct and platform threads draw on one budget by construction: it counts
- *    the sender, not the thread.
+ *    the sender, not the thread. The count and the insert share a transaction
+ *    *and* a per-sender cross-instance lease, because counting durable rows
+ *    does not make a check atomic: two instances over one database both read
+ *    `limit - 1` and both committed. A god-mode broadcast writes rows this
+ *    count deliberately skips — see `admin/god-service.ts`.
  * 3. **Email coalescing** — at most one `message_received` mail per recipient
  *    per thread per {@link COALESCE_WINDOW_MS}, via the outbox's idempotency
  *    key. In-app notifications stay one per message; they are cheap, and the
@@ -68,6 +75,7 @@ import type {
 import type { EmailService } from '../email/service.js';
 import { NexusError, forbidden, notFound, validationFailed } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
+import { messageBudgetLockKey, type KeyedSerializer } from '../lib/keyed-serializer.js';
 import type { NotificationsService } from '../notifications/service.js';
 import { presentApiSummary, type GatewayUrlSource } from '../publishing/present.js';
 
@@ -154,6 +162,15 @@ export interface MessagingServiceDeps {
   audit: AuditService;
   /** Resolves the gateway origin a thread's embedded API summary carries. */
   settings: GatewayUrlSource;
+  /**
+   * The cross-instance section the daily budget is spent inside.
+   *
+   * A transaction only orders writes made through one store object, so without
+   * this two instances at `limit - 1` both counted and both committed. Omitting
+   * it degrades to the in-process ordering the store already provides — correct
+   * for a single writer, and the shape a unit test constructs.
+   */
+  locks?: KeyedSerializer;
   log?: (obj: Record<string, unknown>, message: string) => void;
 }
 
@@ -191,6 +208,7 @@ export function isPlatformThread(thread: ThreadRecord): boolean {
 /** Build the messaging service. */
 export function createMessagingService(deps: MessagingServiceDeps): MessagingService {
   const { config, store, notifications, email, audit, settings } = deps;
+  const locks: KeyedSerializer = deps.locks ?? ((_key, fn) => fn());
 
   function threadUrl(threadId: Uuid): string {
     return `${config.publicUrl}/messages/${threadId}`;
@@ -327,8 +345,11 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
   /**
    * Refuse the send when the sender has spent their rolling 24-hour budget.
    *
-   * Called inside the same serialised database transaction as the message
-   * insert, so concurrent sends cannot all spend the same remaining slot.
+   * Called inside the same database transaction as the message insert, and that
+   * transaction runs inside {@link messageBudgetLockKey} — see
+   * {@link spendBudget}. The transaction is what makes the count and the insert
+   * one step on this instance; the lease is what makes it one step across
+   * instances, which counting durable rows on its own never did.
    * `0` means the operator turned the budget off.
    */
   async function assertWithinBudget(tx: NexusStore, senderUserId: Uuid): Promise<void> {
@@ -347,6 +368,23 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
         setting: 'NEXUS_MAX_MESSAGES_PER_USER_PER_DAY',
       },
     );
+  }
+
+  /**
+   * Run `write` — a whole `store.transaction` — as the one send `senderUserId`
+   * has in flight anywhere in the deployment.
+   *
+   * The key is acquired **outside** the transaction, never inside it: the lease
+   * repository issues statements of its own, and on the SQLite adapter a caller
+   * that opened a transaction and then waited for a key held elsewhere would
+   * hold the transaction queue while it spun (see `createKeyedSerializer`).
+   *
+   * With the budget switched off there is nothing to serialise, so the lease
+   * round trip is skipped entirely rather than charged to every send.
+   */
+  async function spendBudget<T>(senderUserId: Uuid, write: () => Promise<T>): Promise<T> {
+    if (config.maxMessagesPerUserPerDay <= 0) return write();
+    return locks(messageBudgetLockKey(senderUserId), write);
   }
 
   async function loadThread(threadId: Uuid): Promise<ThreadRecord> {
@@ -468,43 +506,49 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
         participantB = input.actor.id;
       }
 
-      const { existing, thread, message, at } = await store.transaction(async (tx) => {
-        await assertWithinBudget(tx, input.actor.id);
-        const existing = await tx.threads.findExisting(participantA, participantB, apiId);
-        const thread =
-          existing ??
-          (await tx.threads.create({
-            subject,
-            api_id: apiId,
-            created_by: input.actor.id,
-            participant_a: participantA,
-            participant_b: participantB,
-          }));
-        const message = await tx.messages.create({
-          thread_id: thread.id,
-          sender_user_id: input.actor.id,
-          body,
-        });
-        const at = nowIso();
-        await tx.threads.touchLastMessage(thread.id, at);
-        return { existing, thread, message, at };
-      });
-
-      if (!existing) {
-        await audit.record(
-          { id: input.actor.id, role: input.actor.role },
-          AuditAction.MESSAGE_THREAD_CREATE,
-          { type: 'message_thread', id: thread.id },
-          { subject, api_id: apiId, platform: participantB === null },
-          input.ip ?? null,
-        );
-      }
-      await audit.record(
-        { id: input.actor.id, role: input.actor.role },
-        AuditAction.MESSAGE_SEND,
-        { type: 'message', id: message.id },
-        { thread_id: thread.id },
-        input.ip ?? null,
+      const { existing, thread, message, at } = await spendBudget(input.actor.id, () =>
+        store.transaction(async (tx) => {
+          await assertWithinBudget(tx, input.actor.id);
+          const existing = await tx.threads.findExisting(participantA, participantB, apiId);
+          const thread =
+            existing ??
+            (await tx.threads.create({
+              subject,
+              api_id: apiId,
+              created_by: input.actor.id,
+              participant_a: participantA,
+              participant_b: participantB,
+            }));
+          const message = await tx.messages.create({
+            thread_id: thread.id,
+            sender_user_id: input.actor.id,
+            body,
+          });
+          const at = nowIso();
+          await tx.threads.touchLastMessage(thread.id, at);
+          // Audited *inside* the transaction, like every other consequential
+          // service: a failed audit write used to leave the message durable and
+          // visible with no `message.send` row and a `500` for the sender, whose
+          // natural retry then stored a second copy.
+          const scoped = audit.forStore(tx);
+          if (!existing) {
+            await scoped.record(
+              { id: input.actor.id, role: input.actor.role },
+              AuditAction.MESSAGE_THREAD_CREATE,
+              { type: 'message_thread', id: thread.id },
+              { subject, api_id: apiId, platform: participantB === null },
+              input.ip ?? null,
+            );
+          }
+          await scoped.record(
+            { id: input.actor.id, role: input.actor.role },
+            AuditAction.MESSAGE_SEND,
+            { type: 'message', id: message.id },
+            { thread_id: thread.id },
+            input.ip ?? null,
+          );
+          return { existing, thread, message, at };
+        }),
       );
 
       await announce(thread, input.actor, message);
@@ -558,23 +602,27 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
       const thread = await loadThread(threadId);
       assertCanPost(user, thread);
 
-      const message = await store.transaction(async (tx) => {
-        await assertWithinBudget(tx, user.id);
-        const created = await tx.messages.create({
-          thread_id: thread.id,
-          sender_user_id: user.id,
-          body: trimmed,
-        });
-        await tx.threads.touchLastMessage(thread.id, nowIso());
-        return created;
-      });
-
-      await audit.record(
-        { id: user.id, role: user.role },
-        AuditAction.MESSAGE_SEND,
-        { type: 'message', id: message.id },
-        { thread_id: thread.id },
-        ip,
+      const message = await spendBudget(user.id, () =>
+        store.transaction(async (tx) => {
+          await assertWithinBudget(tx, user.id);
+          const created = await tx.messages.create({
+            thread_id: thread.id,
+            sender_user_id: user.id,
+            body: trimmed,
+          });
+          await tx.threads.touchLastMessage(thread.id, nowIso());
+          // Inside the transaction: the message and its record commit or roll
+          // back together — see `createThread`.
+          const scoped = audit.forStore(tx);
+          await scoped.record(
+            { id: user.id, role: user.role },
+            AuditAction.MESSAGE_SEND,
+            { type: 'message', id: created.id },
+            { thread_id: thread.id },
+            ip,
+          );
+          return created;
+        }),
       );
 
       await announce(thread, user, message);

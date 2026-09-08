@@ -20,6 +20,7 @@ function message(id: string, createdAt: string): Message {
     thread_id: 'thread-1',
     sender_user_id: 'user-1',
     body: `body ${id}`,
+    broadcast: false,
     created_at: createdAt,
     updated_at: createdAt,
   };

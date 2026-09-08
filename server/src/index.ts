@@ -66,6 +66,7 @@ import { createCrypto, type NexusCrypto } from './lib/crypto.js';
 import { isNexusError } from './lib/errors.js';
 import {
   createKeyedSerializer,
+  SEND_LOCK_CONFLICT_MESSAGE,
   SUPER_ADMIN_LOCK_CONFLICT_MESSAGE,
 } from './lib/keyed-serializer.js';
 import { buildLoggerOptions, type LoggerOptions } from './lib/logger.js';
@@ -263,6 +264,18 @@ export async function buildServer(
     conflictMessage: SUPER_ADMIN_LOCK_CONFLICT_MESSAGE,
   });
 
+  /**
+   * The same mechanism for the two outbound-send ceilings, worded for them:
+   * the rolling daily message budget (`messages:budget:<user>`) and the
+   * god-mode broadcast bounds (`god:broadcast:<user>`). Separate from `locks`
+   * only so a refused send is told what is actually in flight; the keys are
+   * disjoint from that serializer's, so the two never contend.
+   */
+  const sendLocks = createKeyedSerializer({
+    leases: deps.store.leases,
+    conflictMessage: SEND_LOCK_CONFLICT_MESSAGE,
+  });
+
   const audit = createAuditService(deps.store);
   const captcha = createCaptchaService({
     store: deps.store,
@@ -309,6 +322,7 @@ export async function buildServer(
     email,
     audit,
     settings,
+    locks: sendLocks,
     log: warn,
   });
   const massEmail = createMassEmailService({ store: deps.store, email, audit });
@@ -381,6 +395,7 @@ export async function buildServer(
     log: warn,
   });
   const god = createGodService({
+    config,
     store: deps.store,
     audit,
     notifications,
@@ -390,6 +405,7 @@ export async function buildServer(
     publishing,
     credentials,
     locks,
+    broadcastLocks: sendLocks,
     log: warn,
   });
 

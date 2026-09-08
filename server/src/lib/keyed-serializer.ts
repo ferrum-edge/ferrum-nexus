@@ -12,7 +12,8 @@
  * - the composition root's **store-level locks**, which hold the invariants a
  *   single database transaction cannot hold across instances — the
  *   last-super-admin count-then-write above all, where two instances each count
- *   one *other* active super admin and both demote.
+ *   one *other* active super admin and both demote, and the same shape in the
+ *   daily message budget and the god-mode broadcast ceilings.
  *
  * It lives in `lib/` rather than in `ferrum-admin/` because the second user has
  * nothing to do with the gateway; `ferrum-admin/index.ts` re-exports it so the
@@ -81,6 +82,53 @@ export const SUPER_ADMIN_LOCK_CONFLICT_MESSAGE =
 export function userLifecycleLockKey(userId: string): string {
   return `users:lifecycle:${userId}`;
 }
+
+/**
+ * The per-sender key the rolling daily **message budget** is spent under.
+ *
+ * The budget is a read-then-write — count the sender's rows in the window, then
+ * insert one — and a database transaction only orders writes made through one
+ * store object. Two instances over one PostgreSQL both read `used = limit - 1`
+ * and both committed, which is exactly the shape the last-super-admin count
+ * has, and it takes the same answer: acquire the key, then open the
+ * transaction. What made the single-instance case look correct was the store's
+ * in-process transaction queue, which no second process shares.
+ *
+ * Per sender rather than portal-wide: the budget is a property of one account,
+ * and two accounts messaging at once never need to wait for each other. It is
+ * taken by messaging alone and never nested inside another key.
+ */
+export function messageBudgetLockKey(senderUserId: string): string {
+  return `messages:budget:${senderUserId}`;
+}
+
+/**
+ * The per-administrator key a god-mode **broadcast** runs under.
+ *
+ * The per-day broadcast ceiling counts the actor's own `god.broadcast` audit
+ * rows, and the row that makes the current broadcast countable is written at
+ * the end of it — so without a key two instances would each count the same
+ * history and both proceed. Holding it across the whole fan-out is also what
+ * makes the count and the row it produces one step.
+ *
+ * Per administrator rather than portal-wide: the bound is per actor, and one
+ * super admin's announcement has no reason to wait for another's.
+ */
+export function broadcastLockKey(actorUserId: string): string {
+  return `god:broadcast:${actorUserId}`;
+}
+
+/**
+ * `CONFLICT` text for a caller that could not get {@link messageBudgetLockKey}
+ * or {@link broadcastLockKey}.
+ *
+ * Both keys guard an outbound send's own ceiling and are taken from one
+ * serializer, so they share one wording. Deliberately vague about which
+ * instance holds it: this reaches a browser, and "retry" is the whole of the
+ * useful advice.
+ */
+export const SEND_LOCK_CONFLICT_MESSAGE =
+  'Another send from this account is still in flight — please retry';
 
 /** Options for {@link createKeyedSerializer}. */
 export interface KeyedSerializerOptions {

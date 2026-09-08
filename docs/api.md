@@ -598,6 +598,13 @@ account may post `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY` messages (default 200,
 alike; exceeding that is `429 QUOTA_EXCEEDED`. A refusal from either bound
 writes no message, audit, notification or email row.
 
+The budget's count and the message's insert are one step — one transaction, and
+one per-sender lease so it holds across instances too. If a send from the same
+account is still in flight elsewhere for more than 30 seconds, the request is
+answered `409 CONFLICT` asking you to retry rather than being let through.
+Messages a god-mode broadcast wrote carry `broadcast: true` and are not counted
+against the administrator who sent them; the broadcast has ceilings of its own.
+
 Recipients get at most one `message_received` email per thread per 10 minutes
 however many messages arrive, so the mail announces new activity and links to
 the thread rather than quoting one message. In-app notifications stay one per
@@ -644,7 +651,9 @@ Errors: `400 VALIDATION_FAILED` (empty subject/body, or messaging yourself),
 `404 NOT_FOUND` (unknown or disabled recipient, unknown API),
 `429 RATE_LIMITED` (more than 10 a minute from this account),
 `429 QUOTA_EXCEEDED` (the account's rolling 24-hour message budget is spent —
-`details` carries `{ limit, window: "24h", setting: "NEXUS_MAX_MESSAGES_PER_USER_PER_DAY" }`).
+`details` carries `{ limit, window: "24h", setting: "NEXUS_MAX_MESSAGES_PER_USER_PER_DAY" }`),
+`409 CONFLICT` (another send from this account has held the budget section for
+more than 30 seconds — retry).
 
 ### `GET /api/threads/:id`
 
@@ -695,7 +704,8 @@ Errors: `400 VALIDATION_FAILED` (empty body), `403 FORBIDDEN` (not a
 participant), `404 NOT_FOUND` (unknown thread), `429 RATE_LIMITED` (more than 30
 a minute from this account), `429 QUOTA_EXCEEDED` (the account's rolling
 24-hour message budget is spent — it is the same budget `POST /api/threads`
-draws on).
+draws on), `409 CONFLICT` (another send from this account still holds the budget
+section — retry).
 
 ---
 
@@ -917,13 +927,23 @@ _admin_ — enqueues **one outbox row per recipient**, never a BCC blast.
 | `idempotency_key`   | string, 8–128                     | reuse makes the send at-most-once                                 |
 
 ```json
-{ "enqueued": 240, "recipients": 251 }
+{ "enqueued": 240, "recipients": 251, "batch_id": "c3f0…" }
 ```
 
 Rows are keyed `mass:<batch>:<user_id>`, where `<batch>` is your
 `idempotency_key` or a fresh UUID. `recipients` is who matched; `enqueued`
 excludes duplicates suppressed by the key — reposting the same request with the
 same key enqueues nothing new.
+
+**The fan-out is atomic.** Every outbox row and the `admin.mass_email` audit row
+commit together, so a campaign either went out whole or not at all; there is no
+state in which part of your audience was mailed and nothing recorded it.
+
+`batch_id` is echoed on success **and** carried in the failure body, because a
+lost response to a campaign that did commit looks exactly like one that did not.
+Either way, retry with that value as `idempotency_key` and nobody is mailed
+twice. A failure is `500 OUTBOX_FAILURE` with
+`details: { batch_id, recipients, enqueued: 0 }`.
 
 ### `GET /api/admin/audit-logs`
 
@@ -1020,6 +1040,20 @@ Sends a bell notification to every recipient, drops the message into each
 recipient's **platform inbox thread** (so it survives being dismissed from the
 bell and any admin can follow up in the same thread), and optionally enqueues
 an email. The acting super admin is excluded from their own broadcast.
+
+**Two ceilings bound it, both checked before the first row is written.**
+`NEXUS_MAX_BROADCAST_RECIPIENTS` (default 5 000, `0` disables) caps one
+announcement's audience; `NEXUS_MAX_BROADCASTS_PER_DAY` (default 20, `0`
+disables) caps how many one administrator may send in a rolling 24 hours,
+counted from their own `god.broadcast` audit rows. Exceeding either is
+`429 QUOTA_EXCEEDED` naming the limit, the audience size and the variable an
+operator would raise — a refused announcement has to say how to send it anyway.
+
+The message rows a broadcast writes carry `broadcast: true` and are deliberately
+**not** charged to the acting administrator's daily message budget. They used to
+be: one broadcast to a portal larger than that budget refused every ordinary
+message that administrator sent for the next 24 hours, while further broadcasts,
+checked against nothing, stayed available.
 
 ---
 
