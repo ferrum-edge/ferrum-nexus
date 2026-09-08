@@ -1292,6 +1292,11 @@ Errors: `403 FORBIDDEN` (not the owner and not an admin), `404 NOT_FOUND`. A
 gateway request-metrics scrape that is unreachable, erroring or unparseable is
 **not** a portal error: the route answers `200` with `available: false`, zeroed
 counters and `latency_ms: null`. Those zeros represent missing measurements.
+The same applies when no valid `ferrum_requests_total` series belongs to this
+API's proxy, even if the scrape contains other metrics. `unavailable_reason`
+is an optional explanation suitable for display. Clients must hide unmeasured
+counters when `available` is false; an explicit zero request series still
+reports `available: true`.
 A successful independent backend-state read may still populate `backend` and
 `gateway_uptime_seconds`; it cannot make `available` true. Conversely, if only
 backend state is unavailable, request counters remain valid and `backend.status`
