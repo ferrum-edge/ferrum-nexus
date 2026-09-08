@@ -227,7 +227,7 @@ describe('real SMTP transport compatibility', { timeout: 30_000 }, () => {
       assert.equal(response.statusCode, 400, response.body);
       assert.equal(response.json<ApiErrorBody>().error.code, 'VALIDATION_FAILED');
     }
-    assert.deepEqual(relay.commands, []);
+    assert.equal(relay.commands.length, 0);
     const response = await harness.authed(admin, {
       method: 'POST',
       url: '/api/admin/settings/smtp-test',
