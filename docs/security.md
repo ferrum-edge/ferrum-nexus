@@ -389,7 +389,10 @@ requires `bootstrap_token` and refuses everything else with `403 FORBIDDEN`.
   admin. An established portal cannot be talked into a second founder.
 - `GET /api/branding` publishes `bootstrap_required` (no active super admin)
   so the sign-up form knows to ask for the token. That flag is the only public
-  signal; the token itself is never exposed over the API.
+  signal about the seat; the token itself is never exposed over the API. The
+  same payload carries the public registration policy (`open_registration` and
+  the self-selectable `allowed_roles`), which is enforced server-side on every
+  registration and is already observable by attempting one.
 
 #### The founder's seat is atomic
 

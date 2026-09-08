@@ -14,17 +14,17 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 
-import {
-  type ApproveAccessRequestResponse,
-  type BrandingResponse,
-  type CreateAccessRequestResponse,
-  type CreateOrganizationResponse,
-  type CreateThreadResponse,
-  type GetApiResponse,
-  type ListUsersResponse,
-  type MassEmailResponse,
-  type PublishApiResponse,
-  type UpdateUserResponse,
+import type {
+  ApproveAccessRequestResponse,
+  BrandingResponse,
+  CreateAccessRequestResponse,
+  CreateOrganizationResponse,
+  CreateThreadResponse,
+  GetApiResponse,
+  ListUsersResponse,
+  MassEmailResponse,
+  PublishApiResponse,
+  UpdateUserResponse,
 } from '@ferrum-nexus/shared';
 
 import {
@@ -105,8 +105,8 @@ describe('browser workflow contracts', () => {
   /* ── B. the registration policy the sign-up form reads ────────────────── */
 
   it('publishes the registration policy the register form has to obey', async () => {
-    const before = await harness.app.inject({ method: 'GET', url: '/api/branding' });
-    assert.deepEqual(before.json<BrandingResponse>().registration, {
+    const initial = await harness.app.inject({ method: 'GET', url: '/api/branding' });
+    assert.deepEqual(initial.json<BrandingResponse>().registration, {
       open_registration: true,
       allowed_roles: ['client', 'provider'],
     });
@@ -118,8 +118,8 @@ describe('browser workflow contracts', () => {
     });
     assert.equal(saved.statusCode, 200, saved.body);
 
-    const after = await harness.app.inject({ method: 'GET', url: '/api/branding' });
-    assert.deepEqual(after.json<BrandingResponse>().registration, {
+    const narrowed = await harness.app.inject({ method: 'GET', url: '/api/branding' });
+    assert.deepEqual(narrowed.json<BrandingResponse>().registration, {
       open_registration: true,
       allowed_roles: ['client'],
     });
