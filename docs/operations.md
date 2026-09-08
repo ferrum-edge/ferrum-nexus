@@ -1014,7 +1014,10 @@ until Edge has created the proxy — and nothing can be racing a proxy whose id 
 not yet knowable. Deleting an API and the delete-and-recreate that switches
 OpenAPI enforcement mode both take the key like everything else: the conversion
 holds it from its catalog re-read through the rebuild and the compensation, and
-the delete holds it across the gateway teardown **and** the row delete.
+the delete holds it across the gateway teardown **and** the row delete — and
+across nothing else. A delete's per-grantee ACL strip runs after the key is
+released, on each grantee's own consumer key, so a delete of a widely granted
+API cannot hold one proxy's key while it waits out another lease.
 
 > Earlier editions of this section listed deletion and the enforcement
 > conversion as exceptions, and bounded the risk by arguing that a lifecycle

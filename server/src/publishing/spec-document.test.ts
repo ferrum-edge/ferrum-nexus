@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import type { EdgePluginConfig, EdgeProxy } from '../ferrum-admin/types.js';
+import { isNexusError } from '../lib/errors.js';
 import {
+  assertRoutesSubmittable,
   handOwnedPlugins,
   routesSpecDocument,
   submittableProxyBody,
@@ -18,6 +20,19 @@ function document(extra: Record<string, unknown> = {}): Record<string, unknown> 
     paths: { '/invoices': { get: { responses: { '200': { description: 'OK' } } } } },
     ...extra,
   };
+}
+
+/** Assert that `fn` throws `SPEC_INVALID`, returning the error for inspection. */
+function expectSpecInvalid(fn: () => unknown): { message: string; details: unknown } {
+  try {
+    fn();
+  } catch (error) {
+    assert.ok(isNexusError(error), `expected a NexusError, got ${String(error)}`);
+    assert.equal(error.code, 'SPEC_INVALID');
+    assert.equal(error.statusCode, 400);
+    return { message: error.message, details: error.details };
+  }
+  throw new assert.AssertionError({ message: 'expected the call to throw SPEC_INVALID' });
 }
 
 /** A plugin config as `GET /plugins/config` returns it. */
@@ -254,6 +269,129 @@ describe('routesSpecDocument', () => {
     const item = (source.paths as Record<string, Record<string, unknown>>)['/invoices'];
     assert.deepEqual(item?.servers, [{ url: '/other' }]);
     assert.deepEqual((item?.get as Record<string, unknown>).servers, [{ url: '/elsewhere' }]);
+  });
+
+  it('strips servers from a $ref-able webhook path item', () => {
+    // Edge indexes `webhooks` as a resolution target, so a path that is a
+    // `$ref` to one produces an ordinary operation-table entry — built from
+    // that webhook's `servers`. `^/other/invoices$` for an API published at
+    // `/nexus/billing`, and a `400` on the only operation it declares.
+    const submitted = routesSpecDocument(
+      document({
+        paths: { '/invoices': { $ref: '#/webhooks/Invoices' } },
+        webhooks: {
+          Invoices: {
+            servers: [{ url: '/other' }],
+            post: {
+              servers: [{ url: '/elsewhere' }],
+              responses: { '200': { description: 'OK' } },
+            },
+          },
+        },
+      }),
+      { listenPath: '/nexus/billing', proxy: { id: 'proxy-1' } },
+    );
+
+    const webhooks = submitted.webhooks as Record<string, Record<string, unknown>>;
+    const item = webhooks.Invoices as Record<string, unknown>;
+    assert.deepEqual(submitted.servers, [{ url: '/nexus/billing' }]);
+    assert.equal('servers' in item, false);
+    assert.equal('servers' in (item.post as Record<string, unknown>), false);
+  });
+
+  it('strips servers from a component callback path item', () => {
+    // The `callbacks` of an operation are left alone — see the module docblock
+    // — but a `components.callbacks` entry is a named container of Path Items
+    // addressable by pointer, so it is stripped like `components.pathItems`.
+    const submitted = routesSpecDocument(
+      document({
+        components: {
+          schemas: { Invoice: { type: 'object' } },
+          callbacks: {
+            onPaid: {
+              '{$request.body#/callbackUrl}': {
+                servers: [{ url: '/other' }],
+                post: { responses: { '200': { description: 'OK' } } },
+              },
+            },
+          },
+        },
+      }),
+      { listenPath: '/nexus/billing', proxy: { id: 'proxy-1' } },
+    );
+
+    const components = submitted.components as Record<string, Record<string, unknown>>;
+    const callback = components.callbacks?.onPaid as Record<string, Record<string, unknown>>;
+    assert.equal('servers' in (callback['{$request.body#/callbackUrl}'] ?? {}), false);
+    // The rest of `components` rides through on the same object.
+    assert.deepEqual(components.schemas, { Invoice: { type: 'object' } });
+  });
+
+  it('refuses a path that references a Path Item it cannot rewrite', () => {
+    // The general case the strip walk cannot cover: Edge resolves a Path Item
+    // `$ref` as an unrestricted same-document pointer, so a pointer into any
+    // other container would put a server base back that no walk over the three
+    // Path Item containers has been over. Chasing an arbitrary pointer means
+    // re-implementing Edge's resolver; refusing is the honest alternative.
+    const failure = expectSpecInvalid(() =>
+      routesSpecDocument(
+        document({
+          paths: { '/invoices': { $ref: '#/components/callbacks/onPaid/expression' } },
+        }),
+        { listenPath: '/nexus/billing', proxy: { id: 'proxy-1' } },
+      ),
+    );
+
+    assert.match(failure.message, /The path '\/invoices' is a \$ref/);
+    assert.deepEqual(failure.details, {
+      field: 'spec',
+      path: '/invoices',
+      reason: 'unresolvable_path_item_ref',
+    });
+  });
+});
+
+describe('assertRoutesSubmittable', () => {
+  it('accepts the three containers the strip walk covers', () => {
+    for (const reference of [
+      '#/paths/~1payments',
+      '#/components/pathItems/Invoices',
+      '#/webhooks/Invoices',
+    ]) {
+      assertRoutesSubmittable('routes', document({ paths: { '/invoices': { $ref: reference } } }));
+    }
+  });
+
+  it('refuses a reference to another document', () => {
+    // An external reference is refused for the same reason and one more: the
+    // portal never sees the document it points at, so there is nothing it could
+    // rewrite even in principle.
+    const failure = expectSpecInvalid(() =>
+      assertRoutesSubmittable(
+        'routes',
+        document({ paths: { '/invoices': { $ref: 'shared.yaml#/components/pathItems/X' } } }),
+      ),
+    );
+
+    assert.match(failure.message, /is a \$ref the gateway would resolve outside/);
+  });
+
+  it('leaves a docs_only document alone', () => {
+    // Edge generates no operation matchers from a `docs_only` document, so
+    // there is nothing a reference could make unreachable.
+    assertRoutesSubmittable(
+      'docs_only',
+      document({ paths: { '/invoices': { $ref: 'shared.yaml#/components/pathItems/X' } } }),
+    );
+  });
+
+  it('ignores specification extensions among the path templates', () => {
+    // A Paths Object mixes path templates with `^x-` extensions, and only the
+    // templates are Path Items — an extension holding a `$ref` is data.
+    assertRoutesSubmittable(
+      'routes',
+      document({ paths: { 'x-path-notes': { $ref: 'notes.yaml#/anything' } } }),
+    );
   });
 });
 

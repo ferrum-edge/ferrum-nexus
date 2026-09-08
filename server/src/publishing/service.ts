@@ -132,6 +132,13 @@
  * a destructive step without that record is how a rollback silently takes an
  * API off the gateway while its row still reads `published`.
  *
+ * Every such loop additionally **logs** what it swallowed, error message only.
+ * The durable record is the step's job; the log line is what covers a step that
+ * had nothing to record and failed anyway — the gateway is describable either
+ * way, but it may no longer describe what the portal says, and the response the
+ * caller gets is about something else entirely. `plugins/service.ts` follows
+ * the same rule for the palette's two loops.
+ *
  * ## The listen path moves last
  *
  * That sequence used to have one window it could not compensate for. Edge
@@ -243,7 +250,12 @@ import {
   type UpstreamPolicy,
   type UpstreamResolver,
 } from './oas.js';
-import { handOwnedPlugins, routesSpecDocument, submittableProxyBody } from './spec-document.js';
+import {
+  assertRoutesSubmittable,
+  handOwnedPlugins,
+  routesSpecDocument,
+  submittableProxyBody,
+} from './spec-document.js';
 
 /** Result of {@link PublishingService.publish} and `updateSpec`. */
 export interface PublishResult {
@@ -306,9 +318,13 @@ export interface PublishingServiceDeps {
   /**
    * Structured logger, at `error`, for a gateway state no request can repair.
    *
-   * Only the unrepairable `spec_enforcement` conversion uses it: everything
-   * else either compensates silently or fails the request with a `NexusError`
-   * the route layer already logs.
+   * Three kinds of thing reach it, and nothing else does: the unrepairable
+   * `spec_enforcement` conversion, a compensation step that could not undo what
+   * it was undoing, and a delete whose ACL strip failed. What they have in
+   * common is that the response the caller gets cannot describe them — the
+   * request fails for its own reason, or succeeds — so an operator has no other
+   * way to learn the gateway drifted. Everything else either compensates
+   * cleanly or fails with a `NexusError` the route layer already logs.
    */
   log?: (obj: Record<string, unknown>, message: string) => void;
   /**
@@ -864,9 +880,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const circuitBreaker = input.circuit_breaker ?? false;
       const specEnforcement = input.spec_enforcement ?? DEFAULT_SPEC_ENFORCEMENT;
       // Checked before the first gateway write: a document with nothing to
-      // enforce must fail the request outright, not halfway through creating a
-      // proxy that would then have to be rolled back.
+      // enforce — or one whose paths point at a Path Item the submitted copy
+      // cannot rewrite — must fail the request outright, not halfway through
+      // creating a proxy that would then have to be rolled back.
       assertRoutesEnforceable(specEnforcement, parsed.paths);
+      assertRoutesSubmittable(specEnforcement, parsed.document);
 
       // Where the proxy is *born*. It stays here until every security plugin
       // is attached and associated, and the move to `listenPath` is the last
@@ -1301,19 +1319,24 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // gateway is not applying would make the portal claim something untrue.
           if (proxyId && enforcementMoved && patch.spec_enforcement !== undefined) {
             const current = await store.apiSpecs.findCurrentByApi(api.id);
+            const document = current ? safeSpecDocument(current.raw_spec) : {};
             // Refused before the proxy is torn down, not after: a document with
             // nothing to enforce would come back as a proxy that `400`s every
-            // request.
+            // request, and one the submitted copy cannot rewrite would come
+            // back as a proxy `400`ing the operations it does declare. Both
+            // checks belong here rather than inside the rebuild, which runs
+            // with the original proxy already deleted.
             assertRoutesEnforceable(
               patch.spec_enforcement,
               current ? safeSpecPaths(current.raw_spec) : [],
             );
+            assertRoutesSubmittable(patch.spec_enforcement, document);
             undo.push(
               await convertEnforcementLocked(
                 api,
                 proxyId,
                 patch.spec_enforcement,
-                current ? safeSpecDocument(current.raw_spec) : {},
+                document,
                 actor,
                 ip,
               ),
@@ -1510,6 +1533,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           backend = proxyId ? await followedUpstream(api, previous, parsed) : null;
         }
         assertRoutesEnforceable(api.spec_enforcement, parsed.paths);
+        assertRoutesSubmittable(api.spec_enforcement, parsed.document);
         const undo: (() => Promise<void>)[] = [];
         try {
           if (proxyId) {
@@ -1609,8 +1633,19 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             return { spec: revision, api: row };
           });
         } catch (error) {
+          // Best-effort by the same contract `update()` documents: the request
+          // is already failing and an undo step must not replace the failure
+          // the caller needs to see with its own. Every step here replays a
+          // proxy write or a spec replace, so the gateway stays describable
+          // whichever way one goes — but a swallowed failure is still a
+          // divergence nothing else will revisit, so it is logged.
           for (const step of undo.reverse()) {
-            await step().catch(() => undefined);
+            await step().catch((undoError: unknown) => {
+              deps.log?.(
+                { api_id: api.id, proxy_id: proxyId, error: errorMessage(undoError) },
+                'a spec revision compensation step failed; the gateway may not match the portal',
+              );
+            });
           }
           // A compensated failure leaves the row where it was, so the audit
           // details must not claim a move that has just been rewound.
@@ -1665,6 +1700,14 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // delete too, not only the gateway calls: a conversion that acquired it
       // in between would re-read an `apis` row that still existed and rebuild
       // against it.
+      //
+      // It spans **nothing else**. The per-grantee ACL strip below needs no
+      // proxy serialization — the group is consumer-scoped, and each strip
+      // takes its own consumer key — and running it in here would hold
+      // `proxy:<id>` for as long as those consumer keys are contended, up to
+      // `LEASE_WAIT_MS` each under a credential burst. Every concurrent write
+      // on the API would answer `409` for the duration, for a step that cannot
+      // affect what the gateway serves.
       const apply = async (): Promise<{ grants: GrantRecord[]; api: ApiRecord }> => {
         // Re-read under the lease: whatever held it may have moved the proxy or
         // the enforcement mode, and the teardown has to act on what is there
@@ -1699,21 +1742,17 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           }
         }
 
-        // 2. Strip the ACL group from every grantee. The group would be inert
-        //    with the proxy gone, but leaving 500-capped junk on consumers is
-        //    not okay.
-        const grants = await store.grants.listActiveByApi(api.id);
-        for (const grant of grants) {
-          await stripGroup(grant.user_id, api.id).catch(() => undefined);
-        }
-
-        // 3. Drop the rows. The store's delete helpers are the cascade.
+        // 2. Drop the rows. The store's delete helpers are the cascade, and the
+        //    grant list is read a moment before it because the ACL strip and
+        //    the notifications that follow the lease both need it — a line
+        //    later there is nothing left to read it from.
         //
         //    `api_plugins` needs no gateway step of its own: every palette
         //    plugin is proxy-scoped, so deleting the proxy above already
         //    cascaded both the configs and their association rows, and the
         //    sweep that follows it covers anything a gateway left behind. Only
         //    the portal's rows are left to remove here.
+        const grants = await store.grants.listActiveByApi(api.id);
         await store.transaction(async (tx) => {
           await tx.grants.deleteByApi(api.id);
           await tx.accessRequests.deleteByApi(api.id);
@@ -1724,13 +1763,28 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
 
         return { grants, api };
       };
-      // The audit row and the grantee notifications are written outside the
-      // lease, so it is held for the teardown and nothing else — and only after
-      // `apply` returned, which is what makes `api.delete` mean "the gateway
-      // teardown held" rather than "a delete was attempted".
+      // The ACL strip, the audit row and the grantee notifications are all
+      // written outside the lease, so it is held for the teardown and the row
+      // delete and nothing else — and they run only after `apply` returned,
+      // which is what makes `api.delete` mean "the gateway teardown held"
+      // rather than "a delete was attempted".
       const { grants, api } = initial.ferrum_proxy_id
         ? await binder.withProxy(initial.ferrum_proxy_id, apply)
         : await apply();
+
+      // 3. Strip the ACL group from every grantee. The group is already inert —
+      //    the proxy that consulted it is gone — but leaving 500-capped junk on
+      //    consumers is not okay. A failure here cannot make the gateway serve
+      //    anything, so it does not fail the request; it is logged, because
+      //    nothing else will ever revisit it.
+      for (const grant of grants) {
+        await stripGroup(grant.user_id, api.id).catch((error: unknown) => {
+          deps.log?.(
+            { api_id: api.id, user_id: grant.user_id, error: errorMessage(error) },
+            'the ACL group of a deleted API could not be stripped from a grantee consumer',
+          );
+        });
+      }
 
       await audit.record(
         { id: actor.id, role: actor.role },
@@ -2194,10 +2248,23 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * unwound by a later failure in the same PATCH, whose unwind failed. Exactly
    * one of them fires per conversion — the forward path never returns an undo
    * step for a conversion that threw.
+   *
+   * It also decides how the two enforcement levels read. On a `conversion` row
+   * `attempted_spec_enforcement` is what the conversion was reaching for when
+   * it failed. On a `rollback` row that conversion had already *succeeded*, and
+   * what failed is the way back — so those rows carry `restore_target` as well,
+   * naming the level the failed restore was rebuilding outright rather than
+   * leaving an operator to infer it from `spec_enforcement`.
    */
   async function reportUnrepairableProxy(input: {
     api: ApiRecord;
     phase: 'conversion' | 'rollback';
+    /**
+     * The level the conversion was moving *to*, whether or not it got there —
+     * logged as `attempted_spec_enforcement`. Never what the restore was
+     * rebuilding; that is always `api.spec_enforcement`, and on the `rollback`
+     * phase it is logged as `restore_target` so the pair cannot be misread.
+     */
     target: SpecEnforcementLevel;
     proxyId: string;
     pluginNames: string[];
@@ -2217,6 +2284,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       plugin_names: input.pluginNames,
       spec_enforcement: input.api.spec_enforcement,
       attempted_spec_enforcement: input.target,
+      ...(input.phase === 'rollback' ? { restore_target: input.api.spec_enforcement } : {}),
       ...(input.error === null ? {} : { error: errorMessage(input.error) }),
       restore_error: errorMessage(input.restoreError),
     };

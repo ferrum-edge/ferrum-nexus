@@ -185,6 +185,18 @@ export interface MockFerrumEdge {
   /** Clear stored resources, recorded requests and queued failures. */
   reset(): void;
   /**
+   * Drop every armed {@link MockFerrumEdge.queueFailure} and
+   * {@link MockFerrumEdge.delay}, leaving stored resources alone.
+   *
+   * Both are one-shot and both are *matched*, so one that never met a matching
+   * request stays armed for the next test in the file and fires somewhere it
+   * was never meant to — a failure whose cause is two tests away from its
+   * symptom. Suites that arm either should clear them in an `afterEach`;
+   * {@link MockFerrumEdge.reset} does this too, but takes the whole gateway
+   * with it.
+   */
+  clearInjections(): void;
+  /**
    * Replace the payload returned by `GET /health` and `GET /status`.
    *
    * A payload with `ready: false` is served with **HTTP 503**, the way Edge
@@ -2639,6 +2651,11 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       requestCounters.clear();
       requestDurations.clear();
       backendStates.clear();
+    },
+
+    clearInjections(): void {
+      failures.length = 0;
+      delays.length = 0;
     },
 
     setHealth(payload: Record<string, unknown>): void {

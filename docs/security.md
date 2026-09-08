@@ -695,6 +695,18 @@ because Edge can neither attach nor detach an `api_spec` in place — takes the
 same detour, as does its rollback. An API being converted answers `404` for the
 rebuild instead of answering unauthenticated.
 
+> **Advisory follow-up — `GHSA-3r76-f92m-5x8v`.** That advisory's residual-risk
+> note says the proxy delete-and-recreate paths — unpublishing an API, and the
+> enforcement-level conversion — stay outside the per-proxy lease. **That
+> statement is superseded.** The conversion has held the lease since issue #60,
+> and deletion holds it across the gateway teardown _and_ the row delete since
+> issue #135; the conversion additionally refuses to rebuild for an API whose
+> row has gone, which is the backstop for a lease that expired under a stalled
+> instance. Publishing is the only lifecycle operation still outside, and it has
+> nothing to key on — there is no proxy id until Edge has created the proxy. The
+> advisory text lives on GitHub and has to be amended there; this note records
+> what it should say until it is.
+
 **Operational consequence.** Two crash windows remain, both narrow and both
 recognisable:
 
