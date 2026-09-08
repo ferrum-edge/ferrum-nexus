@@ -24,6 +24,7 @@ import type { EdgeApiSpecDocument } from './types.js';
 const SECRET = 'ferrum-admin-client-test-secret-0123456789';
 
 let edge: MockFerrumEdge;
+let edgeUrl: string;
 let client: FerrumAdminClient;
 
 function configFor(url: string, overrides: Partial<EdgeConfig> = {}): EdgeConfig {
@@ -48,6 +49,7 @@ describe('ferrum admin client', () => {
   before(async () => {
     edge = createMockFerrumEdge({ jwtSecret: SECRET, issuer: 'ferrum-edge' });
     const url = await edge.start();
+    edgeUrl = url;
     client = createFerrumAdminClient(configFor(url));
   });
 
@@ -118,11 +120,42 @@ describe('ferrum admin client', () => {
     await assert.rejects(
       () => client.consumers.getByUsername('nexus-user-zz'),
       (error: unknown) =>
-        isNexusError(error) && error.code === 'EDGE_ERROR' && /more consumers/i.test(error.message),
+        isNexusError(error) &&
+        error.code === 'EDGE_ERROR' &&
+        /more consumers/i.test(error.message) &&
+        /restore the consumer id mapping from backup/i.test(error.message),
     );
     // Exactly the cap is still a complete read.
     edge.consumers.delete('nexus/u-first');
     assert.equal(await client.consumers.getByUsername('nexus-user-zz'), null);
+  });
+
+  it('does not scan or create after a failed direct identity lookup', async () => {
+    edge.queueFailure(503, { error: 'unavailable' }, '/consumers/', 'GET');
+    await assert.rejects(() => client.consumers.ensure({ username: 'nexus-user-direct' }));
+    assert.equal(edge.callsTo('POST', '/consumers').length, 0);
+    assert.equal(
+      edge.callsTo('GET', '/consumers').filter((call) => call.path === '/consumers').length,
+      0,
+    );
+  });
+
+  it('does not scan after an uncertain create acknowledgement', async () => {
+    edge.queueFailure(503, { error: 'unavailable' }, '/consumers', 'POST');
+    await assert.rejects(() => client.consumers.ensure({ username: 'nexus-user-direct' }));
+    assert.equal(edge.callsTo('POST', '/consumers').length, 1);
+    assert.equal(
+      edge.callsTo('GET', '/consumers').filter((call) => call.path === '/consumers').length,
+      0,
+    );
+  });
+
+  it('rejects unsupported mock consumer filters instead of pretending to filter', async () => {
+    await assert.rejects(
+      // @ts-expect-error Edge does not support username filtering.
+      () => client.consumers.list({ username: 'missing' }),
+      (error: unknown) => isNexusError(error) && error.code === 'EDGE_ERROR',
+    );
   });
 
   it('appends and deletes credentials by index, capped by the gateway', async () => {
@@ -671,6 +704,133 @@ describe('ferrum admin client', () => {
   });
 
   describe('api specs', () => {
+    it('reports parse categories and their distinct details from the mock importer', async () => {
+      const malformed = specDocument('bad-extension', '/nexus/bad-extension', ['/invoices']);
+      malformed['x-ferrum-proxy'] = { upstream_url: 'https://example.com' };
+      for (const [document, code, explanation] of [
+        [{}, 'UnknownVersion', 'unknown spec version'],
+        [malformed, 'MalformedExtension', 'unknown field: upstream_url'],
+      ] as const) {
+        await assert.rejects(
+          () => client.apiSpecs.create(document),
+          (error: unknown) => {
+            assert.ok(isNexusError(error));
+            assert.equal(error.code, 'EDGE_REJECTED_SPEC');
+            assert.equal(error.statusCode, 400);
+            assert.ok(error.message.includes(explanation));
+            assert.equal((error.details as { gateway_code: string }).gateway_code, code);
+            return true;
+          },
+        );
+      }
+    });
+
+    it('bounds spec diagnostics and keeps gateway failures opaque', async () => {
+      const logs: Record<string, unknown>[] = [];
+      const messages: (string | undefined)[] = [];
+      const logged = createFerrumAdminClient(configFor(edgeUrl), {
+        debug: () => undefined,
+        warn: () => undefined,
+        error: (entry, message) => {
+          logs.push(entry);
+          messages.push(message);
+        },
+      });
+      const document = specDocument('diagnostics', '/nexus/diagnostics', ['/invoices']);
+      try {
+        for (const details of ['x'.repeat(2_000), { private: 'not a string' }]) {
+          const rejection = {
+            error: 'Spec parse failed',
+            code: 'MalformedExtension',
+            details,
+          };
+          edge.queueFailure(422, rejection, '/api-specs', 'POST');
+          await assert.rejects(
+            () => logged.apiSpecs.create(document),
+            (error: unknown) => {
+              assert.ok(isNexusError(error));
+              const diagnostics = error.details as {
+                gateway_message: string;
+                gateway_code: string;
+              };
+              assert.equal(error.code, 'EDGE_REJECTED_SPEC');
+              assert.equal(diagnostics.gateway_code, 'MalformedExtension');
+              assert.equal(
+                diagnostics.gateway_message.length,
+                typeof details === 'string' ? 500 : 'Spec parse failed'.length,
+              );
+              assert.ok(!JSON.stringify(error.toBody()).includes('not a string'));
+              return true;
+            },
+          );
+          assert.deepEqual(logs.at(-1)?.gateway_response, rejection);
+        }
+
+        const failures = [
+          null,
+          { resource_type: 'ignored', errors: [42] },
+          { resource_type: 'proxy', errors: ['overlapping listen_path', 'not echoed'] },
+          { resource_type: 'plugin_config', errors: ['invalid config'] },
+          { resource_type: 'proxy', errors: ['x'.repeat(2_000)] },
+        ];
+        edge.queueFailure(400, { error: 'Spec validation failed', failures }, '/api-specs', 'PUT');
+        await assert.rejects(
+          () => logged.apiSpecs.replace('diagnostics', document),
+          (error: unknown) => {
+            assert.ok(isNexusError(error));
+            assert.equal(error.code, 'EDGE_REJECTED_SPEC');
+            assert.match(
+              error.message,
+              /proxy: overlapping listen_path; plugin_config: invalid config/,
+            );
+            assert.ok(!error.message.includes('not echoed'));
+            assert.equal(
+              (error.details as { gateway_message: string }).gateway_message.length,
+              500,
+            );
+            return true;
+          },
+        );
+        assert.deepEqual(logs.at(-1)?.gateway_response, {
+          error: 'Spec validation failed',
+          failures,
+        });
+
+        for (const status of [401, 403, 500, 503]) {
+          edge.queueFailure(
+            status,
+            { error: 'Spec parse failed', details: 'private detail', code: 'PrivateCode' },
+            '/api-specs',
+            'POST',
+          );
+          await assert.rejects(
+            () => logged.apiSpecs.create(document),
+            (error: unknown) => {
+              assert.ok(isNexusError(error));
+              assert.equal(error.code, 'EDGE_ERROR');
+              assert.equal(error.statusCode, 502);
+              assert.deepEqual(error.details, { status });
+              assert.ok(!error.message.includes('private detail'));
+              return true;
+            },
+          );
+        }
+
+        const before = edge.requests.length;
+        document['x-cycle'] = document;
+        await assert.rejects(
+          () => logged.apiSpecs.create(document),
+          (error: unknown) => isNexusError(error) && error.code === 'INTERNAL',
+        );
+        assert.equal(edge.requests.length, before);
+        assert.equal(logs.at(-1)?.path, '/api-specs');
+        assert.equal(logs.at(-1)?.status, undefined);
+        assert.equal(messages.at(-1), 'Ferrum Edge Admin API request serialization failed');
+      } finally {
+        await logged.close();
+      }
+    });
+
     /** A document the importer will accept, owning `proxyId`. */
     function specDocument(
       proxyId: string,
@@ -836,7 +996,13 @@ describe('ferrum admin client', () => {
 
       await assert.rejects(
         () => client.apiSpecs.create(specDocument('second-proxy', '/nexus/taken', ['/invoices'])),
-        (error: unknown) => isNexusError(error) && /listen_path/.test(error.message),
+        (error: unknown) => {
+          assert.ok(isNexusError(error));
+          assert.equal(error.code, 'EDGE_REJECTED_SPEC');
+          assert.equal(error.statusCode, 400);
+          assert.match(error.message, /proxy: A proxy with overlapping hosts and listen_path/);
+          return true;
+        },
       );
     });
 

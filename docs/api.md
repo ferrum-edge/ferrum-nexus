@@ -133,11 +133,32 @@ validation issues, a conflicting slug, an Edge status).
 | `OUTBOX_FAILURE`     | 500  | Email could not be enqueued, or exhausted its outbox retries.                                                                                                                                                                                                                                                                                                                                                                 |
 | `INTERNAL`           | 500  | Unexpected server-side failure.                                                                                                                                                                                                                                                                                                                                                                                               |
 
+An Edge API-spec write rejected with a 4xx `Spec parse failed` or
+`Spec validation failed` category returns `400 EDGE_REJECTED_SPEC` (except
+401/403, which remain gateway credential errors). Its `details` contains the
+upstream `status`, a `gateway_message` capped at 500 characters, and
+`gateway_code` when Edge supplies a string `code` (also capped at 500 characters).
+The message includes string `details` and a summary of each failure's
+`resource_type` and first error, within the same cap. The complete response is
+logged server-side within the Edge client's response-size bound; it is not
+reflected into the public error details. Other categories remain `502 EDGE_ERROR`,
+and gateway 5xx diagnostics remain opaque. This applies to publish, spec revision,
+and enforcement conversion.
+
 An invalid Edge HTTP/JSON response returns `502 EDGE_PROTOCOL_ERROR` with
 `details: { status, kind: "protocol_error", reason }`. The fixed reason identifies
 the contract violation (for example `invalid_utf8`); response bytes and parser
 exceptions are never included. This can occur on any endpoint calling Edge and
 is not repeated in the per-endpoint notes. See [Edge response contracts](edge-response-contracts.md).
+
+A write the database rolled back because another one touched the same rows —
+an InnoDB deadlock, a PostgreSQL serialization failure, a MongoDB write
+conflict — is retried by the server (bounded, with backoff). If it still cannot
+commit, the endpoint answers `409 CONFLICT` with
+`details: { reason: "transaction_contention", driver, attempts }`. Nothing was
+applied, and the same request may simply be sent again. Like the above, this
+can happen on any state-changing endpoint and is not repeated in the
+per-endpoint notes.
 
 `UNAUTHORIZED`, `FORBIDDEN`, `CSRF_MISMATCH`, `USER_DISABLED` and
 `VALIDATION_FAILED` can come back from any endpoint and are not repeated in the
@@ -1188,6 +1209,14 @@ then persists.
 { "api": { … }, "spec": { … } }
 ```
 
+Uploads accept at most 200 nested object/array levels, counting the root as level
+one, in either enforcement mode. Deeper documents return `400 SPEC_INVALID` with
+`details: { reason: "nesting_too_deep", limit: 200 }` before a gateway call.
+The derived upstream URL, after server-variable expansion, must fit the same
+2,000-character limit as typed `upstream_url`. An oversized derived URL returns
+`400 SPEC_INVALID` naming `servers[0].url` (or the selected server's index) and
+`details.limit: 2000`. These limits also apply to spec revisions.
+
 Errors: `400 SPEC_INVALID` (unparseable, Swagger 2.0, missing
 `openapi`/`info.title`/`info.version`/`paths`, oversized, no upstream
 determinable, or — unless `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true` — an upstream
@@ -1492,6 +1521,12 @@ which the plugin is missing. The `api_plugins` row is written last but inside
 the same compensated block, so a store failure rolls the gateway back rather
 than leaving a plugin running that the portal has no row for.
 
+The save touches **only the config the portal created**, identified by the id
+recorded on the row. Ferrum Edge allows several configs of one plugin name on a
+proxy — with distinct triggers or execution priorities — so a second config an
+operator made by hand is left exactly where it is, and fields the portal does
+not model (`priority_override`) survive the replace.
+
 | Status | Code                | When                                                                                                                                                                                                                                                                                                                                                                          |
 | ------ | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `400`  | `VALIDATION_FAILED` | a config key, value or invariant the plugin does not accept; a trigger on a plugin Edge cannot gate; or a plugin Nexus manages from a first-class API field (`key_auth`/`basic_auth`/`jwt_auth` → `auth_plugin`, `access_control` → `requestable`, `rate_limiting` → `rate_limit`, `cors` → `cors`, `openapi_validator` → `spec_enforcement`), whose message names that field |
@@ -1504,8 +1539,10 @@ than leaving a plugin running that the portal has no row for.
 _provider_, owner-or-admin → `{ "ok": true }`.
 
 Disassociates the config from the proxy, deletes it, then removes the row —
-`404 NOT_FOUND` when the API never had that plugin. A gateway config an
-operator already removed by hand is tolerated: the row still goes.
+`404 NOT_FOUND` when the API never had that plugin. Only the config the portal
+created is deleted; another config of the same plugin name is an operator's and
+stays. A gateway config an operator already removed by hand is tolerated: the
+row still goes.
 
 Deleting the API removes every palette row with it; the gateway objects need no
 separate step, because they are proxy-scoped and the proxy delete cascades them.

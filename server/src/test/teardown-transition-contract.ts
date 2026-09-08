@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 
 import { consumerUsernameForUser } from '@ferrum-nexus/shared';
 
-import type { NexusStore } from '../db/store.js';
+import type { NexusStore, TransactionOptions } from '../db/store.js';
 import { buildTestApp } from './helpers.js';
 
 /** Follow transaction-scoped repositories, including pooled SQL and Mongo sessions. */
@@ -14,8 +14,8 @@ function interceptTransitions(
   return new Proxy(hook(base), {
     get(target, property, receiver) {
       if (property === 'transaction') {
-        return <T>(fn: (tx: NexusStore) => Promise<T>): Promise<T> =>
-          base.transaction((tx) => fn(interceptTransitions(tx, hook)));
+        return <T>(fn: (tx: NexusStore) => Promise<T>, options?: TransactionOptions): Promise<T> =>
+          base.transaction((tx) => fn(interceptTransitions(tx, hook)), options);
       }
       const value: unknown = Reflect.get(target, property, receiver);
       return typeof value === 'function' ? value.bind(base) : value;

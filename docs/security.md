@@ -200,6 +200,14 @@ they are built to answer nothing:
   limiter (20 requests per minute per IP), which is what bounds the cost of the
   scrypt floor.
 
+### Browser session cache
+
+The SPA clears its TanStack Query cache on explicit logout, a request's global
+401 handler, and a session refresh that returns 401. A sign-in after sign-out or
+an identity change clears the cache again before accepting the principal, so
+cached credential metadata and other query results cannot cross accounts in
+the same tab. A transient refresh failure preserves an authenticated session.
+
 ### Password storage
 
 scrypt, `N=16384, r=8, p=1`, 32-byte output, 16-byte random salt per hash, in a
@@ -692,7 +700,9 @@ changed keys and never their values, so the audit log stays readable by anyone
 allowed to read audit logs.
 
 Before changing `NEXUS_SECRET_KEY`, stop all Nexus instances and run
-`npm run rotate-secret-key` with the previous and new keys in the environment.
+`npm run rotate-secret-key` (in a built image:
+`node server/dist/db/rotate-key-cli.js`) with the previous and new keys in the
+environment.
 The command re-encrypts SMTP/CAPTCHA blobs and every other encrypted setting
 in one transaction, refusing all writes if any blob cannot be decrypted. A
 bare key swap without re-encryption leaves those settings unreadable and
@@ -1117,8 +1127,8 @@ ordinary reporting.
 | `api.spec_update`             | `api`       | A new spec revision was published and made current. `details`: spec id, version, path count, OpenAPI enforcement level, `backend_updated`. At the `routes` level the revision also changes what the gateway accepts, so the level is recorded on every upload.                                                                                                                                                                                                                                                                                       |
 | `api.retire`                  | `api`       | An API moved to `retired`. Emitted instead of `api.update` for that transition. `details.gateway_untouched` records that the proxy and live grants were left alone.                                                                                                                                                                                                                                                                                                                                                                                  |
 | `api.delete`                  | `api`       | An API and its Edge objects were destroyed. `details`: slug, proxy id, `revoked_grants`.                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `api.plugin_set`              | `api`       | A palette plugin was created or replaced on the API's proxy. `details`: `plugin_name`, `enabled`, `config_keys`, `trigger`, `replaced`. **The config keys are logged, never their values** — a plugin config can carry a Content-Security-Policy or a partner IP allow-list, and an audit row is not the place for either. The trigger is a method list and a path prefix, which are policy rather than data, so it is recorded in full.                                                                                                             |
-| `api.plugin_remove`           | `api`       | A palette plugin was detached from the proxy and deleted. `details`: `plugin_name`, `label`, `was_attached` (false when an operator had already removed the gateway config by hand).                                                                                                                                                                                                                                                                                                                                                                 |
+| `api.plugin_set`              | `api`       | A palette plugin was created or replaced on the API's proxy. `details`: `plugin_name`, `enabled`, `config_keys`, `trigger`, `replaced`, `plugin_config_id` (the Edge config written, so the row names what was touched). **The config keys are logged, never their values** — a plugin config can carry a Content-Security-Policy or a partner IP allow-list, and an audit row is not the place for either. The trigger is a method list and a path prefix, which are policy rather than data, so it is recorded in full.                            |
+| `api.plugin_remove`           | `api`       | A palette plugin was detached from the proxy and deleted. `details`: `plugin_name`, `label`, `was_attached` (false when an operator had already removed the gateway config by hand), `plugin_config_id` (the Edge config deleted, `null` when there was none). Only the config the portal created is removed — another config of the same plugin name on the proxy is an operator's and is left alone.                                                                                                                                               |
 | `api.gateway_repair_required` | `api`       | A `spec_enforcement` conversion could neither finish nor put the original proxy back, so the API has **no gateway object at all** while its catalog entry, grants and credentials stay valid. `details`: `proxy_id`, hand-owned `plugin_names`, `spec_enforcement`, `attempted_spec_enforcement`, and both error messages. Raw proxy and plugin configurations are never included because they may contain infrastructure credentials or other operator-managed secrets. Also logged at `error`. Alert on it: no later request repairs it by itself. |
 | `test_consumer.create`        | `api`       | A provider created (or replaced) the disposable `nexus-test-<api_id>` consumer. `details`: consumer username/id, credential type, `replaced`.                                                                                                                                                                                                                                                                                                                                                                                                        |
 

@@ -29,10 +29,10 @@ are. A relative `NEXUS_SQLITE_PATH` resolves from `server/`.
 
 ### Required
 
-| Variable                  | Notes                                                                                                                                                                                                                                                                                                                                   |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NEXUS_SECRET_KEY`        | **Required.** Minimum 32 characters. The master secret; the settings-encryption key and the session-token HMAC key are both HKDF-derived from it. Generate with `openssl rand -hex 32`. To change it, run `npm run rotate-secret-key` with the old value in `NEXUS_SECRET_KEY_PREVIOUS` first — see [§7](#7-rotating-nexus_secret_key). |
-| `FERRUM_ADMIN_JWT_SECRET` | **Required.** Minimum 32 characters. Must match the gateway's `FERRUM_ADMIN_JWT_SECRET` exactly.                                                                                                                                                                                                                                        |
+| Variable                  | Notes                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NEXUS_SECRET_KEY`        | **Required.** Minimum 32 characters. The master secret; the settings-encryption key and the session-token HMAC key are both HKDF-derived from it. Generate with `openssl rand -hex 32`. To change it, run `npm run rotate-secret-key` (in a built image: `node server/dist/db/rotate-key-cli.js`) with the old value in `NEXUS_SECRET_KEY_PREVIOUS` first — see [§7](#7-rotating-nexus_secret_key). |
+| `FERRUM_ADMIN_JWT_SECRET` | **Required.** Minimum 32 characters. Must match the gateway's `FERRUM_ADMIN_JWT_SECRET` exactly.                                                                                                                                                                                                                                                                                                    |
 
 ### Server
 
@@ -83,7 +83,7 @@ retain their driver's own timeout; a stalled database can still fail healthcheck
 | `FERRUM_ADMIN_JWT_TTL`             | `60`                    | Admin JWT lifetime in seconds, 5 – 3600. Edge caps it at 3600. Short is correct — tokens are minted per call and cached.                                                                                                                                                                                                                                                                         |
 | `FERRUM_ADMIN_JWT_ISSUER`          | `ferrum-edge`           | The `iss` claim. **Must equal the gateway's configured issuer** or every call is rejected.                                                                                                                                                                                                                                                                                                       |
 | `FERRUM_ADMIN_JWT_AUDIENCE`        | _(unset)_               | Only set when the gateway configures an audience. An unexpected `aud` claim is rejected by the gateway, so Nexus omits it entirely by default.                                                                                                                                                                                                                                                   |
-| `FERRUM_NAMESPACE`                 | `nexus`                 | Namespace Nexus manages, sent as `X-Ferrum-Namespace` on every call. Must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, ≤ 254 chars. Also becomes the first segment of every listen path (`/<namespace>/<slug>`).                                                                                                                                                                                        |
+| `FERRUM_NAMESPACE`                 | `nexus`                 | Namespace Nexus manages, sent as `X-Ferrum-Namespace` on every call. Must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, ≤ 128 chars (the MySQL namespace columns are `VARCHAR(128)`; longer values fail publish on that adapter alone). Also becomes the first segment of every listen path (`/<namespace>/<slug>`).                                                                                     |
 | `FERRUM_GATEWAY_PUBLIC_URL`        | _(unset)_               | Public origin of the gateway's **proxy listener** — where clients send API traffic. Absolute `http(s)` origin, no path/query/credentials; a trailing slash is stripped. Feeds each API's `invoke_url` in the catalog. Distinct from `FERRUM_ADMIN_URL` (control plane) and `NEXUS_PUBLIC_URL` (the portal). The `gateway.public_url` setting overrides it; with neither, `invoke_url` is `null`. |
 | `FERRUM_ADMIN_CA_FILE`             | _(unset)_               | Path to a PEM CA bundle for a TLS-protected Admin API. An unreadable file fails startup.                                                                                                                                                                                                                                                                                                         |
 | `FERRUM_ADMIN_ALLOW_INSECURE_HTTP` | `false`                 | Permits plaintext `http://` Admin URLs on non-loopback hosts. Container-network-only deployments are the intended use.                                                                                                                                                                                                                                                                           |
@@ -378,14 +378,26 @@ For deployments that prefer a separate schema step:
 
 ```bash
 npm run migrate                      # from the repo root
-# or, from a built image:
-node server/dist/db/migrate-cli.ts   # (tsx in dev: npx tsx src/db/migrate-cli.ts)
+# or, from a built image (the compiled entry point — `.js`, not `.ts`):
+node server/dist/db/migrate-cli.js   # (tsx in dev: npx tsx src/db/migrate-cli.ts)
 ```
 
 Run the **root** script, not `npm run migrate --workspace server`: the server
 resolves `@ferrum-nexus/shared` through that workspace's `dist/`, and only the
 root script builds it first. On a clean clone the workspace-level script fails
 until you have run `npm run build --workspace shared` yourself.
+
+The root script is **not available inside the runtime image**, for the same
+reason: the image is built with `npm ci --omit=dev` and its runtime stage copies
+only `shared/dist`, `server/dist`, `web/dist` and `server/src/db/migrations`, so
+neither `tsc` nor the workspace source is present. Inside a container the
+compiled entry point is the only path — as the container's own command, or as a
+one-shot run with the same environment:
+
+```bash
+docker exec <container> node server/dist/db/migrate-cli.js
+docker run --rm --env-file .env <image> node server/dist/db/migrate-cli.js
+```
 
 The CLI loads the same env, applies pending migrations, prints
 `Migrations applied (driver: postgres).` and exits. It exits non-zero on
@@ -504,6 +516,50 @@ place, and you can end up with a grant row whose ACL group was never written
 Collections and indexes are created in code on `init()`; there are no `.sql`
 files for Mongo, but the same `schema_migrations` bookkeeping applies.
 
+### Transactions and contention retries
+
+Every write that has to be atomic runs inside `store.transaction`. Within one
+instance those bodies are **serialised** — one at a time, on every driver — but
+that says nothing about the instance next to it, and each engine can roll a
+transaction back purely because two of them collided:
+
+| Engine     | What it reports                                                    | What it means         |
+| ---------- | ------------------------------------------------------------------ | --------------------- |
+| MySQL      | `ER_LOCK_DEADLOCK` (1213) / `ER_LOCK_WAIT_TIMEOUT` (1205), `40001` | Rolled back, retry it |
+| PostgreSQL | `40001` serialization failure, `40P01` deadlock detected           | Rolled back, retry it |
+| MongoDB    | `WriteConflict` (112), labelled `TransientTransactionError`        | Rolled back, retry it |
+| SQLite     | nothing — one connection, one body at a time                       | Cannot arise          |
+
+Nexus **re-runs the body** in those cases rather than failing the request:
+
+- **Budget.** On MySQL and PostgreSQL, up to 5 attempts, with exponential
+  backoff jittered between 5 ms and 200 ms. On MongoDB the budget is wall
+  clock instead — 5 seconds of contention, on the same backoff — because that
+  engine fails the loser of a contended document immediately rather than
+  blocking it on a lock, so the retry loop is the only thing that waits for the
+  transaction that won; an attempt count would be spent in microseconds and
+  fail the loser while the winner was still committing. The whole MongoDB
+  transaction, that wait included, is capped at 15 seconds (the driver's own
+  default envelope is two minutes, far longer than an HTTP request should
+  wait).
+- **Outcome when it still cannot commit.** `409 CONFLICT` with
+  `details.reason = "transaction_contention"` and the attempt count. A driver
+  error type never reaches a response or a client; a retried request that
+  succeeds looks like any other success.
+- **What is _not_ retried.** A uniqueness violation, a validation failure, a
+  lost connection, or anything a service threw on purpose. Only the contention
+  classes above.
+- **Nothing is applied twice.** A retried attempt starts from a rolled-back
+  state: the failed attempt's rows are gone before the next one begins, and
+  every side effect a body has goes through the transaction. Emails, gateway
+  calls, audit rows for gateway work and notifications all happen _outside_ the
+  transaction, after it commits.
+
+Seeing occasional retries is normal under load. A sustained stream of
+`transaction_contention` conflicts in the logs means real hot-row contention —
+usually many writers on one message thread or one account — and is worth
+investigating rather than raising the budget.
+
 ---
 
 ## 3. Docker
@@ -522,11 +578,16 @@ docker run --rm -p 127.0.0.1:8787:8787 \
   -e NEXUS_SECRET_KEY="$(openssl rand -hex 32)" \
   -e NEXUS_BOOTSTRAP_TOKEN="$(openssl rand -hex 32)" \
   -e FERRUM_ADMIN_URL=http://host.docker.internal:9000 \
+  -e FERRUM_ADMIN_ALLOW_INSECURE_HTTP=true \
   -e FERRUM_ADMIN_JWT_SECRET=change-me-at-least-32-characters-long \
   -e NEXUS_PUBLIC_URL=https://portal.example.com \
   -v nexus-data:/app/data \
   ferrum-nexus
 ```
+
+`FERRUM_ADMIN_ALLOW_INSECURE_HTTP=true` is required here because
+`FERRUM_ADMIN_URL` is plaintext `http://` to `host.docker.internal`, a
+non-loopback host; it is acceptable only because that traffic is in-network.
 
 Drop `NEXUS_BOOTSTRAP_TOKEN` and the container prints a generated one on its
 first start (`docker logs`); see
@@ -693,11 +754,31 @@ inserts an `email_outbox` row; the worker polls every 5 seconds and drains it.
 | Status    | Meaning                                                                                |
 | --------- | -------------------------------------------------------------------------------------- |
 | `pending` | Queued and due (or waiting for `next_attempt_at`).                                     |
-| `sending` | Claimed by a worker. The claim is atomic and increments `attempts`.                    |
+| `sending` | Claimed by a worker. The claim is atomic, increments `attempts` and stamps an owner.   |
 | `sent`    | Delivered.                                                                             |
 | `failed`  | Terminal. Delivery failed on attempt 5 (`OUTBOX_MAX_ATTEMPTS`); `last_error` says why. |
 
 Retries back off `30s · 2^attempts`, capped at one hour, plus up to 10% jitter.
+
+### `failed` has two meanings — read `last_error`
+
+`failed` is the only terminal status the schema has, so it holds two different
+outcomes:
+
+- **Nothing was delivered.** Five attempts were refused, or refused permanently
+  by the relay. `last_error` is the relay's own complaint.
+- **Delivered, but unacknowledged.** `last_error` starts with
+  `delivered-unacknowledged:`. The message reached the relay in full and the
+  relay may well have queued it — Nexus simply never got an answer it could
+  record. That happens when the acknowledgement write fails after a successful
+  `send`, when the connection dies after end-of-data, or when the per-attempt
+  budget below cuts the attempt off there.
+
+The distinction matters because it decides what re-driving does. A row is parked
+in this state instead of retried precisely so the relay is not handed a second
+copy; **re-driving one delivers a duplicate.** SMTP hands a message over at the
+end-of-data marker, so an attempt cut off before that point is an ordinary
+failure and is retried normally.
 
 A `sending` row untouched for five minutes is assumed to belong to a crashed
 worker and is released back to `pending`. **That sweep runs at the top of every
@@ -711,11 +792,31 @@ all.
 
 Five minutes is safe because a claim's lifetime is bounded. Rows are claimed
 **one at a time** rather than as a batch — a batch's last row would otherwise
-sit `sending` for as long as every row ahead of it — and one delivery cannot run
-past about 50 seconds, because Nexus pins nodemailer's timeouts (10 s to
+sit `sending` for as long as every row ahead of it — and every `send` is raced
+against a hard 60-second deadline (`OUTBOX_SEND_BUDGET_MS`). That deadline is
+what makes the arithmetic true: Nexus also pins nodemailer's timeouts (10 s to
 connect, 10 s for the greeting, 30 s of socket inactivity) rather than taking
-its 2 min / 30 s / 10 min defaults. If you raise those, raise the threshold with
-them.
+its 2 min / 30 s / 10 min defaults, but those are **per phase**, not a total.
+`socketTimeout` measures inactivity between reads, so a relay that answers every
+command just inside it — or dribbles legal multi-line continuation replies — can
+otherwise hold one delivery open for minutes and outlive the stale threshold.
+An attempt the deadline cuts off is recorded as delivered-unacknowledged if the
+message had already been written in full, and retried normally if it had not.
+
+Nodemailer offers no way to abort a send in progress, so a connection cut off
+this way is left to its own socket-inactivity timeout. The claim — the thing the
+stale threshold is about — is released immediately either way.
+
+### Two workers, one row
+
+`releaseStale` decides on age alone, so on a bad day it can hand a row to a
+second worker while the first is still inside `send`. Every claim therefore
+carries an internal `generation` token: `markSent`, `reschedule` and `markFailed`
+all match on the claimed ID, that token and `status = 'sending'`. A worker whose
+claim was reclaimed loses its settling write and logs
+`Outbox claim was reclaimed by another worker`; it cannot flip an already-`sent`
+row back to `pending` and have it delivered again. The token is internal and
+never appears in an API response.
 
 ### The quiet failure mode to watch for
 
@@ -750,15 +851,46 @@ the worker is not ticking at all.
 
 The worker logs `Outbox message delivery failed, retrying later`,
 `Outbox message failed permanently`, `Released stale outbox claims`,
+`Outbox message was delivered but could not be marked sent; parked to avoid a duplicate`,
+`Outbox claim was reclaimed by another worker; this attempt did not settle the row`,
 `Outbox message was abandoned mid-flight; it is recovered by the stale sweep`,
 `Could not release stale outbox claims` and `Outbox tick failed` at `warn`.
 `Released stale outbox claims` carries a `released` count; a steady trickle of
 it means messages are being re-queued after somebody's crash, and a duplicate
-may have gone out.
+may have gone out. A steady trickle of reclaimed claims means the stale
+threshold is too close to how long deliveries actually take.
 
-To re-drive a `failed` row, set it back to `pending` with `attempts = 0` and
-`next_attempt_at = NULL`. Note that a row reinstated this way keeps its
-`idempotency_key`, so it will not be duplicated by a re-send from the UI.
+To re-drive a `failed` row, **first read its `last_error`**:
+
+```sql
+-- delivered, only unacknowledged: re-driving these sends a second copy
+SELECT to_email, attempts, last_error, updated_at
+  FROM email_outbox
+ WHERE status = 'failed' AND last_error LIKE 'delivered-unacknowledged:%';
+```
+
+Re-drive only the rows that are **not** in that state, by setting them back to
+`pending` with `attempts = 0` and `next_attempt_at = NULL`. A row reinstated this
+way keeps its `idempotency_key`, so it will not be duplicated by a re-send from
+the UI. A `delivered-unacknowledged:` row should be confirmed with the recipient
+or the relay's own logs before anything is re-sent; if you decide to re-send it
+anyway, expect the recipient to receive two copies.
+
+### Upgrading outbox ownership (migration 014)
+
+Drain and stop **all** Nexus application instances and workers before upgrading.
+Run the normal migrations, then start only the new version. Do not mix old and
+new writers: an old binary can still settle a row by ID without checking the new
+token. This is an additive schema migration, not a safe mixed-version rolling
+deployment, and the same drain requirement applies before rolling back binaries.
+
+SQLite and PostgreSQL add the column transactionally. MySQL uses its existing
+resumable DDL journal and verifies the column definition on restart. MongoDB
+backfills only documents missing the field. Existing rows keep their ID, status,
+counters, error and timestamps; their initial empty token is replaced the next
+time the row is claimed, and an existing `sending` row recovers through the
+normal stale sweep. No queued mail needs to be discarded, and no API response
+shape changes.
 
 SMTP settings are re-read on **every** tick, so an admin fixing them in the UI
 takes effect on the next poll with no restart.
@@ -806,6 +938,7 @@ that is not harmless:
   the secret.
 
 That is why the rotation is a two-key, offline step: `npm run rotate-secret-key`
+(in a built image: `node server/dist/db/rotate-key-cli.js`)
 re-encrypts every `app_settings` row with `encrypted = 1` from the previous key
 to the new one, in one transaction, and refuses to write anything if a single
 row does not open under the previous key. Both keys come from the environment
@@ -820,25 +953,45 @@ old HMAC key; password sign-in is unaffected.
 
 1. **Announce a short window.** Everyone will be signed out.
 2. Back up the database (see [§5](#5-backups)) and record the current
-   `NEXUS_SECRET_KEY` — it is your rollback.
+   `NEXUS_SECRET_KEY`. That is your rollback **before** the rotation runs; once
+   it has, the key that matters — and the one most likely to be lost — is the
+   new one, so persist it where the server reads its configuration (step 4) and
+   treat _that_ as the rollback from then on.
 3. **Stop every Nexus instance** (or run the step against a database no
    instance is using). A running server would keep writing blobs under the old
    key while you rotate.
-4. Re-encrypt the settings with both keys in the environment. With a `.env`
-   file, `NEXUS_SECRET_KEY` is read from it; put the previous key in the shell:
+4. Re-encrypt the settings, from the previous key to a new one. An exported
+   variable wins over `.env` (see [§1](#1-environment-variables)), so
+   re-encrypting to a key that only the shell knows while `.env` still names the
+   old one is a lockout: the restart in step 5 reads `.env`, cannot decrypt the
+   settings, and CAPTCHA fails closed. Generate the new key **first**, write it
+   to the place the server will read it from (`NEXUS_SECRET_KEY` in `.env`, or
+   the container environment), then export only the previous key:
 
    ```bash
+   # 1. Choose the new key and persist it where the server will load it on
+   #    restart (NEXUS_SECRET_KEY in .env, or the container environment).
+   openssl rand -hex 32          # copy this value in before you rotate
+
+   # 2. Then rotate, with only the previous key in the shell:
    export NEXUS_SECRET_KEY_PREVIOUS="<the key the database was last written with>"
-   export NEXUS_SECRET_KEY="$(openssl rand -hex 32)"     # or the value now in .env
-   npm run rotate-secret-key
+   npm run rotate-secret-key                  # from a checkout
+   # from a built image (the only form that runs there):
+   node server/dist/db/rotate-key-cli.js
    # Re-encrypted 2 setting(s) under the new NEXUS_SECRET_KEY (captcha.secret_key, smtp.password); …
    ```
 
-   The command exits non-zero and changes nothing if the previous key is wrong,
-   if the two keys are equal, or if it has already been run.
+   The CLI exits non-zero and changes nothing if the `.env` it loads declares a
+   different `NEXUS_SECRET_KEY` than the one it would rotate to — re-run with
+   `--allow-env-mismatch` only when that file is deliberately not this
+   deployment's configuration — and equally if the previous key is wrong, if the
+   two keys are equal, or if it has already been run.
 
 5. Start the server with the new `NEXUS_SECRET_KEY` (and without
-   `NEXUS_SECRET_KEY_PREVIOUS`).
+   `NEXUS_SECRET_KEY_PREVIOUS`). The new key must be in the same place the
+   server reads its configuration from — the `.env` file or container
+   environment you edited in step 4 — not just in the shell that ran the
+   rotation.
 6. Verify as a **super admin** (SMTP and CAPTCHA settings are super-admin-only):
    sign in — with CAPTCHA on, this is the proof the secret survived — then
    **Send test email** on the settings page returns `ok: true`.
@@ -849,9 +1002,20 @@ old HMAC key; password sign-in is unaffected.
    DELETE FROM email_verification_tokens WHERE used_at IS NULL;
    ```
 
-   Users with an unused verification link will need a new one; the simplest
-   remedy is to mark them verified from **Admin → Users**, or have them
-   re-register.
+   Users with an unused verification link will need a new one. The remedy is
+   self-service: they click **Resend verification** on the sign-in page. There
+   is no administrator control that marks a user verified, and re-registering
+   an existing address is refused, so neither of those is available. A resend
+   is throttled to once per account per ten minutes, and the
+   `DELETE FROM email_verification_tokens` above does **not** clear the
+   issue-claim rows that drive that throttle; to let a user retry immediately,
+   clear those too:
+
+   ```sql
+   DELETE FROM email_token_issue_claims WHERE purpose = 'email_verification';
+   ```
+
+   A portal with email verification not required is unaffected.
 
 8. Watch the outbox for a few minutes: `SELECT status, count(*) FROM email_outbox
 GROUP BY status`. Any `failed` rows accumulated during the window can be
@@ -859,7 +1023,10 @@ GROUP BY status`. Any `failed` rows accumulated during the window can be
 
 **Rollback** is the same command with the keys swapped (`NEXUS_SECRET_KEY_PREVIOUS`
 = the new key, `NEXUS_SECRET_KEY` = the old one), run before the server has
-re-saved anything under the new key; then restart with the old key.
+re-saved anything under the new key; then restart with the old key. Both keys
+must already be persisted wherever the server reads its configuration — a key
+that existed only in the shell that ran the rotation is lost the moment that
+shell closes, and rolling back to a lost key is not possible.
 
 **If you cannot run the command** (for example a hosted database you can only
 reach through the running portal), a super admin can avoid the lockout by
@@ -1097,6 +1264,14 @@ gateway validating the caller's own request — the same text is echoed to the
 caller in `EDGE_ERROR.details.gateway_message`; for `401`/`403` and every `5xx`
 it is deliberately **only** in the log, so this is where you look when a
 provider reports an unexplained `EDGE_ERROR`.
+
+API-spec parse/validation rejections use `400 EDGE_REJECTED_SPEC` for upstream
+4xx responses other than 401/403. Their bounded explanation and machine code
+are in `details.gateway_message` and `details.gateway_code`. The Edge client's
+error log includes the complete parsed response as `gateway_response`, bounded
+by its 16 MiB response limit, including `details` and `failures` omitted from the
+public summary. Serialization failures log `request serialization failed` and
+surface as `500 INTERNAL`; they do not indicate an unreachable gateway.
 
 ### Shutdown
 
@@ -1406,6 +1581,31 @@ it withdraws the intent and puts the row back to `active`.
 `basicauth` is outside all of this: Edge omits it from every read projection, so
 its array length is unknowable and the mirror is the only word on its positions,
 exactly as it has always been.
+
+### Consumer identity recovery
+
+New canonical consumers use a stable derived UUID and persist the mapping in
+`consumers`; provider test consumers persist their current id in
+`gateway_identities`. Normal provisioning does not list the namespace, even
+above 10,000 consumers. Keep these tables with the rest of the Nexus database
+in backups. Do not change a consumer's id or canonical username on Edge.
+
+Older gateway identities without a portal mapping are adopted after a create
+conflict using a logged scan of at most 20 pages of 500 consumers. An incomplete
+scan returns `EDGE_ERROR` with a recovery instruction, never “no consumer”.
+Teardown retains its pending registration/job on this error.
+
+If this legacy limit is reached, pause provisioning and teardown workers during
+maintenance and restore the affected mapping from a consistent Nexus backup.
+Verify the gateway resource with `GET /consumers/{id}` in the configured
+`X-Ferrum-Namespace`: its username must exactly match `nexus-user-<user_id>` or
+the registered `nexus-test-<api_id>`. Restore the canonical `consumers` row or
+the registered identity's `ferrum_consumer_id`, preserving the correct owner
+and namespace. If no mapping backup exists, an administrator must inventory
+the gateway with paginated Admin API reads and reconstruct the mapping after
+verifying those same fields. Back up the portal database before this repair;
+do not delete gateway identities or credentials to make the scan shorter.
+Resume Nexus and retry the provisioning operation or pending teardown job.
 
 ### What a drifted consumer looks like
 
