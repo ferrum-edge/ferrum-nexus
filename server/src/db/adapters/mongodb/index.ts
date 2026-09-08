@@ -2921,15 +2921,17 @@ class MongoStore implements NexusStore {
     claimPending: async (job) => {
       const doc = await this.col(COLLECTIONS.gatewayTeardownJobs).findOneAndUpdate(
         { _id: job.id, generation: job.generation, status: 'pending' } as Filter<NexusDoc>,
-        {
-          $set: {
-            status: 'sending',
-            generation: newId(),
-            updated_at: nowIso(),
-            completed_at: null,
+        [
+          {
+            $set: {
+              status: 'sending',
+              generation: newId(),
+              updated_at: nowIso(),
+              completed_at: null,
+              attempts: { $add: [{ $ifNull: ['$attempts', 0] }, 1] },
+            },
           },
-          $inc: { attempts: 1 },
-        },
+        ],
         { ...this.opts, returnDocument: 'after' },
       );
       const row = asRow(doc);
