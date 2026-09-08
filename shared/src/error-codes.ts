@@ -43,6 +43,8 @@ export const ERROR_CODES = {
   EDGE_UNAVAILABLE: 'EDGE_UNAVAILABLE',
   /** Ferrum Edge Admin API returned an error response. HTTP 502. */
   EDGE_ERROR: 'EDGE_ERROR',
+  /** Ferrum Edge rejected an API spec's structure or validation. HTTP 400. */
+  EDGE_REJECTED_SPEC: 'EDGE_REJECTED_SPEC',
   /** Ferrum Edge Admin API violated its HTTP/JSON response contract. HTTP 502. */
   EDGE_PROTOCOL_ERROR: 'EDGE_PROTOCOL_ERROR',
   /** Uploaded OpenAPI document could not be parsed or failed validation. HTTP 400. */
@@ -81,6 +83,7 @@ export const ERROR_CODE_STATUS: Readonly<Record<ErrorCode, number>> = {
   SHOW_ONCE_ALREADY: 410,
   EDGE_UNAVAILABLE: 502,
   EDGE_ERROR: 502,
+  EDGE_REJECTED_SPEC: 400,
   EDGE_PROTOCOL_ERROR: 502,
   SPEC_INVALID: 400,
   OUTBOX_FAILURE: 500,

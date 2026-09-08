@@ -83,7 +83,7 @@ retain their driver's own timeout; a stalled database can still fail healthcheck
 | `FERRUM_ADMIN_JWT_TTL`             | `60`                    | Admin JWT lifetime in seconds, 5 – 3600. Edge caps it at 3600. Short is correct — tokens are minted per call and cached.                                                                                                                                                                                                                                                                         |
 | `FERRUM_ADMIN_JWT_ISSUER`          | `ferrum-edge`           | The `iss` claim. **Must equal the gateway's configured issuer** or every call is rejected.                                                                                                                                                                                                                                                                                                       |
 | `FERRUM_ADMIN_JWT_AUDIENCE`        | _(unset)_               | Only set when the gateway configures an audience. An unexpected `aud` claim is rejected by the gateway, so Nexus omits it entirely by default.                                                                                                                                                                                                                                                   |
-| `FERRUM_NAMESPACE`                 | `nexus`                 | Namespace Nexus manages, sent as `X-Ferrum-Namespace` on every call. Must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, ≤ 254 chars. Also becomes the first segment of every listen path (`/<namespace>/<slug>`).                                                                                                                                                                                        |
+| `FERRUM_NAMESPACE`                 | `nexus`                 | Namespace Nexus manages, sent as `X-Ferrum-Namespace` on every call. Must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, ≤ 128 chars (the MySQL namespace columns are `VARCHAR(128)`; longer values fail publish on that adapter alone). Also becomes the first segment of every listen path (`/<namespace>/<slug>`).                                                                                     |
 | `FERRUM_GATEWAY_PUBLIC_URL`        | _(unset)_               | Public origin of the gateway's **proxy listener** — where clients send API traffic. Absolute `http(s)` origin, no path/query/credentials; a trailing slash is stripped. Feeds each API's `invoke_url` in the catalog. Distinct from `FERRUM_ADMIN_URL` (control plane) and `NEXUS_PUBLIC_URL` (the portal). The `gateway.public_url` setting overrides it; with neither, `invoke_url` is `null`. |
 | `FERRUM_ADMIN_CA_FILE`             | _(unset)_               | Path to a PEM CA bundle for a TLS-protected Admin API. An unreadable file fails startup.                                                                                                                                                                                                                                                                                                         |
 | `FERRUM_ADMIN_ALLOW_INSECURE_HTTP` | `false`                 | Permits plaintext `http://` Admin URLs on non-loopback hosts. Container-network-only deployments are the intended use.                                                                                                                                                                                                                                                                           |
@@ -1220,6 +1220,14 @@ gateway validating the caller's own request — the same text is echoed to the
 caller in `EDGE_ERROR.details.gateway_message`; for `401`/`403` and every `5xx`
 it is deliberately **only** in the log, so this is where you look when a
 provider reports an unexplained `EDGE_ERROR`.
+
+API-spec parse/validation rejections use `400 EDGE_REJECTED_SPEC` for upstream
+4xx responses other than 401/403. Their bounded explanation and machine code
+are in `details.gateway_message` and `details.gateway_code`. The Edge client's
+error log includes the complete parsed response as `gateway_response`, bounded
+by its 16 MiB response limit, including `details` and `failures` omitted from the
+public summary. Serialization failures log `request serialization failed` and
+surface as `500 INTERNAL`; they do not indicate an unreachable gateway.
 
 ### Shutdown
 

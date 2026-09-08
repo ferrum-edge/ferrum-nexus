@@ -477,9 +477,12 @@ export function loadConfig(env: EnvRecord): NexusConfig {
   }
 
   // ── Namespace ────────────────────────────────────────────────────────────
-  if (!NAMESPACE_PATTERN.test(raw.FERRUM_NAMESPACE) || raw.FERRUM_NAMESPACE.length > 254) {
+  // The narrowest supported width is MySQL's VARCHAR(128) namespace columns;
+  // a longer value would pass validation yet fail every publish with a driver
+  // length error on that adapter alone.
+  if (!NAMESPACE_PATTERN.test(raw.FERRUM_NAMESPACE) || raw.FERRUM_NAMESPACE.length > 128) {
     problems.push(
-      'FERRUM_NAMESPACE must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ and be at most 254 characters',
+      'FERRUM_NAMESPACE must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ and be at most 128 characters',
     );
   }
 
