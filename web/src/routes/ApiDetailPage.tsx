@@ -48,6 +48,7 @@ import {
   timeoutDraftFrom,
   type TimeoutDraft,
 } from '../components/publishing/AdvancedProxySettings';
+import { StartThreadDialog } from '../components/messaging/StartThreadDialog';
 import { PluginsTab } from '../components/plugins/PluginsTab';
 import { SpecEditor, isSpecValid } from '../components/publishing/SpecEditor';
 import { Badge, type BadgeTone } from '../components/ui/Badge';
@@ -95,6 +96,10 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
   );
   const [corsOrigins, setCorsOrigins] = useState(api.cors?.allowed_origins.join('\n') ?? '');
   const [corsCredentials, setCorsCredentials] = useState(api.cors?.allow_credentials ?? false);
+  const [corsWebsocketOrigins, setCorsWebsocketOrigins] = useState(
+    api.cors?.enforce_websocket_origins ?? false,
+  );
+  const [corsHeaders, setCorsHeaders] = useState(api.cors?.allowed_headers?.join('\n') ?? '');
   const [methods, setMethods] = useState<HttpMethod[]>(api.allowed_methods ?? []);
   const [timeouts, setTimeouts] = useState<TimeoutDraft>(timeoutDraftFrom(api.timeouts));
   const [circuitBreaker, setCircuitBreaker] = useState(api.circuit_breaker);
@@ -144,7 +149,14 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
     }
     // Clearing the box sends `null`, which removes the plugin from the proxy.
     const cors: CorsConfig | null =
-      origins.length > 0 ? { allowed_origins: origins, allow_credentials: corsCredentials } : null;
+      origins.length > 0
+        ? {
+            allowed_origins: origins,
+            allow_credentials: corsCredentials,
+            allowed_headers: parseCorsOrigins(corsHeaders),
+            enforce_websocket_origins: corsWebsocketOrigins,
+          }
+        : null;
 
     const parsedTimeouts = timeoutsChanged ? parseTimeoutDraft(timeouts) : undefined;
     if (typeof parsedTimeouts === 'string') {
@@ -311,6 +323,19 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
                 description="Lets browsers send cookies and Authorization headers cross-origin. Ignored when no origins are listed."
                 checked={corsCredentials}
                 onChange={(event) => setCorsCredentials(event.target.checked)}
+              />
+              <Checkbox
+                label="Enforce WebSocket origins"
+                description="Requires a listed Origin on every upgrade. Rejects clients without Origin. Enable for browser-only WebSocket APIs."
+                checked={corsWebsocketOrigins}
+                onChange={(event) => setCorsWebsocketOrigins(event.target.checked)}
+              />
+              <LabeledTextarea
+                label="Additional CORS request headers"
+                rows={2}
+                value={corsHeaders}
+                onChange={(event) => setCorsHeaders(event.target.value)}
+                hint="One header name per line. Authentication headers are included automatically."
               />
             </div>
             <div className="border-t border-border pt-4 md:col-span-2">
@@ -499,6 +524,9 @@ export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
     kind: 'approve' | 'deny';
   } | null>(null);
   const [note, setNote] = useState('');
+  // The provider guide's first use of Messages is clarifying a thin
+  // justification *before* deciding, so the entry point sits on the row.
+  const [messageTarget, setMessageTarget] = useState<AccessRequest | null>(null);
 
   const requests = query.data?.items ?? [];
 
@@ -556,6 +584,16 @@ export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
                   </div>
                   <div className="flex items-center gap-2">
                     <StatusPill status={request.status} />
+                    {request.requester ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label={`Message ${request.requester.display_name}`}
+                        onClick={() => setMessageTarget(request)}
+                      >
+                        Message
+                      </Button>
+                    ) : null}
                     {request.status === 'pending' ? (
                       <>
                         <Button
@@ -629,6 +667,20 @@ export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
           hint="Shared with the requester by email and in-app notification."
         />
       </ConfirmDialog>
+
+      {messageTarget?.requester ? (
+        <StartThreadDialog
+          key={messageTarget.id}
+          open
+          onOpenChange={(next) => {
+            if (!next) setMessageTarget(null);
+          }}
+          recipientUserId={messageTarget.requester.id}
+          apiId={apiId}
+          defaultSubject="About your access request"
+          recipientLabel={messageTarget.requester.display_name}
+        />
+      ) : null}
     </>
   );
 }
@@ -651,6 +703,9 @@ export function GrantsTab({ apiId }: { apiId: string }): ReactElement {
   const toast = useToast();
   const [revoking, setRevoking] = useState<Grant | null>(null);
   const [reason, setReason] = useState('');
+  // The other two uses the guide names — warning grantees of a breaking change,
+  // and explaining a decline — both start from a grantee.
+  const [messageTarget, setMessageTarget] = useState<Grant | null>(null);
 
   const grants = query.data?.items ?? [];
 
@@ -695,6 +750,16 @@ export function GrantsTab({ apiId }: { apiId: string }): ReactElement {
                 </div>
                 <div className="flex items-center gap-2">
                   <StatusPill status={grant.status} />
+                  {grant.user ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      aria-label={`Message ${grant.user.display_name}`}
+                      onClick={() => setMessageTarget(grant)}
+                    >
+                      Message
+                    </Button>
+                  ) : null}
                   {grant.status === 'active' ? (
                     <Button
                       size="sm"
@@ -750,6 +815,20 @@ export function GrantsTab({ apiId }: { apiId: string }): ReactElement {
           onChange={(event) => setReason(event.target.value)}
         />
       </ConfirmDialog>
+
+      {messageTarget?.user ? (
+        <StartThreadDialog
+          key={messageTarget.id}
+          open
+          onOpenChange={(next) => {
+            if (!next) setMessageTarget(null);
+          }}
+          recipientUserId={messageTarget.user.id}
+          apiId={apiId}
+          defaultSubject="About your access to this API"
+          recipientLabel={messageTarget.user.display_name}
+        />
+      ) : null}
     </>
   );
 }

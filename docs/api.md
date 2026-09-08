@@ -449,9 +449,18 @@ before a session exists.
   "tagline": "APIs for partners",
   "support_email": "api-support@acme.example",
   "captcha": { "enabled": false, "provider": "none", "site_key": null },
+  "registration": { "open_registration": true, "allowed_roles": ["client", "provider"] },
   "bootstrap_required": false
 }
 ```
+
+`registration` is the public slice of the registration policy, so the sign-up
+form does not offer a role the server will refuse. `allowed_roles` is the stored
+policy narrowed to the self-selectable roles — an elevated role left in the
+setting never appears here, because `POST /api/auth/register` accepts only
+`client` and `provider` in the first place. Both fields are already observable
+by attempting a registration, and the server re-checks the policy on every one;
+this only saves the visitor a `403`.
 
 `bootstrap_required` is `true` only while the portal has no active
 `super_admin`: the next registration is seated as one and must therefore send
@@ -1162,6 +1171,24 @@ message threads.
 `HttpMethod` is `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`,
 `TRACE` or `CONNECT` — Edge's own enum.
 
+`CorsConfig` contains `allowed_origins` and `allow_credentials`, plus optional
+`allowed_headers` (up to 64 HTTP header-name tokens, each 1–128 characters) and
+`enforce_websocket_origins` (boolean, defaults to `false`). Nexus includes
+`Accept`, `Authorization`, `Content-Type`, `Origin`, and `X-Requested-With`, plus
+`X-API-Key` for `key_auth`, in the gateway's allowed request headers. Extra
+operator headers survive changes; removing a previously supplied portal header
+removes that addition. The CORS method list follows `allowed_methods`, including
+implicit `OPTIONS`; unrestricted APIs use Edge's seven standard CORS methods.
+Auth-only and method-only updates also update the CORS plugin.
+
+`cors.enforce_websocket_origins: true` mirrors exact HTTP(S) origins onto the
+proxy's `allowed_ws_origins`. Wildcards are refused with this option. Edge then
+rejects both unlisted origins and upgrades **without an Origin header**. When
+false or absent, the proxy has no WebSocket origin gate; authentication and ACLs
+still apply, but browser CSWSH protection requires explicit opt-in. Removing
+CORS clears the gate. Existing gateway lists are not changed at startup: save
+the CORS policy to apply this choice to an older API.
+
 **`routes` mode rewrites the document Edge receives, and only that copy.** The
 submitted document has its root `servers` replaced with the API's listen path,
 so the operation matchers Edge generates cover the path clients actually send —
@@ -1186,14 +1213,6 @@ generates no matchers from them.
 
 The provider's stored revision is never modified by any of this: it is what the
 catalog, the docs viewer and `docs_only` publication all hand over unchanged.
-
-An API's CORS origins are additionally mirrored onto the proxy's
-`allowed_ws_origins`, which is the Cross-Site WebSocket Hijacking check: an
-HTTP proxy on Edge also accepts WebSocket upgrades on the same listen path, and
-the `cors` plugin does not run on an upgrade. Only plain `scheme://host[:port]`
-origins are mirrored; `*` (and no policy at all) leaves the list empty, which
-performs no check. There is no separate field for it — see
-[security.md](security.md).
 
 ### `GET /api/apis`
 
@@ -1528,11 +1547,27 @@ what bounds — is the static `PROVIDER_PLUGINS` catalog exported from
 `@ferrum-nexus/shared`, which both the server and the SPA import. There is no
 route to fetch it, because there is nothing per-deployment about it.
 
+`compression` and `request_deduplication` receive default `priority_override`
+values of 3005 and 4060, respectively: compression must finish request-header
+mutation before deduplication fingerprints it. This also composes with a legacy
+sibling at Edge's native priority (4050 or 3010). Operator overrides survive
+saves; an incompatible pair returns `400 VALIDATION_FAILED` naming both plugins
+and the priority adjustment needed. Concurrent palette saves are serialized per
+proxy before that check.
+
+`response_caching` is no longer offered. Edge requires an authenticated response
+to carry backend shared-cache permission (`Cache-Control: public`,
+`must-revalidate`, or `s-maxage`); consumer key partitioning and `vary_by_headers`
+cannot grant it. Nexus does not override that policy. The old descriptor remains
+available only for validating disabled saves and removing existing installations.
+An enabled save returns `400 VALIDATION_FAILED`; GET still lists existing rows
+and DELETE removes only the recorded Nexus-owned gateway config.
+
 ### The `ApiPlugin` object
 
 | Field         | Type                       | Notes                                                                                                                                                                                                                       |
 | ------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `plugin_name` | string                     | the exact Ferrum Edge plugin name, always one of `PROVIDER_PLUGINS`                                                                                                                                                         |
+| `plugin_name` | string                     | the exact Ferrum Edge plugin name, including retired installations                                                                                                                                                          |
 | `enabled`     | boolean                    | `false` keeps the gateway config **and its association with the proxy**, but Edge does not run it — a pause, not a removal, so the settings survive                                                                         |
 | `config`      | object                     | exactly the keys that plugin's descriptor declares. Edge's config key sets are closed, so an extra key is a `400` from the gateway rather than a silently ignored field; Nexus rejects it first, as `400 VALIDATION_FAILED` |
 | `trigger`     | `ApiPluginTrigger` \| null | restrict the plugin to some methods and/or a path prefix; `null` means it runs on every request                                                                                                                             |
@@ -1823,6 +1858,27 @@ deleted first — and marked `revoked` the moment Edge confirms it — leaving a
 brief window with no working credential of that type. If the append then fails,
 the response says so plainly (`502 EDGE_ERROR`, _the previous credential was
 removed … issue a new credential_); everything still live stays revocable.
+
+Either way the credential being replaced passes through the `retiring` status
+before it settles at `revoked`: the retirement is written down _before_ the
+gateway delete, so an acknowledgement lost in flight leaves a row the next
+rotate, revoke or issue can settle rather than a mirror that silently disagrees
+with the gateway for good. A `previous` you read back from a **successful**
+rotation is always `revoked`.
+
+If it is instead the **delete** that fails below the cap, the replacement that
+was already appended is taken back — its show-once secret was never returned,
+so leaving it would spend a cap slot on a credential nobody holds — and the
+original error is reported unchanged, leaving the account as the rotation found
+it. Should that compensating delete fail too, the response says which state the
+gateway array proved and always carries `details.stranded_credential_id` and
+`details.retired_credential_id`: _the gateway did not acknowledge removing the
+previous credential and no longer holds it_ (the delete landed after all; the
+portal settles the pending row on the next call), _both … the portal holds a
+live row for each_ (the two views agree, so revoking the named credential is
+ordinary self-service), or _an administrator must reconcile this consumer_ when
+the array could not be read back at all. Only the last needs an administrator;
+see [`operations.md`](operations.md#12-the-credential-mirror) §12.
 
 An **admin may rotate another account's credential**, and doing so does not
 transfer it: the replacement keeps the original `user_id` and consumer, the

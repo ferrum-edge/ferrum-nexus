@@ -78,6 +78,7 @@ import {
 import { AuditAction, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type { ApiPluginRecord, NexusStore, UserRecord } from '../db/store.js';
+import { incompatiblePaletteSibling, palettePriority } from '../ferrum-admin/palette.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import type {
   EdgePluginConfig,
@@ -288,6 +289,13 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
 
     async set(actor, apiId, pluginName, input, ip = null) {
       const descriptor = descriptorFor(pluginName);
+      if (pluginName === 'response_caching' && input.enabled) {
+        throw validationFailed(
+          'Response caching is no longer offered: authenticated responses require explicit ' +
+            'backend Cache-Control shared-cache opt-in; consumer key settings cannot enable it',
+          { plugin_name: pluginName },
+        );
+      }
       if (input.trigger !== null && !descriptor.supports_trigger) {
         // Not a portal preference: Edge refuses a trigger on a plugin that
         // publishes contextless header/trailer policy or a fixed body ceiling,
@@ -301,21 +309,36 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
 
       const target = await loadTarget(actor, apiId);
       const trigger = edgeTriggerFor(input.trigger);
-      // Keyed by proxy *and* plugin name so two different palette plugins on
-      // one API still save concurrently. The reconcile steps inside nest the
-      // canonical `proxy:<id>` key through `binder.mutateProxy`; that is a
-      // different key, so queue and lease both grant it, and the order is
-      // always name-then-proxy — never the reverse, which would invert the
-      // lock order against another caller.
+      // Serialize palette composition decisions across names. Binder operations
+      // nest the distinct canonical proxy lock in this same order.
       const { saved, replaced, configId } = await edge.serializePerKey(
-        `proxy-plugin:${target.proxyId}:${pluginName}`,
+        `proxy-palette:${target.proxyId}`,
         async () => {
           const row = await store.apiPlugins.find(target.apiId, pluginName);
+          if (pluginName === 'response_caching' && !row) {
+            throw validationFailed('Response caching is retired and cannot be added to an API');
+          }
           // Only the config this row owns. Every other config of the same name
           // on the proxy belongs to an operator and is neither replaced nor
           // deleted here — the purge that used to follow this line removed
           // hand-made deny gates that Nexus had never created (issue #153).
-          const existing = ownedConfig(row, await binder.listByProxy(target.proxyId), pluginName);
+          const onProxy = await binder.listByProxy(target.proxyId);
+          const existing = ownedConfig(row, onProxy, pluginName);
+          const priorityOverride = palettePriority(pluginName);
+          if (input.enabled && priorityOverride !== undefined) {
+            const otherName = incompatiblePaletteSibling(
+              pluginName,
+              existing?.priority_override ?? priorityOverride,
+              onProxy,
+            );
+            if (otherName) {
+              throw validationFailed(
+                'compression must run before request_deduplication; ask the gateway operator ' +
+                  'to lower compression priority_override or raise request_deduplication priority_override',
+                { plugin_name: pluginName, conflicting_plugin: otherName },
+              );
+            }
+          }
           const undo: (() => Promise<void>)[] = [];
           try {
             const written = await binder.reconcileOptionalPlugin(
@@ -325,7 +348,7 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
               gatewaySettings(descriptor, input.config),
               actor.id,
               undo,
-              { enabled: input.enabled, trigger },
+              { enabled: input.enabled, trigger, priorityOverride },
             );
             // Written last but inside the compensated block, like every other
             // gateway-then-store sequence in the portal.
@@ -391,7 +414,7 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
       const target = await loadTarget(actor, apiId);
       // Same key, same nesting contract as `set` above.
       const removedConfigId = await edge.serializePerKey(
-        `proxy-plugin:${target.proxyId}:${pluginName}`,
+        `proxy-palette:${target.proxyId}`,
         async () => {
           const row = await store.apiPlugins.find(target.apiId, pluginName);
           if (!row) throw notFound('Plugin', `${apiId}/${pluginName}`);

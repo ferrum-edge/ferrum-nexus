@@ -80,7 +80,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `FERRUM_RATE_LIMIT_REDIS_TLS`) stamps Redis counter sync onto every rate
   limit Nexus writes; the operations guide warns that quotas are otherwise
   enforced per gateway process.
-- Exact CORS origins are mirrored onto the proxy's `allowed_ws_origins`, so
+- With WebSocket origin enforcement enabled, exact CORS origins are mirrored
+  onto the proxy's `allowed_ws_origins`, so
   a browser cannot open a cross-site WebSocket to an API whose CORS policy
   would refuse it.
 - **Provider plugin palette** (`GET`/`PUT`/`DELETE /api/apis/:id/plugins/:name`
@@ -153,6 +154,36 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   the minting transaction, so it rolls back with a failed mint, and both
   endpoints answer the documented `200 { "ok": true }` whatever happens, logging
   the fault at `warn` instead.
+- **Five documented workflow steps the browser could not complete.** The
+  mass-email and god-mode broadcast composers emitted one audience shape
+  (`{ scope: 'filtered', roles: [oneRole], status: 'active' }`), so the
+  "Administrator" audience sent `roles: ['admin']` and silently skipped every
+  `super_admin`, and the guide's mandatory pre-send test — an explicit audience
+  of one, addressed to yourself — could not be composed. Both composers now
+  offer the audience model the server has always accepted: multi-select roles
+  with an **All administrative roles** shortcut, a status choice, an
+  organization filter, and a named recipient list with **Add myself**.
+  Alongside it: `GET /api/branding` now carries the public registration policy
+  so the sign-up form offers only roles the server accepts and the Settings card
+  edits the stored value instead of advertising a constant; the admin user
+  directory gained an organization column, organization and status filters, and
+  a row editor for `org_id` and `display_name`; providers can start a
+  conversation with a named requester or grantee from the Requests and Grants
+  tabs; and the portal-wide API list opens the management workspace, with the
+  same **Manage API** link on the catalog page for administrators, so an admin
+  can act on somebody else's API without god mode.
+- CORS preflights now include authentication and custom request headers and
+  follow the API's method list. Auth/method changes reconcile the plugin while
+  retaining operator settings and extra headers (#149).
+- WebSocket origin enforcement is explicit via `cors.enforce_websocket_origins`
+  (default false), allowing origin-less clients unless providers opt into the
+  browser-only CSWSH gate. Existing proxies change when CORS is saved (#151).
+- Compression and request deduplication receive compatible default priorities;
+  operator overrides are preserved and incompatible orders get a clear 400.
+  Response caching is removed from the offered palette because its default
+  template cannot enable authenticated storage without backend shared-cache
+  opt-in; existing installations remain removable (#170).
+
 - **A palette save deleted an operator's hand-made plugin config of the same
   name.** Ownership was inferred from the plugin name, so every other config
   of that name on the proxy looked like a leftover duplicate and was removed —

@@ -55,7 +55,9 @@ Three rules define the boundary, and every change has to keep all three true:
 The only unauthenticated read in the whole API is `GET /api/branding`, which
 exists so the login page can render with the right name, logo and colours
 before a session exists. It carries the CAPTCHA _site_ key and never the
-vendor secret.
+vendor secret, and the public slice of the registration policy — whether
+sign-up is open and which roles it may offer — so the register form does not
+offer a role the server answers with a `403`.
 
 ---
 
@@ -925,6 +927,16 @@ hand-edited the consumer) it degrades to deleting the whole credential type
 when only one row is live, and otherwise **refuses** rather than deleting
 somebody else's key.
 
+One mismatch is Nexus's own, and it is settled rather than refused. Every
+destructive call writes the row it is retiring to the `retiring` status
+**before** the gateway `DELETE` and settles it to `revoked` after, so a delete
+Edge applied whose acknowledgement was lost leaves an intent record instead of a
+silent drift. When the mirror is exactly one row longer than the array and
+exactly one live row carries that intent, the next rotate, revoke or issue
+settles it (`credential.settle`) and carries on; every other shape still
+refuses. See [`security.md`](security.md#5-show-once-credentials) §5 and
+[`operations.md`](operations.md#12-the-credential-mirror) §12.
+
 ### 6.2 Rotation sequence
 
 ```
@@ -938,10 +950,17 @@ POST /api/credentials/:id/rotate
 
        if appendFirst:                          the normal path
          POST   /consumers/{id}/credentials/{type}   -> new secret, returned once
+         old row -> status 'retiring'           the intent, before the act
          DELETE /consumers/{id}/credentials/{type}/{position}
               (POST appends, so the old entry's index is unchanged)
+              on failure: take the append back, put the old row back when the
+              array proves the delete never applied, and report the original
+              error — the account is as it was found
        else:                                    already at the gateway cap
+         old row -> status 'retiring'
          DELETE /consumers/{id}/credentials/{type}/{position}
+              on failure: put the old row back when the array proves the
+              delete never applied — nothing has been appended yet
          POST   /consumers/{id}/credentials/{type}   -> new secret, returned once
 
        old row -> status 'revoked', new row -> rotated_from_id = old id,

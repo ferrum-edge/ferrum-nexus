@@ -294,6 +294,36 @@ interface PluginCardProps {
   saved: ApiPlugin | null;
 }
 
+/** Existing caches remain removable after retirement from the offered palette. */
+function RetiredCache({ api }: { api: Api }): ReactElement {
+  const remove = useRemoveApiPlugin();
+  const toast = useToast();
+  return (
+    <Card>
+      <CardHeader
+        title="Response caching (retired)"
+        description="Authenticated responses require explicit backend cache permission. This plugin can no longer be enabled from the portal."
+      />
+      <CardBody>
+        <Button
+          disabled={remove.isPending}
+          onClick={() =>
+            remove.mutate(
+              { id: api.id, name: 'response_caching' },
+              {
+                onSuccess: () => toast.success('Response caching removed'),
+                onError: (error) => toast.error('Response caching was not removed', error.message),
+              },
+            )
+          }
+        >
+          Remove response caching
+        </Button>
+      </CardBody>
+    </Card>
+  );
+}
+
 /** The palette, grouped by category, for one API. */
 export function PluginsTab({ api }: { api: Api }): ReactElement {
   const query = useApiPlugins(api.id);
@@ -318,6 +348,8 @@ export function PluginsTab({ api }: { api: Api }): ReactElement {
         <span className="font-medium text-fg">Settings</span> tab — they are part of what the API
         is, so they have their own controls there.
       </p>
+
+      {configured.has('response_caching') ? <RetiredCache api={api} /> : null}
 
       {categories.map((category) => (
         <section key={category} className="flex flex-col gap-3">

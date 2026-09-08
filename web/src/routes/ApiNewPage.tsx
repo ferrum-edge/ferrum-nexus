@@ -63,6 +63,8 @@ function PublishForm(): ReactElement {
   const [rateLimitWindow, setRateLimitWindow] = useState<string>('60');
   const [corsOrigins, setCorsOrigins] = useState('');
   const [corsCredentials, setCorsCredentials] = useState(false);
+  const [corsWebsocketOrigins, setCorsWebsocketOrigins] = useState(false);
+  const [corsHeaders, setCorsHeaders] = useState('');
   const [methods, setMethods] = useState<HttpMethod[]>([]);
   const [timeouts, setTimeouts] = useState<TimeoutDraft>(EMPTY_TIMEOUT_DRAFT);
   const [circuitBreaker, setCircuitBreaker] = useState(false);
@@ -107,7 +109,14 @@ function PublishForm(): ReactElement {
     // No origins means no `cors` plugin at all, which is not the same as an
     // empty allow-list: the gateway simply adds no CORS headers.
     const cors: CorsConfig | null =
-      origins.length > 0 ? { allowed_origins: origins, allow_credentials: corsCredentials } : null;
+      origins.length > 0
+        ? {
+            allowed_origins: origins,
+            allow_credentials: corsCredentials,
+            allowed_headers: parseCorsOrigins(corsHeaders),
+            enforce_websocket_origins: corsWebsocketOrigins,
+          }
+        : null;
 
     const parsedTimeouts = parseTimeoutDraft(timeouts);
     if (typeof parsedTimeouts === 'string') {
@@ -269,6 +278,19 @@ function PublishForm(): ReactElement {
               description="Lets browsers send cookies and Authorization headers cross-origin. Ignored when no origins are listed."
               checked={corsCredentials}
               onChange={(event) => setCorsCredentials(event.target.checked)}
+            />
+            <Checkbox
+              label="Enforce WebSocket origins"
+              description="Requires a listed Origin on every upgrade. Rejects clients without Origin. Enable for browser-only WebSocket APIs."
+              checked={corsWebsocketOrigins}
+              onChange={(event) => setCorsWebsocketOrigins(event.target.checked)}
+            />
+            <LabeledTextarea
+              label="Additional CORS request headers"
+              rows={2}
+              value={corsHeaders}
+              onChange={(event) => setCorsHeaders(event.target.value)}
+              hint="One header name per line. Authentication headers are included automatically."
             />
           </div>
         </CardBody>
