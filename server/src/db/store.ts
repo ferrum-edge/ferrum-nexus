@@ -493,7 +493,8 @@ export interface UserRepo {
    *
    * Returns the updated row, or `null` when the user is gone or has already
    * moved on — the caller lost the race and must not treat its earlier read as
-   * still true.
+   * still true. Matching same-value patches also succeed. An empty patch is a
+   * guarded read in the caller's read view and leaves `updated_at` untouched.
    *
    * This exists for the last-super-admin invariant, which is a check on *other*
    * rows followed by a write to this one. `countActiveSuperAdmins` and this

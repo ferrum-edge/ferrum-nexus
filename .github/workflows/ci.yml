@@ -79,7 +79,9 @@ jobs:
           NEXUS_TEST_POSTGRES_URL: postgres://postgres:nexus_test@127.0.0.1:5432/postgres
           NEXUS_TEST_MYSQL_URL: mysql://root:nexus_test@127.0.0.1:3306/mysql
           NEXUS_TEST_MONGO_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
-        run: node --import tsx --test src/test/smoke.test.ts src/test/mysql-migration-recovery.test.ts
+        run: >-
+          node --import tsx --test src/test/smoke.test.ts
+          src/test/mysql-migration-recovery.test.ts src/test/mysql-user-transition.test.ts
 
   docker:
     runs-on: ubuntu-latest

@@ -742,24 +742,14 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         .add(expected.role, 'role = ?', expected.role ?? null)
         .add(expected.status, 'status = ?', expected.status ?? null)
         .build();
-      /**
-       * Did the row survive the predicate?
-       *
-       * Reached when the `UPDATE` reported no change, which is not the same as
-       * "somebody else got here first": MySQL counts *changed* rows, not
-       * matched ones, so a patch that wrote identical values inside the same
-       * millisecond looks like a loss. Re-reading the predicate separates the
-       * two — a genuine loser no longer satisfies it.
-       */
-      const stillMatches = async (): Promise<UserRecord | null> => {
-        const row = await queryOne(exec, `SELECT id FROM users${guard.sql}`, guard.params);
-        return row ? users.findById(id) : null;
-      };
-
       const set = setParts(userUpdateColumns(patch));
-      if (!set) return stillMatches();
+      if (!set) {
+        // An empty patch is only a guarded read; it must not touch updated_at.
+        const row = await queryOne(exec, `SELECT * FROM users${guard.sql}`, guard.params);
+        return row ? mapUser(row) : null;
+      }
 
-      const changed = await mapSqlConflict(
+      const matched = await mapSqlConflict(
         'An account with that email address already exists',
         () =>
           execute(exec, `UPDATE users SET ${set.sql}, updated_at = ?${guard.sql}`, [
@@ -768,7 +758,10 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
             ...guard.params,
           ]),
       );
-      return changed > 0 ? users.findById(id) : stillMatches();
+      // PostgreSQL and MySQL (with FOUND_ROWS pinned) count matching rows,
+      // even for identical values. Zero is a genuine predicate loss: an
+      // ordinary SELECT could still see an old REPEATABLE READ snapshot.
+      return matched > 0 ? users.findById(id) : null;
     },
 
     touchLastLogin: async (id, at) => {

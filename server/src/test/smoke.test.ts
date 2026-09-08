@@ -412,6 +412,40 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.deepEqual(await store.users.findById(user.id), won, 'the winner gets the stored row');
     });
 
+    for (const transactional of [false, true]) {
+      it(`users: matching no-ops and empty patches (transaction=${transactional})`, async (t) => {
+        // Freeze Date so a same-value patch also leaves updated_at identical:
+        // a changed-row count would be zero, but this is still a match.
+        t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+        const user = await makeUser();
+        const check = async (db: NexusStore): Promise<void> => {
+          const expected = { role: user.role, status: user.status };
+          assert.deepEqual(
+            await db.users.updateIfMatches(user.id, expected, { status: user.status }),
+            user,
+          );
+          t.mock.timers.tick(1000);
+          assert.deepEqual(await db.users.updateIfMatches(user.id, expected, {}), user);
+          for (const patch of [{}, { status: user.status }]) {
+            assert.equal(
+              await db.users.updateIfMatches(user.id, { role: 'provider' }, patch),
+              null,
+            );
+            assert.equal(
+              await db.users.updateIfMatches(user.id, { status: 'disabled' }, patch),
+              null,
+            );
+            assert.equal(await db.users.updateIfMatches(newId(), {}, patch), null);
+          }
+          assert.deepEqual(await db.users.findById(user.id), user);
+          const changed = await db.users.updateIfMatches(user.id, expected, { role: 'provider' });
+          assert.deepEqual(changed, { ...user, role: 'provider', updated_at: nowIso() });
+        };
+        if (transactional) await store.transaction(check);
+        else await check(store);
+      });
+    }
+
     it('users: the last-super-admin rule survives two demotions at once', async () => {
       // The invariant here is "never fewer active super admins than the suite
       // started with, plus one", which keeps the test independent of whatever
