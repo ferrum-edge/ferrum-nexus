@@ -117,7 +117,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   campaign's idempotency key, generated when the caller supplies none) and
   `GodBroadcastResponse.delivered` / `.failed`.
 - One new audit action, `god.broadcast_complete`, records what a broadcast
-  achieved. `god.broadcast` now records the *attempt* — it is written before the
+  achieved. `god.broadcast` now records the _attempt_ — it is written before the
   fan-out, because it is what the daily broadcast ceiling counts.
 - The getting-started walkthrough and the compose example work on Linux
   out of the box: the Edge data volume is handed to the image's non-root

@@ -287,7 +287,7 @@ Notes an operator needs:
   `NEXUS_MAX_BROADCAST_RECIPIENTS` above the portal's account count if an
   announcement has to reach everyone.
 - **A broadcast is charged when it is attempted, not when it succeeds.** The
-  `god.broadcast` audit row the daily count reads is written *before* the first
+  `god.broadcast` audit row the daily count reads is written _before_ the first
   recipient is touched, so an announcement that reached the portal and then
   failed to record its outcome is still one of the twenty — and still named in
   the trail. What it achieved is a second row, `god.broadcast_complete`, with
@@ -881,7 +881,7 @@ Two operational consequences:
   necessary, and only one of them is a hard wall:
 
   - **On MongoDB it is arithmetic.** A transaction is capped at 16 MB, and each
-    outbox row carries its whole rendered HTML *and* text — so the wall sits at
+    outbox row carries its whole rendered HTML _and_ text — so the wall sits at
     roughly `16 MB ÷ (rendered bytes per row)`: about **80 recipients** with a
     body near the 100 000-character ceiling, about **1 600** at 5 KB, about
     **800** at 10 KB. Past it the send fails atomically — nothing queued,
@@ -889,7 +889,7 @@ Two operational consequences:
   - **On SQLite, PostgreSQL and MySQL it is head-of-line latency.** There is no
     size wall, but every adapter drains transaction bodies through a queue that
     belongs to one store object, so an N-recipient fan-out is N sequential
-    inserts during which *no other transaction on that instance runs*. A
+    inserts during which _no other transaction on that instance runs_. A
     five-figure audience is a visible stall for every other writer, not merely a
     slow request for the administrator who started it.
 

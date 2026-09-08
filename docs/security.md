@@ -1263,7 +1263,7 @@ what was done, and the fact that it was done under god mode and why. `reason`
 is required and non-empty on all four operations.
 
 `broadcast` is the one that writes two rows of its own. `god.broadcast` is the
-*attempt* — written before the first recipient is touched, because it is what
+_attempt_ — written before the first recipient is touched, because it is what
 `NEXUS_MAX_BROADCASTS_PER_DAY` counts, so a broadcast that reached the portal
 and then failed to record its outcome is still charged and still named.
 `god.broadcast_complete` is what the attempt achieved.

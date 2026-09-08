@@ -1092,7 +1092,7 @@ and skipped rather than fatal — one bad account must not stop an emergency
 announcement — so these two are how a partial broadcast says so; the same pair
 lands in the audit trail.
 
-**The trail is two rows.** `god.broadcast` is written *before* the first
+**The trail is two rows.** `god.broadcast` is written _before_ the first
 recipient is touched, with `details.phase: "started"` and the audience size: it
 is what `NEXUS_MAX_BROADCASTS_PER_DAY` counts, so an attempt is charged whether
 or not it goes on to succeed. `god.broadcast_complete` follows the fan-out with

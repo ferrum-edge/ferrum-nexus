@@ -361,10 +361,8 @@ describe('a mass-email campaign that loses to contention', () => {
         'CONFLICT',
         'The database is too busy to complete that right now — please retry',
       );
-      const mocked = t.mock.method(
-        harness.store,
-        'transaction',
-        <T>(): Promise<T> => Promise.reject(contention),
+      const mocked = t.mock.method(harness.store, 'transaction', <T>(): Promise<T> =>
+        Promise.reject(contention),
       );
       const refused = await harness.authed(admin, {
         method: 'POST',
