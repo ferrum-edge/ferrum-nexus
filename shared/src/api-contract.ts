@@ -985,6 +985,15 @@ export interface MassEmailResponse {
   enqueued: number;
   /** Recipients matched by the audience selector. */
   recipients: number;
+  /**
+   * The campaign's batch id — the caller's `idempotency_key` when one was
+   * supplied, otherwise the one the server generated.
+   *
+   * Echoed so a retry can pass it back as `idempotency_key` and reach the same
+   * outbox rows instead of sending the campaign a second time. The failure
+   * body carries it too, in `details.batch_id`.
+   */
+  batch_id: string;
 }
 
 /** `GET /api/admin/audit-logs` */
@@ -1096,6 +1105,17 @@ export interface GodBroadcastResponse {
   notified: number;
   emails_enqueued: number;
   threads_created: number;
+  /**
+   * Recipients whose platform-inbox message was actually written.
+   *
+   * Not the audience size: per-recipient failures are logged and skipped so one
+   * bad account cannot stop an emergency announcement, which used to mean a
+   * broadcast that reached nobody reported exactly what one that reached
+   * everybody did.
+   */
+  delivered: number;
+  /** Recipients the fan-out could not deliver to. `0` on a clean broadcast. */
+  failed: number;
 }
 
 /* ── Public branding ────────────────────────────────────────────────────── */

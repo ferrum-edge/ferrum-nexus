@@ -420,6 +420,7 @@ function mapMessage(row: Row): MessageRecord {
     thread_id: text(row.thread_id),
     sender_user_id: text(row.sender_user_id),
     body: text(row.body),
+    broadcast: bool(row.broadcast),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -2034,13 +2035,15 @@ class SqliteStore implements NexusStore {
       const meta = stamps(input);
       execute(
         this.db,
-        `INSERT INTO messages (id, thread_id, sender_user_id, body, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages
+           (id, thread_id, sender_user_id, body, broadcast, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
           meta.id,
           input.thread_id,
           input.sender_user_id,
           input.body,
+          encodeBool(input.broadcast ?? false),
           meta.created_at,
           meta.updated_at,
         ],
@@ -2100,7 +2103,8 @@ class SqliteStore implements NexusStore {
     countBySenderSince: async (senderUserId, sinceIso) =>
       queryCount(
         this.db,
-        'SELECT COUNT(*) AS count FROM messages WHERE sender_user_id = ? AND created_at >= ?',
+        `SELECT COUNT(*) AS count FROM messages
+          WHERE sender_user_id = ? AND created_at >= ? AND broadcast = 0`,
         [senderUserId, sinceIso],
       ),
 

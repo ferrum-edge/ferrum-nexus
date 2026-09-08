@@ -560,6 +560,9 @@ function mapMessage(row: Row): MessageRecord {
     thread_id: str(row.thread_id),
     sender_user_id: str(row.sender_user_id),
     body: str(row.body),
+    // Documents written before `017_message_broadcast` carry no field at all,
+    // and every one of them is an ordinary message.
+    broadcast: row.broadcast === true,
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
   };
@@ -2602,6 +2605,7 @@ class MongoStore implements NexusStore {
           thread_id: input.thread_id,
           sender_user_id: input.sender_user_id,
           body: input.body,
+          broadcast: input.broadcast ?? false,
           created_at: meta.created_at,
           updated_at: meta.updated_at,
         } as NexusDoc,
@@ -2655,7 +2659,9 @@ class MongoStore implements NexusStore {
 
     countBySenderSince: async (senderUserId, sinceIso) =>
       this.col(COLLECTIONS.messages).countDocuments(
-        { sender_user_id: senderUserId, created_at: { $gte: sinceIso } },
+        // `$ne: true` rather than `false`, so documents written before
+        // `017_message_broadcast` — which have no such field — still count.
+        { sender_user_id: senderUserId, created_at: { $gte: sinceIso }, broadcast: { $ne: true } },
         this.opts,
       ),
 

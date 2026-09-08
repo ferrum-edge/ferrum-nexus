@@ -143,6 +143,12 @@ const guards: Guard[] = [
       },
     ],
   },
+  {
+    sql: 'ALTER TABLE messages ADD COLUMN broadcast TINYINT NOT NULL DEFAULT 0, ADD CONSTRAINT ck_messages_broadcast CHECK (broadcast IN (0, 1))',
+    table: 'messages',
+    columns: [{ name: 'broadcast', type: 'tinyint', nullable: false, default: '0' }],
+    check: { name: 'ck_messages_broadcast', clause: 'broadcast IN (0, 1)' },
+  },
 ];
 
 function mismatch(table: string, name: string): never {

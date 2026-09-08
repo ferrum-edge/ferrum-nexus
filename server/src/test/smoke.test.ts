@@ -57,6 +57,7 @@ import {
   SUPER_ADMIN_LOCK_CONFLICT_MESSAGE,
 } from '../lib/keyed-serializer.js';
 import { faultInjectingStore } from './fault-injection.js';
+import { runMessageBudgetContract } from './message-budget-contract.js';
 import { runOutboxFencingContract } from './outbox-fencing-contract.js';
 import { runPasswordChangeContract } from './password-change-contract.js';
 import { runSettingsTransactionContract } from './settings-transaction-contract.js';
@@ -297,6 +298,7 @@ async function mongoTarget(baseUrl: string): Promise<SmokeTarget> {
  * whatever `makeStore` returns.
  */
 function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): void {
+  runMessageBudgetContract(label, makeStore);
   runOutboxFencingContract(label, makeStore);
   runPasswordChangeContract(label, makeStore);
   runSettingsTransactionContract(label, makeStore);
@@ -1833,6 +1835,36 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         await store.messages.countBySenderSince(sender.id, isoInSeconds(60)),
         0,
         'a window that has not started yet counts nothing',
+      );
+
+      // A god-mode broadcast writes rows with the acting admin as the sender.
+      // Charging those to that admin's own allowance let one announcement to a
+      // portal larger than the budget refuse every ordinary message they sent
+      // for the next day, so the count skips them on every adapter.
+      const announcement = await store.messages.create({
+        thread_id: thread.id,
+        sender_user_id: sender.id,
+        body: 'Platform announcement',
+        broadcast: true,
+        created_at: isoInSeconds(-60),
+      });
+      assert.equal(announcement.broadcast, true, 'the flag survives the round trip');
+      assert.equal((await store.messages.findById(announcement.id))?.broadcast, true);
+      assert.equal(
+        await store.messages.countBySenderSince(sender.id, isoInSeconds(-86_400)),
+        3,
+        'the broadcast row is not charged to the sender: the count is unchanged',
+      );
+
+      const page = await store.messages.listByThread(thread.id, { limit: 50 });
+      assert.equal(
+        page.items.filter((message) => message.broadcast).length,
+        1,
+        'exactly the row that asked to be flagged is flagged',
+      );
+      assert.ok(
+        page.items.every((message) => typeof message.broadcast === 'boolean'),
+        'ordinary rows read back as false, never as an absent field',
       );
 
       await store.messages.deleteByThread(thread.id);

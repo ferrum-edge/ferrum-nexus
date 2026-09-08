@@ -884,7 +884,7 @@ rendered email out to every active `admin` and `super_admin`. Left unbounded,
 one low-privilege account could mail-bomb every administrator, exhaust the SMTP
 quota, and grow four tables without limit (GHSA-gwqc-w33p-5wx5).
 
-Three independent bounds close that, and none of them relies on the others:
+Six independent bounds close that, and none of them relies on the others:
 
 1. **Per-account burst limits** — 10 thread creations and 30 replies per minute.
    Keying on the account rather than the IP is the load-bearing choice: an
@@ -899,8 +899,30 @@ Three independent bounds close that, and none of them relies on the others:
    one allowance and a new conversation is not a fresh one. Exceeding it is
    `429 QUOTA_EXCEEDED` with `details: { limit, window, setting }`. Admins and
    super admins are subject to it too — carving out a role would put the whole
-   budget one privilege escalation away.
-3. **Email coalescing** — the `message_received` mail is enqueued with the
+   budget one privilege escalation away. The count and the insert share a
+   transaction **and** a per-sender lease in `edge_leases`, which is what makes
+   the check one step across instances as well as within one; see the note on
+   read-then-write below.
+3. **A per-broadcast recipient ceiling** — `NEXUS_MAX_BROADCAST_RECIPIENTS`
+   (default 5 000, `0` disables). A god-mode broadcast is the
+   highest-amplification path in the portal, and its message rows are flagged so
+   they do _not_ draw on the sending administrator's budget: charging them there
+   left the amplifying operation unbounded while the rows it wrote refused that
+   administrator's ordinary messaging for a day. Enforced before the first row,
+   with `details: { limit, recipients, setting }`.
+4. **A per-administrator daily broadcast count** — `NEXUS_MAX_BROADCASTS_PER_DAY`
+   (default 20, `0` disables), counted from that actor's own `god.broadcast`
+   audit rows under the same per-actor lease the broadcast runs in, so it holds
+   across instances. The ceiling above bounds one announcement; this bounds a
+   loop of them.
+5. **A per-campaign mass-email recipient ceiling** —
+   `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` (default 5 000, `0` disables). Not an
+   anti-abuse bound — the endpoint is admin-only — but a bound on what one
+   transaction may hold, since the fan-out and its audit row commit together:
+   16 MB per transaction on MongoDB, and on the SQL adapters an N-insert body
+   during which no other transaction on the instance runs. Checked before any
+   row is rendered or written, with `details: { limit, recipients, setting }`.
+6. **Email coalescing** — the `message_received` mail is enqueued with the
    idempotency key `message_received:<thread>:<recipient>:<bucket>`, where
    `bucket` is a 10-minute slice of wall-clock time. The outbox's unique index
    on `idempotency_key` turns every later message in the same window into a
@@ -909,13 +931,27 @@ Three independent bounds close that, and none of them relies on the others:
    _activity_ and links to the thread rather than quoting a body it cannot
    promise to keep delivering.
 
-Two limits on this, stated plainly: the per-minute counters are **in-process**,
-so N instances enforce N × those numbers (the daily budget, which counts durable
-rows, is exact on any number of instances); and the budget's read-then-write is
-not one atomic step, so two concurrent sends can both observe the same count and
-land at `limit + 1`. That race is bounded by the per-minute limiter and costs one
-row, which is the wrong order of magnitude to matter for a resource-exhaustion
-control.
+One limit on this, stated plainly: the per-minute counters are **in-process**,
+so N instances enforce N × those numbers. Put the real burst limit at the proxy
+if you run more than one instance.
+
+The daily budget is **not** in that category, though it used to be described as
+if counting durable rows were enough. It is not: the count and the insert are
+separate statements, and two instances over one database at `quota - 1` both
+read `used < limit` and both committed. What ordered them on a single instance
+was the store's in-process transaction queue, which no second process shares —
+so the single-process regression tests could not observe the gap at all. The
+whole count-and-insert now runs inside a per-sender lease
+(`messages:budget:<user>`) in the same `edge_leases` table the last-super-admin
+guard uses. The cross-adapter contract suite exercises it with two instances
+built over **two store objects** against one database, which is the whole point:
+every adapter drains transaction bodies through a queue belonging to one store
+object, so two apps sharing one store are ordered by that queue whatever the
+lease does, and the case would pass with the lease deleted. Two pools mean two
+queues, and the lease is the only thing left ordering them. A sender whose lease
+is held elsewhere longer than the 30 s wait gets `409 CONFLICT` and is asked to
+retry; it is never a silent overshoot. The lease is skipped entirely when the
+budget is switched off.
 
 ### Consumer quotas are per gateway process
 
@@ -1224,14 +1260,21 @@ ordinary reporting.
 Each of these is written **in addition to** the ordinary audit row the
 underlying operation produces, so an emergency action leaves a two-row trail:
 what was done, and the fact that it was done under god mode and why. `reason`
-is required and non-empty on all four.
+is required and non-empty on all four operations.
 
-| Action             | Target type | Description                                                                                                                                                                                                          |
-| ------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `god.revoke_grant` | `grant`     | A grant was revoked without ownership. Pairs with `access.revoke`. `details`: `reason`, api id, user id.                                                                                                             |
-| `god.delete_api`   | `api`       | An API was destroyed without ownership. Pairs with `api.delete` (and one `access.revoke` per grant when `revoke_grants` was set). `details`: `reason`, slug, `owner_user_id`, `revoked_grants`.                      |
-| `god.disable_user` | `user`      | An account was disabled, its sessions destroyed and its gateway identity stripped. `details`: `reason`, `revoked_grants`, `terminated_sessions`, `previous_status`, and the same `gateway_*` keys as `user.disable`. |
-| `god.broadcast`    | `broadcast` | A platform message was sent to many users. `target_id` is `null`. `details`: `reason` (the subject), audience scope, `recipients`, `notified`, `threads_created`, `emails_enqueued`, `send_email`.                   |
+`broadcast` is the one that writes two rows of its own. `god.broadcast` is the
+_attempt_ — written before the first recipient is touched, because it is what
+`NEXUS_MAX_BROADCASTS_PER_DAY` counts, so a broadcast that reached the portal
+and then failed to record its outcome is still charged and still named.
+`god.broadcast_complete` is what the attempt achieved.
+
+| Action                   | Target type | Description                                                                                                                                                                                                                                                         |
+| ------------------------ | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `god.revoke_grant`       | `grant`     | A grant was revoked without ownership. Pairs with `access.revoke`. `details`: `reason`, api id, user id.                                                                                                                                                            |
+| `god.delete_api`         | `api`       | An API was destroyed without ownership. Pairs with `api.delete` (and one `access.revoke` per grant when `revoke_grants` was set). `details`: `reason`, slug, `owner_user_id`, `revoked_grants`.                                                                     |
+| `god.disable_user`       | `user`      | An account was disabled, its sessions destroyed and its gateway identity stripped. `details`: `reason`, `revoked_grants`, `terminated_sessions`, `previous_status`, and the same `gateway_*` keys as `user.disable`.                                                |
+| `god.broadcast`          | `broadcast` | A platform message was sent to many users. Written **before** the fan-out, so `NEXUS_MAX_BROADCASTS_PER_DAY` charges every attempt. `target_id` is the batch id. `details`: `reason` (the subject), audience scope, `recipients`, `send_email`, `phase: "started"`. |
+| `god.broadcast_complete` | `broadcast` | What that attempt achieved, written after the fan-out. Absent when the announcement went out but its outcome could not be recorded. `details`: `delivered`, `failed`, `notified`, `threads_created`, `emails_enqueued`, and the same audience keys.                 |
 
 ### What is deliberately not audited
 

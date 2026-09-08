@@ -907,7 +907,14 @@ export interface ThreadRepo {
 
 /** Messages inside a thread. */
 export interface MessageRepo {
-  create(input: CreateInput<MessageRecord>): Promise<MessageRecord>;
+  /**
+   * Insert one message. `broadcast` defaults to `false`: only a god-mode
+   * announcement sets it, and only that path should — the flag is what takes a
+   * row out of its sender's daily budget (see {@link countBySenderSince}).
+   */
+  create(
+    input: Omit<CreateInput<MessageRecord>, 'broadcast'> & { broadcast?: boolean },
+  ): Promise<MessageRecord>;
   findById(id: Uuid): Promise<MessageRecord | null>;
   /**
    * One page of a thread's messages, oldest-first by default.
@@ -924,6 +931,13 @@ export interface MessageRepo {
   /**
    * How many messages `senderUserId` has posted since `sinceIso`, across every
    * thread — the per-account messaging budget.
+   *
+   * **Broadcast rows do not count.** A god-mode announcement writes one row per
+   * recipient with the acting administrator as the sender; charging those to
+   * that administrator's personal allowance let a single broadcast to a portal
+   * larger than the budget refuse every ordinary message they sent for the next
+   * 24 hours. Broadcasts are bounded on their own terms instead — see
+   * `NEXUS_MAX_BROADCAST_RECIPIENTS` and `NEXUS_MAX_BROADCASTS_PER_DAY`.
    *
    * The boundary is **inclusive**: a row whose `created_at` equals `sinceIso`
    * counts. `created_at` is an ISO-8601 UTC string in a text column, so every

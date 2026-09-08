@@ -386,8 +386,24 @@ Under **Specific accounts**, search by name or email and add each recipient;
 and eventually fails on its own instead of taking the whole send down with it,
 and each recipient's delivery state is visible individually.
 
-The response tells you both numbers: `recipients` (how many matched) and
-`enqueued` (how many rows were actually created).
+The response tells you three things: `recipients` (how many matched),
+`enqueued` (how many rows were actually created) and `batch_id` (the campaign
+key those rows were filed under).
+
+**The whole fan-out is one transaction**, so a campaign either went out whole or
+not at all — there is no state in which some of your audience was mailed and
+nothing recorded it. A failure answers `500` with
+`details: { batch_id, recipients, enqueued: 0 }`, and retrying with that
+`batch_id` as the campaign key is safe whether the failure was real or only a
+lost response. If the portal was simply too busy you get `409` instead, with the
+same `batch_id` — that one is only ever "try again".
+
+That is also why **one campaign has a recipient ceiling**:
+`NEXUS_MAX_MASS_EMAIL_RECIPIENTS`, 5 000 by default. Everything the campaign
+queues has to fit in one transaction, and on a MongoDB-backed portal a long body
+brings the real limit down sharply — roughly 800 recipients at 10 KB of message.
+An audience past the ceiling is refused before anything is queued, with a message
+naming the limit, the audience size and the setting for your operator to raise.
 
 ### Idempotency
 
@@ -551,6 +567,24 @@ campaign for the next composition. API callers can supply `idempotency_key`
 identical subject/body and audience are deduplicated per sender and recipient.
 This protection applies to email; in-app notifications/messages remain per call.
 You are excluded from your own broadcast.
+
+**Two ceilings bound a broadcast**, both checked before anything is written:
+`NEXUS_MAX_BROADCAST_RECIPIENTS` (default 5 000) on one announcement's audience,
+and `NEXUS_MAX_BROADCASTS_PER_DAY` (default 20) on how many you may send in a
+rolling 24 hours. Exceeding either is refused with a message naming the limit,
+the audience size and the setting to raise. Broadcast messages do **not** count
+against your own daily messaging allowance — one announcement writes a row per
+account, and charging those to you used to block your ordinary messages, support
+follow-ups included, for the rest of the day.
+
+The response says how far it got: `delivered` is the number of accounts whose
+inbox actually received it, and `failed` the number it could not reach. A single
+unreachable account never stops the rest of an emergency announcement, so those
+two are how a partial send tells you. A daily slot is spent the moment you
+confirm, whether the send then succeeds or not — the audit trail records the
+attempt (`god.broadcast`) separately from its outcome
+(`god.broadcast_complete`). An audience that matches nobody is refused outright
+and costs you nothing.
 
 _Use for_ incident notices, maintenance windows and forced credential
 rotations — anything people must not miss. For routine announcements, prefer

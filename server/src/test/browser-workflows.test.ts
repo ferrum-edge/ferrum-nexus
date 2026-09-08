@@ -99,7 +99,11 @@ describe('browser workflow contracts', () => {
       },
     });
     assert.equal(response.statusCode, 200, response.body);
-    assert.deepEqual(response.json<MassEmailResponse>(), { enqueued: 1, recipients: 1 });
+    const sent = response.json<MassEmailResponse>();
+    assert.equal(sent.enqueued, 1);
+    assert.equal(sent.recipients, 1);
+    // The campaign's batch id rides along so a retry can reuse it (#171).
+    assert.equal(typeof sent.batch_id, 'string');
   });
 
   /* ── B. the registration policy the sign-up form reads ────────────────── */

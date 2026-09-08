@@ -247,6 +247,40 @@ export interface NexusConfig {
    */
   maxMessagesPerUserPerDay: number;
   /**
+   * How many recipients one god-mode broadcast may address
+   * (`NEXUS_MAX_BROADCAST_RECIPIENTS`). `0` removes the ceiling.
+   *
+   * A broadcast is the portal's highest-amplification path: one request writes
+   * a notification row, a platform-inbox message and — with `send_email` — a
+   * queued mail for every active account. Its rows deliberately do **not** draw
+   * on the sender's daily message budget, so this is the bound that replaces
+   * it, and it is checked before a single row is written. Set it above the
+   * portal's account count for an announcement to reach everyone.
+   */
+  maxBroadcastRecipients: number;
+  /**
+   * How many god-mode broadcasts one administrator may send in a rolling 24
+   * hours (`NEXUS_MAX_BROADCASTS_PER_DAY`). `0` removes the ceiling.
+   *
+   * The recipient ceiling bounds one announcement; this bounds a loop of them.
+   * Counted from the actor's own `god.broadcast` audit rows, so an operator can
+   * see exactly what the number refers to.
+   */
+  maxBroadcastsPerDay: number;
+  /**
+   * How many recipients one mass-email campaign may address
+   * (`NEXUS_MAX_MASS_EMAIL_RECIPIENTS`). `0` removes the ceiling.
+   *
+   * The fan-out is one transaction — every outbox row and the
+   * `admin.mass_email` row commit together — so the audience size is what that
+   * transaction has to hold, and on every adapter it is also what the instance
+   * stops doing anything else for while the inserts run: transaction bodies are
+   * serialised per store object. On MongoDB there is a hard wall as well, a
+   * 16 MB cap per transaction against which each row counts its whole rendered
+   * HTML and text. Checked before a single row is written.
+   */
+  maxMassEmailRecipients: number;
+  /**
    * Whether a provider may publish an API whose upstream is a loopback, private,
    * link-local or internal destination (`NEXUS_ALLOW_PRIVATE_UPSTREAMS`).
    *
@@ -366,6 +400,9 @@ const envSchema = z.object({
   NEXUS_MAX_APIS_PER_OWNER: intish(DEFAULT_MAX_APIS_PER_OWNER, 0, 100_000),
   NEXUS_SPEC_HISTORY_LIMIT: intish(DEFAULT_SPEC_HISTORY_LIMIT, 1, 10_000),
   NEXUS_MAX_MESSAGES_PER_USER_PER_DAY: intish(200, 0, 1_000_000),
+  NEXUS_MAX_BROADCAST_RECIPIENTS: intish(5_000, 0, 1_000_000),
+  NEXUS_MAX_BROADCASTS_PER_DAY: intish(20, 0, 100_000),
+  NEXUS_MAX_MASS_EMAIL_RECIPIENTS: intish(5_000, 0, 1_000_000),
   NEXUS_ALLOW_PRIVATE_UPSTREAMS: boolish(false),
   NEXUS_WEB_DIST: optionalString(),
 
@@ -563,6 +600,9 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     maxApisPerOwner: raw.NEXUS_MAX_APIS_PER_OWNER,
     specHistoryLimit: raw.NEXUS_SPEC_HISTORY_LIMIT,
     maxMessagesPerUserPerDay: raw.NEXUS_MAX_MESSAGES_PER_USER_PER_DAY,
+    maxBroadcastRecipients: raw.NEXUS_MAX_BROADCAST_RECIPIENTS,
+    maxBroadcastsPerDay: raw.NEXUS_MAX_BROADCASTS_PER_DAY,
+    maxMassEmailRecipients: raw.NEXUS_MAX_MASS_EMAIL_RECIPIENTS,
     allowPrivateUpstreams: raw.NEXUS_ALLOW_PRIVATE_UPSTREAMS,
     webDistPath: raw.NEXUS_WEB_DIST,
     db: {

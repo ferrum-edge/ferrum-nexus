@@ -43,7 +43,11 @@ describe('mass email campaign IDs', () => {
   });
 
   it('submits a maximum-length subject and resets the ID after each success', async () => {
-    const send = vi.spyOn(adminApi, 'massEmail').mockResolvedValue({ enqueued: 2, recipients: 2 });
+    const send = vi.spyOn(adminApi, 'massEmail').mockResolvedValue({
+      enqueued: 2,
+      recipients: 2,
+      batch_id: 'batch-1',
+    });
     const subject = 'S'.repeat(300);
     renderComposer(subject);
     expect(screen.getByLabelText(/^Subject/)).toHaveAttribute('maxlength', '300');
@@ -84,7 +88,7 @@ describe('mass email campaign IDs', () => {
           loseResponse = false;
           throw new TypeError('Network connection lost');
         }
-        return { enqueued, recipients: 2 };
+        return { enqueued, recipients: 2, batch_id: request.idempotency_key ?? 'batch-generated' };
       });
     renderComposer();
     await submit();
@@ -107,7 +111,11 @@ describe('mass email campaign IDs', () => {
   });
 
   it('surfaces unexpected deduplication of a fresh campaign', async () => {
-    vi.spyOn(adminApi, 'massEmail').mockResolvedValue({ enqueued: 0, recipients: 2 });
+    vi.spyOn(adminApi, 'massEmail').mockResolvedValue({
+      enqueued: 0,
+      recipients: 2,
+      batch_id: 'batch-2',
+    });
     renderComposer();
     await submit();
     await waitFor(() =>
@@ -146,7 +154,11 @@ describe('mass email audiences', () => {
 
   it('aims a filtered send at every administrative role, super admins included', async () => {
     stubDirectory();
-    const send = vi.spyOn(adminApi, 'massEmail').mockResolvedValue({ enqueued: 2, recipients: 2 });
+    const send = vi.spyOn(adminApi, 'massEmail').mockResolvedValue({
+      enqueued: 2,
+      recipients: 2,
+      batch_id: 'batch-2',
+    });
     renderComposer();
 
     fireEvent.click(screen.getByLabelText('Filtered'));
@@ -165,7 +177,11 @@ describe('mass email audiences', () => {
 
   it('composes the documented explicit audience of one', async () => {
     stubDirectory();
-    const send = vi.spyOn(adminApi, 'massEmail').mockResolvedValue({ enqueued: 1, recipients: 1 });
+    const send = vi.spyOn(adminApi, 'massEmail').mockResolvedValue({
+      enqueued: 1,
+      recipients: 1,
+      batch_id: 'batch-1',
+    });
     renderComposer();
 
     fireEvent.click(screen.getByLabelText('Specific accounts'));
@@ -182,7 +198,11 @@ describe('mass email audiences', () => {
 
   it('refuses to send an explicit audience with nobody in it', async () => {
     stubDirectory();
-    const send = vi.spyOn(adminApi, 'massEmail').mockResolvedValue({ enqueued: 0, recipients: 0 });
+    const send = vi.spyOn(adminApi, 'massEmail').mockResolvedValue({
+      enqueued: 0,
+      recipients: 0,
+      batch_id: 'batch-0',
+    });
     renderComposer();
 
     fireEvent.click(screen.getByLabelText('Specific accounts'));

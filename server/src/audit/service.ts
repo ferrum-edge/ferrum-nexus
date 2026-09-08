@@ -133,7 +133,21 @@ export const AuditAction = {
   GOD_REVOKE_GRANT: 'god.revoke_grant',
   GOD_DELETE_API: 'god.delete_api',
   GOD_DISABLE_USER: 'god.disable_user',
+  /**
+   * Written **before** the first recipient is touched, which is what makes it
+   * the broadcast's countable record: `NEXUS_MAX_BROADCASTS_PER_DAY` counts
+   * exactly these rows, so an attempt whose fan-out or completion record later
+   * fails is still charged and still named in the trail. `details.phase` is
+   * `started`; what actually got delivered is {@link GOD_BROADCAST_COMPLETE}.
+   */
   GOD_BROADCAST: 'god.broadcast',
+  /**
+   * The outcome of a broadcast whose {@link GOD_BROADCAST} row already exists —
+   * `delivered`, `failed` and the notification/thread/email counts. Deliberately
+   * a second action rather than a second `god.broadcast` row: the daily ceiling
+   * counts `god.broadcast`, and it must be exactly one row per attempt.
+   */
+  GOD_BROADCAST_COMPLETE: 'god.broadcast_complete',
 } as const;
 
 /** Union of every audit action string. */

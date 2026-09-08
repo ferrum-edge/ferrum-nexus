@@ -66,6 +66,7 @@ import { createCrypto, type NexusCrypto } from './lib/crypto.js';
 import { isNexusError } from './lib/errors.js';
 import {
   createKeyedSerializer,
+  SEND_LOCK_CONFLICT_MESSAGE,
   SUPER_ADMIN_LOCK_CONFLICT_MESSAGE,
 } from './lib/keyed-serializer.js';
 import { buildLoggerOptions, type LoggerOptions } from './lib/logger.js';
@@ -172,6 +173,16 @@ export interface BuildServerDeps {
   startTeardownWorker?: boolean;
   /** Serve the built SPA. Defaults to "yes when the dist directory exists". */
   serveStatic?: boolean;
+  /**
+   * How long an outbound send waits for the per-account key another instance is
+   * holding, in milliseconds. Defaults to the serializer's own
+   * `LEASE_WAIT_MS` (30 s).
+   *
+   * A seam for the tests that assert the *timeout* behaviour — the `409` a
+   * caller gets when the wait runs out — which are otherwise unreachable
+   * without waiting half a minute per case. Nothing in production sets it.
+   */
+  sendLockWaitMs?: number;
 }
 
 /** Rate limit applied to `/api/auth/*` when `config.rateLimitEnabled` is true. */
@@ -263,6 +274,19 @@ export async function buildServer(
     conflictMessage: SUPER_ADMIN_LOCK_CONFLICT_MESSAGE,
   });
 
+  /**
+   * The same mechanism for the two outbound-send ceilings, worded for them:
+   * the rolling daily message budget (`messages:budget:<user>`) and the
+   * god-mode broadcast bounds (`god:broadcast:<user>`). Separate from `locks`
+   * only so a refused send is told what is actually in flight; the keys are
+   * disjoint from that serializer's, so the two never contend.
+   */
+  const sendLocks = createKeyedSerializer({
+    leases: deps.store.leases,
+    conflictMessage: SEND_LOCK_CONFLICT_MESSAGE,
+    ...(deps.sendLockWaitMs === undefined ? {} : { waitMs: deps.sendLockWaitMs }),
+  });
+
   const audit = createAuditService(deps.store);
   const captcha = createCaptchaService({
     store: deps.store,
@@ -309,9 +333,10 @@ export async function buildServer(
     email,
     audit,
     settings,
+    locks: sendLocks,
     log: warn,
   });
-  const massEmail = createMassEmailService({ store: deps.store, email, audit });
+  const massEmail = createMassEmailService({ config, store: deps.store, email, audit });
 
   // ── Gateway workflow ────────────────────────────────────────────────────
   // One consumer provisioner is shared by credentials and access so both
@@ -382,6 +407,7 @@ export async function buildServer(
     log: warn,
   });
   const god = createGodService({
+    config,
     store: deps.store,
     audit,
     notifications,
@@ -391,6 +417,7 @@ export async function buildServer(
     publishing,
     credentials,
     locks,
+    broadcastLocks: sendLocks,
     log: warn,
   });
 
