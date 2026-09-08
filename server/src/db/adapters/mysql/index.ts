@@ -9,7 +9,7 @@
  * - an {@link SqlExecutor} that runs statements through {@link formatSql}
  *   (`"ident"` → `` `ident` ``, which is what lets the shared repos say
  *   `"key"` — a reserved word here and not in PostgreSQL) and reports
- *   `affectedRows` as the affected row count;
+ *   `affectedRows` as the matched row count for UPDATEs (CLIENT_FOUND_ROWS);
  * - the serialized, resumable migration runner in `migrations.ts`;
  * - `transaction()`, a real `START TRANSACTION`/`COMMIT`/`ROLLBACK` on a
  *   dedicated connection checked out of the pool for the duration of the body.
@@ -134,6 +134,9 @@ export function createMysqlStore(config: NexusConfig): NexusStore {
   const pool = mysql.createPool({
     uri: config.db.url,
     charset: 'utf8mb4_general_ci',
+    // Conditional UPDATEs must count matches, including identical values.
+    // mysql2 defaults to FOUND_ROWS; pin it so URI flags cannot disable it.
+    flags: ['FOUND_ROWS'],
     // A transaction holds one connection for the whole body, and the store
     // serialises bodies, so a small pool is plenty — but leave headroom for
     // concurrent non-transactional reads.

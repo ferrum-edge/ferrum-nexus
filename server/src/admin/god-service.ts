@@ -39,7 +39,7 @@ import {
 import type { AccessService } from '../access/service.js';
 import { AuditAction, type AuditService } from '../audit/service.js';
 import { runGatewayTeardown, type CredentialsService } from '../credentials/service.js';
-import type { NexusStore, UserRecord } from '../db/store.js';
+import type { GatewayTeardownJobRecord, NexusStore, UserRecord } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
 import { conflict, lastSuperAdmin, notFound, validationFailed } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
@@ -214,38 +214,45 @@ export function createGodService(deps: GodServiceDeps): GodService {
       // one instance in line behind an ordinary demotion on another. The lease
       // is taken outside the transaction — see `users/service.ts`.
       const guardsLastSuperAdmin = target.role === 'super_admin' && target.status === 'active';
-      const transition = async (): Promise<{ row: UserRecord | null; jobId: Uuid }> =>
+      const transition = async (): Promise<{ row: UserRecord; job: GatewayTeardownJobRecord }> =>
         store.transaction(async (tx) => {
-          // The revocation this disable owes is queued in the same transaction
-          // as the status flip, so the account can never be off while nothing
-          // remembers its gateway credentials are still live.
-          const job = await tx.gatewayTeardownJobs.upsertPending(target.id, actor.id, nowIso());
-          if (target.status === 'disabled') return { row: target, jobId: job.id };
+          const current = await tx.users.findById(target.id);
+          if (!current) throw notFound('User', userId);
+          if (current.role !== target.role || current.status !== target.status) {
+            throw conflict(
+              'That account changed while you were disabling it — reload and try again',
+            );
+          }
           if (guardsLastSuperAdmin && (await tx.users.countActiveSuperAdmins(target.id)) === 0) {
             throw lastSuperAdmin();
           }
+          // Even an already-disabled account takes the conditional write:
+          // it must serialize with a concurrent re-enable in the database.
           const row = await tx.users.updateIfMatches(
             target.id,
-            { role: target.role, status: target.status },
+            { role: current.role, status: current.status },
             { status: 'disabled' },
           );
-          return { row, jobId: job.id };
+          if (!row) {
+            throw conflict(
+              'That account changed while you were disabling it — reload and try again',
+            );
+          }
+          // Both writes roll back on any failure, including a lost predicate.
+          const job = await tx.gatewayTeardownJobs.upsertPending(target.id, actor.id, nowIso());
+          return { row, job };
         });
 
       // And, exactly as there, under the account's lifecycle key — the one a
       // gateway identity registration for this account is taken under — so the
       // teardown that follows the flip sees every identity the account got as
       // far as registering. Inside the super-admin key, never around it.
-      const lifecycle = (): Promise<{ row: UserRecord | null; jobId: Uuid }> =>
+      const lifecycle = (): ReturnType<typeof transition> =>
         locks(userLifecycleLockKey(target.id), transition);
       const outcome = guardsLastSuperAdmin
         ? await locks(SUPER_ADMIN_LOCK_KEY, lifecycle)
         : await lifecycle();
       const updated = outcome.row;
-      if (!updated) {
-        if (!(await store.users.findById(target.id))) throw notFound('User', userId);
-        throw conflict('That account changed while you were disabling it — reload and try again');
-      }
       // A disabled account keeps no usable browser session — and no working
       // gateway identity, which a session cookie has nothing to do with.
       const terminated = await store.sessions.deleteForUser(target.id);
@@ -254,7 +261,7 @@ export function createGodService(deps: GodServiceDeps): GodService {
         store,
         userId: target.id,
         subject: actor.id,
-        jobId: outcome.jobId,
+        job: outcome.job,
         ...(deps.log ? { log: deps.log } : {}),
       });
 

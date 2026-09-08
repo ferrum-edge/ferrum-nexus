@@ -131,6 +131,7 @@ import type {
   CredentialFilter,
   CredentialRecord,
   GatewayIdentityRecord,
+  GatewayTeardownJobRecord,
   ListOptions,
   NexusStore,
   UserRecord,
@@ -437,11 +438,8 @@ export interface RunGatewayTeardownInput {
   userId: Uuid;
   /** Actor id recorded as the Edge write's subject. */
   subject: string;
-  /**
-   * The durable job this attempt is closing. Looked up by user when omitted —
-   * pass it when the caller already holds the row (the worker does).
-   */
-  jobId?: Uuid | null;
+  /** Exact queued generation or worker claim. Never look up a replacement after Edge work. */
+  job: GatewayTeardownJobRecord | null;
   log?: (obj: Record<string, unknown>, message: string) => void;
 }
 
@@ -468,10 +466,31 @@ export async function runGatewayTeardown(
   input: RunGatewayTeardownInput,
 ): Promise<GatewayTeardownAttempt> {
   const { credentials, store, userId, subject, log } = input;
+  let claimed: GatewayTeardownJobRecord | null = null;
   try {
+    if (!input.job || input.job.user_id !== userId) {
+      throw new Error('Gateway teardown has no matching queued generation');
+    }
+    claimed =
+      input.job.status === 'pending'
+        ? await store.gatewayTeardownJobs.claimPending(input.job)
+        : input.job.status === 'sending'
+          ? input.job
+          : null;
+    if (!claimed) throw new Error('Gateway teardown attempt was superseded');
+    const current = await store.gatewayTeardownJobs.findByUser(userId);
+    if (
+      !current ||
+      current.id !== claimed.id ||
+      current.generation !== claimed.generation ||
+      current.status !== 'sending'
+    ) {
+      throw new Error('Gateway teardown attempt was superseded');
+    }
     const result = await credentials.disableGatewayAccess(userId, subject);
-    const jobId = input.jobId ?? (await store.gatewayTeardownJobs.findByUser(userId))?.id ?? null;
-    if (jobId !== null) await store.gatewayTeardownJobs.markDone(jobId, nowIso());
+    if (!(await store.gatewayTeardownJobs.markDone(claimed, nowIso()))) {
+      throw new Error('Gateway teardown attempt was superseded');
+    }
     // `no_consumer` means "this account never had a gateway identity at all",
     // so a provider whose only identity was a test consumer reports `ok` — the
     // work was real and it landed.
@@ -499,6 +518,12 @@ export async function runGatewayTeardown(
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    // Inline attempts own claims too. Return only that claim to the queue;
+    // the worker applies its own backoff to claims it supplied. A failed store
+    // write leaves SENDING for stale recovery, never an unfenced fallback.
+    if (claimed && input.job?.status === 'pending') {
+      await store.gatewayTeardownJobs.reschedule(claimed, nowIso(), message).catch(() => false);
+    }
     // `warn`, not `error`: the portal did the right thing and the work is
     // queued. This is the line an operator alerts on — see `docs/operations.md`.
     log?.(
@@ -1295,15 +1320,23 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * live identity behind. The teardown that is waiting on the identity's name
    * key will get it — in-process — but a teardown on another instance may
    * have timed out on the key and, having found nothing else, could have
-   * closed its job. A `done` job is reopened; a `pending` or `sending` one is
-   * already the durable work required and is left alone.
+   * closed its job. Rotate the generation so an attempt that already enumerated
+   * identities cannot subsequently settle this newly discovered work.
    */
   async function ensureTeardownOwed(userId: Uuid): Promise<void> {
-    const owner = await store.users.findById(userId);
-    if (!owner || owner.status === 'active') return;
-    const job = await store.gatewayTeardownJobs.findByUser(userId);
-    if (job && job.status !== 'done') return;
-    await store.gatewayTeardownJobs.upsertPending(userId, null, nowIso());
+    await locks(userLifecycleLockKey(userId), () =>
+      store.transaction(async (tx) => {
+        const owner = await tx.users.findById(userId);
+        if (!owner || owner.status !== 'disabled') return;
+        const matched = await tx.users.updateIfMatches(
+          userId,
+          { role: owner.role, status: 'disabled' },
+          { status: 'disabled' },
+        );
+        if (!matched) throw conflict('That account changed while queuing gateway recovery');
+        await tx.gatewayTeardownJobs.upsertPending(userId, null, nowIso());
+      }),
+    );
   }
 
   /**

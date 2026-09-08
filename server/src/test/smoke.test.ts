@@ -60,6 +60,8 @@ import { faultInjectingStore } from './fault-injection.js';
 import { runPasswordChangeContract } from './password-change-contract.js';
 import { runSettingsTransactionContract } from './settings-transaction-contract.js';
 import { runTeardownCancellationContract } from './teardown-cancellation-contract.js';
+import { runTeardownFencingContract } from './teardown-fencing-contract.js';
+import { runTeardownTransitionContract } from './teardown-transition-contract.js';
 
 const SECRET = 'cross-adapter-smoke-secret-0123456789ab';
 
@@ -267,6 +269,8 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
   runPasswordChangeContract(label, makeStore);
   runSettingsTransactionContract(label, makeStore);
   runTeardownCancellationContract(label, makeStore);
+  runTeardownFencingContract(label, makeStore);
+  runTeardownTransitionContract(label, makeStore);
   describe(`store contract — ${label}`, () => {
     let target: SmokeTarget;
     let store: NexusStore;
@@ -407,6 +411,40 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(won?.display_name, 'Demoted');
       assert.deepEqual(await store.users.findById(user.id), won, 'the winner gets the stored row');
     });
+
+    for (const transactional of [false, true]) {
+      it(`users: matching no-ops and empty patches (transaction=${transactional})`, async (t) => {
+        // Freeze Date so a same-value patch also leaves updated_at identical:
+        // a changed-row count would be zero, but this is still a match.
+        t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+        const user = await makeUser();
+        const check = async (db: NexusStore): Promise<void> => {
+          const expected = { role: user.role, status: user.status };
+          assert.deepEqual(
+            await db.users.updateIfMatches(user.id, expected, { status: user.status }),
+            user,
+          );
+          t.mock.timers.tick(1000);
+          assert.deepEqual(await db.users.updateIfMatches(user.id, expected, {}), user);
+          for (const patch of [{}, { status: user.status }]) {
+            assert.equal(
+              await db.users.updateIfMatches(user.id, { role: 'provider' }, patch),
+              null,
+            );
+            assert.equal(
+              await db.users.updateIfMatches(user.id, { status: 'disabled' }, patch),
+              null,
+            );
+            assert.equal(await db.users.updateIfMatches(newId(), {}, patch), null);
+          }
+          assert.deepEqual(await db.users.findById(user.id), user);
+          const changed = await db.users.updateIfMatches(user.id, expected, { role: 'provider' });
+          assert.deepEqual(changed, { ...user, role: 'provider', updated_at: nowIso() });
+        };
+        if (transactional) await store.transaction(check);
+        else await check(store);
+      });
+    }
 
     it('users: the last-super-admin rule survives two demotions at once', async () => {
       // The invariant here is "never fewer active super admins than the suite
@@ -2057,12 +2095,16 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
 
       // Move it out of `pending` and then re-disable: the row must come back to
       // the start rather than a second job appearing for the same account.
-      await store.gatewayTeardownJobs.reschedule(first.id, isoInSeconds(600), 'edge unreachable');
+      const firstClaim = await store.gatewayTeardownJobs.claimPending(first);
+      assert.ok(firstClaim);
+      await store.gatewayTeardownJobs.reschedule(firstClaim, isoInSeconds(600), 'edge unreachable');
       const rescheduled = await store.gatewayTeardownJobs.findByUser(user.id);
       assert.equal(rescheduled?.last_error, 'edge unreachable');
 
       const second = await store.gatewayTeardownJobs.upsertPending(user.id, null, nowIso());
       assert.equal(second.id, first.id, 'the same row is reused');
+      assert.notEqual(second.generation, first.generation);
+      assert.notEqual(second.generation, firstClaim.generation);
       assert.equal(second.status, 'pending');
       assert.equal(second.attempts, 0);
       assert.equal(second.last_error, null);
@@ -2092,7 +2134,8 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
 
       // A failure is a retry, not a terminal state: the row goes back to
       // `pending` with the reason and a backoff stamp.
-      await store.gatewayTeardownJobs.reschedule(job.id, isoInSeconds(-1), 'edge 500');
+      assert.ok(mine[0]);
+      await store.gatewayTeardownJobs.reschedule(mine[0], isoInSeconds(-1), 'edge 500');
       const retryable = await store.gatewayTeardownJobs.findByUser(user.id);
       assert.equal(retryable?.status, 'pending');
       assert.equal(retryable?.last_error, 'edge 500');
@@ -2106,7 +2149,15 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       );
 
       const at = nowIso();
-      await store.gatewayTeardownJobs.markDone(job.id, at);
+      const currentClaim = reclaimed.find((row) => row.id === job.id);
+      assert.ok(currentClaim);
+      assert.equal(await store.gatewayTeardownJobs.markDone(mine[0], at), false);
+      assert.equal(await store.gatewayTeardownJobs.markDone(currentClaim, at), true);
+      assert.equal(await store.gatewayTeardownJobs.markDone(currentClaim, at), false);
+      assert.equal(
+        await store.gatewayTeardownJobs.reschedule(mine[0], isoInSeconds(600), 'stale failure'),
+        false,
+      );
       const done = await store.gatewayTeardownJobs.findByUser(user.id);
       assert.equal(done?.status, 'done');
       assert.equal(done?.next_attempt_at, null);
@@ -2128,18 +2179,22 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       const other = await makeUser();
       const job = await store.gatewayTeardownJobs.upsertPending(user.id, null, nowIso());
       const unrelated = await store.gatewayTeardownJobs.upsertPending(other.id, null, nowIso());
-      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(job.id), false);
-      await store.gatewayTeardownJobs.claimDue(nowIso(), 100);
+      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(job), false);
+      const oldClaim = await store.gatewayTeardownJobs.claimPending(job);
+      const otherClaim = await store.gatewayTeardownJobs.claimPending(unrelated);
+      assert.ok(oldClaim && otherClaim);
       const reset = await store.gatewayTeardownJobs.upsertPending(user.id, null, nowIso());
       assert.equal(reset.id, job.id, 'upsert retains the claimed ID');
-      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(job.id), false);
+      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(oldClaim), false);
       assert.deepEqual(await store.gatewayTeardownJobs.findByUser(user.id), reset);
-      await store.gatewayTeardownJobs.claimDue(nowIso(), 100);
-      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(job.id), true);
-      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(job.id), false);
+      const newClaim = await store.gatewayTeardownJobs.claimPending(reset);
+      assert.ok(newClaim);
+      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(oldClaim), false);
+      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(newClaim), true);
+      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(newClaim), false);
       assert.equal((await store.gatewayTeardownJobs.findByUser(other.id))?.id, unrelated.id);
-      await store.gatewayTeardownJobs.markDone(unrelated.id, nowIso());
-      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(unrelated.id), false);
+      await store.gatewayTeardownJobs.markDone(otherClaim, nowIso());
+      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(otherClaim), false);
       await store.gatewayTeardownJobs.deleteByUser(other.id);
     });
 
@@ -2150,9 +2205,12 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       );
       const [pending, sending, done] = jobs;
       assert.ok(pending && sending && done);
-      await store.gatewayTeardownJobs.claimDue(nowIso(), 100);
-      await store.gatewayTeardownJobs.reschedule(pending.id, isoInSeconds(600), 'retry later');
-      await store.gatewayTeardownJobs.markDone(done.id, nowIso());
+      const pendingClaim = await store.gatewayTeardownJobs.claimPending(pending);
+      const doneClaim = await store.gatewayTeardownJobs.claimPending(done);
+      await store.gatewayTeardownJobs.claimPending(sending);
+      assert.ok(pendingClaim && doneClaim);
+      await store.gatewayTeardownJobs.reschedule(pendingClaim, isoInSeconds(600), 'retry later');
+      await store.gatewayTeardownJobs.markDone(doneClaim, nowIso());
       const page = await store.gatewayTeardownJobs.list({ statuses: ['pending', 'sending'] });
       assert.ok(page.items.some((job) => job.id === pending.id));
       assert.ok(page.items.some((job) => job.id === sending.id));
