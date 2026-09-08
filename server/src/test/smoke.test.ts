@@ -60,6 +60,7 @@ import { faultInjectingStore } from './fault-injection.js';
 import { runMessageBudgetContract } from './message-budget-contract.js';
 import { runOutboxFencingContract } from './outbox-fencing-contract.js';
 import { runPasswordChangeContract } from './password-change-contract.js';
+import { runRecoveryThrottleContract } from './recovery-throttle-contract.js';
 import { runSettingsTransactionContract } from './settings-transaction-contract.js';
 import { runTeardownCancellationContract } from './teardown-cancellation-contract.js';
 import { runTeardownFencingContract } from './teardown-fencing-contract.js';
@@ -301,6 +302,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
   runMessageBudgetContract(label, makeStore);
   runOutboxFencingContract(label, makeStore);
   runPasswordChangeContract(label, makeStore);
+  runRecoveryThrottleContract(label, makeStore);
   runSettingsTransactionContract(label, makeStore);
   runTeardownCancellationContract(label, makeStore);
   runTeardownFencingContract(label, makeStore);

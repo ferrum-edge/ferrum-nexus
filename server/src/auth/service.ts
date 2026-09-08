@@ -43,7 +43,12 @@ import {
 
 import { AuditAction, ANONYMOUS_ACTOR, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
-import type { NexusStore, SessionRecord, UserRecord } from '../db/store.js';
+import type {
+  NexusStore,
+  SessionRecord,
+  UserRecord,
+  VerificationTokenPurpose,
+} from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
 import { secretEquals } from '../lib/crypto.js';
 import {
@@ -304,6 +309,16 @@ export interface AuthServiceDeps {
    * each seat a founder, and a bootstrap cannot interleave with a demotion.
    */
   locks: KeyedSerializer;
+  /**
+   * Structured logger, at `warn`, for a failure the response is forbidden to
+   * describe.
+   *
+   * Only the recovery endpoints reach it: `forgot-password` and
+   * `resend-verification` answer one uniform `200` whatever happens, so a
+   * store fault under them is invisible to the caller by design and this is
+   * the only place it is recorded.
+   */
+  log?: (obj: Record<string, unknown>, message: string) => void;
   /** Optional hook so the email service can enqueue the verification mail. */
   onRegistered?: OnRegistered;
   /** Optional hook that delivers a re-sent verification link. */
@@ -374,6 +389,40 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
     } finally {
       await floor;
     }
+  }
+
+  /**
+   * Run a recovery-link issuance so that the caller learns nothing from it —
+   * including when it fails.
+   *
+   * {@link withTimingFloor} equalises how long the branches take, but an
+   * exception escaping it still reaches the client as a `500`, and the only
+   * branch that can raise one is the branch that has an account to mint for.
+   * A partially failing store therefore answers `500` for a real address and
+   * `200` for an unknown one, which is precisely the distinction
+   * `docs/security.md` says these two endpoints must never make (issue #137).
+   *
+   * So a failure is logged and swallowed here, and the caller gets the
+   * documented `200 { "ok": true }` either way. Nothing is lost by it: the
+   * claim now rolls back with the mint, so the next attempt — the user
+   * pressing the button again — issues the link the failed one did not. The
+   * route layer never sees these, hence the log line; it is the only record
+   * that the endpoint could not do its work.
+   */
+  async function withUniformAnswer(
+    purpose: VerificationTokenPurpose,
+    body: () => Promise<void>,
+  ): Promise<void> {
+    await withTimingFloor(async () => {
+      try {
+        await body();
+      } catch (error) {
+        deps.log?.(
+          { purpose, error: error instanceof Error ? error.message : String(error) },
+          'an email token could not be issued; the caller was answered uniformly',
+        );
+      }
+    });
   }
 
   /**
@@ -685,7 +734,7 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
     },
 
     async resendVerification(rawEmail, context): Promise<void> {
-      await withTimingFloor(async () => {
+      await withUniformAnswer('email_verification', async () => {
         const email = rawEmail.trim().toLowerCase();
         const record = await store.users.findByEmail(email);
         // Four different reasons to send nothing, all of them invisible to the
@@ -708,17 +757,22 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         const notBefore = new Date(
           Date.parse(issuedAt) - VERIFICATION_RESEND_THROTTLE_SECONDS * 1000,
         ).toISOString();
-        if (
-          !(await store.verificationTokens.claimIssue(
-            record.id,
-            'email_verification',
-            issuedAt,
-            notBefore,
-          ))
-        ) {
-          return;
-        }
         const row = await store.transaction(async (tx) => {
+          // The claim is the *first* write of the mint, not a separate one
+          // before it. It is still the single conditional write that makes
+          // concurrent requests produce exactly one link — but it now commits
+          // with the token or rolls back with it, so a mint that fails leaves
+          // the recipient's ten-minute window unspent (issue #137).
+          if (
+            !(await tx.verificationTokens.claimIssue(
+              record.id,
+              'email_verification',
+              issuedAt,
+              notBefore,
+            ))
+          ) {
+            return null;
+          }
           // Supersede the link from registration (or an earlier resend): the
           // address should only ever have one live verification token.
           await tx.verificationTokens.deleteForUser(record.id, 'email_verification');
@@ -739,6 +793,8 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
             );
           return created;
         });
+        // Genuinely throttled: another request holds the window.
+        if (row === null) return;
 
         if (deps.onVerificationResend) {
           await deps.onVerificationResend({
@@ -752,7 +808,7 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
     },
 
     async requestPasswordReset(rawEmail, context): Promise<void> {
-      await withTimingFloor(async () => {
+      await withUniformAnswer('password_reset', async () => {
         const email = rawEmail.trim().toLowerCase();
         const record = await store.users.findByEmail(email);
         if (!record || record.status !== 'active') return;
@@ -772,17 +828,20 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         const notBefore = new Date(
           Date.parse(issuedAt) - PASSWORD_RESET_THROTTLE_SECONDS * 1000,
         ).toISOString();
-        if (
-          !(await store.verificationTokens.claimIssue(
-            record.id,
-            'password_reset',
-            issuedAt,
-            notBefore,
-          ))
-        ) {
-          return;
-        }
         const row = await store.transaction(async (tx) => {
+          // Inside the transaction, for the reason `resendVerification` gives:
+          // account recovery must not spend the window on a link that was
+          // never minted (issue #137).
+          if (
+            !(await tx.verificationTokens.claimIssue(
+              record.id,
+              'password_reset',
+              issuedAt,
+              notBefore,
+            ))
+          ) {
+            return null;
+          }
           const created = await tx.verificationTokens.create({
             user_id: record.id,
             token_hash: crypto.hashToken(token),
@@ -803,6 +862,8 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
             );
           return created;
         });
+        // Genuinely throttled: another request holds the window.
+        if (row === null) return;
 
         if (deps.onPasswordResetRequested) {
           await deps.onPasswordResetRequested({

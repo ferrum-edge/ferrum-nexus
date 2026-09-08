@@ -193,6 +193,21 @@ they are built to answer nothing:
   the lease and issues the caller's replacement session only after commit,
   while still holding the lease. Reset redemption issues no replacement session.
   A fresh reset link can still be requested subject to the existing throttle.
+- **A failure answers the same as a success.** `withTimingFloor` equalises how
+  long the branches take, but an exception escaping it would still reach the
+  client as a `500` — and the only branch that can raise one is the branch that
+  found an account, which makes a partially failing store an existence oracle.
+  Both endpoints therefore swallow a fault, log it at `warn`, and answer the
+  documented `200 { "ok": true }`; the response is identical for a real
+  address, an unknown one, a disabled one and a throttled one whatever the
+  store did.
+- **A failed mint leaves the throttle window unspent.** The conditional claim
+  on `email_token_issue_claims` — the single write that elects one winner among
+  concurrent requests — is the _first_ write of the minting transaction rather
+  than a separate one committed before it. It therefore commits with the token
+  or rolls back with it, so a store fault cannot burn the recipient's
+  10-minute window on a link that was never issued and leave the retry
+  answering the uniform `200` while sending nothing.
 - **The audit log is where the truth is.** `auth.password_reset_request` and
   `auth.verification_resend` are written only when a link was really issued, so
   operators can see what the response would not say.
@@ -464,6 +479,20 @@ and that group in place, which is offboarding that did not happen. A test
 consumer is disposable by definition, so it is deleted outright rather than
 emptied; whoever needs one next recreates it.
 
+The same teardown runs on `DELETE /api/apis/:id`. The `nexus-test-<api_id>`
+consumer is named after an API that is about to stop existing, so once the API
+is gone nothing in the portal could ever find it again: no account teardown and
+no reconciliation has anything left to look it up by. The deletion therefore
+collects it — the consumer, its credential, its `credential_metadata` rows and
+its `gateway_identities` registration — through the same primitive the account
+teardown uses, after the proxy is deleted (so no live proxy ever had an
+unauthenticatable key) and before the portal rows are dropped (so a failure
+leaves the API in the catalog for the delete to be retried against, rather than
+answering `200` over a stranded identity). A consumer that is already gone is
+not an error. The teardown takes the identity's own name key, which is the key
+`POST /api/apis/:id/test-consumer` holds for the whole of its work, so a
+deletion racing a creation waits for it and then undoes it.
+
 Every gateway step for one identity runs inside a critical section keyed on
 _that_ consumer's Ferrum id — an in-process queue plus an `edge_leases` row —
 so a concurrent approval or credential issue on another Nexus instance cannot
@@ -520,7 +549,32 @@ it, and both disable paths flip `status` under the same key. Whichever wins:
   `403 USER_DISABLED` before anything exists on the gateway.
 
 An append refused after the consumer was created is compensated: the consumer
-is deleted and the registration dropped. If that delete fails, the registration
+is deleted and the registration dropped. A create that was _refused_ is
+compensated too, because a rejection is not proof the gateway did not apply the
+write — Edge may have stored the consumer and lost the acknowledgement, and no
+answer carried its id back.
+
+What makes that recoverable is that **Nexus names every consumer it asks Edge
+to create**, so the id of the create being compensated for is known whether or
+not an answer arrived, and one `GET /consumers/{id}` settles the question with
+no namespace-wide scan. The first consumer of a username takes an id that is a
+pure function of its namespace and username (a domain-separated UUIDv8), so it
+needs nothing persisted to be found again. A consumer that _replaces_ one of
+the same name takes a fresh id instead — reusing the derived one would make the
+replaced consumer and its replacement one resource, and `credential_metadata`,
+every revocation and the registration itself are all keyed on that id — and the
+fresh id is written to `gateway_identities.ferrum_consumer_id` before the
+`POST`, so a crash between the write and the compensation still leaves the
+consumer findable by id on the next teardown. The bounded username scan
+survives only as the fallback for an identity that predates the derivation.
+
+A consumer that turns out to exist is deleted; only a lookup that answers
+"there is no such consumer" lets the registration go. A lookup that _fails_
+leaves the registration standing — a row over a consumer that is gone is
+reclaimable, an orphan with no row is not. A consumer that was merely _found_
+rather than created — the one a replacement was about to take down — is never
+touched by the compensation: it stays its previous owner's until a replacement
+actually succeeds. If that delete fails, the registration
 stays — it is what the teardown enumerates — and, when the owner is no longer
 active, the teardown job that will strip the identity is made sure of: a
 `pending` or `sending` job is left alone, and a `done` one — closed by another
@@ -1209,7 +1263,7 @@ ordinary reporting.
 | `api.update`                  | `api`       | Safe runtime settings changed. `details`: `changed_fields`, plus context such as `previous_auth_plugin` and `existing_credentials_invalidated`. A `spec_enforcement` change additionally carries `proxy_rebuilt: true`: moving between `docs_only` and `routes` deletes and recreates the gateway proxy under the same id, so the API was briefly unreachable and an operator reading the log needs to be able to explain the gap.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `api.spec_update`             | `api`       | A new spec revision was published and made current. `details`: spec id, version, path count, OpenAPI enforcement level, `backend_updated`. At the `routes` level the revision also changes what the gateway accepts, so the level is recorded on every upload.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `api.retire`                  | `api`       | An API moved to `retired`. Emitted instead of `api.update` for that transition. `details.gateway_untouched` records that the proxy and live grants were left alone.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `api.delete`                  | `api`       | An API and its Edge objects were destroyed. `details`: slug, proxy id, `revoked_grants`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `api.delete`                  | `api`       | An API and its Edge objects were destroyed. `details`: slug, proxy id, `revoked_grants`, and — only when the API had one — `test_consumer_id` plus `test_consumer_revoked_credentials` for the `nexus-test-<api_id>` identity torn down with it. An API that never had a test consumer names neither key, so an absent pair reads as "there was nothing to collect" rather than "the teardown was skipped".                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `api.plugin_set`              | `api`       | A palette plugin was created or replaced on the API's proxy. `details`: `plugin_name`, `enabled`, `config_keys`, `trigger`, `replaced`, `plugin_config_id` (the Edge config written, so the row names what was touched). **The config keys are logged, never their values** — a plugin config can carry a Content-Security-Policy or a partner IP allow-list, and an audit row is not the place for either. The trigger is a method list and a path prefix, which are policy rather than data, so it is recorded in full.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `api.plugin_remove`           | `api`       | A palette plugin was detached from the proxy and deleted. `details`: `plugin_name`, `label`, `was_attached` (false when an operator had already removed the gateway config by hand), `plugin_config_id` (the Edge config deleted, `null` when there was none). Only the config the portal created is removed — another config of the same plugin name on the proxy is an operator's and is left alone.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `api.gateway_repair_required` | `api`       | A `spec_enforcement` conversion could neither finish nor put the original proxy back, so the API has **no gateway object at all** while its catalog entry, grants and credentials stay valid. `details`: `phase` — `conversion` when the conversion itself failed and could not be undone, `rollback` when it succeeded and a later step of the same `PATCH` failed and the unwind could not rebuild — plus `proxy_id`, hand-owned `plugin_names`, `spec_enforcement`, `attempted_spec_enforcement`, `restore_error`, and `error` (the failure that made a restore necessary; present on the `conversion` phase only). **Read the two enforcement levels by the phase.** On a `conversion` row `attempted_spec_enforcement` is what the conversion was reaching for and the restore was rebuilding `spec_enforcement`, the level the `apis` row still holds. On a `rollback` row the conversion to `attempted_spec_enforcement` had already succeeded, and it is the unwind back to `spec_enforcement` that failed — so those rows carry `restore_target` as well, naming the level the failed restore was rebuilding outright. Raw proxy and plugin configurations are never included because they may contain infrastructure credentials or other operator-managed secrets. Also logged at `error`. Alert on it: no later request repairs it by itself. Exactly one row is written per affected conversion. |

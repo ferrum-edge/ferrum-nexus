@@ -447,12 +447,78 @@ export interface CredentialsService {
    * instance that found nothing else — is reopened as `pending`. Never
    * throws; the failure that triggered the compensation is the one worth
    * reporting.
+   *
+   * A `null` `consumerId` does **not** mean no consumer exists. A rejected
+   * `POST /consumers` may be a write Edge applied and failed to acknowledge,
+   * and the answer that would have carried the id never arrived (issue #139).
+   * That is what `attemptedConsumerId` is for: Nexus names every consumer it
+   * asks Edge to create, so the caller knows the id of the create it is
+   * compensating for even when nothing came back. One
+   * `GET /consumers/{attemptedConsumerId}` settles it — found means the write
+   * landed and the consumer comes down, absent means it never did — with no
+   * namespace-wide username scan anywhere in the path.
+   *
+   * A lookup that *fails* is neither: the registration is left standing,
+   * because a row kept over a consumer that is gone is reclaimable and an
+   * orphan with no row is not.
+   *
+   * `null` for both ids means no create of this attempt ever reached the
+   * gateway, and nothing is deleted. In particular a consumer that was found
+   * rather than created — the one a replacement was about to take down — is
+   * never touched here: it is the previous owner's until a replacement
+   * actually succeeds.
    */
   abandonGatewayIdentity(
     identity: GatewayIdentityRecord,
     consumerId: string | null,
     subject: string,
+    attemptedConsumerId?: string | null,
   ): Promise<void>;
+  /**
+   * Take one registered gateway identity down: delete its Edge consumer,
+   * revoke every credential row that named it, and consume the registration.
+   *
+   * The primitive behind both the account teardown ({@link
+   * disableGatewayAccess}, which runs it once per registered identity) and the
+   * API deletion that must collect its `nexus-test-<api_id>` consumer (issue
+   * #136). The caller must **not** already hold the identity's name key: this
+   * takes {@link gatewayIdentityLockKey} itself, then the consumer's id key
+   * inside it — name-then-id, the order creation takes them in.
+   *
+   * An identity with no registration, or one whose consumer is already gone,
+   * is not an error: the result simply reports nothing was found. A gateway
+   * failure throws, and leaves the registration for a later attempt.
+   */
+  teardownGatewayIdentity(
+    username: string,
+    subject: string,
+    options?: TeardownGatewayIdentityOptions,
+  ): Promise<TeardownGatewayIdentityResult>;
+}
+
+/** Extra conditions {@link CredentialsService.teardownGatewayIdentity} checks. */
+export interface TeardownGatewayIdentityOptions {
+  /**
+   * Tear the identity down only while it is still this account's, and only
+   * while that account is still `disabled` — both re-checked **inside** the
+   * critical section, which is what stops a teardown that queued behind a
+   * recreation from taking the new owner's live identity with it.
+   *
+   * Omitted by the API-deletion path: a test consumer belongs to the API it
+   * names, so whoever created it last, and whether they are still active, has
+   * no bearing on the API going away.
+   */
+  requireDisabledOwner?: Uuid;
+}
+
+/** What one {@link CredentialsService.teardownGatewayIdentity} attempt collected. */
+export interface TeardownGatewayIdentityResult {
+  /** The Edge consumer that was deleted, or `null` when there was none. */
+  consumer_id: string | null;
+  /** How many `credential_metadata` rows moved to `revoked`. */
+  revoked_credentials: number;
+  /** Whether a `gateway_identities` registration was consumed. */
+  registration_removed: boolean;
 }
 
 /** Dependencies of {@link createCredentialsService}. */
@@ -475,6 +541,16 @@ export interface CredentialsServiceDeps {
    * that omits it is ordered only within itself.
    */
   locks?: KeyedSerializer;
+  /**
+   * Structured logger, at `warn`, for a compensation that could not finish.
+   *
+   * The only thing that reaches it is an abandoned identity whose consumer
+   * could not be deleted or could not even be looked up: the request fails for
+   * its own reason, so nothing in the response says the gateway may still be
+   * carrying a `nexus-test-<api_id>` consumer. The registration is kept for a
+   * teardown to collect, and this line is what tells an operator to expect it.
+   */
+  log?: (obj: Record<string, unknown>, message: string) => void;
 }
 
 /* ── Material generation ────────────────────────────────────────────────── */
@@ -1225,6 +1301,14 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     provisioner,
     issueForConsumer,
 
+    async teardownGatewayIdentity(
+      username,
+      subject,
+      options,
+    ): Promise<TeardownGatewayIdentityResult> {
+      return teardownIdentity(username, subject, options);
+    },
+
     async claimGatewayIdentity(ownerId, username): Promise<GatewayIdentityRecord> {
       return locks(userLifecycleLockKey(ownerId), async () => {
         // Inside the key, so the answer cannot change between here and the
@@ -1243,18 +1327,58 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       await store.gatewayIdentities.bindConsumer(identity.id, consumerId);
     },
 
-    async abandonGatewayIdentity(identity, consumerId, subject): Promise<void> {
-      if (consumerId !== null) {
-        const created = consumerId;
+    async abandonGatewayIdentity(
+      identity,
+      consumerId,
+      subject,
+      attemptedConsumerId = null,
+    ): Promise<void> {
+      let created = consumerId;
+      if (created === null && attemptedConsumerId !== null) {
+        // The create was rejected — but a rejection is not proof the gateway
+        // did not apply it, and the caller only ever holds an id the *answer*
+        // gave it. It does hold the id it *asked for*, though, because Nexus
+        // names every consumer it creates: one read of that id says which of
+        // the two happened.
+        try {
+          created = (await edge.consumers.get(attemptedConsumerId))?.id ?? null;
+        } catch (error) {
+          // The gateway cannot say whether the consumer exists, so neither can
+          // this. Keep the registration: it is the only thing that will lead
+          // anyone back to an orphan, and it costs nothing when there is none.
+          deps.log?.(
+            {
+              user_id: identity.user_id,
+              consumer_username: identity.ferrum_username,
+              consumer_id: attemptedConsumerId,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            'an abandoned gateway identity could not be resolved; its registration was kept for teardown',
+          );
+          await ensureTeardownOwed(identity.user_id).catch(() => undefined);
+          return;
+        }
+      }
+      if (created !== null) {
+        const live = created;
         try {
           // The caller holds the identity's name key and has left the
           // consumer's id key (the append that failed released it), so this
           // is the same name-then-id order as everywhere else.
-          await edge.serializePerKey(created, () => edge.consumers.delete(created, subject));
-        } catch {
+          await edge.serializePerKey(live, () => edge.consumers.delete(live, subject));
+        } catch (error) {
           // The consumer is still up, carrying the API's approval group. The
           // registration stays — it is what a teardown enumerates — and if the
           // owner is no longer active, a teardown must be owed for it.
+          deps.log?.(
+            {
+              user_id: identity.user_id,
+              consumer_username: identity.ferrum_username,
+              consumer_id: live,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            'an abandoned gateway identity could not be deleted; its registration was kept for teardown',
+          );
           await ensureTeardownOwed(identity.user_id).catch(() => undefined);
           return;
         }
@@ -1328,54 +1452,11 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // creation holds for the whole of its work, so an in-flight issuance is
       // waited for and then undone rather than raced.
       for (const identity of await store.gatewayIdentities.listByUser(userId, namespace)) {
-        const outcome = await edge.serializePerKey(
-          gatewayIdentityLockKey(identity.ferrum_username),
-          async () => {
-            await assertStillDisabled(userId);
-            // Re-read under the key: the registration may have changed hands
-            // while this teardown waited for it — an administrator recreating
-            // the test consumer takes it over, and their replacement has
-            // already revoked this account's rows on the old consumer.
-            const current = await store.gatewayIdentities.findByUsername(
-              namespace,
-              identity.ferrum_username,
-            );
-            if (!current || current.user_id !== userId) return { count: 0, consumerId: null };
-
-            // By id once the registration is bound: one read, on a gateway of
-            // any size. The username scan is capped, and only a registration
-            // whose creation stopped before `bind` — the consumer may or may
-            // not exist — has nothing better to go on. Past the cap the scan
-            // throws rather than answering "not found", so the job stays
-            // `pending` with the registration intact instead of closing over
-            // a consumer nobody looked at.
-            const live =
-              current.ferrum_consumer_id !== null
-                ? await edge.consumers.get(current.ferrum_consumer_id)
-                : await edge.consumers.getByUsername(identity.ferrum_username);
-            let count = 0;
-            if (live) {
-              // Name, then id — the order creation takes the two keys in. A
-              // test consumer is disposable by definition, so it goes away
-              // entirely rather than being stripped and left as an empty
-              // identity.
-              count += await edge.serializePerKey(live.id, async () => {
-                await edge.consumers.delete(live.id, subject);
-                return revokeRowsFor(live.id);
-              });
-            }
-            if (current.ferrum_consumer_id !== null && current.ferrum_consumer_id !== live?.id) {
-              // The consumer this registration last knew is already gone;
-              // whatever rows still describe it cannot authenticate anything.
-              count += await revokeRowsFor(current.ferrum_consumer_id);
-            }
-            // Consumed: a retry must not come back to an identity that is done.
-            await store.gatewayIdentities.delete(current.id);
-            return { count, consumerId: live?.id ?? null };
-          },
-        );
-        revoked += outcome.count;
-        if (outcome.consumerId !== null) deleted.push(outcome.consumerId);
+        const outcome = await teardownIdentity(identity.ferrum_username, subject, {
+          requireDisabledOwner: userId,
+        });
+        revoked += outcome.revoked_credentials;
+        if (outcome.consumer_id !== null) deleted.push(outcome.consumer_id);
       }
 
       // Then whatever predates the registry: consumers the account holds live
@@ -2042,6 +2123,87 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       }
     }
     return [...seen].sort();
+  }
+
+  /**
+   * Take one registered identity down, under its own name key.
+   *
+   * Extracted from the account teardown so API deletion can collect the
+   * `nexus-test-<api_id>` consumer through exactly the same steps rather than
+   * a second implementation of them (issue #136). The only account-specific
+   * part is `requireDisabledOwner`, which the API path does not pass.
+   */
+  async function teardownIdentity(
+    username: string,
+    subject: string,
+    options?: TeardownGatewayIdentityOptions,
+  ): Promise<TeardownGatewayIdentityResult> {
+    return edge.serializePerKey(gatewayIdentityLockKey(username), async () => {
+      const owner = options?.requireDisabledOwner;
+      if (owner !== undefined) await assertStillDisabled(owner);
+      // Re-read under the key: the registration may have changed hands while
+      // this teardown waited for it — an administrator recreating the test
+      // consumer takes it over, and their replacement has already revoked the
+      // previous owner's rows on the old consumer.
+      const current = await store.gatewayIdentities.findByUsername(namespace, username);
+      if (owner !== undefined && (!current || current.user_id !== owner)) {
+        return { consumer_id: null, revoked_credentials: 0, registration_removed: false };
+      }
+
+      // By id once the registration is bound: one read, on a gateway of any
+      // size. The bound id is the id Nexus *asked* Edge to assign, and a
+      // replacement's is written before the `POST` that uses it, so a
+      // creation interrupted anywhere after that point still leads straight
+      // to the consumer and a `get` that answers "no such consumer" is proof
+      // the create never landed.
+      //
+      // A registration that stopped before even that — claimed, nothing asked
+      // for yet — is resolved by the id the username derives to, which is the
+      // id the *first* consumer of a name always carries, and only an identity
+      // older than that derivation falls through to the capped scan. Past the
+      // cap the scan throws rather than answering "not found", so the caller
+      // keeps the registration intact instead of closing over a consumer
+      // nobody looked at.
+      //
+      // No registration at all is still worth one derived-id read: it is what
+      // an identity stranded before #139 was fixed looks like, and one `GET`
+      // is what it takes to collect it rather than leave it on the gateway for
+      // good. Never the scan in that case — there is nothing to say a consumer
+      // was ever created, so a namespace-wide read would be paid on every
+      // deletion of an API that simply never had a test consumer.
+      const live = !current
+        ? await edge.consumers.get(edge.consumers.derivedId(username))
+        : current.ferrum_consumer_id !== null
+          ? await edge.consumers.get(current.ferrum_consumer_id)
+          : ((await edge.consumers.get(edge.consumers.derivedId(username))) ??
+            (await edge.consumers.getByUsername(username)));
+      let revoked = 0;
+      if (live) {
+        // Name, then id — the order creation takes the two keys in. A test
+        // consumer is disposable by definition, so it goes away entirely
+        // rather than being stripped and left as an empty identity.
+        revoked += await edge.serializePerKey(live.id, async () => {
+          await edge.consumers.delete(live.id, subject);
+          return revokeRowsFor(live.id);
+        });
+      }
+      if (
+        current &&
+        current.ferrum_consumer_id !== null &&
+        current.ferrum_consumer_id !== live?.id
+      ) {
+        // The consumer this registration last knew is already gone; whatever
+        // rows still describe it cannot authenticate anything.
+        revoked += await revokeRowsFor(current.ferrum_consumer_id);
+      }
+      // Consumed: a retry must not come back to an identity that is done.
+      if (current) await store.gatewayIdentities.delete(current.id);
+      return {
+        consumer_id: live?.id ?? null,
+        revoked_credentials: revoked,
+        registration_removed: current !== null,
+      };
+    });
   }
 
   /** Move every live row of one consumer to `revoked`; returns how many moved. */

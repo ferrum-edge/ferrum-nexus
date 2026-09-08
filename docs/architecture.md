@@ -508,8 +508,12 @@ namespace size. Failed or malformed responses never authorize a create.
 Legacy scans still fail closed at 10,000 consumers; see **Consumer identity
 recovery** in `operations.md` for restoring a missing mapping.
 Provider test consumers resolve a stored `gateway_identities` id before using
-the same derived-id create/adopt path. Replacements receive a fresh Edge id,
-which is bound in that registry before credential issuance.
+the same derived-id create/adopt path. Replacements receive a fresh Nexus-chosen
+id — the derived id belongs to the first consumer of the username and stays with
+it, so reusing it would make a replacement and the consumer it replaced one
+resource in every table keyed on the consumer id. That fresh id is bound in the
+registry _before_ the create that uses it, so a create whose acknowledgement was
+lost is still resolvable by one `GET /consumers/{id}`.
 The mapping lookup, username adoption/create, and mapping insert share a stable
 `consumer-name:[namespace,username]` lease. Concurrent first issuance and approval
 therefore initialize one canonical identity. A retry after local mapping failure

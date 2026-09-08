@@ -1498,10 +1498,20 @@ Destructive and ordered deliberately: the Edge proxy is deleted **first** (so
 nothing stays reachable-but-untracked, and so the API never spends the teardown
 live with its auth plugin already gone), which cascades its plugin associations
 and proxy-scoped plugin configs; any config the cascade missed is swept up
-after. Then the grants, requests, spec revisions and the API row are deleted in
-one store transaction. Only then is the ACL group stripped from every grantee's
-consumer — the group is inert the moment the proxy is gone — and grantees get a
-notification.
+after. Next the API's own gateway identity — the disposable
+`nexus-test-<api_id>` consumer, its credential and the `nexus:api:<id>:approved`
+group it carries — is torn down, because nothing else ever could: it is named
+after an API that is about to stop existing. Then the grants, requests, spec
+revisions and the API row are deleted in one store transaction. Only then is the
+ACL group stripped from every grantee's consumer — the group is inert the moment
+the proxy is gone — and grantees get a notification.
+
+A test consumer that is already gone — or an API that never had one — is not an
+error, and the `api.delete` audit row then names no `test_consumer_id` at all
+rather than claiming a teardown that was never needed. A teardown the gateway
+refuses fails the request with `502 EDGE_ERROR`, leaving the API in the catalog
+so the delete can be retried; the identity stays registered, which is what makes
+it findable.
 
 The gateway teardown and the row delete run under the API's per-proxy lease, and
 the `api.delete` audit row is written only once they have. A `spec_enforcement`
@@ -1578,6 +1588,20 @@ administrator recreating a provider's, say — moves its registration and the
 attribution of its credential to the caller, and it is the caller's disabling
 that takes it down. `403 USER_DISABLED` when the caller was disabled while the
 request was in flight; nothing is created.
+
+A create the gateway applied but failed to acknowledge answers `502 EDGE_ERROR`
+and leaves nothing behind: Nexus names the consumer it asks Edge to create, so
+the compensation re-reads the gateway by that exact id and deletes the consumer
+it finds before releasing the registration. Only if that compensating delete
+cannot run does the registration survive — deliberately, because it is the one
+thing that leads back to the consumer, and deleting the API later collects both.
+
+Recreating a test consumer replaces it with a **distinct** consumer: the
+replacement carries a new id, and the replaced consumer's credential rows move
+to `revoked`. The two are never the same resource, because everything the
+portal records about a credential is keyed on the consumer id.
+
+Deleting the API deletes this consumer with it; see `DELETE /api/apis/:id`.
 
 ---
 

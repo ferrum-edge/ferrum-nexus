@@ -173,6 +173,12 @@ export interface FerrumAdminClient {
      * closing a teardown with the consumer still up — would be wrong.
      */
     getByUsername(username: string): Promise<EdgeConsumer | null>;
+    /**
+     * The id {@link ensure} assigns to the first consumer of `username` in the
+     * configured namespace, without touching the gateway. Not the id of a
+     * consumer that replaces it — see {@link derivedConsumerId}.
+     */
+    derivedId(username: string): string;
     /** Direct stable-id lookup/create; only a legacy identity conflict scans. */
     ensure(
       body: EdgeConsumerWrite,
@@ -331,6 +337,42 @@ const CONSUMER_SCAN_PAGE_SIZE = 500;
  * first 10,000" is not "not there".
  */
 export const CONSUMER_SCAN_LIMIT = MAX_CONSUMER_SCAN_PAGES * CONSUMER_SCAN_PAGE_SIZE;
+
+/**
+ * The consumer id Nexus assigns to the **first** consumer of `username` in
+ * `namespace`.
+ *
+ * UUIDv8: a domain-separated SHA-256 of the namespace and the canonical name.
+ * Edge accepts caller-assigned ids, so {@link FerrumAdminClient.consumers}'
+ * `ensure` creates under this one — which makes it a *pure function of the
+ * name*, computable without asking the gateway anything, and lets a create
+ * whose acknowledgement was lost be resolved with a single
+ * `GET /consumers/{id}` rather than a namespace-wide username scan (issue
+ * #139). Keep the derivation stable across restores.
+ *
+ * It is deliberately **not** the id of a consumer that *replaces* one of the
+ * same name: a replacement must be a distinct resource, or the rows keyed on
+ * the replaced consumer's id (`credential_metadata.ferrum_consumer_id`, and
+ * every revocation and lookup that names it) would be indistinguishable from
+ * the replacement's. A replacement is named by its creator instead and the id
+ * recorded on `gateway_identities` before the `POST`, which buys the same
+ * single-`GET` recovery without the collision.
+ */
+export function derivedConsumerId(namespace: string, username: string): string {
+  const bytes = createHash('sha256')
+    .update(JSON.stringify(['ferrum-nexus-consumer-v1', namespace, username]))
+    .digest();
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x80;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const hex = bytes.subarray(0, 16).toString('hex');
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20),
+  ].join('-');
+}
 
 /**
  * Edge's `MAX_PAGE_SIZE` (`src/admin/mod.rs`). A larger `limit` is clamped to
@@ -1245,22 +1287,12 @@ export function createFerrumAdminClient(
         return found;
       },
 
+      derivedId(username: string): string {
+        return derivedConsumerId(namespace, username);
+      },
+
       async ensure(body, subject): Promise<{ consumer: EdgeConsumer; created: boolean }> {
-        // UUIDv8: a domain-separated SHA-256 of the namespace and canonical name.
-        // Edge accepts caller-assigned ids. Keep this derivation stable across restores.
-        const bytes = createHash('sha256')
-          .update(JSON.stringify(['ferrum-nexus-consumer-v1', namespace, body.username]))
-          .digest();
-        bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x80;
-        bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
-        const hex = bytes.subarray(0, 16).toString('hex');
-        const id = [
-          hex.slice(0, 8),
-          hex.slice(8, 12),
-          hex.slice(12, 16),
-          hex.slice(16, 20),
-          hex.slice(20),
-        ].join('-');
+        const id = derivedConsumerId(namespace, body.username);
         const existing = await this.get(id);
         if (existing) {
           if (existing.username !== body.username) {

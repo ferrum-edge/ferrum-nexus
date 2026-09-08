@@ -2792,6 +2792,9 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
     clearInjections(): void {
       failures.length = 0;
+      // A lost acknowledgement is armed one-shot exactly as a failure is, so
+      // clearing injections has to disarm one that no request ever matched.
+      lostAcks.length = 0;
       delays.length = 0;
     },
 

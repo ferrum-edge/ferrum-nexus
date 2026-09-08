@@ -309,6 +309,7 @@ export async function buildServer(
     audit,
     captcha,
     locks,
+    log: warn,
     onRegistered: deps.onRegistered ?? defaultOnRegistered(config, email, notifications, warn),
     onVerificationResend: emailTokenSender(config, email, warn, {
       templateKey: 'verification',
@@ -360,6 +361,7 @@ export async function buildServer(
     // lifecycle key on: registering a gateway identity has to be ordered
     // against the status flip that disables its owner.
     locks,
+    log: warn,
   });
   // Users is composed after credentials: disabling an account has to strip the
   // gateway identity, not merely the browser session.
