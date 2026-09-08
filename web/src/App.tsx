@@ -11,12 +11,13 @@ import { TooltipProvider } from './components/ui/Tooltip';
 import { BrandingStyles } from './components/layout/BrandingStyles';
 
 /**
- * Error codes that always have a dedicated in-page treatment, so a toast would
- * only duplicate what the user already sees.
+ * Session/auth failures have dedicated treatment. Validation failures must
+ * toast by default; mutations with inline handling can opt out via handledCodes.
+ * The four public auth forms call the API directly and catch their own errors,
+ * so they already bypass these query/mutation cache callbacks.
  */
 const LOCALLY_HANDLED = new Set<string>([
   ERROR_CODES.UNAUTHORIZED,
-  ERROR_CODES.VALIDATION_FAILED,
   ERROR_CODES.CAPTCHA_FAILED,
   ERROR_CODES.EMAIL_NOT_VERIFIED,
 ]);
