@@ -58,8 +58,10 @@ import { parse as parseYaml } from 'yaml';
 
 import {
   MAX_SPEC_BYTES,
+  MAX_SPEC_DEPTH,
   MAX_SPEC_OPERATIONS,
   MAX_SPEC_PATHS,
+  MAX_UPSTREAM_URL_LENGTH,
   OPENAPI_OPERATION_METHODS,
 } from '@ferrum-nexus/shared';
 
@@ -464,6 +466,29 @@ function parseDocument(text: string): { value: unknown; contentType: ParsedSpec[
   }
 }
 
+/** Bound traversal and later serialization without using the JavaScript call stack. */
+function assertSpecDepth(value: unknown): void {
+  const pending = [{ value, depth: 1 }];
+  // YAML aliases may share objects: revisit only when reached at a greater depth.
+  // Cycles therefore also hit the depth limit, without exponential traversal.
+  const visited = new WeakMap<object, number>();
+  while (pending.length > 0) {
+    const entry = pending.pop();
+    if (!entry || entry.value === null || typeof entry.value !== 'object') continue;
+    if (entry.depth > MAX_SPEC_DEPTH) {
+      throw specInvalid(`The document exceeds the ${MAX_SPEC_DEPTH} level nesting limit`, {
+        reason: 'nesting_too_deep',
+        limit: MAX_SPEC_DEPTH,
+      });
+    }
+    if ((visited.get(entry.value) ?? 0) >= entry.depth) continue;
+    visited.set(entry.value, entry.depth);
+    for (const child of Object.values(entry.value)) {
+      pending.push({ value: child, depth: entry.depth + 1 });
+    }
+  }
+}
+
 /**
  * Parse and validate an uploaded OpenAPI document.
  *
@@ -484,6 +509,7 @@ export function parseOpenApiSpec(text: string): ParsedSpec {
 
   const raw = text.trim();
   const { value, contentType } = parseDocument(raw);
+  assertSpecDepth(value);
 
   if (!isRecord(value)) {
     throw specInvalid('The OpenAPI document must be a JSON or YAML object');
@@ -606,13 +632,26 @@ function readPaths(paths: Record<string, unknown>): SpecPath[] {
 }
 
 /** Expand declared string defaults once; never pass unresolved templates to URL parsing. */
-function expandServerUrl(server: Record<string, unknown>): string | null {
+function expandServerUrl(server: Record<string, unknown>, field = 'servers[].url'): string | null {
   if (typeof server.url !== 'string') return null;
   const variables = isRecord(server.variables) ? server.variables : {};
-  let valid = true;
-  let expandedLength = server.url.length;
-  const expanded = server.url.replace(/\{([^{}]+)\}/g, (placeholder: string, name: string) => {
-    if (!valid) return '';
+  const template = server.url.trim();
+  const parts: string[] = [];
+  let offset = 0;
+  let expandedLength = 0;
+  const append = (part: string): void => {
+    expandedLength += part.length;
+    if (expandedLength > MAX_UPSTREAM_URL_LENGTH) {
+      throw specInvalid(
+        `${field} must not exceed ${MAX_UPSTREAM_URL_LENGTH} characters after expansion`,
+        { field, limit: MAX_UPSTREAM_URL_LENGTH },
+      );
+    }
+    parts.push(part);
+  };
+  for (const match of template.matchAll(/\{([^{}]+)\}/g)) {
+    const name = match[1] as string;
+    append(template.slice(offset, match.index));
     const variable = Object.hasOwn(variables, name) ? variables[name] : undefined;
     if (
       !isRecord(variable) ||
@@ -620,25 +659,22 @@ function expandServerUrl(server: Record<string, unknown>): string | null {
       (variable.enum !== undefined &&
         (!Array.isArray(variable.enum) || !variable.enum.includes(variable.default)))
     ) {
-      valid = false;
-      return '';
+      return null;
     }
-    expandedLength += variable.default.length - placeholder.length;
-    if (expandedLength > MAX_SPEC_BYTES) {
-      valid = false;
-      return '';
-    }
-    return variable.default;
-  });
-  return valid && !/[{}]/.test(expanded) ? expanded : null;
+    append(variable.default);
+    offset = match.index + match[0].length;
+  }
+  append(template.slice(offset));
+  const expanded = parts.join('');
+  return !/[{}]/.test(expanded) ? expanded : null;
 }
 
 /** First usable expanded server URL, skipping relative or unresolved entries. */
 function readDefaultUpstream(servers: unknown): SpecUpstream | null {
   if (!Array.isArray(servers)) return null;
-  for (const server of servers) {
+  for (const [index, server] of servers.entries()) {
     if (!isRecord(server) || typeof server.url !== 'string') continue;
-    const expanded = expandServerUrl(server);
+    const expanded = expandServerUrl(server, `servers[${index}].url`);
     const parsed = expanded === null ? null : parseUpstreamUrl(expanded);
     if (parsed) return parsed;
   }
