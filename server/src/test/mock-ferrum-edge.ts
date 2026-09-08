@@ -204,6 +204,23 @@ export interface MockFerrumEdge {
     skip?: number,
   ): void;
   /**
+   * Apply the next matching request normally, then answer it with `status` and
+   * `body` — the lost acknowledgement of a write Edge really did perform.
+   *
+   * {@link MockFerrumEdge.queueFailure} refuses a request *before* it touches
+   * the stored resource, which models a gateway that declined the write. This
+   * models the other half: the mutation lands, the caller is told it did not,
+   * and the two sides are left disagreeing with nothing on the wire to say so.
+   * Narrowed by `pathContains`, `method` and `skip` exactly as failures are.
+   */
+  queueLostAck(
+    status: number,
+    body?: unknown,
+    pathContains?: string,
+    method?: string,
+    skip?: number,
+  ): void;
+  /**
    * Hold the next request whose path contains `pathContains` for `ms` *before*
    * it is handled, then forget the entry.
    *
@@ -1280,7 +1297,17 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   const namespaces = new Map<string, { name: string; description: string | null }>();
   const requests: RecordedRequest[] = [];
   const failures: QueuedFailure[] = [];
+  const lostAcks: QueuedFailure[] = [];
   const delays: QueuedDelay[] = [];
+  /**
+   * Responses whose acknowledgement is being dropped, keyed by the response
+   * object the handler will eventually write to.
+   *
+   * Armed before the request is dispatched and consumed by {@link send}, so
+   * every handler — and every status it might have chosen — is covered without
+   * any of them knowing.
+   */
+  const droppedAcks = new WeakMap<ServerResponse, { status: number; body: unknown }>();
 
   /** `<namespace>|<proxy_id>|<method>|<status>` → cumulative count. */
   const requestCounters = new Map<string, number>();
@@ -1454,6 +1481,11 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   }
 
   function send(res: ServerResponse, status: number, body?: unknown): void {
+    const dropped = droppedAcks.get(res);
+    if (dropped) {
+      droppedAcks.delete(res);
+      return send(res, dropped.status, dropped.body);
+    }
     if (body === undefined) {
       res.writeHead(status);
       res.end();
@@ -2446,6 +2478,23 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
     }
 
+    // Armed, not applied: the request runs to completion against the stored
+    // resource and only its *answer* is replaced, which is what a lost
+    // acknowledgement looks like from the client's side.
+    const lost = lostAcks.find(
+      (entry) =>
+        (entry.pathContains === undefined || url.pathname.includes(entry.pathContains)) &&
+        (entry.method === undefined || entry.method === method),
+    );
+    if (lost) {
+      if (lost.skip > 0) {
+        lost.skip -= 1;
+      } else {
+        lostAcks.splice(lostAcks.indexOf(lost), 1);
+        droppedAcks.set(res, { status: lost.status, body: lost.body });
+      }
+    }
+
     switch (segments[0]) {
       case 'health':
       case 'status':
@@ -2549,6 +2598,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       namespaces.clear();
       requests.length = 0;
       failures.length = 0;
+      lostAcks.length = 0;
       delays.length = 0;
       requestCounters.clear();
       requestDurations.clear();
@@ -2569,6 +2619,22 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       failures.push({
         status,
         body: body ?? { error: 'Injected failure' },
+        skip,
+        ...(pathContains === undefined ? {} : { pathContains }),
+        ...(method === undefined ? {} : { method }),
+      });
+    },
+
+    queueLostAck(
+      status: number,
+      body?: unknown,
+      pathContains?: string,
+      method?: string,
+      skip = 0,
+    ): void {
+      lostAcks.push({
+        status,
+        body: body ?? { error: 'Acknowledgement dropped after the write landed' },
         skip,
         ...(pathContains === undefined ? {} : { pathContains }),
         ...(method === undefined ? {} : { method }),

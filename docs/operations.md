@@ -1345,14 +1345,47 @@ part: two appends inside one millisecond, or a clock stepped backwards between
 two appends, used to reorder the mirror and send a revoke to the wrong entry.
 
 Every destructive call cross-checks that mirror against the live array length
-read in the same critical section. Nexus itself can no longer break the
-agreement — a rotation revokes the row it retired the moment Edge confirms the
-delete, and an append whose row cannot be written is deleted again — so a
-mismatch means the consumer was edited **outside Nexus**.
+read in the same critical section.
+
+### The `retiring` status: a retirement recorded before it is attempted
+
+Ordering the two sides is not enough on its own. A `DELETE` Edge **applied**
+whose acknowledgement never arrived, or a confirmed delete whose follow-up row
+update failed, would leave the mirror permanently one row longer than the
+array — and the cross-check above then refused every later rotate *and* revoke
+of that type while the per-type cap blocked issuing a replacement. The account
+was left holding a live gateway credential nobody could revoke, which is the
+one operation an incident response cannot do without.
+
+So the row is moved to **`retiring`** *before* the destructive call and settled
+to `revoked` after it. `retiring` is durable, still counts as a live slot for
+the cap and for positions, and means exactly _"the gateway entry behind this row
+may already be gone"_. A later rotate, revoke or issue on the same consumer and
+type reads it back and, **in the one shape that admits a single reading** —
+the mirror exactly one row longer than the array, and exactly one live row
+carrying the pending retirement — settles that row and carries on. The
+settlement writes a `credential.settle` audit row naming the credential, the
+consumer, and the two counts that disagreed.
+
+Retrying the delete is not an alternative: when the acknowledgement was lost the
+entry is already gone, so the retry addresses a different entry or `404`s.
+
+A row can also be left `retiring` when a delete failed **outright** and the
+entry is therefore still on the gateway. That is the safe reading of an unknown
+outcome: the lengths then agree, no settlement fires, positions resolve
+normally, and the credential stays revocable. Where the portal can *prove* the
+delete did not apply — the array is still exactly as its own append left it —
+it withdraws the intent and puts the row back to `active`.
+
+`basicauth` is outside all of this: Edge omits it from every read projection, so
+its array length is unknowable and the mirror is the only word on its positions,
+exactly as it has always been.
 
 ### What a drifted consumer looks like
 
-Rotate or revoke returns `502 EDGE_ERROR`:
+Drift that no single pending retirement explains — a consumer edited **outside
+Nexus**, or two rows retiring at once — still refuses. Rotate or revoke returns
+`502 EDGE_ERROR`:
 
 > The gateway credential list does not match the portal. An administrator must
 > reconcile this consumer …
@@ -1361,6 +1394,21 @@ with `details: { expected, actual }` — `expected` is the number of live portal
 rows, `actual` the length of the Edge array. The one case that is not an error
 is a single live row: a revoke then degrades to deleting the whole credential
 type, which is what a revoke asked for anyway.
+
+The refusal is deliberate and is not weakened by the self-healing above: acting
+on a stale index is how somebody else's live key gets deleted. To see whether a
+consumer is drifting for a reason the portal can settle, look for a pending
+retirement:
+
+```sql
+SELECT ferrum_consumer_id, credential_type, COUNT(*) AS retiring
+  FROM credential_metadata
+  WHERE status = 'retiring'
+  GROUP BY ferrum_consumer_id, credential_type;
+```
+
+One such row for the pair means the next rotate, revoke or issue will settle it
+by itself. None, or more than one, means the reconciliation below.
 
 ### What an ambiguous legacy consumer looks like
 
@@ -1423,3 +1471,26 @@ entry is deleted before the replacement is appended (there is no room for both),
 so if the append fails the response says so plainly — _the previous credential
 was removed … issue a new credential_ — the retired row is already `revoked`,
 and everything still live remains revocable.
+
+A failed rotation **below the cap** needs none of it either. The replacement is
+appended first, so a delete that fails leaves an entry whose show-once plaintext
+was never handed to anyone; the portal takes that entry back and deletes its row
+before returning the original error, and the account is left as the rotation
+found it. Both outcomes are recorded as `credential.append_rollback`. Only when
+the compensating delete *also* fails does the caller get
+
+> The previous credential could not be removed from the gateway and the
+> replacement created for it could not be taken back …
+
+with `details.stranded_credential_id`. Both sides still agree at that point —
+one extra entry, one extra row — so the account holder can revoke the named
+credential themselves; no administrator is needed. The audit row carries the
+same id, so a `credential.append_rollback` with `withdrawn: false` is the query
+that finds gateway entries nobody holds:
+
+```sql
+SELECT created_at, target_id AS consumer_id, details
+  FROM audit_logs
+  WHERE action = 'credential.append_rollback'
+  ORDER BY created_at DESC;
+```

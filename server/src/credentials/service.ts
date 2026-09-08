@@ -87,6 +87,38 @@
  *   gone and a new one must be issued.
  * - An append Edge accepted whose metadata row cannot be written is deleted
  *   again, because a live secret with no row is one nobody can see or revoke.
+ *   The delete that undoes it is positional, so it runs only against an array
+ *   that still looks the way the append left it ({@link
+ *   withdrawAppendedEntry}); what it declines to remove is audited, never
+ *   forgotten.
+ * - An append that Edge accepted and whose *paired delete* then failed is
+ *   taken back too. Its plaintext is show-once and this call is not returning
+ *   it, so leaving it would spend a cap slot on a credential nobody holds and
+ *   nothing in the audit trail would explain where it came from.
+ *
+ * ## Ordering is not enough on its own: the retirement is recorded first
+ *
+ * Ordering settles which side may be written when, but it cannot make a
+ * destructive remote call and the local write that records it agree when one
+ * of the two is simply lost. A `DELETE` Edge applied whose acknowledgement
+ * never arrived — or a confirmed delete whose follow-up row update fails —
+ * used to leave the mirror one row longer than the array for good.
+ * {@link resolveCredentialIndex} then refused every later rotate *and* revoke
+ * of that type, the cap blocked issuing a replacement, and the account was
+ * left holding a live gateway credential its owner could not kill.
+ *
+ * So the row is moved to `retiring` **before** the delete, not after it. That
+ * status is durable, still counts as a live array slot, and means exactly
+ * "the entry behind this row may already be gone". A later call reads it back
+ * and, in the one shape that admits a single reading — the mirror exactly one
+ * row longer than the array, and exactly one live row carrying the intent —
+ * settles it and carries on ({@link settleLostRetirement}). Every other
+ * mismatch is still refused: acting on a stale index is how somebody else's
+ * live key dies, and no bookkeeping convenience is worth that.
+ *
+ * Retrying the delete is *not* an alternative. When the acknowledgement was
+ * lost the entry is already gone, so the retry addresses a different entry or
+ * `404`s, and the operator is back where they started.
  *
  * ## The target is loaded twice, and the second read is the one that counts
  *
@@ -120,6 +152,7 @@ import {
   type IssueCredentialResponse,
   type Paginated,
   type ReconcileCredentialsResponse,
+  type Role,
   type RotateCredentialResponse,
   type ShowOnceSecret,
   type Uuid,
@@ -164,6 +197,9 @@ export const CREDENTIAL_TYPES = [
 /** Statuses that still occupy a slot in the Edge credentials array. */
 const LIVE_STATUSES = new Set(['active', 'retiring']);
 
+/** What Edge substitutes for credential material on every ordinary read. */
+const REDACTED_MATERIAL = '[REDACTED]';
+
 /**
  * The serializer key for a non-canonical gateway identity, by **name**.
  *
@@ -180,13 +216,16 @@ export function gatewayIdentityLockKey(username: string): string {
 }
 
 /**
- * Raised whenever the Nexus mirror and the live Edge array disagree.
+ * Raised whenever the Nexus mirror and the live Edge array disagree in a way
+ * that cannot be read unambiguously.
  *
- * Nothing in the credential paths can produce this any more — every failure
- * mode leaves the mirror matching Edge — so reaching it means the consumer was
- * edited outside Nexus. The message names the fix because the operator holding
- * the 502 is the one who has to apply it; the full procedure is
- * `operations.md` §12, "The credential mirror".
+ * The drift Nexus can produce on its own — a delete Edge applied whose
+ * acknowledgement was lost — is recorded as a `retiring` row and settled by
+ * {@link settleLostRetirement} before this is ever reached. What is left is
+ * either a consumer edited outside Nexus, or drift compounded past the point
+ * where a single reading exists. The message names the fix because the
+ * operator holding the 502 is the one who has to apply it; the full procedure
+ * is `operations.md` §12, "The credential mirror".
  */
 const RECONCILE_MESSAGE =
   'The gateway credential list does not match the portal. An administrator must reconcile this consumer — revoke the portal’s remaining credentials for it and issue new ones, or delete the entries added to the gateway by hand — before it can be rotated or revoked';
@@ -201,6 +240,24 @@ const RECONCILE_MESSAGE =
  */
 const AMBIGUOUS_MESSAGE =
   'The gateway position of this credential cannot be determined: it predates the portal’s position tracking and shares that state with another live credential of the same type. An administrator must reconcile this consumer — clearing the credential type on the gateway and revoking its portal rows — after which new credentials can be issued';
+
+/** Outcome of taking back an entry an append had already created on Edge. */
+interface AppendWithdrawal {
+  /** Whether the appended entry is gone from the gateway. */
+  withdrawn: boolean;
+  /**
+   * Whether the array was still exactly as the append left it: one entry
+   * longer than the length the append index was derived from, with this
+   * call's entry at the tail. Necessarily `false` for `basicauth`, which no
+   * read projection shows, and for any array that moved underneath the call.
+   *
+   * What it licenses is narrow but useful: everything that was in the array
+   * before the append is provably still in it, so a paired delete that
+   * reported failure really did fail, and the retirement it was going to
+   * apply can be withdrawn along with the append.
+   */
+  arrayAsAppended: boolean;
+}
 
 /** Generated plaintext plus the Edge entry that carries it. */
 interface GeneratedCredential {
@@ -419,6 +476,33 @@ export function generateCredential(
   }
 }
 
+/**
+ * The plaintext an Edge credential entry carries, or `null` when it is hidden.
+ *
+ * Every ordinary Admin API read replaces `keyauth.key` and `jwt.secret` with
+ * the literal `[REDACTED]` and omits `basicauth` altogether (§4.5), so on a
+ * real gateway this answers `null` for every entry a `GET` returns. It is
+ * still worth asking: where the material *is* visible — a write response, a
+ * gateway that does not redact — it is the strongest identity check an entry
+ * has, and {@link CredentialsService} uses it to refuse a compensating delete
+ * that would otherwise land on the wrong key.
+ */
+export function credentialMaterial(
+  entry: EdgeCredentialEntry,
+  type: CredentialType,
+): string | null {
+  let value: unknown;
+  if (type === 'keyauth') {
+    value = 'key' in entry ? entry.key : undefined;
+  } else if (type === 'jwt') {
+    value = 'secret' in entry ? entry.secret : undefined;
+  } else {
+    value = 'password' in entry ? entry.password : undefined;
+  }
+  if (typeof value !== 'string' || value === REDACTED_MATERIAL) return null;
+  return value;
+}
+
 /** One attempt at stripping a disabled account's gateway identity. */
 export interface GatewayTeardownAttempt {
   /** What the caller reports to the client. Never a terminal failure. */
@@ -629,6 +713,177 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     return Array.isArray(entries) ? entries.length : 0;
   }
 
+  /**
+   * Settle a retirement Edge applied but the portal never recorded, and answer
+   * with the live rows as they stand afterwards.
+   *
+   * A rotation and a revocation both move the row they are retiring to
+   * `retiring` *before* the gateway delete, so the intent is durable before
+   * anything destructive happens. When the delete's acknowledgement is lost —
+   * or the write that settles the row to `revoked` fails right after it — the
+   * mirror is left one row longer than the array, and every later rotate and
+   * revoke of that type used to die on {@link resolveCredentialIndex}'s length
+   * check. The account was then holding a live gateway credential its owner
+   * could no longer revoke, which is the one operation an incident response
+   * needs first.
+   *
+   * The repair is deliberately narrow. Exactly one row too many, and exactly
+   * one live row carrying the pending intent: then that row is the entry Edge
+   * no longer has, settling it makes the two views agree, and every remaining
+   * row keeps its position (a positional delete shifts everything after it
+   * down, which is the same order the mirror is in). Any other shape is
+   * genuine drift — a consumer edited by hand — and still refuses, because
+   * acting on a stale index is how somebody else's live key dies.
+   *
+   * `basicauth` never reaches this: Edge omits it from every read, so
+   * {@link edgeArrayLength} answers with the mirror's own count and the
+   * lengths can never differ. Its positions are the mirror's word alone, as
+   * everywhere else in this module.
+   */
+  async function settleLostRetirement(input: {
+    consumerId: string;
+    type: CredentialType;
+    /** Live rows in gateway order, as {@link liveRows} returned them. */
+    rows: CredentialRecord[];
+    /** Array length read from the gateway inside the same serialised block. */
+    edgeLength: number;
+    actor: { id: Uuid; role: Role };
+    ip: string | null;
+  }): Promise<CredentialRecord[]> {
+    if (input.rows.length !== input.edgeLength + 1) return input.rows;
+    const pending = input.rows.filter((row) => row.status === 'retiring');
+    const retired = pending.length === 1 ? pending[0] : undefined;
+    if (!retired) return input.rows;
+
+    // The settlement and the row that records it commit together: a repair
+    // with no trail is indistinguishable from the drift it repaired, and a
+    // trail describing a repair that did not commit is worse still.
+    const settled = await store.transaction(async (tx) => {
+      const fresh = await tx.credentials.findById(retired.id);
+      if (!fresh || fresh.status !== 'retiring') return false;
+      await tx.credentials.update(retired.id, { status: 'revoked' });
+      const scoped = audit.forStore(tx);
+      await scoped.record(
+        { id: input.actor.id, role: input.actor.role },
+        AuditAction.CREDENTIAL_SETTLE,
+        { type: 'credential', id: retired.id },
+        {
+          credential_type: input.type,
+          consumer_id: input.consumerId,
+          last4: retired.last4,
+          owner_user_id: retired.user_id,
+          mirror_rows: input.rows.length,
+          gateway_entries: input.edgeLength,
+        },
+        input.ip,
+      );
+      return true;
+    });
+    if (!settled) return input.rows;
+    return input.rows.filter((row) => row.id !== retired.id);
+  }
+
+  /**
+   * Take back an entry this call appended — or leave the array alone and say
+   * so.
+   *
+   * `appendIndex` is where `POST` put the entry: Edge appends, so it is the
+   * array length read from the gateway immediately before the call. The delete
+   * that undoes it is destructive and addressed by position, so it is only
+   * issued when the array still looks the way the append left it — exactly one
+   * entry longer than the length the index came from. Anything else means the
+   * array moved underneath the call, and deleting at a stale index is how an
+   * older, still-live key dies; "delete nothing" is strictly better, and the
+   * caller audits the entry it had to leave behind.
+   *
+   * `basicauth` is the exception Edge's read projection forces: it appears in
+   * no response at all, so there is no array to check and the mirror's own
+   * count is the only position there is. Its entry is taken back on that word,
+   * exactly as every other `basicauth` position in this module is resolved.
+   *
+   * Answers whether the entry is gone, and whether the array it was read from
+   * was still exactly as the append left it.
+   */
+  async function withdrawAppendedEntry(input: {
+    consumerId: string;
+    type: CredentialType;
+    appendIndex: number;
+    /** Fingerprint of the material that was appended. */
+    fingerprint: string;
+    actorId: Uuid;
+  }): Promise<AppendWithdrawal> {
+    let asAppended = false;
+    if (input.type !== 'basicauth') {
+      const live = await edge.consumers.get(input.consumerId).catch(() => undefined);
+      // A consumer that no longer exists took its credentials with it; one that
+      // cannot be read is a question mark, and a question mark is not grounds
+      // for a positional delete.
+      if (live === null) return { withdrawn: true, arrayAsAppended: false };
+      if (live === undefined) return { withdrawn: false, arrayAsAppended: false };
+      const entries = live.credentials[input.type];
+      if (!Array.isArray(entries) || entries.length !== input.appendIndex + 1) {
+        return { withdrawn: false, arrayAsAppended: false };
+      }
+      const entry = entries[input.appendIndex];
+      if (entry === undefined) return { withdrawn: false, arrayAsAppended: false };
+      const material = credentialMaterial(entry, input.type);
+      if (material !== null && crypto.fingerprint(material) !== input.fingerprint) {
+        return { withdrawn: false, arrayAsAppended: false };
+      }
+      asAppended = true;
+    }
+    try {
+      await edge.consumers.deleteCredentialAt(
+        input.consumerId,
+        input.type,
+        input.appendIndex,
+        input.actorId,
+      );
+      return { withdrawn: true, arrayAsAppended: asAppended };
+    } catch {
+      return { withdrawn: false, arrayAsAppended: asAppended };
+    }
+  }
+
+  /**
+   * Record an append that had to be undone, and whether it actually went.
+   *
+   * Best effort by construction: it runs on a path that is already failing,
+   * and the error the caller is carrying is the one worth reporting.
+   */
+  async function recordAppendRollback(details: {
+    consumerId: string;
+    type: CredentialType;
+    withdrawn: boolean;
+    operation: 'issue' | 'rotate';
+    /** The row for the appended entry, when one was written. */
+    strandedCredentialId?: Uuid | null;
+    ownerId: Uuid;
+    actor: { id: Uuid; role: Role };
+    cause: unknown;
+    ip?: string | null;
+  }): Promise<void> {
+    await audit
+      .record(
+        { id: details.actor.id, role: details.actor.role },
+        AuditAction.CREDENTIAL_APPEND_ROLLBACK,
+        { type: 'consumer', id: details.consumerId },
+        {
+          credential_type: details.type,
+          consumer_id: details.consumerId,
+          operation: details.operation,
+          withdrawn: details.withdrawn,
+          owner_user_id: details.ownerId,
+          ...(details.withdrawn || !details.strandedCredentialId
+            ? {}
+            : { stranded_credential_id: details.strandedCredentialId }),
+          cause: details.cause instanceof Error ? details.cause.message : String(details.cause),
+        },
+        details.ip ?? null,
+      )
+      .catch(() => undefined);
+  }
+
   async function loadOwned(user: UserRecord, credentialId: Uuid): Promise<CredentialRecord> {
     const credential = await store.credentials.findById(credentialId);
     if (!credential) throw notFound('Credential', credentialId);
@@ -648,13 +903,20 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * whose row could not be written is a live secret nobody in the portal can
    * see, name or revoke, so it is deleted again before the failure propagates.
    * `appendIndex` is where `POST` will have put it — Edge appends, so that is
-   * the array length before the call.
+   * the array length **read from the gateway** before the call. It must not be
+   * derived from the mirror: a portal restored on its own is documented to
+   * leave fewer rows than the gateway has entries, and an index counted from
+   * the short side points at somebody else's older, still-live key.
+   * {@link withdrawAppendedEntry} checks the array before acting on it either
+   * way, and what it declines to remove is audited rather than forgotten.
    */
   async function appendCredential(input: {
     /** The account the row is attributed to and that the secret belongs to. */
     ownerId: Uuid;
     /** Who Edge records as the subject of the write — an admin, when acting. */
     actorId: Uuid;
+    /** The actor's role, for the audit row a failed compensation writes. */
+    actorRole: Role;
     consumerId: string;
     consumerUsername: string;
     type: CredentialType;
@@ -662,6 +924,9 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     rotatedFromId?: Uuid | null;
     /** Index the appended entry occupies, for the compensating delete. */
     appendIndex?: number;
+    /** Which operation to name in that audit row. */
+    operation?: 'issue' | 'rotate';
+    ip?: string | null;
   }): Promise<{ credential: CredentialRecord; secret: ShowOnceSecret }> {
     const generated = generateCredential(input.type, input.consumerUsername);
     await edge.consumers.addCredential(
@@ -690,11 +955,29 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       return { credential, secret: generated.secret };
     } catch (error) {
       if (input.appendIndex !== undefined) {
-        // Best effort: the store failure is the one worth reporting, and a
-        // failed compensation leaves an orphan the reconciliation guard names.
-        await edge.consumers
-          .deleteCredentialAt(input.consumerId, input.type, input.appendIndex, input.actorId)
-          .catch(() => undefined);
+        // The store failure is the one worth reporting, but the entry it
+        // failed to mirror is not allowed to disappear from the record: a
+        // withdrawal that could not be made safely leaves a live secret
+        // nobody holds, and only the audit row says where it is.
+        const { withdrawn } = await withdrawAppendedEntry({
+          consumerId: input.consumerId,
+          type: input.type,
+          appendIndex: input.appendIndex,
+          fingerprint: crypto.fingerprint(generated.material),
+          actorId: input.actorId,
+        });
+        await recordAppendRollback({
+          consumerId: input.consumerId,
+          type: input.type,
+          withdrawn,
+          operation: input.operation ?? 'issue',
+          // The row is what failed to be written, so there is none to name.
+          strandedCredentialId: null,
+          ownerId: input.ownerId,
+          actor: { id: input.actorId, role: input.actorRole },
+          cause: error,
+          ip: input.ip ?? null,
+        });
       }
       throw error;
     }
@@ -708,7 +991,25 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     }
     return edge.serializePerKey(input.consumerId, async () => {
       await assertOwnerActive(input.user.id);
-      const rows = await liveRows(input.consumerId, input.credentialType);
+      // The gateway, not the mirror, says where `POST` will put the entry —
+      // and the read is race-free because the consumer's lease is already
+      // held, exactly as it is for `rotate`. Counting from the mirror is what
+      // made a failed issue on a Nexus-only restore delete the pre-restore key
+      // instead of the orphan it had just created.
+      const consumer = await edge.consumers.get(input.consumerId);
+      if (!consumer) throw edgeError('The gateway consumer for this account no longer exists');
+      const live = await liveRows(input.consumerId, input.credentialType);
+      const length = edgeArrayLength(consumer.credentials, input.credentialType, live.length);
+      const rows = await settleLostRetirement({
+        consumerId: input.consumerId,
+        type: input.credentialType,
+        rows: live,
+        edgeLength: length,
+        actor: { id: input.user.id, role: input.user.role },
+        ip: null,
+      });
+      // The cap is a portal policy over the account's own credentials, so it
+      // is counted on the mirror; the gateway enforces its own on the append.
       if (input.skipCap !== true && rows.length >= cap) {
         throw conflict(
           `You already hold ${rows.length} live ${input.credentialType} credentials (the gateway allows ${cap}); revoke or rotate one first`,
@@ -718,11 +1019,13 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       return appendCredential({
         ownerId: input.user.id,
         actorId: input.user.id,
+        actorRole: input.user.role,
         consumerId: input.consumerId,
         consumerUsername: input.consumerUsername,
         type: input.credentialType,
         label: input.label ?? null,
-        appendIndex: rows.length,
+        appendIndex: length,
+        operation: 'issue',
       });
     });
   }
@@ -1041,8 +1344,20 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
 
         const consumer = await edge.consumers.get(consumerId);
         if (!consumer) throw edgeError('The gateway consumer for this credential no longer exists');
-        const rows = await liveRows(consumerId, type);
-        const length = edgeArrayLength(consumer.credentials, type, rows.length);
+        const live = await liveRows(consumerId, type);
+        const length = edgeArrayLength(consumer.credentials, type, live.length);
+        // A retirement whose delete Edge applied but never acknowledged is
+        // settled here rather than refused: the mirror is one row longer than
+        // the array, and refusing would leave the surviving credential
+        // unrotatable and unrevokable for good.
+        const rows = await settleLostRetirement({
+          consumerId,
+          type,
+          rows: live,
+          edgeLength: length,
+          actor: { id: user.id, role: user.role },
+          ip,
+        });
         const position = resolveCredentialIndex(rows, current, length);
         if (position === 'not-live') {
           throw conflict('This credential has already been revoked');
@@ -1063,6 +1378,11 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
 
         let previous = current;
         if (!appendFirst) {
+          // The intent before the act. `retiring` is durable, still counts as
+          // a live slot, and is what {@link settleLostRetirement} resolves if
+          // the delete lands and its acknowledgement does not — the case where
+          // no local write follows the delete at all.
+          await store.credentials.update(current.id, { status: 'retiring' });
           await removeAt(consumerId, type, position, user.id);
           // Immediately, not at the end. The delete is the destructive step and
           // Edge has confirmed it; deferring the row until the append also
@@ -1089,6 +1409,9 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           label: label ?? current.label,
           rotatedFromId: current.id,
           appendIndex: appendFirst ? length : length - 1,
+          actorRole: user.role,
+          operation: 'rotate',
+          ip,
         }).catch((error: unknown) => {
           if (appendFirst) throw error;
           // At the cap the old secret is already gone and cannot be recreated —
@@ -1105,8 +1428,66 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         });
 
         if (appendFirst) {
-          // `POST` appends, so the old entry's index is unchanged by the append.
-          await removeAt(consumerId, type, position, user.id);
+          // As above: the retirement is recorded before it is attempted, so a
+          // lost acknowledgement leaves a row a later call can settle rather
+          // than a silent length mismatch that wedges the type.
+          await store.credentials.update(current.id, { status: 'retiring' });
+          try {
+            // `POST` appends, so the old entry's index is unchanged by the append.
+            await removeAt(consumerId, type, position, user.id);
+          } catch (error) {
+            // A rotation either hands the caller a new secret or leaves the
+            // account as it found it. The replacement's plaintext is already
+            // lost — it is show-once and this call is not returning it — so an
+            // append left standing is a credential nobody can use that still
+            // occupies one of the per-type cap slots. Take it back.
+            const { withdrawn, arrayAsAppended } = await withdrawAppendedEntry({
+              consumerId,
+              type,
+              appendIndex: length,
+              fingerprint: created.credential.fingerprint,
+              actorId: user.id,
+            });
+            if (withdrawn) {
+              // Never delivered and now gone from the gateway: the row would
+              // only ever be a credential the owner cannot use or explain.
+              await store.credentials.delete(created.credential.id).catch(() => undefined);
+            }
+            if (arrayAsAppended) {
+              // The array still held every entry the append landed on, so the
+              // delete that reported failure really did fail and the entry
+              // being retired is still there. Withdraw the intent with the
+              // append: leaving a row `retiring` over a credential that is
+              // demonstrably live is the one input that could later make
+              // {@link settleLostRetirement} settle the wrong row.
+              await store.credentials
+                .update(current.id, { status: 'active' })
+                .catch(() => undefined);
+            }
+            await recordAppendRollback({
+              consumerId,
+              type,
+              withdrawn,
+              operation: 'rotate',
+              strandedCredentialId: created.credential.id,
+              ownerId: current.user_id,
+              actor: { id: user.id, role: user.role },
+              cause: error,
+              ip,
+            });
+            if (!withdrawn) {
+              throw edgeError(
+                'The previous credential could not be removed from the gateway and the replacement created for it could not be taken back; an administrator must reconcile this consumer',
+                {
+                  credential_type: type,
+                  consumer_id: consumerId,
+                  stranded_credential_id: created.credential.id,
+                  cause: error instanceof Error ? error.message : String(error),
+                },
+              );
+            }
+            throw error;
+          }
           previous = (await store.credentials.update(current.id, { status: 'revoked' })) ?? current;
         }
 
@@ -1180,12 +1561,27 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         // A consumer deleted out from under us means the entry is already gone;
         // the row still has to be marked so the UI stops offering it.
         if (consumer) {
-          const rows = await liveRows(consumerId, type);
-          const length = edgeArrayLength(consumer.credentials, type, rows.length);
+          const live = await liveRows(consumerId, type);
+          const length = edgeArrayLength(consumer.credentials, type, live.length);
+          // Settle a retirement Edge applied but never acknowledged before
+          // resolving anything: the drift it leaves used to refuse this very
+          // call, which is the one an incident response cannot do without.
+          const rows = await settleLostRetirement({
+            consumerId,
+            type,
+            rows: live,
+            edgeLength: length,
+            actor: { id: user.id, role: user.role },
+            ip,
+          });
           const position = resolveCredentialIndex(rows, current, length);
-          // `not-live` cannot follow the status check above, but treat it as a
-          // completed revoke rather than a whole-type delete if it ever does.
+          // `not-live` follows the status check above whenever the settlement
+          // was this very row — its entry is already gone. Either way, treat it
+          // as a completed revoke rather than a whole-type delete.
           if (position !== 'not-live') {
+            // The intent before the act, so a lost acknowledgement leaves a row
+            // the next call can settle instead of a mirror one row too long.
+            await store.credentials.update(current.id, { status: 'retiring' });
             await removeAt(consumerId, type, position, user.id);
           }
         }

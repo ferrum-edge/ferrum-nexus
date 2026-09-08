@@ -1712,6 +1712,22 @@ brief window with no working credential of that type. If the append then fails,
 the response says so plainly (`502 EDGE_ERROR`, _the previous credential was
 removed … issue a new credential_); everything still live stays revocable.
 
+Either way the credential being replaced passes through the `retiring` status
+before it settles at `revoked`: the retirement is written down *before* the
+gateway delete, so an acknowledgement lost in flight leaves a row the next
+rotate, revoke or issue can settle rather than a mirror that silently disagrees
+with the gateway for good. A `previous` you read back from a **successful**
+rotation is always `revoked`.
+
+If it is instead the **delete** that fails below the cap, the replacement that
+was already appended is taken back — its show-once secret was never returned,
+so leaving it would spend a cap slot on a credential nobody holds — and the
+original error is reported unchanged, leaving the account as the rotation found
+it. Should that compensating delete fail too, the response says _the previous
+credential could not be removed … and the replacement … could not be taken
+back_ and carries `details.stranded_credential_id`: both sides still agree, so
+revoking that credential is ordinary self-service.
+
 An **admin may rotate another account's credential**, and doing so does not
 transfer it: the replacement keeps the original `user_id` and consumer, the
 owner keeps seeing and revoking it, and the admin appears only as the actor on
