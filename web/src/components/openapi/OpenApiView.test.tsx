@@ -106,38 +106,42 @@ describe('OpenApiView multi-tag paging', () => {
     expect(screen.queryByText(/Showing/)).not.toBeInTheDocument();
   });
 
-  it.each([99, 100, 101, 250])('pages all tag entries for %i multi-tag operations', (count) => {
-    const { container } = render(<OpenApiView text={multiTagSpec(count)} />);
-    const totalEntries = count * 2;
-    let shown = Math.min(200, totalEntries);
+  it.each([99, 100, 101, 250])(
+    'pages all tag entries for %i multi-tag operations',
+    (count) => {
+      const { container } = render(<OpenApiView text={multiTagSpec(count)} />);
+      const totalEntries = count * 2;
+      let shown = Math.min(200, totalEntries);
 
-    expect(screen.getByText(`${count} operations`)).toBeInTheDocument();
-    expect(container.querySelectorAll('button[aria-expanded]')).toHaveLength(shown);
-
-    while (shown < totalEntries) {
-      expect(
-        screen.getByText(`Showing ${shown} of ${totalEntries} operation entries.`),
-      ).toBeInTheDocument();
-      const remaining = totalEntries - shown;
-      expect(remaining).toBeGreaterThan(0);
-      expect(screen.queryByRole('button', { name: /Show -\d+ more/ })).not.toBeInTheDocument();
-      const nextPage = Math.min(200, remaining);
-      fireEvent.click(screen.getByRole('button', { name: `Show ${nextPage} more` }));
-      shown += nextPage;
+      expect(screen.getByText(`${count} operations`)).toBeInTheDocument();
       expect(container.querySelectorAll('button[aria-expanded]')).toHaveLength(shown);
-    }
 
-    expect(screen.getByRole('heading', { name: 'A' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'B' })).toBeInTheDocument();
-    const expectedPaths = Array.from({ length: count }, (_, index) => `/resource-${index}`);
-    const renderedPaths = Array.from(
-      container.querySelectorAll('button code'),
-      (el) => el.textContent,
-    );
-    expect(renderedPaths).toEqual([...expectedPaths, ...expectedPaths]);
-    expect(screen.queryByRole('button', { name: /Show .* more/ })).not.toBeInTheDocument();
-    expect(screen.queryByText(/Showing/)).not.toBeInTheDocument();
-  }, PAGING_TEST_TIMEOUT_MS);
+      while (shown < totalEntries) {
+        expect(
+          screen.getByText(`Showing ${shown} of ${totalEntries} operation entries.`),
+        ).toBeInTheDocument();
+        const remaining = totalEntries - shown;
+        expect(remaining).toBeGreaterThan(0);
+        expect(screen.queryByRole('button', { name: /Show -\d+ more/ })).not.toBeInTheDocument();
+        const nextPage = Math.min(200, remaining);
+        fireEvent.click(screen.getByRole('button', { name: `Show ${nextPage} more` }));
+        shown += nextPage;
+        expect(container.querySelectorAll('button[aria-expanded]')).toHaveLength(shown);
+      }
+
+      expect(screen.getByRole('heading', { name: 'A' })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'B' })).toBeInTheDocument();
+      const expectedPaths = Array.from({ length: count }, (_, index) => `/resource-${index}`);
+      const renderedPaths = Array.from(
+        container.querySelectorAll('button code'),
+        (el) => el.textContent,
+      );
+      expect(renderedPaths).toEqual([...expectedPaths, ...expectedPaths]);
+      expect(screen.queryByRole('button', { name: /Show .* more/ })).not.toBeInTheDocument();
+      expect(screen.queryByText(/Showing/)).not.toBeInTheDocument();
+    },
+    PAGING_TEST_TIMEOUT_MS,
+  );
 });
 
 describe('OpenApiView', () => {
