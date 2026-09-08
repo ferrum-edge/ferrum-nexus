@@ -631,6 +631,72 @@ length — someone hand-edited the consumer — the operation is **refused** wit
 `EDGE_ERROR` rather than guessing, unless exactly one credential is live, in
 which case removing the whole type is unambiguous.
 
+### A retirement is durable before it is attempted
+
+The gateway delete and the row that records it are on different systems with no
+transaction spanning them, so one lost write used to be enough to put them
+permanently out of step: a `DELETE` Edge applied whose acknowledgement never
+arrived, or a confirmed delete whose follow-up row update failed, left the
+mirror one row longer than the array. The length check above then refused every
+later rotate _and_ revoke of that type, and the per-type cap blocked issuing a
+replacement — an account holding a live gateway credential nobody could kill,
+which is precisely the operation an incident response needs first.
+
+So the row being retired is moved to the `retiring` status **before** the
+destructive call and settled to `revoked` after it. `retiring` is durable, still
+occupies a live slot, and means "the entry behind this row may already be gone".
+The next rotate, revoke or issue on the same consumer and type settles it — but
+only in the single shape that admits one reading: the mirror exactly one row
+longer than the array, and exactly one live row carrying the pending
+retirement. Every other mismatch still refuses, because acting on a stale index
+is the wrong-key deletion this whole design exists to prevent. Settlements are
+audited as `credential.settle`; the operator procedure is `operations.md` §12.
+
+The invariant runs both ways: a row may be left `retiring` only while its entry
+_might_ be gone. Every delete that reports failure re-reads the array inside the
+lease it still holds, and an array still exactly as long as it was before the
+call proves the delete never applied — the row goes back to `active` and the
+caller retries. A `retiring` row over an entry that is demonstrably live would
+be the one input that could make a later settlement pick the wrong row, after
+which a positional delete takes somebody else's live key. Outcomes that cannot
+be proved either way stay `retiring`, which is the safe reading: the row keeps
+its slot and stays revocable.
+
+### An append is never left behind
+
+An entry Edge accepted whose portal row could not be written, and a replacement
+whose paired delete failed, are both taken back before the failure is reported —
+the second because its show-once plaintext was never delivered, so leaving it
+would spend a cap slot on a credential nobody holds. The compensating delete is
+positional, so it is only issued against an array that is still exactly one entry
+longer than the length the append index was derived from; the index is read from
+the **gateway**, never counted from the portal's rows, because a Nexus-only
+restore leaves the mirror shorter than the array and an index counted from the
+short side points at an older, still-live key. Where the material is visible its
+fingerprint is checked too, though Edge's redaction means that is rarely the
+case. An entry the portal declines to remove — or fails to — is recorded as
+`credential.append_rollback` with `withdrawn: false`, the credential id where
+one exists, and the `last4` and `append_index` that identify an entry Edge gives
+no id; never silently forgotten, and never the material itself.
+
+The append's own `POST` is compensated on the same terms. A rejection Edge
+applied anyway — the acknowledgement lost on the way back — would otherwise
+leave a live entry with no row at all, and that is the one drift no later call
+can settle, because nothing local records the entry. So the array is re-read:
+unchanged, the append demonstrably did not apply and nothing is written; grown
+by exactly this call's entry, it is withdrawn; anything else is audited as a
+`suspected` orphan and left exactly where it is.
+
+**`basicauth` is the exception to the compensating delete**, and it is never
+issued for that type: no read projection shows it, so there is no array to check
+an index against and the only index available is one counted off the mirror —
+which a Nexus-only restore leaves shorter than the array, pointing at a
+pre-restore password rather than at the orphan. So the statement above holds
+exactly as written — _the compensating delete only ever removes what it
+appended_ — precisely because `basicauth` is not deleted at all: an append of
+that type that has to be undone is recorded as an orphan for an administrator,
+never guessed at.
+
 Rows that predate the ordinal were backfilled only where their timestamps were
 distinct. Where two live rows of one type share a timestamp, both stay without
 an ordinal and any rotate or revoke of them is refused with `409 CONFLICT`
@@ -1124,12 +1190,14 @@ ordinary reporting.
 
 ### Credentials
 
-| Action                 | Target type  | Description                                                                                                                                                                                                                                                                                                                                                |
-| ---------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `credential.issue`     | `credential` | A gateway credential was minted. `details`: credential type, consumer id, `last4`.                                                                                                                                                                                                                                                                         |
-| `credential.rotate`    | `credential` | Append-then-delete rotation. Target is the **new** credential; `details`: type, consumer id, `rotated_from`, `previous_last4`, plus `owner_user_id` when an admin rotated somebody else's credential — the replacement stays with its owner, the admin is only the actor.                                                                                  |
-| `credential.revoke`    | `credential` | A credential was deleted from Edge and marked revoked. `details`: type, consumer id, `last4`.                                                                                                                                                                                                                                                              |
-| `credential.reconcile` | `consumer`   | An admin emptied one credential type on a gateway consumer and revoked its portal rows — the repair for positions that can no longer be trusted (drifted array, or legacy rows sharing a timestamp). `details`: `credential_type`, `consumer_id`, `gateway_cleared`, `revoked_credentials`, `revoked_credential_ids`, `owner_user_ids`, optional `reason`. |
+| Action                       | Target type  | Description                                                                                                                                                                                                                                                                                                                                                |
+| ---------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `credential.issue`           | `credential` | A gateway credential was minted. `details`: credential type, consumer id, `last4`.                                                                                                                                                                                                                                                                         |
+| `credential.rotate`          | `credential` | Append-then-delete rotation. Target is the **new** credential; `details`: type, consumer id, `rotated_from`, `previous_last4`, plus `owner_user_id` when an admin rotated somebody else's credential — the replacement stays with its owner, the admin is only the actor.                                                                                  |
+| `credential.revoke`          | `credential` | A credential was deleted from Edge and marked revoked. `details`: type, consumer id, `last4`.                                                                                                                                                                                                                                                              |
+| `credential.settle`          | `credential` | A retirement Edge applied but the portal never recorded, settled by a later call on the same consumer and type — the mirror was one row longer than the array and exactly one live row carried the pending `retiring` state. `details`: `credential_type`, `consumer_id`, `last4`, `owner_user_id`, `mirror_rows`, `gateway_entries`.                      |
+| `credential.append_rollback` | `consumer`   | An append this portal made had to be taken back after an issue or a rotation failed. `details`: `credential_type`, `consumer_id`, `operation` (`issue` \| `rotate`), `withdrawn`, `last4` and `append_index`, `owner_user_id`, `cause`, plus `stranded_credential_id`, `retired_credential_id` and `suspected` where each applies. See §5.                 |
+| `credential.reconcile`       | `consumer`   | An admin emptied one credential type on a gateway consumer and revoked its portal rows — the repair for positions that can no longer be trusted (drifted array, or legacy rows sharing a timestamp). `details`: `credential_type`, `consumer_id`, `gateway_cleared`, `revoked_credentials`, `revoked_credential_ids`, `owner_user_ids`, optional `reason`. |
 
 ### Messaging and notifications
 

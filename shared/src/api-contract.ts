@@ -750,13 +750,16 @@ export interface RotateCredentialRequest {
 }
 
 /**
- * `POST /api/credentials/:id/rotate` — show-once. The replacement is created
- * on Edge first; the previous credential moves to `retiring` and is deleted
- * once the rotation is finalized.
+ * `POST /api/credentials/:id/rotate` — show-once. Below the gateway's per-type
+ * cap the replacement is created on Edge first, so both secrets are briefly
+ * live; at the cap the old entry has to go first. Either way the credential
+ * being replaced passes through `retiring` — the durable record that its
+ * gateway entry may already be gone — and settles at `revoked` once Edge has
+ * confirmed the delete.
  */
 export interface RotateCredentialResponse {
   credential: CredentialMetadata;
-  /** The credential being replaced, now in `retiring` status. */
+  /** The credential that was replaced, `revoked` by the time this is returned. */
   previous: CredentialMetadata;
   consumer_username: string;
   secret: ShowOnceSecret;

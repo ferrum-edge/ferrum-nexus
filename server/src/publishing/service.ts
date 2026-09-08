@@ -1895,6 +1895,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             consumerUsername: consumer.username,
             credentialType: CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin],
             label: label ?? `Test consumer for ${api.slug}`,
+            ip,
           });
 
           return { consumer, issued, replacedExisting: existing !== null, revokedCredentials };
