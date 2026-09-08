@@ -99,6 +99,7 @@ describe('MySQL conditional user transitions', { skip: !adminUrl, timeout: 30_00
                               ...args: Parameters<NexusStore['users']['updateIfMatches']>
                             ) => {
                               conditionalCalls += 1;
+                              const [id, expected, patch] = args;
                               assert.deepEqual(args, [
                                 targetId,
                                 { role: 'client', status: 'active' },
@@ -106,7 +107,7 @@ describe('MySQL conditional user transitions', { skip: !adminUrl, timeout: 30_00
                               ]);
                               // Execute the real predicate, with no injected
                               // miss or fabricated result.
-                              conditionalResult = await scoped.users.updateIfMatches(...args);
+                              conditionalResult = await scoped.users.updateIfMatches(id, expected, patch);
                               return conditionalResult;
                             },
                           };
