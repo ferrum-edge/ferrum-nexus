@@ -102,6 +102,7 @@ export function ToastProvider({ children }: { children: ReactNode }): ReactEleme
         {toasts.map((entry) => (
           <ToastPrimitive.Root
             key={entry.id}
+            role={entry.variant === 'error' ? 'alert' : 'status'}
             open
             onOpenChange={(open) => {
               if (!open) dismiss(entry.id);

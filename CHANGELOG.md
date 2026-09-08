@@ -119,6 +119,12 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- SPA validation failures now show the server message in an accessible error
+  toast, with inline errors on profile and gateway settings forms. Public auth
+  forms retain their inline-only error handling (#175).
+- Session refresh returning 401 now clears the query cache through the shared
+  sign-out path. Signing in after sign-out also clears cached data before
+  accepting the next principal (#177).
 - Upgrade better-sqlite3 to 13.0.3 to replace the native cleanup path that
   aborts on Node 24.20.0. Raise the Node minimum from 22.12 to 22.14 and
   retain hosted checks on the minimum and current Node 22/24 releases.

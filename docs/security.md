@@ -200,6 +200,14 @@ they are built to answer nothing:
   limiter (20 requests per minute per IP), which is what bounds the cost of the
   scrypt floor.
 
+### Browser session cache
+
+The SPA clears its TanStack Query cache on explicit logout, a request's global
+401 handler, and a session refresh that returns 401. A sign-in after sign-out or
+an identity change clears the cache again before accepting the principal, so
+cached credential metadata and other query results cannot cross accounts in
+the same tab. A transient refresh failure preserves an authenticated session.
+
 ### Password storage
 
 scrypt, `N=16384, r=8, p=1`, 32-byte output, 16-byte random salt per hash, in a
