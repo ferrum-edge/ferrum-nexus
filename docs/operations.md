@@ -83,7 +83,7 @@ retain their driver's own timeout; a stalled database can still fail healthcheck
 | `FERRUM_ADMIN_JWT_TTL`             | `60`                    | Admin JWT lifetime in seconds, 5 – 3600. Edge caps it at 3600. Short is correct — tokens are minted per call and cached.                                                                                                                                                                                                                                                                         |
 | `FERRUM_ADMIN_JWT_ISSUER`          | `ferrum-edge`           | The `iss` claim. **Must equal the gateway's configured issuer** or every call is rejected.                                                                                                                                                                                                                                                                                                       |
 | `FERRUM_ADMIN_JWT_AUDIENCE`        | _(unset)_               | Only set when the gateway configures an audience. An unexpected `aud` claim is rejected by the gateway, so Nexus omits it entirely by default.                                                                                                                                                                                                                                                   |
-| `FERRUM_NAMESPACE`                 | `nexus`                 | Namespace Nexus manages, sent as `X-Ferrum-Namespace` on every call. Must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, ≤ 254 chars. Also becomes the first segment of every listen path (`/<namespace>/<slug>`).                                                                                                                                                                                        |
+| `FERRUM_NAMESPACE`                 | `nexus`                 | Namespace Nexus manages, sent as `X-Ferrum-Namespace` on every call. Must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, ≤ 128 chars (the MySQL namespace columns are `VARCHAR(128)`; longer values fail publish on that adapter alone). Also becomes the first segment of every listen path (`/<namespace>/<slug>`).                                                                                     |
 | `FERRUM_GATEWAY_PUBLIC_URL`        | _(unset)_               | Public origin of the gateway's **proxy listener** — where clients send API traffic. Absolute `http(s)` origin, no path/query/credentials; a trailing slash is stripped. Feeds each API's `invoke_url` in the catalog. Distinct from `FERRUM_ADMIN_URL` (control plane) and `NEXUS_PUBLIC_URL` (the portal). The `gateway.public_url` setting overrides it; with neither, `invoke_url` is `null`. |
 | `FERRUM_ADMIN_CA_FILE`             | _(unset)_               | Path to a PEM CA bundle for a TLS-protected Admin API. An unreadable file fails startup.                                                                                                                                                                                                                                                                                                         |
 | `FERRUM_ADMIN_ALLOW_INSECURE_HTTP` | `false`                 | Permits plaintext `http://` Admin URLs on non-loopback hosts. Container-network-only deployments are the intended use.                                                                                                                                                                                                                                                                           |
@@ -515,6 +515,50 @@ place, and you can end up with a grant row whose ACL group was never written
 
 Collections and indexes are created in code on `init()`; there are no `.sql`
 files for Mongo, but the same `schema_migrations` bookkeeping applies.
+
+### Transactions and contention retries
+
+Every write that has to be atomic runs inside `store.transaction`. Within one
+instance those bodies are **serialised** — one at a time, on every driver — but
+that says nothing about the instance next to it, and each engine can roll a
+transaction back purely because two of them collided:
+
+| Engine     | What it reports                                                    | What it means         |
+| ---------- | ------------------------------------------------------------------ | --------------------- |
+| MySQL      | `ER_LOCK_DEADLOCK` (1213) / `ER_LOCK_WAIT_TIMEOUT` (1205), `40001` | Rolled back, retry it |
+| PostgreSQL | `40001` serialization failure, `40P01` deadlock detected           | Rolled back, retry it |
+| MongoDB    | `WriteConflict` (112), labelled `TransientTransactionError`        | Rolled back, retry it |
+| SQLite     | nothing — one connection, one body at a time                       | Cannot arise          |
+
+Nexus **re-runs the body** in those cases rather than failing the request:
+
+- **Budget.** On MySQL and PostgreSQL, up to 5 attempts, with exponential
+  backoff jittered between 5 ms and 200 ms. On MongoDB the budget is wall
+  clock instead — 5 seconds of contention, on the same backoff — because that
+  engine fails the loser of a contended document immediately rather than
+  blocking it on a lock, so the retry loop is the only thing that waits for the
+  transaction that won; an attempt count would be spent in microseconds and
+  fail the loser while the winner was still committing. The whole MongoDB
+  transaction, that wait included, is capped at 15 seconds (the driver's own
+  default envelope is two minutes, far longer than an HTTP request should
+  wait).
+- **Outcome when it still cannot commit.** `409 CONFLICT` with
+  `details.reason = "transaction_contention"` and the attempt count. A driver
+  error type never reaches a response or a client; a retried request that
+  succeeds looks like any other success.
+- **What is _not_ retried.** A uniqueness violation, a validation failure, a
+  lost connection, or anything a service threw on purpose. Only the contention
+  classes above.
+- **Nothing is applied twice.** A retried attempt starts from a rolled-back
+  state: the failed attempt's rows are gone before the next one begins, and
+  every side effect a body has goes through the transaction. Emails, gateway
+  calls, audit rows for gateway work and notifications all happen _outside_ the
+  transaction, after it commits.
+
+Seeing occasional retries is normal under load. A sustained stream of
+`transaction_contention` conflicts in the logs means real hot-row contention —
+usually many writers on one message thread or one account — and is worth
+investigating rather than raising the budget.
 
 ---
 
