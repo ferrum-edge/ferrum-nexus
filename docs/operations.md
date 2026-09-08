@@ -1080,14 +1080,28 @@ runtime-setting changes, first-class and palette plugin changes, and the
 rollback steps that undo them all funnel through one key per consumer and one
 per proxy.
 
-The exceptions are the whole-lifecycle operations that **create or destroy** a
-proxy rather than editing one — publishing a new API, unpublishing it, and the
-delete-and-recreate that switches OpenAPI enforcement mode. Those are not
-lease-guarded, so an unpublish racing a plugin edit on the same API can still
-leave an orphaned plugin config behind. They cannot lose an _authentication_
-plugin the way an edit-versus-edit race could, because the proxy they race with
-is being removed outright; treat them as operations to do when nobody else is
-editing the same API.
+The one exception is **publishing a new API**, which has no proxy id to key on
+until Edge has created the proxy — and nothing can be racing a proxy whose id is
+not yet knowable. Deleting an API and the delete-and-recreate that switches
+OpenAPI enforcement mode both take the key like everything else: the conversion
+holds it from its catalog re-read through the rebuild and the compensation, and
+the delete holds it across the gateway teardown **and** the row delete — and
+across nothing else. A delete's per-grantee ACL strip runs after the key is
+released, on each grantee's own consumer key, so a delete of a widely granted
+API cannot hold one proxy's key while it waits out another lease.
+
+> Earlier editions of this section listed deletion and the enforcement
+> conversion as exceptions, and bounded the risk by arguing that a lifecycle
+> operation cannot lose an _authentication_ plugin "because the proxy they race
+> with is being removed outright". That reasoning does not hold for a
+> conversion, which deletes the proxy and **re-creates** it. A delete
+> interleaving with one could therefore remove every Nexus row and still leave
+> the conversion's rebuild serving the API: a live proxy fronting the provider's
+> upstream with no portal record, nothing in the product able to remove it, and
+> a slug no future publish could take (`Proxy name already exists`). Both
+> operations are lease-guarded now, and the conversion additionally refuses to
+> rebuild for an API whose row has gone, so a lease that expired under a stalled
+> instance cannot resurrect one either.
 
 The numbers:
 
