@@ -1195,11 +1195,11 @@ disable as finished. See
 
 ### Statuses
 
-| Status    | Meaning                                                                 |
-| --------- | ----------------------------------------------------------------------- |
+| Status    | Meaning                                                                    |
+| --------- | -------------------------------------------------------------------------- |
 | `pending` | Owed and due (or waiting for `next_attempt_at`). **Credentials are live.** |
-| `sending` | Claimed by an inline request or worker; increments `attempts`.            |
-| `done`    | Edge confirmed the revocation; `completed_at` says when.                  |
+| `sending` | Claimed by an inline request or worker; increments `attempts`.             |
+| `done`    | Edge confirmed the revocation; `completed_at` says when.                   |
 
 There is **no terminal failure state**. Retries back off `10s · 2^attempts`,
 capped at five minutes, plus up to 10% jitter, and continue for as long as the

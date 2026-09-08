@@ -219,7 +219,9 @@ export function createGodService(deps: GodServiceDeps): GodService {
           const current = await tx.users.findById(target.id);
           if (!current) throw notFound('User', userId);
           if (current.role !== target.role || current.status !== target.status) {
-            throw conflict('That account changed while you were disabling it — reload and try again');
+            throw conflict(
+              'That account changed while you were disabling it — reload and try again',
+            );
           }
           if (guardsLastSuperAdmin && (await tx.users.countActiveSuperAdmins(target.id)) === 0) {
             throw lastSuperAdmin();
@@ -232,7 +234,9 @@ export function createGodService(deps: GodServiceDeps): GodService {
             { status: 'disabled' },
           );
           if (!row) {
-            throw conflict('That account changed while you were disabling it — reload and try again');
+            throw conflict(
+              'That account changed while you were disabling it — reload and try again',
+            );
           }
           // Both writes roll back on any failure, including a lost predicate.
           const job = await tx.gatewayTeardownJobs.upsertPending(target.id, actor.id, nowIso());

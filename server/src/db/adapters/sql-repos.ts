@@ -2318,7 +2318,9 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
           userId,
         ]);
         if (!row) {
-          throw new Error('gatewayTeardownJobs.upsertPending: row vanished immediately after upsert');
+          throw new Error(
+            'gatewayTeardownJobs.upsertPending: row vanished immediately after upsert',
+          );
         }
         return mapTeardownJob(row);
       }),
