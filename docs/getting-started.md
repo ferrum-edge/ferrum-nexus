@@ -14,7 +14,8 @@ without the SPA; the corresponding UI steps are noted as you go.
 
 ## 1. Prerequisites
 
-- **Node.js 22.12+** — see [`.nvmrc`](../.nvmrc).
+- **Node.js 22.14+** — see [`.nvmrc`](../.nvmrc). SQLite requires Node-API 10;
+  upgrade older Node 22 installations before installing dependencies.
 - **Docker**, for the Ferrum Edge gateway.
 - `curl` and `jq` for the examples.
 

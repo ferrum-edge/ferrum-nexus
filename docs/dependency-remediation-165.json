@@ -65,13 +65,59 @@
       },
       "dependencies": {},
       "tarballIntegrityVerified": true
+    },
+    "better-sqlite3": {
+      "version": "13.0.3",
+      "metadataUrl": "https://registry.npmjs.org/better-sqlite3/13.0.3",
+      "resolved": "https://registry.npmjs.org/better-sqlite3/-/better-sqlite3-13.0.3.tgz",
+      "integrity": "sha512-RbOBxmLBG8uvFUc15X9+9SFemKcQ0WBuISBVkpuiaUB2qblC8UWlHEjdWVoZ8AdhSwmoEgsiXKfopX0CQxaACQ==",
+      "engines": {
+        "node": ">=22"
+      },
+      "dependencies": {
+        "node-addon-api": "^8.0.0"
+      },
+      "tarballIntegrityVerified": true
+    },
+    "node-addon-api": {
+      "version": "8.9.2",
+      "metadataUrl": "https://registry.npmjs.org/node-addon-api/8.9.2",
+      "resolved": "https://registry.npmjs.org/node-addon-api/-/node-addon-api-8.9.2.tgz",
+      "integrity": "sha512-VijLXbi3UACN69I0JVXJsX4tjACjNoQDgv2gTF6sx2wWEi8tkSg2eX8p5gSIFi8z2+DL3oHmY6OyKce38SDolg==",
+      "engines": {
+        "node": "^18 || ^20 || >= 21"
+      },
+      "dependencies": {},
+      "tarballIntegrityVerified": true
     }
   },
   "publicRegistryAudit": {
     "endpoint": "https://registry.npmjs.org/-/npm/v1/security/advisories/bulk",
-    "packageCount": 462,
+    "packageCount": 429,
     "selection": "Only lock entries resolved from https://registry.npmjs.org/; workspace/private/link entries excluded.",
     "response": {},
-    "lockfileSha256": "08af08625f157b3e3a4694e3c9a4b4893c8937752220feaff2be15ab08a696c9"
+    "lockfileSha256": "9dfb9b6264765dee3abc6403ac41efe4be6bf904b654db8aa0c93e2886912fce"
+  },
+  "sqliteNativeCompatibility": {
+    "failingHead": "606b02803242c5024df6ef3f229a09cf05bc1734",
+    "hostedJobUrl": "https://github.com/ferrum-edge/ferrum-nexus/actions/runs/34172620499/job/101895714990",
+    "nodeVersion": "24.20.0",
+    "failedTestFileProcesses": 18,
+    "failureLogSha256": "ca6cc91fa2f498ddb83e7152af84a2e910cf37059314ff2e0cca6e60b7f21f21",
+    "requiredNodeApiVersion": 10,
+    "minimumNode22Version": "22.14.0",
+    "bindingSourceUrl": "https://github.com/WiseLibs/better-sqlite3/blob/v13.0.3/binding.gyp",
+    "nodeApiMatrixUrl": "https://nodejs.org/api/n-api.html#node-api-version-matrix",
+    "bundledBinaries": [
+      "package/prebuilds/darwin-arm64.node",
+      "package/prebuilds/darwin-x64.node",
+      "package/prebuilds/linux-arm64.node",
+      "package/prebuilds/linux-x64.node",
+      "package/prebuilds/linuxmusl-arm64.node",
+      "package/prebuilds/linuxmusl-x64.node",
+      "package/prebuilds/win32-arm64.node",
+      "package/prebuilds/win32-x64.node"
+    ],
+    "repairHostedValidation": "Pending; previous head results do not validate this repair."
   }
 }

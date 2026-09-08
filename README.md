@@ -56,7 +56,7 @@ See [`docs/architecture.md`](docs/architecture.md) for the full design.
 ## Quickstart
 
 ```bash
-# Requires Node.js 22.12+ (see .nvmrc)
+# Requires Node.js 22.14+ (see .nvmrc)
 npm install
 
 cp .env.example .env

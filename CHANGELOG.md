@@ -109,7 +109,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - Changing SMTP or CAPTCHA settings requires `super_admin`; branding and the
   registration policy stay at `admin`. The settings UI disables those sections
   for other admins.
-- `engines.node` is `>=22.12` (two dependencies already required it); the
+- `engines.node` is `>=22.14` (SQLite's Node-API 10 binding requires it); the
   Vite dev server binds `127.0.0.1` so the documented URL works everywhere.
 - The getting-started walkthrough and the compose example work on Linux
   out of the box: the Edge data volume is handed to the image's non-root
@@ -119,6 +119,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Upgrade better-sqlite3 to 13.0.3 to replace the native cleanup path that
+  aborts on Node 24.20.0. Raise the Node minimum from 22.12 to 22.14 and
+  retain hosted checks on the minimum and current Node 22/24 releases.
 - **Published APIs were unprotected on a live gateway.** Nexus created the
   auth, access-control and rate-limit plugin configs but never listed them in
   the proxy's `plugins[]`, which is what Ferrum Edge actually enforces; every

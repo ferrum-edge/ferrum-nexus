@@ -4,7 +4,7 @@ Thanks for helping improve Ferrum Nexus!
 
 ## Prerequisites
 
-- Node.js 22.12+ — see `.nvmrc`.
+- Node.js 22.14+ — see `.nvmrc`.
 - A Ferrum Edge gateway for end-to-end work (unit and integration tests run
   against a built-in mock Admin API and need no gateway).
 

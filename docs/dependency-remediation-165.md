@@ -1,4 +1,4 @@
-# Static and SMTP dependency remediation (#165)
+# Static, SMTP and SQLite dependency remediation (#165)
 
 Metadata and public advisories checked on 2026-09-07. The baseline is
 `3d12382f3d8aaa837ae9f1b7e3bfb774b0c6a42f`, after #164's Fastify/Undici update.
@@ -10,6 +10,9 @@ Metadata and public advisories checked on 2026-09-07. The baseline is
 - `@types/nodemailer`: 6.4.24 → 8.0.1. Latest external declarations; covers the SMTP options and send/close APIs used with 9.x.
 - `glob`: 11.1.0 → 13.0.6. Required by static 10; Node `18 || 20 || >=22`.
 - `content-disposition`: 0.5.4 → 2.0.1. Required by static 10; Node `>=18`.
+- `better-sqlite3`: 11.10.0 → 13.0.3. Node-API binding replaces the native cleanup path
+  implicated by the Node 24 hosted failure; see the compatibility evidence below.
+- `node-addon-api`: 8.9.2, newly required by SQLite 13; Node `^18 || ^20 || >=21`.
 
 Static's [tagged compatibility table](https://github.com/fastify/fastify-static/blob/v10.1.3/README.md#compatibility)
 and [plugin declaration](https://github.com/fastify/fastify-static/blob/v10.1.3/index.js)
@@ -35,11 +38,73 @@ Its [10.0.0 migration](https://github.com/nodemailer/nodemailer/releases/tag/v10
 TypeScript, dual ESM/CommonJS builds and bundled declarations. This bounded remediation stays
 on the patched 9.x API with external types; it does not require that migration.
 
-The project retains Node `>=22.12`, `.nvmrc` 22.12 and Node 22 container images. The changed
-packages' engine constraints admit both Node 22 and 24; static and its plugin helper declare
-no narrower Node engine. Existing locked glob dependencies (minimatch 10.2.6, minipass 7.1.3,
-path-scurry 2.0.2) satisfy glob 13.0.6. Hosted checks cover the minimum 22.12.0 and current
-22/24 releases, including `npm ci`, typecheck, tests, formatting and build.
+The project now requires Node `>=22.14`, with `.nvmrc` and the hosted minimum job at 22.14.
+This is an explicit increase from 22.12 for SQLite's Node-API 10 binding, not a requirement
+of the static or SMTP updates. The current Node 22 and 24 jobs remain. Existing locked glob
+dependencies (minimatch 10.2.6, minipass 7.1.3, path-scurry 2.0.2) satisfy glob 13.0.6.
+Hosted checks include `npm ci`, typecheck, tests, formatting and build.
+
+## SQLite native compatibility discovered by Node 24 CI
+
+At head `606b02803242c5024df6ef3f229a09cf05bc1734`, hosted
+[run 34172620499, job 101895714990](https://github.com/ferrum-edge/ferrum-nexus/actions/runs/34172620499/job/101895714990)
+installed successfully and passed typechecking on Node 24.20.0, then 18 backend test-file
+processes aborted with `RemoveEnvironmentCleanupHook`, assertion `(env) != nullptr`, and
+`Statement::~Statement()` in `better_sqlite3.node`. The five real SMTP tests passed, as did
+the web suite. The first native assertion is at line 380 of the archived full hosted log
+`work/logs/nexus-166-606-node24-failure.log` in the parent project workspace. This is a native
+compatibility failure exposed by the added runtime job; it is not evidence of an SMTP failure.
+
+The SQLite wrapper was reviewed before selecting the repair. `queryOne`, `queryAll` and
+`execute` create short-lived statements; migrations also prepare statements. `SqliteStore.close()`
+already calls `db.close()` once, and owned test stores are closed by the test helper. The
+native SQL handle and JavaScript wrapper have distinct lifetimes: even after closing the
+database, statement wrappers can be finalized by GC. Caching all statements or adding more
+test cleanup would not replace the failing native base destructor.
+
+Primary source evidence:
+
+- Node 24.20.0's [ObjectWrap destructor](https://github.com/nodejs/node/blob/v24.20.0/src/node_object_wrap.h)
+  calls `RemoveCleanupHook`. Even the final 12.x tag's
+  [Statement implementation](https://github.com/WiseLibs/better-sqlite3/blob/v12.12.0/src/objects/statement.cpp)
+  still inherits `node::ObjectWrap`; the 11.x/12.x release changes provide no replacement
+  for this path. A 12.x bump therefore lacks a source-supported fix for this failure.
+- [13.0.0](https://github.com/WiseLibs/better-sqlite3/releases/tag/v13.0.0) replaces the binding
+  with Node-API; [13.0.3's Statement](https://github.com/WiseLibs/better-sqlite3/blob/v13.0.3/src/objects/statement.cpp)
+  inherits `Napi::ObjectWrap`. [13.0.1](https://github.com/WiseLibs/better-sqlite3/releases/tag/v13.0.1)
+  fixes cross-realm plain-object parameter binding, and
+  [13.0.2](https://github.com/WiseLibs/better-sqlite3/releases/tag/v13.0.2) fixes the separate
+  [worker termination abort](https://github.com/WiseLibs/better-sqlite3/issues/1507).
+  13.0.3 adds the Linux ARM prebuild runner correction and includes SQLite 3.53.4.
+- Its registry engine says `>=22`, but the actual
+  [build defines `NAPI_VERSION=10`](https://github.com/WiseLibs/better-sqlite3/blob/v13.0.3/binding.gyp).
+  Node's [version matrix](https://nodejs.org/api/n-api.html#node-api-version-matrix) and
+  [22.14.0 headers](https://github.com/nodejs/node/blob/v22.14.0/src/node_version.h)
+  establish 22.14.0 as the first Node 22 release supporting Node-API 10. 22.12 cannot load
+  that binding. No inspected published repair preserves 22.12; the minimum increases to
+  22.14 rather than guessing 22.19 or maintaining a private native fork.
+
+The selected package preserves Nexus's synchronous `prepare/get/all/run`, transaction,
+pragma, close and SQLite error-code interfaces. Adapter code, migrations, SQL schemas,
+serialization, transaction ownership and all four store contracts are unchanged. Existing
+external SQLite types cover the API subset Nexus uses; no new 13.x methods are used.
+Replacing this native path is the repair hypothesis supported by source inspection;
+the new hosted results must establish that it resolves Nexus's observed abort.
+
+SQLite 13 bundles native binaries in the npm tarball and declares `gypfile: false` with no
+install script. Its only runtime dependency is node-addon-api. The obsolete `bindings` and
+`prebuild-install` trees are pruned from the lock, and the old SQLite script allowance is
+removed. The Docker build uses the bundled Linux x64/arm64 binaries, rebuilds only esbuild,
+and needs no SQLite compiler packages. Both image stages retain current `node:22-bookworm-slim`;
+the hosted production-image check loads SQLite, queries it and closes it. Other platforms
+without a bundled binary need a separately provisioned source build; this change does not
+claim automatic source-build fallback with upstream's `gypfile: false` packaging.
+
+New child-process regressions exercise production SQLite query helpers under forced GC,
+rollback, retained statements, explicit close and natural exit with an open database.
+They require successful process exit as well as completed assertions, so a destructor abort
+after the assertions still fails CI. The unchanged Node 24 suite remains the original
+reproducer, and the hosted four-adapter contracts and Docker checks remain required.
 
 ## Published advisory coverage and Nexus reachability
 
@@ -77,17 +142,21 @@ settings and internal queued recipients are separate boundaries.
 
 [Registry evidence](dependency-remediation-165.json) records exact metadata URLs, tarball
 URLs, integrity values, engine constraints, dependencies and the bulk advisory response.
-All five changed package tarballs were fetched as data and their SHA-512 digests matched
+All seven changed package tarballs were fetched as data and their SHA-512 digests matched
 the registry integrity values; no downloaded package code was executed.
 The public registry audit selected only lock entries whose resolved URL begins with
 `https://registry.npmjs.org/`, excluded workspace/private/link entries, and submitted
-462 distinct public package names with their locked versions. It returned `{}`. This is
+429 distinct public package names with their final locked versions. It returned `{}`. This is
 an as-of-date published-advisory check, not proof that every dependency is vulnerability-free.
 
 The lockfile was edited from registry JSON without a local install or lockfile regeneration.
 Local validation is limited to static review, JSON/metadata checks and `git diff --check`.
 Hosted `npm ci` is the authoritative lock consistency/integrity and installation gate;
 hosted test/typecheck/build results must be reviewed before merge.
+
+The earlier 606b028 head passed hosted Node 22.12/current 22, four-store contracts and Docker
+checks; its Node 24 failure above prompted the SQLite repair. Those earlier green results
+do not validate the new native package, lockfile, minimum runtime or lifecycle regressions.
 
 The listening-socket HTTP suite retains its API identity, CSRF, mutation and malformed-path
 coverage and adds public asset GET/HEAD, MIME type, conditional requests, byte ranges,
