@@ -221,6 +221,8 @@ export type NotificationRecord = Notification;
 export interface EmailOutboxRecord extends EmailOutboxEntry {
   body_html: string;
   body_text: string;
+  /** Opaque ownership token, replaced on every claim. Internal only. */
+  generation: string;
 }
 
 /**
@@ -916,16 +918,34 @@ export interface EmailOutboxRepo {
   findByIdempotencyKey(key: string): Promise<EmailOutboxRecord | null>;
   /**
    * Atomically claim up to `limit` rows that are `pending` with
-   * `next_attempt_at <= now`, flipping them to `sending` and incrementing
-   * `attempts`. Two concurrent workers never claim the same row.
+   * `next_attempt_at <= now`, flipping them to `sending`, incrementing
+   * `attempts` and replacing `generation`. Two concurrent workers never claim
+   * the same row, and a claim reclaimed by `releaseStale` carries a token the
+   * previous holder cannot settle with.
    */
   claimDue(now: IsoTimestamp, limit: number): Promise<EmailOutboxRecord[]>;
-  /** Delivery succeeded: `status = 'sent'`, `next_attempt_at = null`. */
-  markSent(id: Uuid, at: IsoTimestamp): Promise<void>;
-  /** Delivery failed but retries remain: back to `pending` with a backoff stamp. */
-  reschedule(id: Uuid, nextAttemptAt: IsoTimestamp, lastError: string): Promise<void>;
-  /** Retries exhausted: `status = 'failed'`. */
-  markFailed(id: Uuid, lastError: string): Promise<void>;
+  /**
+   * Delivery succeeded: `status = 'sent'`, `next_attempt_at = null`.
+   *
+   * Settles only the supplied sending generation; `false` means ownership was
+   * lost (the claim was reclaimed and someone else owns the row now).
+   */
+  markSent(entry: EmailOutboxRecord, at: IsoTimestamp): Promise<boolean>;
+  /**
+   * Delivery failed but retries remain: back to `pending` with a backoff stamp.
+   * Settles only the supplied sending generation; `false` means ownership was lost.
+   */
+  reschedule(
+    entry: EmailOutboxRecord,
+    nextAttemptAt: IsoTimestamp,
+    lastError: string,
+  ): Promise<boolean>;
+  /**
+   * Retries exhausted (or the message is parked as delivered-unacknowledged):
+   * `status = 'failed'`. Settles only the supplied sending generation; `false`
+   * means ownership was lost.
+   */
+  markFailed(entry: EmailOutboxRecord, lastError: string): Promise<boolean>;
   /** Return `sending` rows stuck since before `olderThan` to `pending` (crash recovery). */
   releaseStale(olderThan: IsoTimestamp): Promise<number>;
   list(filter: EmailOutboxFilter, options?: ListOptions): Promise<Paginated<EmailOutboxRecord>>;

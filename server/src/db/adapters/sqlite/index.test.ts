@@ -698,14 +698,27 @@ describe('sqlite store', () => {
       const again = await store.emailOutbox.claimDue(nowIso(), 10);
       assert.equal(again.filter((entry) => entry.to_email === marker).length, 0);
 
-      const id = mine[0]?.id ?? '';
-      await store.emailOutbox.reschedule(id, isoInSeconds(-1), 'smtp timeout');
-      const rescheduled = await store.emailOutbox.findById(id);
+      const claim = mine[0];
+      assert.ok(claim);
+      assert.ok(claim.generation, 'a claim carries an ownership token');
+      assert.equal(
+        await store.emailOutbox.reschedule(claim, isoInSeconds(-1), 'smtp timeout'),
+        true,
+      );
+      const rescheduled = await store.emailOutbox.findById(claim.id);
       assert.equal(rescheduled?.status, 'pending');
       assert.equal(rescheduled?.last_error, 'smtp timeout');
 
-      await store.emailOutbox.markFailed(id, 'gave up');
-      assert.equal((await store.emailOutbox.findById(id))?.status, 'failed');
+      // The settled claim is spent: it cannot settle the row a second time.
+      assert.equal(await store.emailOutbox.markFailed(claim, 'gave up'), false);
+
+      const retried = (await store.emailOutbox.claimDue(nowIso(), 10)).find(
+        (entry) => entry.id === claim.id,
+      );
+      assert.ok(retried);
+      assert.notEqual(retried.generation, claim.generation, 'reclaiming replaces the token');
+      assert.equal(await store.emailOutbox.markFailed(retried, 'gave up'), true);
+      assert.equal((await store.emailOutbox.findById(claim.id))?.status, 'failed');
     });
   });
 
