@@ -10,13 +10,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import {
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-} from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { Message, MessagePage, MessageThreadDetail } from '@ferrum-nexus/shared';
 import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -32,11 +26,13 @@ import {
   mergeMessages,
 } from './MessageThreadPage';
 
+const route = vi.hoisted(() => ({ threadId: 'thread-1' }));
+
 vi.mock('@tanstack/react-router', () => ({
   Link: ({ children, to }: { children: React.ReactNode; to: string }): ReactElement => (
     <a href={to}>{children}</a>
   ),
-  useParams: (): { threadId: string } => ({ threadId: 'thread-1' }),
+  useParams: (): { threadId: string } => route,
 }));
 
 vi.mock('../stores/auth', () => ({
@@ -64,8 +60,7 @@ function message(id: string, createdAt: string): Message {
   };
 }
 
-const at = (seconds: number): string =>
-  new Date(Date.UTC(2026, 0, 1, 0, 0, seconds)).toISOString();
+const at = (seconds: number): string => new Date(Date.UTC(2026, 0, 1, 0, 0, seconds)).toISOString();
 
 function compareMessages(a: Message, b: Message): number {
   if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1;
@@ -147,15 +142,24 @@ function collectReachableIds(
 
 const clients: QueryClient[] = [];
 
-function renderThread(): { client: QueryClient } {
+function renderThread(): { client: QueryClient; rerenderThread: () => void } {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   clients.push(client);
-  render(
+  const element = (
     <QueryClientProvider client={client}>
       <MessageThreadPage />
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
-  return { client };
+  const { rerender } = render(element);
+  return {
+    client,
+    rerenderThread: () =>
+      rerender(
+        <QueryClientProvider client={client}>
+          <MessageThreadPage />
+        </QueryClientProvider>,
+      ),
+  };
 }
 
 describe('mergeMessages', () => {
@@ -201,48 +205,86 @@ describe('thread page cursors', () => {
 
     expect(adoptNewestPageCursors(initialThreadPageCursors(), held, page)).toEqual({
       headCursor: 'm16',
-      headGapCursor: 'm16',
-      olderCursor: null,
-      olderPagingStarted: false,
+      olderCursors: ['m16'],
     });
   });
 
-  it('clears a head gap once an older fetch overlaps held messages', () => {
+  it('keeps walking a gap until message ids overlap, even with equal timestamps', () => {
     const cursors = {
       headCursor: 'm16',
-      headGapCursor: 'm16',
-      olderCursor: null,
-      olderPagingStarted: false,
+      olderCursors: ['m16', 'm08'],
     };
-    const held = [message('m8', at(8)), message('m9', at(9)), message('m16', at(16))];
+    const held = [message('m08', at(1)), message('m09', at(1)), message('m16', at(1))];
     const page = {
-      items: [message('m11', at(11)), message('m12', at(12)), message('m13', at(13))],
+      items: [message('m11', at(1)), message('m12', at(1)), message('m13', at(1))],
       next_before: 'm11',
     };
 
-    expect(adoptOlderPageCursors(cursors, held, page)).toEqual({
-      headCursor: null,
-      headGapCursor: null,
-      olderCursor: 'm11',
-      olderPagingStarted: true,
+    const advanced = adoptOlderPageCursors(cursors, held, page);
+    expect(advanced).toEqual({
+      headCursor: 'm16',
+      olderCursors: ['m11', 'm08'],
     });
+    expect(
+      adoptOlderPageCursors(advanced, mergeMessages(held, page.items), {
+        items: [message('m09', at(1)), message('m10', at(1))],
+        next_before: 'm09',
+      }),
+    ).toEqual({ headCursor: 'm16', olderCursors: ['m08'] });
+  });
+
+  it('preserves an open gap on overlapping refetches and queues successive bursts', () => {
+    const held = [message('m08', at(8)), message('m16', at(16))];
+    const cursors = { headCursor: 'm16', olderCursors: ['m16', 'm08'] };
+    const refreshed = adoptNewestPageCursors(cursors, held, {
+      items: [message('m16', at(16)), message('m17', at(17))],
+      next_before: 'm16',
+    });
+    expect(refreshed).toEqual(cursors);
+    const burst = adoptNewestPageCursors(refreshed, held, {
+      items: [message('m24', at(24))],
+      next_before: 'm24',
+    });
+    expect(burst).toEqual({ headCursor: 'm24', olderCursors: ['m24', 'm16', 'm08'] });
+
+    // An in-flight response advances its own cursor, not the new gap's cursor.
+    expect(
+      adoptOlderPageCursors(
+        burst,
+        held,
+        { items: [message('m12', at(12))], next_before: 'm12' },
+        'm16',
+      ),
+    ).toEqual({ headCursor: 'm24', olderCursors: ['m24', 'm12', 'm08'] });
+  });
+
+  it('exhausts a gap at the end of history without reviving the live head cursor', () => {
+    const held = [message('m08', at(8)), message('m16', at(16))];
+    const exhausted = adoptOlderPageCursors(
+      { headCursor: 'm16', olderCursors: ['m16', 'm08'] },
+      held,
+      { items: [message('m01', at(1))], next_before: null },
+    );
+    expect(loadOlderCursor(exhausted)).toBeNull();
+    const refreshed = adoptNewestPageCursors(exhausted, held, {
+      items: [message('m16', at(16)), message('m17', at(17))],
+      next_before: 'm16',
+    });
+    expect(refreshed.headCursor).toBe('m16');
+    expect(loadOlderCursor(refreshed)).toBeNull();
   });
 });
 
 describe('mid-session gap replay', () => {
   it('reaches every message after twenty arrive and ten load-older clicks', () => {
-    const all = Array.from({ length: 20 }, (_, index) =>
-      message(`m${index + 1}`, at(index + 1)),
-    );
+    const all = Array.from({ length: 20 }, (_, index) => message(`m${index + 1}`, at(index + 1)));
 
     const reachable = collectReachableIds(all, 5, 12, 10);
     expect(reachable).toEqual(all.map((entry) => entry.id));
   });
 
   it('still pages quietly through history when the newest window keeps overlapping', () => {
-    const all = Array.from({ length: 12 }, (_, index) =>
-      message(`m${index + 1}`, at(index + 1)),
-    );
+    const all = Array.from({ length: 12 }, (_, index) => message(`m${index + 1}`, at(index + 1)));
 
     const reachable = collectReachableIds(all, 5, 12, 10);
     expect(reachable).toEqual(all.map((entry) => entry.id));
@@ -251,6 +293,7 @@ describe('mid-session gap replay', () => {
 
 describe('MessageThreadPage', () => {
   beforeEach(() => {
+    route.threadId = 'thread-1';
     vi.mocked(threadsApi.get).mockReset();
     vi.mocked(threadsApi.messages).mockReset();
   });
@@ -261,9 +304,7 @@ describe('MessageThreadPage', () => {
   });
 
   it('renders every message after a mid-session burst and repeated load-older clicks', async () => {
-    const all = Array.from({ length: 20 }, (_, index) =>
-      message(`m${index + 1}`, at(index + 1)),
-    );
+    const all = Array.from({ length: 20 }, (_, index) => message(`m${index + 1}`, at(index + 1)));
     const limit = 5;
     let newestPage = pageMessages(all.slice(0, 12), limit);
 
@@ -290,6 +331,10 @@ describe('MessageThreadPage', () => {
       if (!loadButton) break;
       fireEvent.click(loadButton);
       await waitFor(() => expect(threadsApi.messages).toHaveBeenCalledTimes(click + 1));
+      await waitFor(() => {
+        const button = screen.queryByRole('button', { name: 'Load older messages' });
+        if (button) expect(button).not.toBeDisabled();
+      });
     }
 
     for (const entry of all) {
@@ -300,9 +345,7 @@ describe('MessageThreadPage', () => {
   });
 
   it('pages backwards on a quiet thread without extra newest-window churn', async () => {
-    const all = Array.from({ length: 12 }, (_, index) =>
-      message(`m${index + 1}`, at(index + 1)),
-    );
+    const all = Array.from({ length: 12 }, (_, index) => message(`m${index + 1}`, at(index + 1)));
     const limit = 5;
 
     vi.mocked(threadsApi.get).mockResolvedValue(threadDetail(pageMessages(all, limit)));
@@ -323,6 +366,32 @@ describe('MessageThreadPage', () => {
 
     expect(threadsApi.get).toHaveBeenCalledTimes(1);
     expect(vi.mocked(threadsApi.messages)).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('Showing 12 of 12 messages')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Load older messages' })).not.toBeInTheDocument();
+  });
+
+  it('resets held messages and pending gaps when switching threads', async () => {
+    const all = Array.from({ length: 20 }, (_, index) => message(`m${index + 1}`, at(index + 1)));
+    let newestPage = pageMessages(all.slice(0, 12), 5);
+    const other = { ...message('other', at(1)), thread_id: 'thread-2' };
+    vi.mocked(threadsApi.get).mockImplementation(async (id) =>
+      id === 'thread-1'
+        ? threadDetail(newestPage)
+        : { ...threadDetail(pageMessages([other], 5)), id: 'thread-2' },
+    );
+
+    const { client, rerenderThread } = renderThread();
+    await screen.findByText('body m12');
+    newestPage = pageMessages(all, 5);
+    await client.invalidateQueries({ queryKey: queryKeys.threads.detail('thread-1') });
+    await screen.findByText('Showing 10 of 20 messages');
+
+    route.threadId = 'thread-2';
+    rerenderThread();
+    await screen.findByText('body other');
+    expect(screen.getByText('Showing 1 of 1 messages')).toBeInTheDocument();
+    expect(screen.queryByText('body m12')).not.toBeInTheDocument();
+    expect(screen.queryByText('body m20')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Load older messages' })).not.toBeInTheDocument();
   });
 });
