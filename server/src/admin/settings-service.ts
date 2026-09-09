@@ -199,6 +199,8 @@ export async function readEncryptedSetting(
 
 /** Admin settings and email templates. */
 export interface SettingsService {
+  /** Revision of committed in-process writes affecting public branding. */
+  getBrandingRevision(): number;
   /** Everything an admin sees on the settings page (no secrets). */
   getAdminSettings(): Promise<AdminSettingsResponse>;
   /** Apply a partial update; omitted sections are left untouched. */
@@ -244,6 +246,7 @@ export interface SettingsServiceDeps {
 /** Build the settings service. */
 export function createSettingsService(deps: SettingsServiceDeps): SettingsService {
   const { config, store, crypto, audit, auth } = deps;
+  let brandingRevision = 0;
 
   /** Memoised gateway origin; dropped the moment a write changes it. */
   let gatewayUrlCache: { value: string | null; expires: number } | null = null;
@@ -322,6 +325,8 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
   }
 
   return {
+    getBrandingRevision: () => brandingRevision + auth.getBrandingRevision(),
+
     getBranding: async () => readBranding(store),
 
     getGatewayPublicUrl,
@@ -516,6 +521,7 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
           ip,
         );
       });
+      brandingRevision += 1;
       // Only committed updates invalidate the cached public origin.
       if (nextGatewayUrl !== undefined) gatewayUrlCache = null;
 

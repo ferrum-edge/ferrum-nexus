@@ -1028,6 +1028,11 @@ Two bounds close that:
 The limiter is the ceiling; the cache is what keeps traffic under it from
 reaching the database on every repeat load.
 
+Committed local settings writes (including CAPTCHA and registration policy) and
+founder registration invalidate the server memo before the mutation responds.
+The TTL bounds cross-instance server staleness only; browser/CDN copies retain
+their advertised `max-age`.
+
 ### Access-request abuse resistance
 
 A `client` may self-register and raise access requests. Each one durably writes

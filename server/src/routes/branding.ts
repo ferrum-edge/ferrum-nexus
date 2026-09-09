@@ -48,10 +48,12 @@ interface CachedBranding {
  *
  * Same shape as the health-route cache: a TTL bounds sustained traffic and a
  * shared in-flight promise bounds simultaneous bursts. `ttlMs <= 0` removes the
- * memo entirely rather than shrinking it to nothing.
+ * memo entirely rather than shrinking it to nothing. Committed service writes
+ * change the revision immediately, including for callers awaiting an assembly.
  */
 function memoizeBranding(
   ttlMs: number,
+  getRevision: () => number,
   run: () => Promise<BrandingResponse>,
 ): () => Promise<CachedBranding> {
   if (ttlMs <= 0) {
@@ -61,22 +63,30 @@ function memoizeBranding(
     };
   }
 
-  let cached: (CachedBranding & { expiresAt: number }) | null = null;
-  let pending: Promise<CachedBranding> | null = null;
+  let cached: (CachedBranding & { expiresAt: number; revision: number }) | null = null;
+  let pending: { revision: number; promise: Promise<CachedBranding> } | null = null;
 
   return async function loadBranding(): Promise<CachedBranding> {
-    if (cached && cached.expiresAt > Date.now()) {
+    const revision = getRevision();
+    if (cached && cached.revision === revision && cached.expiresAt > Date.now()) {
       return { value: cached.value, checkedAt: cached.checkedAt };
     }
-    pending ??= (async () => {
-      const checkedAt = Date.now();
-      const value = await run();
-      cached = { value, checkedAt, expiresAt: Date.now() + ttlMs };
-      return { value, checkedAt };
-    })().finally(() => {
-      pending = null;
-    });
-    return pending;
+    if (!pending || pending.revision !== revision) {
+      const promise: Promise<CachedBranding> = (async () => {
+        const checkedAt = Date.now();
+        const value = await run();
+        // A write during assembly must not repopulate the cache with old data.
+        if (getRevision() === revision) {
+          cached = { value, checkedAt, expiresAt: Date.now() + ttlMs, revision };
+        }
+        return { value, checkedAt };
+      })().finally(() => {
+        if (pending?.promise === promise) pending = null;
+      });
+      pending = { revision, promise };
+    }
+    const result = await pending.promise;
+    return getRevision() === revision ? result : loadBranding();
   };
 }
 
@@ -89,7 +99,7 @@ export function brandingEtag(payload: BrandingResponse): string {
 export const brandingRoutes: FastifyPluginAsync<BrandingRoutesOptions> = async (app, options) => {
   const { config, settings, captcha, auth } = options;
 
-  const loadBranding = memoizeBranding(config.brandingCacheMs, async () => {
+  const assembleBranding = async (): Promise<BrandingResponse> => {
     const branding = await settings.getBranding();
     const policy = await auth.getRegistrationPolicy();
     return {
@@ -104,7 +114,12 @@ export const brandingRoutes: FastifyPluginAsync<BrandingRoutesOptions> = async (
       },
       bootstrap_required: await auth.bootstrapRequired(),
     };
-  });
+  };
+  const loadBranding = memoizeBranding(
+    config.brandingCacheMs,
+    settings.getBrandingRevision,
+    assembleBranding,
+  );
 
   app.get('/', async (request: FastifyRequest, reply: FastifyReply): Promise<BrandingResponse> => {
     const payload = (await loadBranding()).value;

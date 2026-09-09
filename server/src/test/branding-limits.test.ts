@@ -6,7 +6,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { after, before, describe, it } from 'node:test';
+import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 
 import type { ApiErrorBody } from '@ferrum-nexus/shared';
 
@@ -48,6 +48,155 @@ describe('branding rate limiting', () => {
     );
     assert.ok(limited, 'the limiter must engage');
     assert.equal((JSON.parse(limited) as ApiErrorBody).error.code, 'RATE_LIMITED');
+  });
+});
+
+describe('branding cache invalidation', () => {
+  let harness: TestApp;
+
+  beforeEach(async () => {
+    harness = await buildTestApp({
+      env: { NEXUS_BRANDING_CACHE_MS: '60000', NEXUS_LOG_LEVEL: 'silent' },
+      deps: { startOutboxWorker: false },
+    });
+  });
+
+  afterEach(async () => {
+    await harness.close();
+  });
+
+  it('shows a branding update on the next GET with a new ETag', async () => {
+    const admin = await harness.registerUser();
+    const first = await harness.app.inject({ method: 'GET', url: '/api/branding' });
+    assert.equal(first.statusCode, 200, first.body);
+    assert.ok(first.headers.etag);
+
+    const updated = await harness.authed(admin, {
+      method: 'PUT',
+      url: '/api/admin/settings',
+      payload: { branding: { portal_name: 'Fresh Gateway' } },
+    });
+    assert.equal(updated.statusCode, 200, updated.body);
+
+    const next = await harness.app.inject({ method: 'GET', url: '/api/branding' });
+    assert.equal(next.statusCode, 200, next.body);
+    assert.equal(next.json().portal_name, 'Fresh Gateway');
+    assert.ok(next.headers.etag);
+    assert.notEqual(next.headers.etag, first.headers.etag);
+  });
+
+  it('returns the updated body for If-None-Match with the old ETag', async () => {
+    const admin = await harness.registerUser();
+    const first = await harness.app.inject({ method: 'GET', url: '/api/branding' });
+    assert.equal(first.statusCode, 200, first.body);
+    const etag = first.headers.etag;
+    assert.ok(etag);
+
+    const updated = await harness.authed(admin, {
+      method: 'PUT',
+      url: '/api/admin/settings',
+      payload: { branding: { portal_name: 'Revalidated Gateway' } },
+    });
+    assert.equal(updated.statusCode, 200, updated.body);
+
+    const next = await harness.app.inject({
+      method: 'GET',
+      url: '/api/branding',
+      headers: { 'if-none-match': etag },
+    });
+    assert.equal(next.statusCode, 200, next.body);
+    assert.equal(next.json().portal_name, 'Revalidated Gateway');
+    assert.notEqual(next.headers.etag, etag);
+  });
+
+  it('clears bootstrap_required on the next GET after seating the founder', async () => {
+    const first = await harness.app.inject({ method: 'GET', url: '/api/branding' });
+    assert.equal(first.statusCode, 200, first.body);
+    assert.equal(first.json().bootstrap_required, true);
+
+    const founder = await harness.registerUser();
+    assert.equal(founder.user.role, 'super_admin');
+
+    const next = await harness.app.inject({ method: 'GET', url: '/api/branding' });
+    assert.equal(next.statusCode, 200, next.body);
+    assert.equal(next.json().bootstrap_required, false);
+    assert.notEqual(next.headers.etag, first.headers.etag);
+  });
+
+  it('invalidates CAPTCHA and registration policy after direct service writes', async () => {
+    const admin = await harness.registerUser();
+    const first = await harness.app.inject({ method: 'GET', url: '/api/branding' });
+    assert.equal(first.statusCode, 200, first.body);
+
+    await harness.services.settings.updateSettings(admin.user, {
+      captcha: {
+        enabled: true,
+        provider: 'turnstile',
+        site_key: 'public-site-key',
+        secret_key: 'test-vendor-secret',
+      },
+      registration: { open_registration: false, allowed_roles: ['provider'] },
+    });
+
+    const next = await harness.app.inject({ method: 'GET', url: '/api/branding' });
+    assert.equal(next.statusCode, 200, next.body);
+    assert.equal(next.json().captcha.enabled, true);
+    assert.equal(next.json().captcha.site_key, 'public-site-key');
+    assert.deepEqual(next.json().registration, {
+      open_registration: false,
+      allowed_roles: ['provider'],
+    });
+    assert.notEqual(next.headers.etag, first.headers.etag);
+
+    await harness.services.settings.updateSettings(admin.user, {
+      captcha: { enabled: false, secret_key: null },
+    });
+    const disabled = await harness.app.inject({ method: 'GET', url: '/api/branding' });
+    assert.equal(disabled.statusCode, 200, disabled.body);
+    assert.equal(disabled.json().captcha.enabled, false);
+    assert.notEqual(disabled.headers.etag, next.headers.etag);
+  });
+
+  it('does not reuse an assembly started before a committed write', async (t) => {
+    const admin = await harness.registerUser();
+    const settings = harness.services.settings;
+    const getBranding = settings.getBranding;
+    let release: () => void = () => {};
+    let started: () => void = () => {};
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const reading = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let firstRead = true;
+    t.mock.method(settings, 'getBranding', async () => {
+      const value = await getBranding();
+      if (firstRead) {
+        firstRead = false;
+        started();
+        await blocked;
+      }
+      return value;
+    });
+
+    const overlapping = harness.app.inject({ method: 'GET', url: '/api/branding' }).then((r) => r);
+    try {
+      await reading;
+      await settings.updateSettings(admin.user, { branding: { portal_name: 'Committed Gateway' } });
+      const next = await harness.app.inject({ method: 'GET', url: '/api/branding' });
+      assert.equal(next.statusCode, 200, next.body);
+      assert.equal(next.json().portal_name, 'Committed Gateway');
+    } finally {
+      release();
+    }
+
+    const completed = await overlapping;
+    assert.equal(completed.statusCode, 200, completed.body);
+    assert.equal(completed.json().portal_name, 'Committed Gateway');
+    const cached = await harness.app.inject({ method: 'GET', url: '/api/branding' });
+    assert.equal(cached.statusCode, 200, cached.body);
+    assert.equal(cached.json().portal_name, 'Committed Gateway');
   });
 });
 

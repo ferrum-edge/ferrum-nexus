@@ -445,6 +445,12 @@ with `Cache-Control: public, max-age=…` and an `ETag`. Send `If-None-Match` wi
 the prior `ETag` to receive `304 Not Modified`. Concurrent callers share one
 in-flight assembly. `0` disables the cache.
 
+Committed settings writes and founder registration invalidate the server memo
+on the instance handling the mutation before it responds. The next GET reaching
+that instance reflects the change; an old ETag returns `200` with the new body
+when the payload changes. The TTL bounds cross-instance server staleness only;
+browser/CDN copies retain their advertised `max-age`.
+
 ```json
 {
   "portal_name": "Acme Developer Portal",

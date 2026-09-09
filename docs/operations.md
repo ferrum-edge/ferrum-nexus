@@ -323,6 +323,14 @@ Within the cache window the settings reads run once, the response carries
 `Cache-Control: public, max-age=…` and an `ETag`, and concurrent callers share
 one in-flight assembly. The limiter is the ceiling on top of that cache.
 
+Committed settings writes (including branding, CAPTCHA secrets/site keys and
+registration policy/roles) and founder registration invalidate the server memo
+on the instance handling the mutation before its response is sent. The next
+`GET /api/branding` reaching that instance reflects the change, with a new ETag
+when the payload changes. `NEXUS_BRANDING_CACHE_MS` therefore bounds only
+cross-instance staleness in the server memo. Browser/CDN copies may still be
+served until their advertised `max-age` expires.
+
 #### Access requests
 
 Registration is open by default, so a `client` can create access requests without
