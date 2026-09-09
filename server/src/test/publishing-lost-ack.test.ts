@@ -8,7 +8,7 @@
  * gateway keeps the change while the row, the response and the audit trail all
  * roll back, and no request afterwards is able to notice.
  *
- * Three of those transitions are covered here, one per shape:
+ * Four of those transitions are covered here, one per shape:
  *
  * - **the backend move** in `PATCH /api/apis/:id`, where the visible effect is
  *   live traffic proxied to a host the catalog does not name;
@@ -18,6 +18,8 @@
  * - **the proxy create** in `POST /api/apis`, where the rollback used to have
  *   nothing to delete because the id it deletes came from the answer that was
  *   lost — leaving a live, ungated proxy with no `apis` row and no audit row.
+ * - **the spec re-import** in `PUT /api/apis/:id/spec`, where the gateway
+ *   enforces and forwards a revision the catalog never adopted.
  *
  * Every case additionally asserts the record an operator has to be able to find
  * when the compensation itself cannot finish. A swallowed compensation and a
@@ -220,6 +222,88 @@ describe('a gateway write whose acknowledgement is lost', () => {
     assert.equal(patched.statusCode, 200, patched.body);
     assert.equal(harness.edge.proxies.get(`nexus/${proxyId}`)?.backend_connect_timeout_ms, 4000);
   });
+
+  /* ── PUT: the spec re-import ──────────────────────────────────────────── */
+
+  for (const restoreFails of [false, true]) {
+    it(`restores a lost spec re-import (restore fails: ${restoreFails})`, async () => {
+      const { id, proxyId } = await publish(
+        publishPayload(`lost-ack-spec-${restoreFails}`, { spec_enforcement: 'routes' }),
+      );
+      const initialSpec = harness.edge.apiSpecForProxy(proxyId);
+      assert.ok(initialSpec);
+      const specId = initialSpec.id;
+      const initialPaths = structuredClone(initialSpec.document.paths);
+      const initialConfig = structuredClone(
+        harness.edge.pluginForProxy(proxyId, 'openapi_validator')?.config,
+      );
+      const authId = harness.edge.pluginForProxy(proxyId, 'key_auth')?.id;
+      const previous = await harness.store.apiSpecs.findCurrentByApi(id);
+      const seen = harness.edge.requests.length;
+      const paths = { '/payments': { get: { responses: { '200': { description: 'OK' } } } } };
+
+      // Apply the re-import before returning 503. The optional refusal matches
+      // only the second PUT, so the failed restore really leaves gateway drift.
+      harness.edge.queueLostAck(503, { error: 'timeout' }, '/api-specs/', 'PUT');
+      if (restoreFails) {
+        harness.edge.queueFailure(503, { error: 'unavailable' }, '/api-specs/', 'PUT', 1);
+      }
+      const failed = await harness.authed(provider, {
+        method: 'PUT',
+        url: `/api/apis/${id}/spec`,
+        payload: {
+          spec: JSON.stringify({
+            openapi: '3.1.0',
+            info: { title: 'Billing API', version: '9.9.9' },
+            servers: [{ url: 'https://moved.example.com:9443/v9' }],
+            paths,
+          }),
+        },
+      });
+      assert.equal(failed.statusCode, 502, failed.body);
+      const writes = harness.edge.requests
+        .slice(seen)
+        .filter((call) => call.method === 'PUT' && call.path === `/api-specs/${specId}`);
+      assert.equal(writes.length, 2, 'the pre-registered compensation reuses the known spec id');
+      assert.deepEqual((writes[0]?.body as Record<string, unknown>).paths, paths);
+      assert.deepEqual((writes[1]?.body as Record<string, unknown>).paths, initialPaths);
+      assert.deepEqual(
+        harness.edge.apiSpecForProxy(proxyId)?.document.paths,
+        restoreFails ? paths : initialPaths,
+      );
+      assert.equal(
+        harness.edge.proxies.get(`nexus/${proxyId}`)?.backend_host,
+        restoreFails ? 'moved.example.com' : 'billing.example.com',
+      );
+      const validator = harness.edge.pluginForProxy(proxyId, 'openapi_validator')?.config;
+      if (restoreFails) {
+        assert.notDeepEqual(validator, initialConfig);
+      } else {
+        assert.deepEqual(validator, initialConfig);
+      }
+      assert.equal(harness.edge.pluginForProxy(proxyId, 'key_auth')?.id, authId);
+      assert.deepEqual(await harness.store.apiSpecs.findCurrentByApi(id), previous);
+      const reread = await harness.authed(provider, { method: 'GET', url: `/api/apis/${id}` });
+      assert.equal(reread.json<GetApiResponse>().api.version, '2.4.0');
+      assert.equal(
+        reread.json<GetApiResponse>().api.upstream_url,
+        'https://billing.example.com:8443/v2',
+      );
+      assert.deepEqual(await rowsFor(harness, 'api.spec_update', id), []);
+      const rows = await rowsFor(harness, 'api.gateway_repair_required', id);
+      assert.equal(rows.length, restoreFails ? 1 : 0);
+      if (restoreFails) {
+        const details = rows[0] ?? {};
+        assert.equal(details.phase, 'compensation');
+        assert.equal(details.proxy_id, proxyId);
+        assert.deepEqual(details.attempted_changes, ['spec']);
+        assert.deepEqual(details.steps, ['the spec re-import']);
+        assert.equal(typeof details.error, 'string');
+        assert.equal(Array.isArray(details.step_errors), true);
+        assert.equal('proxy' in details, false);
+      }
+    });
+  }
 
   /* ── POST: the proxy create ───────────────────────────────────────────── */
 
