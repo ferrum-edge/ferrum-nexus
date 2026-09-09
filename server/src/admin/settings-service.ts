@@ -362,8 +362,7 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
       await store.transaction(async (tx) => {
         const changed: string[] = [];
         let smtpPasswordSourceChange:
-          | { from: 'override' | 'environment'; to: 'override' | 'environment' }
-          | undefined;
+          { from: 'override' | 'environment'; to: 'override' | 'environment' } | undefined;
 
         if (patch.branding) {
           const current = await readBranding(tx);
@@ -504,20 +503,18 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
 
         // Record key names and credential provenance, never setting values,
         // which would put the SMTP password and CAPTCHA secret in the audit log.
-        await audit
-          .forStore(tx)
-          .record(
-            actor,
-            AuditAction.ADMIN_SETTINGS_UPDATE,
-            { type: 'settings', id: null },
-            {
-              changed_keys: changed,
-              ...(smtpPasswordSourceChange
-                ? { smtp_password_source_change: smtpPasswordSourceChange }
-                : {}),
-            },
-            ip,
-          );
+        await audit.forStore(tx).record(
+          actor,
+          AuditAction.ADMIN_SETTINGS_UPDATE,
+          { type: 'settings', id: null },
+          {
+            changed_keys: changed,
+            ...(smtpPasswordSourceChange
+              ? { smtp_password_source_change: smtpPasswordSourceChange }
+              : {}),
+          },
+          ip,
+        );
       });
       // Only committed updates invalidate the cached public origin.
       if (nextGatewayUrl !== undefined) gatewayUrlCache = null;
