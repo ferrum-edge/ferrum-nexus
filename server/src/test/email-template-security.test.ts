@@ -380,8 +380,8 @@ describe('email template destination boundaries', () => {
       vars: { reset_url: 'https://portal.test/reset-password?token=reset-secret' },
     });
     assert.equal((await harness.tick()).sent, 1);
-    const mail = harness.mailbox.sent.at(-1);
-    assert.ok(mail?.html.includes('HREF="https://portal.test/reset-password?token=reset-secret"'));
+    const mail = harness.mailbox.sent.at(-1) ?? assert.fail('the reset mail must be delivered');
+    assert.ok(mail.html.includes('HREF="https://portal.test/reset-password?token=reset-secret"'));
     assert.equal(mail.text, 'Continue: https://portal.test/reset-password?token=reset-secret\n');
   });
 
