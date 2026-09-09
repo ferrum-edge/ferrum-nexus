@@ -85,7 +85,7 @@ describe('outbox worker', () => {
     assert.equal(stored?.next_attempt_at, null);
     assert.equal(harness.mailbox.sent.length, 1);
     assert.equal(harness.mailbox.sent[0]?.to, 'ada@example.test');
-    assert.ok(harness.mailbox.sent[0]?.html.includes('portal.test'));
+    assert.ok(harness.mailbox.sent[0]?.html.includes(`${harness.config.publicUrl}/v?token=x`));
   });
 
   it('suppresses a duplicate enqueue with the same idempotency key', async () => {
