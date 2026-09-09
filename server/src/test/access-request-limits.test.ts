@@ -106,7 +106,7 @@ describe('daily access-request budget', () => {
   let harness: TestApp;
   let provider: TestSession;
   let client: TestSession;
-  let apiIds: string[];
+  let apiIds: [string, string, string];
 
   before(async () => {
     harness = await buildTestApp({
@@ -162,7 +162,11 @@ describe('daily access-request budget', () => {
     assert.equal(refused.statusCode, 429, refused.body);
     const body = error(refused.body);
     assert.equal(body.code, 'QUOTA_EXCEEDED');
-    assert.equal(body.details?.setting, 'NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY');
+    assert.deepEqual(body.details, {
+      limit: 2,
+      window: '24h',
+      setting: 'NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY',
+    });
   });
 
   it('writes nothing when the budget refuses', async () => {
