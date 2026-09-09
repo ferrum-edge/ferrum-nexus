@@ -132,8 +132,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   template update audit events now include SHA-256 hashes of both body fields.
   Action links must be whole anchor destinations or standalone text URLs.
   Save and render checks restrict outbound links to the portal origin and
-  operator-approved `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS`; unsafe legacy
-  templates log a warning and queue no mail.
+  operator-approved `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS`; an unsafe legacy
+  template logs a warning and the built-in template is sent in its place.
 - Require the environment SMTP connection before clearing a password override,
   and audit SMTP password-source transitions without recording setting values.
 - **A test consumer whose creation was applied but never acknowledged was

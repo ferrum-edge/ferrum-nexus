@@ -345,8 +345,11 @@ protocol-relative URLs, URL attributes and CSS `url(...)` must resolve to the
 in `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS` (empty by default). Scheme/host case
 and HTML entities are normalized; `javascript:` and `data:` are always refused.
 Ambiguous or active HTML/CSS is refused rather than interpreted as safe. A
-legacy override that violates the policy produces a warning and no outbox
-entry; the public recovery endpoint still returns its uniform response.
+legacy override that violates the policy is replaced by the built-in template
+for that message and a warning is logged, so recovery mail still flows. A
+rendered destination that violates the policy (including mass-email HTML)
+produces a warning and no outbox entry; the public recovery endpoint still
+returns its uniform response.
 
 Action links remain bearer credentials. Operators must trust allowlisted
 hosts and portal routes, including redirects and their handling of referrers.

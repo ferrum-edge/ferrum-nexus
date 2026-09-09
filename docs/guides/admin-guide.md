@@ -369,8 +369,10 @@ additional typography). Simple inline styles and approved CSS `url(...)` work.
 A refused save returns an error naming the field, host or construct, and the
 operator setting. Stored templates and rendered destinations are checked again
 before queueing, including raw HTML from the mass-email composer. A legacy
-template that fails validation sends no mail and logs a warning; replace the
-offending content or restore the default template before retrying delivery.
+template that fails validation is skipped in favour of the built-in template
+and a warning is logged; replace the offending content or restore the default
+template to clear the warning. Rendered content that fails the check (such as
+a mass email linking to an unapproved host) is refused and nothing is queued.
 
 Each successful save records `body_html_sha256` and `body_text_sha256` in the
 `admin.template_update` audit details: SHA-256 hex digests of the exact UTF-8
