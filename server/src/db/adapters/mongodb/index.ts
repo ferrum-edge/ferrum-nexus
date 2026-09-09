@@ -758,6 +758,17 @@ interface IndexDefinition {
   partialFilterExpression?: Document;
 }
 
+/** Indexes added by `007_api_plugins`. */
+const API_PLUGIN_INDEXES: IndexDefinition[] = [
+  {
+    collection: 'api_plugins',
+    name: 'ux_api_plugins_api_name',
+    key: { api_id: 1, plugin_name: 1 },
+    unique: true,
+  },
+  { collection: 'api_plugins', name: 'ix_api_plugins_api', key: { api_id: 1, created_at: 1 } },
+];
+
 /**
  * Every index of `001_initial`, translated.
  *
@@ -808,13 +819,7 @@ const INDEXES: IndexDefinition[] = [
   },
   { collection: 'api_specs', name: 'ix_api_specs_api', key: { api_id: 1, created_at: 1 } },
 
-  {
-    collection: 'api_plugins',
-    name: 'ux_api_plugins_api_name',
-    key: { api_id: 1, plugin_name: 1 },
-    unique: true,
-  },
-  { collection: 'api_plugins', name: 'ix_api_plugins_api', key: { api_id: 1, created_at: 1 } },
+  ...API_PLUGIN_INDEXES,
 
   {
     collection: 'access_requests',
@@ -1091,6 +1096,31 @@ async function createIndexes(db: Db, indexes: IndexDefinition[]): Promise<void> 
   }
 }
 
+/** Keep the most recently updated document for each API/plugin pair. */
+async function deduplicateApiPlugins(db: Db): Promise<void> {
+  const collection = db.collection<NexusDoc>('api_plugins');
+  const duplicateGroups = collection.aggregate<{ duplicate_ids: string[] }>([
+    { $sort: { api_id: 1, plugin_name: 1, updated_at: -1, created_at: -1, _id: -1 } },
+    {
+      $group: {
+        _id: { api_id: '$api_id', plugin_name: '$plugin_name' },
+        ids: { $push: '$_id' },
+        count: { $sum: 1 },
+      },
+    },
+    { $match: { count: { $gt: 1 } } },
+    {
+      $project: {
+        _id: 0,
+        duplicate_ids: { $slice: ['$ids', 1, { $subtract: ['$count', 1] }] },
+      },
+    },
+  ]);
+  for await (const group of duplicateGroups) {
+    await collection.deleteMany({ _id: { $in: group.duplicate_ids } });
+  }
+}
+
 /**
  * Mongo's "migrations".
  *
@@ -1118,6 +1148,16 @@ const MONGO_MIGRATIONS: { id: string; apply: (db: Db) => Promise<void> }[] = [
   {
     id: '006_email_token_issue_claims',
     apply: async (): Promise<void> => undefined,
+  },
+  {
+    id: '007_api_plugins',
+    // Upgraded databases have already run `001_initial`, so install the new
+    // indexes explicitly. Remove any duplicates created before the unique
+    // index existed, retaining the configuration with the latest update.
+    apply: async (db: Db): Promise<void> => {
+      await deduplicateApiPlugins(db);
+      await createIndexes(db, API_PLUGIN_INDEXES);
+    },
   },
   {
     id: '008_gateway_teardown_jobs',
