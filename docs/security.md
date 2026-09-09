@@ -334,6 +334,9 @@ stay at `admin`.
 - **Access requests and grants** are scoped by ownership, not by role alone: a
   `provider` sees the inbox for the APIs they own, and filtering by an
   `api_id` they do not own is `403 FORBIDDEN`.
+  Approve, deny and revoke require both ownership and at least the `provider`
+  role, or the `admin` role. Demotion to `client` removes these powers even if
+  the account still owns APIs; administrators retain oversight of those APIs.
 - **Publishing list** always scopes a `provider` to their own APIs, whatever
   they pass in the query. `mine` is the _admin's_ opt-in.
 - **Credentials** are always the caller's own unless an `admin` passes an
@@ -1319,15 +1322,22 @@ ordinary reporting.
 
 ### Access workflow
 
-| Action                    | Target type      | Description                                                                                                                                                                                                                                                                                                                   |
-| ------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `access.request`          | `access_request` | A client requested access. `details`: api id and slug.                                                                                                                                                                                                                                                                        |
-| `access.cancel`           | `access_request` | The requester withdrew their own pending request.                                                                                                                                                                                                                                                                             |
-| `access.approve`          | `access_request` | Approved: the ACL group is now on the consumer. `details`: api id/slug, user id, grant id, `acl_group`.                                                                                                                                                                                                                       |
-| `access.approve_rollback` | `access_request` | An approval failed after the gateway write; records what was undone. `details`: api id/slug, user id, `cause`, plus `acl_group_removed` + `request_released`, or `acl_group_kept` + `kept_for_grant_id` when a live grant still needs the group. `acl_group_orphaned` means the group is still on the consumer — investigate. |
-| `access.deny`             | `access_request` | Declined. `details`: api id/slug, user id, `has_note`. Nothing changed on the gateway.                                                                                                                                                                                                                                        |
-| `access.revoke`           | `grant`          | A grant was withdrawn and the ACL group removed. `details`: api id/slug, user id, `acl_group`, `reason`. A bulk revocation adds `bulk: true` and writes one row per grant. Exactly one row per grant per revocation — the transition is a compare-and-set, so a concurrent second revocation loses and records nothing.       |
-| `access.revoke_rollback`  | `grant`          | A revocation claimed the grant but the gateway would not drop the ACL group; records what was undone. `details`: api id, user id, `acl_group`, `cause`, `grant_restored`. `grant_restored: false` means the portal says revoked while the group may still be live — investigate.                                              |
+Approval rollback treats an unacknowledged gateway write as possibly applied
+and attempts idempotent removal unless a live grant needs the group.
+`acl_group_possibly_applied: true` records that uncertain write outcome;
+`false` means the write was acknowledged or the active-user guard rejected it
+before the ACL write. The removal, kept or orphan fields describe compensation.
+An orphan field means the group may remain live and needs investigation.
+
+| Action                    | Target type      | Description                                                                                                                                                                                                                                                                                                                    |
+| ------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `access.request`          | `access_request` | A client requested access. `details`: api id and slug.                                                                                                                                                                                                                                                                         |
+| `access.cancel`           | `access_request` | The requester withdrew their own pending request.                                                                                                                                                                                                                                                                              |
+| `access.approve`          | `access_request` | Approved: the ACL group is now on the consumer. `details`: api id/slug, user id, grant id, `acl_group`.                                                                                                                                                                                                                        |
+| `access.approve_rollback` | `access_request` | An approval failed during the grant attempt; records what was undone. `details`: api id/slug, user id, `cause`, plus `acl_group_removed` + `request_released`, or `acl_group_kept` + `kept_for_grant_id` when a live grant still needs the group. `acl_group_orphaned` means the group may stay on the consumer — investigate. |
+| `access.deny`             | `access_request` | Declined. `details`: api id/slug, user id, `has_note`. Nothing changed on the gateway.                                                                                                                                                                                                                                         |
+| `access.revoke`           | `grant`          | A grant was withdrawn and the ACL group removed. `details`: api id/slug, user id, `acl_group`, `reason`. A bulk revocation adds `bulk: true` and writes one row per grant. Exactly one row per grant per revocation — the transition is a compare-and-set, so a concurrent second revocation loses and records nothing.        |
+| `access.revoke_rollback`  | `grant`          | A revocation claimed the grant but the gateway would not drop the ACL group; records what was undone. `details`: api id, user id, `acl_group`, `cause`, `grant_restored`. `grant_restored: false` means the portal says revoked while the group may still be live — investigate.                                               |
 
 ### Credentials
 
