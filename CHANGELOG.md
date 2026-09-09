@@ -134,6 +134,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   Save and render checks restrict outbound links to the portal origin and
   operator-approved `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS`; an unsafe legacy
   template logs a warning and the built-in template is sent in its place.
+- Compensate approvals whose gateway write was not acknowledged and record the
+  uncertain outcome in the rollback audit.
+- Require the provider role as well as API ownership for access decisions;
+  administrators retain oversight after an owner is demoted.
+
 - Catalog specifications and the Documentation tab now show gateway server
   addresses throughout normalized JSON/YAML documents. Provider spec editing
   reads the original upload through an owner/admin-only endpoint.
