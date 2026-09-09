@@ -92,7 +92,8 @@ import type {
 } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
-import { conflict, forbidden, notFound, validationFailed, type NexusError } from '../lib/errors.js';
+import { NexusError, conflict, forbidden, notFound, validationFailed } from '../lib/errors.js';
+import { accessRequestBudgetLockKey, type KeyedSerializer } from '../lib/keyed-serializer.js';
 import { nowIso } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
 import { presentApiSummary, type GatewayUrlSource } from '../publishing/present.js';
@@ -166,6 +167,12 @@ export interface AccessService {
   ): Promise<number>;
 }
 
+/** Rolling window for the per-account access-request budget. */
+export const ACCESS_REQUEST_BUDGET_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** Human label for {@link ACCESS_REQUEST_BUDGET_WINDOW_MS}, echoed in error details. */
+export const ACCESS_REQUEST_BUDGET_WINDOW_LABEL = '24h';
+
 /** Dependencies of {@link createAccessService}. */
 export interface AccessServiceDeps {
   edge: FerrumAdminClient;
@@ -177,12 +184,14 @@ export interface AccessServiceDeps {
   provisioner: ConsumerProvisioner;
   /** Resolves the gateway origin the embedded API summaries' `invoke_url` uses. */
   settings: GatewayUrlSource;
+  /** Serialises the rolling daily access-request budget per requester. */
+  locks: KeyedSerializer;
   log?: (obj: Record<string, unknown>, message: string) => void;
 }
 
 /** Build the access service. */
 export function createAccessService(deps: AccessServiceDeps): AccessService {
-  const { config, store, edge, audit, notifications, email, provisioner, settings } = deps;
+  const { config, store, edge, audit, notifications, email, provisioner, settings, locks } = deps;
   const namespace = config.edge.namespace;
 
   function userSummary(user: UserRecord): UserSummary {
@@ -543,6 +552,29 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     }
   }
 
+  async function assertWithinBudget(tx: NexusStore, requesterUserId: Uuid): Promise<void> {
+    const limit = config.maxAccessRequestsPerUserPerDay;
+    if (limit <= 0) return;
+    const since = new Date(Date.now() - ACCESS_REQUEST_BUDGET_WINDOW_MS).toISOString();
+    const used = await tx.accessRequests.countByUserSince(requesterUserId, since);
+    if (used < limit) return;
+    throw new NexusError(
+      'QUOTA_EXCEEDED',
+      `You have reached the limit of ${limit} access requests per ${ACCESS_REQUEST_BUDGET_WINDOW_LABEL}. ` +
+        'Wait for the oldest of them to age out, or ask an administrator to raise the limit.',
+      {
+        limit,
+        window: ACCESS_REQUEST_BUDGET_WINDOW_LABEL,
+        setting: 'NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY',
+      },
+    );
+  }
+
+  async function spendBudget<T>(requesterUserId: Uuid, write: () => Promise<T>): Promise<T> {
+    if (config.maxAccessRequestsPerUserPerDay <= 0) return write();
+    return locks(accessRequestBudgetLockKey(requesterUserId), write);
+  }
+
   return {
     async request(user, apiId, justification, ip = null): Promise<AccessRequest> {
       const trimmed = justification.trim();
@@ -574,16 +606,21 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       if (await store.grants.findActiveByApiAndUser(api.id, user.id)) {
         throw conflict('You already have access to this API');
       }
-      if (await store.accessRequests.findPendingByApiAndUser(api.id, user.id)) {
-        throw conflict('You already have a pending request for this API');
-      }
 
-      const created = await store.accessRequests.create({
-        api_id: api.id,
-        user_id: user.id,
-        justification: trimmed,
-        status: 'pending',
-      });
+      const created = await spendBudget(user.id, () =>
+        store.transaction(async (tx) => {
+          await assertWithinBudget(tx, user.id);
+          if (await tx.accessRequests.findPendingByApiAndUser(api.id, user.id)) {
+            throw conflict('You already have a pending request for this API');
+          }
+          return tx.accessRequests.create({
+            api_id: api.id,
+            user_id: user.id,
+            justification: trimmed,
+            status: 'pending',
+          });
+        }),
+      );
 
       await audit.record(
         { id: user.id, role: user.role },

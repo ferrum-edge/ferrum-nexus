@@ -60,6 +60,16 @@ const listGrantsQuery = listQuerySchema.extend({
 
 const revokeBody = z.object({ reason: z.string().trim().max(2_000).nullish() });
 
+/**
+ * Per-account burst limits on the two client write paths, enforced by the
+ * `@fastify/rate-limit` instance the composition root registers on this scope
+ * with `global: false`.
+ */
+export const ACCESS_REQUEST_CREATE_RATE_LIMIT = { max: 10, timeWindow: '1 minute' } as const;
+
+/** Per-account burst limit on `POST /api/access-requests/:id/cancel`. */
+export const ACCESS_REQUEST_CANCEL_RATE_LIMIT = { max: 30, timeWindow: '1 minute' } as const;
+
 /** `/api/access-requests` route plugin. */
 export const accessRequestRoutes: FastifyPluginAsync<AccessRoutesOptions> = async (
   app,
@@ -83,20 +93,27 @@ export const accessRequestRoutes: FastifyPluginAsync<AccessRoutesOptions> = asyn
     );
   });
 
-  app.post('/', async (request, reply): Promise<CreateAccessRequestResponse> => {
-    const { user } = requireAuth(request);
-    const input = parseOrThrow(createBody, request.body);
-    const created = await access.request(
-      user,
-      input.api_id,
-      input.justification,
-      clientIp(request),
-    );
-    reply.status(201);
-    return { access_request: created };
-  });
+  app.post(
+    '/',
+    { config: { rateLimit: { ...ACCESS_REQUEST_CREATE_RATE_LIMIT } } },
+    async (request, reply): Promise<CreateAccessRequestResponse> => {
+      const { user } = requireAuth(request);
+      const input = parseOrThrow(createBody, request.body);
+      const created = await access.request(
+        user,
+        input.api_id,
+        input.justification,
+        clientIp(request),
+      );
+      reply.status(201);
+      return { access_request: created };
+    },
+  );
 
-  app.post('/:id/cancel', async (request): Promise<CancelAccessRequestResponse> => {
+  app.post(
+    '/:id/cancel',
+    { config: { rateLimit: { ...ACCESS_REQUEST_CANCEL_RATE_LIMIT } } },
+    async (request): Promise<CancelAccessRequestResponse> => {
     const { user } = requireAuth(request);
     const { id } = parseOrThrow(idParamSchema, request.params);
     return { access_request: await access.cancel(user, id, clientIp(request)) };

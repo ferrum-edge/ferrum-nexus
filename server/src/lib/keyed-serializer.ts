@@ -103,6 +103,18 @@ export function messageBudgetLockKey(senderUserId: string): string {
 }
 
 /**
+ * The per-requester key the rolling daily **access-request budget** is spent
+ * under.
+ *
+ * Same shape as {@link messageBudgetLockKey}: count durable rows, then insert
+ * one, ordered by a lease so two instances cannot both read `used = limit - 1`.
+ * Cancelled requests still count — otherwise create→cancel→create is a free loop.
+ */
+export function accessRequestBudgetLockKey(userId: string): string {
+  return `access-requests:budget:${userId}`;
+}
+
+/**
  * The per-administrator key a god-mode **broadcast** runs under.
  *
  * The per-day broadcast ceiling counts the actor's own `god.broadcast` audit

@@ -1510,6 +1510,14 @@ class SqliteStore implements NexusStore {
       );
     },
 
+    countByUserSince: async (userId, sinceIso) =>
+      queryCount(
+        this.db,
+        `SELECT COUNT(*) AS count FROM access_requests
+          WHERE user_id = ? AND created_at >= ?`,
+        [userId, sinceIso],
+      ),
+
     deleteByApi: async (apiId) =>
       execute(this.db, 'DELETE FROM access_requests WHERE api_id = ?', [apiId]),
   };

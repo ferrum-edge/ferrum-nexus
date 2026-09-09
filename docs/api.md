@@ -437,7 +437,13 @@ _public_ — widget configuration. Never carries the vendor secret.
 ### `GET /api/branding`
 
 _public_ — the one unauthenticated read besides health. Drives the login page
-before a session exists.
+before a session exists. **Rate-limited** to 120 requests per minute per IP when
+`NEXUS_RATE_LIMIT_ENABLED=true` (always off under `NEXUS_ENV=test`).
+
+The payload is **cached for `NEXUS_BRANDING_CACHE_MS`** (default 5 s) and served
+with `Cache-Control: public, max-age=…` and an `ETag`. Send `If-None-Match` with
+the prior `ETag` to receive `304 Not Modified`. Concurrent callers share one
+in-flight assembly. `0` disables the cache.
 
 ```json
 {
@@ -1757,6 +1763,14 @@ _session_ → `201 { "access_request": AccessRequest }`
 
 Body: `api_id` (uuid), `justification` (1–2000 chars).
 
+**Rate-limited** to 10 requests per minute per account when
+`NEXUS_RATE_LIMIT_ENABLED=true` (always off under `NEXUS_ENV=test`). Independently,
+one account may create `NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY` access
+requests (default 20, `0` = unlimited) in a rolling 24 hours; **cancelled rows
+count**, so create→cancel→create cannot reopen the allowance. Exceeding either
+bound is `429` (`RATE_LIMITED` or `QUOTA_EXCEEDED` with
+`details: { limit, window, setting }`).
+
 Errors, all `409 CONFLICT`: you own this API; the API is retired; the API does
 not accept access requests (`requestable: false`); you already have access; you
 already have a pending request. `404 NOT_FOUND` for an unknown API.
@@ -1774,7 +1788,8 @@ curl -sS -b cookies.txt -X POST http://127.0.0.1:8787/api/access-requests \
 ### `POST /api/access-requests/:id/cancel`
 
 _session_, **requester only** → `{ "access_request": AccessRequest }`.
-No body. `403 FORBIDDEN` for anyone else; `409 CONFLICT` when the request is no
+No body. **Rate-limited** to 30 requests per minute per account when
+`NEXUS_RATE_LIMIT_ENABLED=true`. `403 FORBIDDEN` for anyone else; `409 CONFLICT` when the request is no
 longer `pending`.
 
 ### `POST /api/access-requests/:id/approve`

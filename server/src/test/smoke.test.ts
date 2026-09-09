@@ -1211,6 +1211,40 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(await store.accessRequests.deleteByApi(api.id), 2);
     });
 
+    it('accessRequests: countByUserSince bounds the per-account budget', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const client = await makeUser();
+      const apiA = await makeApi(owner.id);
+      const apiB = await makeApi(owner.id);
+
+      const boundary = isoInSeconds(-3_600);
+      await store.accessRequests.create({
+        api_id: apiA.id,
+        user_id: client.id,
+        justification: 'On the boundary',
+        status: 'cancelled',
+        created_at: boundary,
+      });
+      await store.accessRequests.create({
+        api_id: apiB.id,
+        user_id: client.id,
+        justification: 'Inside',
+        status: 'pending',
+        created_at: isoInSeconds(-60),
+      });
+
+      assert.equal(
+        await store.accessRequests.countByUserSince(client.id, boundary),
+        2,
+        'the boundary is inclusive and every status counts',
+      );
+      assert.equal(
+        await store.accessRequests.countByUserSince(client.id, isoInSeconds(-3_599)),
+        1,
+        'one second later excludes the boundary row',
+      );
+    });
+
     it('accessRequests: exactly one concurrent decision wins the pending status', async () => {
       const owner = await makeUser({ role: 'provider' });
       const client = await makeUser();

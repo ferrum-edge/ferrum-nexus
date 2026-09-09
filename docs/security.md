@@ -1008,6 +1008,44 @@ is held elsewhere longer than the 30 s wait gets `409 CONFLICT` and is asked to
 retry; it is never a silent overshoot. The lease is skipped entirely when the
 budget is switched off.
 
+### Branding abuse resistance
+
+`GET /api/branding` is unauthenticated and used on every SPA load before a
+session exists. Each hit used to run several settings reads and return a payload
+that can include a logo data URL, with `Cache-Control: no-store` and no
+limiter.
+
+Two bounds close that:
+
+1. **A per-IP rate limit** — 120 requests per minute, the same ceiling as
+   `/api/health*`, installed when `NEXUS_RATE_LIMIT_ENABLED=true`.
+2. **A short response cache** — `NEXUS_BRANDING_CACHE_MS` (default 5 s, `0`
+   disables). Within the window the settings reads run once, concurrent callers
+   share one in-flight assembly, and the response is marked cacheable with
+   `Cache-Control: public, max-age=…` and an `ETag`.
+
+The limiter is the ceiling; the cache is what keeps traffic under it from
+reaching the database on every repeat load.
+
+### Access-request abuse resistance
+
+A `client` may self-register and raise access requests. Each one durably writes
+a row, an audit row and a provider notification. `findPendingByApiAndUser` only
+bounds concurrency per API; cancelling reopened the slot without limiting the
+day.
+
+Three bounds close that:
+
+1. **Per-account burst limits** — 10 creations and 30 cancellations per minute,
+   keyed on the account like messaging.
+2. **A rolling 24-hour per-account budget** —
+   `NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY` (default 20, `0` disables).
+   Checked before any row is written; **cancelled rows count**, so
+   create→cancel→create cannot loop. Enforced under a per-requester lease in
+   `edge_leases`, the same shape as the message budget.
+3. **Refusals write nothing** — a `429` leaves no access-request, audit or
+   notification row.
+
 ### Consumer quotas are per gateway process
 
 A per-API rate limit is enforced by Edge's `rate_limiting` plugin, and its

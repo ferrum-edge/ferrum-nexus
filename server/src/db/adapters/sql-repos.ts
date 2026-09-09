@@ -1405,6 +1405,14 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       );
     },
 
+    countByUserSince: async (userId, sinceIso) =>
+      queryCount(
+        exec,
+        `SELECT COUNT(*) AS cnt FROM access_requests
+          WHERE user_id = ? AND created_at >= ?`,
+        [userId, sinceIso],
+      ),
+
     deleteByApi: async (apiId) =>
       execute(exec, 'DELETE FROM access_requests WHERE api_id = ?', [apiId]),
   };

@@ -2153,6 +2153,12 @@ class MongoStore implements NexusStore {
     count: async (filter) =>
       this.col(COLLECTIONS.accessRequests).countDocuments(accessRequestFilter(filter), this.opts),
 
+    countByUserSince: async (userId, sinceIso) =>
+      this.col(COLLECTIONS.accessRequests).countDocuments(
+        { user_id: userId, created_at: { $gte: sinceIso } },
+        this.opts,
+      ),
+
     deleteByApi: async (apiId) =>
       (await this.col(COLLECTIONS.accessRequests).deleteMany({ api_id: apiId }, this.opts))
         .deletedCount,

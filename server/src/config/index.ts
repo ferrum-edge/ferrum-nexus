@@ -8,7 +8,7 @@
  * Every variable documented in the repo-root `.env.example` is covered here
  * with the same default. A handful of extra variables exist for testing and
  * container deployment (`NEXUS_ENV`, `NEXUS_RATE_LIMIT_ENABLED`,
- * `NEXUS_HEALTH_CACHE_MS`, `NEXUS_HEALTH_PROBE_TIMEOUT_MS`,
+ * `NEXUS_HEALTH_CACHE_MS`, `NEXUS_BRANDING_CACHE_MS`, `NEXUS_HEALTH_PROBE_TIMEOUT_MS`,
  * `NEXUS_WEB_DIST`, `NEXUS_ALLOW_PRIVATE_UPSTREAMS`,
  * `FERRUM_ADMIN_TIMEOUT_MS`, `FERRUM_MAX_CREDENTIALS_PER_TYPE`);
  * they are all optional and default to production-safe values.
@@ -192,7 +192,7 @@ export interface NexusConfig {
   bootstrapToken: string | undefined;
   /** Session idle lifetime in seconds (sliding). */
   sessionTtlSeconds: number;
-  /** Whether the `/api/auth/*`, `/api/health`, `/api/apis/*` and `/api/threads/*` rate limiters are installed. Off under `NEXUS_ENV=test`. */
+  /** Whether the `/api/auth/*`, `/api/health`, `/api/branding`, `/api/apis/*`, `/api/threads/*` and `/api/access-requests/*` rate limiters are installed. Off under `NEXUS_ENV=test`. */
   rateLimitEnabled: boolean;
   /**
    * How long `GET /api/health` reuses a dependency probe
@@ -209,6 +209,16 @@ export interface NexusConfig {
    * flip dependency state between requests rely on.
    */
   healthCacheMs: number;
+  /**
+   * How long `GET /api/branding` reuses its assembled payload
+   * (`NEXUS_BRANDING_CACHE_MS`).
+   *
+   * The route is unauthenticated and used to carry a logo data URL plus several
+   * settings reads on every SPA load. Within this window the payload is taken
+   * once and shared, and the response is marked cacheable so a CDN or browser
+   * can absorb repeat traffic. `0` disables the cache.
+   */
+  brandingCacheMs: number;
   /** Shared deadline for the health route's Edge calls; below the 10 s image healthcheck. */
   healthProbeTimeoutMs: number;
   /**
@@ -246,6 +256,16 @@ export interface NexusConfig {
    * integration, not a person.
    */
   maxMessagesPerUserPerDay: number;
+  /**
+   * How many access requests one account may create in a rolling 24 hours
+   * (`NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY`). `0` disables the budget.
+   *
+   * The per-minute limiter bounds a burst; this bounds the day, because every
+   * request durably costs a row, an audit row and a provider notification.
+   * Cancelled requests count toward the ceiling so create→cancel→create cannot
+   * reopen the loop.
+   */
+  maxAccessRequestsPerUserPerDay: number;
   /**
    * How many recipients one god-mode broadcast may address
    * (`NEXUS_MAX_BROADCAST_RECIPIENTS`). `0` removes the ceiling.
@@ -394,12 +414,14 @@ const envSchema = z.object({
   NEXUS_SESSION_TTL: intish(DEFAULT_SESSION_TTL_SECONDS, 60, 60 * 60 * 24 * 30),
   NEXUS_RATE_LIMIT_ENABLED: boolish(true),
   NEXUS_HEALTH_CACHE_MS: intish(5_000, 0, 60_000),
+  NEXUS_BRANDING_CACHE_MS: intish(5_000, 0, 60_000),
   // Reserve at least 5 s for the database, scheduling and HTTP overhead in the
   // shipped 10 s healthcheck. External healthcheck overrides cannot be verified here.
   NEXUS_HEALTH_PROBE_TIMEOUT_MS: intish(1_500, 100, 5_000),
   NEXUS_MAX_APIS_PER_OWNER: intish(DEFAULT_MAX_APIS_PER_OWNER, 0, 100_000),
   NEXUS_SPEC_HISTORY_LIMIT: intish(DEFAULT_SPEC_HISTORY_LIMIT, 1, 10_000),
   NEXUS_MAX_MESSAGES_PER_USER_PER_DAY: intish(200, 0, 1_000_000),
+  NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY: intish(20, 0, 1_000_000),
   NEXUS_MAX_BROADCAST_RECIPIENTS: intish(5_000, 0, 1_000_000),
   NEXUS_MAX_BROADCASTS_PER_DAY: intish(20, 0, 100_000),
   NEXUS_MAX_MASS_EMAIL_RECIPIENTS: intish(5_000, 0, 1_000_000),
@@ -596,10 +618,12 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     sessionTtlSeconds: raw.NEXUS_SESSION_TTL,
     rateLimitEnabled: nodeEnv === 'test' ? false : raw.NEXUS_RATE_LIMIT_ENABLED,
     healthCacheMs: raw.NEXUS_HEALTH_CACHE_MS,
+    brandingCacheMs: raw.NEXUS_BRANDING_CACHE_MS,
     healthProbeTimeoutMs: raw.NEXUS_HEALTH_PROBE_TIMEOUT_MS,
     maxApisPerOwner: raw.NEXUS_MAX_APIS_PER_OWNER,
     specHistoryLimit: raw.NEXUS_SPEC_HISTORY_LIMIT,
     maxMessagesPerUserPerDay: raw.NEXUS_MAX_MESSAGES_PER_USER_PER_DAY,
+    maxAccessRequestsPerUserPerDay: raw.NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY,
     maxBroadcastRecipients: raw.NEXUS_MAX_BROADCAST_RECIPIENTS,
     maxBroadcastsPerDay: raw.NEXUS_MAX_BROADCASTS_PER_DAY,
     maxMassEmailRecipients: raw.NEXUS_MAX_MASS_EMAIL_RECIPIENTS,
