@@ -132,6 +132,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - Require the provider role as well as API ownership for access decisions;
   administrators retain oversight after an owner is demoted.
 
+- Require the environment SMTP connection before clearing a password override,
+  and audit SMTP password-source transitions without recording setting values.
 - **A test consumer whose creation was applied but never acknowledged was
   orphaned on the gateway.** When Edge stored the `nexus-test-<api_id>` consumer
   and then failed to answer, the caller held no id for it, so the compensation
