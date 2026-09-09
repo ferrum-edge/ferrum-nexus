@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 
-import type { UpdateSettingsRequest } from '@ferrum-nexus/shared';
+import type { ApiErrorBody, UpdateSettingsRequest } from '@ferrum-nexus/shared';
 
 import type { NexusStore } from '../db/store.js';
 import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
@@ -21,7 +21,16 @@ export function runSettingsTransactionContract(
     before(async () => {
       target = await makeStore();
       faults = faultInjectingStore(target.store);
-      harness = await buildTestApp({ store: faults.store });
+      harness = await buildTestApp({
+        store: faults.store,
+        env: {
+          NEXUS_SMTP_HOST: 'environment.example.test',
+          NEXUS_SMTP_PORT: '587',
+          NEXUS_SMTP_SECURE: 'false',
+          NEXUS_SMTP_USER: 'environment-user',
+          NEXUS_SMTP_PASSWORD: 'environment-password',
+        },
+      });
       founder = await harness.registerUser();
       const seeded = await harness.authed(founder, {
         method: 'PUT',
@@ -146,6 +155,114 @@ export function runSettingsTransactionContract(
       assert.match(JSON.stringify(audit), /captcha.secret_key/);
       assert.match(JSON.stringify(audit), /smtp.password/);
       assert.doesNotMatch(response.body + JSON.stringify(audit), /private-captcha|private-smtp/);
+    });
+
+    const environmentConnection = {
+      host: 'environment.example.test',
+      port: 587,
+      secure: false,
+      username: 'environment-user',
+    };
+
+    for (const connection of [
+      { host: 'administrator.example.test' },
+      { port: 2525 },
+      { secure: true },
+      { username: 'administrator-user' },
+    ]) {
+      for (const password of [null, '']) {
+        const field = Object.keys(connection)[0];
+        it(`rejects clearing ${JSON.stringify(password)} after overriding ${field}`, async () => {
+          const saved = await harness.authed(founder, {
+            method: 'PUT',
+            url: '/api/admin/settings',
+            payload: {
+              smtp: {
+                ...environmentConnection,
+                ...connection,
+                password: 'administrator-password',
+              },
+            },
+          });
+          assert.equal(saved.statusCode, 200, saved.body);
+          const beforeRows = await target.store.settings.all();
+          const beforeAudit = await harness.auditRows('admin.settings_update');
+          const beforeResolved = await harness.services.email.resolveSettings();
+          assert.equal(beforeResolved.password, 'administrator-password');
+
+          const rejected = await harness.authed(founder, {
+            method: 'PUT',
+            url: '/api/admin/settings',
+            payload: { smtp: { password } },
+          });
+          assert.equal(rejected.statusCode, 400, rejected.body);
+          assert.equal(rejected.json<ApiErrorBody>().error.code, 'VALIDATION_FAILED');
+          assert.deepEqual(await target.store.settings.all(), beforeRows);
+          assert.deepEqual(await harness.auditRows('admin.settings_update'), beforeAudit);
+          assert.deepEqual(await harness.services.email.resolveSettings(), beforeResolved);
+        });
+      }
+    }
+
+    for (const password of [null, '']) {
+      it(`clears ${JSON.stringify(password)} on the environment relay with an audit`, async () => {
+        const saved = await harness.authed(founder, {
+          method: 'PUT',
+          url: '/api/admin/settings',
+          payload: { smtp: { ...environmentConnection, password: 'administrator-password' } },
+        });
+        assert.equal(saved.statusCode, 200, saved.body);
+        const beforeAudit = await harness.auditRows('admin.settings_update');
+        const cleared = await harness.authed(founder, {
+          method: 'PUT',
+          url: '/api/admin/settings',
+          payload: { smtp: { password } },
+        });
+        assert.equal(cleared.statusCode, 200, cleared.body);
+        const resolved = await harness.services.email.resolveSettings();
+        assert.equal(resolved.host, environmentConnection.host);
+        assert.equal(resolved.password, 'environment-password');
+        assert.equal(await target.store.settings.get('smtp.password'), null);
+        const audit = await harness.auditRows('admin.settings_update');
+        const added = audit.filter((row) => !beforeAudit.some((prior) => prior.id === row.id));
+        assert.equal(added.length, 1);
+        assert.deepEqual(added[0]?.details, {
+          changed_keys: ['smtp.password'],
+          smtp_password_source_change: { from: 'override', to: 'environment' },
+        });
+
+        const replaced = await harness.authed(founder, {
+          method: 'PUT',
+          url: '/api/admin/settings',
+          payload: { smtp: { password: 'administrator-password' } },
+        });
+        assert.equal(replaced.statusCode, 200, replaced.body);
+        const replacementAudit = (await harness.auditRows('admin.settings_update')).filter(
+          (row) => !audit.some((prior) => prior.id === row.id),
+        );
+        assert.equal(replacementAudit.length, 1);
+        assert.deepEqual(replacementAudit[0]?.details, {
+          changed_keys: ['smtp.password'],
+          smtp_password_source_change: { from: 'environment', to: 'override' },
+        });
+        assert.doesNotMatch(
+          JSON.stringify([...added, ...replacementAudit]),
+          /administrator-password|environment-password|environment\.example\.test/,
+        );
+      });
+    }
+
+    it('compares effective connection values when clearing redundant overrides', async () => {
+      const response = await harness.authed(founder, {
+        method: 'PUT',
+        url: '/api/admin/settings',
+        payload: { smtp: { host: null, username: '', password: null } },
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      const resolved = await harness.services.email.resolveSettings();
+      assert.equal(resolved.host, environmentConnection.host);
+      assert.equal(resolved.user, environmentConnection.username);
+      assert.equal(resolved.password, 'environment-password');
     });
   });
 }

@@ -783,7 +783,8 @@ Two `app_settings` values are secret and are stored encrypted:
 Both are **write-only over HTTP**: they go in through `PUT /api/admin/settings`
 and are never returned. The DTOs expose only `password_set` / `secret_set`
 booleans. The `admin.settings_update` audit row records the **names** of the
-changed keys and never their values, so the audit log stays readable by anyone
+changed keys and SMTP password-source transitions (`override` or `environment`),
+never setting values, so the audit log stays readable by anyone
 allowed to read audit logs.
 
 Before changing `NEXUS_SECRET_KEY`, stop all Nexus instances and run
