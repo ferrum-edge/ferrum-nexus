@@ -193,12 +193,35 @@ they are built to answer nothing:
   the lease and issues the caller's replacement session only after commit,
   while still holding the lease. Reset redemption issues no replacement session.
   A fresh reset link can still be requested subject to the existing throttle.
+- **A failure answers the same as a success.** `withTimingFloor` equalises how
+  long the branches take, but an exception escaping it would still reach the
+  client as a `500` — and the only branch that can raise one is the branch that
+  found an account, which makes a partially failing store an existence oracle.
+  Both endpoints therefore swallow a fault, log it at `warn`, and answer the
+  documented `200 { "ok": true }`; the response is identical for a real
+  address, an unknown one, a disabled one and a throttled one whatever the
+  store did.
+- **A failed mint leaves the throttle window unspent.** The conditional claim
+  on `email_token_issue_claims` — the single write that elects one winner among
+  concurrent requests — is the _first_ write of the minting transaction rather
+  than a separate one committed before it. It therefore commits with the token
+  or rolls back with it, so a store fault cannot burn the recipient's
+  10-minute window on a link that was never issued and leave the retry
+  answering the uniform `200` while sending nothing.
 - **The audit log is where the truth is.** `auth.password_reset_request` and
   `auth.verification_resend` are written only when a link was really issued, so
   operators can see what the response would not say.
 - **Rate limiting still applies.** Both routes sit under the `/api/auth/*`
   limiter (20 requests per minute per IP), which is what bounds the cost of the
   scrypt floor.
+
+### Browser session cache
+
+The SPA clears its TanStack Query cache on explicit logout, a request's global
+401 handler, and a session refresh that returns 401. A sign-in after sign-out or
+an identity change clears the cache again before accepting the principal, so
+cached credential metadata and other query results cannot cross accounts in
+the same tab. A transient refresh failure preserves an authenticated session.
 
 ### Password storage
 
@@ -231,10 +254,21 @@ read it to echo it back.
 Enforcement covers every non-`GET`/`HEAD`/`OPTIONS` request under `/api` that
 carries a session. Exempt paths are only the pre-session ones:
 `/api/auth/login`, `/api/auth/register`, `/api/auth/verify-email`,
-`/api/auth/captcha`. **`POST /api/auth/logout` is not exempt** — forcing a
+`/api/auth/resend-verification`, `/api/auth/forgot-password`,
+`/api/auth/reset-password`, `/api/auth/captcha`.
+**`POST /api/auth/logout` is not exempt** — forcing a
 sign-out is a state change like any other. An anonymous mutation is rejected by
 the route's own guard with `401`, not by the CSRF hook, because there is no
 session-bound token to compare against yet.
+
+CSRF scope, exemptions and API cache controls use Fastify's matched route
+identity. API catch-all routes return JSON errors for unknown `/api` paths,
+including `/api` itself, instead of serving the SPA. Authenticated unsafe
+requests to those catch-all routes also require CSRF; with a valid token they
+return `404`. Router-rejected malformed paths return a non-cacheable JSON `400`.
+These controls do not rewrite URLs or change the router's case-sensitive path
+matching, encoded-separator handling or query-string semantics. The `/apix`
+boundary remains outside the API namespace.
 
 Defence in depth: `SameSite=Lax` on both cookies, `frame-ancestors: 'none'` and
 `X-Frame-Options: DENY` (no clickjacking), `formAction: 'self'`.
@@ -379,7 +413,10 @@ requires `bootstrap_token` and refuses everything else with `403 FORBIDDEN`.
   admin. An established portal cannot be talked into a second founder.
 - `GET /api/branding` publishes `bootstrap_required` (no active super admin)
   so the sign-up form knows to ask for the token. That flag is the only public
-  signal; the token itself is never exposed over the API.
+  signal about the seat; the token itself is never exposed over the API. The
+  same payload carries the public registration policy (`open_registration` and
+  the self-selectable `allowed_roles`), which is enforced server-side on every
+  registration and is already observable by attempting one.
 
 #### The founder's seat is atomic
 
@@ -443,6 +480,20 @@ and that group in place, which is offboarding that did not happen. A test
 consumer is disposable by definition, so it is deleted outright rather than
 emptied; whoever needs one next recreates it.
 
+The same teardown runs on `DELETE /api/apis/:id`. The `nexus-test-<api_id>`
+consumer is named after an API that is about to stop existing, so once the API
+is gone nothing in the portal could ever find it again: no account teardown and
+no reconciliation has anything left to look it up by. The deletion therefore
+collects it — the consumer, its credential, its `credential_metadata` rows and
+its `gateway_identities` registration — through the same primitive the account
+teardown uses, after the proxy is deleted (so no live proxy ever had an
+unauthenticatable key) and before the portal rows are dropped (so a failure
+leaves the API in the catalog for the delete to be retried against, rather than
+answering `200` over a stranded identity). A consumer that is already gone is
+not an error. The teardown takes the identity's own name key, which is the key
+`POST /api/apis/:id/test-consumer` holds for the whole of its work, so a
+deletion racing a creation waits for it and then undoes it.
+
 Every gateway step for one identity runs inside a critical section keyed on
 _that_ consumer's Ferrum id — an in-process queue plus an `edge_leases` row —
 so a concurrent approval or credential issue on another Nexus instance cannot
@@ -499,7 +550,32 @@ it, and both disable paths flip `status` under the same key. Whichever wins:
   `403 USER_DISABLED` before anything exists on the gateway.
 
 An append refused after the consumer was created is compensated: the consumer
-is deleted and the registration dropped. If that delete fails, the registration
+is deleted and the registration dropped. A create that was _refused_ is
+compensated too, because a rejection is not proof the gateway did not apply the
+write — Edge may have stored the consumer and lost the acknowledgement, and no
+answer carried its id back.
+
+What makes that recoverable is that **Nexus names every consumer it asks Edge
+to create**, so the id of the create being compensated for is known whether or
+not an answer arrived, and one `GET /consumers/{id}` settles the question with
+no namespace-wide scan. The first consumer of a username takes an id that is a
+pure function of its namespace and username (a domain-separated UUIDv8), so it
+needs nothing persisted to be found again. A consumer that _replaces_ one of
+the same name takes a fresh id instead — reusing the derived one would make the
+replaced consumer and its replacement one resource, and `credential_metadata`,
+every revocation and the registration itself are all keyed on that id — and the
+fresh id is written to `gateway_identities.ferrum_consumer_id` before the
+`POST`, so a crash between the write and the compensation still leaves the
+consumer findable by id on the next teardown. The bounded username scan
+survives only as the fallback for an identity that predates the derivation.
+
+A consumer that turns out to exist is deleted; only a lookup that answers
+"there is no such consumer" lets the registration go. A lookup that _fails_
+leaves the registration standing — a row over a consumer that is gone is
+reclaimable, an orphan with no row is not. A consumer that was merely _found_
+rather than created — the one a replacement was about to take down — is never
+touched by the compensation: it stays its previous owner's until a replacement
+actually succeeds. If that delete fails, the registration
 stays — it is what the teardown enumerates — and, when the owner is no longer
 active, the teardown job that will strip the identity is made sure of: a
 `pending` or `sending` job is left alone, and a `done` one — closed by another
@@ -610,6 +686,72 @@ length — someone hand-edited the consumer — the operation is **refused** wit
 `EDGE_ERROR` rather than guessing, unless exactly one credential is live, in
 which case removing the whole type is unambiguous.
 
+### A retirement is durable before it is attempted
+
+The gateway delete and the row that records it are on different systems with no
+transaction spanning them, so one lost write used to be enough to put them
+permanently out of step: a `DELETE` Edge applied whose acknowledgement never
+arrived, or a confirmed delete whose follow-up row update failed, left the
+mirror one row longer than the array. The length check above then refused every
+later rotate _and_ revoke of that type, and the per-type cap blocked issuing a
+replacement — an account holding a live gateway credential nobody could kill,
+which is precisely the operation an incident response needs first.
+
+So the row being retired is moved to the `retiring` status **before** the
+destructive call and settled to `revoked` after it. `retiring` is durable, still
+occupies a live slot, and means "the entry behind this row may already be gone".
+The next rotate, revoke or issue on the same consumer and type settles it — but
+only in the single shape that admits one reading: the mirror exactly one row
+longer than the array, and exactly one live row carrying the pending
+retirement. Every other mismatch still refuses, because acting on a stale index
+is the wrong-key deletion this whole design exists to prevent. Settlements are
+audited as `credential.settle`; the operator procedure is `operations.md` §12.
+
+The invariant runs both ways: a row may be left `retiring` only while its entry
+_might_ be gone. Every delete that reports failure re-reads the array inside the
+lease it still holds, and an array still exactly as long as it was before the
+call proves the delete never applied — the row goes back to `active` and the
+caller retries. A `retiring` row over an entry that is demonstrably live would
+be the one input that could make a later settlement pick the wrong row, after
+which a positional delete takes somebody else's live key. Outcomes that cannot
+be proved either way stay `retiring`, which is the safe reading: the row keeps
+its slot and stays revocable.
+
+### An append is never left behind
+
+An entry Edge accepted whose portal row could not be written, and a replacement
+whose paired delete failed, are both taken back before the failure is reported —
+the second because its show-once plaintext was never delivered, so leaving it
+would spend a cap slot on a credential nobody holds. The compensating delete is
+positional, so it is only issued against an array that is still exactly one entry
+longer than the length the append index was derived from; the index is read from
+the **gateway**, never counted from the portal's rows, because a Nexus-only
+restore leaves the mirror shorter than the array and an index counted from the
+short side points at an older, still-live key. Where the material is visible its
+fingerprint is checked too, though Edge's redaction means that is rarely the
+case. An entry the portal declines to remove — or fails to — is recorded as
+`credential.append_rollback` with `withdrawn: false`, the credential id where
+one exists, and the `last4` and `append_index` that identify an entry Edge gives
+no id; never silently forgotten, and never the material itself.
+
+The append's own `POST` is compensated on the same terms. A rejection Edge
+applied anyway — the acknowledgement lost on the way back — would otherwise
+leave a live entry with no row at all, and that is the one drift no later call
+can settle, because nothing local records the entry. So the array is re-read:
+unchanged, the append demonstrably did not apply and nothing is written; grown
+by exactly this call's entry, it is withdrawn; anything else is audited as a
+`suspected` orphan and left exactly where it is.
+
+**`basicauth` is the exception to the compensating delete**, and it is never
+issued for that type: no read projection shows it, so there is no array to check
+an index against and the only index available is one counted off the mirror —
+which a Nexus-only restore leaves shorter than the array, pointing at a
+pre-restore password rather than at the orphan. So the statement above holds
+exactly as written — _the compensating delete only ever removes what it
+appended_ — precisely because `basicauth` is not deleted at all: an append of
+that type that has to be undone is recorded as an orphan for an administrator,
+never guessed at.
+
 Rows that predate the ordinal were backfilled only where their timestamps were
 distinct. Where two live rows of one type share a timestamp, both stay without
 an ordinal and any rotate or revoke of them is refused with `409 CONFLICT`
@@ -645,7 +787,9 @@ changed keys and never their values, so the audit log stays readable by anyone
 allowed to read audit logs.
 
 Before changing `NEXUS_SECRET_KEY`, stop all Nexus instances and run
-`npm run rotate-secret-key` with the previous and new keys in the environment.
+`npm run rotate-secret-key` (in a built image:
+`node server/dist/db/rotate-key-cli.js`) with the previous and new keys in the
+environment.
 The command re-encrypts SMTP/CAPTCHA blobs and every other encrypted setting
 in one transaction, refusing all writes if any blob cannot be decrypted. A
 bare key swap without re-encryption leaves those settings unreadable and
@@ -682,6 +826,18 @@ The `spec_enforcement` conversion — which has to delete and recreate the proxy
 because Edge can neither attach nor detach an `api_spec` in place — takes the
 same detour, as does its rollback. An API being converted answers `404` for the
 rebuild instead of answering unauthenticated.
+
+> **Advisory follow-up — `GHSA-3r76-f92m-5x8v`.** That advisory's residual-risk
+> note says the proxy delete-and-recreate paths — unpublishing an API, and the
+> enforcement-level conversion — stay outside the per-proxy lease. **That
+> statement is superseded.** The conversion has held the lease since issue #60,
+> and deletion holds it across the gateway teardown _and_ the row delete since
+> issue #135; the conversion additionally refuses to rebuild for an API whose
+> row has gone, which is the backstop for a lease that expired under a stalled
+> instance. Publishing is the only lifecycle operation still outside, and it has
+> nothing to key on — there is no proxy id until Edge has created the proxy. The
+> advisory text lives on GitHub and has to be amended there; this note records
+> what it should say until it is.
 
 **Operational consequence.** Two crash windows remain, both narrow and both
 recognisable:
@@ -783,7 +939,7 @@ rendered email out to every active `admin` and `super_admin`. Left unbounded,
 one low-privilege account could mail-bomb every administrator, exhaust the SMTP
 quota, and grow four tables without limit (GHSA-gwqc-w33p-5wx5).
 
-Three independent bounds close that, and none of them relies on the others:
+Six independent bounds close that, and none of them relies on the others:
 
 1. **Per-account burst limits** — 10 thread creations and 30 replies per minute.
    Keying on the account rather than the IP is the load-bearing choice: an
@@ -798,8 +954,30 @@ Three independent bounds close that, and none of them relies on the others:
    one allowance and a new conversation is not a fresh one. Exceeding it is
    `429 QUOTA_EXCEEDED` with `details: { limit, window, setting }`. Admins and
    super admins are subject to it too — carving out a role would put the whole
-   budget one privilege escalation away.
-3. **Email coalescing** — the `message_received` mail is enqueued with the
+   budget one privilege escalation away. The count and the insert share a
+   transaction **and** a per-sender lease in `edge_leases`, which is what makes
+   the check one step across instances as well as within one; see the note on
+   read-then-write below.
+3. **A per-broadcast recipient ceiling** — `NEXUS_MAX_BROADCAST_RECIPIENTS`
+   (default 5 000, `0` disables). A god-mode broadcast is the
+   highest-amplification path in the portal, and its message rows are flagged so
+   they do _not_ draw on the sending administrator's budget: charging them there
+   left the amplifying operation unbounded while the rows it wrote refused that
+   administrator's ordinary messaging for a day. Enforced before the first row,
+   with `details: { limit, recipients, setting }`.
+4. **A per-administrator daily broadcast count** — `NEXUS_MAX_BROADCASTS_PER_DAY`
+   (default 20, `0` disables), counted from that actor's own `god.broadcast`
+   audit rows under the same per-actor lease the broadcast runs in, so it holds
+   across instances. The ceiling above bounds one announcement; this bounds a
+   loop of them.
+5. **A per-campaign mass-email recipient ceiling** —
+   `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` (default 5 000, `0` disables). Not an
+   anti-abuse bound — the endpoint is admin-only — but a bound on what one
+   transaction may hold, since the fan-out and its audit row commit together:
+   16 MB per transaction on MongoDB, and on the SQL adapters an N-insert body
+   during which no other transaction on the instance runs. Checked before any
+   row is rendered or written, with `details: { limit, recipients, setting }`.
+6. **Email coalescing** — the `message_received` mail is enqueued with the
    idempotency key `message_received:<thread>:<recipient>:<bucket>`, where
    `bucket` is a 10-minute slice of wall-clock time. The outbox's unique index
    on `idempotency_key` turns every later message in the same window into a
@@ -808,13 +986,27 @@ Three independent bounds close that, and none of them relies on the others:
    _activity_ and links to the thread rather than quoting a body it cannot
    promise to keep delivering.
 
-Two limits on this, stated plainly: the per-minute counters are **in-process**,
-so N instances enforce N × those numbers (the daily budget, which counts durable
-rows, is exact on any number of instances); and the budget's read-then-write is
-not one atomic step, so two concurrent sends can both observe the same count and
-land at `limit + 1`. That race is bounded by the per-minute limiter and costs one
-row, which is the wrong order of magnitude to matter for a resource-exhaustion
-control.
+One limit on this, stated plainly: the per-minute counters are **in-process**,
+so N instances enforce N × those numbers. Put the real burst limit at the proxy
+if you run more than one instance.
+
+The daily budget is **not** in that category, though it used to be described as
+if counting durable rows were enough. It is not: the count and the insert are
+separate statements, and two instances over one database at `quota - 1` both
+read `used < limit` and both committed. What ordered them on a single instance
+was the store's in-process transaction queue, which no second process shares —
+so the single-process regression tests could not observe the gap at all. The
+whole count-and-insert now runs inside a per-sender lease
+(`messages:budget:<user>`) in the same `edge_leases` table the last-super-admin
+guard uses. The cross-adapter contract suite exercises it with two instances
+built over **two store objects** against one database, which is the whole point:
+every adapter drains transaction bodies through a queue belonging to one store
+object, so two apps sharing one store are ordered by that queue whatever the
+lease does, and the case would pass with the lease deleted. Two pools mean two
+queues, and the lease is the only thing left ordering them. A sender whose lease
+is held elsewhere longer than the 30 s wait gets `409 CONFLICT` and is asked to
+retry; it is never a silent overshoot. The lease is skipped entirely when the
+budget is switched off.
 
 ### Consumer quotas are per gateway process
 
@@ -842,20 +1034,23 @@ the proxy's own `allowed_ws_origins`, whose default (`[]`) is _no check at all_.
 A page on any origin could otherwise open a socket to a published API and ride
 a logged-in browser's ambient credentials.
 
-Nexus mirrors the API's CORS origins into `allowed_ws_origins` at publish time
-and whenever the CORS policy changes: a provider who named the browser origins
-allowed to call the API has already answered the question. Only plain
-`scheme://host[:port]` origins are mirrored, because the upgrade check is an
-exact, case-insensitive string comparison and a wildcard pattern would silently
-never match. An API with **no CORS policy, or a `*` one, gets `[]`** — a
-half-populated allow-list would be worse than none, and an API deliberately open
-to every browser origin gains nothing from one.
+Nexus mirrors exact HTTP(S) CORS origins into `allowed_ws_origins` only when
+`cors.enforce_websocket_origins` is explicitly `true`. Wildcards are refused in
+this mode. Edge has no option to allow a missing Origin while enforcing this
+list: an origin-less upgrade is rejected along with an unlisted origin.
 
-The consequence is worth stating plainly: **an API with no CORS policy accepts
-WebSocket upgrades from any origin.** Authentication still applies — the auth
-plugin and the ACL group run on the upgrade request — so this is a CSRF-shaped
-risk against browser-borne credentials, not an open door. Providers fronting a
-WebSocket backend from a browser should list their origins.
+The toggle defaults to **false** so adding a browser CORS policy does not break
+non-browser WebSocket clients. With it off, upgrades from any origin pass the
+origin gate. Authentication and ACLs still apply, but browser-borne credentials
+can be exposed to CSWSH. Providers of browser-only WebSocket APIs should enable
+the toggle and list their trusted origins. Mixed-client APIs need an upstream
+origin policy if they require both origin-less clients and browser CSWSH
+protection. Removing CORS clears the origin gate.
+
+No startup migration rewrites existing gateway proxies. Their previous origin
+lists remain until the provider saves CORS; the Settings toggle makes the new
+choice explicit. Review browser-only APIs when upgrading and opt in before
+saving to retain their existing CSWSH protection.
 
 ### CAPTCHA
 
@@ -986,18 +1181,36 @@ this namespace`. A provider cannot fix a publish they cannot read the reason
 The split is enforced in one place — `classify()` in `ferrum-admin/client.ts`.
 Nothing else in the codebase reads an Edge error body.
 
+Invalid HTTP/JSON responses instead use `EDGE_PROTOCOL_ERROR`. These diagnostics
+contain only the upstream status and a fixed reason; response bytes and parser
+or decoder exceptions are never logged or returned. Successful JSON responses
+are decoded as strict UTF-8 so malformed bytes cannot silently rewrite an identity
+or credential field. See [Edge response contracts](edge-response-contracts.md).
+
 ---
 
 ## 10. Audit event catalog
 
-**Every state-changing endpoint writes exactly one `audit_logs` row** via the
+**State-changing endpoints write one `audit_logs` row per event** via the
 audit service, which is the only writer of that table. Rows are append-only:
 there is no update or delete path in the store interface.
 
 Each row carries `actor_user_id`, `actor_role` (both `null` for anonymous
 events), `action`, `target_type`, `target_id`, a JSON `details` object, the
 client `ip`, and `created_at`. Read them at `GET /api/admin/audit-logs`
-(_admin_), filterable by actor, action, target and time range.
+(_admin_), filterable by actor, action, target and time range. The response includes
+`actor: { id, email, display_name, role }` from the current user record, or `actor: null`
+when unavailable. `actor_role` retains the role at the time of the event. An unresolved
+non-null `actor_user_id` is preserved and displayed as an unknown user;
+only a null actor id is displayed as `system` (including anonymous events).
+
+Time bounds are normalized to UTC millisecond ISO timestamps before comparison:
+`from` is inclusive and `to` is exclusive. Second-precision bounds mean `.000`,
+so an upper bound at a second excludes that entire second.
+
+A combined role/status patch writes both transition events, with the full transition
+context in each row. Unchanged fields are excluded from `changed_fields`; profile,
+organization and API patches with no changed fields write no audit row.
 
 **Secrets never appear in `details`.** A settings update records the _names_ of
 the changed keys; a credential event records the type and last4, never the
@@ -1011,6 +1224,12 @@ ordinary reporting.
 > [`server/src/audit/service.ts`](../server/src/audit/service.ts) **and** to
 > this table. `CONTRIBUTING.md` makes that a review requirement; a new action
 > that is not documented here is an incomplete change.
+
+### Gateway startup
+
+| Action                   | Target type     | Description                                                           |
+| ------------------------ | --------------- | --------------------------------------------------------------------- |
+| `gateway.metrics_enable` | `plugin_config` | System created the global metrics config. Details name the namespace. |
 
 ### Authentication
 
@@ -1026,29 +1245,30 @@ ordinary reporting.
 
 ### Users and organizations
 
-| Action                           | Target type    | Description                                                                                                                                                                                                                                                                                                                                                                                            |
-| -------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `user.update`                    | `user`         | A profile or account field changed without a role/status change. `details.self` distinguishes self-service from an admin edit; `changed_fields` lists what moved (`password` appears as a field name, never a value). A self-service password change also ends every other session, counted in `terminated_sessions`.                                                                                  |
-| `user.role_change`               | `user`         | An admin changed an account's role. `details`: `from_role`, `to_role`.                                                                                                                                                                                                                                                                                                                                 |
-| `user.disable`                   | `user`         | An admin disabled (or re-enabled) an account via the ordinary route. `details`: `from_status`, `to_status`, `terminated_sessions`, plus the gateway teardown: `gateway_teardown` (`ok` / `no_consumer` / `pending`), `gateway_consumer_id`, `revoked_credentials`, `removed_acl_groups`, `gateway_error`. `pending` means the revocation is queued and being retried — the credentials are still live. |
-| `user.gateway_teardown_complete` | `user`         | The teardown worker finished a revocation a disable had left pending. Written by the system, so `actor_user_id` is `null`. `details`: `attempts`, `gateway_teardown`, `gateway_consumer_id`, `revoked_credentials`, `removed_acl_groups`.                                                                                                                                                              |
-| `user.gateway_teardown_retry`    | `user`         | An admin re-ran a pending gateway revocation by hand via `POST /api/users/:id/gateway-teardown/retry`. `details`: `attempts` so far, plus the same teardown fields.                                                                                                                                                                                                                                    |
-| `org.create`                     | `organization` | An organization was created. `details`: name.                                                                                                                                                                                                                                                                                                                                                          |
-| `org.update`                     | `organization` | An organization was edited. `details`: `changed_fields`.                                                                                                                                                                                                                                                                                                                                               |
+| Action                           | Target type    | Description                                                                                                                                                                                                                                                                                                                                                                                        |
+| -------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `user.update`                    | `user`         | A profile or account field changed without a role/status change. `details.self` distinguishes self-service from an admin edit; `changed_fields` lists what moved (`password` appears as a field name, never a value). A self-service password change also ends every other session, counted in `terminated_sessions`.                                                                              |
+| `user.role_change`               | `user`         | An admin changed an account's role. `details`: `from_role`, `to_role`.                                                                                                                                                                                                                                                                                                                             |
+| `user.enable`                    | `user`         | An admin re-enabled an account. `details`: `from_status`, `to_status`.                                                                                                                                                                                                                                                                                                                             |
+| `user.disable`                   | `user`         | An admin disabled an account via the ordinary or god-mode route. `details`: `from_status`, `to_status`, `terminated_sessions`, plus the gateway teardown: `gateway_teardown` (`ok` / `no_consumer` / `pending`), `gateway_consumer_id`, `revoked_credentials`, `removed_acl_groups`, `gateway_error`. `pending` means the revocation is queued and being retried — the credentials are still live. |
+| `user.gateway_teardown_complete` | `user`         | The teardown worker finished a revocation a disable had left pending. Written by the system, so `actor_user_id` is `null`. `details`: `attempts`, `gateway_teardown`, `gateway_consumer_id`, `revoked_credentials`, `removed_acl_groups`.                                                                                                                                                          |
+| `user.gateway_teardown_retry`    | `user`         | An admin re-ran a pending gateway revocation by hand via `POST /api/users/:id/gateway-teardown/retry`. `details`: `attempts` so far, plus the same teardown fields.                                                                                                                                                                                                                                |
+| `org.create`                     | `organization` | An organization was created. `details`: name.                                                                                                                                                                                                                                                                                                                                                      |
+| `org.update`                     | `organization` | An organization was edited. `details`: `changed_fields`.                                                                                                                                                                                                                                                                                                                                           |
 
 ### Publishing
 
-| Action                        | Target type | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| ----------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `api.publish`                 | `api`       | An API was published: its Edge proxy and plugin configs created, then associated on the proxy so the gateway runs them. `details`: slug, listen path, proxy id, auth plugin, requestable, visibility, rate limit, CORS policy, method allow-list, backend timeouts, circuit breaker, OpenAPI enforcement level, upstream, spec path count. The proxy's `allowed_ws_origins` is not logged separately — it is a pure function of the CORS policy already recorded here.                                                                               |
-| `api.update`                  | `api`       | Safe runtime settings changed. `details`: `changed_fields`, plus context such as `previous_auth_plugin` and `existing_credentials_invalidated`. A `spec_enforcement` change additionally carries `proxy_rebuilt: true`: moving between `docs_only` and `routes` deletes and recreates the gateway proxy under the same id, so the API was briefly unreachable and an operator reading the log needs to be able to explain the gap.                                                                                                                   |
-| `api.spec_update`             | `api`       | A new spec revision was published and made current. `details`: spec id, version, path count, OpenAPI enforcement level, `backend_updated`. At the `routes` level the revision also changes what the gateway accepts, so the level is recorded on every upload.                                                                                                                                                                                                                                                                                       |
-| `api.retire`                  | `api`       | An API moved to `retired`. Emitted instead of `api.update` for that transition. `details.gateway_untouched` records that the proxy and live grants were left alone.                                                                                                                                                                                                                                                                                                                                                                                  |
-| `api.delete`                  | `api`       | An API and its Edge objects were destroyed. `details`: slug, proxy id, `revoked_grants`.                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `api.plugin_set`              | `api`       | A palette plugin was created or replaced on the API's proxy. `details`: `plugin_name`, `enabled`, `config_keys`, `trigger`, `replaced`. **The config keys are logged, never their values** — a plugin config can carry a Content-Security-Policy or a partner IP allow-list, and an audit row is not the place for either. The trigger is a method list and a path prefix, which are policy rather than data, so it is recorded in full.                                                                                                             |
-| `api.plugin_remove`           | `api`       | A palette plugin was detached from the proxy and deleted. `details`: `plugin_name`, `label`, `was_attached` (false when an operator had already removed the gateway config by hand).                                                                                                                                                                                                                                                                                                                                                                 |
-| `api.gateway_repair_required` | `api`       | A `spec_enforcement` conversion could neither finish nor put the original proxy back, so the API has **no gateway object at all** while its catalog entry, grants and credentials stay valid. `details`: `proxy_id`, hand-owned `plugin_names`, `spec_enforcement`, `attempted_spec_enforcement`, and both error messages. Raw proxy and plugin configurations are never included because they may contain infrastructure credentials or other operator-managed secrets. Also logged at `error`. Alert on it: no later request repairs it by itself. |
-| `test_consumer.create`        | `api`       | A provider created (or replaced) the disposable `nexus-test-<api_id>` consumer. `details`: consumer username/id, credential type, `replaced`.                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Action                        | Target type | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ----------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `api.publish`                 | `api`       | An API was published: its Edge proxy and plugin configs created, then associated on the proxy so the gateway runs them. `details`: slug, listen path, proxy id, auth plugin, requestable, visibility, rate limit, CORS policy, method allow-list, backend timeouts, circuit breaker, OpenAPI enforcement level, upstream, spec path count. The proxy's `allowed_ws_origins` is not logged separately — it is a pure function of the CORS policy already recorded here.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `api.update`                  | `api`       | Safe runtime settings changed. `details`: `changed_fields`, plus context such as `previous_auth_plugin` and `existing_credentials_invalidated`. A `spec_enforcement` change additionally carries `proxy_rebuilt: true`: moving between `docs_only` and `routes` deletes and recreates the gateway proxy under the same id, so the API was briefly unreachable and an operator reading the log needs to be able to explain the gap.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `api.spec_update`             | `api`       | A new spec revision was published and made current. `details`: spec id, version, path count, OpenAPI enforcement level, `backend_updated`. At the `routes` level the revision also changes what the gateway accepts, so the level is recorded on every upload.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `api.retire`                  | `api`       | An API moved to `retired`. Emitted instead of `api.update` for that transition. `details.gateway_untouched` records that the proxy and live grants were left alone.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `api.delete`                  | `api`       | An API and its Edge objects were destroyed. `details`: slug, proxy id, `revoked_grants`, and — only when the API had one — `test_consumer_id` plus `test_consumer_revoked_credentials` for the `nexus-test-<api_id>` identity torn down with it. An API that never had a test consumer names neither key, so an absent pair reads as "there was nothing to collect" rather than "the teardown was skipped".                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `api.plugin_set`              | `api`       | A palette plugin was created or replaced on the API's proxy. `details`: `plugin_name`, `enabled`, `config_keys`, `trigger`, `replaced`, `plugin_config_id` (the Edge config written, so the row names what was touched). **The config keys are logged, never their values** — a plugin config can carry a Content-Security-Policy or a partner IP allow-list, and an audit row is not the place for either. The trigger is a method list and a path prefix, which are policy rather than data, so it is recorded in full.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `api.plugin_remove`           | `api`       | A palette plugin was detached from the proxy and deleted. `details`: `plugin_name`, `label`, `was_attached` (false when an operator had already removed the gateway config by hand), `plugin_config_id` (the Edge config deleted, `null` when there was none). Only the config the portal created is removed — another config of the same plugin name on the proxy is an operator's and is left alone.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `api.gateway_repair_required` | `api`       | A `spec_enforcement` conversion could neither finish nor put the original proxy back, so the API has **no gateway object at all** while its catalog entry, grants and credentials stay valid. `details`: `phase` — `conversion` when the conversion itself failed and could not be undone, `rollback` when it succeeded and a later step of the same `PATCH` failed and the unwind could not rebuild — plus `proxy_id`, hand-owned `plugin_names`, `spec_enforcement`, `attempted_spec_enforcement`, `restore_error`, and `error` (the failure that made a restore necessary; present on the `conversion` phase only). **Read the two enforcement levels by the phase.** On a `conversion` row `attempted_spec_enforcement` is what the conversion was reaching for and the restore was rebuilding `spec_enforcement`, the level the `apis` row still holds. On a `rollback` row the conversion to `attempted_spec_enforcement` had already succeeded, and it is the unwind back to `spec_enforcement` that failed — so those rows carry `restore_target` as well, naming the level the failed restore was rebuilding outright. Raw proxy and plugin configurations are never included because they may contain infrastructure credentials or other operator-managed secrets. Also logged at `error`. Alert on it: no later request repairs it by itself. Exactly one row is written per affected conversion. |
+| `test_consumer.create`        | `api`       | A provider created (or replaced) the disposable `nexus-test-<api_id>` consumer. `details`: consumer username/id, credential type, `replaced`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
 ### Access workflow
 
@@ -1064,12 +1284,14 @@ ordinary reporting.
 
 ### Credentials
 
-| Action                 | Target type  | Description                                                                                                                                                                                                                                                                                                                                                |
-| ---------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `credential.issue`     | `credential` | A gateway credential was minted. `details`: credential type, consumer id, `last4`.                                                                                                                                                                                                                                                                         |
-| `credential.rotate`    | `credential` | Append-then-delete rotation. Target is the **new** credential; `details`: type, consumer id, `rotated_from`, `previous_last4`, plus `owner_user_id` when an admin rotated somebody else's credential — the replacement stays with its owner, the admin is only the actor.                                                                                  |
-| `credential.revoke`    | `credential` | A credential was deleted from Edge and marked revoked. `details`: type, consumer id, `last4`.                                                                                                                                                                                                                                                              |
-| `credential.reconcile` | `consumer`   | An admin emptied one credential type on a gateway consumer and revoked its portal rows — the repair for positions that can no longer be trusted (drifted array, or legacy rows sharing a timestamp). `details`: `credential_type`, `consumer_id`, `gateway_cleared`, `revoked_credentials`, `revoked_credential_ids`, `owner_user_ids`, optional `reason`. |
+| Action                       | Target type  | Description                                                                                                                                                                                                                                                                                                                                                |
+| ---------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `credential.issue`           | `credential` | A gateway credential was minted. `details`: credential type, consumer id, `last4`.                                                                                                                                                                                                                                                                         |
+| `credential.rotate`          | `credential` | Append-then-delete rotation. Target is the **new** credential; `details`: type, consumer id, `rotated_from`, `previous_last4`, plus `owner_user_id` when an admin rotated somebody else's credential — the replacement stays with its owner, the admin is only the actor.                                                                                  |
+| `credential.revoke`          | `credential` | A credential was deleted from Edge and marked revoked. `details`: type, consumer id, `last4`.                                                                                                                                                                                                                                                              |
+| `credential.settle`          | `credential` | A retirement Edge applied but the portal never recorded, settled by a later call on the same consumer and type — the mirror was one row longer than the array and exactly one live row carried the pending `retiring` state. `details`: `credential_type`, `consumer_id`, `last4`, `owner_user_id`, `mirror_rows`, `gateway_entries`.                      |
+| `credential.append_rollback` | `consumer`   | An append this portal made had to be taken back after an issue or a rotation failed. `details`: `credential_type`, `consumer_id`, `operation` (`issue` \| `rotate`), `withdrawn`, `last4` and `append_index`, `owner_user_id`, `cause`, plus `stranded_credential_id`, `retired_credential_id` and `suspected` where each applies. See §5.                 |
+| `credential.reconcile`       | `consumer`   | An admin emptied one credential type on a gateway consumer and revoked its portal rows — the repair for positions that can no longer be trusted (drifted array, or legacy rows sharing a timestamp). `details`: `credential_type`, `consumer_id`, `gateway_cleared`, `revoked_credentials`, `revoked_credential_ids`, `owner_user_ids`, optional `reason`. |
 
 ### Messaging and notifications
 
@@ -1093,14 +1315,21 @@ ordinary reporting.
 Each of these is written **in addition to** the ordinary audit row the
 underlying operation produces, so an emergency action leaves a two-row trail:
 what was done, and the fact that it was done under god mode and why. `reason`
-is required and non-empty on all four.
+is required and non-empty on all four operations.
 
-| Action             | Target type | Description                                                                                                                                                                                                          |
-| ------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `god.revoke_grant` | `grant`     | A grant was revoked without ownership. Pairs with `access.revoke`. `details`: `reason`, api id, user id.                                                                                                             |
-| `god.delete_api`   | `api`       | An API was destroyed without ownership. Pairs with `api.delete` (and one `access.revoke` per grant when `revoke_grants` was set). `details`: `reason`, slug, `owner_user_id`, `revoked_grants`.                      |
-| `god.disable_user` | `user`      | An account was disabled, its sessions destroyed and its gateway identity stripped. `details`: `reason`, `revoked_grants`, `terminated_sessions`, `previous_status`, and the same `gateway_*` keys as `user.disable`. |
-| `god.broadcast`    | `broadcast` | A platform message was sent to many users. `target_id` is `null`. `details`: `reason` (the subject), audience scope, `recipients`, `notified`, `threads_created`, `emails_enqueued`, `send_email`.                   |
+`broadcast` is the one that writes two rows of its own. `god.broadcast` is the
+_attempt_ — written before the first recipient is touched, because it is what
+`NEXUS_MAX_BROADCASTS_PER_DAY` counts, so a broadcast that reached the portal
+and then failed to record its outcome is still charged and still named.
+`god.broadcast_complete` is what the attempt achieved.
+
+| Action                   | Target type | Description                                                                                                                                                                                                                                                         |
+| ------------------------ | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `god.revoke_grant`       | `grant`     | A grant was revoked without ownership. Pairs with `access.revoke`. `details`: `reason`, api id, user id.                                                                                                                                                            |
+| `god.delete_api`         | `api`       | An API was destroyed without ownership. Pairs with `api.delete` (and one `access.revoke` per grant when `revoke_grants` was set). `details`: `reason`, slug, `owner_user_id`, `revoked_grants`.                                                                     |
+| `god.disable_user`       | `user`      | An account was disabled, its sessions destroyed and its gateway identity stripped. `details`: `reason`, `revoked_grants`, `terminated_sessions`, `previous_status`, and the same `gateway_*` keys as `user.disable`.                                                |
+| `god.broadcast`          | `broadcast` | A platform message was sent to many users. Written **before** the fan-out, so `NEXUS_MAX_BROADCASTS_PER_DAY` charges every attempt. `target_id` is the batch id. `details`: `reason` (the subject), audience scope, `recipients`, `send_email`, `phase: "started"`. |
+| `god.broadcast_complete` | `broadcast` | What that attempt achieved, written after the fan-out. Absent when the announcement went out but its outcome could not be recorded. `details`: `delivered`, `failed`, `notified`, `threads_created`, `emails_enqueued`, and the same audience keys.                 |
 
 ### What is deliberately not audited
 
@@ -1136,7 +1365,7 @@ Before going live:
       than one Ferrum Edge data-plane replica — otherwise every provider's
       quota is multiplied by the replica count.
 - [ ] Providers fronting a browser-facing WebSocket backend have listed their
-      CORS origins, which is what populates the proxy's `allowed_ws_origins`.
+      CORS origins and enabled `cors.enforce_websocket_origins`.
 - [ ] `NEXUS_ALLOW_PRIVATE_UPSTREAMS` is left at `false` unless the portal is
       meant to front internal services, in which case gateway egress is
       restricted at the network layer.

@@ -2,17 +2,12 @@
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
 
-# Native build tools for better-sqlite3 when no prebuilt binary matches
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends python3 make g++ \
-  && rm -rf /var/lib/apt/lists/*
-
 COPY package.json package-lock.json ./
 COPY shared/package.json shared/package.json
 COPY server/package.json server/package.json
 COPY web/package.json web/package.json
 RUN npm ci --ignore-scripts \
-  && npm rebuild better-sqlite3 esbuild
+  && npm rebuild esbuild
 
 COPY tsconfig.base.json ./
 COPY shared/ shared/
@@ -22,9 +17,9 @@ RUN npm run build --workspace shared \
   && npm run build --workspace server \
   && npm run build --workspace web
 
-# Production dependencies only
-RUN npm ci --omit=dev --ignore-scripts \
-  && npm rebuild better-sqlite3
+# better-sqlite3 13 ships Linux x64/arm64 Node-API binaries in its tarball.
+# No SQLite install script or native rebuild is needed on these image targets.
+RUN npm ci --omit=dev --ignore-scripts
 
 # ── Runtime stage ───────────────────────────────────────────────────────────
 FROM node:22-bookworm-slim
@@ -55,7 +50,8 @@ EXPOSE 8787
 # /api/health answers 503 only when the database is unreachable; a gateway
 # outage is reported in the body as `degraded` but keeps the container healthy,
 # so an orchestrator does not restart the portal because Edge is down.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+# NEXUS_HEALTH_PROBE_TIMEOUT_MS defaults to 1500 and is capped at 5000; leave headroom.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:' + (process.env.NEXUS_PORT || 8787) + '/api/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
 
 CMD ["node", "server/dist/index.js"]

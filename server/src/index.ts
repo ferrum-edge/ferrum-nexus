@@ -56,18 +56,29 @@ import {
   type MailTransportFactory,
 } from './email/service.js';
 import { createOutboxWorker, type OutboxWorker } from './email/outbox-worker.js';
-import { createFerrumAdmin, type FerrumAdminClient } from './ferrum-admin/index.js';
+import {
+  createFerrumAdmin,
+  type EdgeLogger,
+  type FerrumAdminClient,
+} from './ferrum-admin/index.js';
+import { reconcileGateway } from './ferrum-admin/reconcile.js';
 import { createCrypto, type NexusCrypto } from './lib/crypto.js';
 import { isNexusError } from './lib/errors.js';
 import {
   createKeyedSerializer,
+  SEND_LOCK_CONFLICT_MESSAGE,
   SUPER_ADMIN_LOCK_CONFLICT_MESSAGE,
 } from './lib/keyed-serializer.js';
 import { buildLoggerOptions, type LoggerOptions } from './lib/logger.js';
 import { createMessagingService, type MessagingService } from './messaging/service.js';
 import { registerAuthPlugin } from './middleware/auth-plugin.js';
+import { isApiRequest } from './middleware/api-route.js';
 import { userOrIpKey } from './middleware/rate-limit-keys.js';
-import { registerErrorHandler } from './middleware/error-handler.js';
+import {
+  handleFrameworkError,
+  registerApiNotFoundRoutes,
+  registerErrorHandler,
+} from './middleware/error-handler.js';
 import { createNotificationsService, type NotificationsService } from './notifications/service.js';
 import { createApiPluginsService, type ApiPluginsService } from './plugins/service.js';
 import { createUpstreamResolver, type UpstreamResolver } from './publishing/oas.js';
@@ -162,6 +173,16 @@ export interface BuildServerDeps {
   startTeardownWorker?: boolean;
   /** Serve the built SPA. Defaults to "yes when the dist directory exists". */
   serveStatic?: boolean;
+  /**
+   * How long an outbound send waits for the per-account key another instance is
+   * holding, in milliseconds. Defaults to the serializer's own
+   * `LEASE_WAIT_MS` (30 s).
+   *
+   * A seam for the tests that assert the *timeout* behaviour — the `409` a
+   * caller gets when the wait runs out — which are otherwise unreachable
+   * without waiting half a minute per case. Nothing in production sets it.
+   */
+  sendLockWaitMs?: number;
 }
 
 /** Rate limit applied to `/api/auth/*` when `config.rateLimitEnabled` is true. */
@@ -225,6 +246,7 @@ export async function buildServer(
     logger: deps.logger ?? buildLoggerOptions(config),
     trustProxy: fastifyTrustProxy(config.trustedProxies),
     bodyLimit: 4 * 1024 * 1024,
+    frameworkErrors: handleFrameworkError,
   });
 
   /* ── COMPOSITION — services ─────────────────────────────────────────────
@@ -252,6 +274,19 @@ export async function buildServer(
     conflictMessage: SUPER_ADMIN_LOCK_CONFLICT_MESSAGE,
   });
 
+  /**
+   * The same mechanism for the two outbound-send ceilings, worded for them:
+   * the rolling daily message budget (`messages:budget:<user>`) and the
+   * god-mode broadcast bounds (`god:broadcast:<user>`). Separate from `locks`
+   * only so a refused send is told what is actually in flight; the keys are
+   * disjoint from that serializer's, so the two never contend.
+   */
+  const sendLocks = createKeyedSerializer({
+    leases: deps.store.leases,
+    conflictMessage: SEND_LOCK_CONFLICT_MESSAGE,
+    ...(deps.sendLockWaitMs === undefined ? {} : { waitMs: deps.sendLockWaitMs }),
+  });
+
   const audit = createAuditService(deps.store);
   const captcha = createCaptchaService({
     store: deps.store,
@@ -274,6 +309,7 @@ export async function buildServer(
     audit,
     captcha,
     locks,
+    log: warn,
     onRegistered: deps.onRegistered ?? defaultOnRegistered(config, email, notifications, warn),
     onVerificationResend: emailTokenSender(config, email, warn, {
       templateKey: 'verification',
@@ -298,9 +334,10 @@ export async function buildServer(
     email,
     audit,
     settings,
+    locks: sendLocks,
     log: warn,
   });
-  const massEmail = createMassEmailService({ store: deps.store, email, audit });
+  const massEmail = createMassEmailService({ config, store: deps.store, email, audit });
 
   // ── Gateway workflow ────────────────────────────────────────────────────
   // One consumer provisioner is shared by credentials and access so both
@@ -324,6 +361,7 @@ export async function buildServer(
     // lifecycle key on: registering a gateway identity has to be ordered
     // against the status flip that disables its owner.
     locks,
+    log: warn,
   });
   // Users is composed after credentials: disabling an account has to strip the
   // gateway identity, not merely the browser session.
@@ -357,6 +395,7 @@ export async function buildServer(
     edge: deps.edge,
     audit,
     publishing,
+    log: (obj, message) => app.log.error(obj, message),
   });
   const access = createAccessService({
     config,
@@ -370,6 +409,7 @@ export async function buildServer(
     log: warn,
   });
   const god = createGodService({
+    config,
     store: deps.store,
     audit,
     notifications,
@@ -379,6 +419,7 @@ export async function buildServer(
     publishing,
     credentials,
     locks,
+    broadcastLocks: sendLocks,
     log: warn,
   });
 
@@ -437,7 +478,10 @@ export async function buildServer(
           spaFallback: (_request, reply) =>
             // no-cache: browsers must revalidate the shell so a fresh deploy's
             // hashed asset references are picked up immediately.
-            reply.type('text/html').header('cache-control', 'no-cache').sendFile('index.html'),
+            reply
+              .type('text/html')
+              .header('cache-control', 'no-cache')
+              .sendFile('index.html', { cacheControl: false }),
         }
       : {}),
   });
@@ -483,7 +527,7 @@ export async function buildServer(
   });
 
   app.addHook('onSend', async (request, reply, payload) => {
-    if (request.url.startsWith('/api') && !reply.hasHeader('cache-control')) {
+    if (isApiRequest(request) && !reply.hasHeader('cache-control')) {
       reply.header('cache-control', 'no-store');
     }
     return payload;
@@ -582,6 +626,8 @@ export async function buildServer(
   await app.register(async (scope) => scope.register(credentialsRoutes, { credentials }), {
     prefix: '/api/credentials',
   });
+
+  registerApiNotFoundRoutes(app);
 
   /* ── COMPOSITION — static SPA (production) ──────────────────────────── */
   if (webDist) {
@@ -764,16 +810,21 @@ export async function main(): Promise<void> {
   // The store is built first because the Edge client borrows its lease table:
   // that is what makes consumer and proxy read-modify-writes exclusive across
   // every Nexus instance, not just within this process.
-  const app = await buildServer(config, {
+  const edgeLogger: EdgeLogger = {
+    debug: (obj, message) => app.log.debug(obj, message),
+    warn: (obj, message) => app.log.warn(obj, message),
+    error: (obj, message) => app.log.error(obj, message),
+  };
+  const app: FastifyInstance = await buildServer(config, {
     store,
-    edge: createFerrumAdmin(config, undefined, store.leases),
+    edge: createFerrumAdmin(config, edgeLogger, store.leases),
   });
   if (envFile !== null) app.log.info({ file: envFile }, 'Loaded environment file');
   if (generatedBootstrapToken !== null && founderSeatOpen) {
     logGeneratedBootstrapToken(app, generatedBootstrapToken);
   }
-  // Best-effort: the namespace is also created implicitly by the first write.
-  void app.nexus.edge.ensureNamespace('Managed by Ferrum Nexus');
+  // Best-effort gateway prerequisites must not delay serving the portal.
+  void reconcileGateway(app.nexus.edge, app.nexus.services.audit, app.log);
 
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {

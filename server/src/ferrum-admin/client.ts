@@ -2,11 +2,13 @@
  * The only module in Nexus that speaks the Ferrum Edge Admin API's HTTP shape.
  *
  * Everything above it deals in domain objects and `NexusError`s. Failures are
- * classified into exactly two codes:
+ * classified into four codes:
  *
- * - `EDGE_UNAVAILABLE` — DNS, connect, TLS, socket or timeout. Nothing reached
- *   the gateway.
- * - `EDGE_ERROR` — the gateway answered with a non-2xx status.
+ * - `EDGE_UNAVAILABLE` — DNS, connect, TLS, socket or timeout. A write may
+ *   already have reached the gateway; the client never retries it.
+ * - `EDGE_ERROR` — a refused request.
+ * - `EDGE_REJECTED_SPEC` — a 4xx API-spec parse/validation refusal (HTTP 400).
+ * - `EDGE_PROTOCOL_ERROR` — an invalid HTTP/JSON response.
  *
  * Edge's flat `{"error": "..."}` text is always logged. Whether it is *also*
  * echoed to the caller depends on who the message is about:
@@ -26,8 +28,9 @@
  * of a create would `409`.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { TextDecoder } from 'node:util';
 
 import { Agent, request, type Dispatcher } from 'undici';
 
@@ -35,7 +38,7 @@ import type { EdgeCredentialType } from '@ferrum-nexus/shared';
 
 import type { EdgeConfig } from '../config/index.js';
 import type { LeaseRepo } from '../db/store.js';
-import { conflict, edgeError, edgeUnavailable, internal } from '../lib/errors.js';
+import { conflict, edgeError, edgeUnavailable, internal, NexusError } from '../lib/errors.js';
 import { createKeyedSerializer, type KeyedSerializer } from '../lib/keyed-serializer.js';
 import { createAdminTokenMinter, DEFAULT_ADMIN_SUBJECT, type AdminTokenMinter } from './jwt.js';
 import { parsePrometheusText, type PrometheusSample } from './prometheus.js';
@@ -101,6 +104,8 @@ export {
 
 /** Options for one Admin API call. */
 interface CallOptions {
+  /** Shared deadline for a sequence of health-probe calls. */
+  signal?: AbortSignal;
   /** JSON request body. */
   body?: unknown;
   /** Query string parameters; `undefined` values are dropped. */
@@ -140,7 +145,7 @@ export interface FerrumAdminClient {
    */
   version(): Promise<string | null>;
   /** Combined reachability probe for `GET /api/health`; never throws. */
-  probe(): Promise<EdgeProbe>;
+  probe(timeoutMs?: number): Promise<EdgeProbe>;
 
   /** `GET /namespaces` — a list of name strings. */
   listNamespaces(): Promise<string[]>;
@@ -150,6 +155,8 @@ export interface FerrumAdminClient {
    * swallowed rather than blocking startup.
    */
   ensureNamespace(description?: string): Promise<void>;
+  /** Create the namespace-global metrics prerequisite if absent; return only a new config. */
+  ensureMetricsConfig(): Promise<EdgePluginConfig | null>;
 
   readonly consumers: {
     list(query?: EdgeListQuery): Promise<EdgePage<EdgeConsumer>>;
@@ -166,6 +173,17 @@ export interface FerrumAdminClient {
      * closing a teardown with the consumer still up — would be wrong.
      */
     getByUsername(username: string): Promise<EdgeConsumer | null>;
+    /**
+     * The id {@link ensure} assigns to the first consumer of `username` in the
+     * configured namespace, without touching the gateway. Not the id of a
+     * consumer that replaces it — see {@link derivedConsumerId}.
+     */
+    derivedId(username: string): string;
+    /** Direct stable-id lookup/create; only a legacy identity conflict scans. */
+    ensure(
+      body: EdgeConsumerWrite,
+      subject?: string,
+    ): Promise<{ consumer: EdgeConsumer; created: boolean }>;
     create(body: EdgeConsumerWrite, subject?: string): Promise<EdgeConsumer>;
     /**
      * Whole-resource replace. **Always build the body from a `get()` response** —
@@ -321,6 +339,42 @@ const CONSUMER_SCAN_PAGE_SIZE = 500;
 export const CONSUMER_SCAN_LIMIT = MAX_CONSUMER_SCAN_PAGES * CONSUMER_SCAN_PAGE_SIZE;
 
 /**
+ * The consumer id Nexus assigns to the **first** consumer of `username` in
+ * `namespace`.
+ *
+ * UUIDv8: a domain-separated SHA-256 of the namespace and the canonical name.
+ * Edge accepts caller-assigned ids, so {@link FerrumAdminClient.consumers}'
+ * `ensure` creates under this one — which makes it a *pure function of the
+ * name*, computable without asking the gateway anything, and lets a create
+ * whose acknowledgement was lost be resolved with a single
+ * `GET /consumers/{id}` rather than a namespace-wide username scan (issue
+ * #139). Keep the derivation stable across restores.
+ *
+ * It is deliberately **not** the id of a consumer that *replaces* one of the
+ * same name: a replacement must be a distinct resource, or the rows keyed on
+ * the replaced consumer's id (`credential_metadata.ferrum_consumer_id`, and
+ * every revocation and lookup that names it) would be indistinguishable from
+ * the replacement's. A replacement is named by its creator instead and the id
+ * recorded on `gateway_identities` before the `POST`, which buys the same
+ * single-`GET` recovery without the collision.
+ */
+export function derivedConsumerId(namespace: string, username: string): string {
+  const bytes = createHash('sha256')
+    .update(JSON.stringify(['ferrum-nexus-consumer-v1', namespace, username]))
+    .digest();
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x80;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const hex = bytes.subarray(0, 16).toString('hex');
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20),
+  ].join('-');
+}
+
+/**
  * Edge's `MAX_PAGE_SIZE` (`src/admin/mod.rs`). A larger `limit` is clamped to
  * this, so asking for more only costs a wasted parameter.
  */
@@ -331,6 +385,185 @@ const MAX_PLUGIN_CONFIG_SCAN_PAGES = 50;
 
 /** Longest Edge validation text echoed back to the caller. */
 const MAX_GATEWAY_MESSAGE = 500;
+
+/** Bound all JSON responses, including intermediary error pages and resource lists. */
+export const ADMIN_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
+
+type BodyValidator = (value: unknown) => boolean;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === 'string';
+}
+
+function isIdentifier(value: unknown): boolean {
+  return isString(value) && value.length > 0;
+}
+
+function isStringArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every(isString);
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isConsumerBody(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isIdentifier(value.id) &&
+    isIdentifier(value.namespace) &&
+    isIdentifier(value.username) &&
+    (value.custom_id == null || isString(value.custom_id)) &&
+    isRecord(value.credentials) &&
+    Object.entries(value.credentials).every(([type, entries]) => {
+      if (!Array.isArray(entries) || entries.length === 0 || !entries.every(isRecord)) return false;
+      if (type === 'keyauth') return entries.every((entry) => isString(entry.key));
+      if (type === 'jwt' || type === 'hmac_auth') {
+        return entries.every((entry) => isString(entry.secret));
+      }
+      if (type === 'mtls_auth') return entries.every((entry) => isString(entry.identity));
+      return true;
+    }) &&
+    isStringArray(value.acl_groups)
+  );
+}
+
+function isProxyBody(value: unknown): boolean {
+  // Preserve unmodelled Edge fields for whole-resource PUTs. Validate the
+  // identity and fields Nexus interprets, without imposing HTTP-only routing.
+  return (
+    isRecord(value) &&
+    isIdentifier(value.id) &&
+    isIdentifier(value.namespace) &&
+    (value.listen_path == null || isString(value.listen_path)) &&
+    (value.hosts === undefined || isStringArray(value.hosts)) &&
+    (value.backend_host === undefined || isString(value.backend_host)) &&
+    (value.backend_port === undefined || isCount(value.backend_port)) &&
+    Array.isArray(value.plugins) &&
+    value.plugins.every((item) => isRecord(item) && isIdentifier(item.plugin_config_id))
+  );
+}
+
+function isPluginBody(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isIdentifier(value.id) &&
+    isIdentifier(value.namespace) &&
+    isIdentifier(value.plugin_name) &&
+    isString(value.scope) &&
+    ['global', 'proxy', 'proxy_group'].includes(value.scope) &&
+    (value.proxy_id == null || isIdentifier(value.proxy_id)) &&
+    typeof value.enabled === 'boolean' &&
+    // Edge permits null for plugins with no settings (e.g. basic_auth).
+    (value.config === null || isRecord(value.config))
+  );
+}
+
+function isSpecRefBody(value: unknown): boolean {
+  return isRecord(value) && isIdentifier(value.id) && isIdentifier(value.proxy_id);
+}
+
+function isPageBody(value: unknown, item: BodyValidator): boolean {
+  if (!isRecord(value) || !Array.isArray(value.data) || !value.data.every(item)) return false;
+  const page = value.pagination;
+  return (
+    isRecord(page) &&
+    isCount(page.offset) &&
+    isCount(page.limit) &&
+    page.limit > 0 &&
+    isCount(page.total) &&
+    value.data.length <= page.limit &&
+    value.data.length === Math.min(page.limit, Math.max(0, page.total - page.offset))
+  );
+}
+
+interface ResponseContract {
+  statuses: number[];
+  body: BodyValidator;
+  /** Only an acknowledged no-content write or the status-only liveness probe. */
+  empty?: 'void' | 'live';
+}
+
+/** Endpoint contracts checked against Edge's admin handlers, not generic HTTP success. */
+function responseContract(method: string, path: string): ResponseContract {
+  const parts = path.split('/').slice(1);
+  const resource = parts[0];
+  const credentials = resource === 'consumers' && parts[2] === 'credentials';
+  if (method === 'DELETE' && !(credentials && parts.length === 5)) {
+    return { statuses: [204], body: () => false, empty: 'void' };
+  }
+  let body: BodyValidator;
+  switch (resource) {
+    case 'consumers':
+      body = isConsumerBody;
+      break;
+    case 'proxies':
+      body = isProxyBody;
+      break;
+    case 'plugins':
+      body = isPluginBody;
+      break;
+    case 'namespaces':
+      body = (value) => isRecord(value) && isIdentifier(value.name);
+      break;
+    case 'api-specs':
+      body = isSpecRefBody;
+      if (method === 'GET') {
+        body = (value) =>
+          isRecord(value) &&
+          Array.isArray(value.items) &&
+          value.items.every(isSpecRefBody) &&
+          isCount(value.limit) &&
+          value.limit > 0 &&
+          isCount(value.offset) &&
+          isCount(value.total) &&
+          value.items.length <= value.limit &&
+          value.items.length === Math.min(value.limit, Math.max(0, value.total - value.offset));
+      }
+      break;
+    case 'health':
+      return {
+        statuses: [200, 503],
+        body: (value) =>
+          isRecord(value) &&
+          isIdentifier(value.status) &&
+          (value.ready === undefined || typeof value.ready === 'boolean') &&
+          (value.mode === undefined || isString(value.mode)) &&
+          (value.admin_writes_enabled === undefined ||
+            typeof value.admin_writes_enabled === 'boolean'),
+      };
+    case 'live':
+      return {
+        statuses: [200],
+        body: (value) => isRecord(value) && value.status === 'ok',
+        empty: 'live',
+      };
+    case 'version':
+      return { statuses: [200], body: (value) => isRecord(value) && isIdentifier(value.version) };
+    case 'admin':
+      return {
+        statuses: [200],
+        body: (value) =>
+          isRecord(value) &&
+          isRecord(value.gateway) &&
+          Array.isArray(value.circuit_breakers) &&
+          isRecord(value.health_check) &&
+          Array.isArray(value.health_check.unhealthy_targets),
+      };
+    default:
+      throw internal('Missing Ferrum Edge response contract');
+  }
+  const list = method === 'GET' && parts.length === (resource === 'plugins' ? 2 : 1);
+  if (list && resource !== 'api-specs') {
+    const item = resource === 'namespaces' ? isString : body;
+    body = (value) => isPageBody(value, item);
+  }
+  return { statuses: [method === 'POST' && !credentials ? 201 : 200], body };
+}
 
 /**
  * How long a metrics read is reused before Edge is asked again.
@@ -359,21 +592,26 @@ interface CacheEntry<T> {
   expiresAt: number;
 }
 
-async function readBoundedBody(body: AsyncIterable<Uint8Array>, maxBytes: number): Promise<string> {
+class ResponseTooLargeError extends Error {}
+
+async function readBoundedBody(body: AsyncIterable<Uint8Array>, maxBytes: number): Promise<Buffer> {
   const chunks: Uint8Array[] = [];
   let bytes = 0;
   for await (const chunk of body) {
     bytes += chunk.byteLength;
-    if (bytes > maxBytes) throw new Error(`response exceeded ${maxBytes} bytes`);
+    if (bytes > maxBytes) throw new ResponseTooLargeError('Response exceeded the byte limit');
     chunks.push(chunk);
   }
-  return Buffer.concat(chunks).toString('utf8');
+  return Buffer.concat(chunks);
 }
 
 /** An unavailable scrape: zeroed rather than absent, so callers never branch. */
-function emptyProxyMetrics(): EdgeProxyMetrics {
+function emptyProxyMetrics(
+  reason = 'The gateway request metrics could not be read.',
+): EdgeProxyMetrics {
   return {
     available: false,
+    reason,
     requests: { byMethod: {}, byStatus: {}, total: 0 },
     latency: { buckets: [], count: null, sum: null },
   };
@@ -492,6 +730,7 @@ export function createFerrumAdminClient(
     path: string,
     options: CallOptions = {},
   ): Promise<T | null> {
+    const contract = responseContract(method, path);
     const token = await minter.getToken(options.subject ?? DEFAULT_ADMIN_SUBJECT);
     const url = urlFor(path, options.query);
     const headers: Record<string, string> = {
@@ -502,21 +741,34 @@ export function createFerrumAdminClient(
     const hasBody = options.body !== undefined;
     if (hasBody) headers['content-type'] = 'application/json';
 
-    let statusCode: number;
-    let raw: string;
+    let serializedBody: string | undefined;
+    try {
+      serializedBody = hasBody ? JSON.stringify(options.body) : undefined;
+    } catch (cause) {
+      logger.error({ method, path }, 'Ferrum Edge Admin API request serialization failed');
+      throw internal(`Could not serialize Ferrum Edge request ${method} ${path}`, cause);
+    }
+
+    let statusCode = 0;
+    let bytes: Buffer;
     try {
       const response = await request(url, {
         method,
         headers,
         dispatcher,
-        ...(hasBody ? { body: JSON.stringify(options.body) } : {}),
-        signal: AbortSignal.timeout(config.timeoutMs),
+        // undici.request does not follow redirects; do not install a redirect interceptor.
+        ...(hasBody ? { body: serializedBody } : {}),
+        signal: options.signal ?? AbortSignal.timeout(config.timeoutMs),
       });
       statusCode = response.statusCode;
-      raw = options.maxResponseBytes
-        ? await readBoundedBody(response.body, options.maxResponseBytes)
-        : await response.body.text();
+      bytes = await readBoundedBody(
+        response.body,
+        options.maxResponseBytes ?? ADMIN_RESPONSE_MAX_BYTES,
+      );
     } catch (cause) {
+      if (cause instanceof ResponseTooLargeError) {
+        throw protocolError(statusCode, 'response_too_large', method, path);
+      }
       logger.error(
         { method, path, code: (cause as NodeJS.ErrnoException).code ?? null },
         'Ferrum Edge Admin API is unreachable',
@@ -526,31 +778,120 @@ export function createFerrumAdminClient(
     }
 
     if (statusCode === 404 && options.allow404) return null;
-    if (statusCode === 204 || raw.trim() === '') {
-      if (statusCode >= 400 && !(options.tolerate ?? []).includes(statusCode)) {
-        throw classify(statusCode, null, method, path);
-      }
+    // These are explicit best-effort namespace/version exceptions, never
+    // resource reads. Health's 503 must still satisfy its full body contract.
+    if ((options.tolerate ?? []).includes(statusCode) && !contract.statuses.includes(statusCode)) {
       return null;
     }
-
-    let parsed: unknown;
+    if (statusCode < 200 || (statusCode >= 300 && statusCode < 400)) {
+      throw protocolError(statusCode, 'unexpected_status', method, path);
+    }
+    let raw: string;
+    if (contract.statuses.includes(statusCode)) {
+      try {
+        // Decode only after absence/tolerated-status handling, and outside the
+        // transport catch. Replacement characters could rewrite credentials or
+        // identities. Keep BOM handling unchanged: JSON.parse still rejects it.
+        raw = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+      } catch {
+        throw protocolError(statusCode, 'invalid_utf8', method, path);
+      }
+    } else {
+      // Preserve existing diagnostics for rejected requests; no resource body
+      // from this branch can be returned as a successful acknowledgement.
+      raw = bytes.toString('utf8');
+    }
+    let parsed: unknown = null;
+    let validJson = false;
     try {
       parsed = JSON.parse(raw);
+      validJson = true;
     } catch {
-      parsed = null;
+      // Only error-status classification may inspect an absent JSON body.
     }
-
-    if (statusCode >= 400 && !(options.tolerate ?? []).includes(statusCode)) {
+    if (statusCode >= 400 && !contract.statuses.includes(statusCode)) {
       throw classify(statusCode, parsed, method, path);
+    }
+    if (!contract.statuses.includes(statusCode)) {
+      throw protocolError(statusCode, 'unexpected_status', method, path);
+    }
+    if (raw.trim() === '') {
+      if (contract.empty === 'void') return null;
+      if (contract.empty === 'live') return { status: 'ok' } as T;
+      throw protocolError(statusCode, 'empty_body', method, path);
+    }
+    if (!validJson) throw protocolError(statusCode, 'invalid_json', method, path);
+    if (!contract.body(parsed)) {
+      throw protocolError(statusCode, 'invalid_body', method, path);
+    }
+    if (isRecord(parsed)) {
+      const scoped = /^\/(consumers|proxies|plugins\/config)(?:\/|$)/.exec(path);
+      if (scoped) {
+        const rows = Array.isArray(parsed.data) ? parsed.data : [parsed];
+        const id = path.slice(scoped[1]!.length + 2).split('/')[0];
+        if (
+          rows.some((row: unknown) => !isRecord(row) || row.namespace !== namespace) ||
+          (id && parsed.id !== decodeURIComponent(id))
+        ) {
+          throw protocolError(statusCode, 'resource_mismatch', method, path);
+        }
+      }
+      if (method === 'GET' && isRecord(parsed.pagination)) {
+        if (parsed.pagination.offset !== (options.query?.offset ?? 0)) {
+          throw protocolError(statusCode, 'page_mismatch', method, path);
+        }
+      }
+      if (path === '/api-specs' && method === 'GET' && Array.isArray(parsed.items)) {
+        if (
+          parsed.offset !== (options.query?.offset ?? 0) ||
+          parsed.items.some(
+            (item: unknown) => isRecord(item) && item.proxy_id !== options.query?.proxy_id,
+          )
+        ) {
+          throw protocolError(statusCode, 'page_mismatch', method, path);
+        }
+      }
     }
     return parsed as T;
   }
 
+  function protocolError(status: number, reason: string, method: string, path: string): NexusError {
+    // Never log response bytes, Location, parser exceptions, JWTs or request
+    // bodies. Even a bounded prefix can expose credentials or an HTML login.
+    logger.error(
+      { method, path, status, reason },
+      'Ferrum Edge Admin API returned an invalid protocol response',
+    );
+    return new NexusError(
+      'EDGE_PROTOCOL_ERROR',
+      'The gateway returned an invalid protocol response',
+      { status, kind: 'protocol_error', reason },
+    );
+  }
+
   function classify(status: number, parsed: unknown, method: string, path: string): Error {
-    const body = (parsed ?? {}) as { error?: unknown; applied?: unknown; reason?: unknown };
+    const body = (parsed ?? {}) as {
+      error?: unknown;
+      applied?: unknown;
+      reason?: unknown;
+      details?: unknown;
+      code?: unknown;
+      failures?: unknown;
+    };
+    const isApiSpecWrite =
+      (method === 'POST' || method === 'PUT') && /^\/api-specs(?:\/[^/]+)?$/.test(path);
     const upstream = typeof body.error === 'string' ? body.error : `HTTP ${status}`;
     logger.error(
-      { method, path, status, upstream, reason: body.reason ?? null },
+      {
+        method,
+        path,
+        status,
+        upstream,
+        reason: body.reason ?? null,
+        // readBoundedBody caps this structure before JSON parsing. Keep the full
+        // diagnostics server-side; never reflect the raw document to the caller.
+        ...(isApiSpecWrite ? { gateway_response: parsed } : {}),
+      },
       'Ferrum Edge Admin API returned an error',
     );
 
@@ -562,6 +903,39 @@ export function createFerrumAdminClient(
     }
     if (status === 401 || status === 403) {
       return edgeError('The gateway rejected the Nexus admin credentials', { status });
+    }
+    if (
+      isApiSpecWrite &&
+      status >= 400 &&
+      status < 500 &&
+      (body.error === 'Spec parse failed' || body.error === 'Spec validation failed')
+    ) {
+      let gatewayMessage: string = body.error;
+      if (typeof body.details === 'string' && body.details.trim() !== '') {
+        gatewayMessage += `: ${body.details.trim().slice(0, MAX_GATEWAY_MESSAGE)}`;
+      }
+      if (Array.isArray(body.failures)) {
+        for (const failure of body.failures) {
+          if (gatewayMessage.length >= MAX_GATEWAY_MESSAGE) break;
+          if (!isRecord(failure) || typeof failure.resource_type !== 'string') continue;
+          const firstError = Array.isArray(failure.errors) ? failure.errors[0] : undefined;
+          if (typeof firstError !== 'string') continue;
+          const resource = failure.resource_type.slice(0, MAX_GATEWAY_MESSAGE);
+          gatewayMessage += `; ${resource}: ${firstError.slice(0, MAX_GATEWAY_MESSAGE)}`;
+        }
+      }
+      gatewayMessage = gatewayMessage.slice(0, MAX_GATEWAY_MESSAGE);
+      return new NexusError(
+        'EDGE_REJECTED_SPEC',
+        `The gateway rejected the spec: ${gatewayMessage}`,
+        {
+          status,
+          gateway_message: gatewayMessage,
+          ...(typeof body.code === 'string'
+            ? { gateway_code: body.code.slice(0, MAX_GATEWAY_MESSAGE) }
+            : {}),
+        },
+      );
     }
     // A validation refusal is about the body Nexus built from the caller's own
     // request, so the provider needs the gateway's reason to act on it.
@@ -614,7 +988,7 @@ export function createFerrumAdminClient(
       });
       return {
         statusCode: response.statusCode,
-        body: await readBoundedBody(response.body, METRICS_RESPONSE_MAX_BYTES),
+        body: (await readBoundedBody(response.body, METRICS_RESPONSE_MAX_BYTES)).toString('utf8'),
       };
     } catch (cause) {
       logger.warn(
@@ -654,6 +1028,7 @@ export function createFerrumAdminClient(
     const byMethod: Record<string, number> = {};
     const byStatus: Record<string, number> = {};
     let total = 0;
+    let hasRequests = false;
     const buckets = new Map<number, number>();
     let count: number | null = null;
     let sum: number | null = null;
@@ -666,6 +1041,7 @@ export function createFerrumAdminClient(
       if (sample.name === REQUESTS_FAMILY) {
         const value = counterValue(sample.value);
         if (value === null) continue;
+        hasRequests = true;
         // One (method, status) pair can appear several times — `error_class`
         // and `grpc_status` split it further — so these accumulate.
         if (labels.method !== undefined) {
@@ -695,6 +1071,10 @@ export function createFerrumAdminClient(
       if (sample.name === `${DURATION_FAMILY}_sum`) {
         sum = counterValue(sample.value);
       }
+    }
+
+    if (!hasRequests) {
+      return emptyProxyMetrics('The gateway has no request metrics for this API yet.');
     }
 
     const sorted: EdgeLatencyBucket[] = [...buckets.entries()]
@@ -731,37 +1111,26 @@ export function createFerrumAdminClient(
       const result = await callRequired<EdgePage<T>>('GET', path, {
         query: { limit: pageSize, offset },
       });
-      const items = Array.isArray(result.data) ? result.data : [];
+      // Both scan sizes are within Edge's documented cap. A different size
+      // would make the next offset skip rows and could falsely imply absence.
+      if (result.pagination.limit !== pageSize) {
+        throw protocolError(200, 'page_mismatch', 'GET', path);
+      }
+      const items = result.data;
       if (!visit(items)) return true;
       if (items.length === 0 || items.length < pageSize) return true;
-      const total = result.pagination?.total ?? items.length;
+      const total = result.pagination.total;
       if (offset + items.length >= total) return true;
     }
     return false;
-  }
-
-  /** Whether an Edge response body is a `HealthResponse` and not an error. */
-  function isHealthBody(value: unknown): value is EdgeHealth {
-    return (
-      typeof value === 'object' &&
-      value !== null &&
-      typeof (value as { status?: unknown }).status === 'string'
-    );
   }
 
   return {
     namespace,
 
     async health(): Promise<EdgeHealth> {
-      // `503` + a full payload is Edge saying "reachable, not ready"; a `503`
-      // carrying anything else is a real failure and still classifies.
-      const parsed = await call<unknown>('GET', '/health', { tolerate: [503] });
-      if (isHealthBody(parsed)) return parsed;
-      logger.error(
-        { path: '/health', upstream: (parsed as { error?: unknown } | null)?.error ?? null },
-        'Ferrum Edge health endpoint returned an unrecognised body',
-      );
-      throw edgeError('The gateway health endpoint did not return a health payload');
+      // `503` is reachable-but-not-ready only with a valid health payload.
+      return callRequired<EdgeHealth>('GET', '/health');
     },
 
     async live(): Promise<boolean> {
@@ -778,13 +1147,19 @@ export function createFerrumAdminClient(
       return typeof version === 'string' ? version : null;
     },
 
-    async probe(): Promise<EdgeProbe> {
+    async probe(timeoutMs = config.timeoutMs): Promise<EdgeProbe> {
       const started = Date.now();
+      const signal = AbortSignal.timeout(timeoutMs);
       try {
-        const health = await this.health();
+        const health = await callRequired<EdgeHealth>('GET', '/health', { signal });
         let version: string | null = null;
         try {
-          version = await this.version();
+          const result = await call<{ version?: unknown }>('GET', '/version', {
+            signal,
+            allow404: true,
+            tolerate: [404, 405],
+          });
+          version = typeof result?.version === 'string' ? result.version : null;
         } catch {
           version = null;
         }
@@ -817,7 +1192,7 @@ export function createFerrumAdminClient(
       const page = await callRequired<EdgePage<string>>('GET', '/namespaces', {
         query: { limit: 1000 },
       });
-      return Array.isArray(page.data) ? page.data : [];
+      return page.data;
     },
 
     async ensureNamespace(description?: string): Promise<void> {
@@ -845,6 +1220,32 @@ export function createFerrumAdminClient(
       }
     },
 
+    async ensureMetricsConfig(): Promise<EdgePluginConfig | null> {
+      return serializePerKey(`namespace:${namespace}:prometheus_metrics`, async () => {
+        let found = false;
+        const complete = await scanPages<EdgePluginConfig>(
+          '/plugins/config',
+          EDGE_MAX_PAGE_SIZE,
+          MAX_PLUGIN_CONFIG_SCAN_PAGES,
+          (items) => {
+            found = items.some(
+              (item) => item.plugin_name === 'prometheus_metrics' && item.scope === 'global',
+            );
+            return !found;
+          },
+        );
+        // Even a disabled operator config is intentional; never replace it.
+        if (found) return null;
+        if (!complete) throw edgeError('Could not scan all gateway plugin configs');
+        return this.pluginConfigs.create({
+          plugin_name: 'prometheus_metrics',
+          scope: 'global',
+          enabled: true,
+          config: {},
+        });
+      });
+    },
+
     consumers: {
       async list(query?: EdgeListQuery): Promise<EdgePage<EdgeConsumer>> {
         return callRequired<EdgePage<EdgeConsumer>>('GET', '/consumers', { query: { ...query } });
@@ -857,6 +1258,7 @@ export function createFerrumAdminClient(
       },
 
       async getByUsername(username: string): Promise<EdgeConsumer | null> {
+        logger.warn({ username }, 'Scanning legacy consumer identity without a stored gateway id');
         let found: EdgeConsumer | null = null;
         const complete = await scanPages<EdgeConsumer>(
           '/consumers',
@@ -877,12 +1279,45 @@ export function createFerrumAdminClient(
             { path: '/consumers', scanned: CONSUMER_SCAN_LIMIT, username },
             'Consumer lookup by username gave up before the end of the namespace',
           );
-          throw edgeError('The gateway holds more consumers than a username lookup can scan', {
-            scanned: CONSUMER_SCAN_LIMIT,
-            username,
-          });
+          throw edgeError(
+            'The gateway holds more consumers than a legacy username lookup can scan; an administrator must restore the consumer id mapping from backup after verifying its namespace and username (docs/operations.md, Consumer identity recovery)',
+            { scanned: CONSUMER_SCAN_LIMIT, username },
+          );
         }
         return found;
+      },
+
+      derivedId(username: string): string {
+        return derivedConsumerId(namespace, username);
+      },
+
+      async ensure(body, subject): Promise<{ consumer: EdgeConsumer; created: boolean }> {
+        const id = derivedConsumerId(namespace, body.username);
+        const existing = await this.get(id);
+        if (existing) {
+          if (existing.username !== body.username) {
+            throw edgeError(
+              'The derived consumer id belongs to another username; contact an administrator',
+            );
+          }
+          return { consumer: existing, created: false };
+        }
+        try {
+          return { consumer: await this.create({ ...body, id }, subject), created: true };
+        } catch (error) {
+          // A 409 is a refused write, never an uncertain acknowledgement. Do not
+          // parse an incumbent id out of Edge's free-form error text.
+          if (
+            !(error instanceof NexusError) ||
+            !isRecord(error.details) ||
+            error.details.status !== 409
+          ) {
+            throw error;
+          }
+          const legacy = await this.getByUsername(body.username);
+          if (!legacy) throw error;
+          return { consumer: legacy, created: false };
+        }
       },
 
       async create(body: EdgeConsumerWrite, subject?: string): Promise<EdgeConsumer> {
@@ -1038,7 +1473,7 @@ export function createFerrumAdminClient(
         const page = await callRequired<EdgeApiSpecPage>('GET', '/api-specs', {
           query: { proxy_id: proxyId, limit: 1 },
         });
-        return (Array.isArray(page.items) ? page.items[0] : undefined) ?? null;
+        return page.items[0] ?? null;
       },
       async delete(id: string, subject?: string): Promise<void> {
         await call('DELETE', `/api-specs/${encodeURIComponent(id)}`, { subject, allow404: true });
@@ -1054,7 +1489,15 @@ export function createFerrumAdminClient(
             let parsed: PrometheusSample[] | null = null;
             if (response && response.statusCode >= 200 && response.statusCode < 300) {
               parsed = parsePrometheusText(response.body);
-              if (parsed.length === 0) parsed = null;
+              if (parsed.length === 0) {
+                logger.warn({}, 'Ferrum Edge metrics scrape produced no parseable samples');
+                parsed = null;
+              }
+            } else if (response) {
+              logger.warn(
+                { status: response.statusCode },
+                'Ferrum Edge metrics scrape returned a non-2xx status',
+              );
             }
             scrapeCache = { value: parsed, expiresAt: Date.now() + METRICS_CACHE_TTL_MS };
             return parsed;

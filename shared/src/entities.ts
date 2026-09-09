@@ -98,6 +98,10 @@ export interface CorsConfig {
   allowed_origins: string[];
   /** Whether the gateway sets `Access-Control-Allow-Credentials`. */
   allow_credentials: boolean;
+  /** Extra request headers, in addition to the headers required by authentication. */
+  allowed_headers?: string[];
+  /** Require an exact CORS origin on WebSocket upgrades, including non-browser clients. */
+  enforce_websocket_origins?: boolean;
 }
 
 /**
@@ -369,6 +373,16 @@ export interface Message {
   thread_id: Uuid;
   sender_user_id: Uuid;
   body: string;
+  /**
+   * True when a god-mode broadcast wrote this row into a platform inbox.
+   *
+   * A broadcast fans one administrator's action out across every recipient, so
+   * its rows are excluded from that administrator's rolling per-account message
+   * budget — the broadcast carries its own bound instead. The flag is what the
+   * budget query filters on, and it is surfaced so a reader can tell an
+   * announcement apart from a reply an administrator typed into that thread.
+   */
+  broadcast: boolean;
   created_at: IsoTimestamp;
   updated_at: IsoTimestamp;
   sender?: UserSummary;
@@ -497,6 +511,8 @@ export interface EmailTemplate {
 
 /* ── Audit ──────────────────────────────────────────────────────────────── */
 
+export type ActorSummary = UserSummary;
+
 /** An append-only audit record written for every state-changing request. */
 export interface AuditLog {
   id: Uuid;
@@ -510,7 +526,7 @@ export interface AuditLog {
   details: Record<string, unknown>;
   ip: string | null;
   created_at: IsoTimestamp;
-  actor?: UserSummary | null;
+  actor: ActorSummary | null;
 }
 
 /* ── Settings, branding, captcha ────────────────────────────────────────── */

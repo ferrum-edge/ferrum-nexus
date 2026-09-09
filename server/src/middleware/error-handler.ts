@@ -13,6 +13,7 @@ import type { ApiErrorBody, ErrorCode } from '@ferrum-nexus/shared';
 
 import { NexusError, isNexusError } from '../lib/errors.js';
 import { sanitizeUrlForLog } from '../lib/sanitize-url-for-log.js';
+import { isApiRequest } from './api-route.js';
 
 /** Turn a `ZodError` into `VALIDATION_FAILED` with per-field issue details. */
 export function fromZodError(error: ZodError, message = 'Request validation failed'): NexusError {
@@ -60,6 +61,40 @@ function codeForStatus(status: number): ErrorCode {
 
 function body(error: NexusError): ApiErrorBody {
   return { error: error.toBody() };
+}
+
+/** JSON 404 shared by unmatched API routes and missing SPA assets. */
+function sendNotFound(request: FastifyRequest, reply: FastifyReply): FastifyReply {
+  return reply
+    .status(404)
+    .header('cache-control', 'no-store')
+    .send(body(new NexusError('NOT_FOUND', `Route ${request.method} ${request.url} not found`)));
+}
+
+/**
+ * Let Fastify match the API boundary even when no endpoint matches. Register
+ * after the platform hooks so these routes inherit CSRF and cache controls.
+ * Static and parameter routes take priority over the wildcard. No independent
+ * URL decoder can turn encoded separators, double encoding or dot segments
+ * into a different routing decision here.
+ */
+export function registerApiNotFoundRoutes(app: FastifyInstance): void {
+  app.all('/api', sendNotFound);
+  app.all('/api/*', sendNotFound);
+}
+
+/** Router errors occur before the ordinary request hooks can run. */
+export function handleFrameworkError(
+  error: FastifyError,
+  _request: FastifyRequest,
+  reply: FastifyReply,
+): void {
+  reply.header('cache-control', 'no-store');
+  if (error.code === 'FST_ERR_BAD_URL') {
+    reply.status(400).send(body(new NexusError('VALIDATION_FAILED', 'Malformed request path')));
+    return;
+  }
+  reply.send(error);
 }
 
 /** Normalise any thrown value into a {@link NexusError}. */
@@ -134,14 +169,11 @@ export function registerErrorHandler(
     if (
       options.spaFallback &&
       request.method === 'GET' &&
-      !path.startsWith('/api') &&
+      !isApiRequest(request) &&
       !looksLikeAsset
     ) {
       return options.spaFallback(request, reply);
     }
-    return reply
-      .status(404)
-      .header('cache-control', 'no-store')
-      .send(body(new NexusError('NOT_FOUND', `Route ${request.method} ${request.url} not found`)));
+    return sendNotFound(request, reply);
   });
 }

@@ -9,12 +9,19 @@
  * - an {@link SqlExecutor} that runs statements through {@link formatSql}
  *   (`"ident"` → `` `ident` ``, which is what lets the shared repos say
  *   `"key"` — a reserved word here and not in PostgreSQL) and reports
- *   `affectedRows` as the affected row count;
+ *   `affectedRows` as the matched row count for UPDATEs (CLIENT_FOUND_ROWS);
  * - the serialized, resumable migration runner in `migrations.ts`;
  * - `transaction()`, a real `START TRANSACTION`/`COMMIT`/`ROLLBACK` on a
  *   dedicated connection checked out of the pool for the duration of the body.
  *   Nested `transaction()` calls join the outer one, and bodies are serialised,
- *   both handled by the shared `SqlStore` shell.
+ *   both handled by the shared `SqlStore` shell;
+ * - the classification of InnoDB's "run it again" errors. Two transactions that
+ *   each insert a child row and then update its parent take the foreign key's
+ *   **S** lock before the row's **X** lock and deadlock; InnoDB rolls one of
+ *   them back with `ER_LOCK_DEADLOCK` (SQLSTATE `40001`), which is a request to
+ *   retry, not a failure of the request. The shell retries it — see
+ *   `adapters/transaction-retry.ts` for the policy and the re-runnability
+ *   contract it puts on transaction bodies.
  *
  * Repository statements go through `execute`, so parameters are bound by the
  * server-side prepared-statement protocol rather than escaped into SQL text.
@@ -31,6 +38,7 @@ import { runMysqlMigrations } from './migrations.js';
 import type { NexusStore, StoreHealth } from '../../store.js';
 import { formatSql, type Row, type SqlExecutor, type SqlParam } from '../sql-common.js';
 import { createSqlStore, type SqlStoreBackend } from '../sql-repos.js';
+import { isMysqlRetryableTransactionError } from '../transaction-retry.js';
 
 type MysqlPool = mysql.Pool;
 type MysqlConnection = mysql.PoolConnection;
@@ -116,12 +124,19 @@ class MysqlBackend implements SqlStoreBackend {
         await connection.commit();
         return result;
       } catch (error) {
+        // Explicit even for a deadlock victim, whose transaction the server has
+        // already rolled back: a lock wait timeout rolls back only the
+        // statement, and the shell may run the body again on this same pool.
         await connection.rollback().catch(() => undefined);
         throw error;
       }
     } finally {
       connection.release();
     }
+  }
+
+  isRetryableTransactionError(error: unknown): boolean {
+    return isMysqlRetryableTransactionError(error);
   }
 }
 
@@ -134,6 +149,9 @@ export function createMysqlStore(config: NexusConfig): NexusStore {
   const pool = mysql.createPool({
     uri: config.db.url,
     charset: 'utf8mb4_general_ci',
+    // Conditional UPDATEs must count matches, including identical values.
+    // mysql2 defaults to FOUND_ROWS; pin it so URI flags cannot disable it.
+    flags: ['FOUND_ROWS'],
     // A transaction holds one connection for the whole body, and the store
     // serialises bodies, so a small pool is plenty — but leave headroom for
     // concurrent non-transactional reads.

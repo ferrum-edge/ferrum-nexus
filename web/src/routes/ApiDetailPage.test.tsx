@@ -1,11 +1,26 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import type { ReactElement } from 'react';
+import type { ReactElement, ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AccessRequest, Grant, ListQuery, Paginated } from '@ferrum-nexus/shared';
-import { accessRequestsApi, grantsApi } from '../lib/api';
+import type {
+  AccessRequest,
+  CreateThreadResponse,
+  Grant,
+  ListQuery,
+  Paginated,
+  UserSummary,
+} from '@ferrum-nexus/shared';
+import { accessRequestsApi, grantsApi, threadsApi } from '../lib/api';
 import { ToastProvider } from '../stores/toast';
 import { GrantsTab, RequestsTab } from './ApiDetailPage';
+
+// Starting a conversation navigates to it; these tabs are rendered without a
+// router, so the two hooks the module reaches for are stood in here.
+vi.mock('@tanstack/react-router', () => ({
+  useNavigate: () => () => undefined,
+  useParams: () => ({}),
+  Link: ({ children }: { children: ReactNode }) => children,
+}));
 
 // Radix Select cannot be driven reliably under jsdom (no layout, no pointer
 // capture); each attempt stalled for 30 s and timed out. The status filter is
@@ -285,5 +300,99 @@ describe('provider access pagination', () => {
     await expectPage(50, 1);
     expect(visibleUsers()).toEqual(grants.slice(0, 50).map((entry) => entry.user_id));
     expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
+  });
+});
+
+const REQUESTER: UserSummary = {
+  id: 'user-7',
+  email: 'ada@example.test',
+  display_name: 'Ada Client',
+  role: 'client',
+};
+
+function threadResponse(): CreateThreadResponse {
+  const thread = {
+    id: 'thread-1',
+    subject: 'About your access request',
+    api_id: 'api-1',
+    created_by: 'provider-1',
+    participant_a: REQUESTER.id,
+    participant_b: 'provider-1',
+    last_message_at: CREATED_AT,
+    created_at: CREATED_AT,
+    updated_at: CREATED_AT,
+  };
+  return {
+    thread,
+    message: {
+      id: 'message-1',
+      thread_id: thread.id,
+      sender_user_id: 'provider-1',
+      body: 'Which integration needs this?',
+      broadcast: false,
+      created_at: CREATED_AT,
+      updated_at: CREATED_AT,
+    },
+  };
+}
+
+/**
+ * The provider guide names three uses of Messages — clarifying a thin
+ * justification before deciding, warning grantees of a breaking change, and
+ * explaining a decline. All three are provider-initiated, and none was
+ * reachable: the dialog took its recipient as a prop and was mounted only on
+ * the catalog page and behind "New message", which always addresses admins.
+ */
+describe('provider-initiated conversations', () => {
+  afterEach(() => {
+    cleanup();
+    clients.splice(0).forEach((client) => client.clear());
+    vi.restoreAllMocks();
+  });
+
+  async function sendFrom(button: string): Promise<void> {
+    fireEvent.click(await screen.findByRole('button', { name: button }));
+    const dialog = within(await screen.findByRole('dialog'));
+    expect(dialog.getByText(/goes to Ada Client/)).toBeInTheDocument();
+    fireEvent.change(dialog.getByLabelText(/^Message/), {
+      target: { value: 'Which integration needs this?' },
+    });
+    fireEvent.click(dialog.getByRole('button', { name: 'Send' }));
+  }
+
+  it('starts a thread with the requester from the access-request row', async () => {
+    const pending: AccessRequest = { ...request(7, 'pending'), requester: REQUESTER };
+    vi.spyOn(accessRequestsApi, 'list').mockResolvedValue({ items: [pending], total: 1 });
+    const create = vi.spyOn(threadsApi, 'create').mockResolvedValue(threadResponse());
+
+    renderTab(<RequestsTab apiId="api-1" />);
+    await sendFrom('Message Ada Client');
+
+    await waitFor(() =>
+      expect(create).toHaveBeenCalledWith({
+        subject: 'About your access request',
+        body: 'Which integration needs this?',
+        recipient_user_id: REQUESTER.id,
+        api_id: 'api-1',
+      }),
+    );
+  });
+
+  it('starts a thread with a grantee from the grants tab', async () => {
+    const active: Grant = { ...grant(7, 'active'), user: REQUESTER };
+    vi.spyOn(grantsApi, 'list').mockResolvedValue({ items: [active], total: 1 });
+    const create = vi.spyOn(threadsApi, 'create').mockResolvedValue(threadResponse());
+
+    renderTab(<GrantsTab apiId="api-1" />);
+    await sendFrom('Message Ada Client');
+
+    await waitFor(() =>
+      expect(create).toHaveBeenCalledWith({
+        subject: 'About your access to this API',
+        body: 'Which integration needs this?',
+        recipient_user_id: REQUESTER.id,
+        api_id: 'api-1',
+      }),
+    );
   });
 });

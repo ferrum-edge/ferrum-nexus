@@ -516,6 +516,13 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         notification.body,
         notification.link,
       );
+    } catch (error) {
+      deps.log?.(
+        { user_id: recipient.id, error: error instanceof Error ? error.message : String(error) },
+        'Could not write an in-app notification',
+      );
+    }
+    try {
       await email.enqueue({
         to: recipient.email,
         templateKey: mail.templateKey,
@@ -817,6 +824,10 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       const revokedAt = nowIso();
       let movedRequest: AccessRequestRecord | null = null;
       const updated = await store.transaction(async (tx) => {
+        // The body may be run again if the adapter retries it, so the only
+        // thing it writes outside the store starts each attempt cleared:
+        // a request moved by an attempt that rolled back was not moved.
+        movedRequest = null;
         const result = await tx.grants.updateIfStatus(grant.id, 'active', {
           status: 'revoked',
           revoked_by: actor.id,

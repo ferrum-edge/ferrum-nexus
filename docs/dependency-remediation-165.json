@@ -1,0 +1,123 @@
+{
+  "checkedOn": "2026-09-07",
+  "registryMetadata": {
+    "@fastify/static": {
+      "version": "10.1.3",
+      "metadataUrl": "https://registry.npmjs.org/@fastify%2fstatic/10.1.3",
+      "resolved": "https://registry.npmjs.org/@fastify/static/-/static-10.1.3.tgz",
+      "integrity": "sha512-W6jqajYS974XjPjB5hQWoxPM8NKM4+p8YmQT6G5IbCa4uhdWSVadZUv75siy1wEA/3ty8RYdpBydfWeu9AqAqQ==",
+      "engines": null,
+      "dependencies": {
+        "glob": "^13.0.0",
+        "fastq": "^1.17.1",
+        "@fastify/send": "^4.0.0",
+        "@fastify/error": "^4.0.0",
+        "fastify-plugin": "^6.0.0",
+        "content-disposition": "^2.0.1",
+        "@fastify/accept-negotiator": "^2.0.0"
+      },
+      "tarballIntegrityVerified": true
+    },
+    "nodemailer": {
+      "version": "9.1.1",
+      "metadataUrl": "https://registry.npmjs.org/nodemailer/9.1.1",
+      "resolved": "https://registry.npmjs.org/nodemailer/-/nodemailer-9.1.1.tgz",
+      "integrity": "sha512-izw9mVKFix6YSnC9eLgV6g1opl9DUlRio9ZNcq+Wu9Ujn2UwF+8Nl0B8nz22kEC+CTZCvinkxwJ0DeFbb6NwcQ==",
+      "engines": {
+        "node": ">=6.0.0"
+      },
+      "dependencies": {},
+      "tarballIntegrityVerified": true
+    },
+    "@types/nodemailer": {
+      "version": "8.0.1",
+      "metadataUrl": "https://registry.npmjs.org/@types%2fnodemailer/8.0.1",
+      "resolved": "https://registry.npmjs.org/@types/nodemailer/-/nodemailer-8.0.1.tgz",
+      "integrity": "sha512-PxpaInm8V1JQDd4j0ds5HfvWQk8JupS1C0Picb96QJsrrRDjBH+DlK7L4ZdNSqNULhiZRQHc40nLVShaGxXAMw==",
+      "engines": null,
+      "dependencies": {
+        "@types/node": "*"
+      },
+      "tarballIntegrityVerified": true
+    },
+    "glob": {
+      "version": "13.0.6",
+      "metadataUrl": "https://registry.npmjs.org/glob/13.0.6",
+      "resolved": "https://registry.npmjs.org/glob/-/glob-13.0.6.tgz",
+      "integrity": "sha512-Wjlyrolmm8uDpm/ogGyXZXb1Z+Ca2B8NbJwqBVg0axK9GbBeoS7yGV6vjXnYdGm6X53iehEuxxbyiKp8QmN4Vw==",
+      "engines": {
+        "node": "18 || 20 || >=22"
+      },
+      "dependencies": {
+        "minipass": "^7.1.3",
+        "minimatch": "^10.2.2",
+        "path-scurry": "^2.0.2"
+      },
+      "tarballIntegrityVerified": true
+    },
+    "content-disposition": {
+      "version": "2.0.1",
+      "metadataUrl": "https://registry.npmjs.org/content-disposition/2.0.1",
+      "resolved": "https://registry.npmjs.org/content-disposition/-/content-disposition-2.0.1.tgz",
+      "integrity": "sha512-e+H0ZXHSWYrENhQzw1LPuP4oF5MzVKmDU6d3hxlvaPEYLLg62MxtQNPRx4SYSuYJSBUgnQIG4HIN2tEtNv7Dog==",
+      "engines": {
+        "node": ">=18"
+      },
+      "dependencies": {},
+      "tarballIntegrityVerified": true
+    },
+    "better-sqlite3": {
+      "version": "13.0.3",
+      "metadataUrl": "https://registry.npmjs.org/better-sqlite3/13.0.3",
+      "resolved": "https://registry.npmjs.org/better-sqlite3/-/better-sqlite3-13.0.3.tgz",
+      "integrity": "sha512-RbOBxmLBG8uvFUc15X9+9SFemKcQ0WBuISBVkpuiaUB2qblC8UWlHEjdWVoZ8AdhSwmoEgsiXKfopX0CQxaACQ==",
+      "engines": {
+        "node": ">=22"
+      },
+      "dependencies": {
+        "node-addon-api": "^8.0.0"
+      },
+      "tarballIntegrityVerified": true
+    },
+    "node-addon-api": {
+      "version": "8.9.2",
+      "metadataUrl": "https://registry.npmjs.org/node-addon-api/8.9.2",
+      "resolved": "https://registry.npmjs.org/node-addon-api/-/node-addon-api-8.9.2.tgz",
+      "integrity": "sha512-VijLXbi3UACN69I0JVXJsX4tjACjNoQDgv2gTF6sx2wWEi8tkSg2eX8p5gSIFi8z2+DL3oHmY6OyKce38SDolg==",
+      "engines": {
+        "node": "^18 || ^20 || >= 21"
+      },
+      "dependencies": {},
+      "tarballIntegrityVerified": true
+    }
+  },
+  "publicRegistryAudit": {
+    "endpoint": "https://registry.npmjs.org/-/npm/v1/security/advisories/bulk",
+    "packageCount": 429,
+    "selection": "Only lock entries resolved from https://registry.npmjs.org/; workspace/private/link entries excluded.",
+    "response": {},
+    "lockfileSha256": "9dfb9b6264765dee3abc6403ac41efe4be6bf904b654db8aa0c93e2886912fce"
+  },
+  "sqliteNativeCompatibility": {
+    "failingHead": "606b02803242c5024df6ef3f229a09cf05bc1734",
+    "hostedJobUrl": "https://github.com/ferrum-edge/ferrum-nexus/actions/runs/34172620499/job/101895714990",
+    "nodeVersion": "24.20.0",
+    "failedTestFileProcesses": 18,
+    "failureLogSha256": "ca6cc91fa2f498ddb83e7152af84a2e910cf37059314ff2e0cca6e60b7f21f21",
+    "requiredNodeApiVersion": 10,
+    "minimumNode22Version": "22.14.0",
+    "bindingSourceUrl": "https://github.com/WiseLibs/better-sqlite3/blob/v13.0.3/binding.gyp",
+    "nodeApiMatrixUrl": "https://nodejs.org/api/n-api.html#node-api-version-matrix",
+    "bundledBinaries": [
+      "package/prebuilds/darwin-arm64.node",
+      "package/prebuilds/darwin-x64.node",
+      "package/prebuilds/linux-arm64.node",
+      "package/prebuilds/linux-x64.node",
+      "package/prebuilds/linuxmusl-arm64.node",
+      "package/prebuilds/linuxmusl-x64.node",
+      "package/prebuilds/win32-arm64.node",
+      "package/prebuilds/win32-x64.node"
+    ],
+    "repairHostedValidation": "Pending; previous head results do not validate this repair."
+  }
+}

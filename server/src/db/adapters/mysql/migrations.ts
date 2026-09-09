@@ -19,6 +19,8 @@ interface Column {
   type: string;
   nullable: boolean;
   default: string | null;
+  /** Pre-migration type a `MODIFY` guard accepts as "not yet applied". */
+  from?: string;
 }
 interface Index {
   name: string;
@@ -42,6 +44,16 @@ const textColumn = (name: string): Column => ({
 // Exact statement matching makes a changed/new ALTER fail closed until its
 // recovery postconditions are reviewed too. Never swallow duplicate-name errors.
 const guards: Guard[] = [
+  {
+    sql: "ALTER TABLE gateway_teardown_jobs ADD COLUMN generation VARCHAR(64) NOT NULL DEFAULT ''",
+    table: 'gateway_teardown_jobs',
+    columns: [{ name: 'generation', type: 'varchar(64)', nullable: false, default: '' }],
+  },
+  {
+    sql: "ALTER TABLE email_outbox ADD COLUMN generation VARCHAR(64) NOT NULL DEFAULT ''",
+    table: 'email_outbox',
+    columns: [{ name: 'generation', type: 'varchar(64)', nullable: false, default: '' }],
+  },
   {
     sql: 'ALTER TABLE apis ADD COLUMN upstream_url TEXT NULL, ADD COLUMN cors_json TEXT NULL',
     table: 'apis',
@@ -94,6 +106,13 @@ const guards: Guard[] = [
     columns: [{ name: 'edge_ordinal', type: 'int', nullable: true, default: null }],
   },
   {
+    sql: 'ALTER TABLE api_plugins ADD COLUMN ferrum_plugin_config_id VARCHAR(64) DEFAULT NULL',
+    table: 'api_plugins',
+    columns: [
+      { name: 'ferrum_plugin_config_id', type: 'varchar(64)', nullable: true, default: null },
+    ],
+  },
+  {
     sql: 'ALTER TABLE credential_metadata ADD UNIQUE KEY ux_credentials_ordinal (ferrum_consumer_id, credential_type, edge_ordinal)',
     table: 'credential_metadata',
     indexes: [
@@ -103,6 +122,32 @@ const guards: Guard[] = [
         unique: true,
       },
     ],
+  },
+  {
+    sql: 'ALTER TABLE notifications MODIFY COLUMN title VARCHAR(300) NOT NULL',
+    table: 'notifications',
+    columns: [
+      { name: 'title', type: 'varchar(300)', nullable: false, default: null, from: 'varchar(255)' },
+    ],
+  },
+  {
+    sql: 'ALTER TABLE message_threads MODIFY COLUMN subject VARCHAR(300) NOT NULL',
+    table: 'message_threads',
+    columns: [
+      {
+        name: 'subject',
+        type: 'varchar(300)',
+        nullable: false,
+        default: null,
+        from: 'varchar(255)',
+      },
+    ],
+  },
+  {
+    sql: 'ALTER TABLE messages ADD COLUMN broadcast TINYINT NOT NULL DEFAULT 0, ADD CONSTRAINT ck_messages_broadcast CHECK (broadcast IN (0, 1))',
+    table: 'messages',
+    columns: [{ name: 'broadcast', type: 'tinyint', nullable: false, default: '0' }],
+    check: { name: 'ck_messages_broadcast', clause: 'broadcast IN (0, 1)' },
   },
 ];
 
@@ -138,10 +183,18 @@ async function alreadyApplied(connection: mysql.PoolConnection, guard: Guard): P
       [guard.table, expected.name],
     );
     const row = rows[0];
-    present.push(row !== undefined);
-    if (!row) continue;
+    if (!row) {
+      present.push(false);
+      continue;
+    }
     const type = String(row.COLUMN_TYPE).replace(/^(tinyint|int)\(\d+\)$/, '$1');
     const columnDefault = row.COLUMN_DEFAULT == null ? null : String(row.COLUMN_DEFAULT);
+    // A `MODIFY` guard names the committed pre-migration type in `from`; a
+    // column still carrying it is the not-yet-applied state, not corruption.
+    if (expected.from !== undefined && type === expected.from) {
+      present.push(false);
+      continue;
+    }
     if (
       type !== expected.type ||
       (row.IS_NULLABLE === 'YES') !== expected.nullable ||
@@ -151,6 +204,7 @@ async function alreadyApplied(connection: mysql.PoolConnection, guard: Guard): P
     ) {
       mismatch(guard.table, expected.name);
     }
+    present.push(true);
   }
   for (const expected of guard.indexes ?? []) {
     const [rows] = await connection.execute<mysql.RowDataPacket[]>(

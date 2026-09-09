@@ -134,8 +134,20 @@ const auditLogsQuery = listQuerySchema.extend({
   action: z.string().trim().max(120).optional(),
   target_type: z.string().trim().max(120).optional(),
   target_id: z.string().trim().max(120).optional(),
-  from: z.string().trim().datetime().optional(),
-  to: z.string().trim().datetime().optional(),
+  from: z
+    .string()
+    .trim()
+    .datetime()
+    .transform((value) => new Date(value).toISOString())
+    .describe('UTC timestamp normalized to milliseconds before comparison')
+    .optional(),
+  to: z
+    .string()
+    .trim()
+    .datetime()
+    .transform((value) => new Date(value).toISOString())
+    .describe('UTC timestamp normalized to milliseconds before comparison')
+    .optional(),
 });
 
 /* ── God-mode bodies ──────────────────────────────────────────────────────

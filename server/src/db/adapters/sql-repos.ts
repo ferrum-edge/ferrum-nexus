@@ -95,6 +95,7 @@ import type {
   StoreHealth,
   ThreadRecord,
   ThreadRepo,
+  TransactionOptions,
   UpdateInput,
   UserFilter,
   UserRecord,
@@ -103,7 +104,7 @@ import type {
   VerificationTokenRecord,
   VerificationTokenRepo,
 } from '../store.js';
-import { SPEC_HISTORY_PRUNE_BATCH } from '../store.js';
+import { assertLeaseKeyLength, SPEC_HISTORY_PRUNE_BATCH } from '../store.js';
 import {
   bool,
   encodeBool,
@@ -130,6 +131,7 @@ import {
   type SqlParam,
   type SqlTransactionRunner,
 } from './sql-common.js';
+import { runWithTransactionRetry } from './transaction-retry.js';
 
 /* ── Row mappers ────────────────────────────────────────────────────────── */
 
@@ -278,6 +280,7 @@ function mapApiPlugin(row: Row): ApiPluginRecord {
     enabled: bool(row.enabled),
     config: json<Record<string, unknown>>(row.config_json, {}),
     trigger: json<ApiPluginTrigger | null>(row.trigger_json, null),
+    ferrum_plugin_config_id: textOrNull(row.ferrum_plugin_config_id),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -376,6 +379,7 @@ function mapMessage(row: Row): MessageRecord {
     thread_id: text(row.thread_id),
     sender_user_id: text(row.sender_user_id),
     body: text(row.body),
+    broadcast: bool(row.broadcast),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -398,6 +402,7 @@ function mapNotification(row: Row): NotificationRecord {
 function mapOutbox(row: Row): EmailOutboxRecord {
   return {
     id: text(row.id),
+    generation: text(row.generation),
     to_email: text(row.to_email),
     subject: text(row.subject),
     body_html: text(row.body_html),
@@ -415,6 +420,7 @@ function mapOutbox(row: Row): EmailOutboxRecord {
 function mapTeardownJob(row: Row): GatewayTeardownJobRecord {
   return {
     id: text(row.id),
+    generation: text(row.generation),
     user_id: text(row.user_id),
     status: text(row.status) as GatewayTeardownJobStatus,
     attempts: int(row.attempts),
@@ -741,24 +747,14 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         .add(expected.role, 'role = ?', expected.role ?? null)
         .add(expected.status, 'status = ?', expected.status ?? null)
         .build();
-      /**
-       * Did the row survive the predicate?
-       *
-       * Reached when the `UPDATE` reported no change, which is not the same as
-       * "somebody else got here first": MySQL counts *changed* rows, not
-       * matched ones, so a patch that wrote identical values inside the same
-       * millisecond looks like a loss. Re-reading the predicate separates the
-       * two — a genuine loser no longer satisfies it.
-       */
-      const stillMatches = async (): Promise<UserRecord | null> => {
-        const row = await queryOne(exec, `SELECT id FROM users${guard.sql}`, guard.params);
-        return row ? users.findById(id) : null;
-      };
-
       const set = setParts(userUpdateColumns(patch));
-      if (!set) return stillMatches();
+      if (!set) {
+        // An empty patch is only a guarded read; it must not touch updated_at.
+        const row = await queryOne(exec, `SELECT * FROM users${guard.sql}`, guard.params);
+        return row ? mapUser(row) : null;
+      }
 
-      const changed = await mapSqlConflict(
+      const matched = await mapSqlConflict(
         'An account with that email address already exists',
         () =>
           execute(exec, `UPDATE users SET ${set.sql}, updated_at = ?${guard.sql}`, [
@@ -767,7 +763,10 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
             ...guard.params,
           ]),
       );
-      return changed > 0 ? users.findById(id) : stillMatches();
+      // PostgreSQL and MySQL (with FOUND_ROWS pinned) count matching rows,
+      // even for identical values. Zero is a genuine predicate loss: an
+      // ordinary SELECT could still see an old REPEATABLE READ snapshot.
+      return matched > 0 ? users.findById(id) : null;
     },
 
     touchLastLogin: async (id, at) => {
@@ -1205,11 +1204,12 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       'enabled',
       'config_json',
       'trigger_json',
+      'ferrum_plugin_config_id',
       'created_at',
       'updated_at',
     ],
     'api_id, plugin_name',
-    ['enabled', 'config_json', 'trigger_json', 'updated_at'],
+    ['enabled', 'config_json', 'trigger_json', 'ferrum_plugin_config_id', 'updated_at'],
   );
 
   const apiPlugins: ApiPluginRepo = {
@@ -1243,6 +1243,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
           encodeBool(input.enabled),
           encodeJson(input.config) ?? '{}',
           encodeJson(input.trigger),
+          input.ferrum_plugin_config_id,
           meta.created_at,
           meta.updated_at,
         ]),
@@ -1953,13 +1954,15 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       const meta = stamps(input);
       await execute(
         exec,
-        `INSERT INTO messages (id, thread_id, sender_user_id, body, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages
+           (id, thread_id, sender_user_id, body, broadcast, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
           meta.id,
           input.thread_id,
           input.sender_user_id,
           input.body,
+          encodeBool(input.broadcast ?? false),
           meta.created_at,
           meta.updated_at,
         ],
@@ -2019,7 +2022,8 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     countBySenderSince: async (senderUserId, sinceIso) =>
       queryCount(
         exec,
-        'SELECT COUNT(*) AS cnt FROM messages WHERE sender_user_id = ? AND created_at >= ?',
+        `SELECT COUNT(*) AS cnt FROM messages
+          WHERE sender_user_id = ? AND created_at >= ? AND broadcast = 0`,
         [senderUserId, sinceIso],
       ),
 
@@ -2207,9 +2211,9 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         await execute(
           tx,
           `UPDATE email_outbox
-           SET status = 'sending', attempts = attempts + 1, updated_at = ?
+           SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?
            WHERE id IN (${placeholders(ids.length)}) AND status = 'pending'`,
-          [nowIso(), ...ids],
+          [nowIso(), newId(), ...ids],
         );
         const rows = await queryAll(
           tx,
@@ -2219,32 +2223,32 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         return rows.map(mapOutbox);
       }),
 
-    markSent: async (id, at) => {
-      await execute(
+    // Every settling write moves the row out of `sending`, so a matching row
+    // always changes and MySQL's CLIENT_FOUND_ROWS count is still an ownership
+    // signal.
+    markSent: async (entry, at) =>
+      (await execute(
         exec,
         `UPDATE email_outbox SET status = 'sent', next_attempt_at = NULL, last_error = NULL,
-           updated_at = ? WHERE id = ?`,
-        [at, id],
-      );
-    },
+           updated_at = ? WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [at, entry.id, entry.generation],
+      )) > 0,
 
-    reschedule: async (id, nextAttemptAt, lastError) => {
-      await execute(
+    reschedule: async (entry, nextAttemptAt, lastError) =>
+      (await execute(
         exec,
         `UPDATE email_outbox SET status = 'pending', next_attempt_at = ?, last_error = ?,
-           updated_at = ? WHERE id = ?`,
-        [nextAttemptAt, lastError, nowIso(), id],
-      );
-    },
+           updated_at = ? WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [nextAttemptAt, lastError, nowIso(), entry.id, entry.generation],
+      )) > 0,
 
-    markFailed: async (id, lastError) => {
-      await execute(
+    markFailed: async (entry, lastError) =>
+      (await execute(
         exec,
         `UPDATE email_outbox SET status = 'failed', next_attempt_at = NULL, last_error = ?,
-           updated_at = ? WHERE id = ?`,
-        [lastError, nowIso(), id],
-      );
-    },
+           updated_at = ? WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [lastError, nowIso(), entry.id, entry.generation],
+      )) > 0,
 
     releaseStale: async (olderThan) =>
       execute(
@@ -2277,46 +2281,52 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
   /* ── gatewayTeardownJobs ────────────────────────────────────────────── */
 
   const gatewayTeardownJobs: GatewayTeardownJobRepo = {
-    upsertPending: async (userId, requestedBy, now) => {
-      // The conflict target is `user_id`, not the primary key: an account that
-      // already owes a revocation has that row reset to `pending` rather than
-      // gaining a second one.
-      await execute(
-        exec,
-        upsertSql(
-          dialect,
-          'gateway_teardown_jobs',
-          [
-            'id',
+    upsertPending: async (userId, requestedBy, now) =>
+      inTransaction(async (tx) => {
+        // Keep the upsert and returned ownership token in one transaction.
+        // The affectedRows count of an upsert is never an ownership signal.
+        await execute(
+          tx,
+          upsertSql(
+            dialect,
+            'gateway_teardown_jobs',
+            [
+              'id',
+              'user_id',
+              'status',
+              'attempts',
+              'next_attempt_at',
+              'last_error',
+              'requested_by',
+              'created_at',
+              'updated_at',
+              'completed_at',
+              'generation',
+            ],
             'user_id',
-            'status',
-            'attempts',
-            'next_attempt_at',
-            'last_error',
-            'requested_by',
-            'created_at',
-            'updated_at',
-            'completed_at',
-          ],
-          'user_id',
-          [
-            'status',
-            'attempts',
-            'next_attempt_at',
-            'last_error',
-            'requested_by',
-            'updated_at',
-            'completed_at',
-          ],
-        ),
-        [newId(), userId, 'pending', 0, now, null, requestedBy, now, now, null],
-      );
-      const job = await gatewayTeardownJobs.findByUser(userId);
-      if (!job) {
-        throw new Error('gatewayTeardownJobs.upsertPending: row vanished immediately after upsert');
-      }
-      return job;
-    },
+            [
+              'status',
+              'attempts',
+              'next_attempt_at',
+              'last_error',
+              'requested_by',
+              'updated_at',
+              'completed_at',
+              'generation',
+            ],
+          ),
+          [newId(), userId, 'pending', 0, now, null, requestedBy, now, now, null, newId()],
+        );
+        const row = await queryOne(tx, 'SELECT * FROM gateway_teardown_jobs WHERE user_id = ?', [
+          userId,
+        ]);
+        if (!row) {
+          throw new Error(
+            'gatewayTeardownJobs.upsertPending: row vanished immediately after upsert',
+          );
+        }
+        return mapTeardownJob(row);
+      }),
 
     findByUser: async (userId) => {
       const row = await queryOne(exec, 'SELECT * FROM gateway_teardown_jobs WHERE user_id = ?', [
@@ -2328,6 +2338,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     list: async (filter, options) => {
       const where = new SqlWhereBuilder()
         .add(filter.status, 'status = ?', filter.status ?? null)
+        .addIn('status', filter.statuses)
         .build();
       const { limit, offset } = page(options);
       const total = await queryCount(
@@ -2360,9 +2371,10 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         await execute(
           tx,
           `UPDATE gateway_teardown_jobs
-           SET status = 'sending', attempts = attempts + 1, updated_at = ?
+           SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?,
+               completed_at = NULL
            WHERE id IN (${placeholders(ids.length)}) AND status = 'pending'`,
-          [nowIso(), ...ids],
+          [nowIso(), newId(), ...ids],
         );
         const rows = await queryAll(
           tx,
@@ -2372,24 +2384,48 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         return rows.map(mapTeardownJob);
       }),
 
-    markDone: async (id, at) => {
-      await execute(
+    claimPending: async (job) => {
+      const generation = newId();
+      const at = nowIso();
+      // A matching row always changes status and token, including with MySQL
+      // CLIENT_FOUND_ROWS. Upsert affectedRows is never an ownership signal.
+      const changed = await execute(
+        exec,
+        `UPDATE gateway_teardown_jobs
+         SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?,
+             completed_at = NULL
+         WHERE id = ? AND generation = ? AND status = 'pending'`,
+        [at, generation, job.id, job.generation],
+      );
+      return changed > 0
+        ? {
+            ...job,
+            generation,
+            status: 'sending',
+            attempts: job.attempts + 1,
+            updated_at: at,
+            completed_at: null,
+          }
+        : null;
+    },
+
+    markDone: async (job, at) =>
+      (await execute(
         exec,
         `UPDATE gateway_teardown_jobs
          SET status = 'done', next_attempt_at = NULL, last_error = NULL, completed_at = ?,
-             updated_at = ? WHERE id = ?`,
-        [at, at, id],
-      );
-    },
+             updated_at = ? WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [at, at, job.id, job.generation],
+      )) > 0,
 
-    reschedule: async (id, nextAttemptAt, lastError) => {
-      await execute(
+    reschedule: async (job, nextAttemptAt, lastError) =>
+      (await execute(
         exec,
         `UPDATE gateway_teardown_jobs
-         SET status = 'pending', next_attempt_at = ?, last_error = ?, updated_at = ? WHERE id = ?`,
-        [nextAttemptAt, lastError, nowIso(), id],
-      );
-    },
+         SET status = 'pending', next_attempt_at = ?, last_error = ?, updated_at = ?,
+             completed_at = NULL WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [nextAttemptAt, lastError, nowIso(), job.id, job.generation],
+      )) > 0,
 
     releaseStale: async (olderThan) =>
       execute(
@@ -2401,6 +2437,13 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
     deleteByUser: async (userId) =>
       (await execute(exec, 'DELETE FROM gateway_teardown_jobs WHERE user_id = ?', [userId])) > 0,
+
+    deleteClaimed: async (job) =>
+      (await execute(
+        exec,
+        "DELETE FROM gateway_teardown_jobs WHERE id = ? AND generation = ? AND status = 'sending'",
+        [job.id, job.generation],
+      )) > 0,
   };
 
   /* ── auditLogs ──────────────────────────────────────────────────────── */
@@ -2670,6 +2713,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
   const leases: LeaseRepo = {
     acquire: async (key, owner, expiresAt, now) => {
+      assertLeaseKeyLength(key);
       const stamp = nowIso();
       if (dialect === 'pg') {
         // One statement, so "is it free?" and the claim cannot be split by
@@ -2774,8 +2818,20 @@ export interface SqlStoreBackend {
   /**
    * Check out a dedicated connection, `BEGIN`, run `fn` on it, then `COMMIT`
    * on resolve or `ROLLBACK` on reject, releasing the connection either way.
+   *
+   * The transaction must be finished — committed or rolled back — by the time
+   * the returned promise settles, so the shell can simply call this again to
+   * retry a body the engine rejected for contention.
    */
   withTransaction<T>(fn: (exec: SqlExecutor) => Promise<T>): Promise<T>;
+  /**
+   * Whether an error out of {@link withTransaction} is this engine saying the
+   * transaction was rolled back for contention and should be run again — an
+   * InnoDB deadlock victim, a PostgreSQL serialization failure. The shell
+   * retries those and translates the terminal case; see
+   * `adapters/transaction-retry.ts`.
+   */
+  isRetryableTransactionError(error: unknown): boolean;
 }
 
 /**
@@ -2794,6 +2850,15 @@ export interface SqlStoreBackend {
  * transaction body is scoped to that connection, and calling `transaction()` on
  * *it* simply invokes the callback with itself rather than opening a second
  * transaction (which the drivers would either reject or silently flatten).
+ *
+ * **A body the engine rolled back for contention is run again.** Serialising
+ * bodies orders one store object's transactions; it says nothing about the
+ * other instances sharing the database, and an InnoDB deadlock or a PostgreSQL
+ * serialization failure between two of them used to surface as a `500` with
+ * the body's work lost. The retry happens inside this store's queue slot, so
+ * ordering is unchanged, and a body that cannot commit within the budget fails
+ * as `CONFLICT` rather than leaking a driver error. Bodies must therefore be
+ * re-runnable — see `adapters/transaction-retry.ts`.
  */
 class SqlStore implements NexusStore {
   readonly driver: DbDriver;
@@ -2878,14 +2943,22 @@ class SqlStore implements NexusStore {
     return this.backend.healthCheck();
   }
 
-  transaction<T>(fn: (tx: NexusStore) => Promise<T>): Promise<T> {
+  transaction<T>(fn: (tx: NexusStore) => Promise<T>, options?: TransactionOptions): Promise<T> {
     if (this.scoped) return fn(this);
-    return this.runInTransaction((exec) => fn(new SqlStore(this.backend, exec)));
+    return this.runInTransaction((exec) => fn(new SqlStore(this.backend, exec)), options);
   }
 
-  private runInTransaction<T>(fn: (exec: SqlExecutor) => Promise<T>): Promise<T> {
+  private runInTransaction<T>(
+    fn: (exec: SqlExecutor) => Promise<T>,
+    options?: TransactionOptions,
+  ): Promise<T> {
     if (this.scoped) return fn(this.scoped);
-    const run = (): Promise<T> => this.backend.withTransaction(fn);
+    const run = (): Promise<T> =>
+      runWithTransactionRetry(() => this.backend.withTransaction(fn), {
+        driver: this.driver,
+        retryable: (error) => this.backend.isRetryableTransactionError(error),
+        ...(options?.retry === false ? { retry: false } : {}),
+      });
     const result = this.queue.then(run, run);
     this.queue = result.then(
       () => undefined,

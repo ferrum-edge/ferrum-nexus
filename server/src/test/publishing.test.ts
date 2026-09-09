@@ -5,6 +5,7 @@ import type { LightMyRequestResponse } from 'fastify';
 
 import {
   aclGroupForApi,
+  MAX_SPEC_DEPTH,
   type ApiErrorBody,
   type CatalogListResponse,
   type CreateTestConsumerResponse,
@@ -24,6 +25,18 @@ import {
   type TestApp,
   type TestSession,
 } from './helpers.js';
+
+import { mockCorsPreflight, mockWebsocketAllowed } from './mock-ferrum-edge.js';
+
+const CORS_HEADERS = [
+  'Accept',
+  'Authorization',
+  'Content-Type',
+  'Origin',
+  'X-Requested-With',
+  'X-API-Key',
+];
+const CORS_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
 
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
@@ -157,6 +170,88 @@ describe('publishing', () => {
       harness.edge.reset();
     });
 
+    it('refuses oversized derived URLs and excessive nesting before any gateway call', async () => {
+      const deep = SAMPLE_SPEC_JSON.replace(
+        /}\s*$/,
+        `,"x-deep":${'{"child":'.repeat(MAX_SPEC_DEPTH)}0${'}'.repeat(MAX_SPEC_DEPTH)}}`,
+      );
+      const expanded = JSON.parse(SAMPLE_SPEC_JSON) as Record<string, unknown>;
+      expanded.servers = [
+        {
+          url: 'https://backend.example.com/{base}{base}',
+          variables: { base: { default: 'x'.repeat(1_000) } },
+        },
+      ];
+      const specs = [
+        specWithServer(`https://backend.example.com/${'x'.repeat(3_000)}`),
+        JSON.stringify(expanded),
+        deep,
+      ];
+      const before = harness.edge.requests.length;
+      for (const spec_enforcement of ['docs_only', 'routes']) {
+        for (const spec of specs) {
+          const response = await harness.authed(provider, {
+            method: 'POST',
+            url: '/api/apis',
+            payload: publishPayload({ slug: 'bounded-spec', spec, spec_enforcement }),
+          });
+          assert.equal(response.statusCode, 400, response.body);
+          assert.equal(errorCode(response.body), 'SPEC_INVALID');
+          assert.match(response.body, /servers\[0\]\.url|nesting limit/);
+        }
+      }
+      assert.equal(harness.edge.requests.length, before);
+    });
+
+    it('publishes at the nesting boundary and converts the document to routes', async () => {
+      const levels = MAX_SPEC_DEPTH - 1;
+      const spec = SAMPLE_SPEC_JSON.replace(
+        /}\s*$/,
+        `,"x-deep":${'{"child":'.repeat(levels)}0${'}'.repeat(levels)}}`,
+      );
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'depth-boundary', spec }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const converted = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { spec_enforcement: 'routes' },
+      });
+      assert.equal(converted.statusCode, 200, converted.body);
+      assert.equal(converted.json<UpdateApiResponse>().api.spec_enforcement, 'routes');
+    });
+
+    it('returns actionable API-spec rejection details to the provider', async () => {
+      harness.edge.queueFailure(
+        422,
+        {
+          error: 'Spec parse failed',
+          code: 'MalformedExtension',
+          details: 'malformed x-ferrum-proxy: unknown field upstream_url',
+        },
+        '/api-specs',
+        'POST',
+      );
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'spec-rejected', spec_enforcement: 'routes' }),
+      });
+      assert.equal(response.statusCode, 400, response.body);
+      const body = response.json<ApiErrorBody>();
+      assert.equal(body.error.code, 'EDGE_REJECTED_SPEC');
+      assert.match(body.error.message, /unknown field upstream_url/);
+      assert.equal(
+        (body.error.details as { gateway_code: string }).gateway_code,
+        'MalformedExtension',
+      );
+      assert.equal(harness.edge.proxies.size, 0);
+    });
+
     it('creates the proxy and every plugin with the exact Edge bodies', async () => {
       const response = await harness.authed(provider, {
         method: 'POST',
@@ -265,7 +360,7 @@ describe('publishing', () => {
       assert.deepEqual(effectiveNames(harness, proxyId), ['key_auth']);
     });
 
-    it('attaches a cors plugin carrying exactly the two keys Edge needs', async () => {
+    it('attaches a cors plugin with auth-aware preflight defaults', async () => {
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -284,11 +379,12 @@ describe('publishing', () => {
       assert.ok(cors, 'expected a cors plugin config on the proxy');
       assert.equal(cors.scope, 'proxy');
       assert.equal(cors.enabled, true);
-      // Nothing beyond the two keys the portal models: every other `cors`
-      // field has a native default a provider cannot change from here.
+      // The plugin explicitly allows the headers authentication needs.
       assert.deepEqual(cors.config, {
         allowed_origins: ['https://app.example.com', 'https://admin.example.com'],
         allow_credentials: true,
+        allowed_methods: CORS_METHODS,
+        allowed_headers: CORS_HEADERS,
       });
 
       assert.deepEqual(effectiveNames(harness, proxyId), ['access_control', 'cors', 'key_auth']);
@@ -391,7 +487,7 @@ describe('publishing', () => {
       assert.deepEqual(api.allowed_methods, ['GET', 'POST'], 'the row keeps the provider’s list');
     });
 
-    it('mirrors exact CORS origins into allowed_ws_origins', async () => {
+    it('mirrors exact CORS origins into allowed_ws_origins only when opted in', async () => {
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -400,6 +496,7 @@ describe('publishing', () => {
           cors: {
             allowed_origins: ['https://app.example.com', 'https://admin.example.com:8443'],
             allow_credentials: true,
+            enforce_websocket_origins: true,
           },
         }),
       });
@@ -409,6 +506,111 @@ describe('publishing', () => {
         'https://app.example.com',
         'https://admin.example.com:8443',
       ]);
+    });
+
+    for (const authPlugin of ['key_auth', 'basic_auth', 'jwt_auth'] as const) {
+      it(`allows ${authPlugin} browser headers and only the proxy's methods`, async () => {
+        const response = await harness.authed(provider, {
+          method: 'POST',
+          url: '/api/apis',
+          payload: publishPayload({
+            slug: `cors-${authPlugin.replace('_', '-')}`,
+            auth_plugin: authPlugin,
+            allowed_methods: ['GET'],
+            cors: {
+              allowed_origins: ['https://app.example.com'],
+              allowed_headers: ['X-Tenant'],
+            },
+          }),
+        });
+        assert.equal(response.statusCode, 201, response.body);
+        const api = response.json<PublishApiResponse>().api;
+        const proxyId = String(api.ferrum_proxy_id);
+        const plugin = harness.edge.pluginForProxy(proxyId, 'cors');
+        const preflight = mockCorsPreflight(plugin?.config as Record<string, unknown>);
+        assert.match(
+          preflight['access-control-allow-headers'] ?? '',
+          authPlugin === 'key_auth' ? /X-API-Key/ : /Authorization/,
+        );
+        assert.match(preflight['access-control-allow-headers'] ?? '', /X-Tenant/);
+        assert.equal(preflight['access-control-allow-methods'], 'GET, OPTIONS');
+        assert.equal(mockWebsocketAllowed(storedProxy(harness, proxyId)), true);
+
+        // A method-only PATCH must also rebuild the CORS advertisement.
+        const changed = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${api.id}`,
+          payload: { allowed_methods: ['HEAD'] },
+        });
+        assert.equal(changed.statusCode, 200, changed.body);
+        const updated = harness.edge.pluginForProxy(proxyId, 'cors');
+        assert.equal(
+          mockCorsPreflight(updated?.config as Record<string, unknown>)[
+            'access-control-allow-methods'
+          ],
+          'HEAD, OPTIONS',
+        );
+      });
+    }
+
+    it('models native CORS defaults and absence independently of Nexus derivation', () => {
+      assert.doesNotMatch(mockCorsPreflight({})['access-control-allow-headers'] ?? '', /X-API-Key/);
+      assert.equal(mockCorsPreflight({})['access-control-allow-methods'], CORS_METHODS.join(', '));
+      assert.deepEqual(mockCorsPreflight(undefined), {});
+    });
+
+    it('makes the WebSocket origin gate an explicit opt-in and supports clearing it', async () => {
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'ws-opt-in',
+          cors: { allowed_origins: ['https://app.example.com'] },
+        }),
+      });
+      assert.equal(response.statusCode, 201, response.body);
+      const api = response.json<PublishApiResponse>().api;
+      const proxyId = String(api.ferrum_proxy_id);
+      for (const enforce of [false, true, false]) {
+        const saved = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${api.id}`,
+          payload: {
+            cors: {
+              allowed_origins: ['https://app.example.com'],
+              enforce_websocket_origins: enforce,
+            },
+          },
+        });
+        assert.equal(saved.statusCode, 200, saved.body);
+        const proxy = storedProxy(harness, proxyId);
+        assert.equal(mockWebsocketAllowed(proxy), !enforce);
+        assert.equal(mockWebsocketAllowed(proxy, 'https://evil.example.com'), !enforce);
+        assert.equal(mockWebsocketAllowed(proxy, 'https://APP.example.com'), true);
+      }
+      const cleared = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${api.id}`,
+        payload: { cors: null },
+      });
+      assert.equal(cleared.statusCode, 200, cleared.body);
+      assert.equal(mockWebsocketAllowed(storedProxy(harness, proxyId)), true);
+      assert.equal(harness.edge.pluginForProxy(proxyId, 'cors'), undefined);
+    });
+
+    it('rejects invalid custom headers and wildcard WebSocket enforcement', async () => {
+      for (const cors of [
+        { allowed_origins: ['*'], enforce_websocket_origins: true },
+        { allowed_origins: ['https://app.example.com'], allowed_headers: ['bad header'] },
+        { allowed_origins: ['https://app.example.com'], enforce_websocket_origins: 'true' },
+      ]) {
+        const response = await harness.authed(provider, {
+          method: 'POST',
+          url: '/api/apis',
+          payload: publishPayload({ slug: 'invalid-cors', cors }),
+        });
+        assert.equal(response.statusCode, 400, response.body);
+      }
     });
 
     it('leaves the WS origin check off for a wildcard CORS policy', async () => {
@@ -848,6 +1050,7 @@ describe('publishing', () => {
         id: noiseProxyId,
         namespace: 'nexus',
         listen_path: '/nexus/pagination-noise',
+        plugins: [],
         backend_host: 'noise.internal',
         backend_port: 443,
       });
@@ -1066,6 +1269,8 @@ describe('publishing', () => {
       assert.deepEqual(harness.edge.pluginForProxy(proxyId, 'cors')?.config, {
         allowed_origins: ['https://app.example.com'],
         allow_credentials: false,
+        allowed_methods: CORS_METHODS,
+        allowed_headers: CORS_HEADERS,
       });
       assert.deepEqual(effectiveNames(harness, proxyId), ['access_control', 'cors', 'key_auth']);
       const corsId = String(harness.edge.pluginForProxy(proxyId, 'cors')?.id);
@@ -1085,6 +1290,8 @@ describe('publishing', () => {
       assert.deepEqual(harness.edge.pluginForProxy(proxyId, 'cors')?.config, {
         allowed_origins: ['https://app.example.com', 'https://ops.example.com'],
         allow_credentials: true,
+        allowed_methods: CORS_METHODS,
+        allowed_headers: CORS_HEADERS,
       });
       // Rewritten in place: same id, same association, one config.
       assert.equal(String(harness.edge.pluginForProxy(proxyId, 'cors')?.id), corsId);
@@ -1104,6 +1311,210 @@ describe('publishing', () => {
       assert.ok(!associatedIds(harness, proxyId).includes(corsId));
       assert.deepEqual(effectiveNames(harness, proxyId), ['access_control', 'key_auth']);
       assert.deepEqual(associatedIds(harness, proxyId), writtenIds(harness, proxyId));
+    });
+
+    /* ── Operator tuning on the two plugin-backed settings (issue #150) ── */
+
+    describe('cors and rate_limit are reconciled on change, not on presence', () => {
+      /**
+       * Publish an API that already carries both settings, then tune the two
+       * gateway configs the way an operator would.
+       *
+       * Published rather than PATCHed so the only `api.update` row in the
+       * store belongs to the save under test.
+       */
+      async function tunedByOperator(): Promise<{ cors: string; limiter: string }> {
+        const published = await harness.authed(provider, {
+          method: 'POST',
+          url: '/api/apis',
+          payload: publishPayload({
+            slug: `tuned-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            rate_limit: { limit: 100, window_seconds: 60 },
+            cors: { allowed_origins: ['https://app.example.com'], allow_credentials: false },
+          }),
+        });
+        assert.equal(published.statusCode, 201, published.body);
+        const body = published.json<PublishApiResponse>();
+        apiId = body.api.id;
+        proxyId = String(body.api.ferrum_proxy_id);
+
+        const cors = harness.edge.pluginForProxy(proxyId, 'cors');
+        const limiter = harness.edge.pluginForProxy(proxyId, 'rate_limiting');
+        assert.ok(cors);
+        assert.ok(limiter);
+        // Straight onto the stored resources, the way a hand-edit on the
+        // gateway would land: keys the portal does not model at all.
+        cors.config = {
+          ...(cors.config as Record<string, unknown>),
+          allowed_headers: ['x-tenant'],
+          max_age: 600,
+        };
+        limiter.config = {
+          ...(limiter.config as Record<string, unknown>),
+          sync_mode: 'redis',
+          redis_url: 'redis://limits.internal:6379',
+        };
+        return { cors: String(cors.id), limiter: String(limiter.id) };
+      }
+
+      it('leaves both gateway configs untouched when the SPA replays them', async () => {
+        const ids = await tunedByOperator();
+        const writesBefore = harness.edge.callsTo('PUT', '/plugins/config').length;
+
+        // Exactly what the form submits when a provider fixes a typo.
+        const saved = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${apiId}`,
+          payload: {
+            description: 'A typo, fixed.',
+            rate_limit: { limit: 100, window_seconds: 60 },
+            cors: { allowed_origins: ['https://app.example.com'], allow_credentials: false },
+          },
+        });
+        assert.equal(saved.statusCode, 200, saved.body);
+
+        assert.equal(
+          harness.edge.callsTo('PUT', '/plugins/config').length,
+          writesBefore,
+          'an unchanged setting must not rewrite its gateway config',
+        );
+        assert.deepEqual(harness.edge.pluginForProxy(proxyId, 'cors')?.config, {
+          allowed_origins: ['https://app.example.com'],
+          allow_credentials: false,
+          allowed_headers: ['x-tenant'],
+          max_age: 600,
+          allowed_methods: CORS_METHODS,
+        });
+        assert.deepEqual(harness.edge.pluginForProxy(proxyId, 'rate_limiting')?.config, {
+          limit_by: 'consumer',
+          expose_headers: true,
+          limits: [{ scope: 'default', window_seconds: 60, max_requests: 100 }],
+          sync_mode: 'redis',
+          redis_url: 'redis://limits.internal:6379',
+        });
+        assert.equal(String(harness.edge.pluginForProxy(proxyId, 'cors')?.id), ids.cors);
+        assert.equal(
+          String(harness.edge.pluginForProxy(proxyId, 'rate_limiting')?.id),
+          ids.limiter,
+        );
+
+        // Filtered by target: audit rows accumulate across the whole file.
+        const rows = (await harness.auditRows('api.update')).filter(
+          (entry) => entry.target_id === apiId,
+        );
+        const row = rows[0];
+        assert.ok(row);
+        assert.deepEqual(
+          (row.details as { changed_fields?: unknown }).changed_fields,
+          ['description'],
+          'the log must not name two fields that did not move',
+        );
+      });
+
+      it('does not re-enable a config an operator switched off', async () => {
+        await tunedByOperator();
+        const limiter = harness.edge.pluginForProxy(proxyId, 'rate_limiting');
+        assert.ok(limiter);
+        limiter.enabled = false;
+
+        const saved = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${apiId}`,
+          payload: {
+            description: 'Still just a typo.',
+            rate_limit: { limit: 100, window_seconds: 60 },
+          },
+        });
+        assert.equal(saved.statusCode, 200, saved.body);
+        assert.equal(harness.edge.pluginForProxy(proxyId, 'rate_limiting')?.enabled, false);
+      });
+
+      it('applies a genuine change, audits it, and keeps the operator keys', async () => {
+        await tunedByOperator();
+
+        const saved = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${apiId}`,
+          payload: {
+            rate_limit: { limit: 500, window_seconds: 60 },
+            cors: { allowed_origins: ['https://ops.example.com'], allow_credentials: true },
+          },
+        });
+        assert.equal(saved.statusCode, 200, saved.body);
+        const api = saved.json<UpdateApiResponse>().api;
+        assert.deepEqual(api.rate_limit, { limit: 500, window_seconds: 60 });
+        assert.deepEqual(api.cors, {
+          allowed_origins: ['https://ops.example.com'],
+          allow_credentials: true,
+        });
+
+        // The portal's keys move; the operator's ride along (issue #150's
+        // "merge into the live config rather than replace it").
+        assert.deepEqual(harness.edge.pluginForProxy(proxyId, 'rate_limiting')?.config, {
+          limit_by: 'consumer',
+          expose_headers: true,
+          limits: [{ scope: 'default', window_seconds: 60, max_requests: 500 }],
+          sync_mode: 'redis',
+          redis_url: 'redis://limits.internal:6379',
+        });
+        assert.deepEqual(harness.edge.pluginForProxy(proxyId, 'cors')?.config, {
+          allowed_origins: ['https://ops.example.com'],
+          allow_credentials: true,
+          allowed_headers: [...CORS_HEADERS, 'x-tenant'],
+          max_age: 600,
+          allowed_methods: CORS_METHODS,
+        });
+
+        const rows = (await harness.auditRows('api.update')).filter(
+          (entry) => entry.target_id === apiId,
+        );
+        const row = rows[0];
+        assert.ok(row);
+        const changed = (row.details as { changed_fields?: string[] }).changed_fields ?? [];
+        assert.ok(changed.includes('rate_limit'));
+        assert.ok(changed.includes('cors'));
+      });
+
+      it('still removes both plugins on null', async () => {
+        await tunedByOperator();
+
+        const cleared = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${apiId}`,
+          payload: { rate_limit: null, cors: null },
+        });
+        assert.equal(cleared.statusCode, 200, cleared.body);
+        assert.equal(cleared.json<UpdateApiResponse>().api.rate_limit, null);
+        assert.equal(cleared.json<UpdateApiResponse>().api.cors, null);
+        assert.equal(harness.edge.pluginForProxy(proxyId, 'rate_limiting'), undefined);
+        assert.equal(harness.edge.pluginForProxy(proxyId, 'cors'), undefined);
+        assert.deepEqual(effectiveNames(harness, proxyId), ['access_control', 'key_auth']);
+      });
+
+      it('carries an operator’s priority_override through a genuine change', async () => {
+        await tunedByOperator();
+        const limiter = harness.edge.pluginForProxy(proxyId, 'rate_limiting');
+        const cors = harness.edge.pluginForProxy(proxyId, 'cors');
+        assert.ok(limiter);
+        assert.ok(cors);
+        limiter.priority_override = 9_000;
+        cors.priority_override = 120;
+
+        const saved = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${apiId}`,
+          payload: {
+            rate_limit: { limit: 500, window_seconds: 60 },
+            cors: { allowed_origins: ['https://ops.example.com'], allow_credentials: true },
+          },
+        });
+        assert.equal(saved.statusCode, 200, saved.body);
+        assert.equal(
+          harness.edge.pluginForProxy(proxyId, 'rate_limiting')?.priority_override,
+          9_000,
+        );
+        assert.equal(harness.edge.pluginForProxy(proxyId, 'cors')?.priority_override, 120);
+      });
     });
 
     it('applies the proxy settings and resets them to the gateway defaults on null', async () => {
@@ -1208,6 +1619,55 @@ describe('publishing', () => {
       assert.equal((await harness.auditRows('api.update')).length, auditsBeforeEnabledReplay);
     });
 
+    it('reconciles auth-only CORS changes and removes only portal-owned extra headers', async () => {
+      const configured = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: {
+          auth_plugin: 'basic_auth',
+          cors: {
+            allowed_origins: ['https://app.example.com'],
+            allowed_headers: ['X-Portal'],
+          },
+        },
+      });
+      assert.equal(configured.statusCode, 200, configured.body);
+      const plugin = harness.edge.pluginForProxy(proxyId, 'cors');
+      assert.ok(plugin);
+      const settings = plugin.config as Record<string, unknown>;
+      settings.allowed_headers = [...(settings.allowed_headers as string[]), 'X-Operator'];
+      settings.max_age = 600;
+      plugin.priority_override = 90;
+
+      const changed = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { auth_plugin: 'key_auth' },
+      });
+      assert.equal(changed.statusCode, 200, changed.body);
+      const authConfig = harness.edge.pluginForProxy(proxyId, 'cors')?.config;
+      assert.match(
+        mockCorsPreflight(authConfig as Record<string, unknown>)['access-control-allow-headers'] ??
+          '',
+        /X-API-Key/,
+      );
+
+      const cleared = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: {
+          cors: { allowed_origins: ['https://app.example.com'], allowed_headers: [] },
+        },
+      });
+      assert.equal(cleared.statusCode, 200, cleared.body);
+      const live = harness.edge.pluginForProxy(proxyId, 'cors');
+      const headers = mockCorsPreflight(live?.config as Record<string, unknown>);
+      assert.match(headers['access-control-allow-headers'] ?? '', /X-Operator/);
+      assert.doesNotMatch(headers['access-control-allow-headers'] ?? '', /X-Portal/);
+      assert.equal((live?.config as Record<string, unknown>).max_age, 600);
+      assert.equal(live?.priority_override, 90);
+    });
+
     it('re-derives OPTIONS and the WS origins when CORS arrives later and leaves', async () => {
       await harness.authed(provider, {
         method: 'PATCH',
@@ -1224,7 +1684,11 @@ describe('publishing', () => {
         method: 'PATCH',
         url: `/api/apis/${apiId}`,
         payload: {
-          cors: { allowed_origins: ['https://app.example.com'], allow_credentials: false },
+          cors: {
+            allowed_origins: ['https://app.example.com'],
+            allow_credentials: false,
+            enforce_websocket_origins: true,
+          },
         },
       });
       assert.equal(withCors.statusCode, 200, withCors.body);
@@ -2247,6 +2711,126 @@ describe('publishing', () => {
       assert.equal(storedProxy(harness, proxyId).backend_host, 'billing.example.com');
     });
 
+    /**
+     * A document that overrides `servers` below the root.
+     *
+     * OpenAPI resolves `servers` at three levels — root, Path Item, Operation —
+     * and the nearest one wins, so each of these overrides used to survive the
+     * root rewrite untouched.
+     */
+    function nestedServersSpec(version = '1.0.0'): string {
+      return JSON.stringify({
+        openapi: '3.1.0',
+        info: { title: 'Billing API', version },
+        servers: [{ url: 'https://billing.example.com:8443/v2' }],
+        paths: {
+          '/invoices': {
+            servers: [{ url: '/other' }],
+            get: { responses: { '200': { description: 'OK' } } },
+            post: {
+              servers: [{ url: 'https://writes.example.com/elsewhere' }],
+              responses: { '201': { description: 'Created' } },
+            },
+          },
+          '/payments': { get: { responses: { '200': { description: 'OK' } } } },
+        },
+      });
+    }
+
+    /** Every `servers` key anywhere under `paths`, as `<where>` labels. */
+    function nestedServerSites(document: Record<string, unknown>): string[] {
+      const sites: string[] = [];
+      const paths = (document.paths ?? {}) as Record<string, Record<string, unknown>>;
+      for (const [template, item] of Object.entries(paths)) {
+        if ('servers' in item) sites.push(template);
+        for (const [key, value] of Object.entries(item)) {
+          if (value !== null && typeof value === 'object' && 'servers' in value) {
+            sites.push(`${template}.${key}`);
+          }
+        }
+      }
+      return sites.sort();
+    }
+
+    it('strips path-level and operation-level servers before submitting', async () => {
+      // The whole point of the root rewrite is that the listen path is the base
+      // for every operation. A nested `servers` overrides it and Edge builds
+      // `^/other/invoices$` — a matcher nothing arriving at
+      // `/nexus/enf-nested/invoices` can hit, which
+      // `fail_on_unknown_operation` turns into a `400` on a publish that
+      // answered `201`.
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'enf-nested',
+          spec: nestedServersSpec(),
+          spec_enforcement: 'routes',
+        }),
+      });
+      assert.equal(response.statusCode, 201, response.body);
+      const proxyId = String(response.json<PublishApiResponse>().api.ferrum_proxy_id);
+
+      const document = submittedDocument(proxyId);
+      assert.deepEqual(document.servers, [{ url: '/nexus/enf-nested' }]);
+      assert.deepEqual(nestedServerSites(document), []);
+      assert.deepEqual(operationLabels(proxyId), [
+        'GET /nexus/enf-nested/invoices',
+        'GET /nexus/enf-nested/payments',
+        'POST /nexus/enf-nested/invoices',
+      ]);
+    });
+
+    it('keeps a routes API serving when a revision introduces nested servers', async () => {
+      // The worse entry point: a `PUT` on a live API, which answers `200` and
+      // would otherwise take a working API to a total outage with nothing in
+      // the portal indicating anything is wrong.
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'enf-nested-rev', spec_enforcement: 'routes' }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
+
+      const revised = await harness.authed(provider, {
+        method: 'PUT',
+        url: `/api/apis/${apiId}/spec`,
+        payload: { spec: nestedServersSpec('2.0.0') },
+      });
+      assert.equal(revised.statusCode, 200, revised.body);
+      assert.deepEqual(nestedServerSites(submittedDocument(proxyId)), []);
+      assert.deepEqual(operationLabels(proxyId), [
+        'GET /nexus/enf-nested-rev/invoices',
+        'GET /nexus/enf-nested-rev/payments',
+        'POST /nexus/enf-nested-rev/invoices',
+      ]);
+    });
+
+    it('leaves the provider revision itself untouched, nested servers included', async () => {
+      // Only the copy submitted to Edge is rewritten. The stored revision is
+      // what the catalog and the docs viewer show, and what a `docs_only` API
+      // publishes — the provider's document, as they wrote it.
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'enf-nested-docs',
+          spec: nestedServersSpec(),
+          spec_enforcement: 'docs_only',
+        }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const api = published.json<PublishApiResponse>().api;
+      assert.equal(harness.edge.apiSpecForProxy(String(api.ferrum_proxy_id)), undefined);
+
+      const stored = await harness.store.apiSpecs.findCurrentByApi(api.id);
+      assert.ok(stored);
+      const document = JSON.parse(stored.raw_spec) as Record<string, unknown>;
+      assert.deepEqual(nestedServerSites(document), ['/invoices', '/invoices.post']);
+    });
+
     it('declares no OPTIONS operations for an API with a CORS policy', async () => {
       // `cors` runs at priority 100 and `openapi_validator` at 2960, and
       // `preflight_continue` defaults to false, so the preflight is answered
@@ -3164,6 +3748,7 @@ describe('publishing', () => {
         name: 'operator-owned',
         namespace: 'nexus',
         listen_path: '/nexus/stage-fail-cutover',
+        plugins: [],
         backend_scheme: 'https',
         backend_host: 'elsewhere.example.com',
         backend_port: 443,

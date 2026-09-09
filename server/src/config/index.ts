@@ -8,7 +8,8 @@
  * Every variable documented in the repo-root `.env.example` is covered here
  * with the same default. A handful of extra variables exist for testing and
  * container deployment (`NEXUS_ENV`, `NEXUS_RATE_LIMIT_ENABLED`,
- * `NEXUS_HEALTH_CACHE_MS`, `NEXUS_WEB_DIST`, `NEXUS_ALLOW_PRIVATE_UPSTREAMS`,
+ * `NEXUS_HEALTH_CACHE_MS`, `NEXUS_HEALTH_PROBE_TIMEOUT_MS`,
+ * `NEXUS_WEB_DIST`, `NEXUS_ALLOW_PRIVATE_UPSTREAMS`,
  * `FERRUM_ADMIN_TIMEOUT_MS`, `FERRUM_MAX_CREDENTIALS_PER_TYPE`);
  * they are all optional and default to production-safe values.
  */
@@ -208,6 +209,8 @@ export interface NexusConfig {
    * flip dependency state between requests rely on.
    */
   healthCacheMs: number;
+  /** Shared deadline for the health route's Edge calls; below the 10 s image healthcheck. */
+  healthProbeTimeoutMs: number;
   /**
    * How many APIs one account may own at a time (`NEXUS_MAX_APIS_PER_OWNER`).
    * `0` disables the ceiling.
@@ -243,6 +246,40 @@ export interface NexusConfig {
    * integration, not a person.
    */
   maxMessagesPerUserPerDay: number;
+  /**
+   * How many recipients one god-mode broadcast may address
+   * (`NEXUS_MAX_BROADCAST_RECIPIENTS`). `0` removes the ceiling.
+   *
+   * A broadcast is the portal's highest-amplification path: one request writes
+   * a notification row, a platform-inbox message and — with `send_email` — a
+   * queued mail for every active account. Its rows deliberately do **not** draw
+   * on the sender's daily message budget, so this is the bound that replaces
+   * it, and it is checked before a single row is written. Set it above the
+   * portal's account count for an announcement to reach everyone.
+   */
+  maxBroadcastRecipients: number;
+  /**
+   * How many god-mode broadcasts one administrator may send in a rolling 24
+   * hours (`NEXUS_MAX_BROADCASTS_PER_DAY`). `0` removes the ceiling.
+   *
+   * The recipient ceiling bounds one announcement; this bounds a loop of them.
+   * Counted from the actor's own `god.broadcast` audit rows, so an operator can
+   * see exactly what the number refers to.
+   */
+  maxBroadcastsPerDay: number;
+  /**
+   * How many recipients one mass-email campaign may address
+   * (`NEXUS_MAX_MASS_EMAIL_RECIPIENTS`). `0` removes the ceiling.
+   *
+   * The fan-out is one transaction — every outbox row and the
+   * `admin.mass_email` row commit together — so the audience size is what that
+   * transaction has to hold, and on every adapter it is also what the instance
+   * stops doing anything else for while the inserts run: transaction bodies are
+   * serialised per store object. On MongoDB there is a hard wall as well, a
+   * 16 MB cap per transaction against which each row counts its whole rendered
+   * HTML and text. Checked before a single row is written.
+   */
+  maxMassEmailRecipients: number;
   /**
    * Whether a provider may publish an API whose upstream is a loopback, private,
    * link-local or internal destination (`NEXUS_ALLOW_PRIVATE_UPSTREAMS`).
@@ -357,9 +394,15 @@ const envSchema = z.object({
   NEXUS_SESSION_TTL: intish(DEFAULT_SESSION_TTL_SECONDS, 60, 60 * 60 * 24 * 30),
   NEXUS_RATE_LIMIT_ENABLED: boolish(true),
   NEXUS_HEALTH_CACHE_MS: intish(5_000, 0, 60_000),
+  // Reserve at least 5 s for the database, scheduling and HTTP overhead in the
+  // shipped 10 s healthcheck. External healthcheck overrides cannot be verified here.
+  NEXUS_HEALTH_PROBE_TIMEOUT_MS: intish(1_500, 100, 5_000),
   NEXUS_MAX_APIS_PER_OWNER: intish(DEFAULT_MAX_APIS_PER_OWNER, 0, 100_000),
   NEXUS_SPEC_HISTORY_LIMIT: intish(DEFAULT_SPEC_HISTORY_LIMIT, 1, 10_000),
   NEXUS_MAX_MESSAGES_PER_USER_PER_DAY: intish(200, 0, 1_000_000),
+  NEXUS_MAX_BROADCAST_RECIPIENTS: intish(5_000, 0, 1_000_000),
+  NEXUS_MAX_BROADCASTS_PER_DAY: intish(20, 0, 100_000),
+  NEXUS_MAX_MASS_EMAIL_RECIPIENTS: intish(5_000, 0, 1_000_000),
   NEXUS_ALLOW_PRIVATE_UPSTREAMS: boolish(false),
   NEXUS_WEB_DIST: optionalString(),
 
@@ -471,9 +514,12 @@ export function loadConfig(env: EnvRecord): NexusConfig {
   }
 
   // ── Namespace ────────────────────────────────────────────────────────────
-  if (!NAMESPACE_PATTERN.test(raw.FERRUM_NAMESPACE) || raw.FERRUM_NAMESPACE.length > 254) {
+  // The narrowest supported width is MySQL's VARCHAR(128) namespace columns;
+  // a longer value would pass validation yet fail every publish with a driver
+  // length error on that adapter alone.
+  if (!NAMESPACE_PATTERN.test(raw.FERRUM_NAMESPACE) || raw.FERRUM_NAMESPACE.length > 128) {
     problems.push(
-      'FERRUM_NAMESPACE must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ and be at most 254 characters',
+      'FERRUM_NAMESPACE must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ and be at most 128 characters',
     );
   }
 
@@ -550,9 +596,13 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     sessionTtlSeconds: raw.NEXUS_SESSION_TTL,
     rateLimitEnabled: nodeEnv === 'test' ? false : raw.NEXUS_RATE_LIMIT_ENABLED,
     healthCacheMs: raw.NEXUS_HEALTH_CACHE_MS,
+    healthProbeTimeoutMs: raw.NEXUS_HEALTH_PROBE_TIMEOUT_MS,
     maxApisPerOwner: raw.NEXUS_MAX_APIS_PER_OWNER,
     specHistoryLimit: raw.NEXUS_SPEC_HISTORY_LIMIT,
     maxMessagesPerUserPerDay: raw.NEXUS_MAX_MESSAGES_PER_USER_PER_DAY,
+    maxBroadcastRecipients: raw.NEXUS_MAX_BROADCAST_RECIPIENTS,
+    maxBroadcastsPerDay: raw.NEXUS_MAX_BROADCASTS_PER_DAY,
+    maxMassEmailRecipients: raw.NEXUS_MAX_MASS_EMAIL_RECIPIENTS,
     allowPrivateUpstreams: raw.NEXUS_ALLOW_PRIVATE_UPSTREAMS,
     webDistPath: raw.NEXUS_WEB_DIST,
     db: {

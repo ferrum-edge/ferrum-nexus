@@ -133,6 +133,33 @@ validation issues, a conflicting slug, an Edge status).
 | `OUTBOX_FAILURE`     | 500  | Email could not be enqueued, or exhausted its outbox retries.                                                                                                                                                                                                                                                                                                                                                                 |
 | `INTERNAL`           | 500  | Unexpected server-side failure.                                                                                                                                                                                                                                                                                                                                                                                               |
 
+An Edge API-spec write rejected with a 4xx `Spec parse failed` or
+`Spec validation failed` category returns `400 EDGE_REJECTED_SPEC` (except
+401/403, which remain gateway credential errors). Its `details` contains the
+upstream `status`, a `gateway_message` capped at 500 characters, and
+`gateway_code` when Edge supplies a string `code` (also capped at 500 characters).
+The message includes string `details` and a summary of each failure's
+`resource_type` and first error, within the same cap. The complete response is
+logged server-side within the Edge client's response-size bound; it is not
+reflected into the public error details. Other categories remain `502 EDGE_ERROR`,
+and gateway 5xx diagnostics remain opaque. This applies to publish, spec revision,
+and enforcement conversion.
+
+An invalid Edge HTTP/JSON response returns `502 EDGE_PROTOCOL_ERROR` with
+`details: { status, kind: "protocol_error", reason }`. The fixed reason identifies
+the contract violation (for example `invalid_utf8`); response bytes and parser
+exceptions are never included. This can occur on any endpoint calling Edge and
+is not repeated in the per-endpoint notes. See [Edge response contracts](edge-response-contracts.md).
+
+A write the database rolled back because another one touched the same rows —
+an InnoDB deadlock, a PostgreSQL serialization failure, a MongoDB write
+conflict — is retried by the server (bounded, with backoff). If it still cannot
+commit, the endpoint answers `409 CONFLICT` with
+`details: { reason: "transaction_contention", driver, attempts }`. Nothing was
+applied, and the same request may simply be sent again. Like the above, this
+can happen on any state-changing endpoint and is not repeated in the
+per-endpoint notes.
+
 `UNAUTHORIZED`, `FORBIDDEN`, `CSRF_MISMATCH`, `USER_DISABLED` and
 `VALIDATION_FAILED` can come back from any endpoint and are not repeated in the
 per-endpoint notes below.
@@ -422,9 +449,18 @@ before a session exists.
   "tagline": "APIs for partners",
   "support_email": "api-support@acme.example",
   "captcha": { "enabled": false, "provider": "none", "site_key": null },
+  "registration": { "open_registration": true, "allowed_roles": ["client", "provider"] },
   "bootstrap_required": false
 }
 ```
+
+`registration` is the public slice of the registration policy, so the sign-up
+form does not offer a role the server will refuse. `allowed_roles` is the stored
+policy narrowed to the self-selectable roles — an elevated role left in the
+setting never appears here, because `POST /api/auth/register` accepts only
+`client` and `provider` in the first place. Both fields are already observable
+by attempting a registration, and the server re-checks the policy on every one;
+this only saves the visitor a `403`.
 
 `bootstrap_required` is `true` only while the portal has no active
 `super_admin`: the next registration is seated as one and must therefore send
@@ -462,8 +498,9 @@ organization.
 
 _admin_ — `Paginated<User>` plus `pending_gateway_teardowns`: the portal-wide
 count of disabled accounts whose gateway credentials have **not** been revoked
-yet. Anything above zero means the teardown worker is still retrying against
-Edge.
+yet. Includes both `pending` jobs (queued or waiting for retry backoff) and
+`sending` jobs (in progress or awaiting stale-claim recovery); excludes `done`.
+The count is independent of user-list filtering and pagination.
 
 | Query             | Type                                                        |
 | ----------------- | ----------------------------------------------------------- |
@@ -579,6 +616,13 @@ account may post `NEXUS_MAX_MESSAGES_PER_USER_PER_DAY` messages (default 200,
 alike; exceeding that is `429 QUOTA_EXCEEDED`. A refusal from either bound
 writes no message, audit, notification or email row.
 
+The budget's count and the message's insert are one step — one transaction, and
+one per-sender lease so it holds across instances too. If a send from the same
+account is still in flight elsewhere for more than 30 seconds, the request is
+answered `409 CONFLICT` asking you to retry rather than being let through.
+Messages a god-mode broadcast wrote carry `broadcast: true` and are not counted
+against the administrator who sent them; the broadcast has ceilings of its own.
+
 Recipients get at most one `message_received` email per thread per 10 minutes
 however many messages arrive, so the mail announces new activity and links to
 the thread rather than quoting one message. In-app notifications stay one per
@@ -625,7 +669,9 @@ Errors: `400 VALIDATION_FAILED` (empty subject/body, or messaging yourself),
 `404 NOT_FOUND` (unknown or disabled recipient, unknown API),
 `429 RATE_LIMITED` (more than 10 a minute from this account),
 `429 QUOTA_EXCEEDED` (the account's rolling 24-hour message budget is spent —
-`details` carries `{ limit, window: "24h", setting: "NEXUS_MAX_MESSAGES_PER_USER_PER_DAY" }`).
+`details` carries `{ limit, window: "24h", setting: "NEXUS_MAX_MESSAGES_PER_USER_PER_DAY" }`),
+`409 CONFLICT` (another send from this account has held the budget section for
+more than 30 seconds — retry).
 
 ### `GET /api/threads/:id`
 
@@ -676,7 +722,8 @@ Errors: `400 VALIDATION_FAILED` (empty body), `403 FORBIDDEN` (not a
 participant), `404 NOT_FOUND` (unknown thread), `429 RATE_LIMITED` (more than 30
 a minute from this account), `429 QUOTA_EXCEEDED` (the account's rolling
 24-hour message budget is spent — it is the same budget `POST /api/threads`
-draws on).
+draws on), `409 CONFLICT` (another send from this account still holds the budget
+section — retry).
 
 ---
 
@@ -900,13 +947,36 @@ _admin_ — enqueues **one outbox row per recipient**, never a BCC blast.
 | `idempotency_key`   | string, 8–128                     | reuse makes the send at-most-once                                 |
 
 ```json
-{ "enqueued": 240, "recipients": 251 }
+{ "enqueued": 240, "recipients": 251, "batch_id": "c3f0…" }
 ```
 
 Rows are keyed `mass:<batch>:<user_id>`, where `<batch>` is your
 `idempotency_key` or a fresh UUID. `recipients` is who matched; `enqueued`
 excludes duplicates suppressed by the key — reposting the same request with the
 same key enqueues nothing new.
+
+**The fan-out is atomic.** Every outbox row and the `admin.mass_email` audit row
+commit together, so a campaign either went out whole or not at all; there is no
+state in which part of your audience was mailed and nothing recorded it.
+
+`batch_id` is echoed on success **and** carried in the failure body, because a
+lost response to a campaign that did commit looks exactly like one that did not.
+Either way, retry with that value as `idempotency_key` and nobody is mailed
+twice. A failure is `500 OUTBOX_FAILURE` with
+`details: { batch_id, recipients, enqueued: 0 }`. Contention that outlives the
+adapter's retry budget is `409 CONFLICT` instead, with `batch_id` in `details`
+and nothing queued — retry it with that key.
+
+**The audience is capped** by `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` (default 5 000,
+`0` disables), checked before anything is rendered or written, because the
+fan-out is what one transaction has to hold. Exceeding it is
+`429 QUOTA_EXCEEDED` with
+`details: { limit, recipients, setting: "NEXUS_MAX_MASS_EMAIL_RECIPIENTS" }`.
+
+Errors: `400 VALIDATION_FAILED` (empty subject/body, or an empty explicit
+recipient list), `429 QUOTA_EXCEEDED` (audience past the ceiling),
+`409 CONFLICT` (database contention — retry with the same `idempotency_key`),
+`500 OUTBOX_FAILURE` (nothing queued; retry with the same key).
 
 ### `GET /api/admin/audit-logs`
 
@@ -921,6 +991,13 @@ _admin_ — `Paginated<AuditLog>`, newest first.
 | `from`            | ISO-8601 datetime, inclusive lower bound   |
 | `to`              | ISO-8601 datetime, exclusive upper bound   |
 | `limit`, `offset` | pagination                                 |
+
+Bounds are normalized to UTC millisecond precision: `2026-09-08T01:46:15Z`
+means `2026-09-08T01:46:15.000Z` for both comparisons.
+Each row includes `actor` with the current user's `id`, `email`, `display_name`
+and `role`, or `null` when no user can be resolved. `actor_user_id` remains
+present; a non-null id with a null summary denotes an unknown user, while a
+null id denotes system or anonymous activity. `actor_role` is the historical role.
 
 The full action catalog is in [`security.md`](security.md#10-audit-event-catalog).
 
@@ -989,13 +1066,44 @@ only newly created outbox rows in `emails_enqueued`. Notifications and inbox
 messages are still created for each call; this key deduplicates email only.
 
 ```json
-{ "notified": 251, "emails_enqueued": 251, "threads_created": 88 }
+{ "notified": 251, "emails_enqueued": 251, "threads_created": 88, "delivered": 251, "failed": 0 }
 ```
 
 Sends a bell notification to every recipient, drops the message into each
 recipient's **platform inbox thread** (so it survives being dismissed from the
 bell and any admin can follow up in the same thread), and optionally enqueues
 an email. The acting super admin is excluded from their own broadcast.
+
+**Two ceilings bound it, both checked before the first row is written.**
+`NEXUS_MAX_BROADCAST_RECIPIENTS` (default 5 000, `0` disables) caps one
+announcement's audience; `NEXUS_MAX_BROADCASTS_PER_DAY` (default 20, `0`
+disables) caps how many one administrator may send in a rolling 24 hours,
+counted from their own `god.broadcast` audit rows. Exceeding either is
+`429 QUOTA_EXCEEDED` naming the limit, the audience size and the variable an
+operator would raise — a refused announcement has to say how to send it anyway.
+
+The message rows a broadcast writes carry `broadcast: true` and are deliberately
+**not** charged to the acting administrator's daily message budget. They used to
+be: one broadcast to a portal larger than that budget refused every ordinary
+message that administrator sent for the next 24 hours, while further broadcasts,
+checked against nothing, stayed available.
+
+`delivered` counts the recipients whose inbox message was actually written and
+`failed` the ones the fan-out could not reach. A per-recipient failure is logged
+and skipped rather than fatal — one bad account must not stop an emergency
+announcement — so these two are how a partial broadcast says so; the same pair
+lands in the audit trail.
+
+**The trail is two rows.** `god.broadcast` is written _before_ the first
+recipient is touched, with `details.phase: "started"` and the audience size: it
+is what `NEXUS_MAX_BROADCASTS_PER_DAY` counts, so an attempt is charged whether
+or not it goes on to succeed. `god.broadcast_complete` follows the fan-out with
+`delivered`, `failed` and the notification/thread/email counts.
+
+Errors: `400 VALIDATION_FAILED` (empty subject/body, or an audience that matches
+nobody), `429 QUOTA_EXCEEDED` (either ceiling — `details` names the limit, the
+audience size and the setting), `409 CONFLICT` (another send from this account
+has held the per-administrator section for more than 30 seconds — retry).
 
 ---
 
@@ -1129,13 +1237,48 @@ message threads.
 `HttpMethod` is `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`,
 `TRACE` or `CONNECT` — Edge's own enum.
 
-An API's CORS origins are additionally mirrored onto the proxy's
-`allowed_ws_origins`, which is the Cross-Site WebSocket Hijacking check: an
-HTTP proxy on Edge also accepts WebSocket upgrades on the same listen path, and
-the `cors` plugin does not run on an upgrade. Only plain `scheme://host[:port]`
-origins are mirrored; `*` (and no policy at all) leaves the list empty, which
-performs no check. There is no separate field for it — see
-[security.md](security.md).
+`CorsConfig` contains `allowed_origins` and `allow_credentials`, plus optional
+`allowed_headers` (up to 64 HTTP header-name tokens, each 1–128 characters) and
+`enforce_websocket_origins` (boolean, defaults to `false`). Nexus includes
+`Accept`, `Authorization`, `Content-Type`, `Origin`, and `X-Requested-With`, plus
+`X-API-Key` for `key_auth`, in the gateway's allowed request headers. Extra
+operator headers survive changes; removing a previously supplied portal header
+removes that addition. The CORS method list follows `allowed_methods`, including
+implicit `OPTIONS`; unrestricted APIs use Edge's seven standard CORS methods.
+Auth-only and method-only updates also update the CORS plugin.
+
+`cors.enforce_websocket_origins: true` mirrors exact HTTP(S) origins onto the
+proxy's `allowed_ws_origins`. Wildcards are refused with this option. Edge then
+rejects both unlisted origins and upgrades **without an Origin header**. When
+false or absent, the proxy has no WebSocket origin gate; authentication and ACLs
+still apply, but browser CSWSH protection requires explicit opt-in. Removing
+CORS clears the gate. Existing gateway lists are not changed at startup: save
+the CORS policy to apply this choice to an older API.
+
+**`routes` mode rewrites the document Edge receives, and only that copy.** The
+submitted document has its root `servers` replaced with the API's listen path,
+so the operation matchers Edge generates cover the path clients actually send —
+and every `servers` **below** the root is stripped along with it: on a path
+item, on an operation, and on every Path Item a `$ref`'d path can resolve to,
+which means `components.pathItems`, `webhooks` and `components.callbacks`
+entries too. OpenAPI resolves `servers` nearest-first, so a nested one left in
+place would override the rewrite and generate a matcher for a path no client can
+reach, which `fail_on_unknown_operation` turns into a `400` on every declared
+operation. `servers` inside the `callbacks` of an operation is left alone — it
+describes a request the provider's own service makes outbound, not one this
+proxy serves.
+
+Because Edge resolves a Path Item `$ref` as an unrestricted same-document JSON
+pointer, a `routes` document whose `paths` reference a Path Item **outside**
+`#/paths/`, `#/components/pathItems/` or `#/webhooks/` is refused with
+`400 SPEC_INVALID` on upload, naming the path. Chasing an arbitrary pointer
+would mean re-implementing Edge's resolver in the portal; refusing leaves the
+provider a document they can act on instead of an API that answers `201` and
+then rejects every request. `docs_only` documents are not checked — Edge
+generates no matchers from them.
+
+The provider's stored revision is never modified by any of this: it is what the
+catalog, the docs viewer and `docs_only` publication all hand over unchanged.
 
 ### `GET /api/apis`
 
@@ -1175,6 +1318,14 @@ then persists.
 ```json
 { "api": { … }, "spec": { … } }
 ```
+
+Uploads accept at most 200 nested object/array levels, counting the root as level
+one, in either enforcement mode. Deeper documents return `400 SPEC_INVALID` with
+`details: { reason: "nesting_too_deep", limit: 200 }` before a gateway call.
+The derived upstream URL, after server-variable expansion, must fit the same
+2,000-character limit as typed `upstream_url`. An oversized derived URL returns
+`400 SPEC_INVALID` naming `servers[0].url` (or the selected server's index) and
+`details.limit: 2000`. These limits also apply to spec revisions.
 
 Errors: `400 SPEC_INVALID` (unparseable, Swagger 2.0, missing
 `openapi`/`info.title`/`info.version`/`paths`, oversized, no upstream
@@ -1280,6 +1431,11 @@ Errors: `403 FORBIDDEN` (not the owner and not an admin), `404 NOT_FOUND`. A
 gateway request-metrics scrape that is unreachable, erroring or unparseable is
 **not** a portal error: the route answers `200` with `available: false`, zeroed
 counters and `latency_ms: null`. Those zeros represent missing measurements.
+The same applies when no valid `ferrum_requests_total` series belongs to this
+API's proxy, even if the scrape contains other metrics. `unavailable_reason`
+is an optional explanation suitable for display. Clients must hide unmeasured
+counters when `available` is false; an explicit zero request series still
+reports `available: true`.
 A successful independent backend-state read may still populate `backend` and
 `gateway_uptime_seconds`; it cannot make `available` true. Conversely, if only
 backend state is unavailable, request counters remain valid and `backend.status`
@@ -1326,12 +1482,15 @@ when `routes` is asked for and the current revision declares nothing to allow),
 > Nothing else does this: a spec revision, a CORS change and every runtime
 > setting are all in-place writes.
 
-Enforcement conversion, runtime PATCH, and spec revision use the same per-proxy
-database lease. The conversion holds it across the fresh proxy/spec reads,
-rebuild, compensation, and catalog update. A waiting mutation re-reads catalog
-state after acquiring the lease so it uses the current enforcement mode and
-backend. If the API's proxy identity changed while waiting, the request returns
-`409 CONFLICT`; reload the API before retrying.
+Enforcement conversion, runtime PATCH, spec revision **and deletion** use the
+same per-proxy database lease. The conversion holds it across the fresh
+proxy/spec reads, rebuild, compensation, and catalog update; the delete holds it
+across the gateway teardown _and_ the row delete, so a conversion cannot
+re-create the proxy against rows that are on their way out. A waiting mutation
+re-reads catalog state after acquiring the lease so it uses the current
+enforcement mode and backend. If the API's proxy identity changed while waiting,
+the request returns `409 CONFLICT`; reload the API before retrying, and a
+conversion whose API has been deleted rebuilds nothing.
 
 ### `DELETE /api/apis/:id`
 
@@ -1341,9 +1500,35 @@ Destructive and ordered deliberately: the Edge proxy is deleted **first** (so
 nothing stays reachable-but-untracked, and so the API never spends the teardown
 live with its auth plugin already gone), which cascades its plugin associations
 and proxy-scoped plugin configs; any config the cascade missed is swept up
-after. Then the ACL group is stripped from every grantee's consumer, then the
-grants, requests, spec revisions and the API row are deleted in one store
-transaction. Grantees get a notification.
+after. Next the API's own gateway identity — the disposable
+`nexus-test-<api_id>` consumer, its credential and the `nexus:api:<id>:approved`
+group it carries — is torn down, because nothing else ever could: it is named
+after an API that is about to stop existing. Then the grants, requests, spec
+revisions and the API row are deleted in one store transaction. Only then is the
+ACL group stripped from every grantee's consumer — the group is inert the moment
+the proxy is gone — and grantees get a notification.
+
+A test consumer that is already gone — or an API that never had one — is not an
+error, and the `api.delete` audit row then names no `test_consumer_id` at all
+rather than claiming a teardown that was never needed. A teardown the gateway
+refuses fails the request with `502 EDGE_ERROR`, leaving the API in the catalog
+so the delete can be retried; the identity stays registered, which is what makes
+it findable.
+
+The gateway teardown and the row delete run under the API's per-proxy lease, and
+the `api.delete` audit row is written only once they have. A `spec_enforcement`
+conversion is a delete-and-recreate, so an unserialised teardown could commit in
+the middle of one and leave the conversion's rebuild serving an API with no
+portal record — reachable, un-removable, and holding the slug against every
+future publish. Returns `409 CONFLICT` if the API's proxy identity changed while
+the delete waited for the lease.
+
+The ACL strip is deliberately **outside** that lease. Each grantee's consumer
+has a lease of its own, so a strip can wait on a credential write for that
+account; holding the proxy lease across all of them would answer `409` to every
+concurrent write on the API for as long as the slowest grantee took, for a step
+that cannot change what the gateway serves. A strip that fails is logged rather
+than retried — there is nothing left for the group to authorise.
 
 ### `PUT /api/apis/:id/spec`
 
@@ -1406,6 +1591,20 @@ attribution of its credential to the caller, and it is the caller's disabling
 that takes it down. `403 USER_DISABLED` when the caller was disabled while the
 request was in flight; nothing is created.
 
+A create the gateway applied but failed to acknowledge answers `502 EDGE_ERROR`
+and leaves nothing behind: Nexus names the consumer it asks Edge to create, so
+the compensation re-reads the gateway by that exact id and deletes the consumer
+it finds before releasing the registration. Only if that compensating delete
+cannot run does the registration survive — deliberately, because it is the one
+thing that leads back to the consumer, and deleting the API later collects both.
+
+Recreating a test consumer replaces it with a **distinct** consumer: the
+replacement carries a new id, and the replaced consumer's credential rows move
+to `revoked`. The two are never the same resource, because everything the
+portal records about a credential is keyed on the consumer id.
+
+Deleting the API deletes this consumer with it; see `DELETE /api/apis/:id`.
+
 ---
 
 ## Plugin palette
@@ -1419,11 +1618,27 @@ what bounds — is the static `PROVIDER_PLUGINS` catalog exported from
 `@ferrum-nexus/shared`, which both the server and the SPA import. There is no
 route to fetch it, because there is nothing per-deployment about it.
 
+`compression` and `request_deduplication` receive default `priority_override`
+values of 3005 and 4060, respectively: compression must finish request-header
+mutation before deduplication fingerprints it. This also composes with a legacy
+sibling at Edge's native priority (4050 or 3010). Operator overrides survive
+saves; an incompatible pair returns `400 VALIDATION_FAILED` naming both plugins
+and the priority adjustment needed. Concurrent palette saves are serialized per
+proxy before that check.
+
+`response_caching` is no longer offered. Edge requires an authenticated response
+to carry backend shared-cache permission (`Cache-Control: public`,
+`must-revalidate`, or `s-maxage`); consumer key partitioning and `vary_by_headers`
+cannot grant it. Nexus does not override that policy. The old descriptor remains
+available only for validating disabled saves and removing existing installations.
+An enabled save returns `400 VALIDATION_FAILED`; GET still lists existing rows
+and DELETE removes only the recorded Nexus-owned gateway config.
+
 ### The `ApiPlugin` object
 
 | Field         | Type                       | Notes                                                                                                                                                                                                                       |
 | ------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `plugin_name` | string                     | the exact Ferrum Edge plugin name, always one of `PROVIDER_PLUGINS`                                                                                                                                                         |
+| `plugin_name` | string                     | the exact Ferrum Edge plugin name, including retired installations                                                                                                                                                          |
 | `enabled`     | boolean                    | `false` keeps the gateway config **and its association with the proxy**, but Edge does not run it — a pause, not a removal, so the settings survive                                                                         |
 | `config`      | object                     | exactly the keys that plugin's descriptor declares. Edge's config key sets are closed, so an extra key is a `400` from the gateway rather than a silently ignored field; Nexus rejects it first, as `400 VALIDATION_FAILED` |
 | `trigger`     | `ApiPluginTrigger` \| null | restrict the plugin to some methods and/or a path prefix; `null` means it runs on every request                                                                                                                             |
@@ -1475,6 +1690,12 @@ which the plugin is missing. The `api_plugins` row is written last but inside
 the same compensated block, so a store failure rolls the gateway back rather
 than leaving a plugin running that the portal has no row for.
 
+The save touches **only the config the portal created**, identified by the id
+recorded on the row. Ferrum Edge allows several configs of one plugin name on a
+proxy — with distinct triggers or execution priorities — so a second config an
+operator made by hand is left exactly where it is, and fields the portal does
+not model (`priority_override`) survive the replace.
+
 | Status | Code                | When                                                                                                                                                                                                                                                                                                                                                                          |
 | ------ | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `400`  | `VALIDATION_FAILED` | a config key, value or invariant the plugin does not accept; a trigger on a plugin Edge cannot gate; or a plugin Nexus manages from a first-class API field (`key_auth`/`basic_auth`/`jwt_auth` → `auth_plugin`, `access_control` → `requestable`, `rate_limiting` → `rate_limit`, `cors` → `cors`, `openapi_validator` → `spec_enforcement`), whose message names that field |
@@ -1487,8 +1708,10 @@ than leaving a plugin running that the portal has no row for.
 _provider_, owner-or-admin → `{ "ok": true }`.
 
 Disassociates the config from the proxy, deletes it, then removes the row —
-`404 NOT_FOUND` when the API never had that plugin. A gateway config an
-operator already removed by hand is tolerated: the row still goes.
+`404 NOT_FOUND` when the API never had that plugin. Only the config the portal
+created is deleted; another config of the same plugin name is an operator's and
+stays. A gateway config an operator already removed by hand is tolerated: the
+row still goes.
 
 Deleting the API removes every palette row with it; the gateway objects need no
 separate step, because they are proxy-scoped and the proxy delete cascades them.
@@ -1706,6 +1929,27 @@ deleted first — and marked `revoked` the moment Edge confirms it — leaving a
 brief window with no working credential of that type. If the append then fails,
 the response says so plainly (`502 EDGE_ERROR`, _the previous credential was
 removed … issue a new credential_); everything still live stays revocable.
+
+Either way the credential being replaced passes through the `retiring` status
+before it settles at `revoked`: the retirement is written down _before_ the
+gateway delete, so an acknowledgement lost in flight leaves a row the next
+rotate, revoke or issue can settle rather than a mirror that silently disagrees
+with the gateway for good. A `previous` you read back from a **successful**
+rotation is always `revoked`.
+
+If it is instead the **delete** that fails below the cap, the replacement that
+was already appended is taken back — its show-once secret was never returned,
+so leaving it would spend a cap slot on a credential nobody holds — and the
+original error is reported unchanged, leaving the account as the rotation found
+it. Should that compensating delete fail too, the response says which state the
+gateway array proved and always carries `details.stranded_credential_id` and
+`details.retired_credential_id`: _the gateway did not acknowledge removing the
+previous credential and no longer holds it_ (the delete landed after all; the
+portal settles the pending row on the next call), _both … the portal holds a
+live row for each_ (the two views agree, so revoking the named credential is
+ordinary self-service), or _an administrator must reconcile this consumer_ when
+the array could not be read back at all. Only the last needs an administrator;
+see [`operations.md`](operations.md#12-the-credential-mirror) §12.
 
 An **admin may rotate another account's credential**, and doing so does not
 transfer it: the replacement keeps the original `user_id` and consumer, the

@@ -1,40 +1,26 @@
 import { useRef, useState, type ReactElement } from 'react';
-import { ROLE_LABELS, type MassEmailAudience, type Role } from '@ferrum-nexus/shared';
 import { useMassEmail } from '../../hooks/useAdminSettings';
+import { useAuth } from '../../stores/auth';
 import { useToast } from '../../stores/toast';
+import {
+  AudienceFields,
+  EVERYONE,
+  audienceFrom,
+  audienceReady,
+  describeAudience,
+  type AudienceDraft,
+} from '../../components/admin/AudienceFields';
 import { RoleGuard } from '../../components/layout/RoleGuard';
 import { Button } from '../../components/ui/Button';
 import { Card, CardBody, CardHeader, PageHeader } from '../../components/ui/Card';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { LabeledInput, LabeledTextarea } from '../../components/ui/Input';
-import { LabeledSelect } from '../../components/ui/Select';
-
-type AudienceChoice = 'all' | 'client' | 'provider' | 'admin';
-
-const AUDIENCE_OPTIONS: ReadonlyArray<{
-  value: AudienceChoice;
-  label: string;
-  description: string;
-}> = [
-  { value: 'all', label: 'Everyone', description: 'All portal accounts, whatever their role.' },
-  { value: 'client', label: ROLE_LABELS.client, description: 'Accounts with the client role.' },
-  {
-    value: 'provider',
-    label: ROLE_LABELS.provider,
-    description: 'Accounts with the provider role.',
-  },
-  { value: 'admin', label: ROLE_LABELS.admin, description: 'Administrators only.' },
-];
-
-function audienceFor(choice: AudienceChoice): MassEmailAudience {
-  if (choice === 'all') return { scope: 'all' };
-  return { scope: 'filtered', roles: [choice as Role], status: 'active' };
-}
 
 function Composer(): ReactElement {
   const send = useMassEmail();
   const toast = useToast();
-  const [choice, setChoice] = useState<AudienceChoice>('all');
+  const { user } = useAuth();
+  const [audience, setAudience] = useState<AudienceDraft>(EVERYONE);
   const [subject, setSubject] = useState('');
   const [bodyText, setBodyText] = useState('');
   const [bodyHtml, setBodyHtml] = useState('');
@@ -48,7 +34,7 @@ function Composer(): ReactElement {
       subject: subject.trim(),
       body_text: bodyText,
       body_html: bodyHtml.trim() || `<p>${bodyText.replace(/\n/g, '<br />')}</p>`,
-      audience: audienceFor(choice),
+      audience: audienceFrom(audience),
     };
     // Keep the failed submission's ID until its content changes or it succeeds.
     const content = JSON.stringify(request);
@@ -105,11 +91,10 @@ function Composer(): ReactElement {
           description="Retry unchanged submissions to avoid duplicates. Each completed send starts a new campaign."
         />
         <CardBody className="flex flex-col gap-5">
-          <LabeledSelect<AudienceChoice>
-            label="Audience"
-            value={choice}
-            onValueChange={setChoice}
-            options={AUDIENCE_OPTIONS.map((option) => ({ ...option }))}
+          <AudienceFields
+            value={audience}
+            onChange={setAudience}
+            self={user ? { id: user.id, label: user.display_name } : null}
           />
           <LabeledInput
             label="Subject"
@@ -136,7 +121,11 @@ function Composer(): ReactElement {
           <div>
             <Button
               variant="primary"
-              disabled={subject.trim().length === 0 || bodyText.trim().length === 0}
+              disabled={
+                subject.trim().length === 0 ||
+                bodyText.trim().length === 0 ||
+                !audienceReady(audience)
+              }
               onClick={() => setConfirmOpen(true)}
             >
               Review and send
@@ -149,7 +138,7 @@ function Composer(): ReactElement {
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
         title="Send this mass email?"
-        description={`Audience: ${AUDIENCE_OPTIONS.find((option) => option.value === choice)?.label}. This cannot be recalled once the outbox worker picks it up.`}
+        description={`This goes to ${describeAudience(audience)}. It cannot be recalled once the outbox worker picks it up.`}
         confirmLabel="Send"
         loading={send.isPending}
         onConfirm={submit}

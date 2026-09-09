@@ -36,6 +36,11 @@ export function findEnvFile(cwd: string = process.cwd()): string | null {
   return envFileCandidates(cwd).find((candidate) => existsSync(candidate)) ?? null;
 }
 
+/** Parse the `.env` file at `file` into a record, with no process-env layering. */
+export function readEnvFile(file: string): EnvRecord {
+  return parseEnv(readFileSync(file, 'utf8'));
+}
+
 /**
  * The process environment layered over the values of `.env` (if any).
  *
@@ -48,7 +53,7 @@ export function environmentWithEnvFile(
 ): { env: EnvRecord; file: string | null } {
   const file = findEnvFile(cwd);
   if (file === null) return { env, file: null };
-  const fromFile = parseEnv(readFileSync(file, 'utf8'));
+  const fromFile = readEnvFile(file);
   const merged: EnvRecord = { ...fromFile };
   for (const [key, value] of Object.entries(env)) {
     if (value !== undefined) merged[key] = value;

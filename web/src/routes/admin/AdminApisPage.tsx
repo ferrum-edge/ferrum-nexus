@@ -100,7 +100,7 @@ function AllApisTable(): ReactElement {
         limit={limit}
         onOffsetChange={setOffset}
         loading={query.isLoading}
-        onRowClick={(api) => void navigate({ to: '/catalog/$slug', params: { slug: api.slug } })}
+        onRowClick={(api) => void navigate({ to: '/apis/$apiId', params: { apiId: api.id } })}
         empty={<EmptyState icon="spec" title="No APIs published yet" />}
       />
     </>
@@ -113,7 +113,7 @@ export function AdminApisPage(): ReactElement {
     <RoleGuard minRole="admin">
       <PageHeader
         title="All APIs"
-        description="Every API published on this portal, across all providers."
+        description="Every API published on this portal, across all providers. Opening one takes you to its management workspace, where an admin can approve, deny and revoke without god mode."
       />
       <AllApisTable />
     </RoleGuard>

@@ -57,8 +57,15 @@ import {
   SUPER_ADMIN_LOCK_CONFLICT_MESSAGE,
 } from '../lib/keyed-serializer.js';
 import { faultInjectingStore } from './fault-injection.js';
+import { runMessageBudgetContract } from './message-budget-contract.js';
+import { runOutboxFencingContract } from './outbox-fencing-contract.js';
 import { runPasswordChangeContract } from './password-change-contract.js';
+import { runRecoveryThrottleContract } from './recovery-throttle-contract.js';
 import { runSettingsTransactionContract } from './settings-transaction-contract.js';
+import { runTeardownCancellationContract } from './teardown-cancellation-contract.js';
+import { runTeardownFencingContract } from './teardown-fencing-contract.js';
+import { runTeardownTransitionContract } from './teardown-transition-contract.js';
+import { runTransactionContentionContract } from './transaction-contention-contract.js';
 
 const SECRET = 'cross-adapter-smoke-secret-0123456789ab';
 
@@ -109,6 +116,17 @@ function candidate(
 interface SmokeTarget {
   store: NexusStore;
   teardown: () => Promise<void>;
+  /**
+   * Open a **second store over the same database** — its own pool, its own
+   * transaction queue: two Nexus instances, as a deployment has. The contention
+   * cases need one, because serialising bodies orders a single store object's
+   * transactions and says nothing about the instance next to it. The caller
+   * closes what this returns; the schema is already migrated.
+   *
+   * Absent for sqlite, which is one connection to `:memory:` and cannot have a
+   * second instance at all.
+   */
+  peer?: () => Promise<NexusStore>;
 }
 
 /**
@@ -156,6 +174,18 @@ function withDatabase(url: string, database: string): string {
 
 /* ── Targets ────────────────────────────────────────────────────────────── */
 
+/** Open a second store over an already-migrated database; see {@link SmokeTarget.peer}. */
+async function openPeer(config: ReturnType<typeof loadConfig>): Promise<NexusStore> {
+  const store = createStore(config);
+  try {
+    await store.init();
+  } catch (error) {
+    await store.close().catch(() => undefined);
+    throw error;
+  }
+  return store;
+}
+
 async function sqliteTarget(): Promise<SmokeTarget> {
   const store = createStore(testConfig('sqlite'));
   try {
@@ -177,7 +207,8 @@ async function postgresTarget(adminUrl: string): Promise<SmokeTarget> {
   await admin.query(`CREATE DATABASE "${database}"`);
   await admin.end();
 
-  const store = createStore(testConfig('postgres', withDatabase(adminUrl, database)));
+  const url = withDatabase(adminUrl, database);
+  const store = createStore(testConfig('postgres', url));
   try {
     await store.init();
     await store.migrate();
@@ -190,6 +221,7 @@ async function postgresTarget(adminUrl: string): Promise<SmokeTarget> {
 
   return {
     store,
+    peer: () => openPeer(testConfig('postgres', url)),
     teardown: async (): Promise<void> => {
       await store.close();
       const cleaner = new pg.Client({ connectionString: adminUrl });
@@ -206,7 +238,8 @@ async function mysqlTarget(adminUrl: string): Promise<SmokeTarget> {
   await admin.query(`CREATE DATABASE \`${database}\``);
   await admin.end();
 
-  const store = createStore(testConfig('mysql', withDatabase(adminUrl, database)));
+  const url = withDatabase(adminUrl, database);
+  const store = createStore(testConfig('mysql', url));
   try {
     await store.init();
     await store.migrate();
@@ -219,6 +252,7 @@ async function mysqlTarget(adminUrl: string): Promise<SmokeTarget> {
 
   return {
     store,
+    peer: () => openPeer(testConfig('mysql', url)),
     teardown: async (): Promise<void> => {
       await store.close();
       const cleaner = await mysql.createConnection(adminUrl);
@@ -230,7 +264,8 @@ async function mysqlTarget(adminUrl: string): Promise<SmokeTarget> {
 
 async function mongoTarget(baseUrl: string): Promise<SmokeTarget> {
   const database = throwawayDbName();
-  const store = createStore(testConfig('mongodb', withDatabase(baseUrl, database)));
+  const url = withDatabase(baseUrl, database);
+  const store = createStore(testConfig('mongodb', url));
   try {
     await store.init();
     await store.migrate();
@@ -243,6 +278,7 @@ async function mongoTarget(baseUrl: string): Promise<SmokeTarget> {
 
   return {
     store,
+    peer: () => openPeer(testConfig('mongodb', url)),
     teardown: async (): Promise<void> => {
       await store.close();
       const cleaner = new MongoClient(withDatabase(baseUrl, database));
@@ -263,8 +299,15 @@ async function mongoTarget(baseUrl: string): Promise<SmokeTarget> {
  * whatever `makeStore` returns.
  */
 function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): void {
+  runMessageBudgetContract(label, makeStore);
+  runOutboxFencingContract(label, makeStore);
   runPasswordChangeContract(label, makeStore);
+  runRecoveryThrottleContract(label, makeStore);
   runSettingsTransactionContract(label, makeStore);
+  runTeardownCancellationContract(label, makeStore);
+  runTeardownFencingContract(label, makeStore);
+  runTeardownTransitionContract(label, makeStore);
+  runTransactionContentionContract(label, makeStore);
   describe(`store contract — ${label}`, () => {
     let target: SmokeTarget;
     let store: NexusStore;
@@ -405,6 +448,40 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(won?.display_name, 'Demoted');
       assert.deepEqual(await store.users.findById(user.id), won, 'the winner gets the stored row');
     });
+
+    for (const transactional of [false, true]) {
+      it(`users: matching no-ops and empty patches (transaction=${transactional})`, async (t) => {
+        // Freeze Date so a same-value patch also leaves updated_at identical:
+        // a changed-row count would be zero, but this is still a match.
+        t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+        const user = await makeUser();
+        const check = async (db: NexusStore): Promise<void> => {
+          const expected = { role: user.role, status: user.status };
+          assert.deepEqual(
+            await db.users.updateIfMatches(user.id, expected, { status: user.status }),
+            user,
+          );
+          t.mock.timers.tick(1000);
+          assert.deepEqual(await db.users.updateIfMatches(user.id, expected, {}), user);
+          for (const patch of [{}, { status: user.status }]) {
+            assert.equal(
+              await db.users.updateIfMatches(user.id, { role: 'provider' }, patch),
+              null,
+            );
+            assert.equal(
+              await db.users.updateIfMatches(user.id, { status: 'disabled' }, patch),
+              null,
+            );
+            assert.equal(await db.users.updateIfMatches(newId(), {}, patch), null);
+          }
+          assert.deepEqual(await db.users.findById(user.id), user);
+          const changed = await db.users.updateIfMatches(user.id, expected, { role: 'provider' });
+          assert.deepEqual(changed, { ...user, role: 'provider', updated_at: nowIso() });
+        };
+        if (transactional) await store.transaction(check);
+        else await check(store);
+      });
+    }
 
     it('users: the last-super-admin rule survives two demotions at once', async () => {
       // The invariant here is "never fewer active super admins than the suite
@@ -962,6 +1039,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         enabled: true,
         config: { allow: ['203.0.113.0/24'], mode: 'allow_first' },
         trigger: { methods: ['POST'], path_prefix: '/nexus/orders' },
+        ferrum_plugin_config_id: 'edge-config-0001',
       });
       assert.equal(first.api_id, api.id);
       assert.equal(first.enabled, true);
@@ -969,6 +1047,8 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       // as the JSON text the SQL adapters keep in their `*_json` columns.
       assert.deepEqual(first.config, { allow: ['203.0.113.0/24'], mode: 'allow_first' });
       assert.deepEqual(first.trigger, { methods: ['POST'], path_prefix: '/nexus/orders' });
+      // The portal's ownership claim on one gateway config (issue #153).
+      assert.equal(first.ferrum_plugin_config_id, 'edge-config-0001');
 
       // The PUT route saves the same pair again: one row, not a conflict.
       const replaced = await store.apiPlugins.upsert({
@@ -977,14 +1057,32 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         enabled: false,
         config: { deny: ['198.51.100.4'] },
         trigger: null,
+        ferrum_plugin_config_id: 'edge-config-0002',
       });
       assert.equal(replaced.id, first.id, 'the pair is unique, so a save reuses the row');
       assert.equal(replaced.created_at, first.created_at, 'created_at survives a replace');
       assert.equal(replaced.enabled, false);
       assert.deepEqual(replaced.config, { deny: ['198.51.100.4'] });
       assert.equal(replaced.trigger, null);
+      assert.equal(
+        replaced.ferrum_plugin_config_id,
+        'edge-config-0002',
+        'a save that recreated the gateway config records the new id',
+      );
 
-      assert.deepEqual(await store.apiPlugins.find(api.id, 'ip_restriction'), replaced);
+      // An operator deleted the gateway config by hand: the row survives with
+      // no claim, which is the same shape a pre-015 row has.
+      const orphaned = await store.apiPlugins.upsert({
+        api_id: api.id,
+        plugin_name: 'ip_restriction',
+        enabled: false,
+        config: { deny: ['198.51.100.4'] },
+        trigger: null,
+        ferrum_plugin_config_id: null,
+      });
+      assert.equal(orphaned.ferrum_plugin_config_id, null);
+
+      assert.deepEqual(await store.apiPlugins.find(api.id, 'ip_restriction'), orphaned);
       assert.equal(await store.apiPlugins.find(api.id, 'compression'), null);
       assert.equal((await store.apiPlugins.listByApi(api.id)).length, 1);
     });
@@ -1000,6 +1098,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         enabled: true,
         config: {},
         trigger: null,
+        ferrum_plugin_config_id: 'edge-correlation-1',
       });
       await store.apiPlugins.upsert({
         api_id: api.id,
@@ -1007,14 +1106,17 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         enabled: true,
         config: { algorithms: ['gzip'] },
         trigger: null,
+        ferrum_plugin_config_id: 'edge-compression-1',
       });
-      // The same plugin name on a different API is a different row.
+      // The same plugin name on a different API is a different row, and carries
+      // its own gateway config id.
       await store.apiPlugins.upsert({
         api_id: other.id,
         plugin_name: 'compression',
         enabled: true,
         config: {},
         trigger: null,
+        ferrum_plugin_config_id: 'edge-compression-2',
       });
 
       const listed = await store.apiPlugins.listByApi(api.id);
@@ -1023,6 +1125,16 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         'compression',
         'correlation_id',
       ]);
+      assert.deepEqual(
+        [...listed].map((row) => row.ferrum_plugin_config_id).sort(),
+        ['edge-compression-1', 'edge-correlation-1'],
+        'each row keeps its own gateway config id',
+      );
+      assert.equal(
+        (await store.apiPlugins.find(other.id, 'compression'))?.ferrum_plugin_config_id,
+        'edge-compression-2',
+        'the same plugin name on another API owns a different config',
+      );
 
       assert.equal(await store.apiPlugins.delete(api.id, 'compression'), true);
       assert.equal(await store.apiPlugins.delete(api.id, 'compression'), false);
@@ -1500,6 +1612,91 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(next.edge_ordinal, 6, 'one past the highest ordinal still on file');
     });
 
+    /**
+     * The repair a lost gateway acknowledgement leaves behind, on every
+     * adapter.
+     *
+     * The credentials service writes the row it is retiring to `retiring`
+     * *before* the destructive Edge call, and settles it to `revoked`
+     * afterwards. When the acknowledgement is lost the settlement is done by a
+     * later call instead, in one transaction with the audit row that says so —
+     * a conditional update guarded by a re-read of the status, which is
+     * exactly the shape each dialect implements separately.
+     */
+    it('credentials: a retiring row settles with its audit row, or with neither', async () => {
+      const user = await makeUser();
+      const consumerId = `settle-${newId()}`;
+      const row = await store.credentials.create({
+        user_id: user.id,
+        ferrum_consumer_id: consumerId,
+        credential_type: 'keyauth',
+        ferrum_credential_id: `${consumerId}/credentials/keyauth`,
+        fingerprint: `fp-${newId()}`,
+        last4: 'gone',
+        status: 'retiring',
+      });
+      assert.equal(row.status, 'retiring', 'every dialect accepts the pending state');
+
+      // A settlement that cannot commit leaves the intent for the next caller.
+      await assert.rejects(
+        () =>
+          store.transaction(async (tx) => {
+            await tx.credentials.update(row.id, { status: 'revoked' });
+            await tx.auditLogs.create({
+              actor_user_id: user.id,
+              actor_role: 'client',
+              action: 'credential.settle',
+              target_type: 'credential',
+              target_id: row.id,
+              details: { consumer_id: consumerId },
+              ip: null,
+            });
+            throw new Error('settlement interrupted');
+          }),
+        /settlement interrupted/,
+      );
+      assert.equal((await store.credentials.findById(row.id))?.status, 'retiring');
+      assert.equal(
+        (await store.auditLogs.list({ target_type: 'credential', target_id: row.id })).total,
+        0,
+        'no trail for a repair that did not happen',
+      );
+
+      const settled = await store.transaction(async (tx) => {
+        const fresh = await tx.credentials.findById(row.id);
+        if (!fresh || fresh.status !== 'retiring') return false;
+        await tx.credentials.update(row.id, { status: 'revoked' });
+        await tx.auditLogs.create({
+          actor_user_id: user.id,
+          actor_role: 'client',
+          action: 'credential.settle',
+          target_type: 'credential',
+          target_id: row.id,
+          details: { consumer_id: consumerId, gateway_entries: 0 },
+          ip: null,
+        });
+        return true;
+      });
+      assert.equal(settled, true);
+      assert.equal((await store.credentials.findById(row.id))?.status, 'revoked');
+      assert.equal(
+        (await store.auditLogs.list({ target_type: 'credential', target_id: row.id })).total,
+        1,
+      );
+
+      // Idempotent: the guard sees a row that is no longer pending and the
+      // second caller writes nothing at all.
+      const again = await store.transaction(async (tx) => {
+        const fresh = await tx.credentials.findById(row.id);
+        return fresh?.status === 'retiring';
+      });
+      assert.equal(again, false);
+      assert.equal(
+        await store.credentials.count({ ferrum_consumer_id: consumerId, status: 'revoked' }),
+        1,
+      );
+    });
+
     /* ── threads and messages ─────────────────────────────────────────── */
 
     it('threads and messages: reuse, previews and cascade helper', async () => {
@@ -1640,6 +1837,36 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         await store.messages.countBySenderSince(sender.id, isoInSeconds(60)),
         0,
         'a window that has not started yet counts nothing',
+      );
+
+      // A god-mode broadcast writes rows with the acting admin as the sender.
+      // Charging those to that admin's own allowance let one announcement to a
+      // portal larger than the budget refuse every ordinary message they sent
+      // for the next day, so the count skips them on every adapter.
+      const announcement = await store.messages.create({
+        thread_id: thread.id,
+        sender_user_id: sender.id,
+        body: 'Platform announcement',
+        broadcast: true,
+        created_at: isoInSeconds(-60),
+      });
+      assert.equal(announcement.broadcast, true, 'the flag survives the round trip');
+      assert.equal((await store.messages.findById(announcement.id))?.broadcast, true);
+      assert.equal(
+        await store.messages.countBySenderSince(sender.id, isoInSeconds(-86_400)),
+        3,
+        'the broadcast row is not charged to the sender: the count is unchanged',
+      );
+
+      const page = await store.messages.listByThread(thread.id, { limit: 50 });
+      assert.equal(
+        page.items.filter((message) => message.broadcast).length,
+        1,
+        'exactly the row that asked to be flagged is flagged',
+      );
+      assert.ok(
+        page.items.every((message) => typeof message.broadcast === 'boolean'),
+        'ordinary rows read back as false, never as an absent field',
       );
 
       await store.messages.deleteByThread(thread.id);
@@ -1851,6 +2078,27 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.ok(await store.notifications.findById(target));
     });
 
+    it('messaging: stores the full 300-character broadcast subject', async () => {
+      // The god.broadcast route accepts a subject up to 300 chars and writes it
+      // into both `notifications.title` and `message_threads.subject`; MySQL
+      // used to cap both at VARCHAR(255) and fail only on that driver.
+      const broadcaster = await makeUser();
+      const recipient = await makeUser();
+      const subject = 'x'.repeat(300);
+
+      const [notification] = await store.notifications.createMany([
+        { user_id: recipient.id, type: 'system', title: subject, body: 'maintenance' },
+      ]);
+      assert.equal(notification?.title, subject);
+
+      const thread = await store.threads.create({
+        subject,
+        created_by: broadcaster.id,
+        participant_a: recipient.id,
+      });
+      assert.equal(thread.subject, subject);
+    });
+
     /* ── email outbox ─────────────────────────────────────────────────── */
 
     it('emailOutbox: idempotency keys suppress duplicate sends', async () => {
@@ -1913,8 +2161,14 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         'a claimed row is not handed out twice',
       );
 
-      const id = mine[0]?.id ?? '';
-      await store.emailOutbox.reschedule(id, isoInSeconds(-1), 'smtp timeout');
+      const claim = mine[0];
+      assert.ok(claim);
+      assert.ok(claim.generation, 'a claim carries an ownership token');
+      const id = claim.id;
+      assert.equal(
+        await store.emailOutbox.reschedule(claim, isoInSeconds(-1), 'smtp timeout'),
+        true,
+      );
       const rescheduled = await store.emailOutbox.findById(id);
       assert.equal(rescheduled?.status, 'pending');
       assert.equal(rescheduled?.last_error, 'smtp timeout');
@@ -1923,13 +2177,16 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         'the backoff stamp is in the past, so the row is due again',
       );
 
+      // The spent claim cannot settle the row it no longer owns.
+      assert.equal(await store.emailOutbox.markSent(claim, nowIso()), false);
+
       const reclaimed = await store.emailOutbox.claimDue(nowIso(), 50);
       const retried = reclaimed.find((entry) => entry.id === id);
-      assert.equal(retried?.attempts, 2, 'the backoff reschedule makes the row claimable again');
+      assert.ok(retried);
+      assert.equal(retried.attempts, 2, 'the backoff reschedule makes the row claimable again');
+      assert.notEqual(retried.generation, claim.generation, 'reclaiming replaces the token');
 
-      assert.ok((await store.emailOutbox.releaseStale(isoInSeconds(60))) >= 0);
-
-      await store.emailOutbox.markFailed(id, 'gave up');
+      assert.equal(await store.emailOutbox.markFailed(retried, 'gave up'), true);
       const failed = await store.emailOutbox.findById(id);
       assert.equal(failed?.status, 'failed');
       assert.equal(failed?.next_attempt_at, null);
@@ -1947,8 +2204,12 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         body_text: 'x',
       });
       const at = nowIso();
-      await store.emailOutbox.markSent(entry.entry.id, at);
-      const sent = await store.emailOutbox.findById(entry.entry.id);
+      const claim = (await store.emailOutbox.claimDue(nowIso(), 200)).find(
+        (row) => row.id === entry.entry.id,
+      );
+      assert.ok(claim);
+      assert.equal(await store.emailOutbox.markSent(claim, at), true);
+      const sent = await store.emailOutbox.findById(claim.id);
       assert.equal(sent?.status, 'sent');
       assert.equal(sent?.next_attempt_at, null);
       assert.equal(sent?.last_error, null);
@@ -2055,12 +2316,16 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
 
       // Move it out of `pending` and then re-disable: the row must come back to
       // the start rather than a second job appearing for the same account.
-      await store.gatewayTeardownJobs.reschedule(first.id, isoInSeconds(600), 'edge unreachable');
+      const firstClaim = await store.gatewayTeardownJobs.claimPending(first);
+      assert.ok(firstClaim);
+      await store.gatewayTeardownJobs.reschedule(firstClaim, isoInSeconds(600), 'edge unreachable');
       const rescheduled = await store.gatewayTeardownJobs.findByUser(user.id);
       assert.equal(rescheduled?.last_error, 'edge unreachable');
 
       const second = await store.gatewayTeardownJobs.upsertPending(user.id, null, nowIso());
       assert.equal(second.id, first.id, 'the same row is reused');
+      assert.notEqual(second.generation, first.generation);
+      assert.notEqual(second.generation, firstClaim.generation);
       assert.equal(second.status, 'pending');
       assert.equal(second.attempts, 0);
       assert.equal(second.last_error, null);
@@ -2090,7 +2355,8 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
 
       // A failure is a retry, not a terminal state: the row goes back to
       // `pending` with the reason and a backoff stamp.
-      await store.gatewayTeardownJobs.reschedule(job.id, isoInSeconds(-1), 'edge 500');
+      assert.ok(mine[0]);
+      await store.gatewayTeardownJobs.reschedule(mine[0], isoInSeconds(-1), 'edge 500');
       const retryable = await store.gatewayTeardownJobs.findByUser(user.id);
       assert.equal(retryable?.status, 'pending');
       assert.equal(retryable?.last_error, 'edge 500');
@@ -2104,7 +2370,15 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       );
 
       const at = nowIso();
-      await store.gatewayTeardownJobs.markDone(job.id, at);
+      const currentClaim = reclaimed.find((row) => row.id === job.id);
+      assert.ok(currentClaim);
+      assert.equal(await store.gatewayTeardownJobs.markDone(mine[0], at), false);
+      assert.equal(await store.gatewayTeardownJobs.markDone(currentClaim, at), true);
+      assert.equal(await store.gatewayTeardownJobs.markDone(currentClaim, at), false);
+      assert.equal(
+        await store.gatewayTeardownJobs.reschedule(mine[0], isoInSeconds(600), 'stale failure'),
+        false,
+      );
       const done = await store.gatewayTeardownJobs.findByUser(user.id);
       assert.equal(done?.status, 'done');
       assert.equal(done?.next_attempt_at, null);
@@ -2119,6 +2393,61 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         ),
         true,
       );
+    });
+
+    it('gatewayTeardownJobs: cancellation is scoped to a sending row', async () => {
+      const user = await makeUser();
+      const other = await makeUser();
+      const job = await store.gatewayTeardownJobs.upsertPending(user.id, null, nowIso());
+      const unrelated = await store.gatewayTeardownJobs.upsertPending(other.id, null, nowIso());
+      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(job), false);
+      const oldClaim = await store.gatewayTeardownJobs.claimPending(job);
+      const otherClaim = await store.gatewayTeardownJobs.claimPending(unrelated);
+      assert.ok(oldClaim && otherClaim);
+      const reset = await store.gatewayTeardownJobs.upsertPending(user.id, null, nowIso());
+      assert.equal(reset.id, job.id, 'upsert retains the claimed ID');
+      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(oldClaim), false);
+      assert.deepEqual(await store.gatewayTeardownJobs.findByUser(user.id), reset);
+      const newClaim = await store.gatewayTeardownJobs.claimPending(reset);
+      assert.ok(newClaim);
+      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(oldClaim), false);
+      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(newClaim), true);
+      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(newClaim), false);
+      assert.equal((await store.gatewayTeardownJobs.findByUser(other.id))?.id, unrelated.id);
+      await store.gatewayTeardownJobs.markDone(otherClaim, nowIso());
+      assert.equal(await store.gatewayTeardownJobs.deleteClaimed(otherClaim), false);
+      await store.gatewayTeardownJobs.deleteByUser(other.id);
+    });
+
+    it('gatewayTeardownJobs: filters include sending and backed-off retries', async () => {
+      const users = await Promise.all([makeUser(), makeUser(), makeUser()]);
+      const jobs = await Promise.all(
+        users.map((user) => store.gatewayTeardownJobs.upsertPending(user.id, null, nowIso())),
+      );
+      const [pending, sending, done] = jobs;
+      assert.ok(pending && sending && done);
+      const pendingClaim = await store.gatewayTeardownJobs.claimPending(pending);
+      const doneClaim = await store.gatewayTeardownJobs.claimPending(done);
+      await store.gatewayTeardownJobs.claimPending(sending);
+      assert.ok(pendingClaim && doneClaim);
+      await store.gatewayTeardownJobs.reschedule(pendingClaim, isoInSeconds(600), 'retry later');
+      await store.gatewayTeardownJobs.markDone(doneClaim, nowIso());
+      const page = await store.gatewayTeardownJobs.list({ statuses: ['pending', 'sending'] });
+      assert.ok(page.items.some((job) => job.id === pending.id));
+      assert.ok(page.items.some((job) => job.id === sending.id));
+      assert.ok(!page.items.some((job) => job.id === done.id));
+      const small = await store.gatewayTeardownJobs.list(
+        { statuses: ['pending', 'sending'] },
+        { limit: 1 },
+      );
+      assert.equal(small.total, page.total);
+      assert.equal((await store.gatewayTeardownJobs.list({ statuses: [] })).total, 0);
+      const intersection = await store.gatewayTeardownJobs.list({
+        status: 'done',
+        statuses: ['pending', 'sending'],
+      });
+      assert.equal(intersection.total, 0);
+      for (const user of users) await store.gatewayTeardownJobs.deleteByUser(user.id);
     });
 
     it('gatewayTeardownJobs: releaseStale returns stuck claims to pending', async () => {
@@ -2138,6 +2467,35 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
     });
 
     /* ── audit logs ───────────────────────────────────────────────────── */
+
+    it('audit service: normalizes time bounds and decorates actors on every adapter', async () => {
+      const actor = await makeUser({ role: 'admin' });
+      const audit = createAuditService(store);
+      for (const created_at of ['2026-09-08T01:46:15.000Z', '2026-09-08T01:46:15.816Z']) {
+        await store.auditLogs.create({
+          actor_user_id: actor.id,
+          actor_role: actor.role,
+          action: 'test.precision',
+          target_type: 'user',
+          details: {},
+          created_at,
+        });
+      }
+      for (const bound of ['2026-09-08T01:46:15Z', '2026-09-08T01:46:15.000Z']) {
+        const filter = { actor_user_id: actor.id, from: bound };
+        const page = await audit.list(filter);
+        assert.equal(page.total, 2);
+        assert.equal(await audit.count(filter), 2);
+        assert.deepEqual(page.items[0]?.actor, {
+          id: actor.id,
+          email: actor.email,
+          display_name: actor.display_name,
+          role: actor.role,
+        });
+        assert.equal((await audit.list({ actor_user_id: actor.id, to: bound })).total, 0);
+        assert.equal(await audit.count({ actor_user_id: actor.id, to: bound }), 0);
+      }
+    });
 
     it('auditLogs: appends structured details and filters every way', async () => {
       const actor = await makeUser({ role: 'admin' });
@@ -2507,6 +2865,24 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         ),
       );
       assert.equal(results.filter(Boolean).length, 1);
+    });
+
+    it('leases: refuses an over-long key instead of truncating it', async () => {
+      // `edge_leases.key` is VARCHAR(255) on MySQL; `INSERT IGNORE` would
+      // silently truncate and report "acquired" for a key it did not store.
+      const now = nowIso();
+      const future = isoInSeconds(600);
+
+      // Exactly the limit is stored faithfully and stays acquirable.
+      const boundary = 'k'.repeat(255);
+      assert.equal(await store.leases.acquire(boundary, 'instance-a', future, now), true);
+      assert.equal(await store.leases.release(boundary, 'instance-a'), true);
+
+      await assert.rejects(
+        () => store.leases.acquire('k'.repeat(256), 'instance-a', future, now),
+        (error: unknown) =>
+          isNexusError(error) && error.code === 'INTERNAL' && /Lease key/.test(error.message),
+      );
     });
 
     /* ── transactions ─────────────────────────────────────────────────── */

@@ -256,7 +256,8 @@ export interface ListUsersResponse extends Paginated<User> {
   /**
    * Disabled accounts whose gateway credentials have not been revoked yet,
    * across the whole portal rather than this page. Anything above zero means
-   * the teardown worker is still retrying against Edge.
+   * revocation is outstanding: queued/backed-off (`pending`) or in flight
+   * (`sending`), including claims awaiting crash recovery. `done` is excluded.
    */
   pending_gateway_teardowns: number;
 }
@@ -547,10 +548,13 @@ export type DeleteApiPluginResponse = OkResponse;
  * - **There are no per-consumer counts.** Edge's request counter is not labelled
  *   by consumer, so "who is using this API" cannot be answered from here.
  * - `available: false` means the request-metrics scrape failed (unreachable,
- *   error status, or unparseable body), or the API has no proxy yet. Independent
- *   backend state may still be present. The route still answers `200`.
+ *   error status, unparseable body, or no request series for this proxy), or the
+ *   API has no proxy yet. Independent backend state may still be present.
+ *   The route still answers `200`.
  */
 export interface ApiUsageResponse {
+  /** Safe explanation when request measurements are unavailable. */
+  unavailable_reason?: string;
   /** Whether request counters came from a successful gateway metrics scrape. */
   available: boolean;
   /** When Nexus produced this answer (a cached read may be up to 10s older). */
@@ -746,13 +750,16 @@ export interface RotateCredentialRequest {
 }
 
 /**
- * `POST /api/credentials/:id/rotate` — show-once. The replacement is created
- * on Edge first; the previous credential moves to `retiring` and is deleted
- * once the rotation is finalized.
+ * `POST /api/credentials/:id/rotate` — show-once. Below the gateway's per-type
+ * cap the replacement is created on Edge first, so both secrets are briefly
+ * live; at the cap the old entry has to go first. Either way the credential
+ * being replaced passes through `retiring` — the durable record that its
+ * gateway entry may already be gone — and settles at `revoked` once Edge has
+ * confirmed the delete.
  */
 export interface RotateCredentialResponse {
   credential: CredentialMetadata;
-  /** The credential being replaced, now in `retiring` status. */
+  /** The credential that was replaced, `revoked` by the time this is returned. */
   previous: CredentialMetadata;
   consumer_username: string;
   secret: ShowOnceSecret;
@@ -978,6 +985,15 @@ export interface MassEmailResponse {
   enqueued: number;
   /** Recipients matched by the audience selector. */
   recipients: number;
+  /**
+   * The campaign's batch id — the caller's `idempotency_key` when one was
+   * supplied, otherwise the one the server generated.
+   *
+   * Echoed so a retry can pass it back as `idempotency_key` and reach the same
+   * outbox rows instead of sending the campaign a second time. The failure
+   * body carries it too, in `details.batch_id`.
+   */
+  batch_id: string;
 }
 
 /** `GET /api/admin/audit-logs` */
@@ -986,9 +1002,9 @@ export interface ListAuditLogsQuery extends ListQuery {
   action?: string;
   target_type?: string;
   target_id?: string;
-  /** Inclusive lower bound (ISO-8601). */
+  /** Inclusive lower bound (ISO-8601 UTC, normalized to milliseconds). */
   from?: IsoTimestamp;
-  /** Exclusive upper bound (ISO-8601). */
+  /** Exclusive upper bound (ISO-8601 UTC, normalized to milliseconds). */
   to?: IsoTimestamp;
 }
 
@@ -1089,15 +1105,48 @@ export interface GodBroadcastResponse {
   notified: number;
   emails_enqueued: number;
   threads_created: number;
+  /**
+   * Recipients whose platform-inbox message was actually written.
+   *
+   * Not the audience size: per-recipient failures are logged and skipped so one
+   * bad account cannot stop an emergency announcement, which used to mean a
+   * broadcast that reached nobody reported exactly what one that reached
+   * everybody did.
+   */
+  delivered: number;
+  /** Recipients the fan-out could not deliver to. `0` on a clean broadcast. */
+  failed: number;
 }
 
 /* ── Public branding ────────────────────────────────────────────────────── */
+
+/**
+ * The part of the registration policy an unauthenticated visitor may see.
+ *
+ * The sign-up form needs it to avoid offering a role the server will refuse
+ * with a `403`: `allowed_roles` is enforced on every registration, so a form
+ * built from a hard-coded list contradicts the administrator who narrowed it.
+ * Nothing here is a secret — both facts are already observable by attempting a
+ * registration — and the server re-checks the policy regardless.
+ */
+export interface PublicRegistrationPolicy {
+  /** False when self-service sign-up is closed and accounts are created by an admin. */
+  open_registration: boolean;
+  /**
+   * Roles a visitor may self-select, narrowed to the self-selectable set: an
+   * elevated role stored in the policy is never offered, because
+   * `POST /api/auth/register` refuses one anyway.
+   */
+  allowed_roles: RegistrableRole[];
+}
 
 /** `GET /api/branding` — unauthenticated; drives the login page and theme. */
 export interface BrandingResponse extends BrandingSettings {
   /** Echoed so the SPA can bootstrap the theme before authenticating. */
   default_theme: ThemePreference;
   captcha: CaptchaPublicConfig;
+  /** What the sign-up form may offer; ignored while `bootstrap_required` is true. */
+  registration: PublicRegistrationPolicy;
   /**
    * True while the portal has no active `super_admin`: the next registration
    * is seated as one and must therefore carry `bootstrap_token`. Usually that

@@ -58,8 +58,10 @@ import { parse as parseYaml } from 'yaml';
 
 import {
   MAX_SPEC_BYTES,
+  MAX_SPEC_DEPTH,
   MAX_SPEC_OPERATIONS,
   MAX_SPEC_PATHS,
+  MAX_UPSTREAM_URL_LENGTH,
   OPENAPI_OPERATION_METHODS,
 } from '@ferrum-nexus/shared';
 
@@ -464,6 +466,79 @@ function parseDocument(text: string): { value: unknown; contentType: ParsedSpec[
   }
 }
 
+/** Bound traversal and later serialization without using the JavaScript call stack. */
+function assertSpecDepth(value: unknown): void {
+  if (value === null || typeof value !== 'object') return;
+
+  interface Frame {
+    value: object;
+    depth: number;
+    children: unknown[];
+    childIndex: number;
+    maxChildHeight: number;
+  }
+
+  const active = new WeakSet<object>();
+  const completedHeights = new WeakMap<object, number>();
+  const pending: Frame[] = [];
+
+  const push = (entryValue: object, depth: number): void => {
+    if (depth > MAX_SPEC_DEPTH) {
+      throw specInvalid(`The document exceeds the ${MAX_SPEC_DEPTH} level nesting limit`, {
+        reason: 'nesting_too_deep',
+        limit: MAX_SPEC_DEPTH,
+      });
+    }
+    if (active.has(entryValue)) {
+      throw specInvalid('The OpenAPI document contains a cyclic YAML alias', {
+        reason: 'cyclic_alias',
+      });
+    }
+    active.add(entryValue);
+    pending.push({
+      value: entryValue,
+      depth,
+      children: Object.values(entryValue),
+      childIndex: 0,
+      maxChildHeight: 0,
+    });
+  };
+
+  push(value, 1);
+  while (pending.length > 0) {
+    const frame = pending[pending.length - 1]!;
+    if (frame.childIndex < frame.children.length) {
+      const child = frame.children[frame.childIndex++];
+      if (child === null || typeof child !== 'object') continue;
+      if (active.has(child)) {
+        throw specInvalid('The OpenAPI document contains a cyclic YAML alias', {
+          reason: 'cyclic_alias',
+        });
+      }
+      const completedHeight = completedHeights.get(child);
+      if (completedHeight !== undefined) {
+        if (frame.depth + completedHeight > MAX_SPEC_DEPTH) {
+          throw specInvalid(`The document exceeds the ${MAX_SPEC_DEPTH} level nesting limit`, {
+            reason: 'nesting_too_deep',
+            limit: MAX_SPEC_DEPTH,
+          });
+        }
+        frame.maxChildHeight = Math.max(frame.maxChildHeight, completedHeight);
+        continue;
+      }
+      push(child, frame.depth + 1);
+      continue;
+    }
+
+    const height = frame.maxChildHeight + 1;
+    completedHeights.set(frame.value, height);
+    active.delete(frame.value);
+    pending.pop();
+    const parent = pending[pending.length - 1];
+    if (parent) parent.maxChildHeight = Math.max(parent.maxChildHeight, height);
+  }
+}
+
 /**
  * Parse and validate an uploaded OpenAPI document.
  *
@@ -484,6 +559,7 @@ export function parseOpenApiSpec(text: string): ParsedSpec {
 
   const raw = text.trim();
   const { value, contentType } = parseDocument(raw);
+  assertSpecDepth(value);
 
   if (!isRecord(value)) {
     throw specInvalid('The OpenAPI document must be a JSON or YAML object');
@@ -606,13 +682,26 @@ function readPaths(paths: Record<string, unknown>): SpecPath[] {
 }
 
 /** Expand declared string defaults once; never pass unresolved templates to URL parsing. */
-function expandServerUrl(server: Record<string, unknown>): string | null {
+function expandServerUrl(server: Record<string, unknown>, field = 'servers[].url'): string | null {
   if (typeof server.url !== 'string') return null;
   const variables = isRecord(server.variables) ? server.variables : {};
-  let valid = true;
-  let expandedLength = server.url.length;
-  const expanded = server.url.replace(/\{([^{}]+)\}/g, (placeholder: string, name: string) => {
-    if (!valid) return '';
+  const template = server.url.trim();
+  const parts: string[] = [];
+  let offset = 0;
+  let expandedLength = 0;
+  const append = (part: string): void => {
+    expandedLength += part.length;
+    if (expandedLength > MAX_UPSTREAM_URL_LENGTH) {
+      throw specInvalid(
+        `${field} must not exceed ${MAX_UPSTREAM_URL_LENGTH} characters after expansion`,
+        { field, limit: MAX_UPSTREAM_URL_LENGTH },
+      );
+    }
+    parts.push(part);
+  };
+  for (const match of template.matchAll(/\{([^{}]+)\}/g)) {
+    const name = match[1] as string;
+    append(template.slice(offset, match.index));
     const variable = Object.hasOwn(variables, name) ? variables[name] : undefined;
     if (
       !isRecord(variable) ||
@@ -620,25 +709,22 @@ function expandServerUrl(server: Record<string, unknown>): string | null {
       (variable.enum !== undefined &&
         (!Array.isArray(variable.enum) || !variable.enum.includes(variable.default)))
     ) {
-      valid = false;
-      return '';
+      return null;
     }
-    expandedLength += variable.default.length - placeholder.length;
-    if (expandedLength > MAX_SPEC_BYTES) {
-      valid = false;
-      return '';
-    }
-    return variable.default;
-  });
-  return valid && !/[{}]/.test(expanded) ? expanded : null;
+    append(variable.default);
+    offset = match.index + match[0].length;
+  }
+  append(template.slice(offset));
+  const expanded = parts.join('');
+  return !/[{}]/.test(expanded) ? expanded : null;
 }
 
 /** First usable expanded server URL, skipping relative or unresolved entries. */
 function readDefaultUpstream(servers: unknown): SpecUpstream | null {
   if (!Array.isArray(servers)) return null;
-  for (const server of servers) {
+  for (const [index, server] of servers.entries()) {
     if (!isRecord(server) || typeof server.url !== 'string') continue;
-    const expanded = expandServerUrl(server);
+    const expanded = expandServerUrl(server, `servers[${index}].url`);
     const parsed = expanded === null ? null : parseUpstreamUrl(expanded);
     if (parsed) return parsed;
   }

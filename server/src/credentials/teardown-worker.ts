@@ -43,12 +43,10 @@
  * stay live for good. The same sweep is what recovers a job whose store write
  * failed after the claim, with no restart involved at all.
  *
- * The threshold is safe because a claim's lifetime is bounded: rows are claimed
- * singly, and one job is ~55 seconds at worst (see
- * {@link TEARDOWN_JOB_BUDGET_MS}). Recovery is idempotent in any case — the
- * revocation is a clear-and-delete, so a job run twice is wasted work rather
- * than damage, and the consumer's own Edge lease keeps two instances from
- * running it at the same instant.
+ * Rows are claimed singly; the default timing estimate is documented at
+ * {@link TEARDOWN_JOB_BUDGET_MS}. Recovery replaces the ownership token, so
+ * a delayed attempt cannot settle a reclaimed job. This database fence does
+ * not fence HTTP writes already in flight after a shared Edge lease expires.
  *
  * ## Why there is no `failed` state
  *
@@ -65,6 +63,7 @@
 
 import { AuditAction, SYSTEM_ACTOR, type AuditService } from '../audit/service.js';
 import type { GatewayTeardownJobRecord, NexusStore } from '../db/store.js';
+import { createKeyedSerializer, userLifecycleLockKey } from '../lib/keyed-serializer.js';
 import { runGatewayTeardown, type CredentialsService } from './service.js';
 
 /** Poll interval, matching the outbox worker's. */
@@ -175,17 +174,31 @@ export function createTeardownWorker(deps: TeardownWorkerDeps): TeardownWorker {
   const batchSize = deps.batchSize ?? TEARDOWN_BATCH_SIZE;
   const now = deps.now ?? ((): Date => new Date());
   const random = deps.random ?? Math.random;
+  const locks = createKeyedSerializer({ leases: store.leases });
 
   let timer: NodeJS.Timeout | null = null;
   let inFlight: Promise<TeardownTickResult> | null = null;
+
+  async function cancelJob(job: GatewayTeardownJobRecord): Promise<boolean> {
+    // Upserts reuse the row ID. Identity alone cannot distinguish a later
+    // disable, so order the decision with account transitions and re-read
+    // inside the transaction. Acquire the lease before opening the transaction.
+    return locks(userLifecycleLockKey(job.user_id), () =>
+      store.transaction(async (tx) => {
+        const current = await tx.users.findById(job.user_id);
+        if (current?.status === 'disabled') return false;
+        await tx.gatewayTeardownJobs.deleteClaimed(job);
+        return true;
+      }),
+    );
+  }
 
   async function runJob(result: TeardownTickResult, job: GatewayTeardownJobRecord): Promise<void> {
     const user = await store.users.findById(job.user_id);
     if (!user || user.status !== 'disabled') {
       // Re-enabled (or deleted) between the claim and now. Stripping the
       // consumer of a live account would be a fresh outage, not a fix.
-      await store.gatewayTeardownJobs.deleteByUser(job.user_id);
-      result.cancelled += 1;
+      if (await cancelJob(job)) result.cancelled += 1;
       return;
     }
 
@@ -196,7 +209,7 @@ export function createTeardownWorker(deps: TeardownWorkerDeps): TeardownWorker {
       // No admin is on the other end of a retry, so the Edge write is attributed
       // to the account it is revoking.
       subject: job.requested_by ?? job.user_id,
-      jobId: job.id,
+      job,
       // The per-attempt `warn` line lives in `runGatewayTeardown`; this one adds
       // the attempt count an operator needs to see the retry loop working.
       log: (obj, message) => log({ ...obj, attempts: job.attempts }, message),
@@ -209,17 +222,17 @@ export function createTeardownWorker(deps: TeardownWorkerDeps): TeardownWorker {
       // would only queue another refusal, so re-read and drop the job instead.
       const settled = await store.users.findById(job.user_id);
       if (!settled || settled.status !== 'disabled') {
-        await store.gatewayTeardownJobs.deleteByUser(job.user_id);
-        result.cancelled += 1;
+        if (await cancelJob(job)) result.cancelled += 1;
         return;
       }
 
       const nextAt = new Date(now().getTime() + teardownBackoffMs(job.attempts, random));
-      await store.gatewayTeardownJobs.reschedule(
-        job.id,
+      const rescheduled = await store.gatewayTeardownJobs.reschedule(
+        job,
         nextAt.toISOString(),
         attempt.error ?? 'unknown error',
       );
+      if (!rescheduled) return;
       result.rescheduled += 1;
       log(
         {

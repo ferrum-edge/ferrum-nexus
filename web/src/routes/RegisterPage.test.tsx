@@ -9,7 +9,12 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ERROR_CODES, type RegisterRequest } from '@ferrum-nexus/shared';
+import {
+  ERROR_CODES,
+  REGISTRABLE_ROLES,
+  type RegisterRequest,
+  type RegistrableRole,
+} from '@ferrum-nexus/shared';
 
 const CAPTCHA = { enabled: false, provider: 'none', site_key: null };
 
@@ -21,7 +26,10 @@ function json(body: unknown, status = 200): Response {
 }
 
 /** Stub the public endpoints and record every registration attempt. */
-function stubApi(bootstrapRequired: boolean): { bodies: RegisterRequest[] } {
+function stubApi(
+  bootstrapRequired: boolean,
+  allowedRoles: readonly RegistrableRole[] = REGISTRABLE_ROLES,
+): { bodies: RegisterRequest[] } {
   const bodies: RegisterRequest[] = [];
   vi.stubGlobal(
     'fetch',
@@ -38,6 +46,7 @@ function stubApi(bootstrapRequired: boolean): { bodies: RegisterRequest[] } {
             tagline: null,
             support_email: null,
             captcha: CAPTCHA,
+            registration: { open_registration: true, allowed_roles: [...allowedRoles] },
             bootstrap_required: bootstrapRequired,
           }),
         );
@@ -76,10 +85,13 @@ function stubApi(bootstrapRequired: boolean): { bodies: RegisterRequest[] } {
  * would otherwise stay cached for the next. Re-importing it after
  * `vi.resetModules()` gives each case its own client and its own cache.
  */
-async function renderRegisterPage(bootstrapRequired: boolean): Promise<{
+async function renderRegisterPage(
+  bootstrapRequired: boolean,
+  allowedRoles?: readonly RegistrableRole[],
+): Promise<{
   bodies: RegisterRequest[];
 }> {
-  const stub = stubApi(bootstrapRequired);
+  const stub = stubApi(bootstrapRequired, allowedRoles);
   vi.resetModules();
   const { App } = await import('../App');
   window.history.pushState({}, '', '/register');
@@ -132,5 +144,50 @@ describe('RegisterPage bootstrap token', () => {
 
     await waitFor(() => expect(bodies).toHaveLength(1));
     expect(bodies[0]).not.toHaveProperty('bootstrap_token');
+  });
+});
+
+/**
+ * `allowed_roles` is enforced on every registration, so the form has to know it.
+ *
+ * It used to build the account-type list from the `REGISTRABLE_ROLES` constant
+ * while `GET /api/branding` carried no policy at all, which left the form
+ * offering a role the server answers with a 403.
+ */
+describe('RegisterPage registration policy', () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    window.history.pushState({}, '', '/');
+  });
+
+  it('offers no choice, and registers as the one allowed role', async () => {
+    const { bodies } = await renderRegisterPage(false, ['client']);
+
+    expect(await screen.findByText(/created as/)).toBeInTheDocument();
+    expect(screen.queryByLabelText('Account type')).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/^Display name/), { target: { value: 'Joiner' } });
+    fireEvent.change(screen.getByLabelText(/^Email/), { target: { value: 'joiner@example.test' } });
+    fireEvent.change(screen.getByLabelText(/^Password/), {
+      target: { value: 'correct-horse-battery-staple' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Create account' }));
+
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]?.role).toBe('client');
+  });
+
+  it('keeps the choice while the policy allows both roles', async () => {
+    await renderRegisterPage(false);
+    expect(await screen.findByLabelText('Account type')).toBeInTheDocument();
+  });
+
+  it('refuses to submit when the policy allows no self-service role', async () => {
+    const { bodies } = await renderRegisterPage(false, []);
+
+    expect(await screen.findByText(/not accepting self-service accounts/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create account' })).toBeDisabled();
+    expect(bodies).toHaveLength(0);
   });
 });

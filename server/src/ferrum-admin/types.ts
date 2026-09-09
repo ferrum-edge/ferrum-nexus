@@ -177,7 +177,8 @@ export interface EdgeProxy {
    */
   allowed_ws_origins?: string[];
   circuit_breaker?: EdgeCircuitBreakerConfig | null;
-  plugins?: EdgePluginAssociation[];
+  /** Always serialized by Edge, including an explicit empty association list. */
+  plugins: EdgePluginAssociation[];
   api_spec_id?: string | null;
   created_at?: string;
   updated_at?: string;
@@ -248,8 +249,8 @@ export interface EdgeProxyReplace {
   /**
    * Which plugin configs this proxy runs. A proxy-scoped config is inert until
    * its id appears here (`plugin_cache.rs`
-   * `scoped_plugin_config_applies_to_proxy`), and an omitted or empty list
-   * detaches every one of them.
+   * `scoped_plugin_config_applies_to_proxy`). An explicit empty list detaches
+   * every association; omitting the field preserves the stored list on Edge.
    */
   plugins?: EdgePluginAssociation[];
   /** Every other field, copied verbatim from the preceding `GET`. */
@@ -343,8 +344,8 @@ export type EdgeCorsOrigin = string | { exact: string } | { prefix: string } | {
 /**
  * `cors` config — a closed key set with `allowed_origins` required and bounded
  * at 64 entries. `preflight_continue` and `unmatched_preflights` are mutually
- * exclusive. Nexus does not write this plugin today; the type exists so an
- * operator-managed CORS config read back off a proxy is not `unknown`.
+ * exclusive. Nexus derives preflight headers and methods from the API policy
+ * and carries operator settings when updating the live config.
  */
 export interface EdgeCorsConfig {
   /** Required, 1–64 entries. There is no implicit wildcard. */
@@ -415,7 +416,7 @@ export interface EdgeOpenapiValidatorConfig {
   };
 }
 
-/** Any plugin config body Nexus writes. */
+/** Object settings Nexus composes; optional-plugin reconciliation reserves null for removal. */
 export type EdgePluginSettings =
   | EdgeKeyAuthConfig
   | EdgeBasicAuthConfig
@@ -450,7 +451,8 @@ export interface EdgePluginConfig {
   id: string;
   namespace: string;
   plugin_name: string;
-  config: Record<string, unknown>;
+  /** Edge permits null for plugins without settings, including basic_auth. */
+  config: Record<string, unknown> | null;
   scope: EdgePluginScope;
   proxy_id?: string | null;
   enabled: boolean;
@@ -471,7 +473,8 @@ export interface EdgePluginConfigWrite {
   /** Required when `scope === 'proxy'`; must be absent otherwise. */
   proxy_id?: string | null;
   enabled: boolean;
-  config: EdgePluginSettings;
+  /** Preserve a null config when echoing or restoring an Edge resource. */
+  config: EdgePluginSettings | null;
   /**
    * Execution priority override. Nexus never *chooses* one — the plugin
    * ordering is the gateway's — but a proxy rebuild has to carry an operator's
@@ -639,9 +642,11 @@ export interface EdgeLatencyHistogram {
 
 /** What one `GET /metrics` scrape yielded for a single proxy. */
 export interface EdgeProxyMetrics {
+  /** Safe explanation when this proxy has no usable request measurements. */
+  reason?: string;
   /**
    * `false` when the scrape could not be completed or produced nothing usable
-   * (gateway unreachable, non-2xx, or a body with no recognisable samples). The
+   * (gateway unreachable, non-2xx, or no valid request series for this proxy). The
    * counters are then zeroed rather than absent, so callers never branch on
    * `undefined`.
    */

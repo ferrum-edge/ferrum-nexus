@@ -400,9 +400,16 @@ describe('API deletion and god mode', () => {
       assert.equal(thread.participant_b, null);
       assert.equal(thread.participant_a, client.user.id);
 
-      const row = (await harness.auditRows('god.broadcast'))[0];
-      assert.equal(row?.details.audience_scope, 'all');
-      assert.equal(row?.details.threads_created, body.threads_created);
+      // Two rows: the countable attempt, written before the first recipient is
+      // touched, and the outcome written after the fan-out.
+      const attempt = (await harness.auditRows('god.broadcast'))[0];
+      assert.equal(attempt?.details.audience_scope, 'all');
+      assert.equal(attempt?.details.phase, 'started');
+      assert.equal(attempt?.details.recipients, body.notified);
+      const outcome = (await harness.auditRows('god.broadcast_complete'))[0];
+      assert.equal(outcome?.details.threads_created, body.threads_created);
+      assert.equal(outcome?.details.delivered, body.delivered);
+      assert.equal(outcome?.details.failed, 0);
     });
 
     it('enqueues one email per recipient when send_email is set', async () => {

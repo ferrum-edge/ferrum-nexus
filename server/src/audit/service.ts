@@ -1,14 +1,14 @@
 /**
  * Audit service — the only writer of `audit_logs`.
  *
- * Every state-changing endpoint must record exactly one row here. Actions are
+ * Every state-changing endpoint must record one row per event here. Actions are
  * dot-namespaced strings drawn from {@link AuditAction}; adding a new one means
  * appending to that catalog **and** to the table in `docs/security.md`.
  */
 
 import type { AuditLog, Paginated, Role, Uuid } from '@ferrum-nexus/shared';
 
-import type { AuditLogFilter, ListOptions, NexusStore } from '../db/store.js';
+import type { AuditLogFilter, AuditLogRecord, ListOptions, NexusStore } from '../db/store.js';
 
 /**
  * Catalog of every audit action Nexus emits.
@@ -17,6 +17,8 @@ import type { AuditLogFilter, ListOptions, NexusStore } from '../db/store.js';
  * namespaced `god.*` so they can be filtered out of ordinary reporting.
  */
 export const AuditAction = {
+  /** Startup created the namespace-global request metrics prerequisite. */
+  GATEWAY_METRICS_ENABLE: 'gateway.metrics_enable',
   /* auth */
   AUTH_REGISTER: 'auth.register',
   AUTH_LOGIN: 'auth.login',
@@ -38,6 +40,7 @@ export const AuditAction = {
   USER_UPDATE: 'user.update',
   USER_ROLE_CHANGE: 'user.role_change',
   USER_DISABLE: 'user.disable',
+  USER_ENABLE: 'user.enable',
   /**
    * The teardown worker finished the gateway revocation a disable had left
    * pending. Written by the system, so the actor is {@link SYSTEM_ACTOR}.
@@ -85,6 +88,31 @@ export const AuditAction = {
   CREDENTIAL_ROTATE: 'credential.rotate',
   CREDENTIAL_REVOKE: 'credential.revoke',
   /**
+   * A retirement Edge applied but the portal never recorded, settled by a
+   * later call on the same consumer and type.
+   *
+   * The row was moved to `retiring` before the gateway delete and the delete's
+   * acknowledgement never landed — or the write that follows it failed — so
+   * the mirror was one row longer than the array. The next operation settles
+   * it instead of refusing, and this is the row that says it happened.
+   */
+  CREDENTIAL_SETTLE: 'credential.settle',
+  /**
+   * An append this portal made had to be taken back; records whether it went.
+   *
+   * Written whenever an issue or a rotation fails *after* Edge accepted the
+   * new entry — including when the acceptance itself was never acknowledged,
+   * where `suspected: true` says the orphan could not be confirmed.
+   * `withdrawn: false` means the entry is still on the gateway — either the
+   * compensating delete failed, or the array no longer looked the way the
+   * append left it (and `basicauth` never looks like anything, so it is never
+   * deleted by index) — and `stranded_credential_id` names what to clean up,
+   * with `last4` and `append_index` naming the entry itself. A rotation whose
+   * confirmed delete could not be recorded writes one too, carrying
+   * `retired_credential_id`: the row it left `retiring` for a later call.
+   */
+  CREDENTIAL_APPEND_ROLLBACK: 'credential.append_rollback',
+  /**
    * An admin emptied one credential type on a gateway consumer and revoked its
    * portal rows — the repair for positions that can no longer be trusted.
    */
@@ -105,7 +133,21 @@ export const AuditAction = {
   GOD_REVOKE_GRANT: 'god.revoke_grant',
   GOD_DELETE_API: 'god.delete_api',
   GOD_DISABLE_USER: 'god.disable_user',
+  /**
+   * Written **before** the first recipient is touched, which is what makes it
+   * the broadcast's countable record: `NEXUS_MAX_BROADCASTS_PER_DAY` counts
+   * exactly these rows, so an attempt whose fan-out or completion record later
+   * fails is still charged and still named in the trail. `details.phase` is
+   * `started`; what actually got delivered is {@link GOD_BROADCAST_COMPLETE}.
+   */
   GOD_BROADCAST: 'god.broadcast',
+  /**
+   * The outcome of a broadcast whose {@link GOD_BROADCAST} row already exists —
+   * `delivered`, `failed` and the notification/thread/email counts. Deliberately
+   * a second action rather than a second `god.broadcast` row: the daily ceiling
+   * counts `god.broadcast`, and it must be exactly one row per attempt.
+   */
+  GOD_BROADCAST_COMPLETE: 'god.broadcast_complete',
 } as const;
 
 /** Union of every audit action string. */
@@ -138,7 +180,7 @@ export interface AuditService {
     target: AuditTarget,
     details?: Record<string, unknown>,
     ip?: string | null,
-  ): Promise<AuditLog>;
+  ): Promise<AuditLogRecord>;
   /** Newest-first page with actor/action/target/time filters. */
   list(filter: AuditLogFilter, options?: ListOptions): Promise<Paginated<AuditLog>>;
   /** Count matching rows without fetching a page. */
@@ -168,6 +210,15 @@ export const ANONYMOUS_ACTOR: AuditActor = { id: null, role: null };
  */
 export const SYSTEM_ACTOR: AuditActor = { id: null, role: null };
 
+/** Compare every adapter's stored millisecond UTC timestamps with the same format. */
+function normalizeFilter(filter: AuditLogFilter): AuditLogFilter {
+  return {
+    ...filter,
+    ...(filter.from !== undefined ? { from: new Date(filter.from).toISOString() } : {}),
+    ...(filter.to !== undefined ? { to: new Date(filter.to).toISOString() } : {}),
+  };
+}
+
 /** Build the audit service. */
 export function createAuditService(store: NexusStore): AuditService {
   const service: AuditService = {
@@ -184,11 +235,27 @@ export function createAuditService(store: NexusStore): AuditService {
     },
 
     async list(filter, options) {
-      return store.auditLogs.list(filter, options);
+      const page = await store.auditLogs.list(normalizeFilter(filter), options);
+      const ids = [
+        ...new Set(page.items.flatMap((row) => (row.actor_user_id ? [row.actor_user_id] : []))),
+      ];
+      const users = new Map(
+        (await store.users.findManyByIds(ids)).map(({ id, email, display_name, role }) => [
+          id,
+          { id, email, display_name, role },
+        ]),
+      );
+      return {
+        ...page,
+        items: page.items.map((row) => ({
+          ...row,
+          actor: row.actor_user_id ? (users.get(row.actor_user_id) ?? null) : null,
+        })),
+      };
     },
 
     async count(filter) {
-      return store.auditLogs.count(filter);
+      return store.auditLogs.count(normalizeFilter(filter));
     },
 
     forStore(scoped) {

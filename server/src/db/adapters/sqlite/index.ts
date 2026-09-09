@@ -142,6 +142,7 @@ import type {
   StoreHealth,
   ThreadRecord,
   ThreadRepo,
+  TransactionOptions,
   UpdateInput,
   UserFilter,
   UserRecord,
@@ -150,7 +151,7 @@ import type {
   VerificationTokenRecord,
   VerificationTokenRepo,
 } from '../../store.js';
-import { SPEC_HISTORY_PRUNE_BATCH } from '../../store.js';
+import { assertLeaseKeyLength, SPEC_HISTORY_PRUNE_BATCH } from '../../store.js';
 import {
   bool,
   encodeBool,
@@ -320,6 +321,7 @@ function mapApiPlugin(row: Row): ApiPluginRecord {
     enabled: bool(row.enabled),
     config: json<Record<string, unknown>>(row.config_json, {}),
     trigger: json<ApiPluginTrigger | null>(row.trigger_json, null),
+    ferrum_plugin_config_id: textOrNull(row.ferrum_plugin_config_id),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -418,6 +420,7 @@ function mapMessage(row: Row): MessageRecord {
     thread_id: text(row.thread_id),
     sender_user_id: text(row.sender_user_id),
     body: text(row.body),
+    broadcast: bool(row.broadcast),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -440,6 +443,7 @@ function mapNotification(row: Row): NotificationRecord {
 function mapOutbox(row: Row): EmailOutboxRecord {
   return {
     id: text(row.id),
+    generation: text(row.generation),
     to_email: text(row.to_email),
     subject: text(row.subject),
     body_html: text(row.body_html),
@@ -457,6 +461,7 @@ function mapOutbox(row: Row): EmailOutboxRecord {
 function mapTeardownJob(row: Row): GatewayTeardownJobRecord {
   return {
     id: text(row.id),
+    generation: text(row.generation),
     user_id: text(row.user_id),
     status: text(row.status) as GatewayTeardownJobStatus,
     attempts: int(row.attempts),
@@ -756,7 +761,14 @@ class SqliteStore implements NexusStore {
     return result;
   }
 
-  transaction<T>(fn: (tx: NexusStore) => Promise<T>): Promise<T> {
+  /**
+   * `options.retry` is accepted and ignored: there is one connection and every
+   * body is serialised onto it, so this adapter has no contention class to
+   * retry — no two of its transactions can deadlock or lose a write race with
+   * each other. A body still runs at most once here, whatever the caller asks
+   * for; the option exists for the pooled adapters, which do re-run bodies.
+   */
+  transaction<T>(fn: (tx: NexusStore) => Promise<T>, _options?: TransactionOptions): Promise<T> {
     if (this.ownsOpenTransaction()) {
       // This call is running inside the body of the transaction that currently
       // holds `BEGIN` — a genuine nested call, so join it. A caller that merely
@@ -1330,12 +1342,14 @@ class SqliteStore implements NexusStore {
         execute(
           this.db,
           `INSERT INTO api_plugins
-             (id, api_id, plugin_name, enabled, config_json, trigger_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             (id, api_id, plugin_name, enabled, config_json, trigger_json,
+              ferrum_plugin_config_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (api_id, plugin_name) DO UPDATE SET
              enabled = excluded.enabled,
              config_json = excluded.config_json,
              trigger_json = excluded.trigger_json,
+             ferrum_plugin_config_id = excluded.ferrum_plugin_config_id,
              updated_at = excluded.updated_at`,
           [
             meta.id,
@@ -1344,6 +1358,7 @@ class SqliteStore implements NexusStore {
             encodeBool(input.enabled),
             encodeJson(input.config) ?? '{}',
             encodeJson(input.trigger),
+            input.ferrum_plugin_config_id,
             meta.created_at,
             meta.updated_at,
           ],
@@ -2020,13 +2035,15 @@ class SqliteStore implements NexusStore {
       const meta = stamps(input);
       execute(
         this.db,
-        `INSERT INTO messages (id, thread_id, sender_user_id, body, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages
+           (id, thread_id, sender_user_id, body, broadcast, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
           meta.id,
           input.thread_id,
           input.sender_user_id,
           input.body,
+          encodeBool(input.broadcast ?? false),
           meta.created_at,
           meta.updated_at,
         ],
@@ -2086,7 +2103,8 @@ class SqliteStore implements NexusStore {
     countBySenderSince: async (senderUserId, sinceIso) =>
       queryCount(
         this.db,
-        'SELECT COUNT(*) AS count FROM messages WHERE sender_user_id = ? AND created_at >= ?',
+        `SELECT COUNT(*) AS count FROM messages
+          WHERE sender_user_id = ? AND created_at >= ? AND broadcast = 0`,
         [senderUserId, sinceIso],
       ),
 
@@ -2267,9 +2285,9 @@ class SqliteStore implements NexusStore {
         execute(
           this.db,
           `UPDATE email_outbox
-           SET status = 'sending', attempts = attempts + 1, updated_at = ?
+           SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?
            WHERE id IN (${ids.map(() => '?').join(', ')}) AND status = 'pending'`,
-          [nowIso(), ...ids],
+          [nowIso(), newId(), ...ids],
         );
         return queryAll(
           this.db,
@@ -2280,32 +2298,32 @@ class SqliteStore implements NexusStore {
       return claim();
     },
 
-    markSent: async (id, at) => {
+    // A settling write only lands on the exact claim it was issued for: the
+    // stale sweep can hand a row to another worker mid-delivery, and the
+    // previous holder must not overwrite the new owner's outcome.
+    markSent: async (entry, at) =>
       execute(
         this.db,
         `UPDATE email_outbox SET status = 'sent', next_attempt_at = NULL, last_error = NULL,
-           updated_at = ? WHERE id = ?`,
-        [at, id],
-      );
-    },
+           updated_at = ? WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [at, entry.id, entry.generation],
+      ) > 0,
 
-    reschedule: async (id, nextAttemptAt, lastError) => {
+    reschedule: async (entry, nextAttemptAt, lastError) =>
       execute(
         this.db,
         `UPDATE email_outbox SET status = 'pending', next_attempt_at = ?, last_error = ?,
-           updated_at = ? WHERE id = ?`,
-        [nextAttemptAt, lastError, nowIso(), id],
-      );
-    },
+           updated_at = ? WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [nextAttemptAt, lastError, nowIso(), entry.id, entry.generation],
+      ) > 0,
 
-    markFailed: async (id, lastError) => {
+    markFailed: async (entry, lastError) =>
       execute(
         this.db,
         `UPDATE email_outbox SET status = 'failed', next_attempt_at = NULL, last_error = ?,
-           updated_at = ? WHERE id = ?`,
-        [lastError, nowIso(), id],
-      );
-    },
+           updated_at = ? WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [lastError, nowIso(), entry.id, entry.generation],
+      ) > 0,
 
     releaseStale: async (olderThan) =>
       execute(
@@ -2346,9 +2364,10 @@ class SqliteStore implements NexusStore {
         this.db,
         `INSERT INTO gateway_teardown_jobs
            (id, user_id, status, attempts, next_attempt_at, last_error, requested_by,
-            created_at, updated_at, completed_at)
-         VALUES (?, ?, 'pending', 0, ?, NULL, ?, ?, ?, NULL)
+            created_at, updated_at, completed_at, generation)
+         VALUES (?, ?, 'pending', 0, ?, NULL, ?, ?, ?, NULL, ?)
          ON CONFLICT (user_id) DO UPDATE SET
+           generation = excluded.generation,
            status = 'pending',
            attempts = 0,
            next_attempt_at = excluded.next_attempt_at,
@@ -2356,7 +2375,7 @@ class SqliteStore implements NexusStore {
            requested_by = excluded.requested_by,
            updated_at = excluded.updated_at,
            completed_at = NULL`,
-        [newId(), userId, now, requestedBy, now, now],
+        [newId(), userId, now, requestedBy, now, now, newId()],
       );
       const job = await this.gatewayTeardownJobs.findByUser(userId);
       if (!job) {
@@ -2375,6 +2394,7 @@ class SqliteStore implements NexusStore {
     list: async (filter, options) => {
       const where = new WhereBuilder()
         .add(filter.status, 'status = ?', filter.status ?? null)
+        .addIn('status', filter.statuses)
         .build();
       const { limit, offset } = page(options);
       const total = queryCount(
@@ -2404,9 +2424,10 @@ class SqliteStore implements NexusStore {
         execute(
           this.db,
           `UPDATE gateway_teardown_jobs
-           SET status = 'sending', attempts = attempts + 1, updated_at = ?
+           SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?,
+               completed_at = NULL
            WHERE id IN (${ids.map(() => '?').join(', ')}) AND status = 'pending'`,
-          [nowIso(), ...ids],
+          [nowIso(), newId(), ...ids],
         );
         return queryAll(
           this.db,
@@ -2417,24 +2438,46 @@ class SqliteStore implements NexusStore {
       return claim();
     },
 
-    markDone: async (id, at) => {
+    claimPending: async (job) => {
+      const generation = newId();
+      const at = nowIso();
+      const changed = execute(
+        this.db,
+        `UPDATE gateway_teardown_jobs
+         SET status = 'sending', attempts = attempts + 1, updated_at = ?, generation = ?,
+             completed_at = NULL
+         WHERE id = ? AND generation = ? AND status = 'pending'`,
+        [at, generation, job.id, job.generation],
+      );
+      return changed > 0
+        ? {
+            ...job,
+            generation,
+            status: 'sending',
+            attempts: job.attempts + 1,
+            updated_at: at,
+            completed_at: null,
+          }
+        : null;
+    },
+
+    markDone: async (job, at) =>
       execute(
         this.db,
         `UPDATE gateway_teardown_jobs
          SET status = 'done', next_attempt_at = NULL, last_error = NULL, completed_at = ?,
-             updated_at = ? WHERE id = ?`,
-        [at, at, id],
-      );
-    },
+             updated_at = ? WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [at, at, job.id, job.generation],
+      ) > 0,
 
-    reschedule: async (id, nextAttemptAt, lastError) => {
+    reschedule: async (job, nextAttemptAt, lastError) =>
       execute(
         this.db,
         `UPDATE gateway_teardown_jobs
-         SET status = 'pending', next_attempt_at = ?, last_error = ?, updated_at = ? WHERE id = ?`,
-        [nextAttemptAt, lastError, nowIso(), id],
-      );
-    },
+         SET status = 'pending', next_attempt_at = ?, last_error = ?, updated_at = ?,
+             completed_at = NULL WHERE id = ? AND generation = ? AND status = 'sending'`,
+        [nextAttemptAt, lastError, nowIso(), job.id, job.generation],
+      ) > 0,
 
     releaseStale: async (olderThan) =>
       execute(
@@ -2446,6 +2489,13 @@ class SqliteStore implements NexusStore {
 
     deleteByUser: async (userId) =>
       execute(this.db, 'DELETE FROM gateway_teardown_jobs WHERE user_id = ?', [userId]) > 0,
+
+    deleteClaimed: async (job) =>
+      execute(
+        this.db,
+        "DELETE FROM gateway_teardown_jobs WHERE id = ? AND generation = ? AND status = 'sending'",
+        [job.id, job.generation],
+      ) > 0,
   };
 
   /* ── auditLogs ────────────────────────────────────────────────────────── */
@@ -2695,6 +2745,7 @@ class SqliteStore implements NexusStore {
 
   readonly leases: LeaseRepo = {
     acquire: async (key, owner, expiresAt, now) => {
+      assertLeaseKeyLength(key);
       // One statement, so the "is it free?" test and the claim cannot be split
       // by another writer. `DO UPDATE … WHERE` skips the update — and reports
       // zero changes — while the current holder's lease is still live, which is

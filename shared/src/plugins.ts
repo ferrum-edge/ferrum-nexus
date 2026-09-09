@@ -23,8 +23,7 @@
  * Every descriptor exposes a *slice* of its Edge schema — the knobs a provider
  * selling an API product actually turns — and leaves the rest at Edge's own
  * defaults. Sending a key the portal cannot let the provider change would only
- * freeze that default in place, which is exactly the reasoning behind the
- * `cors` plugin's two-key body in `publishing/service.ts`.
+ * freeze that default in place.
  *
  * ## What is deliberately **not** here
  *
@@ -591,90 +590,16 @@ export const PROVIDER_PLUGINS: readonly ProviderPluginDescriptor[] = [
   },
 
   {
-    name: 'response_caching',
-    category: 'traffic',
-    label: 'Response caching',
-    summary:
-      'Serves a repeated read from the gateway instead of your backend for as long as you allow. ' +
-      'Each caller keeps its own cache partition, so one consumer never sees another’s response.',
-    consumer_recipe:
-      'Consumers see an `X-Cache-Status` header (`HIT`/`MISS`) and an `Age` on a cached ' +
-      'response. `Cache-Control: no-cache` on their request bypasses the cache.',
-    supports_trigger: false,
-    fields: [
-      {
-        kind: 'integer',
-        key: 'ttl_seconds',
-        label: 'Default freshness',
-        help: 'Used when your backend sends no `Cache-Control` of its own; yours always wins.',
-        min: 1,
-        max: 86_400,
-        default: 300,
-        unit: 'seconds',
-      },
-      {
-        kind: 'string_list',
-        key: 'cacheable_methods',
-        label: 'Methods to cache',
-        help: 'Only bodyless reads can be cached — the gateway refuses anything else.',
-        max_entries: 2,
-        min_entries: 1,
-        options: [
-          { value: 'GET', label: 'GET' },
-          { value: 'HEAD', label: 'HEAD' },
-        ],
-        default: ['GET'],
-      },
-      {
-        kind: 'integer_list',
-        key: 'cacheable_status_codes',
-        label: 'Statuses to cache',
-        help: 'Partial (206) and validator-only (304) responses are never stored.',
-        max_entries: 8,
-        min_entries: 1,
-        item_min: 200,
-        item_max: 599,
-        options: [
-          { value: 200, label: '200 OK' },
-          { value: 203, label: '203 Non-Authoritative' },
-          { value: 301, label: '301 Moved Permanently' },
-          { value: 308, label: '308 Permanent Redirect' },
-          { value: 404, label: '404 Not Found' },
-          { value: 410, label: '410 Gone' },
-        ],
-        default: [200, 301, 404],
-      },
-      {
-        kind: 'boolean',
-        key: 'cache_key_include_query',
-        label: 'Separate cache entries per query string',
-        help:
-          'The query string is always part of the key; changing this only rotates the keyspace, ' +
-          'so a cached response is never replayed across different queries either way.',
-        default: true,
-      },
-      {
-        kind: 'string_list',
-        key: 'vary_by_headers',
-        label: 'Also vary by these request headers',
-        help: 'One header name per line, e.g. `accept-language`.',
-        max_entries: 16,
-        item_pattern: HTTP_FIELD_NAME_PATTERN,
-        item_max_length: 128,
-      },
-    ],
-  },
-
-  {
     name: 'request_deduplication',
     category: 'traffic',
     label: 'Idempotency keys',
     summary:
-      'Makes a retried write safe: the first call with a given key runs, and an identical retry ' +
-      'replays the first response instead of charging the card twice.',
+      'Uses an idempotency key to replay completed backend responses within the configured ' +
+      'retention window. Pending requests and uncertain backend outcomes return 409 on retry.',
     consumer_recipe:
-      'Consumers send a unique key per logical operation in the header below and may safely ' +
-      'retry. Reusing a key with a different body is answered with 409 Conflict.',
+      'Send a unique key per logical operation and keep that key when retrying the same request. ' +
+      'A pending operation, an uncertain outcome, or a different request using the same key ' +
+      'returns 409 Conflict while its record remains active. Do not switch keys to bypass it.',
     supports_trigger: true,
     fields: [
       {
@@ -753,9 +678,85 @@ export const PROVIDER_PLUGINS: readonly ProviderPluginDescriptor[] = [
   },
 ];
 
-/** Palette descriptor for `name`, or `undefined` when it is not in the palette. */
+/** Retained only to validate/remove installations made before palette retirement. */
+export const RETIRED_RESPONSE_CACHING: ProviderPluginDescriptor = {
+  name: 'response_caching',
+  category: 'traffic',
+  label: 'Response caching',
+  summary: 'Retired: authenticated responses require explicit backend shared-cache opt-in.',
+  consumer_recipe:
+    'Consumers see an `X-Cache-Status` header (`HIT`/`MISS`) and an `Age` on a cached ' +
+    'response. `Cache-Control: no-cache` on their request bypasses the cache.',
+  supports_trigger: false,
+  fields: [
+    {
+      kind: 'integer',
+      key: 'ttl_seconds',
+      label: 'Default freshness',
+      help: 'Used when your backend sends no `Cache-Control` of its own; yours always wins.',
+      min: 1,
+      max: 86_400,
+      default: 300,
+      unit: 'seconds',
+    },
+    {
+      kind: 'string_list',
+      key: 'cacheable_methods',
+      label: 'Methods to cache',
+      help: 'Only bodyless reads can be cached — the gateway refuses anything else.',
+      max_entries: 2,
+      min_entries: 1,
+      options: [
+        { value: 'GET', label: 'GET' },
+        { value: 'HEAD', label: 'HEAD' },
+      ],
+      default: ['GET'],
+    },
+    {
+      kind: 'integer_list',
+      key: 'cacheable_status_codes',
+      label: 'Statuses to cache',
+      help: 'Partial (206) and validator-only (304) responses are never stored.',
+      max_entries: 8,
+      min_entries: 1,
+      item_min: 200,
+      item_max: 599,
+      options: [
+        { value: 200, label: '200 OK' },
+        { value: 203, label: '203 Non-Authoritative' },
+        { value: 301, label: '301 Moved Permanently' },
+        { value: 308, label: '308 Permanent Redirect' },
+        { value: 404, label: '404 Not Found' },
+        { value: 410, label: '410 Gone' },
+      ],
+      default: [200, 301, 404],
+    },
+    {
+      kind: 'boolean',
+      key: 'cache_key_include_query',
+      label: 'Separate cache entries per query string',
+      help:
+        'The query string is always part of the key; changing this only rotates the keyspace, ' +
+        'so a cached response is never replayed across different queries either way.',
+      default: true,
+    },
+    {
+      kind: 'string_list',
+      key: 'vary_by_headers',
+      label: 'Also vary by these request headers',
+      help: 'One header name per line, e.g. `accept-language`.',
+      max_entries: 16,
+      item_pattern: HTTP_FIELD_NAME_PATTERN,
+      item_max_length: 128,
+    },
+  ],
+};
+
+/** Descriptor for an offered or retired plugin, or `undefined` for an unknown name. */
 export function findProviderPlugin(name: string): ProviderPluginDescriptor | undefined {
-  return PROVIDER_PLUGINS.find((plugin) => plugin.name === name);
+  return name === 'response_caching'
+    ? RETIRED_RESPONSE_CACHING
+    : PROVIDER_PLUGINS.find((plugin) => plugin.name === name);
 }
 
 /**
@@ -809,7 +810,7 @@ export interface ApiPluginTrigger {
 
 /** One palette plugin as configured on an API. */
 export interface ApiPlugin {
-  /** Exact Edge plugin name; always one of {@link PROVIDER_PLUGINS}. */
+  /** Exact Edge plugin name; existing rows may name a retired palette entry. */
   plugin_name: string;
   /**
    * When `false` the config still exists on the gateway and stays associated

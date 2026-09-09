@@ -40,9 +40,11 @@
  * - API specs: `POST`/`PUT /api-specs` create the proxy from `x-ferrum-proxy`,
  *   stamp `api_spec_id` on it, and generate an associated `openapi_validator`
  *   whose operation table is built from the document's paths prefixed by the
- *   `servers[]` pathnames — plus the admission rule that makes issue #49 fail
- *   here as loudly as it does on a real gateway: a hand-built
- *   `openapi_validator` on a proxy with no attached spec is a `400`.
+ *   `servers[]` pathnames — resolved the way OpenAPI defines it, with a Path
+ *   Item's or an Operation's own `servers` overriding the root's — plus the
+ *   admission rule that makes issue #49 fail here as loudly as it does on a
+ *   real gateway: a hand-built `openapi_validator` on a proxy with no attached
+ *   spec is a `400`.
  *
  *   Faithful about the **operation table**, which is what `routes` enforcement
  *   is. Real Edge additionally materializes request/response schemas into each
@@ -140,6 +142,68 @@ export interface MockFerrumEdgeOptions {
   requireNamespaceClaim?: boolean;
 }
 
+/** Native direct-plugin CORS defaults; omission is observably different from Nexus policy. */
+export function mockCorsPreflight(
+  config: Record<string, unknown> | undefined,
+): Record<string, string> {
+  if (!config) return {};
+  const headers = config.allowed_headers ?? [
+    'Accept',
+    'Authorization',
+    'Content-Type',
+    'Origin',
+    'X-Requested-With',
+  ];
+  const methods = config.allowed_methods ?? [
+    'GET',
+    'HEAD',
+    'POST',
+    'PUT',
+    'PATCH',
+    'DELETE',
+    'OPTIONS',
+  ];
+  return {
+    'access-control-allow-headers': (headers as string[]).join(', '),
+    'access-control-allow-methods': (methods as string[]).join(', '),
+  };
+}
+
+/** Edge's independent upgrade gate requires Origin whenever the list is nonempty. */
+export function mockWebsocketAllowed(proxy: Record<string, unknown>, origin?: string): boolean {
+  const origins = proxy.allowed_ws_origins;
+  if (!Array.isArray(origins) || origins.length === 0) return true;
+  return origins.some((allowed) => String(allowed).toLowerCase() === origin?.toLowerCase());
+}
+
+/** Key partitioning cannot override Edge's authenticated-response storage admission. */
+export function mockCacheStorageAllowed(authenticated: boolean, cacheControl = ''): boolean {
+  const directives = cacheControl.toLowerCase().split(/\s*,\s*/);
+  if (directives.some((value) => /^(private|no-store|no-cache)(=|$)/.test(value))) return false;
+  return (
+    !authenticated ||
+    directives.some((value) => /^(public|must-revalidate)$|^s-maxage=\d+$/.test(value))
+  );
+}
+
+/** Model the compression/deduplication composition rule, including equal priorities. */
+export function mockPaletteCompositionError(plugins: Record<string, unknown>[]): string | null {
+  const active = plugins.filter((plugin) => plugin.enabled !== false);
+  const compressors = active.filter((plugin) => plugin.plugin_name === 'compression');
+  const deduplicators = active.filter((plugin) => plugin.plugin_name === 'request_deduplication');
+  for (const compressor of compressors) {
+    for (const deduplicator of deduplicators) {
+      if (
+        Number(compressor.priority_override ?? 4_050) >=
+        Number(deduplicator.priority_override ?? 3_010)
+      ) {
+        return 'request mutation plugin compression must run before request_deduplication';
+      }
+    }
+  }
+  return null;
+}
+
 /** A queued synthetic delay, consumed by the next matching request. */
 interface QueuedDelay {
   /** Only delay requests whose path contains this substring. */
@@ -183,6 +247,18 @@ export interface MockFerrumEdge {
   /** Clear stored resources, recorded requests and queued failures. */
   reset(): void;
   /**
+   * Drop every armed {@link MockFerrumEdge.queueFailure} and
+   * {@link MockFerrumEdge.delay}, leaving stored resources alone.
+   *
+   * Both are one-shot and both are *matched*, so one that never met a matching
+   * request stays armed for the next test in the file and fires somewhere it
+   * was never meant to — a failure whose cause is two tests away from its
+   * symptom. Suites that arm either should clear them in an `afterEach`;
+   * {@link MockFerrumEdge.reset} does this too, but takes the whole gateway
+   * with it.
+   */
+  clearInjections(): void;
+  /**
    * Replace the payload returned by `GET /health` and `GET /status`.
    *
    * A payload with `ready: false` is served with **HTTP 503**, the way Edge
@@ -197,6 +273,29 @@ export interface MockFerrumEdge {
    * for an operation that makes the same call twice.
    */
   queueFailure(
+    status: number,
+    body?: unknown,
+    pathContains?: string,
+    method?: string,
+    skip?: number,
+  ): void;
+  /**
+   * Apply the next matching request normally, then answer it with `status` and
+   * `body` — the lost acknowledgement of a write Edge really did perform.
+   *
+   * {@link MockFerrumEdge.queueFailure} refuses a request *before* it touches
+   * the stored resource, which models a gateway that declined the write. This
+   * models the other half: the mutation lands, the caller is told it did not,
+   * and the two sides are left disagreeing with nothing on the wire to say so.
+   * Narrowed by `pathContains`, `method` and `skip` exactly as failures are.
+   *
+   * It is armed before the request is dispatched and applied by {@link send},
+   * so it covers **every** verb the mock handles — a credential `POST` whose
+   * entry is appended and whose answer is lost reads to the client exactly
+   * like the refusal it is not, which is the shape that leaves a live gateway
+   * entry with no portal row at all.
+   */
+  queueLostAck(
     status: number,
     body?: unknown,
     pathContains?: string,
@@ -390,6 +489,14 @@ const PROXY_KEYS = new Set([
  * without inspection, exactly as an unknown-to-Nexus plugin would be.
  */
 const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = {
+  prometheus_metrics: [
+    'cache_invalidation_min_age_ms',
+    'mesh_series_budget_per_family',
+    'render_cache_ttl_seconds',
+    'schema',
+    'schema_ref',
+    'stale_entry_ttl_seconds',
+  ],
   key_auth: ['key_location', 'hide_credentials'],
   // `basic_auth` accepts *no* fields at all — an empty list is the point.
   basic_auth: [],
@@ -651,6 +758,9 @@ function pathTemplateRegex(template: string): string {
  * is the trap Nexus avoids by rewriting `servers` to the listen path: a
  * document left with its upstream there generates `^/invoices$` and nothing
  * arriving at `/nexus/<slug>/invoices` can ever match it.
+ *
+ * Called once per level — see {@link generateOperations} — because the nearest
+ * declaration wins, not the union of all of them.
  */
 function serverBases(servers: unknown): string[] {
   if (!Array.isArray(servers) || servers.length === 0) return [''];
@@ -664,15 +774,31 @@ function serverBases(servers: unknown): string[] {
   return bases.length === 0 ? [''] : bases;
 }
 
-/** The operation table Edge's importer generates from a document. */
+/**
+ * The operation table Edge's importer generates from a document.
+ *
+ * `servers` is resolved the way OpenAPI defines it and Edge's extractor
+ * implements it: root, Path Item and Operation each may declare one, and the
+ * **nearest** declaration wins for the operation being extracted. Modelling
+ * only the root — which this fake used to do — makes it generate the correct
+ * matcher for a document the real gateway gets wrong, which is how issue #140
+ * survived a green suite: a nested `servers` produced `^/other/one$` on a live
+ * gateway and `400`ed every request while the mock reported the listen path.
+ */
 function generateOperations(document: Record<string, unknown>): Record<string, unknown>[] {
   const paths = isRecord(document.paths) ? document.paths : {};
-  const bases = serverBases(document.servers);
+  const rootBases = serverBases(document.servers);
   const operations: Record<string, unknown>[] = [];
   for (const [template, item] of Object.entries(paths)) {
     if (!isRecord(item)) continue;
+    const itemBases = item.servers === undefined ? rootBases : serverBases(item.servers);
     for (const method of OPENAPI_METHOD_KEYS) {
-      if (item[method] === undefined) continue;
+      const operation = item[method];
+      if (operation === undefined) continue;
+      const bases =
+        isRecord(operation) && operation.servers !== undefined
+          ? serverBases(operation.servers)
+          : itemBases;
       for (const base of bases) {
         operations.push({
           method: method.toUpperCase(),
@@ -1280,7 +1406,17 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   const namespaces = new Map<string, { name: string; description: string | null }>();
   const requests: RecordedRequest[] = [];
   const failures: QueuedFailure[] = [];
+  const lostAcks: QueuedFailure[] = [];
   const delays: QueuedDelay[] = [];
+  /**
+   * Responses whose acknowledgement is being dropped, keyed by the response
+   * object the handler will eventually write to.
+   *
+   * Armed before the request is dispatched and consumed by {@link send}, so
+   * every handler — and every status it might have chosen — is covered without
+   * any of them knowing.
+   */
+  const droppedAcks = new WeakMap<ServerResponse, { status: number; body: unknown }>();
 
   /** `<namespace>|<proxy_id>|<method>|<status>` → cumulative count. */
   const requestCounters = new Map<string, number>();
@@ -1454,6 +1590,11 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
   }
 
   function send(res: ServerResponse, status: number, body?: unknown): void {
+    const dropped = droppedAcks.get(res);
+    if (dropped) {
+      droppedAcks.delete(res);
+      return send(res, dropped.status, dropped.body);
+    }
     if (body === undefined) {
       res.writeHead(status);
       res.end();
@@ -1567,6 +1708,14 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
     if (id === undefined) {
       if (method === 'GET') {
+        // Edge has no consumer filters (its parser currently ignores unknown
+        // keys). Reject them here so tests cannot mistake an unfiltered page
+        // for a supported username lookup.
+        for (const field of query.keys()) {
+          if (field !== 'offset' && field !== 'limit') {
+            return fail(res, 400, `unknown query parameter: ${field}`);
+          }
+        }
         send(res, 200, paginate(consumersIn(namespace).map(project), query));
         return;
       }
@@ -1793,6 +1942,12 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
     }
 
+    const composition = mockPaletteCompositionError(
+      [...seen]
+        .map((id) => pluginConfigs.get(key(namespace, id)))
+        .filter((config): config is Record<string, unknown> => config !== undefined),
+    );
+    if (composition) errors.push(composition);
     return errors.length === 0 ? null : `Invalid proxy plugin associations: ${errors.join('; ')}`;
   }
 
@@ -1855,6 +2010,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
           id: newId,
           namespace,
           strip_listen_path: body.strip_listen_path ?? true,
+          plugins: body.plugins ?? [],
           created_at: nowIso(),
           updated_at: nowIso(),
         };
@@ -1889,6 +2045,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         ...body,
         id,
         namespace,
+        plugins: body.plugins === undefined ? existing.plugins : body.plugins,
         // Server-owned like the timestamps: only the spec importer sets or
         // clears the ownership tag, so a replace can neither adopt a proxy into
         // a spec nor orphan one out of it.
@@ -1951,31 +2108,54 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
    */
   function apiSpecProblem(
     body: unknown,
-  ): { error: string; status: number } | { proxy: Record<string, unknown> } {
-    if (!isRecord(body)) return { error: 'Request body must be a JSON object', status: 400 };
+  ):
+    | { error: string; code: string; details: string; status: number }
+    | { proxy: Record<string, unknown> } {
+    const parseError = (code: string, details: string, status = 400) => ({
+      error: 'Spec parse failed',
+      code,
+      details,
+      status,
+    });
+    if (!isRecord(body)) return parseError('InvalidJson', 'Request body must be a JSON object');
+    if (typeof body.openapi !== 'string' || !/^3\./.test(body.openapi)) {
+      return parseError('UnknownVersion', 'unknown spec version (expected openapi: 3.x.y)');
+    }
     if (body['x-ferrum-consumers'] !== undefined) {
-      return { error: 'x-ferrum-consumers is not allowed in spec documents', status: 400 };
+      return parseError(
+        'ConsumerExtensionNotAllowed',
+        'x-ferrum-consumers is not allowed in spec documents',
+        422,
+      );
     }
     const proxy = body['x-ferrum-proxy'];
     if (!isRecord(proxy)) {
-      return { error: 'Spec document must contain an x-ferrum-proxy object', status: 400 };
+      return parseError(
+        'MissingProxyExtension',
+        'Spec document must contain an x-ferrum-proxy object',
+      );
     }
     if (proxy.api_spec_id !== undefined) {
-      return { error: 'api_spec_id is server-managed and must be omitted', status: 422 };
+      return parseError('MalformedExtension', 'api_spec_id is server-managed and must be omitted');
     }
     for (const field of Object.keys(proxy)) {
-      if (!PROXY_KEYS.has(field)) return { error: `unknown field: ${field}`, status: 400 };
+      if (!PROXY_KEYS.has(field)) {
+        return parseError(
+          'MalformedExtension',
+          `malformed x-ferrum-proxy: unknown field: ${field}`,
+        );
+      }
     }
     const validate = body['x-ferrum-validate'];
     if (isRecord(validate)) {
       for (const field of Object.keys(validate)) {
         if (!FERRUM_VALIDATE_KEYS.has(field)) {
-          return { error: `unknown x-ferrum-validate field: ${field}`, status: 400 };
+          return parseError('MalformedExtension', `unknown x-ferrum-validate field: ${field}`);
         }
       }
     }
     const settingsProblem = validateProxySettings(proxy);
-    if (settingsProblem) return { error: settingsProblem, status: 400 };
+    if (settingsProblem) return parseError('MalformedExtension', settingsProblem);
     return { proxy };
   }
 
@@ -2082,7 +2262,10 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       if (method !== 'POST') return fail(res, 405, 'Method not allowed');
 
       const checked = apiSpecProblem(body);
-      if ('error' in checked) return fail(res, checked.status, checked.error);
+      if ('error' in checked) {
+        const { status, ...rejection } = checked;
+        return send(res, status, rejection);
+      }
       const document = body as Record<string, unknown>;
       const proxyBody = checked.proxy;
 
@@ -2095,7 +2278,17 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         return fail(res, 409, `Proxy '${proxyId}' already exists in this namespace`);
       }
       if (listenPathTaken(namespace, proxyBody.listen_path)) {
-        return fail(res, 409, 'listen_path already exists in this namespace');
+        return send(res, 422, {
+          error: 'Spec validation failed',
+          spec_version: document.openapi,
+          failures: [
+            {
+              resource_type: 'proxy',
+              id: proxyId,
+              errors: ['A proxy with overlapping hosts and listen_path already exists'],
+            },
+          ],
+        });
       }
       if (specForProxy(namespace, proxyId)) {
         return fail(res, 409, `A spec already exists for proxy '${proxyId}'`);
@@ -2128,7 +2321,10 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     if (method === 'PUT') {
       if (!existing) return fail(res, 404, 'API spec not found');
       const checked = apiSpecProblem(body);
-      if ('error' in checked) return fail(res, checked.status, checked.error);
+      if ('error' in checked) {
+        const { status, ...rejection } = checked;
+        return send(res, status, rejection);
+      }
       const document = body as Record<string, unknown>;
       const proxyBody = checked.proxy;
       if (typeof proxyBody.id === 'string' && proxyBody.id !== existing.proxy_id) {
@@ -2141,7 +2337,17 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       // spec-owned proxy is cut over onto the real path — so the uniqueness
       // check applies here too, excluding the proxy being re-inserted.
       if (listenPathTaken(namespace, proxyBody.listen_path, existing.proxy_id)) {
-        return fail(res, 409, 'listen_path already exists in this namespace');
+        return send(res, 422, {
+          error: 'Spec validation failed',
+          spec_version: document.openapi,
+          failures: [
+            {
+              resource_type: 'proxy',
+              id: existing.proxy_id,
+              errors: ['A proxy with overlapping hosts and listen_path already exists'],
+            },
+          ],
+        });
       }
       const proxy = proxies.get(key(namespace, existing.proxy_id));
       existing.document = document;
@@ -2275,7 +2481,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
           id: typeof body.id === 'string' && body.id !== '' ? body.id : randomUUID(),
           namespace,
           enabled: body.enabled ?? true,
-          config: body.config ?? {},
+          config: body.config === undefined ? {} : body.config,
           created_at: nowIso(),
           updated_at: nowIso(),
         };
@@ -2319,6 +2525,19 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         created_at: existing.created_at,
         updated_at: nowIso(),
       };
+      for (const proxy of proxies.values()) {
+        if (proxy.namespace !== namespace || !Array.isArray(proxy.plugins)) continue;
+        const ids = proxy.plugins.filter(isRecord).map((entry) => String(entry.plugin_config_id));
+        if (!ids.includes(id)) continue;
+        const composition = mockPaletteCompositionError(
+          ids
+            .map((configId) =>
+              configId === id ? updated : pluginConfigs.get(key(namespace, configId)),
+            )
+            .filter((config): config is Record<string, unknown> => config !== undefined),
+        );
+        if (composition) return fail(res, 400, composition);
+      }
       pluginConfigs.set(key(namespace, id), updated);
       return send(res, 200, updated);
     }
@@ -2444,6 +2663,23 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       }
     }
 
+    // Armed, not applied: the request runs to completion against the stored
+    // resource and only its *answer* is replaced, which is what a lost
+    // acknowledgement looks like from the client's side.
+    const lost = lostAcks.find(
+      (entry) =>
+        (entry.pathContains === undefined || url.pathname.includes(entry.pathContains)) &&
+        (entry.method === undefined || entry.method === method),
+    );
+    if (lost) {
+      if (lost.skip > 0) {
+        lost.skip -= 1;
+      } else {
+        lostAcks.splice(lostAcks.indexOf(lost), 1);
+        droppedAcks.set(res, { status: lost.status, body: lost.body });
+      }
+    }
+
     switch (segments[0]) {
       case 'health':
       case 'status':
@@ -2547,10 +2783,19 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       namespaces.clear();
       requests.length = 0;
       failures.length = 0;
+      lostAcks.length = 0;
       delays.length = 0;
       requestCounters.clear();
       requestDurations.clear();
       backendStates.clear();
+    },
+
+    clearInjections(): void {
+      failures.length = 0;
+      // A lost acknowledgement is armed one-shot exactly as a failure is, so
+      // clearing injections has to disarm one that no request ever matched.
+      lostAcks.length = 0;
+      delays.length = 0;
     },
 
     setHealth(payload: Record<string, unknown>): void {
@@ -2567,6 +2812,22 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       failures.push({
         status,
         body: body ?? { error: 'Injected failure' },
+        skip,
+        ...(pathContains === undefined ? {} : { pathContains }),
+        ...(method === undefined ? {} : { method }),
+      });
+    },
+
+    queueLostAck(
+      status: number,
+      body?: unknown,
+      pathContains?: string,
+      method?: string,
+      skip = 0,
+    ): void {
+      lostAcks.push({
+        status,
+        body: body ?? { error: 'Acknowledgement dropped after the write landed' },
         skip,
         ...(pathContains === undefined ? {} : { pathContains }),
         ...(method === undefined ? {} : { method }),
@@ -2594,6 +2855,15 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     },
 
     recordRequests(proxyId, entry, namespace = 'nexus'): void {
+      // Edge records these families only when the namespace enables the plugin.
+      const enabled = [...pluginConfigs.values()].some(
+        (config) =>
+          config.namespace === namespace &&
+          config.plugin_name === 'prometheus_metrics' &&
+          config.scope === 'global' &&
+          config.enabled === true,
+      );
+      if (!enabled) return;
       const counterKey = `${namespace}|${proxyId}|${entry.method}|${String(entry.status)}`;
       requestCounters.set(counterKey, (requestCounters.get(counterKey) ?? 0) + entry.count);
       if (entry.durations && entry.durations.length > 0) {

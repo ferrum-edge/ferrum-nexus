@@ -3,8 +3,10 @@ import { describe, it } from 'node:test';
 
 import {
   MAX_SPEC_BYTES,
+  MAX_SPEC_DEPTH,
   MAX_SPEC_OPERATIONS,
   MAX_SPEC_PATHS,
+  MAX_UPSTREAM_URL_LENGTH,
   OPENAPI_OPERATION_METHODS,
 } from '@ferrum-nexus/shared';
 
@@ -114,6 +116,49 @@ const VALID_YAML = [
 ].join('\n');
 
 describe('OpenAPI parsing', () => {
+  it('bounds object and array nesting before serialization, including YAML aliases', () => {
+    const document = (levels: number): string => {
+      const nested = `${'['.repeat(levels)}0${']'.repeat(levels)}`;
+      return `{"openapi":"3.1.0","info":{"title":"Depth","version":"1"},"paths":{},"x-deep":${nested}}`;
+    };
+    assert.doesNotThrow(() => parseOpenApiSpec(document(MAX_SPEC_DEPTH - 1)));
+    for (const levels of [MAX_SPEC_DEPTH, 7_000]) {
+      const failure = expectSpecInvalid(() => parseOpenApiSpec(document(levels)));
+      assert.deepEqual(failure.details, { reason: 'nesting_too_deep', limit: MAX_SPEC_DEPTH });
+    }
+    const cycle = `${VALID_YAML}\nx-cycle: &cycle\n  child: *cycle\n`;
+    const cycleFailure = expectSpecInvalid(() => parseOpenApiSpec(cycle));
+    assert.deepEqual(cycleFailure.details, { reason: 'cyclic_alias' });
+  });
+
+  it('bounds literal and expanded server URLs using the typed upstream limit', () => {
+    const document = (server: Record<string, unknown>): string =>
+      JSON.stringify({
+        openapi: '3.1.0',
+        info: { title: 'URL bounds', version: '1' },
+        paths: {},
+        servers: [server],
+      });
+    const prefix = 'https://backend.example.com/';
+    const boundary = prefix + 'x'.repeat(MAX_UPSTREAM_URL_LENGTH - prefix.length);
+    assert.ok(parseOpenApiSpec(document({ url: boundary })).defaultUpstream);
+    for (const server of [
+      { url: `${boundary}x` },
+      { url: `${prefix}${'x'.repeat(3_000)}` },
+      {
+        url: `${prefix}{base}{base}`,
+        variables: { base: { default: 'x'.repeat(1_000) } },
+      },
+    ]) {
+      const failure = expectSpecInvalid(() => parseOpenApiSpec(document(server)));
+      assert.match(failure.message, /servers\[0\]\.url/);
+      assert.deepEqual(failure.details, {
+        field: 'servers[0].url',
+        limit: MAX_UPSTREAM_URL_LENGTH,
+      });
+    }
+  });
+
   it('reads title, version, description and path count out of YAML', () => {
     const spec = parseOpenApiSpec(VALID_YAML);
     assert.equal(spec.title, 'Billing API');

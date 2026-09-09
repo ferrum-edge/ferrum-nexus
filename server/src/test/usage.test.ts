@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import type { ApiErrorBody, ApiUsageResponse, PublishApiResponse } from '@ferrum-nexus/shared';
 
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
+import { reconcileGateway } from '../ferrum-admin/reconcile.js';
 
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
@@ -48,6 +49,7 @@ describe('api usage', () => {
 
   beforeEach(async () => {
     harness = await buildTestApp();
+    await reconcileGateway(harness.edgeClient, harness.services.audit, harness.app.log);
     founder = await harness.registerUser({ email: 'usage-founder@example.test' });
     provider = await harness.registerUser({
       email: 'usage-provider@example.test',
@@ -109,8 +111,9 @@ describe('api usage', () => {
       assert.equal(usage.backend.status, 'healthy');
     });
 
-    it('reports zero and no latency for an API nothing has called', async () => {
-      const { apiId } = await publishApi('usage-quiet');
+    it('reports an explicit zero series as measured zero with no latency', async () => {
+      const { apiId, proxyId } = await publishApi('usage-quiet');
+      harness.edge.recordRequests(proxyId, { method: 'GET', status: 200, count: 0 });
 
       const usage = await usageFor(provider, apiId);
 
@@ -119,6 +122,18 @@ describe('api usage', () => {
       assert.equal(usage.latency_ms, null);
       assert.equal(usage.backend.status, 'unknown');
       assert.match(String(usage.backend.detail), /No traffic/i);
+    });
+
+    it('reports missing plugin measurements as unavailable through the real scrape', async () => {
+      const { apiId, proxyId } = await publishApi('usage-unmeasured');
+      harness.edge.pluginConfigs.clear();
+      harness.edge.recordRequests(proxyId, { method: 'GET', status: 200, count: 96 });
+
+      const usage = await usageFor(provider, apiId);
+
+      assert.equal(usage.available, false);
+      assert.match(usage.unavailable_reason ?? '', /no request metrics for this API/);
+      assert.doesNotMatch(usage.backend.detail ?? '', /No traffic/);
     });
 
     it('does not count another API’s traffic', async () => {

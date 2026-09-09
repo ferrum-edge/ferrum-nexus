@@ -23,7 +23,11 @@
  */
 
 import { useId, type ReactElement } from 'react';
-import type { PluginFieldSpec, ProviderPluginDescriptor } from '@ferrum-nexus/shared';
+import {
+  CORRELATION_ID_RESERVED_HEADERS,
+  type PluginFieldSpec,
+  type ProviderPluginDescriptor,
+} from '@ferrum-nexus/shared';
 import { Checkbox, Field, Input, Textarea } from '../ui/Input';
 import { Select } from '../ui/Select';
 
@@ -217,8 +221,8 @@ function fieldError(field: PluginFieldSpec, draft: PluginDraft): string | null {
  * Every message for a draft: one per field, plus the whole-plugin invariants
  * under {@link FORM_ERROR_KEY}.
  *
- * The two invariants mirrored here are the two Edge itself enforces beyond its
- * key sets, so the provider is told before the save rather than after it.
+ * These invariants mirror the ones Edge itself enforces beyond its key sets,
+ * so the provider is told before the save rather than after it.
  */
 export function validateDraft(
   descriptor: ProviderPluginDescriptor,
@@ -243,6 +247,14 @@ export function validateDraft(
     if (blocked.length === 0 && draft.allow_missing_user_agent !== false) {
       errors[FORM_ERROR_KEY] =
         'With no blocked patterns, requests with no User-Agent must be rejected — otherwise this filter blocks nothing.';
+    }
+  }
+  if (descriptor.name === 'correlation_id') {
+    const header = String(draft.header_name ?? '').trim();
+    if (CORRELATION_ID_RESERVED_HEADERS.includes(header.toLowerCase())) {
+      errors.header_name =
+        `The gateway owns '${header}' and rejects it as a correlation header; ` +
+        'choose a name of your own, such as x-request-id';
     }
   }
   return errors;

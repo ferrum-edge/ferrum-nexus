@@ -57,6 +57,27 @@
  * actually send. Leave it alone and every request 400s as an unknown
  * operation — including the declared ones.
  *
+ * Replacing the root is not enough on its own. OpenAPI resolves `servers` at
+ * three levels — root, Path Item, Operation — and the **nearest one wins**, so
+ * a document that overrides `servers` on a path or an operation keeps that
+ * override through the rewrite and Edge builds the matcher from it. The result
+ * is a matcher describing a path no client can send (`^/other/one$` for an API
+ * published at `/nexus/relserver`), and with
+ * `fail_on_unknown_operation: true` that is a `400` on every declared
+ * operation of an API the portal just reported as published. So every nested
+ * `servers` is **stripped** as well — see {@link routesSpecDocument} for the
+ * exact reach of that walk.
+ *
+ * A `$ref` is the same override wearing a disguise. Edge resolves a Path Item
+ * reference as an *unrestricted* same-document JSON pointer and reads `servers`
+ * off whatever it lands on, so `paths./invoices: { $ref: '#/webhooks/Invoices' }`
+ * with a `servers` under that webhook produces the unreachable matcher just as
+ * directly as writing it on the path would. The strip therefore covers every
+ * container a submitted document may point into, and
+ * {@link assertRoutesSubmittable} **refuses** a `routes` document that points
+ * anywhere else — a rewrite that can be side-stepped by one indirection is not
+ * a guarantee.
+ *
  * ## CORS preflights need nothing here
  *
  * `cors` runs at priority 100 and `openapi_validator` at 2960
@@ -71,7 +92,10 @@
  * docs/plugin_execution_order.md in the Ferrum Edge repository.
  */
 
+import type { SpecEnforcementLevel } from '@ferrum-nexus/shared';
+
 import type { EdgeApiSpecDocument, EdgePluginConfig, EdgeProxy } from '../ferrum-admin/types.js';
+import { specInvalid } from '../lib/errors.js';
 
 /** Name of the Edge plugin that enforces the operation table. */
 export const OPENAPI_VALIDATOR_PLUGIN = 'openapi_validator';
@@ -150,6 +174,170 @@ export function submittableProxyBody(proxy: EdgeProxy): Record<string, unknown> 
   return body;
 }
 
+/**
+ * The Path Item keys that hold an Operation Object.
+ *
+ * OpenAPI's fixed set, and the only place below a Path Item where `servers` can
+ * appear. Everything else under a path item (`parameters`, `summary`, `$ref`,
+ * vendor extensions) is left exactly as uploaded.
+ */
+const OPENAPI_OPERATION_KEYS = [
+  'get',
+  'put',
+  'post',
+  'delete',
+  'options',
+  'head',
+  'patch',
+  'trace',
+] as const;
+
+/** A plain object, i.e. something that could be an OpenAPI node. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A Path Item with `servers` gone from itself and from every operation under
+ * it, or the node itself when it declared none.
+ *
+ * Returns the input by identity when nothing changed, which is what lets the
+ * callers leave an untouched document byte-for-byte identical to today's
+ * output rather than deep-copying the whole `paths` tree on every publish.
+ */
+function pathItemWithoutServers(item: unknown): unknown {
+  if (!isRecord(item)) return item;
+  let copy: Record<string, unknown> | null = null;
+  const edited = (): Record<string, unknown> => (copy ??= { ...item });
+  if ('servers' in item) delete edited().servers;
+  for (const method of OPENAPI_OPERATION_KEYS) {
+    const operation = item[method];
+    if (!isRecord(operation) || !('servers' in operation)) continue;
+    const withoutServers = { ...operation };
+    delete withoutServers.servers;
+    edited()[method] = withoutServers;
+  }
+  return copy ?? item;
+}
+
+/**
+ * Every Path Item in a container, with nested `servers` stripped.
+ *
+ * `holdsPathItem` is what keeps the walk explicit: a Paths Object mixes path
+ * templates with `^x-` specification extensions, and only the templates are
+ * Path Items. The other containers walked below — `components.pathItems`, a
+ * `webhooks` map and a Callback Object — are keyed by name or by runtime
+ * expression rather than by path template, with nothing to tell apart, so they
+ * pass `() => true`.
+ */
+function pathItemsWithoutServers(
+  container: unknown,
+  holdsPathItem: (key: string) => boolean,
+): unknown {
+  if (!isRecord(container)) return container;
+  let copy: Record<string, unknown> | null = null;
+  for (const [key, item] of Object.entries(container)) {
+    if (!holdsPathItem(key)) continue;
+    const rewritten = pathItemWithoutServers(item);
+    if (rewritten === item) continue;
+    (copy ??= { ...container })[key] = rewritten;
+  }
+  return copy ?? container;
+}
+
+/**
+ * Every Callback Object in a `components.callbacks` map, with nested `servers`
+ * stripped from the Path Items inside it.
+ *
+ * A callback's `servers` normally describes a request the *provider's* service
+ * makes outbound, which is why the `callbacks` hanging off an operation are
+ * left exactly as uploaded. A `components.callbacks` entry is different in one
+ * respect that matters: it is a named container of Path Items addressable by
+ * JSON pointer, so Edge's resolver would read `servers` off one exactly as it
+ * does off a `components.pathItems` entry. {@link assertRoutesSubmittable}
+ * refuses the pointer that would do it; the strip is the second lock on the
+ * same door, and it costs a document nothing an operation table can observe.
+ */
+function callbacksWithoutServers(container: unknown): unknown {
+  if (!isRecord(container)) return container;
+  let copy: Record<string, unknown> | null = null;
+  for (const [name, callback] of Object.entries(container)) {
+    const rewritten = pathItemsWithoutServers(callback, () => true);
+    if (rewritten === callback) continue;
+    (copy ??= { ...container })[name] = rewritten;
+  }
+  return copy ?? container;
+}
+
+/**
+ * The containers a submitted document's `paths` may reference a Path Item in.
+ *
+ * Edge resolves a Path Item `$ref` as an **unrestricted** same-document JSON
+ * pointer (`resolve_reference`, `src/admin/api_specs/extractor.rs`) and builds
+ * the operation's matcher from the `servers` of whatever it lands on — Path
+ * Items under `paths`, under `components.pathItems` and under `webhooks` are
+ * all indexed for that. Those three are exactly the containers
+ * {@link routesSpecDocument} strips, which is why they are exactly the three a
+ * `routes` document is allowed to point into.
+ */
+const RESOLVABLE_PATH_ITEM_POINTERS = [
+  '#/paths/',
+  '#/components/pathItems/',
+  '#/webhooks/',
+] as const;
+
+/**
+ * Refuse a `routes` document whose `paths` reference a Path Item this module
+ * does not rewrite.
+ *
+ * The `servers` strip is only a guarantee if it cannot be side-stepped, and one
+ * `$ref` side-steps it: Edge resolves the pointer, reads `servers` off the
+ * resolved item and generates `^/other/invoices$` for an API published at
+ * `/nexus/billing` — a matcher no client can hit, and with
+ * `fail_on_unknown_operation: true` a `400` on every declared operation of an
+ * API the portal just reported as published. Nexus could chase an arbitrary
+ * pointer and rewrite whatever it finds, but that is a second implementation of
+ * Edge's resolver, and the whole reason `routes` hands Edge the document is not
+ * to have one of those.
+ *
+ * So the pointers that stay inside {@link RESOLVABLE_PATH_ITEM_POINTERS} are
+ * accepted — the strip walk has already been over all three — and anything
+ * else, an external document included, is refused with a message naming the
+ * path and the ways out. Refusing is the same trade
+ * {@link assertRoutesEnforceable} makes in `publishing/service.ts`: a `400` on
+ * upload the provider can act on, rather than a `201` and an API that rejects
+ * every request.
+ *
+ * A no-op for `docs_only`, whose document Edge never generates matchers from,
+ * so callers can pass the level straight through.
+ *
+ * @throws NexusError `SPEC_INVALID`
+ */
+export function assertRoutesSubmittable(
+  enforcement: SpecEnforcementLevel,
+  document: Record<string, unknown>,
+): void {
+  if (enforcement !== 'routes') return;
+  const paths = document.paths;
+  if (!isRecord(paths)) return;
+  for (const [template, item] of Object.entries(paths)) {
+    if (!template.startsWith('/') || !isRecord(item)) continue;
+    if (!('$ref' in item)) continue;
+    // A non-string `$ref` is not a reference at all; it matches no pointer
+    // below and is refused with the same message rather than submitted.
+    const reference = typeof item.$ref === 'string' ? item.$ref : '';
+    if (RESOLVABLE_PATH_ITEM_POINTERS.some((pointer) => reference.startsWith(pointer))) continue;
+    throw specInvalid(
+      `The path '${template}' is a $ref the gateway would resolve outside the part of the ` +
+        "document 'routes' enforcement can rewrite, so it could reintroduce a server base no " +
+        'client can reach; write the path item inline, or reference one under ' +
+        "'#/components/pathItems/', '#/webhooks/' or '#/paths/', or set the enforcement level " +
+        "back to 'docs_only'",
+      { field: 'spec', path: template, reason: 'unresolvable_path_item_ref' },
+    );
+  }
+}
+
 /** Inputs beyond the provider's document. */
 export interface RoutesSpecDocumentOptions {
   /** The proxy's listen path, e.g. `/nexus/billing`. */
@@ -172,22 +360,66 @@ export interface RoutesSpecDocumentOptions {
  *    rejects outright — would make the upload fail for a reason no provider
  *    could act on;
  * 2. `servers` is replaced with the listen path, so the generated operation
- *    matchers cover the path clients actually send (see the module docblock);
+ *    matchers cover the path clients actually send (see the module docblock),
+ *    and every **nested** `servers` is stripped so nothing can override that
+ *    replacement back to a path no client can reach;
  * 3. `x-ferrum-proxy` and `x-ferrum-validate` are stamped on.
  *
- * The copy is shallow because only root keys move: `paths`, `components` and
- * everything under them are handed to Edge exactly as uploaded.
+ * ## What the `servers` strip reaches, and what it deliberately does not
+ *
+ * An explicit shallow walk, not an arbitrary recursion — the point is that the
+ * set of nodes Nexus rewrites is knowable by reading this function:
+ *
+ * - **`paths.<template>`** and **`paths.<template>.<method>`**, the two nested
+ *   levels OpenAPI resolves `servers` at. Only keys that are path templates are
+ *   walked; a Paths Object's `^x-` extensions are data, not Path Items;
+ * - **`components.pathItems.<name>`**, **`webhooks.<name>`** and
+ *   **`components.callbacks.<name>.<expression>`**, with their operations. Each
+ *   is a Path Item addressable by JSON pointer, and Edge resolves a path
+ *   template that is a `$ref` to one as an unrestricted same-document pointer —
+ *   producing exactly the same operation-table entry, and therefore exactly the
+ *   same unreachable matcher, as writing the override on the path would;
+ * - **not** the callbacks hanging off an operation
+ *   (`paths.*.<method>.callbacks.*`). A callback describes a request the
+ *   *provider's* service makes to the client's URL. It is not served by this
+ *   proxy, Edge's extractor builds no listen-path matcher from it, and a
+ *   `servers` there is genuinely the provider's own — rewriting it would
+ *   corrupt documentation to no enforcement benefit. Nothing can `$ref` its way
+ *   into one either: {@link assertRoutesSubmittable}, called first, refuses a
+ *   `paths` entry pointing outside the three containers above.
+ *
+ * Only nodes that actually carried a `servers` key are copied; everything else
+ * is passed through by identity, so a document with no nested `servers` is
+ * submitted exactly as it was uploaded.
+ *
+ * @throws NexusError `SPEC_INVALID` for a `paths` entry that references a Path
+ * Item outside the containers above
  */
 export function routesSpecDocument(
   document: Record<string, unknown>,
   options: RoutesSpecDocumentOptions,
 ): EdgeApiSpecDocument {
+  assertRoutesSubmittable('routes', document);
   const submitted: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(document)) {
     if (key.startsWith('x-ferrum-')) continue;
     submitted[key] = value;
   }
   submitted.servers = [{ url: options.listenPath }];
+  const paths = pathItemsWithoutServers(submitted.paths, (key) => key.startsWith('/'));
+  if (paths !== submitted.paths) submitted.paths = paths;
+  const webhooks = pathItemsWithoutServers(submitted.webhooks, () => true);
+  if (webhooks !== submitted.webhooks) submitted.webhooks = webhooks;
+  const components = submitted.components;
+  if (isRecord(components)) {
+    let rewritten: Record<string, unknown> | null = null;
+    const edited = (): Record<string, unknown> => (rewritten ??= { ...components });
+    const pathItems = pathItemsWithoutServers(components.pathItems, () => true);
+    if (pathItems !== components.pathItems) edited().pathItems = pathItems;
+    const callbacks = callbacksWithoutServers(components.callbacks);
+    if (callbacks !== components.callbacks) edited().callbacks = callbacks;
+    if (rewritten !== null) submitted.components = rewritten;
+  }
   submitted['x-ferrum-proxy'] = options.proxy;
   submitted['x-ferrum-validate'] = { ...ROUTES_VALIDATE_EXTENSION };
   return submitted;

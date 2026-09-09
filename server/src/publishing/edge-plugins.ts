@@ -16,10 +16,19 @@
  *    `scoped_plugin_config_applies_to_proxy`). "Created the config" and "the
  *    gateway runs it" are different claims, so every create is followed by an
  *    association write and every removal is preceded by a disassociation.
+ * 3. **`PUT /plugins/config/{id}` is a whole-resource replace too**, so a body
+ *    built from scratch resets every field the portal does not model —
+ *    `priority_override` is the one that exists today, and any field Edge adds
+ *    later behaves the same way. {@link operatorOwnedFields} carries those across and `writeBody`
+ *    merges the portal's fields over them, which makes the rule structural
+ *    rather than a checklist (issue #159).
  *
- * Nexus stores no Edge plugin config ids: they are looked up by `proxy_id`
- * whenever they need changing, which keeps the schema free of a lifecycle it
- * does not own and reconciles automatically if an operator recreates one.
+ * The first-class configs (`rate_limiting`, `cors`, the auth plugin, the ACL
+ * gate) are still found by `proxy_id` + `plugin_name`, so an operator who
+ * recreates one by hand reconciles automatically. Palette plugins are not:
+ * `api_plugins.ferrum_plugin_config_id` records the config Nexus created,
+ * because a proxy may legitimately carry a second config of the same name that
+ * an operator made and the portal must never replace or delete (issue #153).
  *
  * @see ref-edge-admin.md §3 (proxies), §8 (plugin configs)
  */
@@ -47,6 +56,112 @@ import { notFound } from '../lib/errors.js';
  */
 const SERVER_OWNED_PROXY_FIELDS = ['namespace', 'created_at', 'updated_at'] as const;
 
+/**
+ * Fields of a plugin config the **portal** decides, and therefore rewrites on
+ * every create and every replace.
+ */
+const PORTAL_OWNED_PLUGIN_FIELDS = new Set([
+  'plugin_name',
+  'scope',
+  'proxy_id',
+  'enabled',
+  'config',
+  'trigger',
+]);
+
+/**
+ * Fields a `GET /plugins/config/{id}` returns that the **gateway** owns.
+ *
+ * The id travels in the URL, the namespace comes from `X-Ferrum-Namespace`, the
+ * timestamps from the server, and `api_spec_id` is Edge's own claim on a config
+ * its importer generated — a replace can neither claim nor disclaim it. None of
+ * them belongs in a write body.
+ *
+ * A read-only field Edge adds to the read model later has to be listed here
+ * too, or {@link operatorOwnedFields} echoes it into a body that
+ * `deny_unknown_fields` refuses. That is the deliberate trade: carrying an
+ * unknown field by default preserves an operator's settings, and the failure
+ * mode is a loud 400 rather than a silent reset (issue #159).
+ */
+const SERVER_OWNED_PLUGIN_FIELDS = new Set([
+  'id',
+  'namespace',
+  'api_spec_id',
+  'created_at',
+  'updated_at',
+]);
+
+/**
+ * Everything on a live plugin config that is neither the portal's to set nor
+ * the gateway's to own — today just `priority_override`, tomorrow whatever Edge
+ * adds next.
+ *
+ * `PUT /plugins/config/{id}` is a whole-resource replace, so omitting a field
+ * is how it is removed. Only an operator can set an execution-order override
+ * (palette defaults apply only when it is unset), and losing it changes what the
+ * gateway runs and in what order — which is why it is carried rather than
+ * rebuilt (issue #159).
+ */
+export function operatorOwnedFields(
+  live: EdgePluginConfig | undefined,
+): Partial<EdgePluginConfigWrite> {
+  if (!live) return {};
+  const carried: Record<string, unknown> = {};
+  for (const [field, value] of Object.entries(live)) {
+    if (PORTAL_OWNED_PLUGIN_FIELDS.has(field) || SERVER_OWNED_PLUGIN_FIELDS.has(field)) continue;
+    // `null` is how a read reports "unset"; echoing it back would be a 400
+    // against a closed key set that types the field as an optional number.
+    if (value === null || value === undefined) continue;
+    carried[field] = value;
+  }
+  // The write struct names only the fields Nexus knows about, and the whole
+  // point of this helper is to carry the ones it does not.
+  return carried as Partial<EdgePluginConfigWrite>;
+}
+
+/**
+ * The portal's settings written over the live ones, key by key.
+ *
+ * Only for a plugin whose portal view is a **fixed** key set — `rate_limiting`
+ * and `cors`, whose bodies `publishing/service.ts` derives from API settings.
+ * Extra keys can come from an operator tuning the gateway directly (`max_age`, a
+ * hand-set `sync_mode` that makes a quota cluster-wide), so rebuilding the
+ * object from scratch would silently discard it (issue #150).
+ *
+ * Deliberately **not** used for a palette plugin: those expose optional fields,
+ * so a provider clearing one has to remove the key, and a merge would make that
+ * impossible.
+ */
+export function mergeOperatorSettings(
+  live: EdgePluginConfig | undefined,
+  settings: EdgePluginSettings,
+  previousHeaders: string[] = [],
+): EdgePluginSettings {
+  const current = live?.config;
+  if (!current) return settings;
+  // Both sides are plain JSON objects; the union in `EdgePluginSettings` only
+  // records which plugin each shape belongs to, and a merge crosses no shape.
+  const merged: Record<string, unknown> = { ...current, ...settings };
+  // Required auth headers must coexist with operator-added CORS headers.
+  const before = (current as Record<string, unknown>).allowed_headers;
+  const after = (settings as Record<string, unknown>).allowed_headers;
+  if (Array.isArray(before) && Array.isArray(after)) {
+    const operatorHeaders = before.filter(
+      (value) =>
+        typeof value === 'string' &&
+        !previousHeaders.some((header) => header.toLowerCase() === value.toLowerCase()),
+    );
+    const headers = [...after, ...operatorHeaders].filter(
+      (value): value is string => typeof value === 'string',
+    );
+    merged.allowed_headers = headers.filter(
+      (value, index) =>
+        headers.findIndex((item) => item.toLowerCase() === value.toLowerCase()) === index,
+    );
+  }
+  return merged;
+}
+
 /** One entry of `Proxy.plugins`. */
 function association(pluginConfigId: string): EdgePluginAssociation {
   return { plugin_config_id: pluginConfigId };
@@ -65,6 +180,8 @@ export interface EdgePluginOptions {
    * omitting the key.
    */
   trigger?: EdgePluginTrigger | null;
+  /** Default execution order; a live operator override takes precedence. */
+  priorityOverride?: number;
 }
 
 /** Everything a caller needs to move plugin configs on and off a proxy. */
@@ -108,13 +225,19 @@ export interface EdgePluginBinder {
     change: (proxy: EdgeProxy) => EdgeProxyReplace | null,
     subject: string,
   ): Promise<EdgeProxy>;
-  /** Create a proxy-scoped plugin config. Does **not** associate it. */
+  /**
+   * Create a proxy-scoped plugin config. Does **not** associate it.
+   *
+   * `live` is the resource this create is standing in for — an undo putting a
+   * deleted config back — so the fields the portal does not own survive.
+   */
   attach(
     proxyId: string,
     pluginName: string,
-    pluginConfig: EdgePluginSettings,
+    pluginConfig: EdgePluginSettings | null,
     subject: string,
     options?: EdgePluginOptions,
+    live?: EdgePluginConfig,
   ): Promise<EdgePluginConfig>;
   /** Make the gateway actually run these configs on this proxy. Idempotent. */
   associate(proxyId: string, configIds: string[], subject: string): Promise<void>;
@@ -138,7 +261,15 @@ export interface EdgePluginBinder {
   undoAttach(proxyId: string, configId: string, subject: string): () => Promise<void>;
   /** Undo step for "an associated config was removed": put it back, re-associate. */
   undoRemoval(proxyId: string, config: EdgePluginConfig, subject: string): () => Promise<void>;
-  /** Bring one optional plugin to `pluginSettings`, or remove it when `null`. */
+  /**
+   * Bring one optional plugin to object settings, or remove it when `null`.
+   * This sentinel is distinct from a resource's nullable `config`: restoration
+   * uses attach/replace directly so an operator's null config survives.
+   *
+   * Returns the config as it now stands on the gateway, or `null` when it was
+   * removed — the caller records the id so a later save knows which config is
+   * the portal's (issue #153).
+   */
   reconcileOptionalPlugin(
     proxyId: string,
     existing: EdgePluginConfig | undefined,
@@ -147,20 +278,34 @@ export interface EdgePluginBinder {
     subject: string,
     undo: (() => Promise<void>)[],
     options?: EdgePluginOptions,
-  ): Promise<void>;
+  ): Promise<EdgePluginConfig | null>;
 }
 
 /** Build the plugin/proxy binder over one Ferrum Edge Admin client. */
 export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinder {
-  /** The body for a create or a replace, with `trigger` omitted when absent. */
+  /**
+   * The body for a create or a replace: the portal's fields written **over**
+   * whatever `live` already carries, with `trigger` omitted when absent.
+   *
+   * The merge is the whole point. Building the body from scratch resets every
+   * field the portal does not model, because the `PUT` replaces the whole
+   * resource — which is how an operator's `priority_override` used to vanish on
+   * an ordinary palette save (issue #159). Passing `live` is therefore the rule
+   * for every write path that has a resource in hand, not an optimisation.
+   */
   function writeBody(
     proxyId: string,
     pluginName: string,
-    pluginConfig: EdgePluginSettings,
+    pluginConfig: EdgePluginSettings | null,
     options: EdgePluginOptions | undefined,
+    live?: EdgePluginConfig,
   ): EdgePluginConfigWrite {
     const trigger = options?.trigger ?? null;
     return {
+      ...(options?.priorityOverride === undefined
+        ? {}
+        : { priority_override: options.priorityOverride }),
+      ...operatorOwnedFields(live),
       plugin_name: pluginName,
       scope: 'proxy',
       proxy_id: proxyId,
@@ -221,9 +366,9 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
       return current;
     },
 
-    async attach(proxyId, pluginName, pluginConfig, subject, options) {
+    async attach(proxyId, pluginName, pluginConfig, subject, options, live) {
       return edge.pluginConfigs.create(
-        writeBody(proxyId, pluginName, pluginConfig, options),
+        writeBody(proxyId, pluginName, pluginConfig, options, live),
         subject,
       );
     },
@@ -285,15 +430,16 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
       for (const config of configs) {
         await edge.pluginConfigs.create(
           {
+            // `priority_override` and anything else Edge adds ride along here,
+            // for the same reason a replace carries them: a restore that reset
+            // one would change what the gateway runs.
+            ...operatorOwnedFields(config),
             id: config.id,
             plugin_name: config.plugin_name,
             scope: config.scope,
             proxy_id: proxyId,
             enabled: config.enabled,
             config: config.config,
-            ...(config.priority_override == null
-              ? {}
-              : { priority_override: config.priority_override }),
             ...(config.trigger ? { trigger: config.trigger } : {}),
           },
           subject,
@@ -340,10 +486,14 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
         const id = survivor
           ? config.id
           : (
-              await binder.attach(proxyId, config.plugin_name, config.config, subject, {
-                enabled: config.enabled,
-                trigger: config.trigger ?? null,
-              })
+              await binder.attach(
+                proxyId,
+                config.plugin_name,
+                config.config,
+                subject,
+                { enabled: config.enabled, trigger: config.trigger ?? null },
+                config,
+              )
             ).id;
         await binder.associateLocked(proxyId, [id], subject);
       };
@@ -366,7 +516,7 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
     ) {
       const lockedUndo: (() => Promise<void>)[] = [];
       try {
-        await binder.withProxy(proxyId, () =>
+        return await binder.withProxy(proxyId, () =>
           binder.reconcileOptionalPluginLocked(
             proxyId,
             existing,
@@ -392,26 +542,31 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
       options,
     ) {
       if (pluginSettings === null) {
-        if (!existing) return;
+        if (!existing) return null;
         undo.push(binder.undoRemovalLocked(proxyId, existing, subject));
         await binder.disassociateLocked(proxyId, [existing.id], subject);
         await edge.pluginConfigs.delete(existing.id, subject);
-        return;
+        return null;
       }
 
       if (existing) {
-        await edge.pluginConfigs.replace(
+        // `existing` is the live resource, so both the write and the undo carry
+        // the operator's fields rather than resetting them.
+        const replaced = await edge.pluginConfigs.replace(
           existing.id,
-          writeBody(proxyId, pluginName, pluginSettings, options),
+          writeBody(proxyId, pluginName, pluginSettings, options, existing),
           subject,
         );
         undo.push(async () => {
           await edge.pluginConfigs.replace(
             existing.id,
-            writeBody(proxyId, pluginName, existing.config, {
-              enabled: existing.enabled,
-              trigger: existing.trigger ?? null,
-            }),
+            writeBody(
+              proxyId,
+              pluginName,
+              existing.config,
+              { enabled: existing.enabled, trigger: existing.trigger ?? null },
+              existing,
+            ),
             subject,
           );
         });
@@ -426,12 +581,13 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
           },
           subject,
         );
-        return;
+        return replaced;
       }
 
       const attached = await binder.attach(proxyId, pluginName, pluginSettings, subject, options);
       undo.push(binder.undoAttachLocked(proxyId, attached.id, subject));
       await binder.associateLocked(proxyId, [attached.id], subject);
+      return attached;
     },
   };
 

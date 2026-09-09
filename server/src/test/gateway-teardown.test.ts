@@ -104,7 +104,7 @@ describe('gateway teardown jobs', () => {
 
     const job = await harness.store.gatewayTeardownJobs.findByUser(target.user.id);
     assert.equal(job?.status, 'pending');
-    assert.equal(job?.attempts, 0, 'the failed inline attempt does not consume a claim');
+    assert.equal(job?.attempts, 1, 'the inline attempt owns and consumes a claim');
     assert.equal(job?.requested_by, founder.user.id);
   });
 
@@ -134,7 +134,7 @@ describe('gateway teardown jobs', () => {
 
     const job = await harness.store.gatewayTeardownJobs.findByUser(target.user.id);
     assert.equal(job?.status, 'done');
-    assert.equal(job?.attempts, 1);
+    assert.equal(job?.attempts, 2);
     assert.equal(job?.last_error, null);
     assert.ok(job?.completed_at, 'completion is stamped');
 
@@ -196,7 +196,7 @@ describe('gateway teardown jobs', () => {
 
     const job = await harness.store.gatewayTeardownJobs.findByUser(target.user.id);
     assert.equal(job?.status, 'pending', 'a failure is a retry, never a terminal state');
-    assert.equal(job?.attempts, 1);
+    assert.equal(job?.attempts, 2);
     assert.ok((job?.last_error ?? '').length > 0, 'the reason is kept for the admin surface');
     assert.ok((job?.next_attempt_at ?? '') > new Date().toISOString(), 'the retry is backed off');
     assert.equal(harness.edge.consumerByUsername(username)?.credentials.keyauth?.length, 1);

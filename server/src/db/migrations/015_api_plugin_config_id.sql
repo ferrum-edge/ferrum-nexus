@@ -1,0 +1,15 @@
+-- The Edge plugin config a palette save created — SQLite dialect.
+--
+-- Ownership used to be inferred from the plugin name, so every config of that
+-- name on the proxy looked like the portal's. Edge legitimately allows several
+-- (distinct triggers, distinct `priority_override`s), which is exactly why an
+-- operator would hand-make one — a per-path deny gate, a stricter limit on one
+-- route — and a palette save replaced or deleted it (issue #153). The config id
+-- is the only honest answer to "did the portal create this?", so it is recorded.
+--
+-- NULL on every existing row and on any row whose gateway config an operator
+-- has since removed. `plugins/service.ts` backfills the first case lazily, on
+-- the next save or removal, by matching the plugin name on the proxy — the rule
+-- that resolved it before — adopting a single match and, when there are
+-- several, the first. It never deletes the rest.
+ALTER TABLE api_plugins ADD COLUMN ferrum_plugin_config_id TEXT;

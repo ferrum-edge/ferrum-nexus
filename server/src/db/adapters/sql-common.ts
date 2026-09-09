@@ -46,7 +46,7 @@ export interface SqlExecutor {
   readonly dialect: SqlDialect;
   /** Run a statement and return its rows (empty for non-SELECTs). */
   query(sql: string, params?: SqlParam[]): Promise<Row[]>;
-  /** Run a statement and return the number of rows it affected. */
+  /** Run a statement and return its affected count; UPDATEs count matching rows. */
   execute(sql: string, params?: SqlParam[]): Promise<number>;
 }
 

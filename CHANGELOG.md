@@ -80,7 +80,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `FERRUM_RATE_LIMIT_REDIS_TLS`) stamps Redis counter sync onto every rate
   limit Nexus writes; the operations guide warns that quotas are otherwise
   enforced per gateway process.
-- Exact CORS origins are mirrored onto the proxy's `allowed_ws_origins`, so
+- With WebSocket origin enforcement enabled, exact CORS origins are mirrored
+  onto the proxy's `allowed_ws_origins`, so
   a browser cannot open a cross-site WebSocket to an API whose CORS policy
   would refuse it.
 - **Provider plugin palette** (`GET`/`PUT`/`DELETE /api/apis/:id/plugins/:name`
@@ -109,8 +110,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - Changing SMTP or CAPTCHA settings requires `super_admin`; branding and the
   registration policy stay at `admin`. The settings UI disables those sections
   for other admins.
-- `engines.node` is `>=22.12` (two dependencies already required it); the
+- `engines.node` is `>=22.14` (SQLite's Node-API 10 binding requires it); the
   Vite dev server binds `127.0.0.1` so the documented URL works everywhere.
+- Three wire fields were added, all additive: `Message.broadcast` (true for the
+  rows a god-mode broadcast writes), `MassEmailResponse.batch_id` (the
+  campaign's idempotency key, generated when the caller supplies none) and
+  `GodBroadcastResponse.delivered` / `.failed`.
+- One new audit action, `god.broadcast_complete`, records what a broadcast
+  achieved. `god.broadcast` now records the _attempt_ — it is written before the
+  fan-out, because it is what the daily broadcast ceiling counts.
 - The getting-started walkthrough and the compose example work on Linux
   out of the box: the Edge data volume is handed to the image's non-root
   user, `host.docker.internal` is defined for the gateway container, and
@@ -119,6 +127,160 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **A test consumer whose creation was applied but never acknowledged was
+  orphaned on the gateway.** When Edge stored the `nexus-test-<api_id>` consumer
+  and then failed to answer, the caller held no id for it, so the compensation
+  skipped its delete and dropped the `gateway_identities` registration anyway —
+  leaving a consumer carrying the API's `nexus:api:<id>:approved` group with
+  nothing in the portal that could ever find it again. Nexus now names every
+  consumer it asks Edge to create, so the id of the create being compensated
+  for is known even when no answer came back: the first consumer of a username
+  takes an id derived from the namespace and that username, a replacement takes
+  a fresh one recorded on the `gateway_identities` row _before_ the `POST`. The
+  compensation settles the question with one `GET /consumers/{id}` and deletes
+  what it finds — no namespace-wide username scan, and no reuse of the replaced
+  consumer's id, which the credential mirror is keyed on. A lookup or delete
+  that _fails_ now keeps the registration, which is the only thing that leads
+  back to an orphan.
+- **Deleting an API left its test consumer, key and ACL group on the gateway.**
+  `DELETE /api/apis/:id` tore down the proxy and every portal row but never the
+  API's own `nexus-test-<api_id>` identity — and once the API row was gone,
+  nothing could look it up by name again, so the leak was permanent. The
+  deletion now runs the same teardown the account-disable path uses, between the
+  proxy delete and the row delete, revoking the credential mirror and consuming
+  the registration. A consumer that is already gone is not an error; a gateway
+  failure answers `502 EDGE_ERROR` and leaves the API in the catalog to be
+  deleted again rather than reporting success over a stranded identity. The
+  `api.delete` audit row gains `test_consumer_id` and
+  `test_consumer_revoked_credentials` when there was one to collect.
+- **A failed recovery-link mint spent the throttle window and leaked account
+  existence.** `POST /api/auth/forgot-password` and
+  `POST /api/auth/resend-verification` committed the issue claim before, and
+  outside, the transaction that minted the token, so a transient store failure
+  burned the recipient's ten-minute window on nothing: the retry took the
+  throttle's early return, answered the uniform `200`, and sent no link.
+  Meanwhile the escaping `500` was an existence oracle — only an address with an
+  account reaches the mint, so a partially failing store answered `500` for a
+  real address and `200` for an unknown one. The claim is now the first write of
+  the minting transaction, so it rolls back with a failed mint, and both
+  endpoints answer the documented `200 { "ok": true }` whatever happens, logging
+  the fault at `warn` instead.
+- **Five documented workflow steps the browser could not complete.** The
+  mass-email and god-mode broadcast composers emitted one audience shape
+  (`{ scope: 'filtered', roles: [oneRole], status: 'active' }`), so the
+  "Administrator" audience sent `roles: ['admin']` and silently skipped every
+  `super_admin`, and the guide's mandatory pre-send test — an explicit audience
+  of one, addressed to yourself — could not be composed. Both composers now
+  offer the audience model the server has always accepted: multi-select roles
+  with an **All administrative roles** shortcut, a status choice, an
+  organization filter, and a named recipient list with **Add myself**.
+  Alongside it: `GET /api/branding` now carries the public registration policy
+  so the sign-up form offers only roles the server accepts and the Settings card
+  edits the stored value instead of advertising a constant; the admin user
+  directory gained an organization column, organization and status filters, and
+  a row editor for `org_id` and `display_name`; providers can start a
+  conversation with a named requester or grantee from the Requests and Grants
+  tabs; and the portal-wide API list opens the management workspace, with the
+  same **Manage API** link on the catalog page for administrators, so an admin
+  can act on somebody else's API without god mode.
+- CORS preflights now include authentication and custom request headers and
+  follow the API's method list. Auth/method changes reconcile the plugin while
+  retaining operator settings and extra headers (#149).
+- WebSocket origin enforcement is explicit via `cors.enforce_websocket_origins`
+  (default false), allowing origin-less clients unless providers opt into the
+  browser-only CSWSH gate. Existing proxies change when CORS is saved (#151).
+- Compression and request deduplication receive compatible default priorities;
+  operator overrides are preserved and incompatible orders get a clear 400.
+  Response caching is removed from the offered palette because its default
+  template cannot enable authenticated storage without backend shared-cache
+  opt-in; existing installations remain removable (#170).
+
+- **A god-mode broadcast no longer spends the broadcasting admin's own message
+  budget, and is no longer exempt from every bound.** It writes one `messages`
+  row per recipient with the acting super admin as the sender, and the rolling
+  daily budget counted exactly those rows against them: one announcement to a
+  portal larger than the budget refused every ordinary message that
+  administrator sent for the next 24 hours — including the support follow-up an
+  incident broadcast generates — while further broadcasts, which were never
+  budget-checked at all, stayed available. Broadcast rows now carry a
+  `broadcast` flag the budget query skips, and the broadcast path carries two
+  explicit ceilings of its own, both enforced before the first row is written:
+  `NEXUS_MAX_BROADCAST_RECIPIENTS` (default 5 000) and
+  `NEXUS_MAX_BROADCASTS_PER_DAY` (default 20). The daily ceiling counts
+  `god.broadcast` audit rows, so that row is now written **before** the first
+  recipient is touched: an announcement that reached the whole portal and then
+  failed to record itself used to be uncharged, absent from the trail, and
+  answered with a `500` whose retry announced everything twice. What the attempt
+  achieved — `delivered` and `failed`, counted per recipient rather than assumed
+  from the audience size — is a second row, `god.broadcast_complete`, and the
+  same two numbers are on `GodBroadcastResponse`. An audience that matches
+  nobody is refused rather than spending a daily slot on a no-op.
+- **The daily message budget is now exact across instances**, and
+  `docs/operations.md` no longer claims that counting durable rows made it so.
+  The count and the insert were separate statements on separate connections, so
+  two instances at quota − 1 both committed; what ordered them on a single
+  instance was the store's in-process transaction queue, which is why the
+  single-process regression tests could not fail. The whole count-and-insert
+  now runs inside a per-sender lease in `edge_leases`, exercised by a
+  cross-adapter contract that builds its second instance over a **second store
+  object** against the same database — two pools, two transaction queues — so
+  the case genuinely fails without the lease. A sender whose lease is held
+  elsewhere past the wait gets `409 CONFLICT`, on the broadcast path too.
+- **Messaging records its audit row inside the transaction that writes the
+  message.** A failed audit write used to return `500` for a message that was
+  durably stored and visible to both participants, with no `message.send` row —
+  and the sender's natural retry stored a second copy. Thread creation and
+  replies now commit their rows and their records together.
+- **A mass-email fan-out that fails partway now queues nothing, and a retry is
+  safe.** Each recipient's row used to commit on its own with the
+  `admin.mass_email` row written after the loop, so a failure delivered to part
+  of the audience, recorded nothing, and answered with a bare `500`; because the
+  batch id was generated inside the call and never surfaced, the retry minted a
+  new one and mailed those recipients again. Every outbox row and the audit row
+  now commit in one transaction, and `POST /api/admin/mass-email` returns
+  `batch_id` on success and carries it in the failure body
+  (`500 OUTBOX_FAILURE`, `details: { batch_id, recipients, enqueued }`) so the
+  retry can reuse the key either way. Database contention keeps its own code —
+  `409 CONFLICT` with the batch id — rather than being reported as a broken
+  outbox. Because the fan-out is now one transaction, the audience has a ceiling
+  to match the broadcast path's: `NEXUS_MAX_MASS_EMAIL_RECIPIENTS` (default
+  5 000, `0` disables), enforced before anything is rendered or written. On
+  MongoDB the 16 MB per-transaction cap is a hard wall at roughly 800 recipients
+  with a 10 KB body; on the SQL adapters an unbounded fan-out is an unbounded
+  stall for every other write on the instance, since transaction bodies are
+  serialised per store object.
+- **A palette save deleted an operator's hand-made plugin config of the same
+  name.** Ownership was inferred from the plugin name, so every other config
+  of that name on the proxy looked like a leftover duplicate and was removed —
+  including a per-path deny gate Nexus never created. `api_plugins` now records
+  the Edge config id it produced (migration `015_api_plugin_config_id`) and
+  saves, removals and reconciliation act on that config alone; a row written
+  before the column adopts a single name match on its next save and never
+  deletes the rest. The `api.plugin_set` and `api.plugin_remove` audit rows name
+  the config id they touched.
+- **An ordinary portal save reset an operator's `priority_override`.** The body
+  sent to `PUT /plugins/config/{id}` was built from scratch, and that endpoint
+  is a whole-resource replace, so a field the portal has no control for was
+  cleared on every palette save and every `cors`/`rate_limit` reconcile. Write
+  bodies are now merged over the live resource, so every field the portal does
+  not own survives — including any Edge adds later.
+- **An unrelated API save rewrote the `cors` and `rate_limit` gateway
+  configs.** Both were reconciled on presence rather than on change, so a
+  description fix rebuilt them from the portal's two-field view — discarding an
+  operator's `allowed_headers`, `max_age` or a `sync_mode: redis` that made the
+  quota cluster-wide, re-enabling a config they had switched off, and naming two
+  unchanged fields in the audit row. They are now compared against the stored
+  value first, and a genuine change merges over the live config instead of
+  replacing it. A replay still repairs a dropped plugin association.
+- SPA validation failures now show the server message in an accessible error
+  toast, with inline errors on profile and gateway settings forms. Public auth
+  forms retain their inline-only error handling (#175).
+- Session refresh returning 401 now clears the query cache through the shared
+  sign-out path. Signing in after sign-out also clears cached data before
+  accepting the next principal (#177).
+- Upgrade better-sqlite3 to 13.0.3 to replace the native cleanup path that
+  aborts on Node 24.20.0. Raise the Node minimum from 22.12 to 22.14 and
+  retain hosted checks on the minimum and current Node 22/24 releases.
 - **Published APIs were unprotected on a live gateway.** Nexus created the
   auth, access-control and rate-limit plugin configs but never listed them in
   the proxy's `plugins[]`, which is what Ferrum Edge actually enforces; every
@@ -210,6 +372,23 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   it and losing its writes to the other's rollback. The remaining hazard, a
   bare root-store write issued while a body is open, is documented on the
   store contract.
+- **A transaction rolled back for contention is retried instead of losing its
+  work.** MongoDB drives transactions through the driver's
+  `session.withTransaction()`, backing off between runs and giving up after 5
+  seconds of contention (inside a 15-second cap on the transaction as a whole),
+  and the PostgreSQL and MySQL adapters re-run a body the engine rolled back
+  with a serialization failure or an InnoDB deadlock over up to 5 attempts,
+  backing off with jitter. A write conflict or a deadlock used to surface as
+  `500` with a raw driver error and the body's writes silently gone; contention
+  that outlives the budget is now `409 CONFLICT` with
+  `details.reason = "transaction_contention"`, and no driver error type reaches
+  a response. Transaction bodies are re-runnable by contract —
+  `{ retry: false }` opts one out.
+- **Two people replying to one thread at the same moment no longer deadlock on
+  MySQL.** A send now takes the thread row before inserting the message that
+  references it, so the foreign key's shared lock and the `last_message_at`
+  update cannot form a cycle; one of the two replies used to be rolled back as
+  the deadlock victim and lost behind a `500`.
 
 ### Security
 

@@ -50,6 +50,27 @@
  * Mongo session) and should keep the same observable behaviour: serialised
  * bodies, atomic commit, rollback on throw, no outside caller sharing a body's
  * fate.
+ *
+ * ## Transaction bodies are re-runnable
+ *
+ * The pooled adapters run several connections against one database, and every
+ * engine behind them can roll a transaction back for contention alone: an
+ * InnoDB deadlock victim, a PostgreSQL serialization failure, a MongoDB write
+ * conflict. Each of those means "nothing was applied, run it again", so the
+ * adapters **re-run the body** — bounded, with jitter — rather than losing its
+ * work behind a `500` carrying a driver error. A body that still cannot commit
+ * fails with `NexusError('CONFLICT', …)`; no driver error type ever escapes.
+ *
+ * The price is a contract every call site owes: **a body may run more than
+ * once**, so everything it does must either go through the transaction-scoped
+ * store — where the rollback undoes it — or be idempotent. Gateway calls,
+ * outbox enqueues whose idempotency key is minted inside the body, and
+ * in-memory counters do not belong in one. A body that cannot honour this
+ * passes `{ retry: false }`, which runs it exactly once and still translates
+ * the driver's error.
+ *
+ * `db/adapters/transaction-retry.ts` holds the policy; the sqlite adapter has
+ * one connection and no contention class, so it is unaffected.
  */
 
 import type {
@@ -88,6 +109,8 @@ import type {
   Uuid,
 } from '@ferrum-nexus/shared';
 
+import { NexusError } from '../lib/errors.js';
+
 /* ── Generic helpers ────────────────────────────────────────────────────── */
 
 /** Pagination accepted by every `list` method. */
@@ -117,6 +140,21 @@ export type CreateInput<T> = Omit<T, 'id' | 'created_at' | 'updated_at' | Nullab
 
 /** Update payload: any subset of the mutable columns. `updated_at` is set by the adapter. */
 export type UpdateInput<T> = Partial<Omit<T, 'id' | 'created_at' | 'updated_at'>>;
+
+/** How {@link NexusStore.transaction} should treat one body. */
+export interface TransactionOptions {
+  /**
+   * Whether the adapter may re-run the body after the engine rolled it back
+   * for contention. Defaults to `true`.
+   *
+   * Pass `false` only for a body that is genuinely not re-runnable — one whose
+   * effects do not all go through the transaction-scoped store and are not
+   * idempotent. Such a body runs exactly once and a contention failure reaches
+   * the caller as `CONFLICT` instead of being retried; it does not make the
+   * body atomic against anything it was not already.
+   */
+  readonly retry?: boolean;
+}
 
 /* ── Stored record shapes ───────────────────────────────────────────────── */
 
@@ -165,13 +203,26 @@ export type ApiSpecRecord = ApiSpec;
  *
  * The wire {@link ApiPlugin} carries no ids because the route addresses a
  * plugin by `(api, plugin_name)`; the row needs both, plus the API it belongs
- * to. The Ferrum plugin config id is deliberately absent: like `rate_limiting`
- * and `cors`, the gateway object is found by `proxy_id` + `plugin_name`, so an
- * operator who recreates one by hand reconciles automatically.
+ * to and the gateway config the portal created for it.
  */
 export interface ApiPluginRecord extends ApiPlugin {
   id: Uuid;
   api_id: Uuid;
+  /**
+   * The Edge plugin config id Nexus created for this plugin, or `null`.
+   *
+   * This is the portal's **ownership** claim. Edge lets a proxy carry several
+   * configs of one plugin name — distinct triggers, distinct
+   * `priority_override`s — so a name is not an identity, and a save that
+   * matched on the name alone replaced or deleted the operator's hand-made
+   * config as well (issue #153).
+   *
+   * `null` on a row written before the column existed, and on one whose gateway
+   * config an operator has since removed. `plugins/service.ts` backfills the
+   * first case by matching the plugin name on the proxy — the rule that
+   * resolved it then — and creates a fresh config for the second.
+   */
+  ferrum_plugin_config_id: string | null;
 }
 
 /** An `access_requests` row (without the denormalised joins the API adds). */
@@ -195,14 +246,25 @@ export type ConsumerRecord = Consumer;
  * account teardown can enumerate it even while its first credential is still
  * being appended and no `credential_metadata` row exists yet. `ferrum_username`
  * is the stable key — it is known before Edge is touched — and
- * `ferrum_consumer_id` is filled in once the gateway has assigned one.
+ * `ferrum_consumer_id` is the id Nexus asked Edge to assign the consumer.
  */
 export interface GatewayIdentityRecord {
   id: Uuid;
   user_id: Uuid;
   namespace: string;
   ferrum_username: string;
-  /** `null` until the consumer exists on Edge, or after a crash in between. */
+  /**
+   * The consumer id this identity names, or `null` before one has been asked
+   * for at all.
+   *
+   * Nexus chooses every consumer id it asks Edge to create. A *replacement*
+   * consumer's id is recorded here before its `POST` goes out, so a create
+   * whose acknowledgement never arrived is still resolvable by id; the first
+   * consumer of a username needs no record, its id being derived from the
+   * username. A non-null value therefore means "the consumer under this id, if
+   * the create landed" rather than "the consumer exists" — every reader
+   * tolerates a `GET` that answers 404 on it.
+   */
   ferrum_consumer_id: string | null;
   created_at: IsoTimestamp;
   updated_at: IsoTimestamp;
@@ -221,6 +283,8 @@ export type NotificationRecord = Notification;
 export interface EmailOutboxRecord extends EmailOutboxEntry {
   body_html: string;
   body_text: string;
+  /** Opaque ownership token, replaced on every claim. Internal only. */
+  generation: string;
 }
 
 /**
@@ -231,6 +295,8 @@ export interface EmailOutboxRecord extends EmailOutboxEntry {
  */
 export interface GatewayTeardownJobRecord extends GatewayTeardownState {
   id: Uuid;
+  /** Opaque ownership token, replaced on every enqueue and every claim. Internal only. */
+  generation: string;
   user_id: Uuid;
   /** The admin who disabled the account, or `null` once that account is gone. */
   requested_by: Uuid | null;
@@ -453,6 +519,8 @@ export interface EmailOutboxFilter {
 /** Filters for `gatewayTeardownJobs.list`. */
 export interface GatewayTeardownJobFilter {
   status?: GatewayTeardownJobStatus;
+  /** Match any of these statuses, including in-flight work in backlog counts. */
+  statuses?: GatewayTeardownJobStatus[];
 }
 
 /** Filters for `auditLogs.list`. */
@@ -489,7 +557,8 @@ export interface UserRepo {
    *
    * Returns the updated row, or `null` when the user is gone or has already
    * moved on — the caller lost the race and must not treat its earlier read as
-   * still true.
+   * still true. Matching same-value patches also succeed. An empty patch is a
+   * guarded read in the caller's read view and leaves `updated_at` untouched.
    *
    * This exists for the last-super-admin invariant, which is a check on *other*
    * rows followed by a write to this one. `countActiveSuperAdmins` and this
@@ -659,6 +728,12 @@ export interface UpsertApiPluginInput {
   enabled: boolean;
   config: Record<string, unknown>;
   trigger: ApiPluginTrigger | null;
+  /**
+   * The gateway config this save left behind, or `null` when there is none.
+   * Written on every save rather than only on a create: a config an operator
+   * deleted by hand is replaced by a new one with a new id.
+   */
+  ferrum_plugin_config_id: string | null;
 }
 
 /** Client requests for access to a requestable API. */
@@ -819,7 +894,11 @@ export interface GatewayIdentityRepo {
   findByUsername(namespace: string, ferrumUsername: string): Promise<GatewayIdentityRecord | null>;
   /** Every identity registered to `userId` in `namespace`, oldest first. */
   listByUser(userId: Uuid, namespace: string): Promise<GatewayIdentityRecord[]>;
-  /** Record the consumer id Edge assigned (or clear it when the consumer is gone). */
+  /**
+   * Record the consumer id this identity names — the id Nexus asked Edge to
+   * assign, written before the create that uses it when Nexus had to invent
+   * one — or clear it when the consumer is gone.
+   */
   bindConsumer(id: Uuid, ferrumConsumerId: string | null): Promise<GatewayIdentityRecord | null>;
   delete(id: Uuid): Promise<boolean>;
 }
@@ -843,7 +922,14 @@ export interface ThreadRepo {
 
 /** Messages inside a thread. */
 export interface MessageRepo {
-  create(input: CreateInput<MessageRecord>): Promise<MessageRecord>;
+  /**
+   * Insert one message. `broadcast` defaults to `false`: only a god-mode
+   * announcement sets it, and only that path should — the flag is what takes a
+   * row out of its sender's daily budget (see {@link countBySenderSince}).
+   */
+  create(
+    input: Omit<CreateInput<MessageRecord>, 'broadcast'> & { broadcast?: boolean },
+  ): Promise<MessageRecord>;
   findById(id: Uuid): Promise<MessageRecord | null>;
   /**
    * One page of a thread's messages, oldest-first by default.
@@ -860,6 +946,13 @@ export interface MessageRepo {
   /**
    * How many messages `senderUserId` has posted since `sinceIso`, across every
    * thread — the per-account messaging budget.
+   *
+   * **Broadcast rows do not count.** A god-mode announcement writes one row per
+   * recipient with the acting administrator as the sender; charging those to
+   * that administrator's personal allowance let a single broadcast to a portal
+   * larger than the budget refuse every ordinary message they sent for the next
+   * 24 hours. Broadcasts are bounded on their own terms instead — see
+   * `NEXUS_MAX_BROADCAST_RECIPIENTS` and `NEXUS_MAX_BROADCASTS_PER_DAY`.
    *
    * The boundary is **inclusive**: a row whose `created_at` equals `sinceIso`
    * counts. `created_at` is an ISO-8601 UTC string in a text column, so every
@@ -911,16 +1004,34 @@ export interface EmailOutboxRepo {
   findByIdempotencyKey(key: string): Promise<EmailOutboxRecord | null>;
   /**
    * Atomically claim up to `limit` rows that are `pending` with
-   * `next_attempt_at <= now`, flipping them to `sending` and incrementing
-   * `attempts`. Two concurrent workers never claim the same row.
+   * `next_attempt_at <= now`, flipping them to `sending`, incrementing
+   * `attempts` and replacing `generation`. Two concurrent workers never claim
+   * the same row, and a claim reclaimed by `releaseStale` carries a token the
+   * previous holder cannot settle with.
    */
   claimDue(now: IsoTimestamp, limit: number): Promise<EmailOutboxRecord[]>;
-  /** Delivery succeeded: `status = 'sent'`, `next_attempt_at = null`. */
-  markSent(id: Uuid, at: IsoTimestamp): Promise<void>;
-  /** Delivery failed but retries remain: back to `pending` with a backoff stamp. */
-  reschedule(id: Uuid, nextAttemptAt: IsoTimestamp, lastError: string): Promise<void>;
-  /** Retries exhausted: `status = 'failed'`. */
-  markFailed(id: Uuid, lastError: string): Promise<void>;
+  /**
+   * Delivery succeeded: `status = 'sent'`, `next_attempt_at = null`.
+   *
+   * Settles only the supplied sending generation; `false` means ownership was
+   * lost (the claim was reclaimed and someone else owns the row now).
+   */
+  markSent(entry: EmailOutboxRecord, at: IsoTimestamp): Promise<boolean>;
+  /**
+   * Delivery failed but retries remain: back to `pending` with a backoff stamp.
+   * Settles only the supplied sending generation; `false` means ownership was lost.
+   */
+  reschedule(
+    entry: EmailOutboxRecord,
+    nextAttemptAt: IsoTimestamp,
+    lastError: string,
+  ): Promise<boolean>;
+  /**
+   * Retries exhausted (or the message is parked as delivered-unacknowledged):
+   * `status = 'failed'`. Settles only the supplied sending generation; `false`
+   * means ownership was lost.
+   */
+  markFailed(entry: EmailOutboxRecord, lastError: string): Promise<boolean>;
   /** Return `sending` rows stuck since before `olderThan` to `pending` (crash recovery). */
   releaseStale(olderThan: IsoTimestamp): Promise<number>;
   list(filter: EmailOutboxFilter, options?: ListOptions): Promise<Paginated<EmailOutboxRecord>>;
@@ -942,8 +1053,8 @@ export interface GatewayTeardownJobRepo {
    *
    * `user_id` is unique, so an account already carrying a job has that row
    * reset to `pending` with `attempts = 0` and `next_attempt_at = now` instead
-   * of gaining a second one. Re-disabling an account therefore re-drives the
-   * outstanding work rather than duplicating it.
+   * of gaining a second one. A fresh opaque generation invalidates every old
+   * pending snapshot and claim, even when the ID and attempt count are reused.
    */
   upsertPending(
     userId: Uuid,
@@ -958,14 +1069,26 @@ export interface GatewayTeardownJobRepo {
   /**
    * Atomically claim up to `limit` rows that are `pending` with
    * `next_attempt_at <= now`, flipping them to `sending` and incrementing
-   * `attempts`. Two concurrent workers never claim the same row — the same
-   * contract as {@link EmailOutboxRepo.claimDue}.
+   * `attempts` and replacing `generation`. Concurrent workers cannot both win
+   * the same pending generation.
    */
   claimDue(now: IsoTimestamp, limit: number): Promise<GatewayTeardownJobRecord[]>;
-  /** Edge confirmed the revocation: `status = 'done'`, `completed_at = at`. */
-  markDone(id: Uuid, at: IsoTimestamp): Promise<void>;
-  /** The attempt failed: back to `pending` with a backoff stamp and the reason. */
-  reschedule(id: Uuid, nextAttemptAt: IsoTimestamp, lastError: string): Promise<void>;
+  /** Claim precisely this pending generation for an inline attempt, ignoring backoff. */
+  claimPending(job: GatewayTeardownJobRecord): Promise<GatewayTeardownJobRecord | null>;
+  /** Settle only the supplied sending generation; false means ownership was lost. */
+  markDone(job: GatewayTeardownJobRecord, at: IsoTimestamp): Promise<boolean>;
+  /**
+   * Delete only this generation while it is `sending`. IDs are reused by upsertPending:
+   * the worker must also recheck account status under the lifecycle lease and
+   * inside a transaction before cancelling. Pending replacement work is retained.
+   */
+  deleteClaimed(job: GatewayTeardownJobRecord): Promise<boolean>;
+  /** Return only this sending generation to pending; false means ownership was lost. */
+  reschedule(
+    job: GatewayTeardownJobRecord,
+    nextAttemptAt: IsoTimestamp,
+    lastError: string,
+  ): Promise<boolean>;
   /** Return `sending` rows stuck since before `olderThan` to `pending` (crash recovery). */
   releaseStale(olderThan: IsoTimestamp): Promise<number>;
   /**
@@ -1105,6 +1228,26 @@ export interface LeaseRepo {
   deleteExpired(now: IsoTimestamp): Promise<number>;
 }
 
+/**
+ * `edge_leases.key` is `VARCHAR(255)` on MySQL — the narrowest width any adapter
+ * stores. MySQL's `INSERT IGNORE` acquisition silently truncates an over-long
+ * key rather than rejecting it, so a future key-construction change could report
+ * "acquired" for a key it did not store faithfully, wedging the lock forever and
+ * letting two keys that differ only past character 255 collide. Every adapter
+ * refuses such a key up front so they stay behaviourally interchangeable.
+ */
+export const LEASE_KEY_MAX_LENGTH = 255;
+
+/** Refuse a lease key that cannot be stored faithfully on every adapter. */
+export function assertLeaseKeyLength(key: string): void {
+  if (key.length > LEASE_KEY_MAX_LENGTH) {
+    throw new NexusError(
+      'INTERNAL',
+      `Lease key is ${key.length} characters; the maximum is ${LEASE_KEY_MAX_LENGTH}`,
+    );
+  }
+}
+
 /* ── The store ──────────────────────────────────────────────────────────── */
 
 /** Result of {@link NexusStore.healthCheck}. */
@@ -1151,8 +1294,14 @@ export interface NexusStore {
    * parked until the body has committed or rolled back. A body must therefore
    * never wait for another context's store call, which on SQLite would wait for
    * the body.
+   *
+   * **`fn` may run more than once**: a pooled adapter re-runs it when the
+   * engine rolls it back for contention, so every effect it has must go
+   * through `tx` or be idempotent. See "Transaction bodies are re-runnable" at
+   * the top of this module, and {@link TransactionOptions.retry} for the
+   * escape hatch.
    */
-  transaction<T>(fn: (tx: NexusStore) => Promise<T>): Promise<T>;
+  transaction<T>(fn: (tx: NexusStore) => Promise<T>, options?: TransactionOptions): Promise<T>;
 
   readonly users: UserRepo;
   readonly organizations: OrganizationRepo;

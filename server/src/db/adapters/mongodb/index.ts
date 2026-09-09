@@ -30,8 +30,19 @@
  * a standalone `mongod` cannot start a session transaction at all. {@link init}
  * therefore probes the deployment with `hello` and:
  *
- * - **replica set / mongos** — `transaction()` is a real session transaction:
- *   `startTransaction`, commit on resolve, `abortTransaction` on reject.
+ * - **replica set / mongos** — `transaction()` is a real session transaction,
+ *   driven by the driver's own `session.withTransaction()`: commit on resolve,
+ *   abort on reject, and — the reason it is the driver's loop rather than a
+ *   hand-rolled one — the body is **run again** when the server labels the
+ *   failure `TransientTransactionError`, and the commit is retried on
+ *   `UnknownTransactionCommitResult`. A write conflict is MongoDB asking for
+ *   exactly that; not retrying it lost the body's work behind a raw
+ *   `MongoServerError`. The driver re-runs with no pause between runs, so the
+ *   adapter puts the shared backoff in front of each one and bounds the loop by
+ *   wall clock — {@link MONGO_CONTENTION_BUDGET_MS} of contention, inside
+ *   {@link MONGO_TRANSACTION_BUDGET_MS} for the transaction as a whole — after
+ *   which the caller gets a `CONFLICT`, never a driver error. Bodies must be
+ *   re-runnable, which is the contract `adapters/transaction-retry.ts` states.
  * - **standalone, `NEXUS_DB_ALLOW_STANDALONE` unset** — `init()` throws
  *   `NexusError('INTERNAL', …)` so the process refuses to start rather than
  *   silently losing atomicity. This is the documented default: credential
@@ -144,6 +155,7 @@ import type {
   StoreHealth,
   ThreadRecord,
   ThreadRepo,
+  TransactionOptions,
   UpdateInput,
   UserFilter,
   UserRecord,
@@ -152,7 +164,13 @@ import type {
   VerificationTokenRecord,
   VerificationTokenRepo,
 } from '../../store.js';
-import { SPEC_HISTORY_PRUNE_BATCH } from '../../store.js';
+import { assertLeaseKeyLength, SPEC_HISTORY_PRUNE_BATCH } from '../../store.js';
+import {
+  createMongoContentionGate,
+  isMongoTransactionContentionError,
+  MONGO_TRANSACTION_BUDGET_MS,
+  transactionContentionError,
+} from '../transaction-retry.js';
 
 /* ── Collection names (identical to the SQL table names) ────────────────── */
 
@@ -451,6 +469,9 @@ function mapApiPlugin(row: Row): ApiPluginRecord {
     // both sides of the store contract see the same parsed objects.
     config: (row.config ?? {}) as Record<string, unknown>,
     trigger: (row.trigger ?? null) as ApiPluginTrigger | null,
+    // Absent on every document written before 015, which is exactly the `null`
+    // the SQL dialects get from the new column.
+    ferrum_plugin_config_id: strOrNull(row.ferrum_plugin_config_id),
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
   };
@@ -539,6 +560,9 @@ function mapMessage(row: Row): MessageRecord {
     thread_id: str(row.thread_id),
     sender_user_id: str(row.sender_user_id),
     body: str(row.body),
+    // Documents written before `017_message_broadcast` carry no field at all,
+    // and every one of them is an ordinary message.
+    broadcast: row.broadcast === true,
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
   };
@@ -561,6 +585,7 @@ function mapNotification(row: Row): NotificationRecord {
 function mapOutbox(row: Row): EmailOutboxRecord {
   return {
     id: str(row._id),
+    generation: str(row.generation ?? ''),
     to_email: str(row.to_email),
     subject: str(row.subject),
     body_html: str(row.body_html),
@@ -590,6 +615,7 @@ function mapGatewayIdentity(row: Row): GatewayIdentityRecord {
 function mapTeardownJob(row: Row): GatewayTeardownJobRecord {
   return {
     id: str(row._id),
+    generation: str(row.generation ?? ''),
     user_id: str(row.user_id),
     status: str(row.status) as GatewayTeardownJobStatus,
     attempts: num(row.attempts),
@@ -758,6 +784,17 @@ interface IndexDefinition {
   partialFilterExpression?: Document;
 }
 
+/** Indexes added by `007_api_plugins`. */
+const API_PLUGIN_INDEXES: IndexDefinition[] = [
+  {
+    collection: 'api_plugins',
+    name: 'ux_api_plugins_api_name',
+    key: { api_id: 1, plugin_name: 1 },
+    unique: true,
+  },
+  { collection: 'api_plugins', name: 'ix_api_plugins_api', key: { api_id: 1, created_at: 1 } },
+];
+
 /**
  * Every index of `001_initial`, translated.
  *
@@ -808,13 +845,7 @@ const INDEXES: IndexDefinition[] = [
   },
   { collection: 'api_specs', name: 'ix_api_specs_api', key: { api_id: 1, created_at: 1 } },
 
-  {
-    collection: 'api_plugins',
-    name: 'ux_api_plugins_api_name',
-    key: { api_id: 1, plugin_name: 1 },
-    unique: true,
-  },
-  { collection: 'api_plugins', name: 'ix_api_plugins_api', key: { api_id: 1, created_at: 1 } },
+  ...API_PLUGIN_INDEXES,
 
   {
     collection: 'access_requests',
@@ -1091,6 +1122,31 @@ async function createIndexes(db: Db, indexes: IndexDefinition[]): Promise<void> 
   }
 }
 
+/** Keep the most recently updated document for each API/plugin pair. */
+async function deduplicateApiPlugins(db: Db): Promise<void> {
+  const collection = db.collection<NexusDoc>('api_plugins');
+  const duplicateGroups = collection.aggregate<{ duplicate_ids: string[] }>([
+    { $sort: { api_id: 1, plugin_name: 1, updated_at: -1, created_at: -1, _id: -1 } },
+    {
+      $group: {
+        _id: { api_id: '$api_id', plugin_name: '$plugin_name' },
+        ids: { $push: '$_id' },
+        count: { $sum: 1 },
+      },
+    },
+    { $match: { count: { $gt: 1 } } },
+    {
+      $project: {
+        _id: 0,
+        duplicate_ids: { $slice: ['$ids', 1, { $subtract: ['$count', 1] }] },
+      },
+    },
+  ]);
+  for await (const group of duplicateGroups) {
+    await collection.deleteMany({ _id: { $in: group.duplicate_ids } });
+  }
+}
+
 /**
  * Mongo's "migrations".
  *
@@ -1118,6 +1174,16 @@ const MONGO_MIGRATIONS: { id: string; apply: (db: Db) => Promise<void> }[] = [
   {
     id: '006_email_token_issue_claims',
     apply: async (): Promise<void> => undefined,
+  },
+  {
+    id: '007_api_plugins',
+    // Upgraded databases have already run `001_initial`, so install the new
+    // indexes explicitly. Remove any duplicates created before the unique
+    // index existed, retaining the configuration with the latest update.
+    apply: async (db: Db): Promise<void> => {
+      await deduplicateApiPlugins(db);
+      await createIndexes(db, API_PLUGIN_INDEXES);
+    },
   },
   {
     id: '008_gateway_teardown_jobs',
@@ -1148,6 +1214,29 @@ const MONGO_MIGRATIONS: { id: string; apply: (db: Db) => Promise<void> }[] = [
     // The unique name index is what makes `claim` a per-identity upsert; the
     // collection itself is created on the first insert.
     apply: (db: Db): Promise<void> => createIndexes(db, IDENTITY_INDEXES),
+  },
+  {
+    id: '013_teardown_generation',
+    apply: async (db: Db): Promise<void> => {
+      await db
+        .collection('gateway_teardown_jobs')
+        .updateMany({ generation: { $exists: false } }, { $set: { generation: '' } });
+    },
+  },
+  {
+    // Nothing to do: the SQL dialects add a nullable column, and a document
+    // with no `ferrum_plugin_config_id` already maps to the same `null`. The id
+    // is recorded anyway so `schema_migrations` means the same thing here.
+    id: '015_api_plugin_config_id',
+    apply: async (): Promise<void> => undefined,
+  },
+  {
+    id: '016_outbox_generation',
+    apply: async (db: Db): Promise<void> => {
+      await db
+        .collection('email_outbox')
+        .updateMany({ generation: { $exists: false } }, { $set: { generation: '' } });
+    },
   },
 ];
 
@@ -1311,8 +1400,8 @@ class MongoStore implements NexusStore {
     }
   }
 
-  transaction<T>(fn: (tx: NexusStore) => Promise<T>): Promise<T> {
-    return this.inTransaction(fn);
+  transaction<T>(fn: (tx: NexusStore) => Promise<T>, options?: TransactionOptions): Promise<T> {
+    return this.inTransaction(fn, options);
   }
 
   /**
@@ -1324,8 +1413,23 @@ class MongoStore implements NexusStore {
    * documented behaviour is unchanged: bodies are serialised, a nested call
    * joins the open transaction, and a standalone deployment that opted in with
    * `NEXUS_DB_ALLOW_STANDALONE` degrades to sequential execution.
+   *
+   * The body runs under `session.withTransaction()`, which is the driver's own
+   * retry envelope: it re-runs the callback on a `TransientTransactionError`
+   * (a write conflict, above all) and re-commits on an
+   * `UnknownTransactionCommitResult`. Two bounds are put on it — the contention
+   * gate enforced here, and `timeoutMS`, which the driver applies to every
+   * operation the session runs — because the envelope otherwise keeps trying
+   * for two minutes, far longer than an HTTP request should wait. The gate is
+   * also what makes those re-runs wait for the transaction that won: MongoDB
+   * fails the loser of a contended document immediately instead of blocking it
+   * on a lock, so without a backoff the envelope would spin through its whole
+   * budget while the winner was still committing.
    */
-  private inTransaction<T>(fn: (tx: MongoStore) => Promise<T>): Promise<T> {
+  private inTransaction<T>(
+    fn: (tx: MongoStore) => Promise<T>,
+    options?: TransactionOptions,
+  ): Promise<T> {
     // Already inside a transaction body — join it rather than nesting.
     if (this.session) return fn(this);
 
@@ -1333,20 +1437,41 @@ class MongoStore implements NexusStore {
       if (!this.ctx.supportsTransactions) {
         // Standalone deployment with NEXUS_DB_ALLOW_STANDALONE=true: run the
         // body sequentially. It is still serialised against other bodies, but
-        // there is no atomic commit and no rollback on throw.
+        // there is no atomic commit, no rollback on throw, and nothing to
+        // retry — a body that fails here has already left writes behind.
         return fn(new MongoStore(this.ctx, null));
       }
+      // `retry: false` still gets the envelope, bounded to a single attempt:
+      // the body runs exactly once and the driver's error is still translated.
+      const gate = createMongoContentionGate({ retry: options?.retry });
       const session = this.ctx.client.startSession();
+      let lastError: unknown;
       try {
-        session.startTransaction();
-        try {
-          const result = await fn(new MongoStore(this.ctx, session));
-          await session.commitTransaction();
-          return result;
-        } catch (error) {
-          await session.abortTransaction().catch(() => undefined);
-          throw error;
+        return await session.withTransaction(
+          async () => {
+            // Backs off before a re-run, and throws the terminal `CONFLICT`
+            // once the contention budget is spent. That is not a `MongoError`,
+            // so `withTransaction` stops retrying and rethrows it rather than
+            // looping until `timeoutMS` expires.
+            await gate.beforeAttempt(lastError);
+            try {
+              return await fn(new MongoStore(this.ctx, session));
+            } catch (error) {
+              lastError = error;
+              throw error;
+            }
+          },
+          { timeoutMS: MONGO_TRANSACTION_BUDGET_MS },
+        );
+      } catch (error) {
+        // A body's own `NexusError` — including the one the gate throws —
+        // reaches the caller unchanged; a driver error that the envelope gave
+        // up on becomes the same `CONFLICT` the SQL adapters raise.
+        if (error instanceof NexusError) throw error;
+        if (isMongoTransactionContentionError(error)) {
+          throw transactionContentionError('mongodb', gate.attempts, error);
         }
+        throw error;
       } finally {
         await session.endSession();
       }
@@ -1879,6 +2004,7 @@ class MongoStore implements NexusStore {
               enabled: input.enabled,
               config: input.config,
               trigger: input.trigger,
+              ferrum_plugin_config_id: input.ferrum_plugin_config_id,
               updated_at: meta.updated_at,
             },
             $setOnInsert: {
@@ -2519,6 +2645,7 @@ class MongoStore implements NexusStore {
           thread_id: input.thread_id,
           sender_user_id: input.sender_user_id,
           body: input.body,
+          broadcast: input.broadcast ?? false,
           created_at: meta.created_at,
           updated_at: meta.updated_at,
         } as NexusDoc,
@@ -2572,7 +2699,9 @@ class MongoStore implements NexusStore {
 
     countBySenderSince: async (senderUserId, sinceIso) =>
       this.col(COLLECTIONS.messages).countDocuments(
-        { sender_user_id: senderUserId, created_at: { $gte: sinceIso } },
+        // `$ne: true` rather than `false`, so documents written before
+        // `017_message_broadcast` — which have no such field — still count.
+        { sender_user_id: senderUserId, created_at: { $gte: sinceIso }, broadcast: { $ne: true } },
         this.opts,
       ),
 
@@ -2690,6 +2819,7 @@ class MongoStore implements NexusStore {
             body_text: input.body_text,
             status: 'pending',
             attempts: 0,
+            generation: '',
             next_attempt_at: input.next_attempt_at ?? meta.created_at,
             last_error: null,
             idempotency_key: key,
@@ -2742,6 +2872,7 @@ class MongoStore implements NexusStore {
             {
               $set: {
                 status: 'sending',
+                generation: newId(),
                 updated_at: nowIso(),
                 attempts: { $add: [{ $ifNull: ['$attempts', 0] }, 1] },
               },
@@ -2760,17 +2891,21 @@ class MongoStore implements NexusStore {
       return claimed;
     },
 
-    markSent: async (id, at) => {
-      await this.col(COLLECTIONS.emailOutbox).updateOne(
-        { _id: id },
+    // Settling matches the claimed generation while it is still `sending`, so a
+    // worker whose claim was reclaimed mid-delivery cannot overwrite the new
+    // owner's outcome.
+    markSent: async (entry, at) => {
+      const result = await this.col(COLLECTIONS.emailOutbox).updateOne(
+        { _id: entry.id, generation: entry.generation, status: 'sending' } as Filter<NexusDoc>,
         { $set: { status: 'sent', next_attempt_at: null, last_error: null, updated_at: at } },
         this.opts,
       );
+      return result.modifiedCount > 0;
     },
 
-    reschedule: async (id, nextAttemptAt, lastError) => {
-      await this.col(COLLECTIONS.emailOutbox).updateOne(
-        { _id: id },
+    reschedule: async (entry, nextAttemptAt, lastError) => {
+      const result = await this.col(COLLECTIONS.emailOutbox).updateOne(
+        { _id: entry.id, generation: entry.generation, status: 'sending' } as Filter<NexusDoc>,
         {
           $set: {
             status: 'pending',
@@ -2781,11 +2916,12 @@ class MongoStore implements NexusStore {
         },
         this.opts,
       );
+      return result.modifiedCount > 0;
     },
 
-    markFailed: async (id, lastError) => {
-      await this.col(COLLECTIONS.emailOutbox).updateOne(
-        { _id: id },
+    markFailed: async (entry, lastError) => {
+      const result = await this.col(COLLECTIONS.emailOutbox).updateOne(
+        { _id: entry.id, generation: entry.generation, status: 'sending' } as Filter<NexusDoc>,
         {
           $set: {
             status: 'failed',
@@ -2796,6 +2932,7 @@ class MongoStore implements NexusStore {
         },
         this.opts,
       );
+      return result.modifiedCount > 0;
     },
 
     releaseStale: async (olderThan) => {
@@ -2833,6 +2970,7 @@ class MongoStore implements NexusStore {
         { user_id: userId } as Filter<NexusDoc>,
         {
           $set: {
+            generation: newId(),
             status: 'pending',
             attempts: 0,
             next_attempt_at: now,
@@ -2862,6 +3000,12 @@ class MongoStore implements NexusStore {
     list: async (filter, options) => {
       const query: Record<string, unknown> = {};
       if (filter.status !== undefined) query.status = filter.status;
+      if (filter.statuses !== undefined) {
+        query.status = {
+          $in: filter.statuses,
+          ...(filter.status !== undefined ? { $eq: filter.status } : {}),
+        };
+      }
       return this.paginate(
         COLLECTIONS.gatewayTeardownJobs,
         query as Filter<NexusDoc>,
@@ -2886,6 +3030,8 @@ class MongoStore implements NexusStore {
             {
               $set: {
                 status: 'sending',
+                generation: newId(),
+                completed_at: null,
                 updated_at: nowIso(),
                 attempts: { $add: [{ $ifNull: ['$attempts', 0] }, 1] },
               },
@@ -2900,9 +3046,29 @@ class MongoStore implements NexusStore {
       return claimed;
     },
 
-    markDone: async (id, at) => {
-      await this.col(COLLECTIONS.gatewayTeardownJobs).updateOne(
-        { _id: id },
+    claimPending: async (job) => {
+      const doc = await this.col(COLLECTIONS.gatewayTeardownJobs).findOneAndUpdate(
+        { _id: job.id, generation: job.generation, status: 'pending' } as Filter<NexusDoc>,
+        [
+          {
+            $set: {
+              status: 'sending',
+              generation: newId(),
+              updated_at: nowIso(),
+              completed_at: null,
+              attempts: { $add: [{ $ifNull: ['$attempts', 0] }, 1] },
+            },
+          },
+        ],
+        { ...this.opts, returnDocument: 'after' },
+      );
+      const row = asRow(doc);
+      return row ? mapTeardownJob(row) : null;
+    },
+
+    markDone: async (job, at) => {
+      const result = await this.col(COLLECTIONS.gatewayTeardownJobs).updateOne(
+        { _id: job.id, generation: job.generation, status: 'sending' } as Filter<NexusDoc>,
         {
           $set: {
             status: 'done',
@@ -2914,21 +3080,24 @@ class MongoStore implements NexusStore {
         },
         this.opts,
       );
+      return result.modifiedCount > 0;
     },
 
-    reschedule: async (id, nextAttemptAt, lastError) => {
-      await this.col(COLLECTIONS.gatewayTeardownJobs).updateOne(
-        { _id: id },
+    reschedule: async (job, nextAttemptAt, lastError) => {
+      const result = await this.col(COLLECTIONS.gatewayTeardownJobs).updateOne(
+        { _id: job.id, generation: job.generation, status: 'sending' } as Filter<NexusDoc>,
         {
           $set: {
             status: 'pending',
             next_attempt_at: nextAttemptAt,
             last_error: lastError,
             updated_at: nowIso(),
+            completed_at: null,
           },
         },
         this.opts,
       );
+      return result.modifiedCount > 0;
     },
 
     releaseStale: async (olderThan) => {
@@ -2944,6 +3113,14 @@ class MongoStore implements NexusStore {
     deleteByUser: async (userId) => {
       const result = await this.col(COLLECTIONS.gatewayTeardownJobs).deleteOne(
         { user_id: userId } as Filter<NexusDoc>,
+        this.opts,
+      );
+      return result.deletedCount > 0;
+    },
+
+    deleteClaimed: async (job) => {
+      const result = await this.col(COLLECTIONS.gatewayTeardownJobs).deleteOne(
+        { _id: job.id, generation: job.generation, status: 'sending' } as Filter<NexusDoc>,
         this.opts,
       );
       return result.deletedCount > 0;
@@ -3189,6 +3366,7 @@ class MongoStore implements NexusStore {
 
   readonly leases: LeaseRepo = {
     acquire: async (key, owner, expiresAt, now) => {
+      assertLeaseKeyLength(key);
       const stamp = nowIso();
       try {
         // The filter is the free-or-expired test and the upsert is the claim,
