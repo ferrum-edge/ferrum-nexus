@@ -127,6 +127,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Catalog specifications and the Documentation tab now show gateway server
+  addresses throughout normalized JSON/YAML documents. Provider spec editing
+  reads the original upload through an owner/admin-only endpoint.
 - Require the environment SMTP connection before clearing a password override,
   and audit SMTP password-source transitions without recording setting values.
 - **A test consumer whose creation was applied but never acknowledged was

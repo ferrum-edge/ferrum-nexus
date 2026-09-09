@@ -1177,7 +1177,7 @@ latest request for this API; `my_grant` their active grant. Both may be `null`.
 
 ### `GET /api/catalog/:slug/spec`
 
-_session_ — the raw current document.
+_session_ — the normalized current document for consumers.
 
 ```json
 {
@@ -1191,7 +1191,20 @@ _session_ — the raw current document.
 ```
 
 `content_type` is `application/json` or `application/yaml`, matching
-`raw_spec`. `404 NOT_FOUND` when the API is not viewable or has no spec.
+`raw_spec`. JSON uploads remain JSON; YAML uploads remain YAML. Formatting and
+YAML comments are not preserved. OpenAPI root, path-item and operation `servers`
+are replaced with the API's `invoke_url`, including those in webhooks, reusable
+path items and callbacks. Link Object `server` entries in components and response
+links are also replaced. Schemas, examples and extensions remain untouched.
+When the public gateway origin is unset, only `listen_path` is
+used; neither the upstream nor the Admin API origin is a fallback. The
+Documentation tab renders this same normalized document.
+
+`404 NOT_FOUND` when the API is not viewable or has no spec. A stored document
+that cannot be normalized returns `400 SPEC_INVALID` without its contents or
+parser diagnostics. `internal` APIs remain unlisted but readable by signed-in
+users holding the link. The provider's original is available only through
+`GET /api/apis/:id/spec`.
 
 ---
 
@@ -1552,6 +1565,15 @@ account; holding the proxy lease across all of them would answer `409` to every
 concurrent write on the API for as long as the slowest grantee took, for a step
 that cannot change what the gateway serves. A strip that fails is logged rather
 than retried — there is nothing left for the group to authorise.
+
+### `GET /api/apis/:id/spec`
+
+_provider_, owner-or-admin — the original current stored upload, without the
+catalog's server rewriting. Returns the same metadata fields as the catalog
+spec endpoint, with `raw_spec` containing the original JSON or YAML text
+(outer whitespace is trimmed at upload) and a matching `content_type`.
+The provider's Specification editor reads this endpoint. `403 FORBIDDEN` for
+another provider's API; `404 NOT_FOUND` when the API or current spec is absent.
 
 ### `PUT /api/apis/:id/spec`
 

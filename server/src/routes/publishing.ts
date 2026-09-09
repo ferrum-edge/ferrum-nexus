@@ -31,6 +31,7 @@ import {
   type DeleteApiPluginResponse,
   type DeleteApiResponse,
   type GetApiResponse,
+  type GetApiSpecResponse,
   type ListApiPluginsResponse,
   type ListApisResponse,
   type PublishApiResponse,
@@ -314,6 +315,12 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
       return result;
     },
   );
+
+  app.get('/:id/spec', async (request): Promise<GetApiSpecResponse> => {
+    const { user } = requireAuth(request);
+    const { id } = parseOrThrow(idParamSchema, request.params);
+    return publishing.spec(user, id);
+  });
 
   app.get('/:id', async (request): Promise<GetApiResponse> => {
     const { user } = requireAuth(request);

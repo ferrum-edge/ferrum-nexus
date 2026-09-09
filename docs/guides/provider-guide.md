@@ -289,11 +289,15 @@ item — under `components.pathItems`, `webhooks` or `components.callbacks` — 
 the nearest one wins. Any of those would override the rewrite above and produce
 rules for a path no client can send, so the portal removes them from the copy it
 submits: every declared operation would otherwise answer `400`. Nothing is
-removed from the document you uploaded — the catalog, the docs viewer and
-`docs_only` publication all still show it exactly as you wrote it, nested
-`servers` included. A `servers` inside the `callbacks` of an operation is left
-alone, because a callback describes a request your service makes outbound rather
-than one this API serves.
+removed from the stored upload or the provider's Specification editor. In the
+catalog and docs viewer, both enforcement levels instead show normalized
+JSON/YAML with OpenAPI root, path-item and operation `servers` replaced by the
+gateway address (the listen path alone when no public gateway origin is
+configured), including webhooks, reusable path items and callbacks. That consumer
+projection also rewrites Link Object `server` entries in components and response
+links, preserving schemas, examples and extensions. The enforcement copy leaves servers
+inside operation callbacks alone, because those describe requests your service
+makes outbound rather than ones this API serves.
 
 **A path that is a `$ref` has to point somewhere the portal can reach.** The
 gateway follows a path item's `$ref` anywhere in the document, so one pointing
