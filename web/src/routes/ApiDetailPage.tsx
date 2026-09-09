@@ -1,5 +1,5 @@
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
-import { useEffect, useMemo, useState, type FormEvent, type ReactElement } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react';
 import {
   AUTH_PLUGIN_LABELS,
   AUTH_PLUGIN_TYPES,
@@ -106,6 +106,9 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
   const [methodsChanged, setMethodsChanged] = useState(false);
   const [timeoutsChanged, setTimeoutsChanged] = useState(false);
   const [circuitBreakerChanged, setCircuitBreakerChanged] = useState(false);
+  const methodsGeneration = useRef(0);
+  const timeoutsGeneration = useRef(0);
+  const circuitBreakerGeneration = useRef(0);
   const [specEnforcement, setSpecEnforcement] = useState<SpecEnforcementLevel>(
     api.spec_enforcement,
   );
@@ -164,6 +167,10 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
       return;
     }
 
+    const submittedMethodsGeneration = methodsGeneration.current;
+    const submittedTimeoutsGeneration = timeoutsGeneration.current;
+    const submittedCircuitBreakerGeneration = circuitBreakerGeneration.current;
+
     update.mutate(
       {
         id: api.id,
@@ -188,9 +195,12 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
       },
       {
         onSuccess: () => {
-          setMethodsChanged(false);
-          setTimeoutsChanged(false);
-          setCircuitBreakerChanged(false);
+          // Keep edits made while this request was in flight dirty for the next save.
+          if (methodsGeneration.current === submittedMethodsGeneration) setMethodsChanged(false);
+          if (timeoutsGeneration.current === submittedTimeoutsGeneration) setTimeoutsChanged(false);
+          if (circuitBreakerGeneration.current === submittedCircuitBreakerGeneration) {
+            setCircuitBreakerChanged(false);
+          }
           toast.success('API settings saved');
         },
       },
@@ -343,16 +353,19 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
               <AdvancedProxySettings
                 methods={methods}
                 onMethodsChange={(next) => {
+                  methodsGeneration.current += 1;
                   setMethods(next);
                   setMethodsChanged(true);
                 }}
                 timeouts={timeouts}
                 onTimeoutsChange={(next) => {
+                  timeoutsGeneration.current += 1;
                   setTimeouts(next);
                   setTimeoutsChanged(true);
                 }}
                 circuitBreaker={circuitBreaker}
                 onCircuitBreakerChange={(next) => {
+                  circuitBreakerGeneration.current += 1;
                   setCircuitBreaker(next);
                   setCircuitBreakerChanged(true);
                 }}
