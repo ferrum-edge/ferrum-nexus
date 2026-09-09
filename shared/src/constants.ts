@@ -350,6 +350,26 @@ export const MAX_SPEC_PATHS = 2_000;
 export const MAX_SPEC_OPERATIONS = 3_000;
 
 /**
+ * Maximum number of things the documentation viewer has to walk in one uploaded
+ * document: schema nodes, parameter entries and media types, added together.
+ *
+ * Paths and operations are not a bound on render cost. One operation can carry
+ * thousands of parameters, dozens of media types per body, and schemas whose
+ * expansion dwarfs both — none of which {@link MAX_SPEC_PATHS} or
+ * {@link MAX_SPEC_OPERATIONS} count, and none of which {@link MAX_SPEC_BYTES}
+ * bounds either, because the viewer's cost is in the structure rather than the
+ * transfer. This counts what the renderer actually walks.
+ *
+ * Sized to sit above anything a portal legitimately fronts — the largest public
+ * APIs that fit inside {@link MAX_SPEC_BYTES} are an order of magnitude below
+ * it — while still refusing a document packed to that byte limit with the
+ * smallest nodes it can hold, which is the shape a hostile upload takes. The
+ * viewer additionally bounds what it renders, so this is the outer fence rather
+ * than the only one.
+ */
+export const MAX_SPEC_RENDER_UNITS = 100_000;
+
+/**
  * HTTP methods that make a key of an OpenAPI path item an *operation*. Every
  * other key (`parameters`, `summary`, `servers`, `$ref`, extensions) is not.
  */

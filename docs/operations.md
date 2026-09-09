@@ -1235,6 +1235,58 @@ instance has acquired the lease. Edge cannot reject that stale holder's later
 `PUT`. Renewal makes this overlap unlikely during normal operation, but it does
 not make concurrent gateway writers safe.
 
+### When a gateway change cannot be taken back
+
+Ferrum Edge has no cross-resource transaction, so an operation that touches
+several gateway objects — a publish, an API `PATCH`, a spec revision — records a
+compensating call for each write and replays them in reverse if a later step
+fails. Two properties of that machinery matter operationally.
+
+**A rejected Edge response is not proof the write did not happen.** A `PUT` or a
+`POST` the gateway applied and could not acknowledge — a timeout, a dropped
+connection, a proxy in front of Edge answering 502 — fails in the caller exactly
+like one Edge refused. Every compensating step is therefore registered _before_
+the write it undoes rather than after it returns, and a publish mints its own
+proxy id and records it before dispatching the create, so the rollback's
+`DELETE` always has a target. The cost is that a compensation sometimes replays
+a write that never landed; every restore is scoped to the fields its own step
+wrote, so that replay is an idempotent no-op rather than a second change.
+
+**A compensation that fails is recorded, never only swallowed.** The unwind must
+not replace the error the caller asked about, so it does not raise — it writes an
+audit row instead, and that row is the only thing that says the gateway may no
+longer match the catalog:
+
+| Row                           | What it means                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `api.gateway_repair_required` | A change the portal made and could not put back. `details.phase` distinguishes them: `conversion` and `rollback` are a `spec_enforcement` rebuild that left the API with no proxy at all; `compensation` is the lesser case where the proxy is still there but a field — the upstream backend, a runtime setting, an auth or access control plugin — may not match the catalog. `details.steps` names which.             |
+| `api.publish_rollback`        | A publish that reached the gateway and then failed. `withdrawn: true` is the ordinary case and needs nothing; `withdrawn: false` means the compensating delete could not be confirmed and `details.stranded_proxy_id` names a proxy that may still be live on its unguessable staging path, with no `apis` row and — when the publish died before its plugins were associated — nothing the gateway runs in front of it. |
+
+Both are also logged at `error`. Neither repairs itself: no later request
+revisits them, so alert on both.
+
+```sql
+SELECT created_at, action, target_id AS api_id, details
+  FROM audit_logs
+  WHERE action IN ('api.gateway_repair_required', 'api.publish_rollback')
+  ORDER BY created_at DESC;
+```
+
+For an `api.publish_rollback` with `withdrawn: false`, read the named proxy back
+with `GET /proxies/{id}` on the Admin API. If it is there it is a proxy nothing
+in the portal knows about — no catalog entry, and no way to reach or remove it
+from the UI — and the repair is to delete it. Nexus never reuses a stranded id,
+so the provider's retry published a different proxy and deleting this one cannot
+affect it. For an `api.gateway_repair_required` with `phase: 'compensation'`,
+compare the fields `details.steps` names against the API's catalog entry and put
+the gateway back by hand, or ask the provider to re-submit the `PATCH` — it is
+idempotent.
+
+There is deliberately **no automatic sweep** for either. Reconciling a namespace
+by deleting every proxy with no matching `apis` row would also delete proxies an
+operator created outside the portal, which Nexus does not own and must never
+remove.
+
 ### The same table guards the last super admin
 
 `edge_leases` is not only for gateway resources. One database invariant needs

@@ -25,6 +25,7 @@ import {
 import { formatDateTime, parseCorsOrigins } from '../lib/format';
 import {
   useApi,
+  useApiSpec,
   useApiUsage,
   useCreateTestConsumer,
   useDeleteApi,
@@ -36,7 +37,6 @@ import {
   useApproveAccessRequest,
   useDenyAccessRequest,
 } from '../hooks/useAccessRequests';
-import { useCatalogSpec } from '../hooks/useCatalog';
 import { useGrants, useRevokeGrant } from '../hooks/useGrants';
 import { useToast } from '../stores/toast';
 import { RoleGuard } from '../components/layout/RoleGuard';
@@ -117,7 +117,7 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
   // The current document is not on this page, so it is fetched to offer the
   // same "use the methods declared in the spec" shortcut the publish form has.
   // An API with no stored revision simply does not get the shortcut.
-  const specQuery = useCatalogSpec(api.slug);
+  const specQuery = useApiSpec(api.id);
   const specMethods = useMemo<HttpMethod[]>(() => {
     const raw = specQuery.data?.raw_spec;
     if (!raw) return [];
@@ -416,7 +416,7 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
 }
 
 function SpecTab({ api }: { api: Api }): ReactElement {
-  const specQuery = useCatalogSpec(api.slug);
+  const specQuery = useApiSpec(api.id);
   const updateSpec = useUpdateApiSpec();
   const toast = useToast();
   const [draft, setDraft] = useState<string | null>(null);

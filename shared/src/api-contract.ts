@@ -338,11 +338,11 @@ export interface CatalogDetailResponse {
   my_grant: Grant | null;
 }
 
-/** `GET /api/catalog/:slug/spec` — the raw document plus its metadata. */
+/** `GET /api/catalog/:slug/spec` — the normalized document plus its metadata. */
 export interface CatalogSpecResponse {
   api_id: Uuid;
   version: string;
-  /** The document exactly as uploaded (JSON or YAML text). */
+  /** JSON or YAML text normalized to use gateway servers throughout. */
   raw_spec: string;
   /** `application/json` or `application/yaml`, matching `raw_spec`. */
   content_type: string;
@@ -351,6 +351,12 @@ export interface CatalogSpecResponse {
 }
 
 /* ── Publishing (provider) ──────────────────────────────────────────────── */
+
+/** `GET /api/apis/:id/spec` — owner/admin access to the stored original. */
+export interface GetApiSpecResponse extends Omit<CatalogSpecResponse, 'raw_spec'> {
+  /** The original stored upload (JSON or YAML text), without catalog rewriting. */
+  raw_spec: string;
+}
 
 /** `GET /api/apis` */
 export interface ListApisQuery extends ListQuery {
