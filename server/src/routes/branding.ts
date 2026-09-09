@@ -36,9 +36,17 @@ export interface BrandingRoutesOptions {
   auth: AuthService;
 }
 
+/**
+ * Everything in the branding payload that may be memoised. `bootstrap_required`
+ * is deliberately absent: the founder seat is a cross-instance state
+ * transition, and a process that cached an open seat must not keep
+ * advertising it for the rest of the TTL after another instance filled it.
+ */
+type CachedBrandingPayload = Omit<BrandingResponse, 'bootstrap_required'>;
+
 /** A payload and the moment it was assembled. */
 interface CachedBranding {
-  value: BrandingResponse;
+  value: CachedBrandingPayload;
   /** Epoch milliseconds at which the underlying reads started. */
   checkedAt: number;
 }
@@ -54,7 +62,7 @@ interface CachedBranding {
 function memoizeBranding(
   ttlMs: number,
   getRevision: () => number,
-  run: () => Promise<BrandingResponse>,
+  run: () => Promise<CachedBrandingPayload>,
 ): () => Promise<CachedBranding> {
   if (ttlMs <= 0) {
     return async () => {
@@ -99,7 +107,7 @@ export function brandingEtag(payload: BrandingResponse): string {
 export const brandingRoutes: FastifyPluginAsync<BrandingRoutesOptions> = async (app, options) => {
   const { config, settings, captcha, auth } = options;
 
-  const assembleBranding = async (): Promise<BrandingResponse> => {
+  const assembleBranding = async (): Promise<CachedBrandingPayload> => {
     const branding = await settings.getBranding();
     const policy = await auth.getRegistrationPolicy();
     return {
@@ -112,7 +120,6 @@ export const brandingRoutes: FastifyPluginAsync<BrandingRoutesOptions> = async (
         open_registration: policy.open_registration,
         allowed_roles: REGISTRABLE_ROLES.filter((role) => policy.allowed_roles.includes(role)),
       },
-      bootstrap_required: await auth.bootstrapRequired(),
     };
   };
   const loadBranding = memoizeBranding(
@@ -122,7 +129,13 @@ export const brandingRoutes: FastifyPluginAsync<BrandingRoutesOptions> = async (
   );
 
   app.get('/', async (request: FastifyRequest, reply: FastifyReply): Promise<BrandingResponse> => {
-    const payload = (await loadBranding()).value;
+    // The seat check is one indexed count and is read live on every request:
+    // see `CachedBrandingPayload`.
+    const [cached, bootstrap_required] = await Promise.all([
+      loadBranding(),
+      auth.bootstrapRequired(),
+    ]);
+    const payload: BrandingResponse = { ...cached.value, bootstrap_required };
     const maxAgeSec =
       config.brandingCacheMs > 0 ? Math.max(1, Math.ceil(config.brandingCacheMs / 1000)) : 0;
 

@@ -98,9 +98,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
-- The branding response cache invalidates immediately after local settings writes
-  and founder registration, including reads overlapping those changes. Its TTL
-  bounds cross-instance server staleness; changed payloads receive a new ETag.
+- The branding response cache invalidates immediately after local settings writes,
+  including reads overlapping those changes, and never caches `bootstrap_required`.
+  Its TTL bounds cross-instance server staleness of the remaining fields; changed
+  payloads receive a new ETag.
 - Every Ferrum Edge admin JWT now carries an `ns` claim naming the configured
   namespace, so a gateway running with `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true`
   accepts Nexus.

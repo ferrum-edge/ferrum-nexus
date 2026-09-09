@@ -216,9 +216,10 @@ export interface NexusConfig {
    * The route is unauthenticated and used to carry a logo data URL plus several
    * settings reads on every SPA load. Within this window the payload is taken
    * once and shared, and the response is marked cacheable so a CDN or browser
-   * can absorb repeat traffic. Committed local settings writes and founder
-   * registration invalidate immediately; the TTL bounds cross-instance
-   * staleness. Browser/CDN copies retain their max-age. `0` disables the cache.
+   * can absorb repeat traffic. Committed local settings writes invalidate
+   * immediately and `bootstrap_required` is never cached; the TTL bounds
+   * cross-instance staleness of the other fields. Browser/CDN copies retain
+   * their max-age. `0` disables the cache.
    */
   brandingCacheMs: number;
   /** Shared deadline for the health route's Edge calls; below the 10 s image healthcheck. */
