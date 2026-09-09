@@ -393,6 +393,78 @@ describe('access workflow', () => {
     assert.equal(second.statusCode, 409);
   });
 
+  it('refuses a demoted owner all decisions while an admin can still decide', async () => {
+    const owner = await harness.registerUser({
+      email: 'demoted-owner@example.test',
+      role: 'provider',
+    });
+    const apiId = await publish(owner, 'demoted-owner');
+    const approveId = await request(client, apiId);
+    const denyId = await request(secondClient, apiId);
+    const adminAccount = await harness.registerUser({ email: 'access-admin@example.test' });
+    const promoted = await harness.authed(founder, {
+      method: 'PATCH',
+      url: `/api/users/${adminAccount.user.id}`,
+      payload: { role: 'admin' },
+    });
+    assert.equal(promoted.statusCode, 200, promoted.body);
+    const admin = await harness.loginUser('access-admin@example.test');
+    const demoted = await harness.authed(founder, {
+      method: 'PATCH',
+      url: `/api/users/${owner.user.id}`,
+      payload: { role: 'client' },
+    });
+    assert.equal(demoted.statusCode, 200, demoted.body);
+    const demotedOwner = await harness.loginUser('demoted-owner@example.test');
+    assert.equal(demotedOwner.user.role, 'client');
+
+    for (const [requestId, decision] of [
+      [approveId, 'approve'],
+      [denyId, 'deny'],
+    ]) {
+      const refused = await harness.authed(demotedOwner, {
+        method: 'POST',
+        url: `/api/access-requests/${requestId}/${decision}`,
+        payload: {},
+      });
+      assert.equal(refused.statusCode, 403, refused.body);
+      assert.equal(errorCode(refused.body), 'FORBIDDEN');
+    }
+    assert.equal((await harness.store.accessRequests.findById(approveId))?.status, 'pending');
+    assert.equal((await harness.store.accessRequests.findById(denyId))?.status, 'pending');
+    assert.ok(!groupsOf(client.user.id).includes(aclGroupForApi(apiId)));
+
+    const approved = await harness.authed(admin, {
+      method: 'POST',
+      url: `/api/access-requests/${approveId}/approve`,
+      payload: {},
+    });
+    assert.equal(approved.statusCode, 200, approved.body);
+    const grantId = approved.json<ApproveAccessRequestResponse>().grant.id;
+    const denied = await harness.authed(admin, {
+      method: 'POST',
+      url: `/api/access-requests/${denyId}/deny`,
+      payload: {},
+    });
+    assert.equal(denied.statusCode, 200, denied.body);
+    const refused = await harness.authed(demotedOwner, {
+      method: 'POST',
+      url: `/api/grants/${grantId}/revoke`,
+      payload: {},
+    });
+    assert.equal(refused.statusCode, 403, refused.body);
+    assert.equal(errorCode(refused.body), 'FORBIDDEN');
+    assert.equal((await harness.store.grants.findById(grantId))?.status, 'active');
+    assert.ok(groupsOf(client.user.id).includes(aclGroupForApi(apiId)));
+    const revoked = await harness.authed(admin, {
+      method: 'POST',
+      url: `/api/grants/${grantId}/revoke`,
+      payload: {},
+    });
+    assert.equal(revoked.statusCode, 200, revoked.body);
+    assert.ok(!groupsOf(client.user.id).includes(aclGroupForApi(apiId)));
+  });
+
   describe('listing scopes', () => {
     it('shows a client only their own requests and grants', async () => {
       const requests = await harness.authed(client, {

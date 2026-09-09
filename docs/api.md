@@ -1775,10 +1775,11 @@ how you sell an API. See [the provider guide](guides/provider-guide.md#plugins).
 
 ## Access requests
 
-Registered under `/api/access-requests`; _session_ throughout. Who may act on a
-row depends on who owns the API it points at, so there is no route-level role
-guard: a client raises and cancels, a provider decides requests on their own
-APIs, an admin may act on any.
+Registered under `/api/access-requests`; _session_ throughout. The service checks
+both role and ownership: a client raises and cancels their own requests, an API
+owner must retain at least the `provider` role to approve, deny or revoke, and
+an admin may decide on any API. A demoted owner receives `403 FORBIDDEN` for
+these decisions; ownership alone does not preserve provider powers.
 
 ### `GET /api/access-requests`
 
@@ -1824,7 +1825,7 @@ longer `pending`.
 
 ### `POST /api/access-requests/:id/approve`
 
-_session_, **API owner or admin** →
+_session_, **API owner with at least the provider role, or admin** →
 
 ```json
 { "access_request": { …, "status": "approved" }, "grant": { …, "acl_group": "nexus:api:2b1c…:approved" } }
@@ -1845,17 +1846,21 @@ ACL group `nexus:api:<api_id>:approved` is added (serialised per consumer), then
 the grant row is committed. The requester gets a notification and an
 `access_approved` email.
 
-Errors: `403 FORBIDDEN` (not the owner and not an admin), `409 CONFLICT`
+Errors: `403 FORBIDDEN` (neither a provider owner nor an admin), `409 CONFLICT`
 (already decided, the user already holds an active grant, or the API is retired
 or no longer requestable),
 `502 EDGE_ERROR` / `502 EDGE_UNAVAILABLE` — failed approval attempts compensate
 unowned ACL additions and return the request to `pending` where possible.
+Compensation also removes additions whose gateway write was not acknowledged.
+The rollback audit's `acl_group_possibly_applied: true` marks that uncertain
+write outcome; the removal or orphan field records the compensation outcome.
 Incomplete compensation is recorded in `access.approve_rollback` audit details
 and logs; inspect the current request/grant before retrying an ambiguous failure.
 
 ### `POST /api/access-requests/:id/deny`
 
-_session_, **API owner or admin** → `{ "access_request": AccessRequest }`.
+_session_, **API owner with at least the provider role, or admin** →
+`{ "access_request": AccessRequest }`.
 Body `{ "decision_note"?: string | null }`, optional. Nothing changes on the
 gateway. `409 CONFLICT` when already decided.
 
@@ -1881,7 +1886,7 @@ Same scoping as access requests: own / owned-APIs / everything.
 
 ### `POST /api/grants/:id/revoke`
 
-_session_, **API owner or admin** → `{ "grant": Grant }`.
+_session_, **API owner with at least the provider role, or admin** → `{ "grant": Grant }`.
 
 Body: `{ "reason"?: string | null }` (≤ 2000), optional.
 

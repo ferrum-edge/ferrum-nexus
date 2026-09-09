@@ -132,6 +132,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   the previous document and backend. A failed restore writes the existing
   `api.gateway_repair_required` audit event with `phase: 'compensation'` (#214,
   GHSA-5mfx-x488-p4f9).
+- Compensate approvals whose gateway write was not acknowledged and record the
+  uncertain outcome in the rollback audit.
+- Require the provider role as well as API ownership for access decisions;
+  administrators retain oversight after an owner is demoted.
+
 - Catalog specifications and the Documentation tab now show gateway server
   addresses throughout normalized JSON/YAML documents. Provider spec editing
   reads the original upload through an owner/admin-only endpoint.
