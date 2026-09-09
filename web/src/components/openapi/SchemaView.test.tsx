@@ -175,41 +175,49 @@ describe('OpenApiView page budget', () => {
     });
   }
 
-  it('spends one allowance across every media type of an expanded operation', () => {
-    const { container } = render(<OpenApiView text={wideMediaTypeSpec(50, MAX_PAGE_NODES)} />);
+  it(
+    'spends one allowance across every media type of an expanded operation',
+    () => {
+      const { container } = render(<OpenApiView text={wideMediaTypeSpec(50, MAX_PAGE_NODES)} />);
 
-    const started = Date.now();
-    fireEvent.click(screen.getAllByRole('button', { expanded: false })[0] as HTMLElement);
-    expect(Date.now() - started).toBeLessThan(10_000);
+      const started = Date.now();
+      fireEvent.click(screen.getAllByRole('button', { expanded: false })[0] as HTMLElement);
+      expect(Date.now() - started).toBeLessThan(10_000);
 
-    // The first media type spends the page allowance; the other 49 are never
-    // walked, which is what a per-call budget used to let them do.
-    expect(screen.getAllByText(/download the specification/).length).toBeGreaterThan(0);
-    expect(screen.getByText('application/vnd.x0+json')).toBeInTheDocument();
-    expect(screen.queryByText('application/vnd.x49+json')).not.toBeInTheDocument();
+      // The first media type spends the page allowance; the other 49 are never
+      // walked, which is what a per-call budget used to let them do.
+      expect(screen.getAllByText(/download the specification/).length).toBeGreaterThan(0);
+      expect(screen.getByText('application/vnd.x0+json')).toBeInTheDocument();
+      expect(screen.queryByText('application/vnd.x49+json')).not.toBeInTheDocument();
 
-    // A schema row costs a handful of elements, so one allowance is tens of
-    // thousands of them — against the ~1.2 million that 50 fresh allowances,
-    // one per media type, used to mount.
-    expect(container.querySelectorAll('code').length).toBeLessThan(MAX_PAGE_NODES * 4);
-    expect(container.querySelectorAll('*').length).toBeLessThan(MAX_PAGE_NODES * 10);
-  }, BUDGET_TEST_TIMEOUT_MS);
+      // A schema row costs a handful of elements, so one allowance is tens of
+      // thousands of them — against the ~1.2 million that 50 fresh allowances,
+      // one per media type, used to mount.
+      expect(container.querySelectorAll('code').length).toBeLessThan(MAX_PAGE_NODES * 4);
+      expect(container.querySelectorAll('*').length).toBeLessThan(MAX_PAGE_NODES * 10);
+    },
+    BUDGET_TEST_TIMEOUT_MS,
+  );
 
-  it('keeps two expanded operations inside one page allowance between them', () => {
-    const { container } = render(<OpenApiView text={wideMediaTypeSpec(2, MAX_PAGE_NODES)} />);
+  it(
+    'keeps two expanded operations inside one page allowance between them',
+    () => {
+      const { container } = render(<OpenApiView text={wideMediaTypeSpec(2, MAX_PAGE_NODES)} />);
 
-    const buttons = screen.getAllByRole('button', { expanded: false });
-    expect(buttons).toHaveLength(2);
-    fireEvent.click(buttons[0] as HTMLElement);
-    const oneOpen = container.querySelectorAll('*').length;
+      const buttons = screen.getAllByRole('button', { expanded: false });
+      expect(buttons).toHaveLength(2);
+      fireEvent.click(buttons[0] as HTMLElement);
+      const oneOpen = container.querySelectorAll('*').length;
 
-    fireEvent.click(screen.getAllByRole('button', { expanded: false })[0] as HTMLElement);
-    const twoOpen = container.querySelectorAll('*').length;
+      fireEvent.click(screen.getAllByRole('button', { expanded: false })[0] as HTMLElement);
+      const twoOpen = container.querySelectorAll('*').length;
 
-    // The allowance is divided between the expanded cards rather than handed to
-    // each of them, so opening the second one does not double the page.
-    expect(twoOpen).toBeLessThan(oneOpen * 1.5);
-    expect(twoOpen).toBeLessThan(MAX_PAGE_NODES * 10);
-    expect(screen.getAllByText(/download the specification/).length).toBeGreaterThan(0);
-  }, BUDGET_TEST_TIMEOUT_MS);
+      // The allowance is divided between the expanded cards rather than handed to
+      // each of them, so opening the second one does not double the page.
+      expect(twoOpen).toBeLessThan(oneOpen * 1.5);
+      expect(twoOpen).toBeLessThan(MAX_PAGE_NODES * 10);
+      expect(screen.getAllByText(/download the specification/).length).toBeGreaterThan(0);
+    },
+    BUDGET_TEST_TIMEOUT_MS,
+  );
 });
