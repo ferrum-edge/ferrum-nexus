@@ -114,10 +114,11 @@ export const accessRequestRoutes: FastifyPluginAsync<AccessRoutesOptions> = asyn
     '/:id/cancel',
     { config: { rateLimit: { ...ACCESS_REQUEST_CANCEL_RATE_LIMIT } } },
     async (request): Promise<CancelAccessRequestResponse> => {
-    const { user } = requireAuth(request);
-    const { id } = parseOrThrow(idParamSchema, request.params);
-    return { access_request: await access.cancel(user, id, clientIp(request)) };
-  });
+      const { user } = requireAuth(request);
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      return { access_request: await access.cancel(user, id, clientIp(request)) };
+    },
+  );
 
   app.post('/:id/approve', async (request): Promise<ApproveAccessRequestResponse> => {
     const { user } = requireAuth(request);

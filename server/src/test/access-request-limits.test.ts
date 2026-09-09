@@ -20,11 +20,7 @@ function error(body: string): ApiErrorBody['error'] {
   return (JSON.parse(body) as ApiErrorBody).error;
 }
 
-async function publish(
-  harness: TestApp,
-  owner: TestSession,
-  slug: string,
-): Promise<string> {
+async function publish(harness: TestApp, owner: TestSession, slug: string): Promise<string> {
   const response = await harness.authed(owner, {
     method: 'POST',
     url: '/api/apis',
