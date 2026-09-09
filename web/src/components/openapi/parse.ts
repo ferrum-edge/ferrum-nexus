@@ -1,9 +1,17 @@
 /**
  * Minimal OpenAPI reader for the built-in documentation renderer.
  *
- * The portal deliberately ships no swagger-ui: specs are parsed with `yaml`
- * (which also accepts JSON) and walked structurally. Nothing here throws — a
- * malformed document produces an error result the UI renders as a panel.
+ * The portal deliberately ships no swagger-ui: specs are parsed and walked
+ * structurally. Nothing here throws — a malformed document produces an error
+ * result the UI renders as a panel.
+ *
+ * JSON is tried first, exactly as the server's `parseDocument` does. The `yaml`
+ * parser accepts JSON too, but its flow-mapping parse is quadratic in mapping
+ * width, so routing a JSON document through it turns a millisecond parse into a
+ * multi-second freeze of the viewer's main thread on a document the server
+ * happily accepts. Documents that open with `{` or `[` are therefore JSON, and
+ * a JSON syntax error in one is reported as such rather than retried as YAML —
+ * the same documents the server would reject, refused here for the same reason.
  */
 
 import { parse as parseYaml } from 'yaml';
@@ -208,22 +216,35 @@ export function declaredMethods(text: string): string[] {
   return [...found];
 }
 
+/** The message of a thrown parser error, for the panel the UI renders. */
+function reason(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 /**
- * Parse an OpenAPI document supplied as YAML or JSON text.
+ * Parse an OpenAPI document supplied as JSON or YAML text.
  *
- * Never throws: syntax errors and structurally invalid documents both come back
- * as `{ ok: false, error }`.
+ * JSON first — see the module docblock for why the distinction is not merely
+ * cosmetic. Never throws: syntax errors and structurally invalid documents both
+ * come back as `{ ok: false, error }`.
  */
 export function parseSpecText(text: string): SpecParseResult {
   const trimmed = text.trim();
   if (trimmed.length === 0) return { ok: false, error: 'The specification is empty.' };
 
   let parsed: unknown;
-  try {
-    parsed = parseYaml(trimmed);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { ok: false, error: `Could not parse the specification: ${message}` };
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      parsed = JSON.parse(trimmed) as unknown;
+    } catch (error) {
+      return { ok: false, error: `Could not parse the specification as JSON: ${reason(error)}` };
+    }
+  } else {
+    try {
+      parsed = parseYaml(trimmed) as unknown;
+    } catch (error) {
+      return { ok: false, error: `Could not parse the specification: ${reason(error)}` };
+    }
   }
 
   const doc = asRecord(parsed);

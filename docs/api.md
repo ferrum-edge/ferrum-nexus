@@ -91,7 +91,9 @@ booleans accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`.
 - Every id is a string UUID; every timestamp is an ISO-8601 string.
 - Absent optional values are `null`, not omitted.
 - Request bodies are `application/json`. The body limit is 4 MiB; an uploaded
-  OpenAPI document is additionally capped at 2 MiB.
+  OpenAPI document is additionally capped at 2 MiB, and by structural limits on
+  paths, operations, nesting depth and render cost (see
+  [`POST /api/apis`](#post-apiapis)).
 - All `/api` responses carry `cache-control: no-store`.
 
 ---
@@ -1332,6 +1334,17 @@ then persists.
 Uploads accept at most 200 nested object/array levels, counting the root as level
 one, in either enforcement mode. Deeper documents return `400 SPEC_INVALID` with
 `details: { reason: "nesting_too_deep", limit: 200 }` before a gateway call.
+
+A document must also stay inside what the built-in documentation viewer can
+render. Bytes, paths and operations do not bound that: one declared operation
+can carry any number of parameters, media types and schema nodes, and every
+signed-in viewer of the catalog entry walks them. Nexus therefore counts the
+schema nodes (including reusable `components.schemas`), the parameter entries
+and the media types across the document and refuses more than **100,000** of
+them together with `400 SPEC_INVALID` and
+`details: { reason: "too_much_to_render", schema_nodes, parameters, media_types, units, limit }`.
+The viewer bounds what it renders as well, and truncates a branch it cannot
+afford rather than freezing the tab.
 The derived upstream URL, after server-variable expansion, must fit the same
 2,000-character limit as typed `upstream_url`. An oversized derived URL returns
 `400 SPEC_INVALID` naming `servers[0].url` (or the selected server's index) and

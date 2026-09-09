@@ -25,6 +25,12 @@
  *   structure, and a server-valid 2 MiB document holding tens of thousands of
  *   minimal operations would freeze every catalog viewer that renders one card
  *   per operation.
+ * - the document costs no more than {@link MAX_SPEC_RENDER_UNITS} to *render*.
+ *   Paths and operations are the wrong unit for that: the documentation viewer
+ *   walks one row per schema node, per parameter and per media type, and a
+ *   single declared operation can carry any number of all three. A document is
+ *   provider-authored and is read back by every signed-in viewer of the catalog
+ *   entry, so this counts what the viewer walks and refuses past the ceiling.
  *
  * Everything else (schema correctness, `$ref` resolution, operation shape) is
  * left alone: an over-strict portal would reject specs the gateway is perfectly
@@ -61,6 +67,7 @@ import {
   MAX_SPEC_DEPTH,
   MAX_SPEC_OPERATIONS,
   MAX_SPEC_PATHS,
+  MAX_SPEC_RENDER_UNITS,
   MAX_UPSTREAM_URL_LENGTH,
   OPENAPI_OPERATION_METHODS,
 } from '@ferrum-nexus/shared';
@@ -540,6 +547,129 @@ function assertSpecDepth(value: unknown): void {
 }
 
 /**
+ * Object and array nodes in `root`, counting each *occurrence*.
+ *
+ * Memoised per node: a YAML document may point many keys at one anchored
+ * subtree, and re-walking it for every occurrence is exponential. The memo
+ * makes the walk linear while still charging each occurrence what it costs to
+ * render, which is the number this limit is about. Cyclic aliases are already
+ * rejected by {@link assertSpecDepth}, so the walk terminates.
+ */
+function countNodes(root: unknown, memo: WeakMap<object, number>): number {
+  if (root === null || typeof root !== 'object') return 0;
+  const cached = memo.get(root);
+  if (cached !== undefined) return cached;
+
+  interface Frame {
+    value: object;
+    children: unknown[];
+    childIndex: number;
+    total: number;
+  }
+
+  const pending: Frame[] = [];
+  pending.push({ value: root, children: Object.values(root), childIndex: 0, total: 1 });
+  let rootTotal = 0;
+
+  while (pending.length > 0) {
+    const frame = pending[pending.length - 1]!;
+    if (frame.childIndex < frame.children.length) {
+      const child = frame.children[frame.childIndex++];
+      if (child === null || typeof child !== 'object') continue;
+      const cachedChild = memo.get(child);
+      if (cachedChild !== undefined) {
+        frame.total += cachedChild;
+        continue;
+      }
+      pending.push({ value: child, children: Object.values(child), childIndex: 0, total: 1 });
+      continue;
+    }
+
+    memo.set(frame.value, frame.total);
+    rootTotal = frame.total;
+    pending.pop();
+    const parent = pending[pending.length - 1];
+    if (parent) parent.total += frame.total;
+  }
+
+  return rootTotal;
+}
+
+/** The three things the documentation viewer walks, counted separately. */
+interface RenderUnits {
+  schemaNodes: number;
+  parameters: number;
+  mediaTypes: number;
+}
+
+/**
+ * Refuse a document that costs more to render than {@link MAX_SPEC_RENDER_UNITS}.
+ *
+ * Counted over the parts the viewer actually walks — reusable schemas, and the
+ * parameters, request bodies and responses of every declared operation — rather
+ * than over the document as a whole, so the number in the error means something
+ * the provider can act on.
+ */
+function assertRenderCost(document: Record<string, unknown>, paths: Record<string, unknown>): void {
+  const memo = new WeakMap<object, number>();
+  const units: RenderUnits = { schemaNodes: 0, parameters: 0, mediaTypes: 0 };
+
+  const components = isRecord(document.components) ? document.components : null;
+  const schemas = components && isRecord(components.schemas) ? components.schemas : null;
+  if (schemas) {
+    for (const schema of Object.values(schemas)) units.schemaNodes += countNodes(schema, memo);
+  }
+
+  const addParameters = (list: unknown): void => {
+    if (!Array.isArray(list)) return;
+    units.parameters += list.length;
+    for (const entry of list) {
+      if (isRecord(entry)) units.schemaNodes += countNodes(entry.schema, memo);
+    }
+  };
+
+  const addContent = (body: unknown): void => {
+    if (!isRecord(body) || !isRecord(body.content)) return;
+    const content = body.content;
+    units.mediaTypes += Object.keys(content).length;
+    for (const media of Object.values(content)) {
+      if (isRecord(media)) units.schemaNodes += countNodes(media.schema, memo);
+    }
+  };
+
+  for (const item of Object.values(paths)) {
+    if (!isRecord(item)) continue;
+    addParameters(item.parameters);
+    for (const method of OPENAPI_OPERATION_METHODS) {
+      const operation = item[method];
+      if (!isRecord(operation)) continue;
+      addParameters(operation.parameters);
+      addContent(operation.requestBody);
+      if (!isRecord(operation.responses)) continue;
+      for (const response of Object.values(operation.responses)) addContent(response);
+    }
+  }
+
+  const total = units.schemaNodes + units.parameters + units.mediaTypes;
+  if (total <= MAX_SPEC_RENDER_UNITS) return;
+
+  throw specInvalid(
+    `The document declares ${units.schemaNodes} schema nodes, ${units.parameters} parameters and ` +
+      `${units.mediaTypes} media types, more than the ${MAX_SPEC_RENDER_UNITS} the documentation ` +
+      'viewer can render',
+    {
+      field: 'paths',
+      reason: 'too_much_to_render',
+      schema_nodes: units.schemaNodes,
+      parameters: units.parameters,
+      media_types: units.mediaTypes,
+      units: total,
+      limit: MAX_SPEC_RENDER_UNITS,
+    },
+  );
+}
+
+/**
  * Parse and validate an uploaded OpenAPI document.
  *
  * @throws NexusError `SPEC_INVALID` with a `details` object naming the offending
@@ -619,6 +749,9 @@ export function parseOpenApiSpec(text: string): ParsedSpec {
       { field: 'paths', operations: operationCount, limit: MAX_SPEC_OPERATIONS },
     );
   }
+  // Last of the limits, and the only one that walks the whole document: it runs
+  // once the cheap counts have already refused the obvious floods.
+  assertRenderCost(value, paths);
 
   return {
     title,
