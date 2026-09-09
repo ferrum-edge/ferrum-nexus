@@ -70,6 +70,18 @@ export const AuditAction = {
    * administrator can rebuild the API from this row.
    */
   API_GATEWAY_REPAIR_REQUIRED: 'api.gateway_repair_required',
+  /**
+   * A publish that reached the gateway and then failed; records whether the
+   * proxy it created came back off again.
+   *
+   * The proxy id is minted by Nexus and recorded before the create is
+   * dispatched, so the compensating `DELETE` has a target even when the
+   * create's acknowledgement never arrives. `withdrawn: false` means that
+   * `DELETE` did not confirm, and `stranded_proxy_id` names a proxy that may
+   * still be live on its unguessable staging path with no plugin attached and
+   * no `apis` row — the only record that it exists.
+   */
+  API_PUBLISH_ROLLBACK: 'api.publish_rollback',
   TEST_CONSUMER_CREATE: 'test_consumer.create',
 
   /* access workflow */
