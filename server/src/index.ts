@@ -203,6 +203,16 @@ export const AUTH_RATE_LIMIT = { max: 20, timeWindow: '1 minute' } as const;
 export const HEALTH_RATE_LIMIT = { max: 120, timeWindow: '1 minute' } as const;
 
 /**
+ * Rate limit applied to `/api/branding` when `config.rateLimitEnabled` is true.
+ *
+ * Same ceiling as health: the route is unauthenticated and each hit used to run
+ * several settings reads and return a payload that can include a logo data URL.
+ * The `NEXUS_BRANDING_CACHE_MS` cache in `routes/branding.ts` is what keeps
+ * traffic under this ceiling from reaching the database; this is the ceiling.
+ */
+export const BRANDING_RATE_LIMIT = { max: 120, timeWindow: '1 minute' } as const;
+
+/**
  * Translate `config.trustedProxies` into a value Fastify accepts.
  *
  * A hop count becomes a `TrustProxyFunction` rather than being passed through:
@@ -406,6 +416,7 @@ export async function buildServer(
     email,
     provisioner,
     settings,
+    locks: sendLocks,
     log: warn,
   });
   const god = createGodService({
@@ -564,9 +575,15 @@ export async function buildServer(
     { prefix: '/api/auth' },
   );
 
-  await app.register(async (scope) => scope.register(brandingRoutes, { settings, captcha, auth }), {
-    prefix: '/api/branding',
-  });
+  await app.register(
+    async (scope) => {
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { ...BRANDING_RATE_LIMIT });
+      }
+      await scope.register(brandingRoutes, { config, settings, captcha, auth });
+    },
+    { prefix: '/api/branding' },
+  );
 
   await app.register(async (scope) => scope.register(usersRoutes, { users, config }), {
     prefix: '/api/users',
@@ -615,9 +632,15 @@ export async function buildServer(
     { prefix: '/api/apis' },
   );
 
-  await app.register(async (scope) => scope.register(accessRequestRoutes, { access }), {
-    prefix: '/api/access-requests',
-  });
+  await app.register(
+    async (scope) => {
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
+      }
+      await scope.register(accessRequestRoutes, { access });
+    },
+    { prefix: '/api/access-requests' },
+  );
 
   await app.register(async (scope) => scope.register(grantRoutes, { access }), {
     prefix: '/api/grants',

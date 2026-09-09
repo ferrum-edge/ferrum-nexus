@@ -276,6 +276,8 @@ export interface AuthService {
   issueSession(user: UserRecord, context: RequestContext): Promise<IssuedSession>;
   /** Current registration policy, with defaults applied. */
   getRegistrationPolicy(): Promise<RegistrationPolicy>;
+  /** Revision of committed bootstrap changes on this instance. */
+  getBrandingRevision(): number;
   /**
    * True while the portal has no active `super_admin`, i.e. the next
    * registration is the bootstrap one and must carry a valid `bootstrap_token`.
@@ -364,6 +366,7 @@ export async function readRegistrationPolicy(store: NexusStore): Promise<Registr
 /** Build the authentication service. */
 export function createAuthService(deps: AuthServiceDeps): AuthService {
   const { config, store, crypto, audit, captcha, locks } = deps;
+  let brandingRevision = 0;
   const serializePasswordChange = createPasswordChangeSerializer(store);
 
   async function getRegistrationPolicy(): Promise<RegistrationPolicy> {
@@ -556,6 +559,7 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
 
   return {
     getRegistrationPolicy,
+    getBrandingRevision: () => brandingRevision,
     issueSession,
     bootstrapRequired,
 
@@ -622,6 +626,8 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
       const { record, promoted, verificationToken } = seatOpen
         ? await locks(SUPER_ADMIN_LOCK_KEY, founderTransaction)
         : await store.transaction((tx) => persistRegistration(tx, draft, false));
+
+      if (promoted) brandingRevision += 1;
 
       const requiresVerification = !promoted && verificationToken !== null;
       const user = toPublicUser(record);
