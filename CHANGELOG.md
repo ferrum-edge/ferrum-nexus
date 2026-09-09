@@ -131,6 +131,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Compensate approvals whose gateway write was not acknowledged and record the
+  uncertain outcome in the rollback audit.
+- Require the provider role as well as API ownership for access decisions;
+  administrators retain oversight after an owner is demoted.
+
+- Catalog specifications and the Documentation tab now show gateway server
+  addresses throughout normalized JSON/YAML documents. Provider spec editing
+  reads the original upload through an owner/admin-only endpoint.
 - Require the environment SMTP connection before clearing a password override,
   and audit SMTP password-source transitions without recording setting values.
 - **A test consumer whose creation was applied but never acknowledged was
@@ -403,6 +411,17 @@ codebase, once independently — and every finding below was proven with a
 working exploit before being fixed, and is covered by a regression test that
 fails without the fix.
 
+- **A published OpenAPI document can no longer freeze a reader's browser.**
+  The catalog viewer parses documents that open with `{` or `[` as JSON — the
+  YAML parser accepts JSON but its cost grows quadratically with the width of a
+  mapping, which stalled the tab for seconds before drawing anything. Rendering
+  now spends a single node allowance across the whole page, divided between the
+  operations the reader has expanded, instead of a fresh one per schema; a
+  branch that exhausts it shows one "truncated" notice and its siblings are not
+  mounted. Publishing additionally refuses a document that declares more than
+  100,000 schema nodes, parameters and media types together
+  (`SPEC_INVALID`, `details.reason = "too_much_to_render"`) — bytes, paths and
+  operations bound none of what a reader actually pays for.
 - **Bootstrap election is atomic.** Concurrent registrations against an empty
   portal could _all_ become `super_admin`; the first-user promotion is now a
   single claim on a unique key.

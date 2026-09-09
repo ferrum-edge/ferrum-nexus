@@ -15,25 +15,76 @@ import {
 const MAX_DEPTH = 12;
 
 /**
- * Hard stop on total rendered nodes.
+ * Hard stop on total rendered nodes for one page of documentation.
  *
  * Depth alone does not bound the tree: every level fans out across
  * `properties`, `items` and `oneOf`/`anyOf`/`allOf`, so a document that is
  * merely 14 levels deep with a handful of `$ref`ing properties each expands to
  * billions of nodes and hangs the tab. Specs are attacker-authored (any
  * provider can publish one), so the budget is a safety limit, not a nicety.
+ *
+ * The allowance is spent across an **entire page render**, not per call: an
+ * operation renders one schema per parameter, per request media type and per
+ * response media type, and a per-call allowance would multiply by every one of
+ * them. {@link OpenApiView} divides this allowance between the operations a
+ * viewer has expanded and hands each one its slice.
  */
-const MAX_NODES = 4000;
+export const MAX_PAGE_NODES = 4000;
 
-/** Mutable node allowance shared by one top-level render pass. */
-interface Budget {
+/**
+ * Mutable node allowance threaded through one render pass.
+ *
+ * It is consumed while React elements are *constructed*, which is why every
+ * holder creates it inside its own render body: a budget object is never shared
+ * across component boundaries, so a component rendered twice for one commit
+ * (React's development-mode double invoke) spends a fresh allowance each time
+ * rather than draining a shared one.
+ */
+export interface RenderBudget {
   remaining: number;
+}
+
+/** A budget for one render pass; `limit` is a slice of {@link MAX_PAGE_NODES}. */
+export function createRenderBudget(limit: number = MAX_PAGE_NODES): RenderBudget {
+  return { remaining: Math.max(0, Math.floor(limit)) };
+}
+
+/**
+ * Spend one node from `budget`, reporting whether there was one to spend.
+ *
+ * Rows that mount no schema — a parameter, a media type, a response entry —
+ * still cost DOM, so they charge through here rather than riding free.
+ */
+export function chargeNode(budget: RenderBudget): boolean {
+  if (budget.remaining <= 0) return false;
+  budget.remaining -= 1;
+  return true;
+}
+
+/**
+ * The one affordance an exhausted branch renders.
+ *
+ * Exhaustion stops *mounting*, not just recursing: the caller that sees it
+ * abandons the remaining siblings, so a hostile document costs a bounded DOM
+ * instead of a linear one.
+ */
+export function TruncationNotice(): ReactElement {
+  return (
+    <p className="text-xs text-fg-subtle">
+      …truncated — download the specification to read the rest.
+    </p>
+  );
 }
 
 export interface SchemaViewProps {
   schema: unknown;
   /** Document root, used to resolve local `$ref`s. */
   doc: SpecNode;
+  /**
+   * The page allowance this schema draws on. Required — every caller shares one
+   * budget per render pass, which is the whole point of the limit.
+   */
+  budget: RenderBudget;
   /** Property name when this schema sits inside an object. */
   name?: string;
   required?: boolean;
@@ -93,24 +144,37 @@ function TypeLine({ schema }: { schema: SpecNode }): ReactElement | null {
  * the current branch renders as a "circular" marker rather than recursing, so
  * self-referential schemas (`Node.children: Node[]`) terminate.
  */
-export function SchemaView({
+export function SchemaView(props: SchemaViewProps): ReactElement {
+  return renderSchema(props);
+}
+
+/**
+ * The same renderer as a plain function.
+ *
+ * {@link OpenApiView} calls this rather than mounting {@link SchemaView} as a
+ * component: the budget is spent while elements are *constructed*, so a caller
+ * that owns a budget has to construct every schema inside its own render body
+ * instead of handing the same budget object to children React may invoke on its
+ * own schedule.
+ */
+export function renderSchema({
   schema,
   doc,
+  budget,
   name,
   required = false,
   depth = 0,
   seen = [],
 }: SchemaViewProps): ReactElement {
-  // A fresh allowance per top-level render. The whole subtree is produced
-  // synchronously inside this one call, so the counter is consumed in a single
-  // deterministic pass rather than across separate component renders.
-  const budget: Budget = { remaining: MAX_NODES };
+  // The whole subtree is produced synchronously inside this one call, so the
+  // caller's allowance is consumed in a single deterministic pass; what is left
+  // of it is what the caller's next schema gets.
   return renderNode({ schema, doc, name, required, depth, seen }, budget);
 }
 
 function renderNode(
   { schema, doc, name, required = false, depth, seen }: RenderArgs,
-  budget: Budget,
+  budget: RenderBudget,
 ): ReactElement {
   const node = asRecord(schema);
 
@@ -119,11 +183,7 @@ function renderNode(
   }
 
   if (budget.remaining <= 0) {
-    return (
-      <SchemaRow name={name} required={required} depth={depth}>
-        <span className="text-xs text-fg-subtle">…truncated</span>
-      </SchemaRow>
-    );
+    return <TruncationNotice />;
   }
   budget.remaining -= 1;
 
@@ -183,6 +243,49 @@ function renderNode(
     (asArray(node.allOf) && { key: 'allOf', entries: asArray(node.allOf) }) ??
     null;
 
+  // Children are built before the tree is returned, and each loop abandons its
+  // remaining siblings the moment the budget is gone: exhaustion has to stop
+  // *mounting*, not merely stop recursing, or a wide document still costs one
+  // rendered row per entry.
+  const compositionRows: ReactElement[] = [];
+  for (const entry of composition?.entries ?? []) {
+    if (budget.remaining <= 0) {
+      compositionRows.push(<TruncationNotice key="__truncated" />);
+      break;
+    }
+    compositionRows.push(
+      <div key={compositionRows.length}>
+        {renderNode({ schema: entry, doc, depth: depth + 1, seen }, budget)}
+      </div>,
+    );
+  }
+
+  const itemsRow =
+    items !== undefined ? renderNode({ schema: items, doc, depth: depth + 1, seen }, budget) : null;
+
+  const propertyRows: ReactElement[] = [];
+  for (const [propertyName, propertySchema] of Object.entries(properties ?? {})) {
+    if (budget.remaining <= 0) {
+      propertyRows.push(<TruncationNotice key="__truncated" />);
+      break;
+    }
+    propertyRows.push(
+      <div key={propertyName}>
+        {renderNode(
+          {
+            schema: propertySchema,
+            doc,
+            name: propertyName,
+            required: requiredNames.has(propertyName),
+            depth: depth + 1,
+            seen,
+          },
+          budget,
+        )}
+      </div>,
+    );
+  }
+
   return (
     <div>
       <SchemaRow name={name} required={required} depth={depth}>
@@ -192,42 +295,22 @@ function renderNode(
         <p className={cn('text-xs text-fg-muted', depth > 0 && 'pl-3')}>{description}</p>
       ) : null}
 
-      {composition && composition.entries ? (
+      {composition && compositionRows.length > 0 ? (
         <div className="mt-1 border-l border-border pl-3">
           <p className="text-xs font-medium text-fg-subtle">{composition.key}</p>
-          {composition.entries.map((entry, index) => (
-            <div key={index}>
-              {renderNode({ schema: entry, doc, depth: depth + 1, seen }, budget)}
-            </div>
-          ))}
+          {compositionRows}
         </div>
       ) : null}
 
-      {items !== undefined ? (
+      {itemsRow ? (
         <div className="mt-1 border-l border-border pl-3">
           <p className="text-xs font-medium text-fg-subtle">items</p>
-          {renderNode({ schema: items, doc, depth: depth + 1, seen }, budget)}
+          {itemsRow}
         </div>
       ) : null}
 
-      {properties ? (
-        <div className="mt-1 flex flex-col gap-2 border-l border-border pl-3">
-          {Object.entries(properties).map(([propertyName, propertySchema]) => (
-            <div key={propertyName}>
-              {renderNode(
-                {
-                  schema: propertySchema,
-                  doc,
-                  name: propertyName,
-                  required: requiredNames.has(propertyName),
-                  depth: depth + 1,
-                  seen,
-                },
-                budget,
-              )}
-            </div>
-          ))}
-        </div>
+      {propertyRows.length > 0 ? (
+        <div className="mt-1 flex flex-col gap-2 border-l border-border pl-3">{propertyRows}</div>
       ) : null}
     </div>
   );

@@ -12,6 +12,7 @@ import type {
   DeleteApiPluginResponse,
   DeleteApiResponse,
   GetApiResponse,
+  GetApiSpecResponse,
   ListApiPluginsResponse,
   ListApisQuery,
   ListApisResponse,
@@ -52,6 +53,15 @@ export function useApi(id: string): UseQueryResult<GetApiResponse> {
   return useQuery({
     queryKey: queryKeys.apis.detail(id),
     queryFn: () => apisApi.get(id),
+    enabled: id.length > 0,
+  });
+}
+
+/** The stored original for the provider's spec editor. */
+export function useApiSpec(id: string): UseQueryResult<GetApiSpecResponse> {
+  return useQuery({
+    queryKey: queryKeys.apis.spec(id),
+    queryFn: () => apisApi.spec(id),
     enabled: id.length > 0,
   });
 }

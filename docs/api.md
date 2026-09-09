@@ -91,7 +91,9 @@ booleans accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`.
 - Every id is a string UUID; every timestamp is an ISO-8601 string.
 - Absent optional values are `null`, not omitted.
 - Request bodies are `application/json`. The body limit is 4 MiB; an uploaded
-  OpenAPI document is additionally capped at 2 MiB.
+  OpenAPI document is additionally capped at 2 MiB, and by structural limits on
+  paths, operations, nesting depth and render cost (see
+  [`POST /api/apis`](#post-apiapis)).
 - All `/api` responses carry `cache-control: no-store`.
 
 ---
@@ -1189,7 +1191,7 @@ latest request for this API; `my_grant` their active grant. Both may be `null`.
 
 ### `GET /api/catalog/:slug/spec`
 
-_session_ — the raw current document.
+_session_ — the normalized current document for consumers.
 
 ```json
 {
@@ -1203,7 +1205,20 @@ _session_ — the raw current document.
 ```
 
 `content_type` is `application/json` or `application/yaml`, matching
-`raw_spec`. `404 NOT_FOUND` when the API is not viewable or has no spec.
+`raw_spec`. JSON uploads remain JSON; YAML uploads remain YAML. Formatting and
+YAML comments are not preserved. OpenAPI root, path-item and operation `servers`
+are replaced with the API's `invoke_url`, including those in webhooks, reusable
+path items and callbacks. Link Object `server` entries in components and response
+links are also replaced. Schemas, examples and extensions remain untouched.
+When the public gateway origin is unset, only `listen_path` is
+used; neither the upstream nor the Admin API origin is a fallback. The
+Documentation tab renders this same normalized document.
+
+`404 NOT_FOUND` when the API is not viewable or has no spec. A stored document
+that cannot be normalized returns `400 SPEC_INVALID` without its contents or
+parser diagnostics. `internal` APIs remain unlisted but readable by signed-in
+users holding the link. The provider's original is available only through
+`GET /api/apis/:id/spec`.
 
 ---
 
@@ -1346,6 +1361,17 @@ then persists.
 Uploads accept at most 200 nested object/array levels, counting the root as level
 one, in either enforcement mode. Deeper documents return `400 SPEC_INVALID` with
 `details: { reason: "nesting_too_deep", limit: 200 }` before a gateway call.
+
+A document must also stay inside what the built-in documentation viewer can
+render. Bytes, paths and operations do not bound that: one declared operation
+can carry any number of parameters, media types and schema nodes, and every
+signed-in viewer of the catalog entry walks them. Nexus therefore counts the
+schema nodes (including reusable `components.schemas`), the parameter entries
+and the media types across the document and refuses more than **100,000** of
+them together with `400 SPEC_INVALID` and
+`details: { reason: "too_much_to_render", schema_nodes, parameters, media_types, units, limit }`.
+The viewer bounds what it renders as well, and truncates a branch it cannot
+afford rather than freezing the tab.
 The derived upstream URL, after server-variable expansion, must fit the same
 2,000-character limit as typed `upstream_url`. An oversized derived URL returns
 `400 SPEC_INVALID` naming `servers[0].url` (or the selected server's index) and
@@ -1554,6 +1580,15 @@ concurrent write on the API for as long as the slowest grantee took, for a step
 that cannot change what the gateway serves. A strip that fails is logged rather
 than retried — there is nothing left for the group to authorise.
 
+### `GET /api/apis/:id/spec`
+
+_provider_, owner-or-admin — the original current stored upload, without the
+catalog's server rewriting. Returns the same metadata fields as the catalog
+spec endpoint, with `raw_spec` containing the original JSON or YAML text
+(outer whitespace is trimmed at upload) and a matching `content_type`.
+The provider's Specification editor reads this endpoint. `403 FORBIDDEN` for
+another provider's API; `404 NOT_FOUND` when the API or current spec is absent.
+
 ### `PUT /api/apis/:id/spec`
 
 _provider_, owner-or-admin — publish a new spec revision.
@@ -1754,10 +1789,11 @@ how you sell an API. See [the provider guide](guides/provider-guide.md#plugins).
 
 ## Access requests
 
-Registered under `/api/access-requests`; _session_ throughout. Who may act on a
-row depends on who owns the API it points at, so there is no route-level role
-guard: a client raises and cancels, a provider decides requests on their own
-APIs, an admin may act on any.
+Registered under `/api/access-requests`; _session_ throughout. The service checks
+both role and ownership: a client raises and cancels their own requests, an API
+owner must retain at least the `provider` role to approve, deny or revoke, and
+an admin may decide on any API. A demoted owner receives `403 FORBIDDEN` for
+these decisions; ownership alone does not preserve provider powers.
 
 ### `GET /api/access-requests`
 
@@ -1812,7 +1848,7 @@ longer `pending`.
 
 ### `POST /api/access-requests/:id/approve`
 
-_session_, **API owner or admin** →
+_session_, **API owner with at least the provider role, or admin** →
 
 ```json
 { "access_request": { …, "status": "approved" }, "grant": { …, "acl_group": "nexus:api:2b1c…:approved" } }
@@ -1833,17 +1869,21 @@ ACL group `nexus:api:<api_id>:approved` is added (serialised per consumer), then
 the grant row is committed. The requester gets a notification and an
 `access_approved` email.
 
-Errors: `403 FORBIDDEN` (not the owner and not an admin), `409 CONFLICT`
+Errors: `403 FORBIDDEN` (neither a provider owner nor an admin), `409 CONFLICT`
 (already decided, the user already holds an active grant, or the API is retired
 or no longer requestable),
 `502 EDGE_ERROR` / `502 EDGE_UNAVAILABLE` — failed approval attempts compensate
 unowned ACL additions and return the request to `pending` where possible.
+Compensation also removes additions whose gateway write was not acknowledged.
+The rollback audit's `acl_group_possibly_applied: true` marks that uncertain
+write outcome; the removal or orphan field records the compensation outcome.
 Incomplete compensation is recorded in `access.approve_rollback` audit details
 and logs; inspect the current request/grant before retrying an ambiguous failure.
 
 ### `POST /api/access-requests/:id/deny`
 
-_session_, **API owner or admin** → `{ "access_request": AccessRequest }`.
+_session_, **API owner with at least the provider role, or admin** →
+`{ "access_request": AccessRequest }`.
 Body `{ "decision_note"?: string | null }`, optional. Nothing changes on the
 gateway. `409 CONFLICT` when already decided.
 
@@ -1869,7 +1909,7 @@ Same scoping as access requests: own / owned-APIs / everything.
 
 ### `POST /api/grants/:id/revoke`
 
-_session_, **API owner or admin** → `{ "grant": Grant }`.
+_session_, **API owner with at least the provider role, or admin** → `{ "grant": Grant }`.
 
 Body: `{ "reason"?: string | null }` (≤ 2000), optional.
 

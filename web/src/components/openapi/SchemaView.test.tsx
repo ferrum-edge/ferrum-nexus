@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SchemaView } from './SchemaView';
+import { createRenderBudget, MAX_PAGE_NODES, SchemaView } from './SchemaView';
 import { OpenApiView } from './OpenApiView';
 import type { SpecNode } from './parse';
 
@@ -30,6 +30,7 @@ describe('SchemaView', () => {
     render(
       <SchemaView
         doc={doc}
+        budget={createRenderBudget()}
         schema={{
           type: 'object',
           required: ['id'],
@@ -51,7 +52,13 @@ describe('SchemaView', () => {
         },
       },
     } as SpecNode;
-    render(<SchemaView doc={doc} schema={{ $ref: '#/components/schemas/Node' }} />);
+    render(
+      <SchemaView
+        doc={doc}
+        budget={createRenderBudget()}
+        schema={{ $ref: '#/components/schemas/Node' }}
+      />,
+    );
     expect(screen.getByText(/circular →/)).toBeInTheDocument();
   });
 
@@ -60,12 +67,16 @@ describe('SchemaView', () => {
     const doc = fanOutDoc(14, 8);
     const started = Date.now();
     const { container } = render(
-      <SchemaView doc={doc} schema={{ $ref: '#/components/schemas/L0' }} />,
+      <SchemaView
+        doc={doc}
+        budget={createRenderBudget()}
+        schema={{ $ref: '#/components/schemas/L0' }}
+      />,
     );
     expect(Date.now() - started).toBeLessThan(5_000);
     // The budget stops the traversal well before the document is exhausted.
     expect(container.querySelectorAll('code').length).toBeLessThan(20_000);
-    expect(screen.getAllByText('…truncated').length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/download the specification/).length).toBeGreaterThan(0);
   });
 
   it('stops a pure $ref alias chain at the depth limit', () => {
@@ -77,7 +88,13 @@ describe('SchemaView', () => {
         level === 39 ? { type: 'string' } : { $ref: `#/components/schemas/A${level + 1}` };
     }
     const doc = { components: { schemas } } as SpecNode;
-    render(<SchemaView doc={doc} schema={{ $ref: '#/components/schemas/A0' }} />);
+    render(
+      <SchemaView
+        doc={doc}
+        budget={createRenderBudget()}
+        schema={{ $ref: '#/components/schemas/A0' }}
+      />,
+    );
     expect(screen.getByText('…nested further')).toBeInTheDocument();
   });
 });
@@ -124,4 +141,83 @@ describe('OpenApiView operation paging', () => {
     expect(screen.queryByText(/Showing/)).not.toBeInTheDocument();
     expect(screen.getByText('Operation 2')).toBeInTheDocument();
   });
+});
+
+/** Both budget cases mount tens of thousands of jsdom nodes on purpose. */
+const BUDGET_TEST_TIMEOUT_MS = 30_000;
+
+describe('OpenApiView page budget', () => {
+  /**
+   * One operation, one response, `mediaTypes` media types — each pointing at a
+   * schema wide enough to exhaust the whole page allowance on its own. The
+   * document is a few KB; only its expansion is large, and nothing the server
+   * counts (paths, operations, bytes) sees any of it.
+   */
+  function wideMediaTypeSpec(mediaTypes: number, properties: number): string {
+    const wide: Record<string, unknown> = {};
+    for (let index = 0; index < properties; index += 1) {
+      wide[`property_${index}`] = { type: 'string' };
+    }
+    const content: Record<string, unknown> = {};
+    for (let index = 0; index < mediaTypes; index += 1) {
+      content[`application/vnd.x${index}+json`] = { schema: { $ref: '#/components/schemas/Wide' } };
+    }
+    return JSON.stringify({
+      openapi: '3.0.3',
+      info: { title: 'Fan-out API', version: '1.0.0' },
+      paths: {
+        '/things': {
+          get: { summary: 'Fan out', responses: { '200': { description: 'ok', content } } },
+          post: { summary: 'Fan out too', responses: { '200': { description: 'ok', content } } },
+        },
+      },
+      components: { schemas: { Wide: { type: 'object', properties: wide } } },
+    });
+  }
+
+  it(
+    'spends one allowance across every media type of an expanded operation',
+    () => {
+      const { container } = render(<OpenApiView text={wideMediaTypeSpec(50, MAX_PAGE_NODES)} />);
+
+      const started = Date.now();
+      fireEvent.click(screen.getAllByRole('button', { expanded: false })[0] as HTMLElement);
+      expect(Date.now() - started).toBeLessThan(10_000);
+
+      // The first media type spends the page allowance; the other 49 are never
+      // walked, which is what a per-call budget used to let them do.
+      expect(screen.getAllByText(/download the specification/).length).toBeGreaterThan(0);
+      expect(screen.getByText('application/vnd.x0+json')).toBeInTheDocument();
+      expect(screen.queryByText('application/vnd.x49+json')).not.toBeInTheDocument();
+
+      // A schema row costs a handful of elements, so one allowance is tens of
+      // thousands of them — against the ~1.2 million that 50 fresh allowances,
+      // one per media type, used to mount.
+      expect(container.querySelectorAll('code').length).toBeLessThan(MAX_PAGE_NODES * 4);
+      expect(container.querySelectorAll('*').length).toBeLessThan(MAX_PAGE_NODES * 10);
+    },
+    BUDGET_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'keeps two expanded operations inside one page allowance between them',
+    () => {
+      const { container } = render(<OpenApiView text={wideMediaTypeSpec(2, MAX_PAGE_NODES)} />);
+
+      const buttons = screen.getAllByRole('button', { expanded: false });
+      expect(buttons).toHaveLength(2);
+      fireEvent.click(buttons[0] as HTMLElement);
+      const oneOpen = container.querySelectorAll('*').length;
+
+      fireEvent.click(screen.getAllByRole('button', { expanded: false })[0] as HTMLElement);
+      const twoOpen = container.querySelectorAll('*').length;
+
+      // The allowance is divided between the expanded cards rather than handed to
+      // each of them, so opening the second one does not double the page.
+      expect(twoOpen).toBeLessThan(oneOpen * 1.5);
+      expect(twoOpen).toBeLessThan(MAX_PAGE_NODES * 10);
+      expect(screen.getAllByText(/download the specification/).length).toBeGreaterThan(0);
+    },
+    BUDGET_TEST_TIMEOUT_MS,
+  );
 });
