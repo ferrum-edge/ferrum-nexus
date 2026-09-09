@@ -1844,7 +1844,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           for (const step of undo.reverse()) {
             await step().catch((undoError: unknown) => {
               failures.push({
-                step: api.spec_enforcement === 'routes' ? 'the spec re-import' : 'the upstream backend',
+                step:
+                  api.spec_enforcement === 'routes' ? 'the spec re-import' : 'the upstream backend',
                 error: errorMessage(undoError),
               });
               deps.log?.(
