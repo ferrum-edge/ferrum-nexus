@@ -141,6 +141,14 @@ describe('validateDraft', () => {
     expect(errors.header_name).toMatch(/does not accept/);
   });
 
+  it('reports a reserved correlation header on its field', () => {
+    const errors = validateDraft(descriptor('correlation_id'), {
+      header_name: '  AUTHORIZATION  ',
+      echo_downstream: true,
+    });
+    expect(errors.header_name).toMatch(/gateway owns 'AUTHORIZATION'/);
+  });
+
   it('reports ip_restriction with both lists empty as a whole-plugin problem', () => {
     const errors = validateDraft(descriptor('ip_restriction'), {
       allow: '',
