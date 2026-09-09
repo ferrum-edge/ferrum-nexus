@@ -95,7 +95,9 @@ export function validateTemplateLinks(
     }
 
     const source = content[field];
-    const decoded = decode(source).replace(/[\r\n]/g, ' ').replace(/[\u0000-\u001f\u007f]/g, '');
+    const decoded = decode(source)
+      .replace(/[\r\n]/g, ' ')
+      .replace(/[\u0000-\u001f\u007f]/g, '');
     if (/\b(?:j\s*a\s*v\s*a\s*s\s*c\s*r\s*i\s*p\s*t|d\s*a\s*t\s*a)\s*:/i.test(decoded)) {
       refuse('javascript: or data: scheme');
     }
