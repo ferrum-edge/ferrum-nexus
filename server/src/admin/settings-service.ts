@@ -19,7 +19,7 @@
  * 1. **Secrets are write-only.** `password`/`secret_key` are never returned;
  *    the DTOs expose `password_set`/`secret_set` booleans instead.
  * 2. **Audit rows record changed keys, never values.** A settings update writes
- *    `admin.settings_update` with the list of touched keys and nothing else, so
+ *    `admin.settings_update` with touched keys and password-source transitions, so
  *    the audit log can be read by anyone allowed to read audit logs.
  * 3. **`smtp`, `captcha`, and `gateway` are `super_admin`-only** (see
  *    {@link PRIVILEGED_SETTINGS_SECTIONS}); `branding` and `registration` are
@@ -368,6 +368,8 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
       // store. In particular, secret writes cannot split from their config.
       await store.transaction(async (tx) => {
         const changed: string[] = [];
+        let smtpPasswordSourceChange:
+          { from: 'override' | 'environment'; to: 'override' | 'environment' } | undefined;
 
         if (patch.branding) {
           const current = await readBranding(tx);
@@ -440,15 +442,27 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
               : {}),
           };
           const connectionChanged =
-            (next.host ?? config.smtp.host ?? null) !==
+            (str(next.host) ?? config.smtp.host ?? null) !==
               (current.host ?? config.smtp.host ?? null) ||
             (next.port ?? config.smtp.port) !== (current.port ?? config.smtp.port) ||
             (next.secure ?? config.smtp.secure) !== (current.secure ?? config.smtp.secure) ||
-            (next.username ?? config.smtp.user ?? null) !==
+            (str(next.username) ?? config.smtp.user ?? null) !==
               (current.username ?? config.smtp.user ?? null);
-          const passwordSet =
-            (await tx.settings.get(SMTP_PASSWORD_SETTINGS_KEY)) !== null ||
-            config.smtp.password !== undefined;
+          const storedPassword = await tx.settings.get(SMTP_PASSWORD_SETTINGS_KEY);
+          const passwordSet = storedPassword !== null || config.smtp.password !== undefined;
+          const clearingPassword = patch.smtp.password === null || patch.smtp.password === '';
+          const connectionMatchesEnvironment =
+            (str(next.host) ?? config.smtp.host ?? null) === (config.smtp.host ?? null) &&
+            (next.port ?? config.smtp.port) === config.smtp.port &&
+            (next.secure ?? config.smtp.secure) === config.smtp.secure &&
+            (str(next.username) ?? config.smtp.user ?? null) === (config.smtp.user ?? null);
+          // Clearing an override restores the environment credential. Its connection
+          // must also belong to the environment, even when this patch did not move it.
+          if (clearingPassword && !connectionMatchesEnvironment) {
+            throw validationFailed(
+              'SMTP password can only be cleared when the connection matches the environment',
+            );
+          }
           if (connectionChanged && passwordSet && !patch.smtp.password) {
             throw validationFailed(
               'SMTP password is required when changing the SMTP connection settings',
@@ -461,7 +475,10 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
 
           if (patch.smtp.password !== undefined) {
             changed.push('smtp.password');
-            if (patch.smtp.password === null || patch.smtp.password === '') {
+            const from = storedPassword === null ? 'environment' : 'override';
+            const to = clearingPassword ? 'environment' : 'override';
+            if (from !== to) smtpPasswordSourceChange = { from, to };
+            if (clearingPassword) {
               await tx.settings.delete(SMTP_PASSWORD_SETTINGS_KEY);
             } else {
               await tx.settings.set(
@@ -491,17 +508,20 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
           await tx.settings.set(REGISTRATION_SETTINGS_KEY, next, false);
         }
 
-        // Only the *names* of the changed keys are recorded — never the values,
+        // Record key names and credential provenance, never setting values,
         // which would put the SMTP password and CAPTCHA secret in the audit log.
-        await audit
-          .forStore(tx)
-          .record(
-            actor,
-            AuditAction.ADMIN_SETTINGS_UPDATE,
-            { type: 'settings', id: null },
-            { changed_keys: changed },
-            ip,
-          );
+        await audit.forStore(tx).record(
+          actor,
+          AuditAction.ADMIN_SETTINGS_UPDATE,
+          { type: 'settings', id: null },
+          {
+            changed_keys: changed,
+            ...(smtpPasswordSourceChange
+              ? { smtp_password_source_change: smtpPasswordSourceChange }
+              : {}),
+          },
+          ip,
+        );
       });
       // Only committed updates invalidate the cached public origin.
       if (nextGatewayUrl !== undefined) gatewayUrlCache = null;

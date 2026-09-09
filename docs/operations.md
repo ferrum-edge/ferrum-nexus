@@ -1000,7 +1000,8 @@ takes effect on the next poll with no restart.
 One `PUT /api/admin/settings` commits its section rows, encrypted SMTP/CAPTCHA
 values, and `admin.settings_update` audit record in the same store transaction.
 A later write or audit failure rolls the whole patch back. The audit records
-changed key names only. Gateway-origin cache invalidation follows commit.
+changed key names and SMTP password-source transitions (`override` or
+`environment`), never setting values. Gateway-origin cache invalidation follows commit.
 
 This uses the normal transaction guarantees of SQLite, PostgreSQL, MySQL, and
 MongoDB replica sets. The explicitly opted-in MongoDB standalone development

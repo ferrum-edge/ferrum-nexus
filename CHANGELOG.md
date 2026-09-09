@@ -134,6 +134,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   Save and render checks restrict outbound links to the portal origin and
   operator-approved `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS`; unsafe legacy
   templates log a warning and queue no mail.
+- Require the environment SMTP connection before clearing a password override,
+  and audit SMTP password-source transitions without recording setting values.
 - **A test consumer whose creation was applied but never acknowledged was
   orphaned on the gateway.** When Edge stored the `nexus-test-<api_id>` consumer
   and then failed to answer, the caller held no id for it, so the compensation

@@ -851,6 +851,16 @@ send its gateway credentials.
 | `registration` | `open_registration`, `require_email_verification`, `allowed_roles` (array of roles)                                                                                                                                                                                                                                                                                                                          |
 | `gateway`      | _super_admin_ — `public_url` — absolute `http(s)` **origin** of the gateway's proxy listener, no path, query or credentials; a trailing slash is stripped. `null` or `""` clears the override and falls back to `FERRUM_GATEWAY_PUBLIC_URL`. Whoever controls it directs clients to send their gateway credentials to that origin, so it needs `super_admin` like `smtp` and `captcha`.                      |
 
+SMTP connection changes are compared after merging stored overrides over the
+environment defaults. Clearing the SMTP password with `null` or `""` restores
+the environment password and is allowed only when the effective `host`, `port`,
+`secure`, and `username` all match the environment connection. Otherwise the
+entire patch fails with `400 VALIDATION_FAILED`, even when no connection field
+is included in that patch. Restore the environment connection with a fresh
+password before clearing the override. The `admin.settings_update` audit details
+include `smtp_password_source_change: { from, to }` when the source changes
+between `override` and `environment`; no credential or connection values are logged.
+
 An enabled CAPTCHA configuration requires a provider other than `none`, a
 non-empty site key, and a usable secret (supplied now or already stored).
 `400 VALIDATION_FAILED` rejects the entire patch if any is missing; disable
