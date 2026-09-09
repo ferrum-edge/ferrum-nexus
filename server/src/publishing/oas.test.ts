@@ -127,7 +127,8 @@ describe('OpenAPI parsing', () => {
       assert.deepEqual(failure.details, { reason: 'nesting_too_deep', limit: MAX_SPEC_DEPTH });
     }
     const cycle = `${VALID_YAML}\nx-cycle: &cycle\n  child: *cycle\n`;
-    expectSpecInvalid(() => parseOpenApiSpec(cycle));
+    const cycleFailure = expectSpecInvalid(() => parseOpenApiSpec(cycle));
+    assert.deepEqual(cycleFailure.details, { reason: 'cyclic_alias' });
   });
 
   it('bounds literal and expanded server URLs using the typed upstream limit', () => {

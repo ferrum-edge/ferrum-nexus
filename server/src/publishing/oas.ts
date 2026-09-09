@@ -468,24 +468,74 @@ function parseDocument(text: string): { value: unknown; contentType: ParsedSpec[
 
 /** Bound traversal and later serialization without using the JavaScript call stack. */
 function assertSpecDepth(value: unknown): void {
-  const pending = [{ value, depth: 1 }];
-  // YAML aliases may share objects: revisit only when reached at a greater depth.
-  // Cycles therefore also hit the depth limit, without exponential traversal.
-  const visited = new WeakMap<object, number>();
-  while (pending.length > 0) {
-    const entry = pending.pop();
-    if (!entry || entry.value === null || typeof entry.value !== 'object') continue;
-    if (entry.depth > MAX_SPEC_DEPTH) {
+  if (value === null || typeof value !== 'object') return;
+
+  interface Frame {
+    value: object;
+    depth: number;
+    children: unknown[];
+    childIndex: number;
+    maxChildHeight: number;
+  }
+
+  const active = new WeakSet<object>();
+  const completedHeights = new WeakMap<object, number>();
+  const pending: Frame[] = [];
+
+  const push = (entryValue: object, depth: number): void => {
+    if (depth > MAX_SPEC_DEPTH) {
       throw specInvalid(`The document exceeds the ${MAX_SPEC_DEPTH} level nesting limit`, {
         reason: 'nesting_too_deep',
         limit: MAX_SPEC_DEPTH,
       });
     }
-    if ((visited.get(entry.value) ?? 0) >= entry.depth) continue;
-    visited.set(entry.value, entry.depth);
-    for (const child of Object.values(entry.value)) {
-      pending.push({ value: child, depth: entry.depth + 1 });
+    if (active.has(entryValue)) {
+      throw specInvalid('The OpenAPI document contains a cyclic YAML alias', {
+        reason: 'cyclic_alias',
+      });
     }
+    active.add(entryValue);
+    pending.push({
+      value: entryValue,
+      depth,
+      children: Object.values(entryValue),
+      childIndex: 0,
+      maxChildHeight: 0,
+    });
+  };
+
+  push(value, 1);
+  while (pending.length > 0) {
+    const frame = pending[pending.length - 1]!;
+    if (frame.childIndex < frame.children.length) {
+      const child = frame.children[frame.childIndex++];
+      if (child === null || typeof child !== 'object') continue;
+      if (active.has(child)) {
+        throw specInvalid('The OpenAPI document contains a cyclic YAML alias', {
+          reason: 'cyclic_alias',
+        });
+      }
+      const completedHeight = completedHeights.get(child);
+      if (completedHeight !== undefined) {
+        if (frame.depth + completedHeight > MAX_SPEC_DEPTH) {
+          throw specInvalid(`The document exceeds the ${MAX_SPEC_DEPTH} level nesting limit`, {
+            reason: 'nesting_too_deep',
+            limit: MAX_SPEC_DEPTH,
+          });
+        }
+        frame.maxChildHeight = Math.max(frame.maxChildHeight, completedHeight);
+        continue;
+      }
+      push(child, frame.depth + 1);
+      continue;
+    }
+
+    const height = frame.maxChildHeight + 1;
+    completedHeights.set(frame.value, height);
+    active.delete(frame.value);
+    pending.pop();
+    const parent = pending[pending.length - 1];
+    if (parent) parent.maxChildHeight = Math.max(parent.maxChildHeight, height);
   }
 }
 
