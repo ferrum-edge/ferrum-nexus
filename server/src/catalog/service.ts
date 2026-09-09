@@ -38,10 +38,12 @@
  *   integrations already in production must not break — but the documentation
  *   stops being served to people who are not already using it.
  *
- * The raw spec follows the detail page exactly: there is no separate
+ * The normalized spec follows the detail page's visibility exactly: there is no separate
  * "documentation" permission, because a catalog entry whose documentation you
  * cannot read is not a catalog entry, it is a teaser.
  */
+
+import { stringify as stringifyYaml } from 'yaml';
 
 import {
   clampPageSize,
@@ -67,8 +69,10 @@ import type {
   NexusStore,
   UserRecord,
 } from '../db/store.js';
-import { notFound } from '../lib/errors.js';
+import { notFound, specInvalid } from '../lib/errors.js';
+import { parseOpenApiSpec, type ParsedSpec } from '../publishing/oas.js';
 import { presentApi, type GatewayUrlSource } from '../publishing/present.js';
+import { rewriteSpecServers } from '../publishing/spec-document.js';
 
 /** Filters accepted by {@link CatalogService.list}. */
 export interface CatalogFilter {
@@ -88,7 +92,7 @@ export interface CatalogService {
   ): Promise<Paginated<CatalogApi>>;
   /** One API by slug, with the caller's open request and active grant. */
   detail(viewer: UserRecord, slug: string): Promise<CatalogDetailResponse>;
-  /** The raw current spec document, when the caller may see the API. */
+  /** The normalized current spec with gateway servers, when the caller may see the API. */
   spec(viewer: UserRecord, slug: string): Promise<CatalogSpecResponse>;
   /** Whether `api` appears in `viewer`'s browse list. */
   canList(viewer: UserRecord, api: ApiRecord, hasGrant: boolean): boolean;
@@ -101,12 +105,6 @@ export interface CatalogServiceDeps {
   store: NexusStore;
   /** Resolves the gateway origin each row's `invoke_url` is built from. */
   settings: GatewayUrlSource;
-}
-
-/** Content type matching a stored raw document. */
-export function contentTypeOf(rawSpec: string): string {
-  const head = rawSpec.trimStart();
-  return head.startsWith('{') || head.startsWith('[') ? 'application/json' : 'application/yaml';
 }
 
 /** Build the catalog service. */
@@ -301,11 +299,29 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       const record = await store.apiSpecs.findCurrentByApi(api.id);
       if (!record) throw notFound('Specification for API', slug);
 
+      let parsed: ParsedSpec;
+      try {
+        parsed = parseOpenApiSpec(record.raw_spec);
+      } catch {
+        // Stored legacy or corrupt documents must never fall back to raw output
+        // or expose parser diagnostics containing provider-authored addresses.
+        throw specInvalid('The catalog specification could not be normalized');
+      }
+      const presented = presentApi(api, await settings.getGatewayPublicUrl());
+      const document = rewriteSpecServers(
+        parsed.document,
+        presented.invoke_url ?? presented.listen_path,
+        'catalog',
+      );
+
       return {
         api_id: api.id,
         version: record.version,
-        raw_spec: record.raw_spec,
-        content_type: contentTypeOf(record.raw_spec),
+        raw_spec:
+          parsed.contentType === 'application/json'
+            ? JSON.stringify(document, null, 2)
+            : stringifyYaml(document),
+        content_type: parsed.contentType,
         parsed_title: record.parsed_title,
         parsed_version: record.parsed_version,
       };

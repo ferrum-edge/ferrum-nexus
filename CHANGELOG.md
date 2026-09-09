@@ -127,6 +127,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Catalog specifications and the Documentation tab now show gateway server
+  addresses throughout normalized JSON/YAML documents. Provider spec editing
+  reads the original upload through an owner/admin-only endpoint.
 - **A test consumer whose creation was applied but never acknowledged was
   orphaned on the gateway.** When Edge stored the `nexus-test-<api_id>` consumer
   and then failed to answer, the caller held no id for it, so the compensation

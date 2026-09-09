@@ -196,6 +196,7 @@ import {
   type AuthPluginType,
   type CorsConfig,
   type CreateTestConsumerResponse,
+  type GetApiSpecResponse,
   type HttpMethod,
   type Paginated,
   type PublishApiRequest,
@@ -281,6 +282,8 @@ export interface ApiListFilter {
 export interface PublishingService {
   /** APIs the caller may administer: their own, or every API for an admin. */
   list(actor: UserRecord, filter?: ApiListFilter, options?: ListOptions): Promise<Paginated<Api>>;
+  /** The original current spec, restricted to the owner or an admin. */
+  spec(actor: UserRecord, apiId: Uuid): Promise<GetApiSpecResponse>;
   /** One API with its current spec metadata and request/grant counters. */
   get(
     actor: UserRecord,
@@ -856,6 +859,23 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         api: presentApi(api, await settings.getGatewayPublicUrl()),
         spec: spec ? specSummary(spec) : null,
         stats: { pending_requests: pending, active_grants: active, total_requests: total },
+      };
+    },
+
+    async spec(actor, apiId): Promise<GetApiSpecResponse> {
+      const api = await loadApi(apiId);
+      assertCanAdminister(actor, api);
+      const record = await store.apiSpecs.findCurrentByApi(api.id);
+      if (!record) throw notFound('Specification for API', apiId);
+      const head = record.raw_spec.trimStart();
+      return {
+        api_id: api.id,
+        version: record.version,
+        raw_spec: record.raw_spec,
+        content_type:
+          head.startsWith('{') || head.startsWith('[') ? 'application/json' : 'application/yaml',
+        parsed_title: record.parsed_title,
+        parsed_version: record.parsed_version,
       };
     },
 

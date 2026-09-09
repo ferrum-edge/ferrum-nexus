@@ -52,9 +52,10 @@
  * That is why {@link routesSpecDocument} **replaces** `servers`. The provider's
  * own `servers[0]` is their upstream — it is where `backend_scheme`,
  * `backend_host`, `backend_port` and `backend_path` come from, and it stays
- * authoritative for those on the `apis` row. Only the copy submitted to Edge is
- * rewritten, and only so the generated matchers line up with what clients
- * actually send. Leave it alone and every request 400s as an unknown
+ * authoritative for those on the `apis` row. The copy submitted to Edge is
+ * rewritten so the generated matchers line up with what clients actually send;
+ * the catalog also uses {@link rewriteSpecServers} to hide provider servers.
+ * Leave the enforcement copy alone and every request 400s as an unknown
  * operation — including the declared ones.
  *
  * Replacing the root is not enough on its own. OpenAPI resolves `servers` at
@@ -405,7 +406,39 @@ export function routesSpecDocument(
     if (key.startsWith('x-ferrum-')) continue;
     submitted[key] = value;
   }
-  submitted.servers = [{ url: options.listenPath }];
+  const rewritten = rewriteSpecServers(submitted, options.listenPath);
+  rewritten['x-ferrum-proxy'] = options.proxy;
+  rewritten['x-ferrum-validate'] = { ...ROUTES_VALIDATE_EXTENSION };
+  return rewritten;
+}
+
+/**
+ * Share the gateway server rule between enforcement and catalog documents.
+ * Enforcement strips overrides in the containers Edge resolves. The catalog
+ * replaces every occurrence, including callbacks and extension data, because
+ * none of the uploaded server entries may cross the consumer boundary.
+ * Callers must validate document depth and reject cycles before this walk.
+ */
+export function rewriteSpecServers(
+  document: Record<string, unknown>,
+  serverUrl: string,
+  scope: 'routes' | 'catalog' = 'routes',
+): Record<string, unknown> {
+  const servers = [{ url: serverUrl }];
+  if (scope === 'catalog') {
+    const rewrite = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(rewrite);
+      if (!isRecord(value)) return value;
+      return Object.fromEntries(
+        Object.entries(value).map(([key, child]) => [
+          key,
+          key === 'servers' ? servers : rewrite(child),
+        ]),
+      );
+    };
+    return { ...(rewrite(document) as Record<string, unknown>), servers };
+  }
+  const submitted: Record<string, unknown> = { ...document, servers };
   const paths = pathItemsWithoutServers(submitted.paths, (key) => key.startsWith('/'));
   if (paths !== submitted.paths) submitted.paths = paths;
   const webhooks = pathItemsWithoutServers(submitted.webhooks, () => true);
@@ -420,7 +453,5 @@ export function routesSpecDocument(
     if (callbacks !== components.callbacks) edited().callbacks = callbacks;
     if (rewritten !== null) submitted.components = rewritten;
   }
-  submitted['x-ferrum-proxy'] = options.proxy;
-  submitted['x-ferrum-validate'] = { ...ROUTES_VALIDATE_EXTENSION };
   return submitted;
 }

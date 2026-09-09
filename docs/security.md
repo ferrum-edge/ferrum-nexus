@@ -338,8 +338,16 @@ stay at `admin`.
   they pass in the query. `mine` is the _admin's_ opt-in.
 - **Credentials** are always the caller's own unless an `admin` passes an
   explicit `user_id` — and even then, only the metadata, never a secret.
-- **Catalog** answers `404`, not `403`, for an API you may not see, so it never
-  confirms that an internal API exists.
+- **Catalog** answers `404`, not `403`, for an API you may not see. Published
+  `internal` APIs are deliberately unlisted but readable by any signed-in user
+  holding the link. Catalog API objects omit `upstream_url`; catalog specs and
+  the Documentation tab replace every `servers` occurrence with the gateway
+  invoke URL (only the listen path when no public gateway origin is configured).
+  JSON and YAML are normalized in their original format; comments and formatting
+  are not preserved. Invalid stored documents fail closed without returning the
+  upload or parser diagnostics. This redacts server entries, not arbitrary URLs
+  a provider writes in prose, examples or other fields. The original spec and
+  provider editor use `GET /api/apis/:id/spec`, restricted to owner or admin.
 
 ### The provider / operator split on gateway plugins
 
