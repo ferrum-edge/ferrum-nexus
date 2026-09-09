@@ -286,8 +286,7 @@ describe('a gateway write whose acknowledgement is lost', () => {
     const create = calls.find((call) => call.method === 'POST' && call.path === '/api-specs');
     assert.ok(create, 'the spec import really was dispatched');
     const submitted = (create.body as Record<string, unknown>)['x-ferrum-proxy'] as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
     assert.ok(submitted, 'the spec carried the proxy body the id was minted into');
     const proxyId = String(submitted.id);
     assert.ok(
