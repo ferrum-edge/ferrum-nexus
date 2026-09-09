@@ -75,6 +75,28 @@ describe('sqlite store', () => {
       assert.deepEqual(second.skipped, ['001_first', '002_second']);
     });
 
+    it('does not reapply a released migration after its file is renamed', async () => {
+      const applied = ['002_verification_token_purpose'];
+      const driver = {
+        ensureMigrationsTable: async (): Promise<void> => undefined,
+        listApplied: async (): Promise<string[]> => [...applied],
+        applyMigration: async (migration: MigrationFile): Promise<void> => {
+          applied.push(migration.id);
+        },
+      };
+      const renamed: MigrationFile = {
+        id: '003_verification_token_purpose',
+        filename: '003_verification_token_purpose.sql',
+        sql: 'ALTER TABLE email_verification_tokens ADD COLUMN purpose TEXT;',
+      };
+
+      const result = await runMigrations(driver, [renamed]);
+
+      assert.deepEqual(result.applied, []);
+      assert.deepEqual(result.skipped, ['003_verification_token_purpose']);
+      assert.deepEqual(applied, ['002_verification_token_purpose']);
+    });
+
     it('splits SQL into statements, ignoring comments and quoted semicolons', () => {
       const statements = splitSqlStatements(
         "-- a comment;\nCREATE TABLE t (a TEXT);\nINSERT INTO t VALUES ('x;y'); -- trailing\n",
