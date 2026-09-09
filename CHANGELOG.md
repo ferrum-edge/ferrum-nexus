@@ -127,6 +127,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Spec revisions register their gateway re-import compensation before issuing
+  `PUT /api-specs/{id}`, so a write applied with a lost acknowledgement restores
+  the previous document and backend. A failed restore writes the existing
+  `api.gateway_repair_required` audit event with `phase: 'compensation'` (#214,
+  GHSA-5mfx-x488-p4f9).
 - Catalog specifications and the Documentation tab now show gateway server
   addresses throughout normalized JSON/YAML documents. Provider spec editing
   reads the original upload through an owner/admin-only endpoint.
