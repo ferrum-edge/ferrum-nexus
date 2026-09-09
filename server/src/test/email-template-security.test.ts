@@ -406,7 +406,8 @@ describe('email template destination boundaries', () => {
         assert.equal(created, true);
         assert.equal((await harness.tick()).claimed, 1);
         const mail =
-          harness.mailbox.sent.at(-1) ?? assert.fail('the built-in template must still be delivered');
+          harness.mailbox.sent.at(-1) ??
+          assert.fail('the built-in template must still be delivered');
         assert.ok(!mail.html.includes('attacker.example'));
         assert.ok(
           mail.html.includes('href="https://portal.test/action?token=secret-must-not-be-logged"'),
