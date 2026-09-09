@@ -118,7 +118,7 @@ describe('outbox claims are recovered without a restart', () => {
     const { entry } = await harness.services.email.enqueue({
       to,
       templateKey: 'verification',
-      vars: { recipient_name: 'Ada', verification_url: 'https://portal.test/v?token=x' },
+      vars: { recipient_name: 'Ada', verification_url: `${harness.config.publicUrl}/v?token=x` },
       idempotencyKey: `claim-recovery:${to}`,
     });
     return entry.id;

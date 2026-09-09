@@ -166,6 +166,29 @@ settings **override** these at runtime (see [key rotation](#7-rotating-nexus_sec
 | `NEXUS_SMTP_PASSWORD` | _(unset)_                             |
 | `NEXUS_EMAIL_FROM`    | `Ferrum Nexus <no-reply@example.com>` |
 
+`NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS` is an **operator-only environment
+setting**, default empty, with no database or admin UI override. It is a
+comma-separated list of exact lowercase-normalized hosts, optionally with a
+non-default port, such as `assets.example.com,docs.example.com:8443`. Surrounding
+whitespace and empty entries are ignored. Schemes, paths, credentials, wildcards
+and noncanonical hosts are rejected at startup. A host without a port permits
+the default HTTP/HTTPS ports; subdomains and other ports require separate entries.
+
+Email templates allow the portal's `NEXUS_PUBLIC_URL` origin automatically;
+other HTTP(S) destinations require this list. Only approve hosts the operator
+trusts, including their redirects and referrer handling. The policy covers all
+three template fields, URL attributes and CSS URLs, and rechecks substitutions
+(including mass-email HTML) before enqueueing. It never permits `javascript:`
+or `data:`, or embedding action-link placeholders inside other URLs/attributes.
+Changing the list requires restarting the server. A stored template that
+violates the policy is not sent: the server logs `Stored email template refused
+by the link policy` and sends the built-in template for that key instead, so
+account recovery keeps working. Repair or reset the template to clear the
+warning; already-rendered outbox rows are unchanged. A rendered destination
+that violates the policy (for example mass-email HTML linking to an unapproved
+host) is refused with `Refused unsafe email template` and nothing is queued.
+See [template authoring rules](guides/admin-guide.md#placeholders).
+
 ### Abuse controls
 
 Two settings bound what one semi-trusted account can consume. Registration may

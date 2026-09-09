@@ -326,14 +326,12 @@ export async function buildServer(
       keyPrefix: 'verify',
       path: '/verify-email',
       urlVar: 'verification_url',
-      tokenVar: 'verification_token',
     }),
     onPasswordResetRequested: emailTokenSender(config, email, warn, {
       templateKey: 'password_reset',
       keyPrefix: 'reset',
       path: '/reset-password',
       urlVar: 'reset_url',
-      tokenVar: 'reset_token',
     }),
   });
   const settings = createSettingsService({ config, store: deps.store, crypto, audit, auth });
@@ -683,8 +681,6 @@ interface EmailTokenDelivery {
   path: string;
   /** Template variable carrying the full link. */
   urlVar: string;
-  /** Template variable carrying the bare token, for admins who reword the mail. */
-  tokenVar: string;
 }
 
 /**
@@ -715,7 +711,6 @@ function emailTokenSender(
           recipient_name: user.display_name,
           recipient_email: user.email,
           [delivery.urlVar]: url,
-          [delivery.tokenVar]: token,
         },
       });
     } catch (error) {
@@ -757,7 +752,6 @@ function defaultOnRegistered(
             recipient_name: user.display_name,
             recipient_email: user.email,
             verification_url: url,
-            verification_token: verificationToken,
           },
         });
       }

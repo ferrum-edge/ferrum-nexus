@@ -26,6 +26,8 @@
  *    editable by any `admin`.
  */
 
+import { createHash } from 'node:crypto';
+
 import {
   EMAIL_TEMPLATE_KEYS,
   roleAtLeast,
@@ -52,7 +54,12 @@ import {
 } from '../auth/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type { NexusStore } from '../db/store.js';
-import { DEFAULT_EMAIL_TEMPLATES, TEMPLATE_VARIABLES } from '../email/templates.js';
+import { validateTemplateLinks } from '../email/template-links.js';
+import {
+  DEFAULT_EMAIL_TEMPLATES,
+  removedTemplateVariable,
+  TEMPLATE_VARIABLES,
+} from '../email/templates.js';
 import type { NexusCrypto } from '../lib/crypto.js';
 import { forbidden, validationFailed } from '../lib/errors.js';
 import { GATEWAY_PUBLIC_URL_RULE, normalizeGatewayPublicUrl } from '../lib/gateway-url.js';
@@ -541,12 +548,26 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
     },
 
     async upsertEmailTemplate(actor, key, value, ip = null): Promise<EmailTemplate> {
+      for (const field of ['subject', 'body_html', 'body_text'] as const) {
+        const variable = removedTemplateVariable(value[field]);
+        if (variable) {
+          throw validationFailed(`Template placeholder '${variable}' is no longer supported`, {
+            field,
+            variable,
+          });
+        }
+      }
+      validateTemplateLinks(value, config);
       const template = await store.emailTemplates.upsert(key, value);
       await audit.record(
         actor,
         AuditAction.ADMIN_TEMPLATE_UPDATE,
         { type: 'email_template', id: key },
-        { key },
+        {
+          key,
+          body_html_sha256: createHash('sha256').update(template.body_html, 'utf8').digest('hex'),
+          body_text_sha256: createHash('sha256').update(template.body_text, 'utf8').digest('hex'),
+        },
         ip,
       );
       return template;

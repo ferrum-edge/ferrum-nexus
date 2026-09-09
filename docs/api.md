@@ -920,7 +920,7 @@ set.
 
 ### `GET /api/admin/email-templates/:key`
 
-_admin_ — `key` ∈ `verification`, `access_approved`, `access_denied`,
+_admin_ — `key` ∈ `verification`, `password_reset`, `access_approved`, `access_denied`,
 `access_revoked`, `message_received`, `mass`, `credential_rotated`.
 
 ```json
@@ -951,10 +951,46 @@ _admin_ — `key` ∈ `verification`, `access_approved`, `access_denied`,
 
 When no override exists, the built-in default is returned with a synthetic id.
 
+`available_variables` lists supported placeholder names. Every template includes
+`portal_name`, `portal_url`, `recipient_name`, `recipient_email`, and `year`.
+`password_reset` adds only `reset_url`; `verification` adds only `verification_url`.
+Neither `reset_token` nor `verification_token` is advertised or interpolated.
+Existing stored references to those retired placeholders render as empty strings.
+See the [admin guide](guides/admin-guide.md#placeholders) for the other keys.
+
 ### `PUT /api/admin/email-templates/:key`
 
 _admin_ — body `subject` (1–300), `body_html` (1–100 000), `body_text`
 (1–100 000). All three are required. → `{ "template": EmailTemplate }`.
+
+Referencing `{{reset_token}}` or `{{verification_token}}` in any of these fields
+returns `400 VALIDATION_FAILED`, including whitespace-padded placeholders. The
+error message names the retired variable and `details` contains `field` and
+`variable`. No template is saved. Use `{{reset_url}}` / `{{verification_url}}`
+for the server-generated action links; other unknown placeholders still render
+empty. A successful save records `body_html_sha256` and `body_text_sha256` in
+`admin.template_update` audit details, as SHA-256 hex digests of each saved UTF-8
+body string.
+
+All three fields also enforce the email link policy. Absolute HTTP(S) URLs,
+protocol-relative URLs, URL attributes (`href`, `src`, `action`, `srcset`,
+`data`, `poster`, `formaction`, `background`, `xlink:href`) and CSS `url(...)`
+must resolve to the `NEXUS_PUBLIC_URL` origin or an exact host in the
+operator-only `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS` setting. The default
+allowlist is empty. HTML entities and scheme/host case are normalized;
+`javascript:` and `data:` are always refused. Ambiguous or active HTML/CSS is
+also refused; see the [template authoring rules](guides/admin-guide.md#placeholders).
+
+`{{reset_url}}` and `{{verification_url}}` may only be the entire `href` value
+of an HTML anchor or a whitespace-delimited URL in `body_text`. Other attributes,
+HTML text, subjects and concatenation into another URL are refused, including
+URLs on approved hosts. Any placeholder in a URL or attribute must supply the
+entire value. A violation returns `400 VALIDATION_FAILED` before saving or
+auditing; the message names the field, offending host or construct, and setting.
+`details` contains `field`, `construct`, and `setting`. URL paths, query strings
+and token values are not included in these errors. Stored templates and their
+rendered destinations are revalidated before enqueueing; refusal logs a warning
+and creates no outbox entry.
 
 ### `POST /api/admin/mass-email`
 

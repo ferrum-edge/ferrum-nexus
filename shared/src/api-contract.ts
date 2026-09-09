@@ -941,14 +941,17 @@ export interface SmtpTestResponse {
 /** `GET /api/admin/email-templates/:key` */
 export interface GetEmailTemplateResponse {
   template: EmailTemplate;
-  /** Placeholder names the template may interpolate, e.g. `portal_name`. */
+  /** Supported placeholders, e.g. `portal_name`; excludes raw reset/verification tokens. */
   available_variables: string[];
 }
 
 /** `PUT /api/admin/email-templates/:key` */
 export interface UpdateEmailTemplateRequest {
+  /** All fields reject raw-token placeholders and destinations outside the operator link policy. */
   subject: string;
+  /** Action URL placeholders must be the entire href of an anchor. */
   body_html: string;
+  /** Action URL placeholders must be delimited by whitespace or the start/end of the body. */
   body_text: string;
 }
 

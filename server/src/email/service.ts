@@ -31,6 +31,7 @@ import {
 import type { NexusConfig } from '../config/index.js';
 import type { EmailOutboxRecord, NexusStore } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
+import { validateTemplateLinks } from './template-links.js';
 import {
   DEFAULT_EMAIL_TEMPLATES,
   renderTemplate,
@@ -395,14 +396,59 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
     };
   }
 
+  /**
+   * The template `render` actually uses: the stored override when it satisfies
+   * the link policy, otherwise the built-in template.
+   *
+   * An override saved before the policy existed can name a destination the
+   * policy now refuses. Refusing to send at all would turn one stale template
+   * into an account-recovery outage (no verification or reset mail), so the
+   * built-in template — which the policy always accepts — is sent instead and
+   * the refusal is logged for the operator. Saves are still rejected outright
+   * by `updateEmailTemplate`, so this fallback only ever covers legacy rows.
+   */
+  async function usableTemplate(key: EmailTemplateKey): Promise<EmailTemplateContent> {
+    const override = await store.emailTemplates.get(key);
+    if (!override) return DEFAULT_EMAIL_TEMPLATES[key];
+    const content = {
+      subject: override.subject,
+      body_html: override.body_html,
+      body_text: override.body_text,
+    };
+    try {
+      validateTemplateLinks(content, config);
+      return content;
+    } catch (error) {
+      deps.log?.(
+        { template: key, error: error instanceof Error ? error.message : 'validation failed' },
+        'Stored email template refused by the link policy; sending the built-in template',
+      );
+      return DEFAULT_EMAIL_TEMPLATES[key];
+    }
+  }
+
   async function render(
     templateKey: EmailTemplateKey,
     vars: TemplateVars = {},
     rawHtmlVars: readonly string[] = [],
   ): Promise<RenderedEmail> {
-    const content = await resolveTemplate(templateKey);
+    const content = await usableTemplate(templateKey);
     const merged = { ...(await commonVars()), ...vars };
-    return renderTemplate(content, merged, { rawHtmlVars });
+    try {
+      const rendered = renderTemplate(content, merged, { rawHtmlVars });
+      // Recheck substituted destinations, including raw HTML from the composer.
+      validateTemplateLinks(
+        { subject: rendered.subject, body_html: rendered.html, body_text: rendered.text },
+        config,
+      );
+      return rendered;
+    } catch (error) {
+      deps.log?.(
+        { template: templateKey, error: error instanceof Error ? error.message : 'render failed' },
+        'Refused unsafe email template',
+      );
+      throw error;
+    }
   }
 
   async function transportFor(): Promise<MailTransport | null> {

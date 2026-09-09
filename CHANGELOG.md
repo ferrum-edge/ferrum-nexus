@@ -131,6 +131,13 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Email templates use `reset_url` and `verification_url` for account action
+  links. Retired raw-token placeholders render empty and are rejected on save;
+  template update audit events now include SHA-256 hashes of both body fields.
+  Action links must be whole anchor destinations or standalone text URLs.
+  Save and render checks restrict outbound links to the portal origin and
+  operator-approved `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS`; an unsafe legacy
+  template logs a warning and the built-in template is sent in its place.
 - Spec revisions register their gateway re-import compensation before issuing
   `PUT /api-specs/{id}`, so a write applied with a lost acknowledgement restores
   the previous document and backend. A failed restore writes the existing

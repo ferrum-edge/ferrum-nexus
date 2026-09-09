@@ -43,6 +43,7 @@ describe('loadConfig', () => {
     assert.equal(config.host, '127.0.0.1');
     assert.equal(config.port, 8787);
     assert.equal(config.publicUrl, 'http://127.0.0.1:5173');
+    assert.deepEqual(config.emailTemplateAllowedLinkHosts, []);
     assert.equal(config.trustedProxies, false);
     assert.equal(config.allowPrivateUpstreams, false);
     assert.equal(config.logLevel, 'info');
@@ -64,6 +65,35 @@ describe('loadConfig', () => {
     });
     assert.equal(config.smtp.port, 587);
     assert.equal(config.smtp.from, 'Ferrum Nexus <no-reply@example.com>');
+  });
+
+  describe('NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS', () => {
+    it('accepts only exact hosts and normalizes case and surrounding whitespace', () => {
+      const config = loadConfig(
+        baseEnv({
+          NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS: ' Assets.Example.test,docs.test:8443, ',
+        }),
+      );
+      assert.deepEqual(config.emailTemplateAllowedLinkHosts, [
+        'assets.example.test',
+        'docs.test:8443',
+      ]);
+    });
+
+    for (const value of [
+      '*.test',
+      'https://docs.test',
+      'docs.test/x',
+      'u@docs.test',
+      'docs.test?x',
+    ]) {
+      it(`rejects ${value}`, () => {
+        expectConfigError(
+          baseEnv({ NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS: value }),
+          'NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS',
+        );
+      });
+    }
   });
 
   describe('FERRUM_GATEWAY_PUBLIC_URL', () => {
