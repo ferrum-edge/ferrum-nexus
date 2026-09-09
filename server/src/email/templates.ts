@@ -141,8 +141,7 @@ export const DEFAULT_EMAIL_TEMPLATES: Readonly<Record<EmailTemplateKey, EmailTem
       '<p>Hello {{recipient_name}},</p>' +
         '<p>Confirm your email address to finish setting up your {{portal_name}} account.</p>' +
         '<p><a href="{{verification_url}}">Verify my email address</a></p>' +
-        '<p>If the link does not work, paste this address into your browser:<br />' +
-        '{{verification_url}}</p>' +
+        '<p>If the link does not work, copy its address into your browser.</p>' +
         '<p>This link expires in 24 hours. If you did not create an account, ignore this email.</p>',
     ),
     body_text:
@@ -159,8 +158,7 @@ export const DEFAULT_EMAIL_TEMPLATES: Readonly<Record<EmailTemplateKey, EmailTem
         '<p>Someone asked to reset the password for your {{portal_name}} account. ' +
         'Choose a new one with the link below.</p>' +
         '<p><a href="{{reset_url}}">Set a new password</a></p>' +
-        '<p>If the link does not work, paste this address into your browser:<br />' +
-        '{{reset_url}}</p>' +
+        '<p>If the link does not work, copy its address into your browser.</p>' +
         '<p>This link expires in one hour and can only be used once. Using it signs ' +
         'you out everywhere. If you did not ask for this, ignore this email — your ' +
         'password has not changed.</p>',

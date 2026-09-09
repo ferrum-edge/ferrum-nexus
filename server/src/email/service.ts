@@ -31,6 +31,7 @@ import {
 import type { NexusConfig } from '../config/index.js';
 import type { EmailOutboxRecord, NexusStore } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
+import { validateTemplateLinks } from './template-links.js';
 import {
   DEFAULT_EMAIL_TEMPLATES,
   renderTemplate,
@@ -402,7 +403,22 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
   ): Promise<RenderedEmail> {
     const content = await resolveTemplate(templateKey);
     const merged = { ...(await commonVars()), ...vars };
-    return renderTemplate(content, merged, { rawHtmlVars });
+    try {
+      validateTemplateLinks(content, config);
+      const rendered = renderTemplate(content, merged, { rawHtmlVars });
+      // Recheck substituted destinations, including raw HTML from the composer.
+      validateTemplateLinks(
+        { subject: rendered.subject, body_html: rendered.html, body_text: rendered.text },
+        config,
+      );
+      return rendered;
+    } catch (error) {
+      deps.log?.(
+        { template: templateKey, error: error instanceof Error ? error.message : 'render failed' },
+        'Refused unsafe email template',
+      );
+      throw error;
+    }
   }
 
   async function transportFor(): Promise<MailTransport | null> {

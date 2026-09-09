@@ -130,6 +130,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - Email templates use `reset_url` and `verification_url` for account action
   links. Retired raw-token placeholders render empty and are rejected on save;
   template update audit events now include SHA-256 hashes of both body fields.
+  Action links must be whole anchor destinations or standalone text URLs.
+  Save and render checks restrict outbound links to the portal origin and
+  operator-approved `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS`; unsafe legacy
+  templates log a warning and queue no mail.
 - **A test consumer whose creation was applied but never acknowledged was
   orphaned on the gateway.** When Edge stored the `nexus-test-<api_id>` consumer
   and then failed to answer, the caller held no id for it, so the compensation

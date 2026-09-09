@@ -941,9 +941,11 @@ export interface GetEmailTemplateResponse {
 
 /** `PUT /api/admin/email-templates/:key` */
 export interface UpdateEmailTemplateRequest {
-  /** All three fields reject `reset_token` and `verification_token` placeholders. */
+  /** All fields reject raw-token placeholders and destinations outside the operator link policy. */
   subject: string;
+  /** Action URL placeholders must be the entire href of an anchor. */
   body_html: string;
+  /** Action URL placeholders must be delimited by whitespace or the start/end of the body. */
   body_text: string;
 }
 

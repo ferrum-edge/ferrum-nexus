@@ -379,7 +379,7 @@ describe('admin settings', () => {
       url: '/api/admin/email-templates/verification',
       payload: {
         subject: 'Confirm your address',
-        body_html: '<p>{{verification_url}}</p>',
+        body_html: '<a href="{{verification_url}}">Verify</a>',
         body_text: '{{verification_url}}',
       },
     });
@@ -390,7 +390,7 @@ describe('admin settings', () => {
     );
 
     const rendered = await harness.services.email.render('verification', {
-      verification_url: 'https://portal.test/v?token=t',
+      verification_url: `${harness.config.publicUrl}/v?token=t`,
     });
     assert.equal(rendered.subject, 'Confirm your address');
 

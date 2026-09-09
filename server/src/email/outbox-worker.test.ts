@@ -70,7 +70,7 @@ describe('outbox worker', () => {
     const { entry, created } = await harness.services.email.enqueue({
       to: 'ada@example.test',
       templateKey: 'verification',
-      vars: { recipient_name: 'Ada', verification_url: 'https://portal.test/v?token=x' },
+      vars: { recipient_name: 'Ada', verification_url: `${harness.config.publicUrl}/v?token=x` },
       idempotencyKey: 'worker:happy',
     });
     assert.equal(created, true);

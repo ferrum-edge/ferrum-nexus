@@ -333,11 +333,26 @@ Email templates also stay at `admin`. Render contexts expose the server-built
 `reset_url` and `verification_url`, but never separate raw-token variables.
 The retired `reset_token` and `verification_token` placeholders render empty
 even in legacy overrides; saving either in any template field fails with
-`400 VALIDATION_FAILED` naming the variable. Action URLs still contain bearer
-tokens, and template editing does not constrain URL placement or external
-destinations. Template authors therefore remain trusted with the use of those
-links; removing raw-token placeholders alone does not isolate an untrusted
-author from all sensitive email content.
+`400 VALIDATION_FAILED` naming the variable. Action URL placeholders may only
+be the entire `href` value of an HTML anchor, or a whitespace-delimited URL in
+the text body. They cannot be embedded in image URLs, CSS, other attributes,
+subjects, or another URL, even when that destination is allowed.
+
+Every field is checked on save and again before rendering a stored template;
+substituted destinations are also checked before enqueueing. HTTP(S) links,
+protocol-relative URLs, URL attributes and CSS `url(...)` must resolve to the
+`NEXUS_PUBLIC_URL` origin or an exact host explicitly configured by the operator
+in `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS` (empty by default). Scheme/host case
+and HTML entities are normalized; `javascript:` and `data:` are always refused.
+Ambiguous or active HTML/CSS is refused rather than interpreted as safe. A
+legacy override that violates the policy produces a warning and no outbox
+entry; the public recovery endpoint still returns its uniform response.
+
+Action links remain bearer credentials. Operators must trust allowlisted
+hosts and portal routes, including redirects and their handling of referrers.
+This policy constrains template destinations; it does not make malicious copy,
+omitted recovery links, or operator-approved destinations trustworthy. Messages
+already rendered into the outbox before upgrading are not revalidated.
 
 ### Scoping rules worth knowing
 

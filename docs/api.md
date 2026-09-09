@@ -946,6 +946,26 @@ empty. A successful save records `body_html_sha256` and `body_text_sha256` in
 `admin.template_update` audit details, as SHA-256 hex digests of each saved UTF-8
 body string.
 
+All three fields also enforce the email link policy. Absolute HTTP(S) URLs,
+protocol-relative URLs, URL attributes (`href`, `src`, `action`, `srcset`,
+`data`, `poster`, `formaction`, `background`, `xlink:href`) and CSS `url(...)`
+must resolve to the `NEXUS_PUBLIC_URL` origin or an exact host in the
+operator-only `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS` setting. The default
+allowlist is empty. HTML entities and scheme/host case are normalized;
+`javascript:` and `data:` are always refused. Ambiguous or active HTML/CSS is
+also refused; see the [template authoring rules](guides/admin-guide.md#placeholders).
+
+`{{reset_url}}` and `{{verification_url}}` may only be the entire `href` value
+of an HTML anchor or a whitespace-delimited URL in `body_text`. Other attributes,
+HTML text, subjects and concatenation into another URL are refused, including
+URLs on approved hosts. Any placeholder in a URL or attribute must supply the
+entire value. A violation returns `400 VALIDATION_FAILED` before saving or
+auditing; the message names the field, offending host or construct, and setting.
+`details` contains `field`, `construct`, and `setting`. URL paths, query strings
+and token values are not included in these errors. Stored templates and their
+rendered destinations are revalidated before enqueueing; refusal logs a warning
+and creates no outbox entry.
+
 ### `POST /api/admin/mass-email`
 
 _admin_ — enqueues **one outbox row per recipient**, never a BCC blast.

@@ -54,6 +54,7 @@ import {
 } from '../auth/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type { NexusStore } from '../db/store.js';
+import { validateTemplateLinks } from '../email/template-links.js';
 import {
   DEFAULT_EMAIL_TEMPLATES,
   removedTemplateVariable,
@@ -530,6 +531,7 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
           });
         }
       }
+      validateTemplateLinks(value, config);
       const template = await store.emailTemplates.upsert(key, value);
       await audit.record(
         actor,

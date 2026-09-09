@@ -90,7 +90,7 @@ describe('template resolution', () => {
   let harness: TestApp;
 
   before(async () => {
-    harness = await buildTestApp();
+    harness = await buildTestApp({ env: { NEXUS_PUBLIC_URL: 'https://portal.test' } });
   });
 
   after(async () => {
@@ -107,7 +107,7 @@ describe('template resolution', () => {
 
     await harness.store.emailTemplates.upsert('verification', {
       subject: 'Confirm {{recipient_name}} at {{portal_name}}',
-      body_html: '<p>{{verification_url}}</p>',
+      body_html: '<a href="{{verification_url}}">Verify</a>',
       body_text: 'Go to {{verification_url}}',
     });
 

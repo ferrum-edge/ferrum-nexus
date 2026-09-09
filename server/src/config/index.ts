@@ -160,6 +160,8 @@ export interface NexusConfig {
   port: number;
   /** Public origin of the portal, used in emails and verification links. */
   publicUrl: string;
+  /** Exact additional host[:port] destinations permitted in email templates. */
+  emailTemplateAllowedLinkHosts: string[];
   /**
    * Which proxies may set `X-Forwarded-For` (`NEXUS_TRUSTED_PROXIES`).
    *
@@ -374,6 +376,7 @@ const envSchema = z.object({
   NEXUS_HOST: stringish('127.0.0.1'),
   NEXUS_PORT: intish(8787, 0, 65_535),
   NEXUS_PUBLIC_URL: stringish('http://127.0.0.1:5173'),
+  NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS: optionalString(),
   NEXUS_TRUSTED_PROXIES: optionalString(),
   /** @deprecated alias for `NEXUS_TRUSTED_PROXIES=1`. */
   NEXUS_TRUST_PROXY: boolish(false),
@@ -513,6 +516,27 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     problems.push('NEXUS_PUBLIC_URL must be an absolute URL, e.g. https://portal.example.com');
   }
 
+  const emailTemplateAllowedLinkHosts: string[] = [];
+  for (const value of (raw.NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS ?? '').split(',')) {
+    const host = value.trim().toLowerCase();
+    if (!host) continue;
+    try {
+      const parsed = new URL(`https://${host}`);
+      if (
+        !/^(?:[a-z0-9][a-z0-9.-]*|\[[0-9a-f:]+\])(?::[0-9]+)?$/.test(host) ||
+        parsed.host !== host
+      ) {
+        throw new Error('not an exact host');
+      }
+      emailTemplateAllowedLinkHosts.push(host);
+    } catch {
+      problems.push(
+        'NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS requires comma-separated exact hosts ' +
+          '(optional non-default port); no schemes, paths, credentials or wildcards',
+      );
+    }
+  }
+
   // ── Namespace ────────────────────────────────────────────────────────────
   // The narrowest supported width is MySQL's VARCHAR(128) namespace columns;
   // a longer value would pass validation yet fail every publish with a driver
@@ -588,6 +612,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     host: raw.NEXUS_HOST,
     port: raw.NEXUS_PORT,
     publicUrl,
+    emailTemplateAllowedLinkHosts,
     trustedProxies,
     cookieSecure,
     logLevel: raw.NEXUS_LOG_LEVEL,
