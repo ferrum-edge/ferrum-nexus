@@ -57,6 +57,11 @@ export interface MigrationResult {
   skipped: string[];
 }
 
+/** Historical ids that were released before a migration was renumbered. */
+const LEGACY_MIGRATION_IDS: Readonly<Record<string, readonly string[]>> = {
+  '006_email_token_issue_claims': ['004_email_token_issue_claims'],
+};
+
 /**
  * Apply every migration that has not been recorded yet, in id order.
  *
@@ -72,7 +77,8 @@ export async function runMigrations(
   const result: MigrationResult = { applied: [], skipped: [] };
 
   for (const migration of [...migrations].sort((a, b) => a.id.localeCompare(b.id))) {
-    if (applied.has(migration.id)) {
+    const legacyIds = LEGACY_MIGRATION_IDS[migration.id] ?? [];
+    if (applied.has(migration.id) || legacyIds.some((id) => applied.has(id))) {
       result.skipped.push(migration.id);
       continue;
     }
