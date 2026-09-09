@@ -1764,14 +1764,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 ? safeSpecDocument(previous.raw_spec)
                 : parsed.document;
               const restoreBackend = proxyBackendFields(proxy);
-              await edge.apiSpecs.replace(
-                specId,
-                build(parsed.document, {
-                  ...submittableProxyBody(proxy),
-                  ...(backend ? backendFields(backend) : {}),
-                }),
-                actor.id,
-              );
+              // Register before PUT: a lost response can still mean it landed.
               undo.push(async () => {
                 // Re-read rather than replay the captured body: only the
                 // document and the backend are being rewound, exactly as
@@ -1788,6 +1781,14 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   actor.id,
                 );
               });
+              await edge.apiSpecs.replace(
+                specId,
+                build(parsed.document, {
+                  ...submittableProxyBody(proxy),
+                  ...(backend ? backendFields(backend) : {}),
+                }),
+                actor.id,
+              );
             } else if (backend) {
               // Registered from inside the mutator, between the `GET` and the
               // `PUT`, for the reason the helper documents: waiting for the
@@ -1838,13 +1839,30 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // the caller needs to see with its own. Every step here replays a
           // proxy write or a spec replace, so the gateway stays describable
           // whichever way one goes — but a swallowed failure is still a
-          // divergence nothing else will revisit, so it is logged.
+          // divergence nothing else will revisit, so it is logged and audited.
+          const failures: { step: string; error: string }[] = [];
           for (const step of undo.reverse()) {
             await step().catch((undoError: unknown) => {
+              failures.push({
+                step:
+                  api.spec_enforcement === 'routes' ? 'the spec re-import' : 'the upstream backend',
+                error: errorMessage(undoError),
+              });
               deps.log?.(
                 { api_id: api.id, proxy_id: proxyId, error: errorMessage(undoError) },
                 'a spec revision compensation step failed; the gateway may not match the portal',
               );
+            });
+          }
+          if (failures.length > 0) {
+            await recordCompensationFailure({
+              api,
+              proxyId,
+              attempted: ['spec'],
+              failures,
+              error,
+              actor,
+              ip,
             });
           }
           // A compensated failure leaves the row where it was, so the audit
@@ -2597,7 +2615,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   }
 
   /**
-   * Record the compensating steps of one `PATCH` that could not be replayed.
+   * Record the compensating steps of one API mutation that could not be replayed.
    *
    * The unwind swallows so the caller still sees the failure it asked about,
    * which means this row is the only thing that says the gateway may no longer
@@ -2607,7 +2625,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * enforcement conversion writes, which describe an API with no proxy at all
    * rather than one whose fields drifted.
    *
-   * `attempted_changes` is what the `PATCH` had got as far as changing when it
+   * `attempted_changes` is what the mutation had got as far as changing when it
    * failed, and `steps` names the ones that could not be undone, so an operator
    * knows which fields to compare against the catalog rather than the whole
    * proxy.
@@ -2631,7 +2649,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     };
     deps.log?.(
       { api_id: input.api.id, ...details },
-      'an API PATCH could not undo every gateway change it made; the gateway may have drifted',
+      'an API mutation could not undo every gateway change it made; the gateway may have drifted',
     );
     await audit
       .record(
