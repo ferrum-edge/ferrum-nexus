@@ -48,6 +48,15 @@ left alone. Maximum document size is **2 MiB**, with at most **200 nested
 object/array levels** (the root is level one). Excessive nesting is refused at
 upload in both enforcement modes, before contacting the gateway.
 
+A document also has to stay inside what the portal's documentation viewer can
+render: at most **100,000** schema nodes, parameter entries and media types
+added together, counted across `components.schemas` and every declared
+operation. Past that the upload is refused with `SPEC_INVALID` naming the three
+counts. It is a generous ceiling — the largest public APIs sit well below it —
+and it exists because every reader of your catalog entry renders the document in
+their own browser. A document under the ceiling that is still expensive to
+expand is truncated in the viewer rather than rendered in full.
+
 A minimal document that publishes cleanly:
 
 ```yaml

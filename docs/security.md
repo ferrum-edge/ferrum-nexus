@@ -929,6 +929,40 @@ Neither control replaces the registration policy. A portal that does not want
 strangers allocating gateway resources at all should take `provider` out of
 `allowed_roles` and promote vetted accounts, or close registration entirely.
 
+### A published document is untrusted content in every reader's browser
+
+Provider registration is open by default, so the OpenAPI document a `provider`
+uploads is attacker-controlled input — and the portal renders it, in full, in
+the browser of every signed-in account that opens the catalog entry. For a
+`public` API that is anyone with an account, with no grant required. The cost of
+rendering it therefore has to be bounded on both sides, and neither `MAX_SPEC_BYTES`
+nor the path and operation counts does it: those bound the transfer and the
+number of cards, not the work behind one card.
+
+Two bounds, at the two places the cost appears:
+
+- **At publish.** Nexus counts what the viewer walks — schema nodes, parameter
+  entries and media types across the document — and refuses more than
+  `MAX_SPEC_RENDER_UNITS` (100,000) of them with `400 SPEC_INVALID` and
+  `details.reason = "too_much_to_render"`. One declared operation can carry
+  thousands of parameters and dozens of media types per body, each pulling in a
+  `$ref` whose expansion dwarfs the document; counting paths and operations sees
+  none of that.
+- **At render.** The viewer spends a single node allowance across the whole
+  page, divided between the operations the reader has expanded, rather than a
+  fresh one per schema. A branch that exhausts it renders one "truncated"
+  affordance and its siblings are **not walked**, so exhaustion stops mounting
+  DOM rather than merely stopping recursion. Documents are parsed with
+  `JSON.parse` when they open with `{` or `[`, as the server already does: the
+  YAML parser accepts JSON but its flow-mapping parse is quadratic in mapping
+  width, and routing a wide JSON document through it froze the reader's main
+  thread for seconds before anything was drawn.
+
+The two are independent on purpose. The publish-time ceiling protects readers
+whose browsers the portal does not control; the render-time budget protects
+readers from documents that were published before the ceiling existed, or that
+sit under it and are still expensive to expand.
+
 ### Messaging abuse resistance
 
 Registration is open by default, so **an authenticated account is not a trusted
