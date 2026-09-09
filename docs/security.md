@@ -329,6 +329,16 @@ an `admin` sending either section, and the check lives in the service, so it
 holds however `updateSettings` is reached. Branding and registration policy
 stay at `admin`.
 
+Email templates also stay at `admin`. Render contexts expose the server-built
+`reset_url` and `verification_url`, but never separate raw-token variables.
+The retired `reset_token` and `verification_token` placeholders render empty
+even in legacy overrides; saving either in any template field fails with
+`400 VALIDATION_FAILED` naming the variable. Action URLs still contain bearer
+tokens, and template editing does not constrain URL placement or external
+destinations. Template authors therefore remain trusted with the use of those
+links; removing raw-token placeholders alone does not isolate an untrusted
+author from all sensitive email content.
+
 ### Scoping rules worth knowing
 
 - **Access requests and grants** are scoped by ownership, not by role alone: a
@@ -1309,6 +1319,11 @@ ordinary reporting.
 | `admin.template_update` | `email_template` | An email template was overridden. `target_id` is the template key.                                                                             |
 | `admin.mass_email`      | `mass_email`     | A mass email was dispatched. `target_id` is the batch id. `details`: subject, audience scope, `recipients`, `enqueued`.                        |
 | `admin.smtp_test`       | `settings`       | A test message was sent straight through SMTP. `target_id` is `smtp`. `details`: `to_email`, `ok`.                                             |
+
+`admin.template_update` details contain `key`, `body_html_sha256`, and
+`body_text_sha256`. Each digest is the lowercase hexadecimal SHA-256 of the
+exact saved UTF-8 body string, so an investigator can compare template versions
+without copying email bodies or rendered tokens into the audit log.
 
 ### God mode (`super_admin` only)
 

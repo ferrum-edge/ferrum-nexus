@@ -62,6 +62,18 @@ export function escapeHtml(value: string): string {
 
 const PLACEHOLDER = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g;
 
+/** Retired secret placeholders are refused on save and always render empty. */
+const REMOVED_TEMPLATE_VARIABLES: readonly string[] = ['reset_token', 'verification_token'];
+
+/** Find a retired placeholder using the same syntax as the renderer. */
+export function removedTemplateVariable(template: string): string | undefined {
+  for (const match of template.matchAll(PLACEHOLDER)) {
+    const name = match[1];
+    if (name && REMOVED_TEMPLATE_VARIABLES.includes(name)) return name;
+  }
+  return undefined;
+}
+
 /**
  * Substitute `{{name}}` placeholders in `template`.
  *
@@ -75,6 +87,7 @@ export function interpolate(
   rawNames: readonly string[] = [],
 ): string {
   return template.replace(PLACEHOLDER, (_match, name: string) => {
+    if (REMOVED_TEMPLATE_VARIABLES.includes(name)) return '';
     const value = vars[name];
     if (value === undefined || value === null) return '';
     const text = String(value);
@@ -262,8 +275,8 @@ export const DEFAULT_EMAIL_TEMPLATES: Readonly<Record<EmailTemplateKey, EmailTem
  * `available_variables`. Always includes {@link COMMON_TEMPLATE_VARIABLES}.
  */
 export const TEMPLATE_VARIABLES: Readonly<Record<EmailTemplateKey, readonly string[]>> = {
-  verification: [...COMMON_TEMPLATE_VARIABLES, 'verification_url', 'verification_token'],
-  password_reset: [...COMMON_TEMPLATE_VARIABLES, 'reset_url', 'reset_token'],
+  verification: [...COMMON_TEMPLATE_VARIABLES, 'verification_url'],
+  password_reset: [...COMMON_TEMPLATE_VARIABLES, 'reset_url'],
   access_approved: [
     ...COMMON_TEMPLATE_VARIABLES,
     'api_name',

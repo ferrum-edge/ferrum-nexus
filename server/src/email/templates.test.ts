@@ -28,6 +28,32 @@ describe('email templates', () => {
     assert.equal(out, 'Hi Ada!');
   });
 
+  for (const key of ['password_reset', 'verification'] as const) {
+    it(`renders only the supported URL for ${key}, even if raw tokens are supplied`, () => {
+      const urlVar = key === 'password_reset' ? 'reset_url' : 'verification_url';
+      const url = 'https://portal.test/action?token=single-use-secret';
+      const retired = '{{reset_token}}|{{ \nverification_token\t }}';
+      const rendered = renderTemplate(
+        {
+          subject: retired,
+          body_html: `<a href="{{${urlVar}}}">Continue</a>|${retired}`,
+          body_text: `{{${urlVar}}}|${retired}`,
+        },
+        {
+          [urlVar]: url,
+          reset_token: 'single-use-secret',
+          verification_token: 'single-use-secret',
+        },
+        { rawHtmlVars: ['reset_token', 'verification_token'] },
+      );
+      assert.deepEqual(rendered, {
+        subject: '|',
+        html: `<a href="${url}">Continue</a>||`,
+        text: `${url}||`,
+      });
+    });
+  }
+
   it('escapes values in the html body but not in the subject or text', () => {
     const rendered = renderTemplate(
       {

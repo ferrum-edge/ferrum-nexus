@@ -935,12 +935,13 @@ export interface SmtpTestResponse {
 /** `GET /api/admin/email-templates/:key` */
 export interface GetEmailTemplateResponse {
   template: EmailTemplate;
-  /** Placeholder names the template may interpolate, e.g. `portal_name`. */
+  /** Supported placeholders, e.g. `portal_name`; excludes raw reset/verification tokens. */
   available_variables: string[];
 }
 
 /** `PUT /api/admin/email-templates/:key` */
 export interface UpdateEmailTemplateRequest {
+  /** All three fields reject `reset_token` and `verification_token` placeholders. */
   subject: string;
   body_html: string;
   body_text: string;
