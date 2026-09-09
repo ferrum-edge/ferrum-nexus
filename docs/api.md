@@ -1180,9 +1180,11 @@ _session_ — the normalized current document for consumers.
 
 `content_type` is `application/json` or `application/yaml`, matching
 `raw_spec`. JSON uploads remain JSON; YAML uploads remain YAML. Formatting and
-YAML comments are not preserved. Every `servers` entry, including root, path,
-operation, callback and extension occurrences, is replaced with the API's
-`invoke_url`. When the public gateway origin is unset, only `listen_path` is
+YAML comments are not preserved. OpenAPI root, path-item and operation `servers`
+are replaced with the API's `invoke_url`, including those in webhooks, reusable
+path items and callbacks. Link Object `server` entries in components and response
+links are also replaced. Schemas, examples and extensions remain untouched.
+When the public gateway origin is unset, only `listen_path` is
 used; neither the upstream nor the Admin API origin is a fallback. The
 Documentation tab renders this same normalized document.
 

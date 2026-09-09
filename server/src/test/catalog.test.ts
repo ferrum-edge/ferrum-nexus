@@ -333,28 +333,42 @@ describe('catalog visibility', () => {
 
     for (const format of ['json', 'yaml'] as const) {
       for (const visibility of ['public', 'internal'] as const) {
-        it(`rewrites every server in ${visibility} ${format} specs for non-grantees`, async () => {
+        it(`rewrites structural servers in ${visibility} ${format} specs for non-grantees`, async () => {
           const upstream = 'https://origin.example.test/private';
-          const servers = [{ url: upstream, description: upstream }];
-          const operation = { servers, responses: { '200': { description: 'OK' } } };
-          const item = { servers, get: operation };
-          const document = {
-            openapi: '3.1.0',
-            info: { title: 'Server projection', version: '1.0.0' },
-            servers,
-            paths: {
-              '/invoices': {
-                ...item,
-                post: { ...operation, callbacks: { notify: { '{$request.body#/url}': item } } },
-              },
-            },
-            components: {
-              pathItems: { Invoices: item },
-              callbacks: { notify: { '/event': item } },
-            },
-            webhooks: { event: item },
-            'x-extra': [{ servers }],
+          const freeForm = { servers: [{ url: upstream }], server: { url: upstream } };
+          const schema = {
+            type: 'object',
+            properties: { servers: { type: 'object', example: freeForm } },
           };
+          const makeDocument = (server: { url: string; description?: string }) => {
+            const servers = [server];
+            const link = { operationId: 'listInvoices', server, 'x-extra': freeForm };
+            const response = { description: 'OK', links: { next: link } };
+            const operation = { servers, responses: { '200': response } };
+            const item = { servers, get: operation, 'x-extra': freeForm };
+            return {
+              openapi: '3.1.0',
+              info: { title: 'Server projection', version: '1.0.0' },
+              servers,
+              paths: {
+                '/invoices': {
+                  ...item,
+                  post: { ...operation, callbacks: { notify: { '{$request.body#/url}': item } } },
+                },
+              },
+              components: {
+                pathItems: { Invoices: item },
+                callbacks: { notify: { '/event': item } },
+                links: { next: link },
+                responses: { Success: response },
+                schemas: { Cluster: schema },
+                examples: { sample: { value: freeForm } },
+              },
+              webhooks: { event: item },
+              'x-extra': [freeForm],
+            };
+          };
+          const document = makeDocument({ url: upstream, description: upstream });
           const raw = format === 'json' ? JSON.stringify(document) : stringifyYaml(document);
           const slug = `cat-servers-${visibility}-${format}`;
           const id = await publish(provider, slug, { spec: raw, visibility });
@@ -365,26 +379,12 @@ describe('catalog visibility', () => {
           assert.equal(response.statusCode, 200, response.body);
           const body = response.json<CatalogSpecResponse>();
           assert.equal(body.content_type, `application/${format}`);
-          assert.ok(!body.raw_spec.includes('origin.example.test'));
           const normalized: unknown =
             format === 'json' ? JSON.parse(body.raw_spec) : parseYaml(body.raw_spec);
-          let count = 0;
-          const checkServers = (value: unknown): void => {
-            if (Array.isArray(value)) {
-              value.forEach(checkServers);
-            } else if (typeof value === 'object' && value !== null) {
-              for (const [key, child] of Object.entries(value)) {
-                if (key === 'servers') {
-                  count++;
-                  assert.deepEqual(child, [{ url: `https://gateway.example.test/nexus/${slug}` }]);
-                } else {
-                  checkServers(child);
-                }
-              }
-            }
-          };
-          checkServers(normalized);
-          assert.equal(count, 13);
+          assert.deepEqual(
+            normalized,
+            makeDocument({ url: `https://gateway.example.test/nexus/${slug}` }),
+          );
 
           for (const viewer of [provider, founder]) {
             const original = await harness.authed(viewer, {

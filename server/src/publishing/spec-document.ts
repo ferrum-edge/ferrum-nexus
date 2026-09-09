@@ -415,8 +415,8 @@ export function routesSpecDocument(
 /**
  * Share the gateway server rule between enforcement and catalog documents.
  * Enforcement strips overrides in the containers Edge resolves. The catalog
- * replaces every occurrence, including callbacks and extension data, because
- * none of the uploaded server entries may cross the consumer boundary.
+ * replaces servers only at OpenAPI structural positions, including callbacks
+ * and links. Schema properties, examples and extensions remain untouched.
  * Callers must validate document depth and reject cycles before this walk.
  */
 export function rewriteSpecServers(
@@ -426,17 +426,56 @@ export function rewriteSpecServers(
 ): Record<string, unknown> {
   const servers = [{ url: serverUrl }];
   if (scope === 'catalog') {
-    const rewrite = (value: unknown): unknown => {
-      if (Array.isArray(value)) return value.map(rewrite);
+    const map = (value: unknown, rewrite: (child: unknown) => unknown): unknown => {
       if (!isRecord(value)) return value;
       return Object.fromEntries(
         Object.entries(value).map(([key, child]) => [
           key,
-          key === 'servers' ? servers : rewrite(child),
+          key.startsWith('x-') ? child : rewrite(child),
         ]),
       );
     };
-    return { ...(rewrite(document) as Record<string, unknown>), servers };
+    const link = (value: unknown): unknown =>
+      isRecord(value) && 'server' in value ? { ...value, server: { url: serverUrl } } : value;
+    const response = (value: unknown): unknown =>
+      isRecord(value) && 'links' in value ? { ...value, links: map(value.links, link) } : value;
+    const callback = (value: unknown): unknown => map(value, pathItem);
+    const operation = (value: unknown): unknown => {
+      if (!isRecord(value)) return value;
+      const copy = { ...value };
+      if ('servers' in copy) copy.servers = servers;
+      if ('callbacks' in copy) copy.callbacks = map(copy.callbacks, callback);
+      if ('responses' in copy) copy.responses = map(copy.responses, response);
+      return copy;
+    };
+    const pathItem = (value: unknown): unknown => {
+      if (!isRecord(value)) return value;
+      const copy = { ...value };
+      if ('servers' in copy) copy.servers = servers;
+      for (const method of OPENAPI_OPERATION_KEYS) {
+        if (method in copy) copy[method] = operation(copy[method]);
+      }
+      return copy;
+    };
+    const copy: Record<string, unknown> = { ...document, servers };
+    if (isRecord(document.paths)) {
+      copy.paths = Object.fromEntries(
+        Object.entries(document.paths).map(([key, value]) => [
+          key,
+          key.startsWith('/') ? pathItem(value) : value,
+        ]),
+      );
+    }
+    if ('webhooks' in document) copy.webhooks = map(document.webhooks, pathItem);
+    if (isRecord(document.components)) {
+      const components = { ...document.components };
+      if ('pathItems' in components) components.pathItems = map(components.pathItems, pathItem);
+      if ('callbacks' in components) components.callbacks = map(components.callbacks, callback);
+      if ('links' in components) components.links = map(components.links, link);
+      if ('responses' in components) components.responses = map(components.responses, response);
+      copy.components = components;
+    }
+    return copy;
   }
   const submitted: Record<string, unknown> = { ...document, servers };
   const paths = pathItemsWithoutServers(submitted.paths, (key) => key.startsWith('/'));

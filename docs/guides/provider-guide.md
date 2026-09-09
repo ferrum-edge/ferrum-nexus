@@ -282,9 +282,11 @@ rules for a path no client can send, so the portal removes them from the copy it
 submits: every declared operation would otherwise answer `400`. Nothing is
 removed from the stored upload or the provider's Specification editor. In the
 catalog and docs viewer, both enforcement levels instead show normalized
-JSON/YAML with every `servers` occurrence replaced by the gateway address (the
-listen path alone when no public gateway origin is configured). That consumer
-projection also rewrites callback servers. The enforcement copy leaves servers
+JSON/YAML with OpenAPI root, path-item and operation `servers` replaced by the
+gateway address (the listen path alone when no public gateway origin is
+configured), including webhooks, reusable path items and callbacks. That consumer
+projection also rewrites Link Object `server` entries in components and response
+links, preserving schemas, examples and extensions. The enforcement copy leaves servers
 inside operation callbacks alone, because those describe requests your service
 makes outbound rather than ones this API serves.
 
