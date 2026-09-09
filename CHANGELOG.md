@@ -127,6 +127,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Compensate approvals whose gateway write was not acknowledged and record the
+  uncertain outcome in the rollback audit.
+- Require the provider role as well as API ownership for access decisions;
+  administrators retain oversight after an owner is demoted.
+
 - **A test consumer whose creation was applied but never acknowledged was
   orphaned on the gateway.** When Edge stored the `nexus-test-<api_id>` consumer
   and then failed to answer, the caller held no id for it, so the compensation
