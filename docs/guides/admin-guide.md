@@ -165,9 +165,11 @@ Once it is set, every API in the catalog gains an **invoke URL** of
 page, next to each of a client's granted APIs, and on the provider's API
 overview.
 
-Unlike SMTP and CAPTCHA this is **not** super-admin-only: a public gateway
-address is published information, not a secret. It is also not the portal's own
-address — that is `NEXUS_PUBLIC_URL`, used for the links in outbound email.
+Like SMTP and CAPTCHA this is **super-admin-only**: the address is published to
+every client as the place to send its gateway credentials, so whoever controls
+it can redirect those credentials to another origin. An ordinary `admin` can
+read it but not change it. It is also not the portal's own address — that is
+`NEXUS_PUBLIC_URL`, used for the links in outbound email.
 
 Leaving the field blank falls back to the `FERRUM_GATEWAY_PUBLIC_URL`
 environment variable, which is the right place to set it if your deployment is
