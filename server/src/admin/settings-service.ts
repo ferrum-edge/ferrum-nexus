@@ -21,10 +21,9 @@
  * 2. **Audit rows record changed keys, never values.** A settings update writes
  *    `admin.settings_update` with the list of touched keys and nothing else, so
  *    the audit log can be read by anyone allowed to read audit logs.
- * 3. **`smtp` and `captcha` are `super_admin`-only** (see
- *    {@link PRIVILEGED_SETTINGS_SECTIONS}); `branding`, `gateway` and
- *    `registration` are editable by any `admin` — a public gateway address is
- *    published information, not a secret.
+ * 3. **`smtp`, `captcha`, and `gateway` are `super_admin`-only** (see
+ *    {@link PRIVILEGED_SETTINGS_SECTIONS}); `branding` and `registration` are
+ *    editable by any `admin`.
  */
 
 import {
@@ -62,12 +61,13 @@ import { newId, nowIso } from '../lib/ids.js';
 /**
  * Sections of {@link UpdateSettingsRequest} that only a `super_admin` may touch.
  *
- * Both are escalation paths rather than presentation: whoever owns `smtp` owns
+ * These are escalation paths rather than presentation: whoever owns `smtp` owns
  * every verification and password-reset link the portal sends, and whoever owns
- * `captcha` owns the registration brake. `branding` and `registration` stay at
- * `admin`.
+ * `captcha` owns the registration brake. Whoever controls `gateway` can direct
+ * clients to send their gateway credentials to another origin. `branding` and
+ * `registration` stay at `admin`.
  */
-export const PRIVILEGED_SETTINGS_SECTIONS = ['smtp', 'captcha'] as const;
+export const PRIVILEGED_SETTINGS_SECTIONS = ['smtp', 'captcha', 'gateway'] as const;
 
 /** `app_settings` key holding the public branding block. */
 export const BRANDING_SETTINGS_KEY = 'branding';
@@ -329,7 +329,8 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
     getAdminSettings: snapshot,
 
     async updateSettings(actor, patch, ip = null): Promise<AdminSettingsResponse> {
-      // Mail and CAPTCHA are privilege-escalation surfaces, not preferences:
+      // Mail, CAPTCHA, and the client-facing gateway origin are
+      // privilege-escalation surfaces, not preferences:
       // repointing SMTP hands the operator every verification and
       // password-reset message, and turning CAPTCHA off (or swapping its
       // secret) removes the registration brake. `/api/admin` only requires
@@ -373,9 +374,8 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
           await tx.settings.set(BRANDING_SETTINGS_KEY, next, false);
         }
 
-        // Not privileged: a gateway address is what the catalog exists to
-        // publish. Normalised above rather than only in the route schema, so the
-        // stored value is an origin no matter who calls the service.
+        // Normalised above rather than only in the route schema, so the stored
+        // value is an origin no matter who calls the service.
         if (nextGatewayUrl !== undefined) {
           await tx.settings.set(GATEWAY_SETTINGS_KEY, { public_url: nextGatewayUrl }, false);
           changed.push('gateway.public_url');

@@ -207,9 +207,9 @@ export const adminRoutes: FastifyPluginAsync<AdminRoutesOptions> = async (app, o
   app.put('/settings', async (request): Promise<UpdateSettingsResponse> => {
     const { user } = requireAuth(request);
     const patch = parseOrThrow(updateSettingsBody, request.body);
-    // Branding and registration policy are `admin`; the `smtp` and `captcha`
-    // sections need `super_admin`, enforced by the service so the rule holds
-    // wherever `updateSettings` is called from.
+    // Branding and registration policy are `admin`; the `smtp`, `captcha`, and
+    // `gateway` sections need `super_admin`, enforced by the service so the rule
+    // holds wherever `updateSettings` is called from.
     return settings.updateSettings({ id: user.id, role: user.role }, patch, clientIp(request));
   });
 

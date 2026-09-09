@@ -288,42 +288,43 @@ the route, while "is this your API" is a property of the row.
 
 ### Capability matrix
 
-| Capability                                        | client | provider | admin | super_admin |
-| ------------------------------------------------- | ------ | -------- | ----- | ----------- |
-| Register, sign in, manage own profile             | ✓      | ✓        | ✓     | ✓           |
-| Browse catalog, read specs                        | ✓      | ✓        | ✓     | ✓           |
-| Request access, cancel own request                | ✓      | ✓        | ✓     | ✓           |
-| Issue / rotate / revoke **own** credentials       | ✓      | ✓        | ✓     | ✓           |
-| Messaging, notifications                          | ✓      | ✓        | ✓     | ✓           |
-| Publish an API, update own API/spec               | —      | ✓        | ✓     | ✓           |
-| Configure palette plugins on **own** API          | —      | ✓        | ✓     | ✓           |
-| Create a test consumer for own API                | —      | ✓        | ✓     | ✓           |
-| Approve / deny requests on **own** APIs           | —      | ✓        | ✓     | ✓           |
-| Revoke grants on **own** APIs                     | —      | ✓        | ✓     | ✓           |
-| Edit / delete **another** provider's API          | —      | —        | ✓     | ✓           |
-| Decide requests / revoke grants on **any** API    | —      | —        | ✓     | ✓           |
-| List all users; change `client` ⇄ `provider`      | —      | —        | ✓     | ✓           |
-| Manage organizations                              | —      | —        | ✓     | ✓           |
-| List another account's credential metadata        | —      | —        | ✓     | ✓           |
-| Read/reply in the platform inbox; read any thread | —      | —        | ✓     | ✓           |
-| Portal settings: branding, registration policy    | —      | —        | ✓     | ✓           |
-| Email templates, mass email                       | —      | —        | ✓     | ✓           |
-| Read the audit log                                | —      | —        | ✓     | ✓           |
-| Portal settings: **SMTP and CAPTCHA**             | —      | —        | **—** | ✓           |
-| Grant or revoke `admin` / `super_admin`           | —      | —        | **—** | ✓           |
-| Disable or re-enable an `admin` or `super_admin`  | —      | —        | **—** | ✓           |
-| God mode (4 endpoints)                            | —      | —        | —     | ✓           |
+| Capability                                         | client | provider | admin | super_admin |
+| -------------------------------------------------- | ------ | -------- | ----- | ----------- |
+| Register, sign in, manage own profile              | ✓      | ✓        | ✓     | ✓           |
+| Browse catalog, read specs                         | ✓      | ✓        | ✓     | ✓           |
+| Request access, cancel own request                 | ✓      | ✓        | ✓     | ✓           |
+| Issue / rotate / revoke **own** credentials        | ✓      | ✓        | ✓     | ✓           |
+| Messaging, notifications                           | ✓      | ✓        | ✓     | ✓           |
+| Publish an API, update own API/spec                | —      | ✓        | ✓     | ✓           |
+| Configure palette plugins on **own** API           | —      | ✓        | ✓     | ✓           |
+| Create a test consumer for own API                 | —      | ✓        | ✓     | ✓           |
+| Approve / deny requests on **own** APIs            | —      | ✓        | ✓     | ✓           |
+| Revoke grants on **own** APIs                      | —      | ✓        | ✓     | ✓           |
+| Edit / delete **another** provider's API           | —      | —        | ✓     | ✓           |
+| Decide requests / revoke grants on **any** API     | —      | —        | ✓     | ✓           |
+| List all users; change `client` ⇄ `provider`       | —      | —        | ✓     | ✓           |
+| Manage organizations                               | —      | —        | ✓     | ✓           |
+| List another account's credential metadata         | —      | —        | ✓     | ✓           |
+| Read/reply in the platform inbox; read any thread  | —      | —        | ✓     | ✓           |
+| Portal settings: branding, registration policy     | —      | —        | ✓     | ✓           |
+| Email templates, mass email                        | —      | —        | ✓     | ✓           |
+| Read the audit log                                 | —      | —        | ✓     | ✓           |
+| Portal settings: **SMTP, CAPTCHA and gateway URL** | —      | —        | **—** | ✓           |
+| Grant or revoke `admin` / `super_admin`            | —      | —        | **—** | ✓           |
+| Disable or re-enable an `admin` or `super_admin`   | —      | —        | **—** | ✓           |
+| God mode (4 endpoints)                             | —      | —        | —     | ✓           |
 
 The three bolded gaps are the point of the `super_admin` tier: an `admin` has
 broad authority over content and users but **cannot escalate itself or another
 account**, cannot disable or re-enable an administrator, and cannot take over the
-platform's mail.
+platform's mail or redirect where its clients send their gateway credentials.
 
-`smtp` and `captcha` are `super_admin`-only because they are escalation paths
-dressed as preferences. Whoever controls the SMTP host receives every
-verification and password-reset link the portal sends, which is an account
+`smtp`, `captcha` and `gateway` are `super_admin`-only because they are
+escalation paths dressed as preferences. Whoever controls the SMTP host receives
+every verification and password-reset link the portal sends, which is an account
 takeover of every user; whoever controls the CAPTCHA settings can switch off
-the registration brake. `PUT /api/admin/settings` answers `403 FORBIDDEN` for
+the registration brake; whoever controls the gateway origin directs every client
+to send its gateway credentials to a host of their choosing. `PUT /api/admin/settings` answers `403 FORBIDDEN` for
 an `admin` sending either section, and the check lives in the service, so it
 holds however `updateSettings` is reached. Branding and registration policy
 stay at `admin`.

@@ -835,11 +835,13 @@ _admin_, except `smtp` and `captcha` which are **_super_admin_** — partial
 update; **omitted sections are untouched**, and omitted fields inside a supplied
 section keep their current value.
 
-A body carrying an `smtp` or `captcha` section from an ordinary `admin` is
-refused with `403 FORBIDDEN` and nothing is written — not even the sections that
-would have been allowed. Mail and CAPTCHA are escalation surfaces, not
-preferences: repointing SMTP delivers every verification and password-reset link
-to the operator, and CAPTCHA is the registration brake.
+A body carrying an `smtp`, `captcha` or `gateway` section from an ordinary
+`admin` is refused with `403 FORBIDDEN` and nothing is written — not even the
+sections that would have been allowed. Mail, CAPTCHA and the gateway origin are
+escalation surfaces, not preferences: repointing SMTP delivers every
+verification and password-reset link to the operator, CAPTCHA is the
+registration brake, and the gateway origin is where every client is told to
+send its gateway credentials.
 
 | Section        | Fields                                                                                                                                                                                                                                                                                                                                                                                                       |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -847,7 +849,7 @@ to the operator, and CAPTCHA is the registration brake.
 | `captcha`      | _super_admin_ — `enabled`, `provider` (`none`\|`recaptcha`\|`hcaptcha`\|`turnstile`), `site_key` (nullable), `secret_key` — **write-only**, stored AES-256-GCM encrypted; pass `null` or `""` to clear                                                                                                                                                                                                       |
 | `smtp`         | _super_admin_ — `host`, `port` (1–65535), `secure`, `username`, `password` — **write-only**, encrypted; `null`/`""` clears — `from_address`. Changing `host`, `port`, `secure` or `username` while a password is stored (or set by env) requires sending a fresh `password` in the same request (`400 VALIDATION_FAILED` otherwise), so a stored credential can never be replayed against a different server |
 | `registration` | `open_registration`, `require_email_verification`, `allowed_roles` (array of roles)                                                                                                                                                                                                                                                                                                                          |
-| `gateway`      | `public_url` — absolute `http(s)` **origin** of the gateway's proxy listener, no path, query or credentials; a trailing slash is stripped. `null` or `""` clears the override and falls back to `FERRUM_GATEWAY_PUBLIC_URL`. Editable by any `admin`.                                                                                                                                                        |
+| `gateway`      | _super_admin_ — `public_url` — absolute `http(s)` **origin** of the gateway's proxy listener, no path, query or credentials; a trailing slash is stripped. `null` or `""` clears the override and falls back to `FERRUM_GATEWAY_PUBLIC_URL`. Whoever controls it directs clients to send their gateway credentials to that origin, so it needs `super_admin` like `smtp` and `captcha`.                      |
 
 An enabled CAPTCHA configuration requires a provider other than `none`, a
 non-empty site key, and a usable secret (supplied now or already stored).
