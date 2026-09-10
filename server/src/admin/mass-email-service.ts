@@ -21,9 +21,9 @@
  * queued nothing, and its {@link MassEmailResponse.batch_id} comes back on both
  * the success and the failure path so a retry can reuse it either way.
  *
- * Rendering happens **before** the transaction opens: it reads the template and
- * the branding per recipient and does the string work, none of which needs to
- * be inside the atomic section. What the transaction holds is the inserts.
+ * Template and branding reads happen **before** the transaction opens. The
+ * resulting pure renderer is then used immediately before each insert, so the
+ * transaction stays retryable without retaining the whole rendered fan-out.
  *
  * **And the audience is bounded**, by `NEXUS_MAX_MASS_EMAIL_RECIPIENTS`,
  * checked before any of that. Atomicity is not free: the inserts are what one
@@ -38,7 +38,7 @@ import type { MassEmailAudience, MassEmailRequest, MassEmailResponse } from '@fe
 
 import { AuditAction, type AuditActor, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
-import type { EnqueueEmailInput, NexusStore, UserFilter, UserRecord } from '../db/store.js';
+import type { NexusStore, UserFilter, UserRecord } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
 import { MASS_RAW_HTML_VARS } from '../email/templates.js';
 import { NexusError, isNexusError, quotaExceeded, validationFailed } from '../lib/errors.js';
@@ -119,36 +119,30 @@ export function createMassEmailService(deps: MassEmailServiceDeps): MassEmailSer
       }
       const batch = request.idempotency_key ?? newId();
 
-      // Rendered outside the transaction: one template read, one branding read
-      // and the interpolation per recipient, none of which the atomic section
-      // needs to hold open.
-      const queue: EnqueueEmailInput[] = [];
-      for (const recipient of recipients) {
-        const rendered = await email.render(
-          'mass',
-          {
-            recipient_name: recipient.display_name,
-            recipient_email: recipient.email,
-            subject,
-            body_html: request.body_html,
-            body_text: request.body_text,
-          },
-          MASS_RAW_HTML_VARS,
-        );
-        queue.push({
-          to_email: recipient.email,
-          subject: rendered.subject,
-          body_html: rendered.html,
-          body_text: rendered.text,
-          idempotency_key: `mass:${batch}:${recipient.id}`,
-        });
-      }
+      // Resolve store-backed template state once, outside the retryable
+      // transaction. The returned renderer is pure, so it is safe to call on a
+      // transaction retry and lets each large rendered body become collectible
+      // immediately after its insert instead of retaining the entire fan-out.
+      const render = await email.prepareRenderer('mass', MASS_RAW_HTML_VARS);
 
       try {
         const enqueued = await store.transaction(async (tx) => {
           let created = 0;
-          for (const entry of queue) {
-            const result = await tx.emailOutbox.enqueue(entry);
+          for (const recipient of recipients) {
+            const rendered = render({
+              recipient_name: recipient.display_name,
+              recipient_email: recipient.email,
+              subject,
+              body_html: request.body_html,
+              body_text: request.body_text,
+            });
+            const result = await tx.emailOutbox.enqueue({
+              to_email: recipient.email,
+              subject: rendered.subject,
+              body_html: rendered.html,
+              body_text: rendered.text,
+              idempotency_key: `mass:${batch}:${recipient.id}`,
+            });
             if (result.created) created += 1;
           }
           const scoped = audit.forStore(tx);

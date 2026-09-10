@@ -331,6 +331,11 @@ export interface EmailService {
     vars?: TemplateVars,
     rawHtmlVars?: readonly string[],
   ): Promise<RenderedEmail>;
+  /** Resolve shared template state once and return a pure per-recipient renderer. */
+  prepareRenderer(
+    templateKey: EmailTemplateKey,
+    rawHtmlVars?: readonly string[],
+  ): Promise<(vars?: TemplateVars) => RenderedEmail>;
   /** Render and queue one message. Never throws for a duplicate key. */
   enqueue(input: EnqueueEmail): Promise<{ entry: EmailOutboxRecord; created: boolean }>;
   /**
@@ -400,9 +405,18 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
     vars: TemplateVars = {},
     rawHtmlVars: readonly string[] = [],
   ): Promise<RenderedEmail> {
+    const renderer = await prepareRenderer(templateKey, rawHtmlVars);
+    return renderer(vars);
+  }
+
+  async function prepareRenderer(
+    templateKey: EmailTemplateKey,
+    rawHtmlVars: readonly string[] = [],
+  ): Promise<(vars?: TemplateVars) => RenderedEmail> {
     const content = await resolveTemplate(templateKey);
-    const merged = { ...(await commonVars()), ...vars };
-    return renderTemplate(content, merged, { rawHtmlVars });
+    const common = await commonVars();
+    return (vars: TemplateVars = {}) =>
+      renderTemplate(content, { ...common, ...vars }, { rawHtmlVars });
   }
 
   async function transportFor(): Promise<MailTransport | null> {
@@ -416,6 +430,7 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
     resolveSettings,
     resolveTemplate,
     render,
+    prepareRenderer,
 
     async isConfigured(): Promise<boolean> {
       const settings = await resolveSettings();
