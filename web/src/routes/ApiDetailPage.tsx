@@ -97,7 +97,7 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
   const [corsOrigins, setCorsOrigins] = useState(api.cors?.allowed_origins.join('\n') ?? '');
   const [corsCredentials, setCorsCredentials] = useState(api.cors?.allow_credentials ?? false);
   const [corsWebsocketOrigins, setCorsWebsocketOrigins] = useState(
-    api.cors?.enforce_websocket_origins ?? false,
+    api.cors?.enforce_websocket_origins ?? true,
   );
   const [corsHeaders, setCorsHeaders] = useState(api.cors?.allowed_headers?.join('\n') ?? '');
   const [methods, setMethods] = useState<HttpMethod[]>(api.allowed_methods ?? []);
@@ -326,7 +326,7 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
               />
               <Checkbox
                 label="Enforce WebSocket origins"
-                description="Requires a listed Origin on every upgrade. Rejects clients without Origin. Enable for browser-only WebSocket APIs."
+                description="Requires a listed Origin on every upgrade. Rejects clients without Origin. Disable only for non-browser clients that omit it."
                 checked={corsWebsocketOrigins}
                 onChange={(event) => setCorsWebsocketOrigins(event.target.checked)}
               />

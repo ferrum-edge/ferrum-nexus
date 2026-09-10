@@ -63,7 +63,7 @@ function PublishForm(): ReactElement {
   const [rateLimitWindow, setRateLimitWindow] = useState<string>('60');
   const [corsOrigins, setCorsOrigins] = useState('');
   const [corsCredentials, setCorsCredentials] = useState(false);
-  const [corsWebsocketOrigins, setCorsWebsocketOrigins] = useState(false);
+  const [corsWebsocketOrigins, setCorsWebsocketOrigins] = useState(true);
   const [corsHeaders, setCorsHeaders] = useState('');
   const [methods, setMethods] = useState<HttpMethod[]>([]);
   const [timeouts, setTimeouts] = useState<TimeoutDraft>(EMPTY_TIMEOUT_DRAFT);
@@ -281,7 +281,7 @@ function PublishForm(): ReactElement {
             />
             <Checkbox
               label="Enforce WebSocket origins"
-              description="Requires a listed Origin on every upgrade. Rejects clients without Origin. Enable for browser-only WebSocket APIs."
+              description="Requires a listed Origin on every upgrade. Rejects clients without Origin. Disable only for non-browser clients that omit it."
               checked={corsWebsocketOrigins}
               onChange={(event) => setCorsWebsocketOrigins(event.target.checked)}
             />

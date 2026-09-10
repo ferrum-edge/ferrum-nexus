@@ -712,7 +712,8 @@ and independently of — the `cors` plugin:
   with it;
 - `allowed_ws_origins` is the WebSocket upgrade origin check, which the `cors`
   plugin never runs for. The API's exact CORS origins are mirrored into it; a
-  wildcard or absent policy leaves it `[]`, which performs no check.
+  wildcard, absent policy, or explicit opt-out leaves it `[]`, which performs no
+  check. An omitted opt-out setting remains enabled for legacy CORS records.
 
 Both derivations are recomputed whenever either input changes, in a single
 read-modify-write with one undo step. A PATCH that does not name a setting does

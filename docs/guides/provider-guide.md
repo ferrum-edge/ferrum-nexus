@@ -211,15 +211,16 @@ Use **Additional CORS request headers** for custom headers, one name per line.
 The advertised methods follow your API's method list, with `OPTIONS` included
 for preflight. Operator-added gateway headers survive a portal save.
 
-**Enforce WebSocket origins** is a separate, opt-in control, off by default.
+**Enforce WebSocket origins** is a separate control, on by default.
 Edge accepts WebSocket upgrades on HTTP API paths, and its CORS plugin does not
-run on upgrades. Enable this option for browser-only WebSocket APIs to reject
+run on upgrades. Keep this option enabled for browser-only WebSocket APIs to reject
 pages from origins outside your list (CSWSH protection). It requires exact
 HTTP(S) origins; wildcards are not accepted. Edge also rejects clients that send
 **no Origin header**, so leave it off if your non-browser clients omit Origin.
 When off, upgrades from any origin pass this gate; authentication and ACLs still
 apply. Clearing CORS removes the gate too. Existing APIs retain their gateway
-policy until CORS is saved; review this option when saving an older API.
+policy until CORS is saved; legacy policies without this setting remain protected
+when saved unless the provider explicitly disables it.
 
 ### Enforcement level
 
@@ -567,7 +568,7 @@ API, but two of them have consequences worth reading first.
 | Visibility                 | Listing only. Existing grants and calls are unaffected.                                                                    |
 | Upstream URL               | Re-points the gateway's backend. Takes effect immediately, and the upstream shown on the API page updates with it.         |
 | Rate limit                 | Attaches, updates, or (cleared) removes the quota.                                                                         |
-| CORS                       | Attaches, replaces, or (cleared) removes the browser CORS policy and its opt-in WebSocket origin check.                    |
+| CORS                       | Attaches, replaces, or (cleared) removes the browser CORS policy and its default-on WebSocket origin check.                |
 | Allowed methods            | Takes effect immediately. Untick everything to accept every method again.                                                  |
 | Timeouts, circuit breaker  | Take effect immediately. Clearing the timeout boxes restores the gateway defaults.                                         |
 | **Requestable → off**      | ⚠️ Removes the access gate. **Every authenticated consumer can now call this API.** Existing grants stay but become inert. |

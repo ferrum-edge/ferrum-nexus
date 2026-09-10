@@ -1237,7 +1237,7 @@ message threads.
 
 `CorsConfig` contains `allowed_origins` and `allow_credentials`, plus optional
 `allowed_headers` (up to 64 HTTP header-name tokens, each 1–128 characters) and
-`enforce_websocket_origins` (boolean, defaults to `false`). Nexus includes
+`enforce_websocket_origins` (boolean, defaults to `true`). Nexus includes
 `Accept`, `Authorization`, `Content-Type`, `Origin`, and `X-Requested-With`, plus
 `X-API-Key` for `key_auth`, in the gateway's allowed request headers. Extra
 operator headers survive changes; removing a previously supplied portal header
@@ -1245,11 +1245,11 @@ removes that addition. The CORS method list follows `allowed_methods`, including
 implicit `OPTIONS`; unrestricted APIs use Edge's seven standard CORS methods.
 Auth-only and method-only updates also update the CORS plugin.
 
-`cors.enforce_websocket_origins: true` mirrors exact HTTP(S) origins onto the
+By default, Nexus mirrors exact HTTP(S) CORS origins onto the
 proxy's `allowed_ws_origins`. Wildcards are refused with this option. Edge then
 rejects both unlisted origins and upgrades **without an Origin header**. When
-false or absent, the proxy has no WebSocket origin gate; authentication and ACLs
-still apply, but browser CSWSH protection requires explicit opt-in. Removing
+explicitly false, the proxy has no WebSocket origin gate; authentication and ACLs
+still apply, but browser CSWSH protection has been opted out. Removing
 CORS clears the gate. Existing gateway lists are not changed at startup: save
 the CORS policy to apply this choice to an older API.
 
