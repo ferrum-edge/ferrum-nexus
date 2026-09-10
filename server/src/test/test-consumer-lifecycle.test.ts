@@ -270,6 +270,30 @@ describe('test consumer lifecycle', () => {
     assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'revoked');
   });
 
+  it('retains a fresh-id consumer registration when a later replacement fails', async () => {
+    const api = await publish();
+    const username = `nexus-test-${api.id}`;
+
+    assert.equal((await createTestConsumer(api.id)).statusCode, 201);
+    const replaced = await createTestConsumer(api.id);
+    assert.equal(replaced.statusCode, 201, replaced.body);
+    const credentialId = replaced.json<CreateTestConsumerResponse>().credential.id;
+    const live = harness.edge.consumerByUsername(username);
+    assert.ok(live);
+    assert.notEqual(live.id, derivedConsumerId('nexus', username));
+
+    harness.edge.queueFailure(503, { error: 'down' }, `/consumers/${live.id}`, 'DELETE');
+    const failed = await createTestConsumer(api.id);
+    assert.equal(failed.statusCode, 502, failed.body);
+    assert.equal((await registrationFor(username))?.ferrum_consumer_id, live.id);
+
+    const removed = await deleteApi(api.id);
+    assert.equal(removed.statusCode, 200, removed.body);
+    assert.equal(harness.edge.consumerByUsername(username), undefined);
+    assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'revoked');
+    assert.equal(await registrationFor(username), null);
+  });
+
   /* ── #136: deleting the API collects the identity it created ──────────── */
 
   it('tears down the test consumer, its credential and its group with the API', async () => {

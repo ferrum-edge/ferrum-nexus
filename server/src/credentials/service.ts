@@ -473,6 +473,7 @@ export interface CredentialsService {
     consumerId: string | null,
     subject: string,
     attemptedConsumerId?: string | null,
+    retainedConsumerId?: string | null,
   ): Promise<void>;
   /**
    * Take one registered gateway identity down: delete its Edge consumer,
@@ -1332,7 +1333,19 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       consumerId,
       subject,
       attemptedConsumerId = null,
+      retainedConsumerId = null,
     ): Promise<void> {
+      if (consumerId === null && attemptedConsumerId === null && retainedConsumerId !== null) {
+        // Replacement stopped before asking Edge to create anything. Keep the
+        // registration pointed at the incumbent: unlike a first (derived-id)
+        // consumer, a prior replacement may have a random id and cannot be
+        // recovered after this row is removed.
+        await store.gatewayIdentities.bindConsumer(identity.id, retainedConsumerId).catch(() => {
+          // Even unbound, the retained registration makes teardown fall back
+          // to the bounded username lookup instead of losing the identity.
+        });
+        return;
+      }
       let created = consumerId;
       if (created === null && attemptedConsumerId !== null) {
         // The create was rejected — but a rejection is not proof the gateway

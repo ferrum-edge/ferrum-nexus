@@ -2022,6 +2022,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             consumerId,
             actor.id,
             attemptedConsumerId,
+            previous?.ferrum_consumer_id,
           );
           throw error;
         }
