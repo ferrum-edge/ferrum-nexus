@@ -350,11 +350,13 @@ Committed settings writes (including branding, CAPTCHA secrets/site keys and
 registration policy/roles) invalidate the server memo on the instance handling
 the mutation before its response is sent. The next `GET /api/branding` reaching
 that instance reflects the change, with a new ETag when the payload changes.
-The database-backed `bootstrap_required` check is coalesced and cached for at
-most one second, independently of `NEXUS_BRANDING_CACHE_MS`. This bounds
-anonymous database work while limiting cross-instance founder-seat staleness to
-one second. Browser/CDN copies may still be served until their advertised
-`max-age` expires.
+`bootstrap_required` is never memoised: it is read live, so a founder seated on
+any instance is reflected by every instance at once. Concurrent anonymous
+requests coalesce onto one in-flight count query per instance, which bounds the
+database work a burst can cause without retaining the answer.
+`NEXUS_BRANDING_CACHE_MS` therefore bounds only cross-instance staleness of the
+remaining fields in the server memo. Browser/CDN copies may still be
+served until their advertised `max-age` expires.
 
 #### Access requests
 

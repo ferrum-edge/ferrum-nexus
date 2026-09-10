@@ -450,10 +450,12 @@ in-flight assembly. `0` disables the cache.
 Committed settings writes invalidate the server memo on the instance handling
 the mutation before it responds. The next GET reaching that instance reflects
 the change; an old ETag returns `200` with the new body when the payload
-changes. The database-backed `bootstrap_required` check is coalesced and cached
-for at most one second, independently of the response TTL. This bounds anonymous
-database work while limiting cross-instance founder-seat staleness to one second.
-Browser/CDN copies retain their advertised `max-age`.
+changes. `bootstrap_required` is never memoised: it is read live, so a founder
+seated on any instance is reflected everywhere at once. Concurrent anonymous
+requests coalesce onto one in-flight count query per instance, which bounds the
+database work a burst can cause without retaining the answer. The TTL bounds
+cross-instance server staleness of the remaining fields only; browser/CDN copies
+retain their advertised `max-age`.
 
 ```json
 {

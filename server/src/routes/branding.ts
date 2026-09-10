@@ -44,9 +44,6 @@ export interface BrandingRoutesOptions {
  */
 type CachedBrandingPayload = Omit<BrandingResponse, 'bootstrap_required'>;
 
-/** Keep the cross-instance founder hint fresh while bounding anonymous database work. */
-const BOOTSTRAP_REQUIRED_CACHE_MS = 1_000;
-
 /** A payload and the moment it was assembled. */
 interface CachedBranding {
   value: CachedBrandingPayload;
@@ -101,30 +98,30 @@ function memoizeBranding(
   };
 }
 
-/** Briefly cache and coalesce the database-backed founder-seat check. */
-function memoizeBootstrapRequired(
+/**
+ * Coalesce concurrent database-backed founder-seat checks onto one query.
+ *
+ * Deliberately NOT a cache: the founder seat is a cross-instance state
+ * transition, so no result is retained once the query settles and every
+ * request that arrives afterwards reads the database again. What this bounds
+ * is anonymous amplification — however many `/api/branding` requests arrive
+ * while one count query is in flight, they all wait on that single query, so
+ * an instance never holds more than one seat check against the pool at a
+ * time. A same-instance seat claim bumps the revision, which makes callers
+ * that were waiting on a pre-claim query re-read rather than trust its answer.
+ */
+function coalesceBootstrapRequired(
   getRevision: () => number,
   run: () => Promise<boolean>,
 ): () => Promise<boolean> {
-  let cached: { value: boolean; expiresAt: number; revision: number } | null = null;
   let pending: { revision: number; promise: Promise<boolean> } | null = null;
 
   return async function loadBootstrapRequired(): Promise<boolean> {
     const revision = getRevision();
-    if (cached && cached.revision === revision && cached.expiresAt > Date.now()) {
-      return cached.value;
-    }
     if (!pending || pending.revision !== revision) {
-      const promise = run()
-        .then((value) => {
-          if (getRevision() === revision) {
-            cached = { value, expiresAt: Date.now() + BOOTSTRAP_REQUIRED_CACHE_MS, revision };
-          }
-          return value;
-        })
-        .finally(() => {
-          if (pending?.promise === promise) pending = null;
-        });
+      const promise = run().finally(() => {
+        if (pending?.promise === promise) pending = null;
+      });
       pending = { revision, promise };
     }
     const value = await pending.promise;
@@ -161,7 +158,7 @@ export const brandingRoutes: FastifyPluginAsync<BrandingRoutesOptions> = async (
     settings.getBrandingRevision,
     assembleBranding,
   );
-  const loadBootstrapRequired = memoizeBootstrapRequired(
+  const loadBootstrapRequired = coalesceBootstrapRequired(
     auth.getBrandingRevision,
     auth.bootstrapRequired,
   );
