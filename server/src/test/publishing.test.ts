@@ -1980,6 +1980,55 @@ describe('publishing', () => {
       assert.equal(proxy?.backend_path, '/base');
     });
 
+    it('writes nothing when a PATCH replays the live upstream', async () => {
+      const api = await harness.store.apis.findById(apiId);
+      assert.ok(api?.upstream_url);
+      const before = storedProxy(harness, proxyId);
+      assert.equal(before.backend_host, 'billing.example.com');
+      const putsBefore = harness.edge.callsTo('PUT', `/proxies/${proxyId}`).length;
+      const auditIdsBefore = await auditIds(harness, 'api.update');
+
+      const replayed = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { upstream_url: api.upstream_url },
+      });
+      assert.equal(replayed.statusCode, 200, replayed.body);
+
+      // A matching live backend is not a move: no whole-resource replace, no
+      // undo, and nothing to bill to the audit trail.
+      assert.equal(harness.edge.callsTo('PUT', `/proxies/${proxyId}`).length, putsBefore);
+      assert.equal(storedProxy(harness, proxyId).backend_host, 'billing.example.com');
+      assert.deepEqual(await auditRowsSince(harness, 'api.update', auditIdsBefore), []);
+    });
+
+    it('audits a database-equal PATCH that repairs a drifted upstream', async () => {
+      const api = await harness.store.apis.findById(apiId);
+      assert.ok(api?.upstream_url);
+      const proxy = storedProxy(harness, proxyId);
+      proxy.backend_host = 'elsewhere.example.com';
+      proxy.backend_port = 9000;
+      const auditIdsBefore = await auditIds(harness, 'api.update');
+
+      const repaired = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { upstream_url: api.upstream_url },
+      });
+      assert.equal(repaired.statusCode, 200, repaired.body);
+      assert.equal(storedProxy(harness, proxyId).backend_host, 'billing.example.com');
+      assert.equal(storedProxy(harness, proxyId).backend_port, 8443);
+      assert.equal(storedProxy(harness, proxyId).backend_scheme, 'https');
+      assert.equal(storedProxy(harness, proxyId).backend_path, '/v2');
+
+      const added = await auditRowsSince(harness, 'api.update', auditIdsBefore);
+      assert.equal(added.length, 1);
+      assert.deepEqual(added[0]?.details, {
+        changed_fields: [],
+        gateway_reconciled: true,
+      });
+    });
+
     it('records the normalized upstream on the row and stamps it updated', async () => {
       const before = await harness.store.apis.findById(apiId);
       assert.ok(before);

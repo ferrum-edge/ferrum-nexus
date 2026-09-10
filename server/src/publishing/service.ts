@@ -1306,15 +1306,21 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               });
             }
             await assertUpstreamAllowed(upstream, upstreamPolicy);
-            await replaceProxyBackendLocked(proxyId, upstream, actor.id, (step) =>
+            const wrote = await replaceProxyBackendLocked(proxyId, upstream, actor.id, (step) =>
               pushUndo('the upstream backend', step),
             );
+            // A live backend that already matches is not a mutation. A write
+            // that repaired drift is, even when the Nexus row does not move —
+            // that is what earns the audit row on an otherwise database-equal
+            // request, the same flag the settings mutator sets.
+            if (wrote) gatewayMutated = true;
             // The row records where the gateway is now pointed, normalized rather
             // than however the provider typed it.
             update.upstream_url = formatUpstreamUrl(upstream);
-            if (!isDeepStrictEqual(update.upstream_url, api.upstream_url))
+            if (!isDeepStrictEqual(update.upstream_url, api.upstream_url)) {
               changed.push('upstream_url');
-            details.upstream = `${upstream.scheme}://${upstream.host}:${upstream.port}`;
+              details.upstream = `${upstream.scheme}://${upstream.host}:${upstream.port}`;
+            }
           }
 
           if (patch.auth_plugin !== undefined && patch.auth_plugin !== api.auth_plugin && proxyId) {
@@ -2727,30 +2733,42 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   /**
    * Replace the backend while the caller holds the canonical proxy lease.
    *
-   * `register` is handed the undo step for this move **after the `GET` and
-   * before the `PUT`**, which is the only place it can be handed over safely: a
-   * `PUT` Edge applied and did not manage to acknowledge rejects the promise,
-   * so a caller that waits for this function to return registers nothing and
-   * leaves live traffic pointed at the new upstream while the row, the response
-   * and the audit trail all roll back. The restore is an idempotent
-   * whole-resource write of the four `backend_*` fields, so registering it for
-   * a `PUT` that provably did not land costs one wasted call and nothing else.
+   * Compares the submitted upstream against the live `backend_*` fields first.
+   * When they already match, the `PUT` is skipped, no undo is registered, and
+   * the function returns `false`. When they differ, `register` is handed the
+   * undo step **after the `GET` and before the `PUT`**, which is the only place
+   * it can be handed over safely: a `PUT` Edge applied and did not manage to
+   * acknowledge rejects the promise, so a caller that waits for this function
+   * to return registers nothing and leaves live traffic pointed at the new
+   * upstream while the row, the response and the audit trail all roll back.
+   * The restore is an idempotent whole-resource write of the four `backend_*`
+   * fields, so registering it for a `PUT` that provably did not land costs one
+   * wasted call and nothing else. Returns `true` when the write was attempted.
    */
   async function replaceProxyBackendLocked(
     proxyId: string,
     upstream: SpecUpstream,
     subject: string,
     register?: (undoStep: () => Promise<void>) => void,
-  ): Promise<EdgeProxy> {
-    return binder.mutateProxyLocked(
+  ): Promise<boolean> {
+    let wrote = false;
+    await binder.mutateProxyLocked(
       proxyId,
       (proxy) => {
+        const next = backendFields(upstream);
+        // Nothing to put back: returning `null` skips the `PUT` entirely,
+        // which is the only case where suppressing the undo is sound. Once
+        // the write is *attempted* its outcome is unknowable from a rejected
+        // promise, so from here on the undo is registered whatever happens.
+        if (isDeepStrictEqual(proxyBackendFields(proxy), next)) return null;
+        wrote = true;
         // Register before PUT: a lost response can still mean it landed.
         register?.(restoreProxyBackendLocked(proxy, subject));
-        return { ...proxy, ...backendFields(upstream) };
+        return { ...proxy, ...next };
       },
       subject,
     );
+    return wrote;
   }
 
   /** The four `backend_*` fields exactly as a proxy currently carries them. */
