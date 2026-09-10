@@ -1592,8 +1592,18 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 proxyId,
                 (proxy) => {
                   const record = proxy as unknown as Record<string, unknown>;
+                  // A field the proxy does not carry is the gateway applying its
+                  // own default — `GET` omits what was never set, and Nexus
+                  // itself omits the timeouts and `allowed_methods` at creation
+                  // when the provider chose none. Comparing against the raw
+                  // absence would read every replayed default as drift, replace
+                  // the whole resource to write back what it already does, and
+                  // bill the audit trail for a repair that never happened. The
+                  // same table the undo restores from says what an absence
+                  // means.
                   const differs = Object.entries(proxySettings).some(
-                    ([field, value]) => !isDeepStrictEqual(record[field], value),
+                    ([field, value]) =>
+                      !isDeepStrictEqual(record[field] ?? PROXY_SETTING_DEFAULTS[field], value),
                   );
                   // Nothing to put back: returning `null` skips the `PUT`
                   // entirely, which is the only case where suppressing the undo

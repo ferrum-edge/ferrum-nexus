@@ -1640,6 +1640,34 @@ describe('publishing', () => {
       });
     });
 
+    it('writes nothing when a PATCH replays settings the proxy never carried', async () => {
+      // Published without timeouts or a method list, so the proxy carries
+      // neither field and the gateway is applying its own defaults. Replaying
+      // the catalog's `null`s asks for exactly what is already running: an
+      // absent field is the default, not drift, so there is no whole-resource
+      // replace to make and no repair to bill to the audit trail.
+      const before = storedProxy(harness, proxyId);
+      assert.equal(before.allowed_methods, undefined);
+      assert.equal(before.backend_connect_timeout_ms, undefined);
+      const auditIdsBefore = await auditIds(harness, 'api.update');
+
+      const replayed = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { cors: null, allowed_methods: null, timeouts: null },
+      });
+      assert.equal(replayed.statusCode, 200, replayed.body);
+
+      // A `PUT` would have written the defaults out as values — see the reset
+      // above — so their continued absence is the proof that none was issued.
+      const after = storedProxy(harness, proxyId);
+      assert.equal(after.allowed_methods, undefined);
+      assert.equal(after.backend_connect_timeout_ms, undefined);
+      assert.equal(after.backend_read_timeout_ms, undefined);
+      assert.equal(after.backend_write_timeout_ms, undefined);
+      assert.deepEqual(await auditRowsSince(harness, 'api.update', auditIdsBefore), []);
+    });
+
     it('does not overwrite an operator-tuned breaker when its boolean is replayed', async () => {
       const proxy = storedProxy(harness, proxyId);
       proxy.circuit_breaker = {
