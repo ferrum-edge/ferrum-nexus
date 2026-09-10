@@ -44,6 +44,9 @@ export interface BrandingRoutesOptions {
  */
 type CachedBrandingPayload = Omit<BrandingResponse, 'bootstrap_required'>;
 
+/** Keep the cross-instance founder hint fresh while bounding anonymous database work. */
+const BOOTSTRAP_REQUIRED_CACHE_MS = 1_000;
+
 /** A payload and the moment it was assembled. */
 interface CachedBranding {
   value: CachedBrandingPayload;
@@ -98,6 +101,37 @@ function memoizeBranding(
   };
 }
 
+/** Briefly cache and coalesce the database-backed founder-seat check. */
+function memoizeBootstrapRequired(
+  getRevision: () => number,
+  run: () => Promise<boolean>,
+): () => Promise<boolean> {
+  let cached: { value: boolean; expiresAt: number; revision: number } | null = null;
+  let pending: { revision: number; promise: Promise<boolean> } | null = null;
+
+  return async function loadBootstrapRequired(): Promise<boolean> {
+    const revision = getRevision();
+    if (cached && cached.revision === revision && cached.expiresAt > Date.now()) {
+      return cached.value;
+    }
+    if (!pending || pending.revision !== revision) {
+      const promise = run()
+        .then((value) => {
+          if (getRevision() === revision) {
+            cached = { value, expiresAt: Date.now() + BOOTSTRAP_REQUIRED_CACHE_MS, revision };
+          }
+          return value;
+        })
+        .finally(() => {
+          if (pending?.promise === promise) pending = null;
+        });
+      pending = { revision, promise };
+    }
+    const value = await pending.promise;
+    return getRevision() === revision ? value : loadBootstrapRequired();
+  };
+}
+
 /** Weak ETag for a branding payload — stable for the cached object identity. */
 export function brandingEtag(payload: BrandingResponse): string {
   return `"${createHash('sha256').update(JSON.stringify(payload)).digest('hex')}"`;
@@ -127,13 +161,15 @@ export const brandingRoutes: FastifyPluginAsync<BrandingRoutesOptions> = async (
     settings.getBrandingRevision,
     assembleBranding,
   );
+  const loadBootstrapRequired = memoizeBootstrapRequired(
+    auth.getBrandingRevision,
+    auth.bootstrapRequired,
+  );
 
   app.get('/', async (request: FastifyRequest, reply: FastifyReply): Promise<BrandingResponse> => {
-    // The seat check is one indexed count and is read live on every request:
-    // see `CachedBrandingPayload`.
     const [cached, bootstrap_required] = await Promise.all([
       loadBranding(),
-      auth.bootstrapRequired(),
+      loadBootstrapRequired(),
     ]);
     const payload: BrandingResponse = { ...cached.value, bootstrap_required };
     const maxAgeSec =

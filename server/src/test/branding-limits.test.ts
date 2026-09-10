@@ -214,6 +214,28 @@ describe('branding response cache', () => {
     await harness.close();
   });
 
+  it('coalesces the database-backed bootstrap check for anonymous bursts', async () => {
+    const users = harness.store.users;
+    const countActiveSuperAdmins = users.countActiveSuperAdmins.bind(users);
+    let calls = 0;
+    users.countActiveSuperAdmins = async (excludeUserId?: string): Promise<number> => {
+      calls += 1;
+      return countActiveSuperAdmins(excludeUserId);
+    };
+
+    try {
+      const responses = await Promise.all(
+        Array.from({ length: 20 }, () =>
+          harness.app.inject({ method: 'GET', url: '/api/branding' }),
+        ),
+      );
+      assert.ok(responses.every((response) => response.statusCode === 200));
+      assert.equal(calls, 1);
+    } finally {
+      users.countActiveSuperAdmins = countActiveSuperAdmins;
+    }
+  });
+
   it('serves public cache headers and honours If-None-Match', async () => {
     const first = await harness.app.inject({ method: 'GET', url: '/api/branding' });
     assert.equal(first.statusCode, 200, first.body);
