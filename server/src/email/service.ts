@@ -333,6 +333,11 @@ export interface EmailService {
     vars?: TemplateVars,
     rawHtmlVars?: readonly string[],
   ): Promise<RenderedEmail>;
+  /** Resolve shared template state once and return a pure per-recipient renderer. */
+  prepareRenderer(
+    templateKey: EmailTemplateKey,
+    rawHtmlVars?: readonly string[],
+  ): Promise<(vars?: TemplateVars) => RenderedEmail>;
   /** Render and queue one message. Never throws for a duplicate key. */
   enqueue(input: EnqueueEmail): Promise<{ entry: EmailOutboxRecord; created: boolean }>;
   /**
@@ -433,23 +438,36 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
     vars: TemplateVars = {},
     rawHtmlVars: readonly string[] = [],
   ): Promise<RenderedEmail> {
+    const renderer = await prepareRenderer(templateKey, rawHtmlVars);
+    return renderer(vars);
+  }
+
+  async function prepareRenderer(
+    templateKey: EmailTemplateKey,
+    rawHtmlVars: readonly string[] = [],
+  ): Promise<(vars?: TemplateVars) => RenderedEmail> {
     const content = await usableTemplate(templateKey);
-    const merged = { ...(await commonVars()), ...vars };
-    try {
-      const rendered = renderTemplate(content, merged, { rawHtmlVars });
-      // Recheck substituted destinations, including raw HTML from the composer.
-      validateTemplateLinks(
-        { subject: rendered.subject, body_html: rendered.html, body_text: rendered.text },
-        config,
-      );
-      return rendered;
-    } catch (error) {
-      deps.log?.(
-        { template: templateKey, error: error instanceof Error ? error.message : 'render failed' },
-        'Refused unsafe email template',
-      );
-      throw error;
-    }
+    const common = await commonVars();
+    return (vars: TemplateVars = {}) => {
+      try {
+        const rendered = renderTemplate(content, { ...common, ...vars }, { rawHtmlVars });
+        // Recheck substituted destinations, including raw HTML from the composer.
+        validateTemplateLinks(
+          { subject: rendered.subject, body_html: rendered.html, body_text: rendered.text },
+          config,
+        );
+        return rendered;
+      } catch (error) {
+        deps.log?.(
+          {
+            template: templateKey,
+            error: error instanceof Error ? error.message : 'render failed',
+          },
+          'Refused unsafe email template',
+        );
+        throw error;
+      }
+    };
   }
 
   async function transportFor(): Promise<MailTransport | null> {
@@ -463,6 +481,7 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
     resolveSettings,
     resolveTemplate,
     render,
+    prepareRenderer,
 
     async isConfigured(): Promise<boolean> {
       const settings = await resolveSettings();
