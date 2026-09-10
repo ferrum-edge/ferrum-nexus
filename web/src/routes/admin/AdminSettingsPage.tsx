@@ -53,11 +53,12 @@ const CAPTCHA_PROVIDERS: ReadonlyArray<{ value: CaptchaProvider; label: string }
  * Shown in place of the save button on a section an ordinary `admin` may read
  * but not write.
  *
- * `PUT /api/admin/settings` refuses an `smtp` or `captcha` section from anyone
- * below `super_admin` with a 403, because both are escalation paths rather than
+ * `PUT /api/admin/settings` refuses an `smtp`, `captcha`, or `gateway` section from anyone
+ * below `super_admin` with a 403, because all three are escalation paths rather than
  * preferences: whoever owns the SMTP relay receives every verification and
  * password-reset link the portal sends, and whoever owns CAPTCHA owns the
- * registration brake. The fields stay visible but disabled rather than hidden —
+ * registration brake, and whoever controls the gateway address can redirect
+ * client credentials. The fields stay visible but disabled rather than hidden —
  * an admin is still allowed to *read* the configuration, and needs to when
  * diagnosing mail that is not arriving.
  */
@@ -219,13 +220,14 @@ function BrandingTab({ settings }: { settings: AdminSettingsResponse }): ReactEl
 /**
  * Where the gateway's proxy listener answers.
  *
- * Not a secret and not an escalation path, so an ordinary `admin` may edit it —
- * unlike the SMTP and CAPTCHA cards. Until it is set, every API in the catalog
- * reports a null invoke URL and clients have to be told the address by hand.
+ * Restricted to super admins because clients trust this origin with gateway
+ * credentials. Until it is set, every API in the catalog reports a null invoke
+ * URL and clients have to be told the address by hand.
  */
 function GatewayTab({ settings }: { settings: AdminSettingsResponse }): ReactElement {
   const update = useUpdateAdminSettings();
   const toast = useToast();
+  const { canSuperAdmin } = useAuth();
   const [publicUrl, setPublicUrl] = useState(settings.gateway.public_url ?? '');
 
   return (
@@ -241,6 +243,7 @@ function GatewayTab({ settings }: { settings: AdminSettingsResponse }): ReactEle
           placeholder="https://api.example.com"
           value={publicUrl}
           onChange={(event) => setPublicUrl(event.target.value)}
+          disabled={!canSuperAdmin}
           hint="Scheme, host and port only — no path. This is where clients send API traffic, which is not this portal’s own address. Leave it blank to fall back to FERRUM_GATEWAY_PUBLIC_URL."
         />
         <p className="text-sm text-fg-muted">
@@ -248,20 +251,24 @@ function GatewayTab({ settings }: { settings: AdminSettingsResponse }): ReactEle
           <code className="font-mono text-xs">/&lt;namespace&gt;/&lt;slug&gt;</code> listen path.
           While it is unset the catalog can only show the listen path.
         </p>
-        <div>
-          <Button
-            variant="primary"
-            loading={update.isPending}
-            onClick={() =>
-              update.mutate(
-                { gateway: { public_url: publicUrl.trim() || null } },
-                { onSuccess: () => toast.success('Gateway address saved') },
-              )
-            }
-          >
-            Save gateway
-          </Button>
-        </div>
+        {canSuperAdmin ? (
+          <div>
+            <Button
+              variant="primary"
+              loading={update.isPending}
+              onClick={() =>
+                update.mutate(
+                  { gateway: { public_url: publicUrl.trim() || null } },
+                  { onSuccess: () => toast.success('Gateway address saved') },
+                )
+              }
+            >
+              Save gateway
+            </Button>
+          </div>
+        ) : (
+          <SuperAdminOnlyNotice what="the public gateway URL" />
+        )}
       </CardBody>
     </Card>
   );

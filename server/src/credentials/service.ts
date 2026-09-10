@@ -965,7 +965,25 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       );
       return { withdrawn: true, arrayAsAppended: true, arrayLength };
     } catch {
-      return { withdrawn: false, arrayAsAppended: true, arrayLength };
+      // DELETE has no concurrency token and its acknowledgement can be lost
+      // after Edge applies it. Re-read while the consumer lease is still held
+      // before deciding which metadata rows survive the rollback.
+      const after = await edge.consumers.get(input.consumerId).catch(() => undefined);
+      if (after === null) {
+        return { withdrawn: true, arrayAsAppended: true, arrayLength: 0 };
+      }
+      if (after === undefined) {
+        return { withdrawn: false, arrayAsAppended: false, arrayLength: null };
+      }
+      const afterEntries = after.credentials[input.type];
+      const afterLength = Array.isArray(afterEntries) ? afterEntries.length : 0;
+      if (afterLength === input.appendIndex) {
+        return { withdrawn: true, arrayAsAppended: true, arrayLength: afterLength };
+      }
+      if (afterLength === input.appendIndex + 1) {
+        return { withdrawn: false, arrayAsAppended: true, arrayLength: afterLength };
+      }
+      return { withdrawn: false, arrayAsAppended: false, arrayLength: afterLength };
     }
   }
 

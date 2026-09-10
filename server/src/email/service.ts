@@ -31,6 +31,7 @@ import {
 import type { NexusConfig } from '../config/index.js';
 import type { EmailOutboxRecord, NexusStore } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
+import { validateTemplateLinks } from './template-links.js';
 import {
   DEFAULT_EMAIL_TEMPLATES,
   renderTemplate,
@@ -185,12 +186,13 @@ function classifySendFailure(error: unknown, phase: SendPhase): unknown {
       { cause: error },
     );
   }
-  if (phase === 'unknown' && error instanceof SmtpBudgetExceededError) {
-    // The budget fired and nothing told us how far the message got. Parking is
-    // the safe side of that coin: a duplicate password reset is worse than a
-    // row an operator has to look at.
+  if (error instanceof SmtpBudgetExceededError) {
+    // Nodemailer cannot abort an individual non-pooled send. Even if the MIME
+    // stream has not finished yet, it can continue after our caller's deadline
+    // and hand the message to the relay. Parking is therefore the only safe
+    // outcome: retrying could deliver a duplicate security-sensitive email.
     return new MailDeliveredUnacknowledgedError(
-      `${reason}; how far the message got could not be determined`,
+      `${reason}; the SMTP operation may still complete in the background`,
       { cause: error },
     );
   }
@@ -241,21 +243,23 @@ export function createSmtpTransport(
     done();
   });
 
-  // One attempt at a time, so `current` is never ambiguous. The worker delivers
-  // its claims one at a time anyway; this only guards a caller that does not.
+  // One underlying attempt at a time, so `current` is never ambiguous and a
+  // relay cannot accumulate live sockets after callers' deadlines expire.
   let queue: Promise<unknown> = Promise.resolve();
-  function serialize<T>(task: () => Promise<T>): Promise<T> {
-    const run = queue.then(task, task);
-    queue = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
+  function serialize<T>(task: () => { result: Promise<T>; settled: Promise<void> }): Promise<T> {
+    const started = queue.then(task, task);
+    queue = started
+      .then(({ settled }) => settled)
+      .then(
+        () => undefined,
+        () => undefined,
+      );
+    return started.then(({ result }) => result);
   }
 
   return {
     async send(mail) {
-      await serialize(async () => {
+      await serialize(() => {
         const state: SendState = { phase: 'unknown' };
         current = state;
         let timer: NodeJS.Timeout | undefined;
@@ -268,34 +272,32 @@ export function createSmtpTransport(
             text: mail.text,
           })
           .then((): void => undefined);
-        try {
-          // The race is what makes the budget a bound rather than a comment:
-          // nodemailer's three timeouts are per-phase, so a conforming relay
-          // that answers slowly can otherwise outlive the stale threshold and
-          // have its claim reclaimed mid-flight.
-          await new Promise<void>((resolve, reject) => {
-            timer = setTimeout(() => reject(new SmtpBudgetExceededError(budgetMs)), budgetMs);
-            timer.unref?.();
-            // Attaching both handlers here is also what keeps an abandoned
-            // attempt from surfacing as an unhandled rejection.
-            attempt.then(resolve, reject);
-          });
-        } catch (error) {
-          if (error instanceof SmtpBudgetExceededError) {
-            // Nodemailer has no per-send abort. `close()` is the only lever, and
-            // a connection it cannot reach is left to the socket-inactivity
-            // timeout — the claim, which is what mattered, is already released.
-            try {
-              transporter.close();
-            } catch {
-              // Closing must never mask the delivery outcome.
-            }
+        const result = (async (): Promise<void> => {
+          try {
+            // The race is what makes the budget a bound rather than a comment:
+            // nodemailer's three timeouts are per-phase, so a conforming relay
+            // that answers slowly can otherwise outlive the stale threshold and
+            // have its claim reclaimed mid-flight.
+            await new Promise<void>((resolve, reject) => {
+              timer = setTimeout(() => reject(new SmtpBudgetExceededError(budgetMs)), budgetMs);
+              timer.unref?.();
+              attempt.then(resolve, reject);
+            });
+          } catch (error) {
+            throw classifySendFailure(error, state.phase);
+          } finally {
+            if (timer) clearTimeout(timer);
           }
-          throw classifySendFailure(error, state.phase);
-        } finally {
-          if (timer) clearTimeout(timer);
-          current = null;
-        }
+        })();
+        const settled = attempt
+          .then(
+            () => undefined,
+            () => undefined,
+          )
+          .finally(() => {
+            current = null;
+          });
+        return { result, settled };
       });
     },
     close() {
@@ -395,14 +397,59 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
     };
   }
 
+  /**
+   * The template `render` actually uses: the stored override when it satisfies
+   * the link policy, otherwise the built-in template.
+   *
+   * An override saved before the policy existed can name a destination the
+   * policy now refuses. Refusing to send at all would turn one stale template
+   * into an account-recovery outage (no verification or reset mail), so the
+   * built-in template — which the policy always accepts — is sent instead and
+   * the refusal is logged for the operator. Saves are still rejected outright
+   * by `updateEmailTemplate`, so this fallback only ever covers legacy rows.
+   */
+  async function usableTemplate(key: EmailTemplateKey): Promise<EmailTemplateContent> {
+    const override = await store.emailTemplates.get(key);
+    if (!override) return DEFAULT_EMAIL_TEMPLATES[key];
+    const content = {
+      subject: override.subject,
+      body_html: override.body_html,
+      body_text: override.body_text,
+    };
+    try {
+      validateTemplateLinks(content, config);
+      return content;
+    } catch (error) {
+      deps.log?.(
+        { template: key, error: error instanceof Error ? error.message : 'validation failed' },
+        'Stored email template refused by the link policy; sending the built-in template',
+      );
+      return DEFAULT_EMAIL_TEMPLATES[key];
+    }
+  }
+
   async function render(
     templateKey: EmailTemplateKey,
     vars: TemplateVars = {},
     rawHtmlVars: readonly string[] = [],
   ): Promise<RenderedEmail> {
-    const content = await resolveTemplate(templateKey);
+    const content = await usableTemplate(templateKey);
     const merged = { ...(await commonVars()), ...vars };
-    return renderTemplate(content, merged, { rawHtmlVars });
+    try {
+      const rendered = renderTemplate(content, merged, { rawHtmlVars });
+      // Recheck substituted destinations, including raw HTML from the composer.
+      validateTemplateLinks(
+        { subject: rendered.subject, body_html: rendered.html, body_text: rendered.text },
+        config,
+      );
+      return rendered;
+    } catch (error) {
+      deps.log?.(
+        { template: templateKey, error: error instanceof Error ? error.message : 'render failed' },
+        'Refused unsafe email template',
+      );
+      throw error;
+    }
   }
 
   async function transportFor(): Promise<MailTransport | null> {

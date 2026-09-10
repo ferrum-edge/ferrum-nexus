@@ -387,6 +387,58 @@ describe('access workflow under concurrency', () => {
 
   /* ── Finding 5: an approval that cannot commit gives the gateway back ─── */
 
+  it('takes the ACL group back after a lost gateway acknowledgement', async () => {
+    const apiId = await publish('approval-lost-ack');
+    const client = await freshClient();
+    const requestId = await request(client, apiId);
+    const group = aclGroupForApi(apiId);
+    harness.edge.queueLostAck(502, { error: 'Acknowledgement lost' }, '/consumers/', 'PUT');
+
+    const approved = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/access-requests/${requestId}/approve`,
+      payload: {},
+    });
+    assert.equal(approved.statusCode, 502, approved.body);
+    assert.equal(groupRemovals(client.user.id, group), 1, 'the applied group was removed');
+    assert.deepEqual(groupsOf(client.user.id), []);
+    assert.equal(await harness.store.grants.findActiveByApiAndUser(apiId, client.user.id), null);
+    assert.equal((await harness.store.accessRequests.findById(requestId))?.status, 'pending');
+
+    const rollback = (await harness.auditRows('access.approve_rollback')).find(
+      (row) => row.target_id === requestId,
+    );
+    assert.ok(rollback);
+    assert.equal(rollback.details.acl_group_possibly_applied, true);
+    assert.equal(rollback.details.acl_group_removed, group);
+    assert.equal(rollback.details.request_released, true);
+  });
+
+  it('skips ACL compensation when the active-user guard rejects before the write', async () => {
+    const apiId = await publish('approval-disabled-requester');
+    const client = await freshClient();
+    const requestId = await request(client, apiId);
+    await harness.store.users.update(client.user.id, { status: 'disabled' });
+
+    const approved = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/access-requests/${requestId}/approve`,
+      payload: {},
+    });
+    assert.equal(approved.statusCode, 403, approved.body);
+    assert.equal(errorCode(approved.body), 'USER_DISABLED');
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(client.user.id));
+    assert.ok(consumer);
+    assert.equal(harness.edge.callsTo('PUT', `/consumers/${consumer.id}`).length, 0);
+    assert.equal((await harness.store.accessRequests.findById(requestId))?.status, 'pending');
+    const rollback = (await harness.auditRows('access.approve_rollback')).find(
+      (row) => row.target_id === requestId,
+    );
+    assert.ok(rollback);
+    assert.equal(rollback.details.acl_group_possibly_applied, false);
+    assert.equal(rollback.details.acl_group_removed, undefined);
+  });
+
   it('takes the ACL group back when the grant row cannot be written', async () => {
     const apiId = await publish('race-grant-write-fails');
     const client = await freshClient();

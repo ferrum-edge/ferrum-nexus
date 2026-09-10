@@ -6,6 +6,7 @@ import {
   MAX_SPEC_DEPTH,
   MAX_SPEC_OPERATIONS,
   MAX_SPEC_PATHS,
+  MAX_SPEC_RENDER_UNITS,
   MAX_UPSTREAM_URL_LENGTH,
   OPENAPI_OPERATION_METHODS,
 } from '@ferrum-nexus/shared';
@@ -33,6 +34,34 @@ function specWithPaths(count: number): string {
     openapi: '3.1.0',
     info: { title: 'Generated', version: '1.0.0' },
     paths,
+  });
+}
+
+/**
+ * A document with one operation whose render cost comes from all three counted
+ * dimensions: `schemaCount` empty schema properties, six parameters and six
+ * response media types. Its total is `schemaCount + 14` render units.
+ */
+function renderCostSpec(schemaCount: number): string {
+  const properties: Record<string, unknown> = {};
+  for (let index = 0; index < schemaCount; index += 1) properties[`p${index}`] = {};
+  const content: Record<string, unknown> = {};
+  for (let index = 0; index < 6; index += 1) content[`application/vnd.x${index}+json`] = {};
+  return JSON.stringify({
+    openapi: '3.1.0',
+    info: { title: 'Wide', version: '1.0.0' },
+    paths: {
+      '/a': {
+        get: {
+          parameters: Array.from({ length: 6 }, (_, index) => ({
+            name: `q${index}`,
+            in: 'query',
+          })),
+          responses: { '200': { description: 'OK', content } },
+        },
+      },
+    },
+    components: { schemas: { Wide: { type: 'object', properties } } },
   });
 }
 
@@ -365,6 +394,30 @@ describe('OpenAPI parsing', () => {
       field: 'paths',
       paths: MAX_SPEC_PATHS + 1,
       limit: MAX_SPEC_PATHS,
+    });
+  });
+
+  it('accepts a document at the render ceiling and rejects one just over it', () => {
+    // Everything the viewer walks and neither the path nor the operation count
+    // sees: one operation, one path, and a components section whose expansion
+    // is what a reader actually pays for.
+    const atLimit = renderCostSpec(MAX_SPEC_RENDER_UNITS - 14);
+    assert.ok(Buffer.byteLength(atLimit, 'utf8') < MAX_SPEC_BYTES);
+    assert.equal(parseOpenApiSpec(atLimit).operationCount, 1);
+
+    const overLimit = renderCostSpec(MAX_SPEC_RENDER_UNITS - 13);
+    assert.ok(Buffer.byteLength(overLimit, 'utf8') < MAX_SPEC_BYTES);
+    const failure = expectSpecInvalid(() => parseOpenApiSpec(overLimit));
+    assert.match(failure.message, /schema nodes, 6 parameters and 6 media types/);
+    assert.match(failure.message, /more than the 100000 the documentation viewer can render/);
+    assert.deepEqual(failure.details, {
+      field: 'paths',
+      reason: 'too_much_to_render',
+      schema_nodes: MAX_SPEC_RENDER_UNITS - 11,
+      parameters: 6,
+      media_types: 6,
+      units: MAX_SPEC_RENDER_UNITS + 1,
+      limit: MAX_SPEC_RENDER_UNITS,
     });
   });
 

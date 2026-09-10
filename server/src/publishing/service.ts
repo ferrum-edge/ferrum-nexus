@@ -63,8 +63,8 @@
  *   CORS policy, or every browser preflight would fail;
  * - the `cors` plugin does not run on a WebSocket upgrade at all, and an
  *   HTTP proxy on Edge accepts upgrades on the same listen path, so the CORS
- *   origins are mirrored into `allowed_ws_origins` only when the provider opts
- *   into the CSWSH check with `cors.enforce_websocket_origins`.
+ *   origins are mirrored into `allowed_ws_origins` unless the provider explicitly
+ *   opts out of the CSWSH check with `cors.enforce_websocket_origins: false`.
  *
  * The `apis` row stores the provider's own method list and nothing for the WS
  * origins; both derivations are recomputed whenever either input changes.
@@ -123,22 +123,36 @@
  * in the safe direction and is documented at the call site: an API stays
  * reachable and authenticated rather than becoming open or orphaned.
  *
- * **Compensation loops swallow, so undo steps must record.** A failing request
- * unwinds its stack best-effort — an undo step that threw must not replace the
- * failure the caller needs to see. The rule that makes that safe is a
- * *step-side* obligation: an undo step that can leave the gateway in a state
- * the portal does not describe writes its own durable record (today, an
- * {@link AuditAction.API_GATEWAY_REPAIR_REQUIRED} row) before it throws. Steps
- * that only replay a proxy write or a portal row have nothing to record. Adding
- * a destructive step without that record is how a rollback silently takes an
- * API off the gateway while its row still reads `published`.
+ * **An undo step is registered before the write it undoes, never after.** A
+ * rejected Edge promise is not proof the write did not happen: a `PUT` the
+ * gateway applied and could not acknowledge rejects exactly like one it
+ * refused, and registering afterwards means the outer catch replays only the
+ * *earlier* steps while the gateway keeps the change. Every read-modify-write
+ * therefore hands its undo over from inside the mutator — after the `GET` that
+ * produced the "before" snapshot, before the `PUT` — so the two cannot come
+ * apart; `publish` mints its proxy id and records it before dispatching the
+ * create for the same reason. The cost is an undo that sometimes replays a
+ * write that never landed, which is a wasted idempotent call and nothing more,
+ * and it is why every restore is scoped to the fields its own step wrote.
  *
- * Every such loop additionally **logs** what it swallowed, error message only.
- * The durable record is the step's job; the log line is what covers a step that
- * had nothing to record and failed anyway — the gateway is describable either
- * way, but it may no longer describe what the portal says, and the response the
- * caller gets is about something else entirely. `plugins/service.ts` follows
- * the same rule for the palette's two loops.
+ * **Compensation loops swallow, so a failed undo must be recorded.** A failing
+ * request unwinds its stack best-effort — an undo step that threw must not
+ * replace the failure the caller needs to see. What makes that safe is that
+ * nothing is swallowed silently: the loop writes one
+ * {@link AuditAction.API_GATEWAY_REPAIR_REQUIRED} row naming the proxy and the
+ * steps that could not be replayed, and a step that can leave the gateway in a
+ * state the portal does not describe *at all* — today only the
+ * `spec_enforcement` rebuild, which deletes and recreates the proxy — writes
+ * its own richer record before it throws and is excluded from the summary so
+ * one incident is not reported twice. `publish` does the same with an
+ * {@link AuditAction.API_PUBLISH_ROLLBACK} row, which names the proxy its
+ * compensating delete could not confirm.
+ *
+ * Every such loop additionally **logs** what it swallowed, error message only —
+ * the gateway is describable either way, but it may no longer describe what the
+ * portal says, and the response the caller gets is about something else
+ * entirely. `plugins/service.ts` follows the same rule for the palette's two
+ * loops.
  *
  * ## The listen path moves last
  *
@@ -196,6 +210,7 @@ import {
   type AuthPluginType,
   type CorsConfig,
   type CreateTestConsumerResponse,
+  type GetApiSpecResponse,
   type HttpMethod,
   type Paginated,
   type PublishApiRequest,
@@ -281,6 +296,8 @@ export interface ApiListFilter {
 export interface PublishingService {
   /** APIs the caller may administer: their own, or every API for an admin. */
   list(actor: UserRecord, filter?: ApiListFilter, options?: ListOptions): Promise<Paginated<Api>>;
+  /** The original current spec, restricted to the owner or an admin. */
+  spec(actor: UserRecord, apiId: Uuid): Promise<GetApiSpecResponse>;
   /** One API with its current spec metadata and request/grant counters. */
   get(
     actor: UserRecord,
@@ -324,13 +341,19 @@ export interface PublishingServiceDeps {
   /**
    * Structured logger, at `error`, for a gateway state no request can repair.
    *
-   * Three kinds of thing reach it, and nothing else does: the unrepairable
+   * Four kinds of thing reach it, and nothing else does: the unrepairable
    * `spec_enforcement` conversion, a compensation step that could not undo what
-   * it was undoing, and a delete whose ACL strip failed. What they have in
-   * common is that the response the caller gets cannot describe them — the
-   * request fails for its own reason, or succeeds — so an operator has no other
-   * way to learn the gateway drifted. Everything else either compensates
-   * cleanly or fails with a `NexusError` the route layer already logs.
+   * it was undoing, a publish whose compensating proxy delete could not be
+   * confirmed, and a delete whose ACL strip failed. What they have in common is
+   * that the response the caller gets cannot describe them — the request fails
+   * for its own reason, or succeeds — so an operator has no other way to learn
+   * the gateway drifted. Everything else either compensates cleanly or fails
+   * with a `NexusError` the route layer already logs.
+   *
+   * The first three additionally leave an audit row (`api.gateway_repair_required`
+   * or `api.publish_rollback`), which is the durable half; this is the copy an
+   * operator watching `error` sees without querying. The ACL strip has no row of
+   * its own because nothing about the gateway's *behaviour* changed with it.
    */
   log?: (obj: Record<string, unknown>, message: string) => void;
   /**
@@ -517,11 +540,12 @@ export function proxyAllowedMethods(
 }
 
 /**
- * Opt-in CSWSH protection. Edge has no allow-missing-Origin option: a nonempty
- * list rejects origin-less clients too. Only exact origins can be mirrored.
+ * Default-on CSWSH protection. Edge has no allow-missing-Origin option: a nonempty
+ * list rejects origin-less clients too. Only an explicit `false` opts out, so
+ * legacy CORS records that predate this setting retain their origin check.
  */
 export function wsOriginsFor(cors: CorsConfig | null): string[] {
-  if (!cors?.enforce_websocket_origins) return [];
+  if (!cors || cors.enforce_websocket_origins === false) return [];
   if (cors.allowed_origins.includes('*')) return [];
   return cors.allowed_origins.filter((origin) =>
     /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^*\s]+$/.test(origin),
@@ -863,6 +887,23 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       };
     },
 
+    async spec(actor, apiId): Promise<GetApiSpecResponse> {
+      const api = await loadApi(apiId);
+      assertCanAdminister(actor, api);
+      const record = await store.apiSpecs.findCurrentByApi(api.id);
+      if (!record) throw notFound('Specification for API', apiId);
+      const head = record.raw_spec.trimStart();
+      return {
+        api_id: api.id,
+        version: record.version,
+        raw_spec: record.raw_spec,
+        content_type:
+          head.startsWith('{') || head.startsWith('[') ? 'application/json' : 'application/yaml',
+        parsed_title: record.parsed_title,
+        parsed_version: record.parsed_version,
+      };
+    },
+
     async publish(owner, input, ip = null): Promise<PublishResult> {
       const name = input.name.trim();
       if (name === '') throw validationFailed('An API name is required');
@@ -939,21 +980,41 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // rather than left to the gateway so `ferrum_proxy_id` stays a plain
           // proxy id whatever the mode, and so the rollback below has something
           // to delete even if the response never arrives.
+          //
+          // **Recorded before the call is awaited**, which is the half that
+          // makes that claim true. A create Edge applied and did not manage to
+          // acknowledge rejects the promise, so a `created.proxyId` taken from
+          // the *return value* is still unset when the rollback runs — and the
+          // proxy it would have deleted is live on its staging path with no
+          // plugin attached, no `apis` row and nothing in the product able to
+          // find it. The gateway takes the id from the body either way, so the
+          // pre-mint costs nothing and the rollback always has a target.
+          const proxyId = newId();
+          created.proxyId = proxyId;
+          // What the gateway says it created, which the spec importer echoes
+          // back and which the minted id is the fallback for.
+          let gatewayProxyId = proxyId;
           if (specEnforcement === 'routes') {
             const ref = await createSpecOwnedProxy(
               parsed.document,
               stagingPath,
-              { id: newId(), ...proxyBody },
+              { id: proxyId, ...proxyBody },
               owner.id,
             );
+            gatewayProxyId = ref.id;
             created.proxyId = ref.id;
             // Kept so the cutover below does not have to look the spec up again
             // — one fewer round trip in the window the staging path exists.
             created.specId = ref.specId;
           } else {
-            created.proxyId = (await edge.proxies.create(proxyBody, owner.id)).id;
+            // The gateway's answer still wins when it arrives — Edge echoes the
+            // id it took from the body, and adopting it keeps `ferrum_proxy_id`
+            // whatever Edge decided rather than whatever Nexus asked for.
+            const ref = await edge.proxies.create({ id: proxyId, ...proxyBody }, owner.id);
+            gatewayProxyId = ref.id;
+            created.proxyId = ref.id;
           }
-          const proxy = { id: created.proxyId };
+          const proxy = { id: gatewayProxyId };
 
           const auth = await attach(
             proxy.id,
@@ -1059,11 +1120,52 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // deletes make the intent obvious and survive a partial cascade. The
           // store transaction has already rolled itself back, so nothing is left
           // on the Nexus side either.
+          //
+          // Every step is best-effort, and a swallowed compensation is exactly
+          // as invisible as no compensation at all — a publish that left a
+          // live, ungated proxy behind used to read like one that cleaned up.
+          // So the outcome is recorded either way: an
+          // {@link AuditAction.API_PUBLISH_ROLLBACK} row names the attempt that
+          // touched the gateway and failed, and names the proxy still on it
+          // when the delete could not be confirmed. `DELETE` tolerates a 404,
+          // so a create that genuinely never landed unwinds cleanly and the row
+          // says `withdrawn: true`.
           for (const pluginId of created.pluginIds) {
             await edge.pluginConfigs.delete(pluginId, owner.id).catch(() => undefined);
           }
+          // Deleting the proxy is what makes the withdrawal complete — it
+          // cascades the configs and, on a `routes` API, the spec — so it is
+          // also what decides whether anything is left behind.
+          let strandedProxyId: string | null = null;
           if (created.proxyId) {
-            await edge.proxies.delete(created.proxyId, owner.id).catch(() => undefined);
+            const target = created.proxyId;
+            strandedProxyId = await edge.proxies
+              .delete(target, owner.id)
+              .then(() => null)
+              .catch(() => target);
+          }
+          await audit
+            .record(
+              { id: owner.id, role: owner.role },
+              AuditAction.API_PUBLISH_ROLLBACK,
+              { type: 'api', id: apiId },
+              {
+                slug,
+                proxy_id: created.proxyId ?? null,
+                spec_enforcement: specEnforcement,
+                auth_plugin: input.auth_plugin,
+                withdrawn: strandedProxyId === null,
+                ...(strandedProxyId === null ? {} : { stranded_proxy_id: strandedProxyId }),
+                error: errorMessage(error),
+              },
+              ip,
+            )
+            .catch(() => undefined);
+          if (strandedProxyId !== null) {
+            deps.log?.(
+              { api_id: apiId, proxy_id: strandedProxyId, error: errorMessage(error) },
+              'a failed publish could not delete the proxy it created; it is still on the gateway',
+            );
           }
           throw error;
         }
@@ -1165,7 +1267,33 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // call, or the Nexus row update itself — unwinds them in reverse, so a
         // half-applied PATCH never leaves the gateway in a shape the portal does
         // not describe.
+        //
+        // **Registration happens before the write it undoes**, never after it
+        // returns: a rejected Edge promise is not proof the write did not
+        // happen, and a `PUT` that landed with its acknowledgement lost is
+        // exactly the case compensation exists for. Where a step is a
+        // read-modify-write the registration goes inside the mutator, between
+        // the `GET` that produced the "before" snapshot and the `PUT` — the
+        // shape `edge-plugins.ts` already uses — so the snapshot and its undo
+        // cannot come apart.
         const undo: (() => Promise<void>)[] = [];
+        // Index-aligned with `undo`: what each step puts back, for the record a
+        // failed unwind writes. Steps the plugin binder pushes itself leave a
+        // hole and fall back to a generic name.
+        const undoLabels: (string | undefined)[] = [];
+        // Indices of steps that write their own durable record before they
+        // throw — today only the enforcement conversion's rebuild, which is why
+        // the unwind must not report those a second time.
+        const selfRecording = new Set<number>();
+        const pushUndo = (
+          label: string,
+          step: () => Promise<void>,
+          recordsOwnFailure = false,
+        ): void => {
+          undoLabels[undo.length] = label;
+          if (recordsOwnFailure) selfRecording.add(undo.length);
+          undo.push(step);
+        };
         let updated: ApiRecord;
 
         try {
@@ -1178,8 +1306,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               });
             }
             await assertUpstreamAllowed(upstream, upstreamPolicy);
-            const before = await replaceProxyBackendLocked(proxyId, upstream, actor.id);
-            undo.push(restoreProxyBackendLocked(before, actor.id));
+            await replaceProxyBackendLocked(proxyId, upstream, actor.id, (step) =>
+              pushUndo('the upstream backend', step),
+            );
             // The row records where the gateway is now pointed, normalized rather
             // than however the provider typed it.
             update.upstream_url = formatUpstreamUrl(upstream);
@@ -1204,10 +1333,16 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               authPluginConfig(patch.auth_plugin),
               actor.id,
             );
-            undo.push(undoAttach(proxyId, attached.id, actor.id));
+            pushUndo(
+              'the replacement authentication plugin',
+              undoAttach(proxyId, attached.id, actor.id),
+            );
             await associate(proxyId, [attached.id], actor.id);
             if (previous) {
-              undo.push(undoRemoval(proxyId, previous, actor.id));
+              pushUndo(
+                'the previous authentication plugin',
+                undoRemoval(proxyId, previous, actor.id),
+              );
               await disassociate(proxyId, [previous.id], actor.id);
               await edge.pluginConfigs.delete(previous.id, actor.id);
             }
@@ -1229,12 +1364,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 accessControlConfig(api.id),
                 actor.id,
               );
-              undo.push(undoAttach(proxyId, attached.id, actor.id));
+              pushUndo('the access control plugin', undoAttach(proxyId, attached.id, actor.id));
               await associate(proxyId, [attached.id], actor.id);
             } else if (!patch.requestable && acl) {
               // Dropping the gate opens the API to every authenticated consumer;
               // existing grants stay on the consumers and become inert.
-              undo.push(undoRemoval(proxyId, acl, actor.id));
+              pushUndo('the access control plugin', undoRemoval(proxyId, acl, actor.id));
               await disassociate(proxyId, [acl.id], actor.id);
               await edge.pluginConfigs.delete(acl.id, actor.id);
             }
@@ -1273,13 +1408,26 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             const live = findPlugin(plugins, pluginName);
             if (isDeepStrictEqual(next, current) && !derivedChanged) {
               if (next !== null && live) {
+                // `associateLocked` would do the same idempotent
+                // read-modify-write, but it reports nothing back: whether the
+                // association was missing is exactly what decides between "this
+                // PATCH changed nothing" and "this PATCH repaired the gateway",
+                // and it is only knowable from the document the mutator is
+                // handed. Same shape `reconcileOptionalPluginLocked` uses —
+                // one `GET`, the undo registered between it and the `PUT`.
                 await mutateProxy(
                   gatewayProxyId,
                   (proxy) => {
                     const currentIds = associatedIds(proxy);
+                    // Already named by the proxy: no write, so nothing to undo
+                    // and nothing to audit.
                     if (currentIds.includes(live.id)) return null;
                     gatewayMutated = true;
-                    undo.push(() => disassociate(gatewayProxyId, [live.id], actor.id));
+                    // Register before PUT: a lost response can still mean it
+                    // landed.
+                    pushUndo(`the ${pluginName} plugin association`, () =>
+                      disassociate(gatewayProxyId, [live.id], actor.id),
+                    );
                     return {
                       ...proxy,
                       plugins: [...currentIds, live.id].map((plugin_config_id) => ({
@@ -1376,7 +1524,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               current ? safeSpecPaths(current.raw_spec) : [],
             );
             assertRoutesSubmittable(patch.spec_enforcement, document);
-            undo.push(
+            pushUndo(
+              'the spec_enforcement proxy rebuild',
               await convertEnforcementLocked(
                 api,
                 proxyId,
@@ -1385,6 +1534,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 actor,
                 ip,
               ),
+              // It writes its own `api.gateway_repair_required` row before it
+              // throws, carrying the proxy document and plugin configs an
+              // operator needs to rebuild from — the summary below would only
+              // report the same incident twice.
+              true,
             );
             update.spec_enforcement = patch.spec_enforcement;
             changed.push('spec_enforcement');
@@ -1433,23 +1587,39 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             if (patch.cors !== undefined) proxySettings.allowed_ws_origins = wsOriginsFor(nextCors);
 
             if (Object.keys(proxySettings).length > 0) {
-              let written = false;
-              const before = await mutateProxy(
+              const fields = Object.keys(proxySettings);
+              await mutateProxy(
                 proxyId,
                 (proxy) => {
                   const record = proxy as unknown as Record<string, unknown>;
                   const differs = Object.entries(proxySettings).some(
                     ([field, value]) => !isDeepStrictEqual(record[field], value),
                   );
+                  // Nothing to put back: returning `null` skips the `PUT`
+                  // entirely, which is the only case where suppressing the undo
+                  // is sound. Once the write is *attempted* its outcome is
+                  // unknowable from a rejected promise, so from here on the
+                  // undo is registered whatever happens.
                   if (!differs) return null;
-                  written = true;
+                  // The `PUT` is about to be attempted, so the PATCH has
+                  // mutated the gateway whatever the response says — that is
+                  // what earns the audit row on an otherwise database-equal
+                  // request.
                   gatewayMutated = true;
+                  // Register before PUT: a lost response can still mean it
+                  // landed — and this write carries `allowed_ws_origins`, so
+                  // the shape that gets lost is the CSWSH origin check going
+                  // missing on the gateway while the portal still displays it.
+                  // Scoped to the fields this PATCH wrote, so the restore
+                  // cannot revert a concurrent change to an unrelated one.
+                  pushUndo(
+                    'the proxy runtime settings',
+                    restoreProxySettingsLocked(proxy, fields, actor.id),
+                  );
                   return { ...proxy, ...proxySettings };
                 },
                 actor.id,
               );
-              if (written)
-                undo.push(restoreProxySettingsLocked(before, Object.keys(proxySettings), actor.id));
             }
 
             if (patch.allowed_methods !== undefined) {
@@ -1488,21 +1658,41 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         } catch (error) {
           // Compensation is best-effort by contract: the PATCH is already
           // failing, and an undo step that throws must not replace the failure
-          // the caller needs to see with its own. That swallow is only safe
-          // because of the rule it depends on — **an undo step that can leave
-          // the gateway in a state the portal does not describe is responsible
-          // for its own durable record before it throws.** The enforcement
-          // conversion's step is the one that can (it deletes and rebuilds the
-          // proxy), and it writes an `api.gateway_repair_required` row itself;
-          // every other step here replays a proxy write or an association and
-          // leaves the gateway describable either way. Anything new pushed onto
-          // this stack has to satisfy that rule or the failure is invisible.
-          for (const step of undo.reverse()) {
+          // the caller needs to see with its own. What makes that swallow safe
+          // is that it is no longer silent. Every step that throws is named in
+          // one `api.gateway_repair_required` row for the request — the proxy,
+          // what could not be put back, and why — because a step that replays a
+          // proxy write still leaves the gateway describing something the
+          // portal does not, and the response the caller gets is about
+          // something else entirely.
+          //
+          // A step that writes its *own* record is excluded from that summary
+          // rather than reported twice: the enforcement conversion's rebuild is
+          // the one that can leave the API with no proxy at all, and its row
+          // carries the document and plugin configs needed to rebuild it.
+          const failures: { step: string; error: string }[] = [];
+          for (let index = undo.length - 1; index >= 0; index -= 1) {
+            const step = undo[index];
+            if (!step) continue;
             await step().catch((undoError: unknown) => {
+              const label = undoLabels[index] ?? 'a gateway plugin change';
               deps.log?.(
-                { api_id: api.id, proxy_id: proxyId, error: errorMessage(undoError) },
+                { api_id: api.id, proxy_id: proxyId, step: label, error: errorMessage(undoError) },
                 'an API PATCH compensation step failed; the gateway may not match the portal',
               );
+              if (selfRecording.has(index)) return;
+              failures.push({ step: label, error: errorMessage(undoError) });
+            });
+          }
+          if (failures.length > 0) {
+            await recordCompensationFailure({
+              api,
+              proxyId,
+              attempted: changed,
+              failures,
+              error,
+              actor,
+              ip,
             });
           }
           throw error;
@@ -1621,14 +1811,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 ? safeSpecDocument(previous.raw_spec)
                 : parsed.document;
               const restoreBackend = proxyBackendFields(proxy);
-              await edge.apiSpecs.replace(
-                specId,
-                build(parsed.document, {
-                  ...submittableProxyBody(proxy),
-                  ...(backend ? backendFields(backend) : {}),
-                }),
-                actor.id,
-              );
+              // Register before PUT: a lost response can still mean it landed.
               undo.push(async () => {
                 // Re-read rather than replay the captured body: only the
                 // document and the backend are being rewound, exactly as
@@ -1645,9 +1828,22 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   actor.id,
                 );
               });
+              await edge.apiSpecs.replace(
+                specId,
+                build(parsed.document, {
+                  ...submittableProxyBody(proxy),
+                  ...(backend ? backendFields(backend) : {}),
+                }),
+                actor.id,
+              );
             } else if (backend) {
-              const before = await replaceProxyBackendLocked(proxyId, backend, actor.id);
-              undo.push(restoreProxyBackendLocked(before, actor.id));
+              // Registered from inside the mutator, between the `GET` and the
+              // `PUT`, for the reason the helper documents: waiting for the
+              // call to return registers nothing when Edge applied the move and
+              // lost the answer.
+              await replaceProxyBackendLocked(proxyId, backend, actor.id, (step) =>
+                undo.push(step),
+              );
             }
 
             if (backend) {
@@ -1690,13 +1886,30 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // the caller needs to see with its own. Every step here replays a
           // proxy write or a spec replace, so the gateway stays describable
           // whichever way one goes — but a swallowed failure is still a
-          // divergence nothing else will revisit, so it is logged.
+          // divergence nothing else will revisit, so it is logged and audited.
+          const failures: { step: string; error: string }[] = [];
           for (const step of undo.reverse()) {
             await step().catch((undoError: unknown) => {
+              failures.push({
+                step:
+                  api.spec_enforcement === 'routes' ? 'the spec re-import' : 'the upstream backend',
+                error: errorMessage(undoError),
+              });
               deps.log?.(
                 { api_id: api.id, proxy_id: proxyId, error: errorMessage(undoError) },
                 'a spec revision compensation step failed; the gateway may not match the portal',
               );
+            });
+          }
+          if (failures.length > 0) {
+            await recordCompensationFailure({
+              api,
+              proxyId,
+              attempted: ['spec'],
+              failures,
+              error,
+              actor,
+              ip,
             });
           }
           // A compensated failure leaves the row where it was, so the audit
@@ -2448,15 +2661,79 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       .catch(() => undefined);
   }
 
-  /** Replace the backend while the caller holds the canonical proxy lease. */
+  /**
+   * Record the compensating steps of one API mutation that could not be replayed.
+   *
+   * The unwind swallows so the caller still sees the failure it asked about,
+   * which means this row is the only thing that says the gateway may no longer
+   * match the portal. It carries identifiers and step names only — never a
+   * captured Edge resource, for the reason {@link reportUnrepairableProxy}
+   * gives — and `phase: 'compensation'` separates it from the two the
+   * enforcement conversion writes, which describe an API with no proxy at all
+   * rather than one whose fields drifted.
+   *
+   * `attempted_changes` is what the mutation had got as far as changing when it
+   * failed, and `steps` names the ones that could not be undone, so an operator
+   * knows which fields to compare against the catalog rather than the whole
+   * proxy.
+   */
+  async function recordCompensationFailure(input: {
+    api: ApiRecord;
+    proxyId: string | null;
+    attempted: string[];
+    failures: { step: string; error: string }[];
+    error: unknown;
+    actor: UserRecord;
+    ip: string | null;
+  }): Promise<void> {
+    const details = {
+      phase: 'compensation',
+      proxy_id: input.proxyId,
+      attempted_changes: input.attempted,
+      steps: input.failures.map((failure) => failure.step),
+      step_errors: input.failures.map((failure) => failure.error),
+      error: errorMessage(input.error),
+    };
+    deps.log?.(
+      { api_id: input.api.id, ...details },
+      'an API mutation could not undo every gateway change it made; the gateway may have drifted',
+    );
+    await audit
+      .record(
+        { id: input.actor.id, role: input.actor.role },
+        AuditAction.API_GATEWAY_REPAIR_REQUIRED,
+        { type: 'api', id: input.api.id },
+        details,
+        input.ip,
+      )
+      .catch(() => undefined);
+  }
+
+  /**
+   * Replace the backend while the caller holds the canonical proxy lease.
+   *
+   * `register` is handed the undo step for this move **after the `GET` and
+   * before the `PUT`**, which is the only place it can be handed over safely: a
+   * `PUT` Edge applied and did not manage to acknowledge rejects the promise,
+   * so a caller that waits for this function to return registers nothing and
+   * leaves live traffic pointed at the new upstream while the row, the response
+   * and the audit trail all roll back. The restore is an idempotent
+   * whole-resource write of the four `backend_*` fields, so registering it for
+   * a `PUT` that provably did not land costs one wasted call and nothing else.
+   */
   async function replaceProxyBackendLocked(
     proxyId: string,
     upstream: SpecUpstream,
     subject: string,
+    register?: (undoStep: () => Promise<void>) => void,
   ): Promise<EdgeProxy> {
     return binder.mutateProxyLocked(
       proxyId,
-      (proxy) => ({ ...proxy, ...backendFields(upstream) }),
+      (proxy) => {
+        // Register before PUT: a lost response can still mean it landed.
+        register?.(restoreProxyBackendLocked(proxy, subject));
+        return { ...proxy, ...backendFields(upstream) };
+      },
       subject,
     );
   }

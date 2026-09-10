@@ -2,7 +2,14 @@ import { useMemo, useState, type ReactElement } from 'react';
 import { cn } from '../../lib/cn';
 import { Badge, type BadgeTone } from '../ui/Badge';
 import { Icon } from '../ui/Icon';
-import { SchemaView } from './SchemaView';
+import {
+  chargeNode,
+  createRenderBudget,
+  MAX_PAGE_NODES,
+  renderSchema,
+  TruncationNotice,
+  type RenderBudget,
+} from './SchemaView';
 import {
   asRecord,
   asString,
@@ -33,13 +40,66 @@ function statusTone(status: string): BadgeTone {
   return 'neutral';
 }
 
-function ParameterTable({
-  parameters,
-  doc,
-}: {
-  parameters: SpecNode[];
-  doc: SpecNode;
-}): ReactElement {
+/**
+ * The parameter table for one operation.
+ *
+ * A plain function, not a component: it spends the caller's budget as it builds
+ * elements, which only stays deterministic while that happens inside the
+ * caller's own render.
+ */
+function renderParameterTable(
+  parameters: SpecNode[],
+  doc: SpecNode,
+  budget: RenderBudget,
+): ReactElement {
+  const rows: ReactElement[] = [];
+  let index = 0;
+  for (const parameter of parameters) {
+    // The row itself costs DOM whether or not it carries a schema, so it is
+    // charged before it is built and the rest are abandoned once it cannot be.
+    if (!chargeNode(budget)) {
+      rows.push(
+        <tr key="__truncated">
+          <td colSpan={4} className="py-2">
+            <TruncationNotice />
+          </td>
+        </tr>,
+      );
+      break;
+    }
+    rows.push(
+      <tr
+        key={`${asString(parameter.name) ?? 'param'}-${index}`}
+        className="border-b border-border last:border-b-0"
+      >
+        <td className="py-2 pr-3 align-top">
+          <code className="font-mono text-xs text-fg">{asString(parameter.name) ?? '—'}</code>
+          {asString(parameter.description) ? (
+            <p className="mt-0.5 text-xs text-fg-muted">{asString(parameter.description)}</p>
+          ) : null}
+        </td>
+        <td className="py-2 pr-3 align-top text-xs text-fg-muted">
+          {asString(parameter.in) ?? '—'}
+        </td>
+        <td className="py-2 pr-3 align-top text-xs">
+          {parameter.required === true ? (
+            <span className="text-danger">required</span>
+          ) : (
+            <span className="text-fg-subtle">optional</span>
+          )}
+        </td>
+        <td className="py-2 align-top">
+          {parameter.schema !== undefined ? (
+            renderSchema({ schema: parameter.schema, doc, budget })
+          ) : (
+            <span className="text-xs text-fg-subtle">—</span>
+          )}
+        </td>
+      </tr>,
+    );
+    index += 1;
+  }
+
   return (
     <div className="overflow-x-auto">
       <table className="w-full border-collapse text-sm">
@@ -59,88 +119,73 @@ function ParameterTable({
             </th>
           </tr>
         </thead>
-        <tbody>
-          {parameters.map((parameter, index) => (
-            <tr
-              key={`${asString(parameter.name) ?? 'param'}-${index}`}
-              className="border-b border-border last:border-b-0"
-            >
-              <td className="py-2 pr-3 align-top">
-                <code className="font-mono text-xs text-fg">{asString(parameter.name) ?? '—'}</code>
-                {asString(parameter.description) ? (
-                  <p className="mt-0.5 text-xs text-fg-muted">{asString(parameter.description)}</p>
-                ) : null}
-              </td>
-              <td className="py-2 pr-3 align-top text-xs text-fg-muted">
-                {asString(parameter.in) ?? '—'}
-              </td>
-              <td className="py-2 pr-3 align-top text-xs">
-                {parameter.required === true ? (
-                  <span className="text-danger">required</span>
-                ) : (
-                  <span className="text-fg-subtle">optional</span>
-                )}
-              </td>
-              <td className="py-2 align-top">
-                {parameter.schema !== undefined ? (
-                  <SchemaView schema={parameter.schema} doc={doc} />
-                ) : (
-                  <span className="text-xs text-fg-subtle">—</span>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
+        <tbody>{rows}</tbody>
       </table>
     </div>
   );
 }
 
-function ContentSchemas({
-  content,
-  doc,
-}: {
-  content: unknown;
-  doc: SpecNode;
-}): ReactElement | null {
+/** Media-type entries for one request or response body; see renderParameterTable. */
+function renderContentSchemas(
+  content: unknown,
+  doc: SpecNode,
+  budget: RenderBudget,
+): ReactElement | null {
   const record = asRecord(content);
   if (!record) return null;
   const entries = Object.entries(record);
   if (entries.length === 0) return null;
-  return (
-    <div className="flex flex-col gap-3">
-      {entries.map(([mediaType, value]) => {
-        const media = asRecord(value);
-        return (
-          <div key={mediaType}>
-            <p className="mb-1 font-mono text-xs text-fg-subtle">{mediaType}</p>
-            {media && media.schema !== undefined ? (
-              <SchemaView schema={media.schema} doc={doc} />
-            ) : (
-              <p className="text-xs text-fg-subtle">No schema declared.</p>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
+
+  // One media type per entry, each with its own schema: this is the fan-out the
+  // per-call budget used to multiply by, so it draws on the page allowance and
+  // stops mounting entries the moment that allowance is gone.
+  const rendered: ReactElement[] = [];
+  for (const [mediaType, value] of entries) {
+    if (!chargeNode(budget)) {
+      rendered.push(<TruncationNotice key="__truncated" />);
+      break;
+    }
+    const media = asRecord(value);
+    rendered.push(
+      <div key={mediaType}>
+        <p className="mb-1 font-mono text-xs text-fg-subtle">{mediaType}</p>
+        {media && media.schema !== undefined ? (
+          renderSchema({ schema: media.schema, doc, budget })
+        ) : (
+          <p className="text-xs text-fg-subtle">No schema declared.</p>
+        )}
+      </div>,
+    );
+  }
+
+  return <div className="flex flex-col gap-3">{rendered}</div>;
 }
 
 function OperationCard({
   operation,
   doc,
+  allowance,
+  open,
+  onToggle,
 }: {
   operation: SpecOperation;
   doc: SpecNode;
+  /** This card's slice of the page allowance, spent only while it is open. */
+  allowance: number;
+  open: boolean;
+  onToggle: () => void;
 }): ReactElement {
-  const [open, setOpen] = useState(false);
   const panelId = `op-panel-${operation.id}`;
+  // Created inside this render body so the allowance is spent afresh on every
+  // invocation: one budget per card, shared by every schema the card mounts.
+  const budget = createRenderBudget(allowance);
+  const truncated = open && budget.remaining <= 0;
 
   return (
     <div className="border-b border-border last:border-b-0">
       <button
         type="button"
-        onClick={() => setOpen((current) => !current)}
+        onClick={onToggle}
         aria-expanded={open}
         aria-controls={panelId}
         className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-inset"
@@ -163,62 +208,89 @@ function OperationCard({
           id={panelId}
           className="flex flex-col gap-5 border-t border-border bg-inset/40 px-4 py-4"
         >
-          {operation.description ? (
-            <p className="text-sm whitespace-pre-line text-fg-muted">{operation.description}</p>
-          ) : null}
-          {operation.operationId ? (
-            <p className="text-xs text-fg-subtle">
-              operationId: <code className="font-mono">{operation.operationId}</code>
-            </p>
-          ) : null}
-
-          {operation.parameters.length > 0 ? (
-            <section>
-              <h4 className="mb-1.5 text-xs font-semibold tracking-wide text-fg-subtle uppercase">
-                Parameters
-              </h4>
-              <ParameterTable parameters={operation.parameters} doc={doc} />
-            </section>
-          ) : null}
-
-          {operation.requestBody ? (
-            <section>
-              <h4 className="mb-1.5 text-xs font-semibold tracking-wide text-fg-subtle uppercase">
-                Request body
-              </h4>
-              {asString(operation.requestBody.description) ? (
-                <p className="mb-2 text-sm text-fg-muted">
-                  {asString(operation.requestBody.description)}
+          {truncated ? (
+            <TruncationNotice />
+          ) : (
+            <>
+              {operation.description ? (
+                <p className="text-sm whitespace-pre-line text-fg-muted">{operation.description}</p>
+              ) : null}
+              {operation.operationId ? (
+                <p className="text-xs text-fg-subtle">
+                  operationId: <code className="font-mono">{operation.operationId}</code>
                 </p>
               ) : null}
-              <ContentSchemas content={operation.requestBody.content} doc={doc} />
-            </section>
-          ) : null}
 
-          {operation.responses.length > 0 ? (
-            <section>
-              <h4 className="mb-1.5 text-xs font-semibold tracking-wide text-fg-subtle uppercase">
-                Responses
-              </h4>
-              <div className="flex flex-col gap-3">
-                {operation.responses.map(([status, response]) => (
-                  <div key={status} className="rounded-md border border-border bg-surface p-3">
-                    <div className="mb-1.5 flex items-center gap-2">
-                      <Badge tone={statusTone(status)}>{status}</Badge>
-                      <span className="text-sm text-fg-muted">
-                        {asString(response.description) ?? ''}
-                      </span>
-                    </div>
-                    <ContentSchemas content={response.content} doc={doc} />
+              {operation.parameters.length > 0 ? (
+                <section>
+                  <h4 className="mb-1.5 text-xs font-semibold tracking-wide text-fg-subtle uppercase">
+                    Parameters
+                  </h4>
+                  {renderParameterTable(operation.parameters, doc, budget)}
+                </section>
+              ) : null}
+
+              {operation.requestBody ? (
+                <section>
+                  <h4 className="mb-1.5 text-xs font-semibold tracking-wide text-fg-subtle uppercase">
+                    Request body
+                  </h4>
+                  {asString(operation.requestBody.description) ? (
+                    <p className="mb-2 text-sm text-fg-muted">
+                      {asString(operation.requestBody.description)}
+                    </p>
+                  ) : null}
+                  {renderContentSchemas(operation.requestBody.content, doc, budget)}
+                </section>
+              ) : null}
+
+              {operation.responses.length > 0 ? (
+                <section>
+                  <h4 className="mb-1.5 text-xs font-semibold tracking-wide text-fg-subtle uppercase">
+                    Responses
+                  </h4>
+                  <div className="flex flex-col gap-3">
+                    {renderResponses(operation.responses, doc, budget)}
                   </div>
-                ))}
-              </div>
-            </section>
-          ) : null}
+                </section>
+              ) : null}
+            </>
+          )}
         </div>
       ) : null}
     </div>
   );
+}
+
+/**
+ * Response entries, bounded by the card's budget.
+ *
+ * A response costs a card and a status badge before any schema is walked, and a
+ * document may declare thousands of them on one operation, so each entry is
+ * charged and the remainder abandoned once the allowance is gone.
+ */
+function renderResponses(
+  responses: ReadonlyArray<[string, SpecNode]>,
+  doc: SpecNode,
+  budget: RenderBudget,
+): ReactElement[] {
+  const rendered: ReactElement[] = [];
+  for (const [status, response] of responses) {
+    if (!chargeNode(budget)) {
+      rendered.push(<TruncationNotice key="__truncated" />);
+      break;
+    }
+    rendered.push(
+      <div key={status} className="rounded-md border border-border bg-surface p-3">
+        <div className="mb-1.5 flex items-center gap-2">
+          <Badge tone={statusTone(status)}>{status}</Badge>
+          <span className="text-sm text-fg-muted">{asString(response.description) ?? ''}</span>
+        </div>
+        {renderContentSchemas(response.content, doc, budget)}
+      </div>,
+    );
+  }
+  return rendered;
 }
 
 export interface OpenApiViewProps {
@@ -231,6 +303,14 @@ export interface OpenApiViewProps {
  *
  * Renders info, servers and tag-grouped operations with collapsible details;
  * a document that fails to parse renders an error panel instead of throwing.
+ *
+ * Rendering cost is bounded per *page*, not per schema. A document is
+ * provider-authored and reaches every signed-in viewer of the catalog entry, so
+ * the page divides one {@link MAX_PAGE_NODES} allowance between the operations
+ * a viewer has expanded, and a branch that runs out renders a single
+ * {@link TruncationNotice} instead of walking what is left. The server refuses
+ * documents that are far past that at publish time (`MAX_SPEC_RENDER_UNITS`);
+ * this is what keeps the ones it accepts cheap to look at.
  */
 export function OpenApiView({ text }: OpenApiViewProps): ReactElement {
   const result = useMemo(() => parseSpecText(text), [text]);
@@ -263,8 +343,30 @@ export function OpenApiView({ text }: OpenApiViewProps): ReactElement {
  */
 const OPERATIONS_PAGE = 200;
 
+/**
+ * One key per rendered card. An operation carrying two tags appears under both
+ * groups, so the tag name is part of the identity — expanding one appearance
+ * must not expand the other.
+ */
+function cardKey(groupName: string, operationId: string): string {
+  return `${groupName}\u0000${operationId}`;
+}
+
 function ParsedSpecView({ spec }: { spec: ParsedSpec }): ReactElement {
   const [visibleCount, setVisibleCount] = useState(OPERATIONS_PAGE);
+  // Expansion is page state, not card state: the page allowance is divided
+  // between the cards a viewer has expanded, so the page has to know how many
+  // there are. Every expanded card together costs at most MAX_PAGE_NODES.
+  const [openKeys, setOpenKeys] = useState<ReadonlySet<string>>(() => new Set<string>());
+  const cardAllowance = Math.floor(MAX_PAGE_NODES / Math.max(1, openKeys.size));
+
+  const toggleCard = (key: string): void => {
+    setOpenKeys((current) => {
+      const next = new Set(current);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
+  };
 
   // Page the complete grouped-entry sequence so every tag presentation is preserved.
   // Both the budget and remaining count include each appearance of a multi-tag operation.
@@ -331,9 +433,19 @@ function ParsedSpecView({ spec }: { spec: ParsedSpec }): ReactElement {
                 <p className="mt-0.5 text-sm text-fg-muted">{group.description}</p>
               ) : null}
             </div>
-            {operations.map((operation) => (
-              <OperationCard key={operation.id} operation={operation} doc={spec.doc} />
-            ))}
+            {operations.map((operation) => {
+              const key = cardKey(group.name, operation.id);
+              return (
+                <OperationCard
+                  key={operation.id}
+                  operation={operation}
+                  doc={spec.doc}
+                  allowance={cardAllowance}
+                  open={openKeys.has(key)}
+                  onToggle={() => toggleCard(key)}
+                />
+              );
+            })}
           </section>
         ))
       )}

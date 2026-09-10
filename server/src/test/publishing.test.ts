@@ -16,6 +16,7 @@ import {
   type UpdateApiSpecResponse,
 } from '@ferrum-nexus/shared';
 
+import type { AuditLogRecord } from '../db/store.js';
 import {
   SAMPLE_SPEC_JSON,
   SAMPLE_SPEC_YAML,
@@ -87,6 +88,27 @@ function associatedIds(harness: TestApp, proxyId: string): string[] {
   return plugins
     .map((entry) => String((entry as { plugin_config_id: unknown }).plugin_config_id))
     .sort();
+}
+
+/**
+ * Ids of the audit rows for an action that already exist.
+ *
+ * Rows accumulate across the whole file on one shared harness, and
+ * `created_at` is only millisecond-precise — two rows written in the same
+ * millisecond tie-break on a random uuid. Diffing ids is the only ordering-free
+ * way to name the row a single request wrote.
+ */
+async function auditIds(harness: TestApp, action: string): Promise<Set<string>> {
+  return new Set((await harness.auditRows(action)).map((entry) => entry.id));
+}
+
+/** The rows for an action that appeared since {@link auditIds} was taken. */
+async function auditRowsSince(
+  harness: TestApp,
+  action: string,
+  before: Set<string>,
+): Promise<AuditLogRecord[]> {
+  return (await harness.auditRows(action)).filter((entry) => !before.has(entry.id));
 }
 
 /** The proxy document the mock currently stores. */
@@ -487,7 +509,7 @@ describe('publishing', () => {
       assert.deepEqual(api.allowed_methods, ['GET', 'POST'], 'the row keeps the provider’s list');
     });
 
-    it('mirrors exact CORS origins into allowed_ws_origins only when opted in', async () => {
+    it('mirrors exact CORS origins into allowed_ws_origins by default', async () => {
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -496,7 +518,6 @@ describe('publishing', () => {
           cors: {
             allowed_origins: ['https://app.example.com', 'https://admin.example.com:8443'],
             allow_credentials: true,
-            enforce_websocket_origins: true,
           },
         }),
       });
@@ -534,7 +555,11 @@ describe('publishing', () => {
         );
         assert.match(preflight['access-control-allow-headers'] ?? '', /X-Tenant/);
         assert.equal(preflight['access-control-allow-methods'], 'GET, OPTIONS');
-        assert.equal(mockWebsocketAllowed(storedProxy(harness, proxyId)), true);
+        assert.equal(mockWebsocketAllowed(storedProxy(harness, proxyId)), false);
+        assert.equal(
+          mockWebsocketAllowed(storedProxy(harness, proxyId), 'https://app.example.com'),
+          true,
+        );
 
         // A method-only PATCH must also rebuild the CORS advertisement.
         const changed = await harness.authed(provider, {
@@ -559,7 +584,7 @@ describe('publishing', () => {
       assert.deepEqual(mockCorsPreflight(undefined), {});
     });
 
-    it('makes the WebSocket origin gate an explicit opt-in and supports clearing it', async () => {
+    it('defaults the WebSocket origin gate on and supports explicitly clearing it', async () => {
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -571,6 +596,15 @@ describe('publishing', () => {
       assert.equal(response.statusCode, 201, response.body);
       const api = response.json<PublishApiResponse>().api;
       const proxyId = String(api.ferrum_proxy_id);
+      assert.equal(mockWebsocketAllowed(storedProxy(harness, proxyId)), false);
+      assert.equal(
+        mockWebsocketAllowed(storedProxy(harness, proxyId), 'https://evil.example.com'),
+        false,
+      );
+      assert.equal(
+        mockWebsocketAllowed(storedProxy(harness, proxyId), 'https://APP.example.com'),
+        true,
+      );
       for (const enforce of [false, true, false]) {
         const saved = await harness.authed(provider, {
           method: 'PATCH',
@@ -1167,7 +1201,7 @@ describe('publishing', () => {
         proxy.plugins = associatedIds(harness, proxyId)
           .filter((value) => value !== id)
           .map((plugin_config_id) => ({ plugin_config_id }));
-        const auditsBefore = (await harness.auditRows('api.update')).length;
+        const auditIdsBefore = await auditIds(harness, 'api.update');
         const saved = await harness.authed(provider, {
           method: 'PATCH',
           url: `/api/apis/${apiId}`,
@@ -1176,9 +1210,11 @@ describe('publishing', () => {
         assert.equal(saved.statusCode, 200, saved.body);
         assert.equal(String(harness.edge.pluginForProxy(proxyId, pluginName)!.id), id);
         assert.ok(effectiveNames(harness, proxyId).includes(pluginName));
-        const rows = await harness.auditRows('api.update');
-        assert.equal(rows.length, auditsBefore + 1);
-        assert.deepEqual(rows[0]?.details, {
+        // Repairing the association changed no Nexus field, but it did change
+        // the gateway, so the caller still has to be named in the log.
+        const added = await auditRowsSince(harness, 'api.update', auditIdsBefore);
+        assert.equal(added.length, 1);
+        assert.deepEqual(added[0]?.details, {
           changed_fields: [],
           gateway_reconciled: true,
         });
@@ -1583,7 +1619,7 @@ describe('publishing', () => {
       proxy.backend_connect_timeout_ms = 100;
       proxy.backend_read_timeout_ms = 200;
       proxy.backend_write_timeout_ms = 300;
-      const auditsBefore = (await harness.auditRows('api.update')).length;
+      const auditIdsBefore = await auditIds(harness, 'api.update');
 
       const repaired = await harness.authed(provider, {
         method: 'PATCH',
@@ -1596,9 +1632,9 @@ describe('publishing', () => {
       assert.equal(storedProxy(harness, proxyId).backend_read_timeout_ms, 9_000);
       assert.equal(storedProxy(harness, proxyId).backend_write_timeout_ms, 11_000);
 
-      const rows = await harness.auditRows('api.update');
-      assert.equal(rows.length, auditsBefore + 1);
-      assert.deepEqual(rows[0]?.details, {
+      const added = await auditRowsSince(harness, 'api.update', auditIdsBefore);
+      assert.equal(added.length, 1);
+      assert.deepEqual(added[0]?.details, {
         changed_fields: [],
         gateway_reconciled: true,
       });

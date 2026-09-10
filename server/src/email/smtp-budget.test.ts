@@ -186,10 +186,18 @@ describe('SMTP send budget', { timeout: 30_000 }, () => {
     assert.ok(elapsed < 5_000, `the send returned after ${elapsed}ms, not on the relay's schedule`);
     assert.equal(
       isDeliveredUnacknowledged(error),
-      false,
-      'nothing was written past DATA, so the retry loop is safe',
+      true,
+      'the live SMTP operation must not be retried',
     );
     assert.deepEqual(relay.received, [], 'the relay never saw a complete message');
+
+    // The timed-out Nodemailer operation cannot be cancelled. A later caller
+    // must wait for it instead of adding another live connection.
+    const queuedAt = Date.now();
+    const queuedError = await failureOf(transport, MAIL);
+    assert.ok(Date.now() - queuedAt > 500, 'the next send waited for the underlying operation');
+    assert.ok(isDeliveredUnacknowledged(queuedError));
+    assert.equal(relay.received.length, 1, 'the original operation continued to delivery');
   });
 
   it('treats a stall after end-of-data as delivered-unacknowledged', async () => {

@@ -48,6 +48,15 @@ left alone. Maximum document size is **2 MiB**, with at most **200 nested
 object/array levels** (the root is level one). Excessive nesting is refused at
 upload in both enforcement modes, before contacting the gateway.
 
+A document also has to stay inside what the portal's documentation viewer can
+render: at most **100,000** schema nodes, parameter entries and media types
+added together, counted across `components.schemas` and every declared
+operation. Past that the upload is refused with `SPEC_INVALID` naming the three
+counts. It is a generous ceiling — the largest public APIs sit well below it —
+and it exists because every reader of your catalog entry renders the document in
+their own browser. A document under the ceiling that is still expensive to
+expand is truncated in the viewer rather than rendered in full.
+
 A minimal document that publishes cleanly:
 
 ```yaml
@@ -211,15 +220,16 @@ Use **Additional CORS request headers** for custom headers, one name per line.
 The advertised methods follow your API's method list, with `OPTIONS` included
 for preflight. Operator-added gateway headers survive a portal save.
 
-**Enforce WebSocket origins** is a separate, opt-in control, off by default.
+**Enforce WebSocket origins** is a separate control, on by default.
 Edge accepts WebSocket upgrades on HTTP API paths, and its CORS plugin does not
-run on upgrades. Enable this option for browser-only WebSocket APIs to reject
+run on upgrades. Keep this option enabled for browser-only WebSocket APIs to reject
 pages from origins outside your list (CSWSH protection). It requires exact
 HTTP(S) origins; wildcards are not accepted. Edge also rejects clients that send
 **no Origin header**, so leave it off if your non-browser clients omit Origin.
 When off, upgrades from any origin pass this gate; authentication and ACLs still
 apply. Clearing CORS removes the gate too. Existing APIs retain their gateway
-policy until CORS is saved; review this option when saving an older API.
+policy until CORS is saved; legacy policies without this setting remain protected
+when saved unless the provider explicitly disables it.
 
 ### Enforcement level
 
@@ -280,11 +290,15 @@ item — under `components.pathItems`, `webhooks` or `components.callbacks` — 
 the nearest one wins. Any of those would override the rewrite above and produce
 rules for a path no client can send, so the portal removes them from the copy it
 submits: every declared operation would otherwise answer `400`. Nothing is
-removed from the document you uploaded — the catalog, the docs viewer and
-`docs_only` publication all still show it exactly as you wrote it, nested
-`servers` included. A `servers` inside the `callbacks` of an operation is left
-alone, because a callback describes a request your service makes outbound rather
-than one this API serves.
+removed from the stored upload or the provider's Specification editor. In the
+catalog and docs viewer, both enforcement levels instead show normalized
+JSON/YAML with OpenAPI root, path-item and operation `servers` replaced by the
+gateway address (the listen path alone when no public gateway origin is
+configured), including webhooks, reusable path items and callbacks. That consumer
+projection also rewrites Link Object `server` entries in components and response
+links, preserving schemas, examples and extensions. The enforcement copy leaves servers
+inside operation callbacks alone, because those describe requests your service
+makes outbound rather than ones this API serves.
 
 **A path that is a `$ref` has to point somewhere the portal can reach.** The
 gateway follows a path item's `$ref` anywhere in the document, so one pointing
@@ -567,7 +581,7 @@ API, but two of them have consequences worth reading first.
 | Visibility                 | Listing only. Existing grants and calls are unaffected.                                                                    |
 | Upstream URL               | Re-points the gateway's backend. Takes effect immediately, and the upstream shown on the API page updates with it.         |
 | Rate limit                 | Attaches, updates, or (cleared) removes the quota.                                                                         |
-| CORS                       | Attaches, replaces, or (cleared) removes the browser CORS policy and its opt-in WebSocket origin check.                    |
+| CORS                       | Attaches, replaces, or (cleared) removes the browser CORS policy and its default-on WebSocket origin check.                |
 | Allowed methods            | Takes effect immediately. Untick everything to accept every method again.                                                  |
 | Timeouts, circuit breaker  | Take effect immediately. Clearing the timeout boxes restores the gateway defaults.                                         |
 | **Requestable → off**      | ⚠️ Removes the access gate. **Every authenticated consumer can now call this API.** Existing grants stay but become inert. |

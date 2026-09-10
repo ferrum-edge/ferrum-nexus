@@ -53,7 +53,7 @@ describe('admin settings', () => {
     assert.equal(errorCode(response.body), 'FORBIDDEN');
   });
 
-  describe('mail and CAPTCHA are super_admin-only', () => {
+  describe('security-sensitive settings are super_admin-only', () => {
     let admin: TestSession;
 
     before(async () => {
@@ -113,19 +113,14 @@ describe('admin settings', () => {
       assert.equal(settings.branding.tagline, 'Set by an ordinary admin');
     });
 
-    it('lets an ordinary admin publish the gateway address', async () => {
-      // Deliberately not privileged: a proxy-listener origin is published
-      // information, not an escalation path like SMTP or CAPTCHA.
+    it('refuses an ordinary admin changing the gateway address', async () => {
       const response = await harness.authed(admin, {
         method: 'PUT',
         url: '/api/admin/settings',
         payload: { gateway: { public_url: 'https://gw.example.com' } },
       });
-      assert.equal(response.statusCode, 200, response.body);
-      assert.equal(
-        response.json<AdminSettingsResponse>().gateway.public_url,
-        'https://gw.example.com',
-      );
+      assert.equal(response.statusCode, 403);
+      assert.equal(errorCode(response.body), 'FORBIDDEN');
     });
 
     it('lets a super_admin change the same SMTP section', async () => {
@@ -384,7 +379,7 @@ describe('admin settings', () => {
       url: '/api/admin/email-templates/verification',
       payload: {
         subject: 'Confirm your address',
-        body_html: '<p>{{verification_url}}</p>',
+        body_html: '<a href="{{verification_url}}">Verify</a>',
         body_text: '{{verification_url}}',
       },
     });
@@ -395,7 +390,7 @@ describe('admin settings', () => {
     );
 
     const rendered = await harness.services.email.render('verification', {
-      verification_url: 'https://portal.test/v?token=t',
+      verification_url: `${harness.config.publicUrl}/v?token=t`,
     });
     assert.equal(rendered.subject, 'Confirm your address');
 

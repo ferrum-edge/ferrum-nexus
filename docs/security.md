@@ -288,57 +288,100 @@ the route, while "is this your API" is a property of the row.
 
 ### Capability matrix
 
-| Capability                                        | client | provider | admin | super_admin |
-| ------------------------------------------------- | ------ | -------- | ----- | ----------- |
-| Register, sign in, manage own profile             | ✓      | ✓        | ✓     | ✓           |
-| Browse catalog, read specs                        | ✓      | ✓        | ✓     | ✓           |
-| Request access, cancel own request                | ✓      | ✓        | ✓     | ✓           |
-| Issue / rotate / revoke **own** credentials       | ✓      | ✓        | ✓     | ✓           |
-| Messaging, notifications                          | ✓      | ✓        | ✓     | ✓           |
-| Publish an API, update own API/spec               | —      | ✓        | ✓     | ✓           |
-| Configure palette plugins on **own** API          | —      | ✓        | ✓     | ✓           |
-| Create a test consumer for own API                | —      | ✓        | ✓     | ✓           |
-| Approve / deny requests on **own** APIs           | —      | ✓        | ✓     | ✓           |
-| Revoke grants on **own** APIs                     | —      | ✓        | ✓     | ✓           |
-| Edit / delete **another** provider's API          | —      | —        | ✓     | ✓           |
-| Decide requests / revoke grants on **any** API    | —      | —        | ✓     | ✓           |
-| List all users; change `client` ⇄ `provider`      | —      | —        | ✓     | ✓           |
-| Manage organizations                              | —      | —        | ✓     | ✓           |
-| List another account's credential metadata        | —      | —        | ✓     | ✓           |
-| Read/reply in the platform inbox; read any thread | —      | —        | ✓     | ✓           |
-| Portal settings: branding, registration policy    | —      | —        | ✓     | ✓           |
-| Email templates, mass email                       | —      | —        | ✓     | ✓           |
-| Read the audit log                                | —      | —        | ✓     | ✓           |
-| Portal settings: **SMTP and CAPTCHA**             | —      | —        | **—** | ✓           |
-| Grant or revoke `admin` / `super_admin`           | —      | —        | **—** | ✓           |
-| Disable or re-enable an `admin` or `super_admin`  | —      | —        | **—** | ✓           |
-| God mode (4 endpoints)                            | —      | —        | —     | ✓           |
+| Capability                                         | client | provider | admin | super_admin |
+| -------------------------------------------------- | ------ | -------- | ----- | ----------- |
+| Register, sign in, manage own profile              | ✓      | ✓        | ✓     | ✓           |
+| Browse catalog, read specs                         | ✓      | ✓        | ✓     | ✓           |
+| Request access, cancel own request                 | ✓      | ✓        | ✓     | ✓           |
+| Issue / rotate / revoke **own** credentials        | ✓      | ✓        | ✓     | ✓           |
+| Messaging, notifications                           | ✓      | ✓        | ✓     | ✓           |
+| Publish an API, update own API/spec                | —      | ✓        | ✓     | ✓           |
+| Configure palette plugins on **own** API           | —      | ✓        | ✓     | ✓           |
+| Create a test consumer for own API                 | —      | ✓        | ✓     | ✓           |
+| Approve / deny requests on **own** APIs            | —      | ✓        | ✓     | ✓           |
+| Revoke grants on **own** APIs                      | —      | ✓        | ✓     | ✓           |
+| Edit / delete **another** provider's API           | —      | —        | ✓     | ✓           |
+| Decide requests / revoke grants on **any** API     | —      | —        | ✓     | ✓           |
+| List all users; change `client` ⇄ `provider`       | —      | —        | ✓     | ✓           |
+| Manage organizations                               | —      | —        | ✓     | ✓           |
+| List another account's credential metadata         | —      | —        | ✓     | ✓           |
+| Read/reply in the platform inbox; read any thread  | —      | —        | ✓     | ✓           |
+| Portal settings: branding, registration policy     | —      | —        | ✓     | ✓           |
+| Email templates, mass email                        | —      | —        | ✓     | ✓           |
+| Read the audit log                                 | —      | —        | ✓     | ✓           |
+| Portal settings: **SMTP, CAPTCHA and gateway URL** | —      | —        | **—** | ✓           |
+| Grant or revoke `admin` / `super_admin`            | —      | —        | **—** | ✓           |
+| Disable or re-enable an `admin` or `super_admin`   | —      | —        | **—** | ✓           |
+| God mode (4 endpoints)                             | —      | —        | —     | ✓           |
 
 The three bolded gaps are the point of the `super_admin` tier: an `admin` has
 broad authority over content and users but **cannot escalate itself or another
 account**, cannot disable or re-enable an administrator, and cannot take over the
-platform's mail.
+platform's mail or redirect where its clients send their gateway credentials.
 
-`smtp` and `captcha` are `super_admin`-only because they are escalation paths
-dressed as preferences. Whoever controls the SMTP host receives every
-verification and password-reset link the portal sends, which is an account
+`smtp`, `captcha` and `gateway` are `super_admin`-only because they are
+escalation paths dressed as preferences. Whoever controls the SMTP host receives
+every verification and password-reset link the portal sends, which is an account
 takeover of every user; whoever controls the CAPTCHA settings can switch off
-the registration brake. `PUT /api/admin/settings` answers `403 FORBIDDEN` for
+the registration brake; whoever controls the gateway origin directs every client
+to send its gateway credentials to a host of their choosing. `PUT /api/admin/settings` answers `403 FORBIDDEN` for
 an `admin` sending either section, and the check lives in the service, so it
 holds however `updateSettings` is reached. Branding and registration policy
 stay at `admin`.
+
+Email templates also stay at `admin`. Render contexts expose the server-built
+`reset_url` and `verification_url`, but never separate raw-token variables.
+The retired `reset_token` and `verification_token` placeholders render empty
+even in legacy overrides; saving either in any template field fails with
+`400 VALIDATION_FAILED` naming the variable. Action URL placeholders may only
+be the entire `href` value of an HTML anchor, or a whitespace-delimited URL in
+the text body. They cannot be embedded in image URLs, CSS, other attributes,
+subjects, or another URL, even when that destination is allowed.
+
+Every field is checked on save and again before rendering a stored template;
+substituted destinations are also checked before enqueueing. HTTP(S) links,
+protocol-relative URLs, URL attributes and CSS `url(...)` must resolve to the
+`NEXUS_PUBLIC_URL` origin or an exact host explicitly configured by the operator
+in `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS` (empty by default). Scheme/host case
+and HTML entities are normalized; `javascript:` and `data:` are always refused.
+Ambiguous or active HTML/CSS is refused rather than interpreted as safe. A
+legacy override that violates the policy is replaced by the built-in template
+for that message and a warning is logged, so recovery mail still flows. A
+rendered destination that violates the policy (including mass-email HTML)
+produces a warning and no outbox entry; the public recovery endpoint still
+returns its uniform response.
+
+Action links remain bearer credentials. Operators must trust allowlisted
+hosts and portal routes, including redirects and their handling of referrers.
+This policy constrains template destinations; it does not make malicious copy,
+omitted recovery links, or operator-approved destinations trustworthy. Messages
+already rendered into the outbox before upgrading are not revalidated.
 
 ### Scoping rules worth knowing
 
 - **Access requests and grants** are scoped by ownership, not by role alone: a
   `provider` sees the inbox for the APIs they own, and filtering by an
   `api_id` they do not own is `403 FORBIDDEN`.
+  Approve, deny and revoke require both ownership and at least the `provider`
+  role, or the `admin` role. Demotion to `client` removes these powers even if
+  the account still owns APIs; administrators retain oversight of those APIs.
 - **Publishing list** always scopes a `provider` to their own APIs, whatever
   they pass in the query. `mine` is the _admin's_ opt-in.
 - **Credentials** are always the caller's own unless an `admin` passes an
   explicit `user_id` — and even then, only the metadata, never a secret.
-- **Catalog** answers `404`, not `403`, for an API you may not see, so it never
-  confirms that an internal API exists.
+- **Catalog** answers `404`, not `403`, for an API you may not see. Published
+  `internal` APIs are deliberately unlisted but readable by any signed-in user
+  holding the link. Catalog API objects omit `upstream_url`; catalog specs and
+  the Documentation tab replace OpenAPI root, path-item and operation `servers`,
+  including webhooks, reusable path items and callbacks, and Link Object `server`
+  entries in components and response links with the gateway invoke URL (only the
+  listen path when no public gateway origin is configured). Schemas, examples
+  and extensions remain untouched.
+  JSON and YAML are normalized in their original format; comments and formatting
+  are not preserved. Invalid stored documents fail closed without returning the
+  upload or parser diagnostics. This redacts server entries, not arbitrary URLs
+  a provider writes in prose, examples or other fields. The original spec and
+  provider editor use `GET /api/apis/:id/spec`, restricted to owner or admin.
 
 ### The provider / operator split on gateway plugins
 
@@ -782,7 +825,8 @@ Two `app_settings` values are secret and are stored encrypted:
 Both are **write-only over HTTP**: they go in through `PUT /api/admin/settings`
 and are never returned. The DTOs expose only `password_set` / `secret_set`
 booleans. The `admin.settings_update` audit row records the **names** of the
-changed keys and never their values, so the audit log stays readable by anyone
+changed keys and SMTP password-source transitions (`override` or `environment`),
+never setting values, so the audit log stays readable by anyone
 allowed to read audit logs.
 
 Before changing `NEXUS_SECRET_KEY`, stop all Nexus instances and run
@@ -928,6 +972,40 @@ Neither control replaces the registration policy. A portal that does not want
 strangers allocating gateway resources at all should take `provider` out of
 `allowed_roles` and promote vetted accounts, or close registration entirely.
 
+### A published document is untrusted content in every reader's browser
+
+Provider registration is open by default, so the OpenAPI document a `provider`
+uploads is attacker-controlled input — and the portal renders it, in full, in
+the browser of every signed-in account that opens the catalog entry. For a
+`public` API that is anyone with an account, with no grant required. The cost of
+rendering it therefore has to be bounded on both sides, and neither `MAX_SPEC_BYTES`
+nor the path and operation counts does it: those bound the transfer and the
+number of cards, not the work behind one card.
+
+Two bounds, at the two places the cost appears:
+
+- **At publish.** Nexus counts what the viewer walks — schema nodes, parameter
+  entries and media types across the document — and refuses more than
+  `MAX_SPEC_RENDER_UNITS` (100,000) of them with `400 SPEC_INVALID` and
+  `details.reason = "too_much_to_render"`. One declared operation can carry
+  thousands of parameters and dozens of media types per body, each pulling in a
+  `$ref` whose expansion dwarfs the document; counting paths and operations sees
+  none of that.
+- **At render.** The viewer spends a single node allowance across the whole
+  page, divided between the operations the reader has expanded, rather than a
+  fresh one per schema. A branch that exhausts it renders one "truncated"
+  affordance and its siblings are **not walked**, so exhaustion stops mounting
+  DOM rather than merely stopping recursion. Documents are parsed with
+  `JSON.parse` when they open with `{` or `[`, as the server already does: the
+  YAML parser accepts JSON but its flow-mapping parse is quadratic in mapping
+  width, and routing a wide JSON document through it froze the reader's main
+  thread for seconds before anything was drawn.
+
+The two are independent on purpose. The publish-time ceiling protects readers
+whose browsers the portal does not control; the render-time budget protects
+readers from documents that were published before the ceiling existed, or that
+sit under it and are still expensive to expand.
+
 ### Messaging abuse resistance
 
 Registration is open by default, so **an authenticated account is not a trusted
@@ -1007,6 +1085,51 @@ is held elsewhere longer than the 30 s wait gets `409 CONFLICT` and is asked to
 retry; it is never a silent overshoot. The lease is skipped entirely when the
 budget is switched off.
 
+### Branding abuse resistance
+
+`GET /api/branding` is unauthenticated and used on every SPA load before a
+session exists. Each hit used to run several settings reads and return a payload
+that can include a logo data URL, with `Cache-Control: no-store` and no
+limiter.
+
+Two bounds close that:
+
+1. **A per-IP rate limit** — 120 requests per minute, the same ceiling as
+   `/api/health*`, installed when `NEXUS_RATE_LIMIT_ENABLED=true`.
+2. **A short response cache** — `NEXUS_BRANDING_CACHE_MS` (default 5 s, `0`
+   disables). Within the window the settings reads run once, concurrent callers
+   share one in-flight assembly, and the response is marked cacheable with
+   `Cache-Control: public, max-age=…` and an `ETag`.
+
+The limiter is the ceiling; the cache is what keeps traffic under it from
+reaching the database on every repeat load.
+
+Committed local settings writes (including CAPTCHA and registration policy)
+invalidate the server memo before the mutation responds, and `bootstrap_required`
+is read live on every request rather than memoised, so no instance keeps
+advertising an open founder seat after another instance fills it. The TTL bounds
+cross-instance server staleness of the remaining fields only; browser/CDN copies
+retain their advertised `max-age`.
+
+### Access-request abuse resistance
+
+A `client` may self-register and raise access requests. Each one durably writes
+a row, an audit row and a provider notification. `findPendingByApiAndUser` only
+bounds concurrency per API; cancelling reopened the slot without limiting the
+day.
+
+Three bounds close that:
+
+1. **Per-account burst limits** — 10 creations and 30 cancellations per minute,
+   keyed on the account like messaging.
+2. **A rolling 24-hour per-account budget** —
+   `NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY` (default 20, `0` disables).
+   Checked before any row is written; **cancelled rows count**, so
+   create→cancel→create cannot loop. Enforced under a per-requester lease in
+   `edge_leases`, the same shape as the message budget.
+3. **Refusals write nothing** — a `429` leaves no access-request, audit or
+   notification row.
+
 ### Consumer quotas are per gateway process
 
 A per-API rate limit is enforced by Edge's `rate_limiting` plugin, and its
@@ -1033,13 +1156,13 @@ the proxy's own `allowed_ws_origins`, whose default (`[]`) is _no check at all_.
 A page on any origin could otherwise open a socket to a published API and ride
 a logged-in browser's ambient credentials.
 
-Nexus mirrors exact HTTP(S) CORS origins into `allowed_ws_origins` only when
-`cors.enforce_websocket_origins` is explicitly `true`. Wildcards are refused in
-this mode. Edge has no option to allow a missing Origin while enforcing this
+Nexus mirrors exact HTTP(S) CORS origins into `allowed_ws_origins` by default.
+Only an explicit `cors.enforce_websocket_origins: false` disables the check, so
+older CORS policies that predate the setting remain protected. Wildcards are
+refused in this mode. Edge has no option to allow a missing Origin while enforcing this
 list: an origin-less upgrade is rejected along with an unlisted origin.
 
-The toggle defaults to **false** so adding a browser CORS policy does not break
-non-browser WebSocket clients. With it off, upgrades from any origin pass the
+The toggle defaults to **true**. With it off, upgrades from any origin pass the
 origin gate. Authentication and ACLs still apply, but browser-borne credentials
 can be exposed to CSWSH. Providers of browser-only WebSocket APIs should enable
 the toggle and list their trusted origins. Mixed-client APIs need an upstream
@@ -1047,9 +1170,8 @@ origin policy if they require both origin-less clients and browser CSWSH
 protection. Removing CORS clears the origin gate.
 
 No startup migration rewrites existing gateway proxies. Their previous origin
-lists remain until the provider saves CORS; the Settings toggle makes the new
-choice explicit. Review browser-only APIs when upgrading and opt in before
-saving to retain their existing CSWSH protection.
+lists remain until the provider saves CORS; saving a legacy CORS policy preserves
+the origin check unless the provider explicitly disables it.
 
 ### CAPTCHA
 
@@ -1209,7 +1331,12 @@ so an upper bound at a second excludes that entire second.
 
 A combined role/status patch writes both transition events, with the full transition
 context in each row. Unchanged fields are excluded from `changed_fields`; profile,
-organization and API patches with no changed fields write no audit row.
+organization and API patches with no changed fields write no audit row. The one
+exception is an API patch that changed no Nexus field but did write to the
+gateway — repairing a plugin association an operator dropped, or proxy runtime
+settings that had drifted from the catalog. That is a state change and is
+recorded as `api.update` with an empty `changed_fields` and
+`details.gateway_reconciled: true`.
 
 **Secrets never appear in `details`.** A settings update records the _names_ of
 the changed keys; a credential event records the type and last4, never the
@@ -1257,29 +1384,37 @@ ordinary reporting.
 
 ### Publishing
 
-| Action                        | Target type | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| ----------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `api.publish`                 | `api`       | An API was published: its Edge proxy and plugin configs created, then associated on the proxy so the gateway runs them. `details`: slug, listen path, proxy id, auth plugin, requestable, visibility, rate limit, CORS policy, method allow-list, backend timeouts, circuit breaker, OpenAPI enforcement level, upstream, spec path count. The proxy's `allowed_ws_origins` is not logged separately — it is a pure function of the CORS policy already recorded here.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `api.update`                  | `api`       | Safe runtime settings changed. `details`: `changed_fields`, plus context such as `previous_auth_plugin` and `existing_credentials_invalidated`. A `spec_enforcement` change additionally carries `proxy_rebuilt: true`: moving between `docs_only` and `routes` deletes and recreates the gateway proxy under the same id, so the API was briefly unreachable and an operator reading the log needs to be able to explain the gap.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `api.spec_update`             | `api`       | A new spec revision was published and made current. `details`: spec id, version, path count, OpenAPI enforcement level, `backend_updated`. At the `routes` level the revision also changes what the gateway accepts, so the level is recorded on every upload.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `api.retire`                  | `api`       | An API moved to `retired`. Emitted instead of `api.update` for that transition. `details.gateway_untouched` records that the proxy and live grants were left alone.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `api.delete`                  | `api`       | An API and its Edge objects were destroyed. `details`: slug, proxy id, `revoked_grants`, and — only when the API had one — `test_consumer_id` plus `test_consumer_revoked_credentials` for the `nexus-test-<api_id>` identity torn down with it. An API that never had a test consumer names neither key, so an absent pair reads as "there was nothing to collect" rather than "the teardown was skipped".                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `api.plugin_set`              | `api`       | A palette plugin was created or replaced on the API's proxy. `details`: `plugin_name`, `enabled`, `config_keys`, `trigger`, `replaced`, `plugin_config_id` (the Edge config written, so the row names what was touched). **The config keys are logged, never their values** — a plugin config can carry a Content-Security-Policy or a partner IP allow-list, and an audit row is not the place for either. The trigger is a method list and a path prefix, which are policy rather than data, so it is recorded in full.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `api.plugin_remove`           | `api`       | A palette plugin was detached from the proxy and deleted. `details`: `plugin_name`, `label`, `was_attached` (false when an operator had already removed the gateway config by hand), `plugin_config_id` (the Edge config deleted, `null` when there was none). Only the config the portal created is removed — another config of the same plugin name on the proxy is an operator's and is left alone.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `api.gateway_repair_required` | `api`       | A `spec_enforcement` conversion could neither finish nor put the original proxy back, so the API has **no gateway object at all** while its catalog entry, grants and credentials stay valid. `details`: `phase` — `conversion` when the conversion itself failed and could not be undone, `rollback` when it succeeded and a later step of the same `PATCH` failed and the unwind could not rebuild — plus `proxy_id`, hand-owned `plugin_names`, `spec_enforcement`, `attempted_spec_enforcement`, `restore_error`, and `error` (the failure that made a restore necessary; present on the `conversion` phase only). **Read the two enforcement levels by the phase.** On a `conversion` row `attempted_spec_enforcement` is what the conversion was reaching for and the restore was rebuilding `spec_enforcement`, the level the `apis` row still holds. On a `rollback` row the conversion to `attempted_spec_enforcement` had already succeeded, and it is the unwind back to `spec_enforcement` that failed — so those rows carry `restore_target` as well, naming the level the failed restore was rebuilding outright. Raw proxy and plugin configurations are never included because they may contain infrastructure credentials or other operator-managed secrets. Also logged at `error`. Alert on it: no later request repairs it by itself. Exactly one row is written per affected conversion. |
-| `test_consumer.create`        | `api`       | A provider created (or replaced) the disposable `nexus-test-<api_id>` consumer. `details`: consumer username/id, credential type, `replaced`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Action                        | Target type | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ----------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `api.publish`                 | `api`       | An API was published: its Edge proxy and plugin configs created, then associated on the proxy so the gateway runs them. `details`: slug, listen path, proxy id, auth plugin, requestable, visibility, rate limit, CORS policy, method allow-list, backend timeouts, circuit breaker, OpenAPI enforcement level, upstream, spec path count. The proxy's `allowed_ws_origins` is not logged separately — it is a pure function of the CORS policy already recorded here.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `api.update`                  | `api`       | Safe runtime settings changed. `details`: `changed_fields`, plus context such as `previous_auth_plugin` and `existing_credentials_invalidated`. A `spec_enforcement` change additionally carries `proxy_rebuilt: true`: moving between `docs_only` and `routes` deletes and recreates the gateway proxy under the same id, so the API was briefly unreachable and an operator reading the log needs to be able to explain the gap. A row with an empty `changed_fields` and `gateway_reconciled: true` is a patch that moved no Nexus field but repaired live gateway drift — a missing plugin association, or proxy runtime settings that no longer matched the catalog.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `api.spec_update`             | `api`       | A new spec revision was published and made current. `details`: spec id, version, path count, OpenAPI enforcement level, `backend_updated`. At the `routes` level the revision also changes what the gateway accepts, so the level is recorded on every upload.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `api.retire`                  | `api`       | An API moved to `retired`. Emitted instead of `api.update` for that transition. `details.gateway_untouched` records that the proxy and live grants were left alone.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `api.delete`                  | `api`       | An API and its Edge objects were destroyed. `details`: slug, proxy id, `revoked_grants`, and — only when the API had one — `test_consumer_id` plus `test_consumer_revoked_credentials` for the `nexus-test-<api_id>` identity torn down with it. An API that never had a test consumer names neither key, so an absent pair reads as "there was nothing to collect" rather than "the teardown was skipped".                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `api.plugin_set`              | `api`       | A palette plugin was created or replaced on the API's proxy. `details`: `plugin_name`, `enabled`, `config_keys`, `trigger`, `replaced`, `plugin_config_id` (the Edge config written, so the row names what was touched). **The config keys are logged, never their values** — a plugin config can carry a Content-Security-Policy or a partner IP allow-list, and an audit row is not the place for either. The trigger is a method list and a path prefix, which are policy rather than data, so it is recorded in full.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `api.plugin_remove`           | `api`       | A palette plugin was detached from the proxy and deleted. `details`: `plugin_name`, `label`, `was_attached` (false when an operator had already removed the gateway config by hand), `plugin_config_id` (the Edge config deleted, `null` when there was none). Only the config the portal created is removed — another config of the same plugin name on the proxy is an operator's and is left alone.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `api.gateway_repair_required` | `api`       | A gateway change the portal made and could not take back. `details.phase` says which of three: `conversion` and `rollback` are a `spec_enforcement` conversion that left the API with **no gateway object at all** while its catalog entry, grants and credentials stay valid — `conversion` when the conversion itself failed and could not be undone, `rollback` when it succeeded and a later step of the same `PATCH` failed and the unwind could not rebuild. Those two carry `proxy_id`, hand-owned `plugin_names`, `spec_enforcement`, `attempted_spec_enforcement`, `restore_error`, and `error` (the failure that made a restore necessary; present on the `conversion` phase only). **Read the two enforcement levels by the phase.** On a `conversion` row `attempted_spec_enforcement` is what the conversion was reaching for and the restore was rebuilding `spec_enforcement`, the level the `apis` row still holds. On a `rollback` row the conversion to `attempted_spec_enforcement` had already succeeded, and it is the unwind back to `spec_enforcement` that failed — so those rows carry `restore_target` as well, naming the level the failed restore was rebuilding outright. Raw proxy and plugin configurations are never included because they may contain infrastructure credentials or other operator-managed secrets. Also logged at `error`. Alert on it: no later request repairs it by itself. Exactly one row is written per affected conversion. **`compensation`** is the third phase and a lesser state: a `PATCH` or spec revision unwound the gateway changes it had made and at least one replay failed, so the proxy is still there but one or more of its fields may no longer match the catalog. Those rows carry `proxy_id`, `attempted_changes` (what the mutation had got as far as changing; `spec` for a spec revision), `steps` (what could not be put back — the upstream backend, the proxy runtime settings, an authentication or access control plugin, or the spec re-import), `step_errors` and `error`. A step that writes one of the first two phases is never also counted here, so one incident is one row. |
+| `api.publish_rollback`        | `api`       | A publish that reached the gateway and then failed, recording whether what it created came back off again. The proxy id is minted by Nexus and recorded **before** the create is dispatched, so the compensating `DELETE` has a target even when the create's acknowledgement never arrives. `details`: `slug`, `proxy_id`, `spec_enforcement`, `auth_plugin`, `withdrawn`, `error`, and — only when `withdrawn` is `false` — `stranded_proxy_id`. `withdrawn: true` is the ordinary case and needs nothing. `withdrawn: false` means a proxy may still be live on its unguessable `/<ns>/.staging/<32 hex>` path with no `apis` row and — when the publish died before its plugins were associated — nothing the gateway runs in front of it; this row is the only record that it exists. Alert on it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `test_consumer.create`        | `api`       | A provider created (or replaced) the disposable `nexus-test-<api_id>` consumer. `details`: consumer username/id, credential type, `replaced`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 
 ### Access workflow
 
-| Action                    | Target type      | Description                                                                                                                                                                                                                                                                                                                   |
-| ------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `access.request`          | `access_request` | A client requested access. `details`: api id and slug.                                                                                                                                                                                                                                                                        |
-| `access.cancel`           | `access_request` | The requester withdrew their own pending request.                                                                                                                                                                                                                                                                             |
-| `access.approve`          | `access_request` | Approved: the ACL group is now on the consumer. `details`: api id/slug, user id, grant id, `acl_group`.                                                                                                                                                                                                                       |
-| `access.approve_rollback` | `access_request` | An approval failed after the gateway write; records what was undone. `details`: api id/slug, user id, `cause`, plus `acl_group_removed` + `request_released`, or `acl_group_kept` + `kept_for_grant_id` when a live grant still needs the group. `acl_group_orphaned` means the group is still on the consumer — investigate. |
-| `access.deny`             | `access_request` | Declined. `details`: api id/slug, user id, `has_note`. Nothing changed on the gateway.                                                                                                                                                                                                                                        |
-| `access.revoke`           | `grant`          | A grant was withdrawn and the ACL group removed. `details`: api id/slug, user id, `acl_group`, `reason`. A bulk revocation adds `bulk: true` and writes one row per grant. Exactly one row per grant per revocation — the transition is a compare-and-set, so a concurrent second revocation loses and records nothing.       |
-| `access.revoke_rollback`  | `grant`          | A revocation claimed the grant but the gateway would not drop the ACL group; records what was undone. `details`: api id, user id, `acl_group`, `cause`, `grant_restored`. `grant_restored: false` means the portal says revoked while the group may still be live — investigate.                                              |
+Approval rollback treats an unacknowledged gateway write as possibly applied
+and attempts idempotent removal unless a live grant needs the group.
+`acl_group_possibly_applied: true` records that uncertain write outcome;
+`false` means the write was acknowledged or the active-user guard rejected it
+before the ACL write. The removal, kept or orphan fields describe compensation.
+An orphan field means the group may remain live and needs investigation.
+
+| Action                    | Target type      | Description                                                                                                                                                                                                                                                                                                                    |
+| ------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `access.request`          | `access_request` | A client requested access. `details`: api id and slug.                                                                                                                                                                                                                                                                         |
+| `access.cancel`           | `access_request` | The requester withdrew their own pending request.                                                                                                                                                                                                                                                                              |
+| `access.approve`          | `access_request` | Approved: the ACL group is now on the consumer. `details`: api id/slug, user id, grant id, `acl_group`.                                                                                                                                                                                                                        |
+| `access.approve_rollback` | `access_request` | An approval failed during the grant attempt; records what was undone. `details`: api id/slug, user id, `cause`, plus `acl_group_removed` + `request_released`, or `acl_group_kept` + `kept_for_grant_id` when a live grant still needs the group. `acl_group_orphaned` means the group may stay on the consumer — investigate. |
+| `access.deny`             | `access_request` | Declined. `details`: api id/slug, user id, `has_note`. Nothing changed on the gateway.                                                                                                                                                                                                                                         |
+| `access.revoke`           | `grant`          | A grant was withdrawn and the ACL group removed. `details`: api id/slug, user id, `acl_group`, `reason`. A bulk revocation adds `bulk: true` and writes one row per grant. Exactly one row per grant per revocation — the transition is a compare-and-set, so a concurrent second revocation loses and records nothing.        |
+| `access.revoke_rollback`  | `grant`          | A revocation claimed the grant but the gateway would not drop the ACL group; records what was undone. `details`: api id, user id, `acl_group`, `cause`, `grant_restored`. `grant_restored: false` means the portal says revoked while the group may still be live — investigate.                                               |
 
 ### Credentials
 
@@ -1308,6 +1443,11 @@ ordinary reporting.
 | `admin.template_update` | `email_template` | An email template was overridden. `target_id` is the template key.                                                                             |
 | `admin.mass_email`      | `mass_email`     | A mass email was dispatched. `target_id` is the batch id. `details`: subject, audience scope, `recipients`, `enqueued`.                        |
 | `admin.smtp_test`       | `settings`       | A test message was sent straight through SMTP. `target_id` is `smtp`. `details`: `to_email`, `ok`.                                             |
+
+`admin.template_update` details contain `key`, `body_html_sha256`, and
+`body_text_sha256`. Each digest is the lowercase hexadecimal SHA-256 of the
+exact saved UTF-8 body string, so an investigator can compare template versions
+without copying email bodies or rendered tokens into the audit log.
 
 ### God mode (`super_admin` only)
 
@@ -1364,7 +1504,7 @@ Before going live:
       than one Ferrum Edge data-plane replica — otherwise every provider's
       quota is multiplied by the replica count.
 - [ ] Providers fronting a browser-facing WebSocket backend have listed their
-      CORS origins and enabled `cors.enforce_websocket_origins`.
+      CORS origins and have not disabled `cors.enforce_websocket_origins`.
 - [ ] `NEXUS_ALLOW_PRIVATE_UPSTREAMS` is left at `false` unless the portal is
       meant to front internal services, in which case gateway egress is
       restricted at the network layer.

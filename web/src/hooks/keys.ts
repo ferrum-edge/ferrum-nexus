@@ -20,6 +20,7 @@ export const queryKeys = {
 
   apis: {
     all: ['apis'] as const,
+    spec: (id: string) => ['apis', 'spec', id] as const,
     list: (params: unknown) => ['apis', 'list', params] as const,
     detail: (id: string) => ['apis', 'detail', id] as const,
     usage: (id: string) => ['apis', 'usage', id] as const,

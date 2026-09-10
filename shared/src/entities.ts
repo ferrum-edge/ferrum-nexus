@@ -100,7 +100,7 @@ export interface CorsConfig {
   allow_credentials: boolean;
   /** Extra request headers, in addition to the headers required by authentication. */
   allowed_headers?: string[];
-  /** Require an exact CORS origin on WebSocket upgrades, including non-browser clients. */
+  /** Require an exact CORS origin on WebSocket upgrades. Defaults to true when omitted. */
   enforce_websocket_origins?: boolean;
 }
 

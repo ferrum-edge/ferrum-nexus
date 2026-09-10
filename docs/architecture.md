@@ -629,6 +629,14 @@ variants under that outer lease; the serializer itself remains non-reentrant.
 Spec revision refreshes its catalog mode and current revision after acquiring
 the lease, so a conversion that won first changes how the revision is applied.
 
+Spec revisions register their undo before `PUT /api-specs/{id}`, using the
+spec id and previous document and backend already read under that lease. If
+Edge applies the re-import but loses its acknowledgement, the undo restores
+the previous document and backend before releasing the lease. A failed restore
+writes `api.gateway_repair_required` with `phase: 'compensation'`,
+`attempted_changes: ['spec']`, and the failed step in `steps`; the catalog keeps
+its previous revision and no `api.spec_update` success event is written.
+
 ```
 apis row ─── proxy          name `nexus-<slug>`, listen_path `/<namespace>/<slug>`
               │             allowed_methods, backend_{connect,read,write}_timeout_ms,
@@ -712,7 +720,8 @@ and independently of — the `cors` plugin:
   with it;
 - `allowed_ws_origins` is the WebSocket upgrade origin check, which the `cors`
   plugin never runs for. The API's exact CORS origins are mirrored into it; a
-  wildcard or absent policy leaves it `[]`, which performs no check.
+  wildcard, absent policy, or explicit opt-out leaves it `[]`, which performs no
+  check. An omitted opt-out setting remains enabled for legacy CORS records.
 
 Both derivations are recomputed whenever either input changes, in a single
 read-modify-write with one undo step. A PATCH that does not name a setting does

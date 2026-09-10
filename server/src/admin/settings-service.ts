@@ -19,13 +19,14 @@
  * 1. **Secrets are write-only.** `password`/`secret_key` are never returned;
  *    the DTOs expose `password_set`/`secret_set` booleans instead.
  * 2. **Audit rows record changed keys, never values.** A settings update writes
- *    `admin.settings_update` with the list of touched keys and nothing else, so
+ *    `admin.settings_update` with touched keys and password-source transitions, so
  *    the audit log can be read by anyone allowed to read audit logs.
- * 3. **`smtp` and `captcha` are `super_admin`-only** (see
- *    {@link PRIVILEGED_SETTINGS_SECTIONS}); `branding`, `gateway` and
- *    `registration` are editable by any `admin` — a public gateway address is
- *    published information, not a secret.
+ * 3. **`smtp`, `captcha`, and `gateway` are `super_admin`-only** (see
+ *    {@link PRIVILEGED_SETTINGS_SECTIONS}); `branding` and `registration` are
+ *    editable by any `admin`.
  */
+
+import { createHash } from 'node:crypto';
 
 import {
   EMAIL_TEMPLATE_KEYS,
@@ -53,7 +54,12 @@ import {
 } from '../auth/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type { NexusStore } from '../db/store.js';
-import { DEFAULT_EMAIL_TEMPLATES, TEMPLATE_VARIABLES } from '../email/templates.js';
+import { validateTemplateLinks } from '../email/template-links.js';
+import {
+  DEFAULT_EMAIL_TEMPLATES,
+  removedTemplateVariable,
+  TEMPLATE_VARIABLES,
+} from '../email/templates.js';
 import type { NexusCrypto } from '../lib/crypto.js';
 import { forbidden, validationFailed } from '../lib/errors.js';
 import { GATEWAY_PUBLIC_URL_RULE, normalizeGatewayPublicUrl } from '../lib/gateway-url.js';
@@ -62,12 +68,13 @@ import { newId, nowIso } from '../lib/ids.js';
 /**
  * Sections of {@link UpdateSettingsRequest} that only a `super_admin` may touch.
  *
- * Both are escalation paths rather than presentation: whoever owns `smtp` owns
+ * These are escalation paths rather than presentation: whoever owns `smtp` owns
  * every verification and password-reset link the portal sends, and whoever owns
- * `captcha` owns the registration brake. `branding` and `registration` stay at
- * `admin`.
+ * `captcha` owns the registration brake. Whoever controls `gateway` can direct
+ * clients to send their gateway credentials to another origin. `branding` and
+ * `registration` stay at `admin`.
  */
-export const PRIVILEGED_SETTINGS_SECTIONS = ['smtp', 'captcha'] as const;
+export const PRIVILEGED_SETTINGS_SECTIONS = ['smtp', 'captcha', 'gateway'] as const;
 
 /** `app_settings` key holding the public branding block. */
 export const BRANDING_SETTINGS_KEY = 'branding';
@@ -199,6 +206,8 @@ export async function readEncryptedSetting(
 
 /** Admin settings and email templates. */
 export interface SettingsService {
+  /** Revision of committed in-process writes affecting public branding. */
+  getBrandingRevision(): number;
   /** Everything an admin sees on the settings page (no secrets). */
   getAdminSettings(): Promise<AdminSettingsResponse>;
   /** Apply a partial update; omitted sections are left untouched. */
@@ -244,6 +253,7 @@ export interface SettingsServiceDeps {
 /** Build the settings service. */
 export function createSettingsService(deps: SettingsServiceDeps): SettingsService {
   const { config, store, crypto, audit, auth } = deps;
+  let brandingRevision = 0;
 
   /** Memoised gateway origin; dropped the moment a write changes it. */
   let gatewayUrlCache: { value: string | null; expires: number } | null = null;
@@ -322,6 +332,8 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
   }
 
   return {
+    getBrandingRevision: () => brandingRevision + auth.getBrandingRevision(),
+
     getBranding: async () => readBranding(store),
 
     getGatewayPublicUrl,
@@ -329,7 +341,8 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
     getAdminSettings: snapshot,
 
     async updateSettings(actor, patch, ip = null): Promise<AdminSettingsResponse> {
-      // Mail and CAPTCHA are privilege-escalation surfaces, not preferences:
+      // Mail, CAPTCHA, and the client-facing gateway origin are
+      // privilege-escalation surfaces, not preferences:
       // repointing SMTP hands the operator every verification and
       // password-reset message, and turning CAPTCHA off (or swapping its
       // secret) removes the registration brake. `/api/admin` only requires
@@ -360,6 +373,8 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
       // store. In particular, secret writes cannot split from their config.
       await store.transaction(async (tx) => {
         const changed: string[] = [];
+        let smtpPasswordSourceChange:
+          { from: 'override' | 'environment'; to: 'override' | 'environment' } | undefined;
 
         if (patch.branding) {
           const current = await readBranding(tx);
@@ -373,9 +388,8 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
           await tx.settings.set(BRANDING_SETTINGS_KEY, next, false);
         }
 
-        // Not privileged: a gateway address is what the catalog exists to
-        // publish. Normalised above rather than only in the route schema, so the
-        // stored value is an origin no matter who calls the service.
+        // Normalised above rather than only in the route schema, so the stored
+        // value is an origin no matter who calls the service.
         if (nextGatewayUrl !== undefined) {
           await tx.settings.set(GATEWAY_SETTINGS_KEY, { public_url: nextGatewayUrl }, false);
           changed.push('gateway.public_url');
@@ -433,15 +447,27 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
               : {}),
           };
           const connectionChanged =
-            (next.host ?? config.smtp.host ?? null) !==
+            (str(next.host) ?? config.smtp.host ?? null) !==
               (current.host ?? config.smtp.host ?? null) ||
             (next.port ?? config.smtp.port) !== (current.port ?? config.smtp.port) ||
             (next.secure ?? config.smtp.secure) !== (current.secure ?? config.smtp.secure) ||
-            (next.username ?? config.smtp.user ?? null) !==
+            (str(next.username) ?? config.smtp.user ?? null) !==
               (current.username ?? config.smtp.user ?? null);
-          const passwordSet =
-            (await tx.settings.get(SMTP_PASSWORD_SETTINGS_KEY)) !== null ||
-            config.smtp.password !== undefined;
+          const storedPassword = await tx.settings.get(SMTP_PASSWORD_SETTINGS_KEY);
+          const passwordSet = storedPassword !== null || config.smtp.password !== undefined;
+          const clearingPassword = patch.smtp.password === null || patch.smtp.password === '';
+          const connectionMatchesEnvironment =
+            (str(next.host) ?? config.smtp.host ?? null) === (config.smtp.host ?? null) &&
+            (next.port ?? config.smtp.port) === config.smtp.port &&
+            (next.secure ?? config.smtp.secure) === config.smtp.secure &&
+            (str(next.username) ?? config.smtp.user ?? null) === (config.smtp.user ?? null);
+          // Clearing an override restores the environment credential. Its connection
+          // must also belong to the environment, even when this patch did not move it.
+          if (clearingPassword && !connectionMatchesEnvironment) {
+            throw validationFailed(
+              'SMTP password can only be cleared when the connection matches the environment',
+            );
+          }
           if (connectionChanged && passwordSet && !patch.smtp.password) {
             throw validationFailed(
               'SMTP password is required when changing the SMTP connection settings',
@@ -454,7 +480,10 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
 
           if (patch.smtp.password !== undefined) {
             changed.push('smtp.password');
-            if (patch.smtp.password === null || patch.smtp.password === '') {
+            const from = storedPassword === null ? 'environment' : 'override';
+            const to = clearingPassword ? 'environment' : 'override';
+            if (from !== to) smtpPasswordSourceChange = { from, to };
+            if (clearingPassword) {
               await tx.settings.delete(SMTP_PASSWORD_SETTINGS_KEY);
             } else {
               await tx.settings.set(
@@ -484,18 +513,22 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
           await tx.settings.set(REGISTRATION_SETTINGS_KEY, next, false);
         }
 
-        // Only the *names* of the changed keys are recorded — never the values,
+        // Record key names and credential provenance, never setting values,
         // which would put the SMTP password and CAPTCHA secret in the audit log.
-        await audit
-          .forStore(tx)
-          .record(
-            actor,
-            AuditAction.ADMIN_SETTINGS_UPDATE,
-            { type: 'settings', id: null },
-            { changed_keys: changed },
-            ip,
-          );
+        await audit.forStore(tx).record(
+          actor,
+          AuditAction.ADMIN_SETTINGS_UPDATE,
+          { type: 'settings', id: null },
+          {
+            changed_keys: changed,
+            ...(smtpPasswordSourceChange
+              ? { smtp_password_source_change: smtpPasswordSourceChange }
+              : {}),
+          },
+          ip,
+        );
       });
+      brandingRevision += 1;
       // Only committed updates invalidate the cached public origin.
       if (nextGatewayUrl !== undefined) gatewayUrlCache = null;
 
@@ -515,12 +548,26 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
     },
 
     async upsertEmailTemplate(actor, key, value, ip = null): Promise<EmailTemplate> {
+      for (const field of ['subject', 'body_html', 'body_text'] as const) {
+        const variable = removedTemplateVariable(value[field]);
+        if (variable) {
+          throw validationFailed(`Template placeholder '${variable}' is no longer supported`, {
+            field,
+            variable,
+          });
+        }
+      }
+      validateTemplateLinks(value, config);
       const template = await store.emailTemplates.upsert(key, value);
       await audit.record(
         actor,
         AuditAction.ADMIN_TEMPLATE_UPDATE,
         { type: 'email_template', id: key },
-        { key },
+        {
+          key,
+          body_html_sha256: createHash('sha256').update(template.body_html, 'utf8').digest('hex'),
+          body_text_sha256: createHash('sha256').update(template.body_text, 'utf8').digest('hex'),
+        },
         ip,
       );
       return template;

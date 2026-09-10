@@ -25,6 +25,7 @@ import {
 import { formatDateTime, parseCorsOrigins } from '../lib/format';
 import {
   useApi,
+  useApiSpec,
   useApiUsage,
   useCreateTestConsumer,
   useDeleteApi,
@@ -36,7 +37,6 @@ import {
   useApproveAccessRequest,
   useDenyAccessRequest,
 } from '../hooks/useAccessRequests';
-import { useCatalogSpec } from '../hooks/useCatalog';
 import { useGrants, useRevokeGrant } from '../hooks/useGrants';
 import { useToast } from '../stores/toast';
 import { RoleGuard } from '../components/layout/RoleGuard';
@@ -97,7 +97,7 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
   const [corsOrigins, setCorsOrigins] = useState(api.cors?.allowed_origins.join('\n') ?? '');
   const [corsCredentials, setCorsCredentials] = useState(api.cors?.allow_credentials ?? false);
   const [corsWebsocketOrigins, setCorsWebsocketOrigins] = useState(
-    api.cors?.enforce_websocket_origins ?? false,
+    api.cors?.enforce_websocket_origins ?? true,
   );
   const [corsHeaders, setCorsHeaders] = useState(api.cors?.allowed_headers?.join('\n') ?? '');
   const [methods, setMethods] = useState<HttpMethod[]>(api.allowed_methods ?? []);
@@ -117,7 +117,7 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
   // The current document is not on this page, so it is fetched to offer the
   // same "use the methods declared in the spec" shortcut the publish form has.
   // An API with no stored revision simply does not get the shortcut.
-  const specQuery = useCatalogSpec(api.slug);
+  const specQuery = useApiSpec(api.id);
   const specMethods = useMemo<HttpMethod[]>(() => {
     const raw = specQuery.data?.raw_spec;
     if (!raw) return [];
@@ -336,7 +336,7 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
               />
               <Checkbox
                 label="Enforce WebSocket origins"
-                description="Requires a listed Origin on every upgrade. Rejects clients without Origin. Enable for browser-only WebSocket APIs."
+                description="Requires a listed Origin on every upgrade. Rejects clients without Origin. Disable only for non-browser clients that omit it."
                 checked={corsWebsocketOrigins}
                 onChange={(event) => setCorsWebsocketOrigins(event.target.checked)}
               />
@@ -416,7 +416,7 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
 }
 
 function SpecTab({ api }: { api: Api }): ReactElement {
-  const specQuery = useCatalogSpec(api.slug);
+  const specQuery = useApiSpec(api.id);
   const updateSpec = useUpdateApiSpec();
   const toast = useToast();
   const [draft, setDraft] = useState<string | null>(null);
