@@ -343,7 +343,7 @@ describe('catalog visibility', () => {
           const makeDocument = (server: { url: string; description?: string }) => {
             const servers = [server];
             const link = { operationId: 'listInvoices', server, 'x-extra': freeForm };
-            const response = { description: 'OK', links: { next: link } };
+            const response = { description: 'OK', links: { 'x-next': link } };
             const operation = { servers, responses: { '200': response } };
             const item = { servers, get: operation, 'x-extra': freeForm };
             return {
@@ -357,10 +357,10 @@ describe('catalog visibility', () => {
                 },
               },
               components: {
-                pathItems: { Invoices: item },
-                callbacks: { notify: { '/event': item } },
-                links: { next: link },
-                responses: { Success: response },
+                pathItems: { 'x-private': item },
+                callbacks: { 'x-notify': { '/event': item } },
+                links: { 'x-next': link },
+                responses: { 'x-success': response },
                 schemas: { Cluster: schema },
                 examples: { sample: { value: freeForm } },
               },

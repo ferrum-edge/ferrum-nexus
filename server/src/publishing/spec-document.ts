@@ -435,10 +435,16 @@ export function rewriteSpecServers(
         ]),
       );
     };
+    const registry = (value: unknown, rewrite: (child: unknown) => unknown): unknown =>
+      isRecord(value)
+        ? Object.fromEntries(Object.entries(value).map(([key, child]) => [key, rewrite(child)]))
+        : value;
     const link = (value: unknown): unknown =>
       isRecord(value) && 'server' in value ? { ...value, server: { url: serverUrl } } : value;
     const response = (value: unknown): unknown =>
-      isRecord(value) && 'links' in value ? { ...value, links: map(value.links, link) } : value;
+      isRecord(value) && 'links' in value
+        ? { ...value, links: registry(value.links, link) }
+        : value;
     const callback = (value: unknown): unknown => map(value, pathItem);
     const operation = (value: unknown): unknown => {
       if (!isRecord(value)) return value;
@@ -469,10 +475,13 @@ export function rewriteSpecServers(
     if ('webhooks' in document) copy.webhooks = map(document.webhooks, pathItem);
     if (isRecord(document.components)) {
       const components = { ...document.components };
-      if ('pathItems' in components) components.pathItems = map(components.pathItems, pathItem);
-      if ('callbacks' in components) components.callbacks = map(components.callbacks, callback);
-      if ('links' in components) components.links = map(components.links, link);
-      if ('responses' in components) components.responses = map(components.responses, response);
+      if ('pathItems' in components)
+        components.pathItems = registry(components.pathItems, pathItem);
+      if ('callbacks' in components)
+        components.callbacks = registry(components.callbacks, callback);
+      if ('links' in components) components.links = registry(components.links, link);
+      if ('responses' in components)
+        components.responses = registry(components.responses, response);
       copy.components = components;
     }
     return copy;

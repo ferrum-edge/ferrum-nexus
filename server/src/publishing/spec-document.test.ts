@@ -6,6 +6,7 @@ import { isNexusError } from '../lib/errors.js';
 import {
   assertRoutesSubmittable,
   handOwnedPlugins,
+  rewriteSpecServers,
   routesSpecDocument,
   submittableProxyBody,
   ROUTES_VALIDATE_EXTENSION,
@@ -21,6 +22,30 @@ function document(extra: Record<string, unknown> = {}): Record<string, unknown> 
     ...extra,
   };
 }
+
+describe('rewriteSpecServers for catalog documents', () => {
+  it('rewrites structural servers below x-prefixed registry entry names', () => {
+    const upstream = { url: 'https://origin.example.test/private' };
+    const rewritten = rewriteSpecServers(
+      document({
+        components: {
+          pathItems: {
+            'x-private': { servers: [upstream], get: { servers: [upstream] } },
+          },
+          callbacks: { 'x-notify': { '/event': { servers: [upstream] } } },
+          links: { 'x-next': { server: upstream } },
+          responses: {
+            'x-success': { links: { 'x-next': { server: upstream } } },
+          },
+        },
+      }),
+      'https://gateway.example.test/nexus/billing',
+      'catalog',
+    );
+
+    assert.ok(!JSON.stringify(rewritten).includes('origin.example.test'));
+  });
+});
 
 /** Assert that `fn` throws `SPEC_INVALID`, returning the error for inspection. */
 function expectSpecInvalid(fn: () => unknown): { message: string; details: unknown } {
