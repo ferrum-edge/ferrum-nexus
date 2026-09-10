@@ -1156,13 +1156,13 @@ the proxy's own `allowed_ws_origins`, whose default (`[]`) is _no check at all_.
 A page on any origin could otherwise open a socket to a published API and ride
 a logged-in browser's ambient credentials.
 
-Nexus mirrors exact HTTP(S) CORS origins into `allowed_ws_origins` only when
-`cors.enforce_websocket_origins` is explicitly `true`. Wildcards are refused in
-this mode. Edge has no option to allow a missing Origin while enforcing this
+Nexus mirrors exact HTTP(S) CORS origins into `allowed_ws_origins` by default.
+Only an explicit `cors.enforce_websocket_origins: false` disables the check, so
+older CORS policies that predate the setting remain protected. Wildcards are
+refused in this mode. Edge has no option to allow a missing Origin while enforcing this
 list: an origin-less upgrade is rejected along with an unlisted origin.
 
-The toggle defaults to **false** so adding a browser CORS policy does not break
-non-browser WebSocket clients. With it off, upgrades from any origin pass the
+The toggle defaults to **true**. With it off, upgrades from any origin pass the
 origin gate. Authentication and ACLs still apply, but browser-borne credentials
 can be exposed to CSWSH. Providers of browser-only WebSocket APIs should enable
 the toggle and list their trusted origins. Mixed-client APIs need an upstream
@@ -1170,9 +1170,8 @@ origin policy if they require both origin-less clients and browser CSWSH
 protection. Removing CORS clears the origin gate.
 
 No startup migration rewrites existing gateway proxies. Their previous origin
-lists remain until the provider saves CORS; the Settings toggle makes the new
-choice explicit. Review browser-only APIs when upgrading and opt in before
-saving to retain their existing CSWSH protection.
+lists remain until the provider saves CORS; saving a legacy CORS policy preserves
+the origin check unless the provider explicitly disables it.
 
 ### CAPTCHA
 
@@ -1500,7 +1499,7 @@ Before going live:
       than one Ferrum Edge data-plane replica — otherwise every provider's
       quota is multiplied by the replica count.
 - [ ] Providers fronting a browser-facing WebSocket backend have listed their
-      CORS origins and enabled `cors.enforce_websocket_origins`.
+      CORS origins and have not disabled `cors.enforce_websocket_origins`.
 - [ ] `NEXUS_ALLOW_PRIVATE_UPSTREAMS` is left at `false` unless the portal is
       meant to front internal services, in which case gateway egress is
       restricted at the network layer.

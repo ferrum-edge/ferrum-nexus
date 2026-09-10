@@ -63,8 +63,8 @@
  *   CORS policy, or every browser preflight would fail;
  * - the `cors` plugin does not run on a WebSocket upgrade at all, and an
  *   HTTP proxy on Edge accepts upgrades on the same listen path, so the CORS
- *   origins are mirrored into `allowed_ws_origins` only when the provider opts
- *   into the CSWSH check with `cors.enforce_websocket_origins`.
+ *   origins are mirrored into `allowed_ws_origins` unless the provider explicitly
+ *   opts out of the CSWSH check with `cors.enforce_websocket_origins: false`.
  *
  * The `apis` row stores the provider's own method list and nothing for the WS
  * origins; both derivations are recomputed whenever either input changes.
@@ -540,11 +540,12 @@ export function proxyAllowedMethods(
 }
 
 /**
- * Opt-in CSWSH protection. Edge has no allow-missing-Origin option: a nonempty
- * list rejects origin-less clients too. Only exact origins can be mirrored.
+ * Default-on CSWSH protection. Edge has no allow-missing-Origin option: a nonempty
+ * list rejects origin-less clients too. Only an explicit `false` opts out, so
+ * legacy CORS records that predate this setting retain their origin check.
  */
 export function wsOriginsFor(cors: CorsConfig | null): string[] {
-  if (!cors?.enforce_websocket_origins) return [];
+  if (!cors || cors.enforce_websocket_origins === false) return [];
   if (cors.allowed_origins.includes('*')) return [];
   return cors.allowed_origins.filter((origin) =>
     /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^*\s]+$/.test(origin),

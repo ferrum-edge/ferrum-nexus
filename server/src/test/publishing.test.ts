@@ -487,7 +487,7 @@ describe('publishing', () => {
       assert.deepEqual(api.allowed_methods, ['GET', 'POST'], 'the row keeps the provider’s list');
     });
 
-    it('mirrors exact CORS origins into allowed_ws_origins only when opted in', async () => {
+    it('mirrors exact CORS origins into allowed_ws_origins by default', async () => {
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -496,7 +496,6 @@ describe('publishing', () => {
           cors: {
             allowed_origins: ['https://app.example.com', 'https://admin.example.com:8443'],
             allow_credentials: true,
-            enforce_websocket_origins: true,
           },
         }),
       });
@@ -534,7 +533,11 @@ describe('publishing', () => {
         );
         assert.match(preflight['access-control-allow-headers'] ?? '', /X-Tenant/);
         assert.equal(preflight['access-control-allow-methods'], 'GET, OPTIONS');
-        assert.equal(mockWebsocketAllowed(storedProxy(harness, proxyId)), true);
+        assert.equal(mockWebsocketAllowed(storedProxy(harness, proxyId)), false);
+        assert.equal(
+          mockWebsocketAllowed(storedProxy(harness, proxyId), 'https://app.example.com'),
+          true,
+        );
 
         // A method-only PATCH must also rebuild the CORS advertisement.
         const changed = await harness.authed(provider, {
@@ -559,7 +562,7 @@ describe('publishing', () => {
       assert.deepEqual(mockCorsPreflight(undefined), {});
     });
 
-    it('makes the WebSocket origin gate an explicit opt-in and supports clearing it', async () => {
+    it('defaults the WebSocket origin gate on and supports explicitly clearing it', async () => {
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -571,6 +574,15 @@ describe('publishing', () => {
       assert.equal(response.statusCode, 201, response.body);
       const api = response.json<PublishApiResponse>().api;
       const proxyId = String(api.ferrum_proxy_id);
+      assert.equal(mockWebsocketAllowed(storedProxy(harness, proxyId)), false);
+      assert.equal(
+        mockWebsocketAllowed(storedProxy(harness, proxyId), 'https://evil.example.com'),
+        false,
+      );
+      assert.equal(
+        mockWebsocketAllowed(storedProxy(harness, proxyId), 'https://APP.example.com'),
+        true,
+      );
       for (const enforce of [false, true, false]) {
         const saved = await harness.authed(provider, {
           method: 'PATCH',
