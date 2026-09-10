@@ -1167,6 +1167,7 @@ describe('publishing', () => {
         proxy.plugins = associatedIds(harness, proxyId)
           .filter((value) => value !== id)
           .map((plugin_config_id) => ({ plugin_config_id }));
+        const auditsBefore = (await harness.auditRows('api.update')).length;
         const saved = await harness.authed(provider, {
           method: 'PATCH',
           url: `/api/apis/${apiId}`,
@@ -1175,6 +1176,12 @@ describe('publishing', () => {
         assert.equal(saved.statusCode, 200, saved.body);
         assert.equal(String(harness.edge.pluginForProxy(proxyId, pluginName)!.id), id);
         assert.ok(effectiveNames(harness, proxyId).includes(pluginName));
+        const rows = await harness.auditRows('api.update');
+        assert.equal(rows.length, auditsBefore + 1);
+        assert.deepEqual(rows[0]?.details, {
+          changed_fields: [],
+          gateway_reconciled: true,
+        });
       });
     }
 
@@ -1557,6 +1564,44 @@ describe('publishing', () => {
       assert.equal(reset.backend_read_timeout_ms, 30_000);
       assert.equal(reset.backend_write_timeout_ms, 30_000);
       assert.equal(reset.circuit_breaker, null);
+    });
+
+    it('audits a database-equal PATCH that repairs drifted proxy settings', async () => {
+      const settings = {
+        allowed_methods: ['GET', 'DELETE'],
+        timeouts: { connect_ms: 800, read_ms: 9_000, write_ms: 11_000 },
+      };
+      const applied = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: settings,
+      });
+      assert.equal(applied.statusCode, 200, applied.body);
+
+      const proxy = storedProxy(harness, proxyId);
+      proxy.allowed_methods = ['GET'];
+      proxy.backend_connect_timeout_ms = 100;
+      proxy.backend_read_timeout_ms = 200;
+      proxy.backend_write_timeout_ms = 300;
+      const auditsBefore = (await harness.auditRows('api.update')).length;
+
+      const repaired = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: settings,
+      });
+      assert.equal(repaired.statusCode, 200, repaired.body);
+      assert.deepEqual(storedProxy(harness, proxyId).allowed_methods, ['GET', 'DELETE']);
+      assert.equal(storedProxy(harness, proxyId).backend_connect_timeout_ms, 800);
+      assert.equal(storedProxy(harness, proxyId).backend_read_timeout_ms, 9_000);
+      assert.equal(storedProxy(harness, proxyId).backend_write_timeout_ms, 11_000);
+
+      const rows = await harness.auditRows('api.update');
+      assert.equal(rows.length, auditsBefore + 1);
+      assert.deepEqual(rows[0]?.details, {
+        changed_fields: [],
+        gateway_reconciled: true,
+      });
     });
 
     it('does not overwrite an operator-tuned breaker when its boolean is replayed', async () => {

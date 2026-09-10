@@ -716,6 +716,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     return binder.find(plugins, name);
   }
 
+  function associatedIds(proxy: EdgeProxy): string[] {
+    return (proxy.plugins ?? []).map((entry) => entry.plugin_config_id);
+  }
+
   /** Unique slug, or `CONFLICT` when the provider's choice is taken. */
   async function resolveSlug(requested: string | undefined, name: string): Promise<string> {
     const slug = slugify(requested && requested.trim() !== '' ? requested : name);
@@ -1120,6 +1124,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         const update: Partial<ApiRecord> = {};
         const changed: string[] = [];
         const details: Record<string, unknown> = {};
+        let gatewayMutated = false;
 
         if (patch.name !== undefined) {
           const name = patch.name.trim();
@@ -1267,7 +1272,24 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           ): Promise<boolean> => {
             const live = findPlugin(plugins, pluginName);
             if (isDeepStrictEqual(next, current) && !derivedChanged) {
-              if (next !== null && live) await associate(gatewayProxyId, [live.id], actor.id);
+              if (next !== null && live) {
+                await mutateProxy(
+                  gatewayProxyId,
+                  (proxy) => {
+                    const currentIds = associatedIds(proxy);
+                    if (currentIds.includes(live.id)) return null;
+                    gatewayMutated = true;
+                    undo.push(() => disassociate(gatewayProxyId, [live.id], actor.id));
+                    return {
+                      ...proxy,
+                      plugins: [...currentIds, live.id].map((plugin_config_id) => ({
+                        plugin_config_id,
+                      })),
+                    };
+                  },
+                  actor.id,
+                );
+              }
               return false;
             }
             await reconcileOptionalPlugin(
@@ -1421,6 +1443,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   );
                   if (!differs) return null;
                   written = true;
+                  gatewayMutated = true;
                   return { ...proxy, ...proxySettings };
                 },
                 actor.id,
@@ -1450,12 +1473,18 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             }
           }
 
-          // A no-op PATCH still answers with the API as the wire describes it.
-          if (changed.length === 0) return presentApi(api, await settings.getGatewayPublicUrl());
-
-          const persisted = await store.apis.update(api.id, update);
-          if (!persisted) throw notFound('API', apiId);
-          updated = persisted;
+          if (changed.length === 0) {
+            // Reconciliation can repair live gateway drift without changing the
+            // Nexus row. That is still a state-changing operation and must retain
+            // the caller attribution in the audit trail.
+            if (!gatewayMutated) return presentApi(api, await settings.getGatewayPublicUrl());
+            details.gateway_reconciled = true;
+            updated = api;
+          } else {
+            const persisted = await store.apis.update(api.id, update);
+            if (!persisted) throw notFound('API', apiId);
+            updated = persisted;
+          }
         } catch (error) {
           // Compensation is best-effort by contract: the PATCH is already
           // failing, and an undo step that throws must not replace the failure
