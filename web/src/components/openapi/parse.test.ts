@@ -64,4 +64,27 @@ describe('parseSpecText', () => {
     expect(result.error).toMatch(/Could not parse the specification as JSON/);
     expect(parseYaml).not.toHaveBeenCalled();
   });
+
+  it('deduplicates operation tags before creating grouped card entries', () => {
+    const result = parseSpecText(
+      JSON.stringify({
+        openapi: '3.0.3',
+        info: { title: 'Tagged API', version: '1.0.0' },
+        paths: {
+          '/things': {
+            get: {
+              tags: Array.from({ length: 200 }, () => 'Things'),
+              responses: { '200': { description: 'ok' } },
+            },
+          },
+        },
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.spec.groups).toHaveLength(1);
+    expect(result.spec.groups[0]?.operations).toHaveLength(1);
+    expect(result.spec.groups[0]?.operations[0]?.tags).toEqual(['Things']);
+  });
 });

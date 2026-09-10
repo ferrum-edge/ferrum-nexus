@@ -156,9 +156,13 @@ function readOperations(doc: SpecNode): SpecOperation[] {
         }
       }
 
-      const tags = (asArray(operation.tags) ?? [])
-        .map(asString)
-        .filter((tag): tag is string => tag !== null);
+      const tags = [
+        ...new Set(
+          (asArray(operation.tags) ?? [])
+            .map(asString)
+            .filter((tag): tag is string => tag !== null),
+        ),
+      ];
 
       operations.push({
         id: `${method}-${path}`,
