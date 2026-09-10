@@ -458,7 +458,10 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
         return rendered;
       } catch (error) {
         deps.log?.(
-          { template: templateKey, error: error instanceof Error ? error.message : 'render failed' },
+          {
+            template: templateKey,
+            error: error instanceof Error ? error.message : 'render failed',
+          },
           'Refused unsafe email template',
         );
         throw error;
