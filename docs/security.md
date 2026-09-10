@@ -1106,8 +1106,10 @@ reaching the database on every repeat load.
 
 Committed local settings writes (including CAPTCHA and registration policy)
 invalidate the server memo before the mutation responds, and `bootstrap_required`
-is read live on every request rather than memoised, so no instance keeps
-advertising an open founder seat after another instance fills it. The TTL bounds
+is read live rather than memoised, so no instance keeps advertising an open
+founder seat after another instance fills it. Concurrent anonymous requests
+coalesce onto one in-flight count query per instance, so a burst cannot hold
+more than one seat check against the database pool at a time. The TTL bounds
 cross-instance server staleness of the remaining fields only; browser/CDN copies
 retain their advertised `max-age`.
 

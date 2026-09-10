@@ -98,6 +98,37 @@ function memoizeBranding(
   };
 }
 
+/**
+ * Coalesce concurrent database-backed founder-seat checks onto one query.
+ *
+ * Deliberately NOT a cache: the founder seat is a cross-instance state
+ * transition, so no result is retained once the query settles and every
+ * request that arrives afterwards reads the database again. What this bounds
+ * is anonymous amplification — however many `/api/branding` requests arrive
+ * while one count query is in flight, they all wait on that single query, so
+ * an instance never holds more than one seat check against the pool at a
+ * time. A same-instance seat claim bumps the revision, which makes callers
+ * that were waiting on a pre-claim query re-read rather than trust its answer.
+ */
+function coalesceBootstrapRequired(
+  getRevision: () => number,
+  run: () => Promise<boolean>,
+): () => Promise<boolean> {
+  let pending: { revision: number; promise: Promise<boolean> } | null = null;
+
+  return async function loadBootstrapRequired(): Promise<boolean> {
+    const revision = getRevision();
+    if (!pending || pending.revision !== revision) {
+      const promise = run().finally(() => {
+        if (pending?.promise === promise) pending = null;
+      });
+      pending = { revision, promise };
+    }
+    const value = await pending.promise;
+    return getRevision() === revision ? value : loadBootstrapRequired();
+  };
+}
+
 /** Weak ETag for a branding payload — stable for the cached object identity. */
 export function brandingEtag(payload: BrandingResponse): string {
   return `"${createHash('sha256').update(JSON.stringify(payload)).digest('hex')}"`;
@@ -127,13 +158,15 @@ export const brandingRoutes: FastifyPluginAsync<BrandingRoutesOptions> = async (
     settings.getBrandingRevision,
     assembleBranding,
   );
+  const loadBootstrapRequired = coalesceBootstrapRequired(
+    auth.getBrandingRevision,
+    auth.bootstrapRequired,
+  );
 
   app.get('/', async (request: FastifyRequest, reply: FastifyReply): Promise<BrandingResponse> => {
-    // The seat check is one indexed count and is read live on every request:
-    // see `CachedBrandingPayload`.
     const [cached, bootstrap_required] = await Promise.all([
       loadBranding(),
-      auth.bootstrapRequired(),
+      loadBootstrapRequired(),
     ]);
     const payload: BrandingResponse = { ...cached.value, bootstrap_required };
     const maxAgeSec =
