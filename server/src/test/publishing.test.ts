@@ -16,6 +16,7 @@ import {
   type UpdateApiSpecResponse,
 } from '@ferrum-nexus/shared';
 
+import type { AuditLogRecord } from '../db/store.js';
 import {
   SAMPLE_SPEC_JSON,
   SAMPLE_SPEC_YAML,
@@ -87,6 +88,27 @@ function associatedIds(harness: TestApp, proxyId: string): string[] {
   return plugins
     .map((entry) => String((entry as { plugin_config_id: unknown }).plugin_config_id))
     .sort();
+}
+
+/**
+ * Ids of the audit rows for an action that already exist.
+ *
+ * Rows accumulate across the whole file on one shared harness, and
+ * `created_at` is only millisecond-precise — two rows written in the same
+ * millisecond tie-break on a random uuid. Diffing ids is the only ordering-free
+ * way to name the row a single request wrote.
+ */
+async function auditIds(harness: TestApp, action: string): Promise<Set<string>> {
+  return new Set((await harness.auditRows(action)).map((entry) => entry.id));
+}
+
+/** The rows for an action that appeared since {@link auditIds} was taken. */
+async function auditRowsSince(
+  harness: TestApp,
+  action: string,
+  before: Set<string>,
+): Promise<AuditLogRecord[]> {
+  return (await harness.auditRows(action)).filter((entry) => !before.has(entry.id));
 }
 
 /** The proxy document the mock currently stores. */
@@ -1179,6 +1201,7 @@ describe('publishing', () => {
         proxy.plugins = associatedIds(harness, proxyId)
           .filter((value) => value !== id)
           .map((plugin_config_id) => ({ plugin_config_id }));
+        const auditIdsBefore = await auditIds(harness, 'api.update');
         const saved = await harness.authed(provider, {
           method: 'PATCH',
           url: `/api/apis/${apiId}`,
@@ -1187,6 +1210,14 @@ describe('publishing', () => {
         assert.equal(saved.statusCode, 200, saved.body);
         assert.equal(String(harness.edge.pluginForProxy(proxyId, pluginName)!.id), id);
         assert.ok(effectiveNames(harness, proxyId).includes(pluginName));
+        // Repairing the association changed no Nexus field, but it did change
+        // the gateway, so the caller still has to be named in the log.
+        const added = await auditRowsSince(harness, 'api.update', auditIdsBefore);
+        assert.equal(added.length, 1);
+        assert.deepEqual(added[0]?.details, {
+          changed_fields: [],
+          gateway_reconciled: true,
+        });
       });
     }
 
@@ -1569,6 +1600,72 @@ describe('publishing', () => {
       assert.equal(reset.backend_read_timeout_ms, 30_000);
       assert.equal(reset.backend_write_timeout_ms, 30_000);
       assert.equal(reset.circuit_breaker, null);
+    });
+
+    it('audits a database-equal PATCH that repairs drifted proxy settings', async () => {
+      const settings = {
+        allowed_methods: ['GET', 'DELETE'],
+        timeouts: { connect_ms: 800, read_ms: 9_000, write_ms: 11_000 },
+      };
+      const applied = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: settings,
+      });
+      assert.equal(applied.statusCode, 200, applied.body);
+
+      const proxy = storedProxy(harness, proxyId);
+      proxy.allowed_methods = ['GET'];
+      proxy.backend_connect_timeout_ms = 100;
+      proxy.backend_read_timeout_ms = 200;
+      proxy.backend_write_timeout_ms = 300;
+      const auditIdsBefore = await auditIds(harness, 'api.update');
+
+      const repaired = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: settings,
+      });
+      assert.equal(repaired.statusCode, 200, repaired.body);
+      assert.deepEqual(storedProxy(harness, proxyId).allowed_methods, ['GET', 'DELETE']);
+      assert.equal(storedProxy(harness, proxyId).backend_connect_timeout_ms, 800);
+      assert.equal(storedProxy(harness, proxyId).backend_read_timeout_ms, 9_000);
+      assert.equal(storedProxy(harness, proxyId).backend_write_timeout_ms, 11_000);
+
+      const added = await auditRowsSince(harness, 'api.update', auditIdsBefore);
+      assert.equal(added.length, 1);
+      assert.deepEqual(added[0]?.details, {
+        changed_fields: [],
+        gateway_reconciled: true,
+      });
+    });
+
+    it('writes nothing when a PATCH replays settings the proxy never carried', async () => {
+      // Published without timeouts or a method list, so the proxy carries
+      // neither field and the gateway is applying its own defaults. Replaying
+      // the catalog's `null`s asks for exactly what is already running: an
+      // absent field is the default, not drift, so there is no whole-resource
+      // replace to make and no repair to bill to the audit trail.
+      const before = storedProxy(harness, proxyId);
+      assert.equal(before.allowed_methods, undefined);
+      assert.equal(before.backend_connect_timeout_ms, undefined);
+      const auditIdsBefore = await auditIds(harness, 'api.update');
+
+      const replayed = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { cors: null, allowed_methods: null, timeouts: null },
+      });
+      assert.equal(replayed.statusCode, 200, replayed.body);
+
+      // A `PUT` would have written the defaults out as values — see the reset
+      // above — so their continued absence is the proof that none was issued.
+      const after = storedProxy(harness, proxyId);
+      assert.equal(after.allowed_methods, undefined);
+      assert.equal(after.backend_connect_timeout_ms, undefined);
+      assert.equal(after.backend_read_timeout_ms, undefined);
+      assert.equal(after.backend_write_timeout_ms, undefined);
+      assert.deepEqual(await auditRowsSince(harness, 'api.update', auditIdsBefore), []);
     });
 
     it('does not overwrite an operator-tuned breaker when its boolean is replayed', async () => {

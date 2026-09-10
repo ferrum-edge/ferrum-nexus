@@ -740,6 +740,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     return binder.find(plugins, name);
   }
 
+  function associatedIds(proxy: EdgeProxy): string[] {
+    return (proxy.plugins ?? []).map((entry) => entry.plugin_config_id);
+  }
+
   /** Unique slug, or `CONFLICT` when the provider's choice is taken. */
   async function resolveSlug(requested: string | undefined, name: string): Promise<string> {
     const slug = slugify(requested && requested.trim() !== '' ? requested : name);
@@ -1222,6 +1226,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         const update: Partial<ApiRecord> = {};
         const changed: string[] = [];
         const details: Record<string, unknown> = {};
+        let gatewayMutated = false;
 
         if (patch.name !== undefined) {
           const name = patch.name.trim();
@@ -1402,7 +1407,37 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           ): Promise<boolean> => {
             const live = findPlugin(plugins, pluginName);
             if (isDeepStrictEqual(next, current) && !derivedChanged) {
-              if (next !== null && live) await associate(gatewayProxyId, [live.id], actor.id);
+              if (next !== null && live) {
+                // `associateLocked` would do the same idempotent
+                // read-modify-write, but it reports nothing back: whether the
+                // association was missing is exactly what decides between "this
+                // PATCH changed nothing" and "this PATCH repaired the gateway",
+                // and it is only knowable from the document the mutator is
+                // handed. Same shape `reconcileOptionalPluginLocked` uses —
+                // one `GET`, the undo registered between it and the `PUT`.
+                await mutateProxy(
+                  gatewayProxyId,
+                  (proxy) => {
+                    const currentIds = associatedIds(proxy);
+                    // Already named by the proxy: no write, so nothing to undo
+                    // and nothing to audit.
+                    if (currentIds.includes(live.id)) return null;
+                    gatewayMutated = true;
+                    // Register before PUT: a lost response can still mean it
+                    // landed.
+                    pushUndo(`the ${pluginName} plugin association`, () =>
+                      disassociate(gatewayProxyId, [live.id], actor.id),
+                    );
+                    return {
+                      ...proxy,
+                      plugins: [...currentIds, live.id].map((plugin_config_id) => ({
+                        plugin_config_id,
+                      })),
+                    };
+                  },
+                  actor.id,
+                );
+              }
               return false;
             }
             await reconcileOptionalPlugin(
@@ -1557,8 +1592,18 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 proxyId,
                 (proxy) => {
                   const record = proxy as unknown as Record<string, unknown>;
+                  // A field the proxy does not carry is the gateway applying its
+                  // own default — `GET` omits what was never set, and Nexus
+                  // itself omits the timeouts and `allowed_methods` at creation
+                  // when the provider chose none. Comparing against the raw
+                  // absence would read every replayed default as drift, replace
+                  // the whole resource to write back what it already does, and
+                  // bill the audit trail for a repair that never happened. The
+                  // same table the undo restores from says what an absence
+                  // means.
                   const differs = Object.entries(proxySettings).some(
-                    ([field, value]) => !isDeepStrictEqual(record[field], value),
+                    ([field, value]) =>
+                      !isDeepStrictEqual(record[field] ?? PROXY_SETTING_DEFAULTS[field], value),
                   );
                   // Nothing to put back: returning `null` skips the `PUT`
                   // entirely, which is the only case where suppressing the undo
@@ -1566,6 +1611,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                   // unknowable from a rejected promise, so from here on the
                   // undo is registered whatever happens.
                   if (!differs) return null;
+                  // The `PUT` is about to be attempted, so the PATCH has
+                  // mutated the gateway whatever the response says — that is
+                  // what earns the audit row on an otherwise database-equal
+                  // request.
+                  gatewayMutated = true;
                   // Register before PUT: a lost response can still mean it
                   // landed — and this write carries `allowed_ws_origins`, so
                   // the shape that gets lost is the CSWSH origin check going
@@ -1603,12 +1653,18 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             }
           }
 
-          // A no-op PATCH still answers with the API as the wire describes it.
-          if (changed.length === 0) return presentApi(api, await settings.getGatewayPublicUrl());
-
-          const persisted = await store.apis.update(api.id, update);
-          if (!persisted) throw notFound('API', apiId);
-          updated = persisted;
+          if (changed.length === 0) {
+            // Reconciliation can repair live gateway drift without changing the
+            // Nexus row. That is still a state-changing operation and must retain
+            // the caller attribution in the audit trail.
+            if (!gatewayMutated) return presentApi(api, await settings.getGatewayPublicUrl());
+            details.gateway_reconciled = true;
+            updated = api;
+          } else {
+            const persisted = await store.apis.update(api.id, update);
+            if (!persisted) throw notFound('API', apiId);
+            updated = persisted;
+          }
         } catch (error) {
           // Compensation is best-effort by contract: the PATCH is already
           // failing, and an undo step that throws must not replace the failure
