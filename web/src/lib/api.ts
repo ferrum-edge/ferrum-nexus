@@ -48,6 +48,7 @@ import {
   type ForgotPasswordRequest,
   type ForgotPasswordResponse,
   type GetApiResponse,
+  type GetApiSpecResponse,
   type GetEmailTemplateResponse,
   type GetMeUserResponse,
   type GetThreadQuery,
@@ -373,6 +374,8 @@ export const catalogApi = {
 /* ── Publishing (provider) ──────────────────────────────────────────────── */
 
 export const apisApi = {
+  spec: (id: string): Promise<GetApiSpecResponse> =>
+    get<GetApiSpecResponse>(`/apis/${encodeURIComponent(id)}/spec`),
   list: (query: ListApisQuery = {}): Promise<ListApisResponse> =>
     get<ListApisResponse>('/apis', { ...query }),
   get: (id: string): Promise<GetApiResponse> =>

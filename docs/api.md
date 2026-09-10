@@ -91,7 +91,9 @@ booleans accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`.
 - Every id is a string UUID; every timestamp is an ISO-8601 string.
 - Absent optional values are `null`, not omitted.
 - Request bodies are `application/json`. The body limit is 4 MiB; an uploaded
-  OpenAPI document is additionally capped at 2 MiB.
+  OpenAPI document is additionally capped at 2 MiB, and by structural limits on
+  paths, operations, nesting depth and render cost (see
+  [`POST /api/apis`](#post-apiapis)).
 - All `/api` responses carry `cache-control: no-store`.
 
 ---
@@ -437,7 +439,21 @@ _public_ — widget configuration. Never carries the vendor secret.
 ### `GET /api/branding`
 
 _public_ — the one unauthenticated read besides health. Drives the login page
-before a session exists.
+before a session exists. **Rate-limited** to 120 requests per minute per IP when
+`NEXUS_RATE_LIMIT_ENABLED=true` (always off under `NEXUS_ENV=test`).
+
+The payload is **cached for `NEXUS_BRANDING_CACHE_MS`** (default 5 s) and served
+with `Cache-Control: public, max-age=…` and an `ETag`. Send `If-None-Match` with
+the prior `ETag` to receive `304 Not Modified`. Concurrent callers share one
+in-flight assembly. `0` disables the cache.
+
+Committed settings writes invalidate the server memo on the instance handling
+the mutation before it responds. The next GET reaching that instance reflects
+the change; an old ETag returns `200` with the new body when the payload
+changes. `bootstrap_required` is never memoised: it is read live on every
+request, so a founder seated on any instance is reflected everywhere at once.
+The TTL bounds cross-instance server staleness of the remaining fields only;
+browser/CDN copies retain their advertised `max-age`.
 
 ```json
 {
@@ -835,11 +851,13 @@ _admin_, except `smtp` and `captcha` which are **_super_admin_** — partial
 update; **omitted sections are untouched**, and omitted fields inside a supplied
 section keep their current value.
 
-A body carrying an `smtp` or `captcha` section from an ordinary `admin` is
-refused with `403 FORBIDDEN` and nothing is written — not even the sections that
-would have been allowed. Mail and CAPTCHA are escalation surfaces, not
-preferences: repointing SMTP delivers every verification and password-reset link
-to the operator, and CAPTCHA is the registration brake.
+A body carrying an `smtp`, `captcha` or `gateway` section from an ordinary
+`admin` is refused with `403 FORBIDDEN` and nothing is written — not even the
+sections that would have been allowed. Mail, CAPTCHA and the gateway origin are
+escalation surfaces, not preferences: repointing SMTP delivers every
+verification and password-reset link to the operator, CAPTCHA is the
+registration brake, and the gateway origin is where every client is told to
+send its gateway credentials.
 
 | Section        | Fields                                                                                                                                                                                                                                                                                                                                                                                                       |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -847,7 +865,17 @@ to the operator, and CAPTCHA is the registration brake.
 | `captcha`      | _super_admin_ — `enabled`, `provider` (`none`\|`recaptcha`\|`hcaptcha`\|`turnstile`), `site_key` (nullable), `secret_key` — **write-only**, stored AES-256-GCM encrypted; pass `null` or `""` to clear                                                                                                                                                                                                       |
 | `smtp`         | _super_admin_ — `host`, `port` (1–65535), `secure`, `username`, `password` — **write-only**, encrypted; `null`/`""` clears — `from_address`. Changing `host`, `port`, `secure` or `username` while a password is stored (or set by env) requires sending a fresh `password` in the same request (`400 VALIDATION_FAILED` otherwise), so a stored credential can never be replayed against a different server |
 | `registration` | `open_registration`, `require_email_verification`, `allowed_roles` (array of roles)                                                                                                                                                                                                                                                                                                                          |
-| `gateway`      | `public_url` — absolute `http(s)` **origin** of the gateway's proxy listener, no path, query or credentials; a trailing slash is stripped. `null` or `""` clears the override and falls back to `FERRUM_GATEWAY_PUBLIC_URL`. Editable by any `admin`.                                                                                                                                                        |
+| `gateway`      | _super_admin_ — `public_url` — absolute `http(s)` **origin** of the gateway's proxy listener, no path, query or credentials; a trailing slash is stripped. `null` or `""` clears the override and falls back to `FERRUM_GATEWAY_PUBLIC_URL`. Whoever controls it directs clients to send their gateway credentials to that origin, so it needs `super_admin` like `smtp` and `captcha`.                      |
+
+SMTP connection changes are compared after merging stored overrides over the
+environment defaults. Clearing the SMTP password with `null` or `""` restores
+the environment password and is allowed only when the effective `host`, `port`,
+`secure`, and `username` all match the environment connection. Otherwise the
+entire patch fails with `400 VALIDATION_FAILED`, even when no connection field
+is included in that patch. Restore the environment connection with a fresh
+password before clearing the override. The `admin.settings_update` audit details
+include `smtp_password_source_change: { from, to }` when the source changes
+between `override` and `environment`; no credential or connection values are logged.
 
 An enabled CAPTCHA configuration requires a provider other than `none`, a
 non-empty site key, and a usable secret (supplied now or already stored).
@@ -892,7 +920,7 @@ set.
 
 ### `GET /api/admin/email-templates/:key`
 
-_admin_ — `key` ∈ `verification`, `access_approved`, `access_denied`,
+_admin_ — `key` ∈ `verification`, `password_reset`, `access_approved`, `access_denied`,
 `access_revoked`, `message_received`, `mass`, `credential_rotated`.
 
 ```json
@@ -923,10 +951,46 @@ _admin_ — `key` ∈ `verification`, `access_approved`, `access_denied`,
 
 When no override exists, the built-in default is returned with a synthetic id.
 
+`available_variables` lists supported placeholder names. Every template includes
+`portal_name`, `portal_url`, `recipient_name`, `recipient_email`, and `year`.
+`password_reset` adds only `reset_url`; `verification` adds only `verification_url`.
+Neither `reset_token` nor `verification_token` is advertised or interpolated.
+Existing stored references to those retired placeholders render as empty strings.
+See the [admin guide](guides/admin-guide.md#placeholders) for the other keys.
+
 ### `PUT /api/admin/email-templates/:key`
 
 _admin_ — body `subject` (1–300), `body_html` (1–100 000), `body_text`
 (1–100 000). All three are required. → `{ "template": EmailTemplate }`.
+
+Referencing `{{reset_token}}` or `{{verification_token}}` in any of these fields
+returns `400 VALIDATION_FAILED`, including whitespace-padded placeholders. The
+error message names the retired variable and `details` contains `field` and
+`variable`. No template is saved. Use `{{reset_url}}` / `{{verification_url}}`
+for the server-generated action links; other unknown placeholders still render
+empty. A successful save records `body_html_sha256` and `body_text_sha256` in
+`admin.template_update` audit details, as SHA-256 hex digests of each saved UTF-8
+body string.
+
+All three fields also enforce the email link policy. Absolute HTTP(S) URLs,
+protocol-relative URLs, URL attributes (`href`, `src`, `action`, `srcset`,
+`data`, `poster`, `formaction`, `background`, `xlink:href`) and CSS `url(...)`
+must resolve to the `NEXUS_PUBLIC_URL` origin or an exact host in the
+operator-only `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS` setting. The default
+allowlist is empty. HTML entities and scheme/host case are normalized;
+`javascript:` and `data:` are always refused. Ambiguous or active HTML/CSS is
+also refused; see the [template authoring rules](guides/admin-guide.md#placeholders).
+
+`{{reset_url}}` and `{{verification_url}}` may only be the entire `href` value
+of an HTML anchor or a whitespace-delimited URL in `body_text`. Other attributes,
+HTML text, subjects and concatenation into another URL are refused, including
+URLs on approved hosts. Any placeholder in a URL or attribute must supply the
+entire value. A violation returns `400 VALIDATION_FAILED` before saving or
+auditing; the message names the field, offending host or construct, and setting.
+`details` contains `field`, `construct`, and `setting`. URL paths, query strings
+and token values are not included in these errors. Stored templates and their
+rendered destinations are revalidated before enqueueing; refusal logs a warning
+and creates no outbox entry.
 
 ### `POST /api/admin/mass-email`
 
@@ -1163,7 +1227,7 @@ latest request for this API; `my_grant` their active grant. Both may be `null`.
 
 ### `GET /api/catalog/:slug/spec`
 
-_session_ — the raw current document.
+_session_ — the normalized current document for consumers.
 
 ```json
 {
@@ -1177,7 +1241,20 @@ _session_ — the raw current document.
 ```
 
 `content_type` is `application/json` or `application/yaml`, matching
-`raw_spec`. `404 NOT_FOUND` when the API is not viewable or has no spec.
+`raw_spec`. JSON uploads remain JSON; YAML uploads remain YAML. Formatting and
+YAML comments are not preserved. OpenAPI root, path-item and operation `servers`
+are replaced with the API's `invoke_url`, including those in webhooks, reusable
+path items and callbacks. Link Object `server` entries in components and response
+links are also replaced. Schemas, examples and extensions remain untouched.
+When the public gateway origin is unset, only `listen_path` is
+used; neither the upstream nor the Admin API origin is a fallback. The
+Documentation tab renders this same normalized document.
+
+`404 NOT_FOUND` when the API is not viewable or has no spec. A stored document
+that cannot be normalized returns `400 SPEC_INVALID` without its contents or
+parser diagnostics. `internal` APIs remain unlisted but readable by signed-in
+users holding the link. The provider's original is available only through
+`GET /api/apis/:id/spec`.
 
 ---
 
@@ -1320,6 +1397,17 @@ then persists.
 Uploads accept at most 200 nested object/array levels, counting the root as level
 one, in either enforcement mode. Deeper documents return `400 SPEC_INVALID` with
 `details: { reason: "nesting_too_deep", limit: 200 }` before a gateway call.
+
+A document must also stay inside what the built-in documentation viewer can
+render. Bytes, paths and operations do not bound that: one declared operation
+can carry any number of parameters, media types and schema nodes, and every
+signed-in viewer of the catalog entry walks them. Nexus therefore counts the
+schema nodes (including reusable `components.schemas`), the parameter entries
+and the media types across the document and refuses more than **100,000** of
+them together with `400 SPEC_INVALID` and
+`details: { reason: "too_much_to_render", schema_nodes, parameters, media_types, units, limit }`.
+The viewer bounds what it renders as well, and truncates a branch it cannot
+afford rather than freezing the tab.
 The derived upstream URL, after server-variable expansion, must fit the same
 2,000-character limit as typed `upstream_url`. An oversized derived URL returns
 `400 SPEC_INVALID` naming `servers[0].url` (or the selected server's index) and
@@ -1528,6 +1616,15 @@ concurrent write on the API for as long as the slowest grantee took, for a step
 that cannot change what the gateway serves. A strip that fails is logged rather
 than retried — there is nothing left for the group to authorise.
 
+### `GET /api/apis/:id/spec`
+
+_provider_, owner-or-admin — the original current stored upload, without the
+catalog's server rewriting. Returns the same metadata fields as the catalog
+spec endpoint, with `raw_spec` containing the original JSON or YAML text
+(outer whitespace is trimmed at upload) and a matching `content_type`.
+The provider's Specification editor reads this endpoint. `403 FORBIDDEN` for
+another provider's API; `404 NOT_FOUND` when the API or current spec is absent.
+
 ### `PUT /api/apis/:id/spec`
 
 _provider_, owner-or-admin — publish a new spec revision.
@@ -1728,10 +1825,11 @@ how you sell an API. See [the provider guide](guides/provider-guide.md#plugins).
 
 ## Access requests
 
-Registered under `/api/access-requests`; _session_ throughout. Who may act on a
-row depends on who owns the API it points at, so there is no route-level role
-guard: a client raises and cancels, a provider decides requests on their own
-APIs, an admin may act on any.
+Registered under `/api/access-requests`; _session_ throughout. The service checks
+both role and ownership: a client raises and cancels their own requests, an API
+owner must retain at least the `provider` role to approve, deny or revoke, and
+an admin may decide on any API. A demoted owner receives `403 FORBIDDEN` for
+these decisions; ownership alone does not preserve provider powers.
 
 ### `GET /api/access-requests`
 
@@ -1755,6 +1853,14 @@ _session_ → `201 { "access_request": AccessRequest }`
 
 Body: `api_id` (uuid), `justification` (1–2000 chars).
 
+**Rate-limited** to 10 requests per minute per account when
+`NEXUS_RATE_LIMIT_ENABLED=true` (always off under `NEXUS_ENV=test`). Independently,
+one account may create `NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY` access
+requests (default 20, `0` = unlimited) in a rolling 24 hours; **cancelled rows
+count**, so create→cancel→create cannot reopen the allowance. Exceeding either
+bound is `429` (`RATE_LIMITED` or `QUOTA_EXCEEDED` with
+`details: { limit, window, setting }`).
+
 Errors, all `409 CONFLICT`: you own this API; the API is retired; the API does
 not accept access requests (`requestable: false`); you already have access; you
 already have a pending request. `404 NOT_FOUND` for an unknown API.
@@ -1772,12 +1878,13 @@ curl -sS -b cookies.txt -X POST http://127.0.0.1:8787/api/access-requests \
 ### `POST /api/access-requests/:id/cancel`
 
 _session_, **requester only** → `{ "access_request": AccessRequest }`.
-No body. `403 FORBIDDEN` for anyone else; `409 CONFLICT` when the request is no
+No body. **Rate-limited** to 30 requests per minute per account when
+`NEXUS_RATE_LIMIT_ENABLED=true`. `403 FORBIDDEN` for anyone else; `409 CONFLICT` when the request is no
 longer `pending`.
 
 ### `POST /api/access-requests/:id/approve`
 
-_session_, **API owner or admin** →
+_session_, **API owner with at least the provider role, or admin** →
 
 ```json
 { "access_request": { …, "status": "approved" }, "grant": { …, "acl_group": "nexus:api:2b1c…:approved" } }
@@ -1798,17 +1905,21 @@ ACL group `nexus:api:<api_id>:approved` is added (serialised per consumer), then
 the grant row is committed. The requester gets a notification and an
 `access_approved` email.
 
-Errors: `403 FORBIDDEN` (not the owner and not an admin), `409 CONFLICT`
+Errors: `403 FORBIDDEN` (neither a provider owner nor an admin), `409 CONFLICT`
 (already decided, the user already holds an active grant, or the API is retired
 or no longer requestable),
 `502 EDGE_ERROR` / `502 EDGE_UNAVAILABLE` — failed approval attempts compensate
 unowned ACL additions and return the request to `pending` where possible.
+Compensation also removes additions whose gateway write was not acknowledged.
+The rollback audit's `acl_group_possibly_applied: true` marks that uncertain
+write outcome; the removal or orphan field records the compensation outcome.
 Incomplete compensation is recorded in `access.approve_rollback` audit details
 and logs; inspect the current request/grant before retrying an ambiguous failure.
 
 ### `POST /api/access-requests/:id/deny`
 
-_session_, **API owner or admin** → `{ "access_request": AccessRequest }`.
+_session_, **API owner with at least the provider role, or admin** →
+`{ "access_request": AccessRequest }`.
 Body `{ "decision_note"?: string | null }`, optional. Nothing changes on the
 gateway. `409 CONFLICT` when already decided.
 
@@ -1834,7 +1945,7 @@ Same scoping as access requests: own / owned-APIs / everything.
 
 ### `POST /api/grants/:id/revoke`
 
-_session_, **API owner or admin** → `{ "grant": Grant }`.
+_session_, **API owner with at least the provider role, or admin** → `{ "grant": Grant }`.
 
 Body: `{ "reason"?: string | null }` (≤ 2000), optional.
 

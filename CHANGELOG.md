@@ -98,6 +98,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- The branding response cache invalidates immediately after local settings writes,
+  including reads overlapping those changes, and never caches `bootstrap_required`.
+  Its TTL bounds cross-instance server staleness of the remaining fields; changed
+  payloads receive a new ETag.
 - Every Ferrum Edge admin JWT now carries an `ns` claim naming the configured
   namespace, so a gateway running with `FERRUM_ADMIN_REQUIRE_NAMESPACE_CLAIM=true`
   accepts Nexus.
@@ -127,6 +131,28 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Email templates use `reset_url` and `verification_url` for account action
+  links. Retired raw-token placeholders render empty and are rejected on save;
+  template update audit events now include SHA-256 hashes of both body fields.
+  Action links must be whole anchor destinations or standalone text URLs.
+  Save and render checks restrict outbound links to the portal origin and
+  operator-approved `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS`; an unsafe legacy
+  template logs a warning and the built-in template is sent in its place.
+- Spec revisions register their gateway re-import compensation before issuing
+  `PUT /api-specs/{id}`, so a write applied with a lost acknowledgement restores
+  the previous document and backend. A failed restore writes the existing
+  `api.gateway_repair_required` audit event with `phase: 'compensation'` (#214,
+  GHSA-5mfx-x488-p4f9).
+- Compensate approvals whose gateway write was not acknowledged and record the
+  uncertain outcome in the rollback audit.
+- Require the provider role as well as API ownership for access decisions;
+  administrators retain oversight after an owner is demoted.
+
+- Catalog specifications and the Documentation tab now show gateway server
+  addresses throughout normalized JSON/YAML documents. Provider spec editing
+  reads the original upload through an owner/admin-only endpoint.
+- Require the environment SMTP connection before clearing a password override,
+  and audit SMTP password-source transitions without recording setting values.
 - **A test consumer whose creation was applied but never acknowledged was
   orphaned on the gateway.** When Edge stored the `nexus-test-<api_id>` consumer
   and then failed to answer, the caller held no id for it, so the compensation
@@ -397,6 +423,17 @@ codebase, once independently — and every finding below was proven with a
 working exploit before being fixed, and is covered by a regression test that
 fails without the fix.
 
+- **A published OpenAPI document can no longer freeze a reader's browser.**
+  The catalog viewer parses documents that open with `{` or `[` as JSON — the
+  YAML parser accepts JSON but its cost grows quadratically with the width of a
+  mapping, which stalled the tab for seconds before drawing anything. Rendering
+  now spends a single node allowance across the whole page, divided between the
+  operations the reader has expanded, instead of a fresh one per schema; a
+  branch that exhausts it shows one "truncated" notice and its siblings are not
+  mounted. Publishing additionally refuses a document that declares more than
+  100,000 schema nodes, parameters and media types together
+  (`SPEC_INVALID`, `details.reason = "too_much_to_render"`) — bytes, paths and
+  operations bound none of what a reader actually pays for.
 - **Bootstrap election is atomic.** Concurrent registrations against an empty
   portal could _all_ become `super_admin`; the first-user promotion is now a
   single claim on a unique key.

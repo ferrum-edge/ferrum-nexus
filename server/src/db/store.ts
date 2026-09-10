@@ -769,6 +769,13 @@ export interface AccessRequestRepo {
   /** Newest request per API for one user, for a page of catalog rows. */
   listLatestForUser(userId: Uuid, apiIds: Uuid[]): Promise<AccessRequestRecord[]>;
   count(filter: AccessRequestFilter): Promise<number>;
+  /**
+   * Rows one account created since `sinceIso`, every status included.
+   *
+   * Drives the rolling daily access-request budget: a cancelled row still
+   * counts, so create→cancel→create cannot reopen the allowance.
+   */
+  countByUserSince(userId: Uuid, sinceIso: IsoTimestamp): Promise<number>;
   /** Cascade helper for API deletion. */
   deleteByApi(apiId: Uuid): Promise<number>;
 }

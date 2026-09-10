@@ -52,9 +52,10 @@
  * That is why {@link routesSpecDocument} **replaces** `servers`. The provider's
  * own `servers[0]` is their upstream — it is where `backend_scheme`,
  * `backend_host`, `backend_port` and `backend_path` come from, and it stays
- * authoritative for those on the `apis` row. Only the copy submitted to Edge is
- * rewritten, and only so the generated matchers line up with what clients
- * actually send. Leave it alone and every request 400s as an unknown
+ * authoritative for those on the `apis` row. The copy submitted to Edge is
+ * rewritten so the generated matchers line up with what clients actually send;
+ * the catalog also uses {@link rewriteSpecServers} to hide provider servers.
+ * Leave the enforcement copy alone and every request 400s as an unknown
  * operation — including the declared ones.
  *
  * Replacing the root is not enough on its own. OpenAPI resolves `servers` at
@@ -405,7 +406,78 @@ export function routesSpecDocument(
     if (key.startsWith('x-ferrum-')) continue;
     submitted[key] = value;
   }
-  submitted.servers = [{ url: options.listenPath }];
+  const rewritten = rewriteSpecServers(submitted, options.listenPath);
+  rewritten['x-ferrum-proxy'] = options.proxy;
+  rewritten['x-ferrum-validate'] = { ...ROUTES_VALIDATE_EXTENSION };
+  return rewritten;
+}
+
+/**
+ * Share the gateway server rule between enforcement and catalog documents.
+ * Enforcement strips overrides in the containers Edge resolves. The catalog
+ * replaces servers only at OpenAPI structural positions, including callbacks
+ * and links. Schema properties, examples and extensions remain untouched.
+ * Callers must validate document depth and reject cycles before this walk.
+ */
+export function rewriteSpecServers(
+  document: Record<string, unknown>,
+  serverUrl: string,
+  scope: 'routes' | 'catalog' = 'routes',
+): Record<string, unknown> {
+  const servers = [{ url: serverUrl }];
+  if (scope === 'catalog') {
+    const map = (value: unknown, rewrite: (child: unknown) => unknown): unknown => {
+      if (!isRecord(value)) return value;
+      return Object.fromEntries(
+        Object.entries(value).map(([key, child]) => [
+          key,
+          key.startsWith('x-') ? child : rewrite(child),
+        ]),
+      );
+    };
+    const link = (value: unknown): unknown =>
+      isRecord(value) && 'server' in value ? { ...value, server: { url: serverUrl } } : value;
+    const response = (value: unknown): unknown =>
+      isRecord(value) && 'links' in value ? { ...value, links: map(value.links, link) } : value;
+    const callback = (value: unknown): unknown => map(value, pathItem);
+    const operation = (value: unknown): unknown => {
+      if (!isRecord(value)) return value;
+      const copy = { ...value };
+      if ('servers' in copy) copy.servers = servers;
+      if ('callbacks' in copy) copy.callbacks = map(copy.callbacks, callback);
+      if ('responses' in copy) copy.responses = map(copy.responses, response);
+      return copy;
+    };
+    const pathItem = (value: unknown): unknown => {
+      if (!isRecord(value)) return value;
+      const copy = { ...value };
+      if ('servers' in copy) copy.servers = servers;
+      for (const method of OPENAPI_OPERATION_KEYS) {
+        if (method in copy) copy[method] = operation(copy[method]);
+      }
+      return copy;
+    };
+    const copy: Record<string, unknown> = { ...document, servers };
+    if (isRecord(document.paths)) {
+      copy.paths = Object.fromEntries(
+        Object.entries(document.paths).map(([key, value]) => [
+          key,
+          key.startsWith('/') ? pathItem(value) : value,
+        ]),
+      );
+    }
+    if ('webhooks' in document) copy.webhooks = map(document.webhooks, pathItem);
+    if (isRecord(document.components)) {
+      const components = { ...document.components };
+      if ('pathItems' in components) components.pathItems = map(components.pathItems, pathItem);
+      if ('callbacks' in components) components.callbacks = map(components.callbacks, callback);
+      if ('links' in components) components.links = map(components.links, link);
+      if ('responses' in components) components.responses = map(components.responses, response);
+      copy.components = components;
+    }
+    return copy;
+  }
+  const submitted: Record<string, unknown> = { ...document, servers };
   const paths = pathItemsWithoutServers(submitted.paths, (key) => key.startsWith('/'));
   if (paths !== submitted.paths) submitted.paths = paths;
   const webhooks = pathItemsWithoutServers(submitted.webhooks, () => true);
@@ -420,7 +492,5 @@ export function routesSpecDocument(
     if (callbacks !== components.callbacks) edited().callbacks = callbacks;
     if (rewritten !== null) submitted.components = rewritten;
   }
-  submitted['x-ferrum-proxy'] = options.proxy;
-  submitted['x-ferrum-validate'] = { ...ROUTES_VALIDATE_EXTENSION };
   return submitted;
 }

@@ -169,9 +169,11 @@ Once it is set, every API in the catalog gains an **invoke URL** of
 page, next to each of a client's granted APIs, and on the provider's API
 overview.
 
-Unlike SMTP and CAPTCHA this is **not** super-admin-only: a public gateway
-address is published information, not a secret. It is also not the portal's own
-address — that is `NEXUS_PUBLIC_URL`, used for the links in outbound email.
+Like SMTP and CAPTCHA this is **super-admin-only**: the address is published to
+every client as the place to send its gateway credentials, so whoever controls
+it can redirect those credentials to another origin. An ordinary `admin` can
+read it but not change it. It is also not the portal's own address — that is
+`NEXUS_PUBLIC_URL`, used for the links in outbound email.
 
 Leaving the field blank falls back to the `FERRUM_GATEWAY_PUBLIC_URL`
 environment variable, which is the right place to set it if your deployment is
@@ -330,8 +332,8 @@ verbatim.
 
 | Template             | Extra placeholders                                                    |
 | -------------------- | --------------------------------------------------------------------- |
-| `verification`       | `verification_url`, `verification_token`                              |
-| `password_reset`     | `reset_url`, `reset_token`                                            |
+| `verification`       | `verification_url`                                                    |
+| `password_reset`     | `reset_url`                                                           |
 | `access_approved`    | `api_name`, `api_slug`, `api_url`, `decided_by_name`, `decision_note` |
 | `access_denied`      | `api_name`, `api_slug`, `decided_by_name`, `decision_note`            |
 | `access_revoked`     | `api_name`, `api_slug`, `revoked_by_name`, `reason`                   |
@@ -339,9 +341,42 @@ verbatim.
 | `mass`               | `subject`, `body_html`, `body_text`                                   |
 | `credential_rotated` | `credential_label`, `credential_last4`, `credentials_url`             |
 
-The editor shows the exact list for the template you have open. Using a
-placeholder that is not on that template's list is not an error — it simply
-renders empty.
+The editor shows the exact list for the template you have open. Unknown
+placeholders render empty. The retired `reset_token` and `verification_token`
+placeholders also render empty in stored templates, but saving either one in
+the subject, HTML body or text body returns a validation error naming it.
+Replace them with `{{reset_url}}` or `{{verification_url}}` respectively before
+saving. These complete links are built by the server from `NEXUS_PUBLIC_URL`.
+
+Use action links only as an entire anchor destination, such as
+`<a href="{{reset_url}}">Reset password</a>`. In the text body, place the placeholder
+on its own line or after whitespace, with whitespace or the end of the body
+after it. Do not put it in the subject, HTML text, an image, CSS, another
+attribute, or a URL query parameter. This restriction also applies to
+`{{verification_url}}`. Any placeholder in a URL or attribute must supply the
+entire value; concatenated values such as `{{portal_url}}/help` are refused.
+
+All template fields permit outbound HTTP(S) destinations only on the portal's
+public origin or an operator-approved exact host. An operator can set
+`NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS=assets.example.com,docs.example.com:8443`
+in the server environment; administrators cannot change this list in Settings.
+The default list is empty. Subdomains and different ports are not implicitly
+approved. `javascript:` and `data:` are always refused, as are active HTML,
+HTML comments, malformed tags/attributes, CSS escapes/comments/imports and
+unsupported named HTML entities (use literal Unicode or numeric entities for
+additional typography). Simple inline styles and approved CSS `url(...)` work.
+
+A refused save returns an error naming the field, host or construct, and the
+operator setting. Stored templates and rendered destinations are checked again
+before queueing, including raw HTML from the mass-email composer. A legacy
+template that fails validation is skipped in favour of the built-in template
+and a warning is logged; replace the offending content or restore the default
+template to clear the warning. Rendered content that fails the check (such as
+a mass email linking to an unapproved host) is refused and nothing is queued.
+
+Each successful save records `body_html_sha256` and `body_text_sha256` in the
+`admin.template_update` audit details: SHA-256 hex digests of the exact UTF-8
+body strings, without storing the bodies in the audit log.
 
 Three worth handling carefully. `verification_url` is the only way a new user
 can complete sign-up, so never remove it from the `verification` template, and

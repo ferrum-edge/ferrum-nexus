@@ -92,7 +92,15 @@ import type {
 } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
-import { conflict, forbidden, notFound, validationFailed, type NexusError } from '../lib/errors.js';
+import {
+  NexusError,
+  conflict,
+  forbidden,
+  isNexusError,
+  notFound,
+  validationFailed,
+} from '../lib/errors.js';
+import { accessRequestBudgetLockKey, type KeyedSerializer } from '../lib/keyed-serializer.js';
 import { nowIso } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
 import { presentApiSummary, type GatewayUrlSource } from '../publishing/present.js';
@@ -166,6 +174,12 @@ export interface AccessService {
   ): Promise<number>;
 }
 
+/** Rolling window for the per-account access-request budget. */
+export const ACCESS_REQUEST_BUDGET_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** Human label for {@link ACCESS_REQUEST_BUDGET_WINDOW_MS}, echoed in error details. */
+export const ACCESS_REQUEST_BUDGET_WINDOW_LABEL = '24h';
+
 /** Dependencies of {@link createAccessService}. */
 export interface AccessServiceDeps {
   edge: FerrumAdminClient;
@@ -177,12 +191,14 @@ export interface AccessServiceDeps {
   provisioner: ConsumerProvisioner;
   /** Resolves the gateway origin the embedded API summaries' `invoke_url` uses. */
   settings: GatewayUrlSource;
+  /** Serialises the rolling daily access-request budget per requester. */
+  locks: KeyedSerializer;
   log?: (obj: Record<string, unknown>, message: string) => void;
 }
 
 /** Build the access service. */
 export function createAccessService(deps: AccessServiceDeps): AccessService {
-  const { config, store, edge, audit, notifications, email, provisioner, settings } = deps;
+  const { config, store, edge, audit, notifications, email, provisioner, settings, locks } = deps;
   const namespace = config.edge.namespace;
 
   function userSummary(user: UserRecord): UserSummary {
@@ -193,11 +209,11 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     return `${config.publicUrl}/catalog/${slug}`;
   }
 
-  /** Reviewer check: the API's owner, or any admin. */
+  /** Reviewer check: the API's owner with the provider role, or any admin. */
   function assertCanReview(actor: UserRecord, api: ApiRecord): void {
-    if (api.owner_user_id === actor.id) return;
+    if (api.owner_user_id === actor.id && roleAtLeast(actor.role, 'provider')) return;
     if (roleAtLeast(actor.role, 'admin')) return;
-    throw forbidden('Only the API owner or an administrator can decide this request');
+    throw forbidden('Only an API owner with the provider role or an admin can decide this request');
   }
 
   async function loadRequest(requestId: Uuid): Promise<{
@@ -422,8 +438,9 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     api: ApiRecord;
     requester: UserRecord;
     requestId: Uuid;
-    /** The group put on the consumer, or `null` when the gateway write itself failed. */
+    /** The group that may have landed, or `null` for a proven pre-write rejection. */
     groupAdded: string | null;
+    groupPossiblyApplied: boolean;
     cause: unknown;
     ip: string | null;
   }): Promise<void> {
@@ -432,6 +449,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       api_id: api.id,
       api_slug: api.slug,
       user_id: requester.id,
+      acl_group_possibly_applied: input.groupPossiblyApplied,
       cause: cause instanceof Error ? cause.message : String(cause),
     };
 
@@ -456,7 +474,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
               acl_group: groupAdded,
               error: error instanceof Error ? error.message : String(error),
             },
-            'Could not take back the ACL group of a failed approval — the consumer still has it',
+            'Could not take back the ACL group of a failed approval — the consumer may still have it',
           );
         }
       }
@@ -543,6 +561,29 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     }
   }
 
+  async function assertWithinBudget(tx: NexusStore, requesterUserId: Uuid): Promise<void> {
+    const limit = config.maxAccessRequestsPerUserPerDay;
+    if (limit <= 0) return;
+    const since = new Date(Date.now() - ACCESS_REQUEST_BUDGET_WINDOW_MS).toISOString();
+    const used = await tx.accessRequests.countByUserSince(requesterUserId, since);
+    if (used < limit) return;
+    throw new NexusError(
+      'QUOTA_EXCEEDED',
+      `You have reached the limit of ${limit} access requests per ${ACCESS_REQUEST_BUDGET_WINDOW_LABEL}. ` +
+        'Wait for the oldest of them to age out, or ask an administrator to raise the limit.',
+      {
+        limit,
+        window: ACCESS_REQUEST_BUDGET_WINDOW_LABEL,
+        setting: 'NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY',
+      },
+    );
+  }
+
+  async function spendBudget<T>(requesterUserId: Uuid, write: () => Promise<T>): Promise<T> {
+    if (config.maxAccessRequestsPerUserPerDay <= 0) return write();
+    return locks(accessRequestBudgetLockKey(requesterUserId), write);
+  }
+
   return {
     async request(user, apiId, justification, ip = null): Promise<AccessRequest> {
       const trimmed = justification.trim();
@@ -574,16 +615,21 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       if (await store.grants.findActiveByApiAndUser(api.id, user.id)) {
         throw conflict('You already have access to this API');
       }
-      if (await store.accessRequests.findPendingByApiAndUser(api.id, user.id)) {
-        throw conflict('You already have a pending request for this API');
-      }
 
-      const created = await store.accessRequests.create({
-        api_id: api.id,
-        user_id: user.id,
-        justification: trimmed,
-        status: 'pending',
-      });
+      const created = await spendBudget(user.id, () =>
+        store.transaction(async (tx) => {
+          await assertWithinBudget(tx, user.id);
+          if (await tx.accessRequests.findPendingByApiAndUser(api.id, user.id)) {
+            throw conflict('You already have a pending request for this API');
+          }
+          return tx.accessRequests.create({
+            api_id: api.id,
+            user_id: user.id,
+            justification: trimmed,
+            status: 'pending',
+          });
+        }),
+      );
 
       await audit.record(
         { id: user.id, role: user.role },
@@ -681,11 +727,24 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         // Steps 2 and 3 — see the module docblock for why the gateway goes
         // first, and `unwindApproval` for what happens when the grant does not
         // follow it.
-        let addedGroup: string | null = null;
+        const group = aclGroupForApi(api.id);
+        let addedGroup: string | null = group;
+        let groupPossiblyApplied = true;
         let grant: GrantRecord;
         try {
-          addedGroup = await setGroupMembership(requester, api.id, true);
-          const group = addedGroup;
+          try {
+            // A rejected write may still have landed. Register compensation
+            // before attempting it, even if the gateway never acknowledges it.
+            await setGroupMembership(requester, api.id, true);
+            groupPossiblyApplied = false;
+          } catch (error) {
+            // The provisioner's active-user guard runs before the ACL write.
+            if (isNexusError(error) && error.code === 'USER_DISABLED') {
+              addedGroup = null;
+              groupPossiblyApplied = false;
+            }
+            throw error;
+          }
           grant = await store.transaction(async (tx) =>
             tx.grants.create({
               api_id: api.id,
@@ -703,6 +762,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
             requester,
             requestId: request.id,
             groupAdded: addedGroup,
+            groupPossiblyApplied,
             cause: error,
             ip,
           });
