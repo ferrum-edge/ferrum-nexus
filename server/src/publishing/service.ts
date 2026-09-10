@@ -2212,12 +2212,17 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // the registration with it; a delete that fails leaves the
           // registration for the teardown to find. A previous owner's consumer
           // that survived stays theirs: their live rows are what a teardown
-          // finds it by, and no create of this attempt ever named its id.
+          // finds it by, and no create of this attempt ever named its id — so
+          // the claim that moved their row is abandoned rather than rebound.
+          // `previous` is passed for the one case that is not a takeover:
+          // this account replacing its own consumer, where nothing was created
+          // and the registration is put back on the incumbent it still owns.
           await credentials.abandonGatewayIdentity(
             identity,
             consumerId,
             actor.id,
             attemptedConsumerId,
+            previous,
           );
           throw error;
         }

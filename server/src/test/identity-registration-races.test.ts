@@ -34,7 +34,7 @@ import {
   type PublishApiResponse,
 } from '@ferrum-nexus/shared';
 
-import { CONSUMER_SCAN_LIMIT } from '../ferrum-admin/client.js';
+import { CONSUMER_SCAN_LIMIT, derivedConsumerId } from '../ferrum-admin/client.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
 function errorCode(body: string): string {
@@ -532,6 +532,41 @@ describe('first gateway identity versus disable', () => {
       (row) => row.target_id === provider.user.id,
     );
     assert.deepEqual(audited?.details.deleted_consumers, [theirs.id]);
+  });
+
+  it('a takeover of a replacement consumer is abandoned like any other', async () => {
+    const provider = await freshProvider();
+    const api = await publish(provider, 'identity-takeover-fresh');
+    const username = `nexus-test-${api.id}`;
+
+    // Two creations by the provider, so what is live is itself a replacement:
+    // its id is a random one, not the id the username derives to. That is the
+    // case a same-owner replacement keeps its registration for — the id is
+    // recoverable from nothing else — and taking the identity over must not
+    // borrow that retention, because the consumer is still the provider's.
+    assert.equal((await createTestConsumer(provider, api.id)).statusCode, 201);
+    const second = await createTestConsumer(provider, api.id);
+    assert.equal(second.statusCode, 201, second.body);
+    const credentialId = second.json<CreateTestConsumerResponse>().credential.id;
+    const theirs = harness.edge.consumerByUsername(username);
+    assert.ok(theirs);
+    assert.notEqual(theirs.id, derivedConsumerId('nexus', username));
+
+    harness.edge.queueFailure(503, { error: 'down' }, `/consumers/${theirs.id}`, 'DELETE');
+    const taken = await createTestConsumer(founder, api.id);
+    assert.equal(taken.statusCode, 502, taken.body);
+    assert.equal(errorCode(taken.body), 'EDGE_ERROR');
+
+    assert.equal(harness.edge.consumerByUsername(username)?.id, theirs.id);
+    assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'active');
+    assert.equal(await registrations(founder.user.id), 0, 'the moved registration was abandoned');
+    assert.equal(await registrations(provider.user.id), 0, 'the claim had taken the old one');
+
+    // Their own live rows are what lead their teardown to it.
+    const disabled = await disable('patch', provider);
+    assert.equal(disabled.status, 200, disabled.body);
+    assert.equal(disabled.teardown, 'ok');
+    await assertNothingLive(provider, api.id);
   });
 });
 
