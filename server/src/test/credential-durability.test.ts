@@ -376,6 +376,34 @@ describe('credential durability across a lost gateway write', () => {
     assert.equal((await revoke(user, fresh.credential.id)).statusCode, 200);
   });
 
+  it('confirms a compensating delete whose acknowledgement is lost', async () => {
+    const user = await client();
+    const original = await issue(user, 'production');
+    const consumerId = original.credential.ferrum_consumer_id;
+
+    // The old-entry delete is rejected before mutation. The rollback delete
+    // then removes the appended replacement but loses its acknowledgement.
+    harness.edge.queueFailure(503, { error: 'down' }, '/credentials/keyauth/', 'DELETE');
+    harness.edge.queueLostAck(503, { error: 'timeout' }, '/credentials/keyauth/', 'DELETE');
+    const rotated = await rotate(user, original.credential.id);
+    assert.equal(rotated.statusCode, 502, rotated.body);
+    assert.ok(!('secret' in JSON.parse(rotated.body)), 'no secret was handed out');
+
+    assert.deepEqual(liveKeys(user.user.id), [String(original.secret.key)]);
+    const rows = await harness.store.credentials.list({ user_id: user.user.id });
+    assert.equal(rows.total, 1, 'the confirmed withdrawal removed the replacement row');
+    assert.equal(rows.items[0]?.id, original.credential.id);
+    assert.equal(await statusOf(original.credential.id), 'active');
+
+    const rollback = await rowsFor('credential.append_rollback', consumerId);
+    assert.equal(rollback.length, 1);
+    assert.equal(rollback[0]?.details.withdrawn, true);
+
+    // The mirror still agrees with Edge, so ordinary self-service remains available.
+    assert.equal((await revoke(user, original.credential.id)).statusCode, 200);
+    assert.deepEqual(liveKeys(user.user.id), []);
+  });
+
   it('takes back the replacement when the retirement cannot even be recorded', async () => {
     const user = await client();
     const original = await issue(user, 'production');
