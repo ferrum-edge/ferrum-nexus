@@ -467,13 +467,22 @@ export interface CredentialsService {
    * rather than created — the one a replacement was about to take down — is
    * never touched here: it is the previous owner's until a replacement
    * actually succeeds.
+   *
+   * `replaced` is the registration this attempt's claim overwrote, as it stood
+   * before the claim — the caller reads it to find the incumbent consumer, and
+   * the claim resets the row's `ferrum_consumer_id`, so it is the only record
+   * of the id left. It matters in exactly one case: nothing was created **and**
+   * the incumbent was already this same account's, where the registration is
+   * rebound to the incumbent instead of being deleted. See the implementation
+   * for why a claim that moved the row from *another* account is abandoned
+   * regardless.
    */
   abandonGatewayIdentity(
     identity: GatewayIdentityRecord,
     consumerId: string | null,
     subject: string,
     attemptedConsumerId?: string | null,
-    retainedConsumerId?: string | null,
+    replaced?: GatewayIdentityRecord | null,
   ): Promise<void>;
   /**
    * Take one registered gateway identity down: delete its Edge consumer,
@@ -1333,17 +1342,37 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       consumerId,
       subject,
       attemptedConsumerId = null,
-      retainedConsumerId = null,
+      replaced = null,
     ): Promise<void> {
-      if (consumerId === null && attemptedConsumerId === null && retainedConsumerId !== null) {
-        // Replacement stopped before asking Edge to create anything. Keep the
-        // registration pointed at the incumbent: unlike a first (derived-id)
-        // consumer, a prior replacement may have a random id and cannot be
-        // recovered after this row is removed.
-        await store.gatewayIdentities.bindConsumer(identity.id, retainedConsumerId).catch(() => {
-          // Even unbound, the retained registration makes teardown fall back
-          // to the bounded username lookup instead of losing the identity.
-        });
+      // A replacement that stopped before asking Edge to create anything, over
+      // an incumbent **the same account already owned**: point the row back at
+      // the incumbent rather than delete it. The claim cleared the row's
+      // `ferrum_consumer_id`, and a consumer that itself replaced one carries a
+      // random id — no derivation leads back to it — so dropping the row would
+      // strand a live consumer that only the account teardown's credential-row
+      // sweep could still reach, and the API deletion, which resolves the
+      // identity by name alone, never could.
+      //
+      // Owner equality is the whole of the condition. When the claim *moved*
+      // the registration from another account — an administrator recreating a
+      // provider's test consumer — the incumbent is still that provider's, and
+      // a row naming the claimant would hand their teardown someone else's live
+      // consumer. Such a claim is abandoned exactly as an unbound one is: the
+      // previous owner's own credential rows are what lead their teardown to
+      // the consumer.
+      if (
+        consumerId === null &&
+        attemptedConsumerId === null &&
+        replaced !== null &&
+        replaced.ferrum_consumer_id !== null &&
+        replaced.user_id === identity.user_id
+      ) {
+        await store.gatewayIdentities
+          .bindConsumer(identity.id, replaced.ferrum_consumer_id)
+          .catch(() => {
+            // Even unbound, the retained registration makes teardown fall back
+            // to the bounded username lookup instead of losing the identity.
+          });
         return;
       }
       let created = consumerId;

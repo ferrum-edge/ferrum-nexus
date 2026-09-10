@@ -582,8 +582,14 @@ instance that found nothing else — is reopened as `pending`. Recreating a test
 consumer, by its provider or by an administrator, moves the registration to the
 new owner; the replacement of the old consumer happens under that claim and is
 compensated the same way, so a failed replacement abandons the claim and leaves
-the consumer to whoever held it. The row is deleted once the teardown has taken
-the consumer down.
+the consumer to whoever held it — a registration that named the new claimant
+would point their teardown at the previous owner's live consumer. The one
+exception is a claim that moved nothing, an account replacing a consumer it
+already owned: when that fails before anything is created, the registration is
+put back on the incumbent rather than dropped, because a consumer that is
+itself a replacement carries a random id and the registration is the only thing
+that names it. The row is deleted once the teardown has taken the consumer
+down.
 
 A registration bound to its consumer's id leads the teardown there directly,
 on a gateway of any size. Only a registration whose creation stopped before the
