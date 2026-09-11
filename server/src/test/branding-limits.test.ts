@@ -236,6 +236,42 @@ describe('branding response cache', () => {
     }
   });
 
+  it('briefly caches the bootstrap check across sequential and conditional requests', async () => {
+    const sequential = await buildTestApp({
+      env: { NEXUS_BRANDING_CACHE_MS: '5000', NEXUS_LOG_LEVEL: 'silent' },
+      deps: { startOutboxWorker: false },
+    });
+    const users = sequential.store.users;
+    const countActiveSuperAdmins = users.countActiveSuperAdmins.bind(users);
+    let calls = 0;
+    users.countActiveSuperAdmins = async (excludeUserId?: string): Promise<number> => {
+      calls += 1;
+      return countActiveSuperAdmins(excludeUserId);
+    };
+
+    try {
+      const first = await sequential.app.inject({ method: 'GET', url: '/api/branding' });
+      assert.equal(first.statusCode, 200, first.body);
+      const etag = first.headers.etag;
+      assert.ok(etag);
+
+      for (let request = 0; request < 5; request += 1) {
+        const response = await sequential.app.inject({ method: 'GET', url: '/api/branding' });
+        assert.equal(response.statusCode, 200, response.body);
+      }
+      const conditional = await sequential.app.inject({
+        method: 'GET',
+        url: '/api/branding',
+        headers: { 'if-none-match': etag },
+      });
+      assert.equal(conditional.statusCode, 304, conditional.body);
+      assert.equal(calls, 1);
+    } finally {
+      users.countActiveSuperAdmins = countActiveSuperAdmins;
+      await sequential.close();
+    }
+  });
+
   it('serves public cache headers and honours If-None-Match', async () => {
     const first = await harness.app.inject({ method: 'GET', url: '/api/branding' });
     assert.equal(first.statusCode, 200, first.body);

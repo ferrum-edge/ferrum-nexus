@@ -28,6 +28,9 @@ import type { CaptchaService } from '../auth/captcha.js';
 import type { AuthService } from '../auth/service.js';
 import type { NexusConfig } from '../config/index.js';
 
+/** Keep anonymous requests from mapping one-for-one to database count queries. */
+const BOOTSTRAP_REQUIRED_CACHE_MS = 1_000;
+
 /** Services this route plugin needs. */
 export interface BrandingRoutesOptions {
   config: NexusConfig;
@@ -98,30 +101,30 @@ function memoizeBranding(
   };
 }
 
-/**
- * Coalesce concurrent database-backed founder-seat checks onto one query.
- *
- * Deliberately NOT a cache: the founder seat is a cross-instance state
- * transition, so no result is retained once the query settles and every
- * request that arrives afterwards reads the database again. What this bounds
- * is anonymous amplification — however many `/api/branding` requests arrive
- * while one count query is in flight, they all wait on that single query, so
- * an instance never holds more than one seat check against the pool at a
- * time. A same-instance seat claim bumps the revision, which makes callers
- * that were waiting on a pre-claim query re-read rather than trust its answer.
- */
-function coalesceBootstrapRequired(
+/** Briefly cache and coalesce the database-backed founder-seat check. */
+function memoizeBootstrapRequired(
   getRevision: () => number,
   run: () => Promise<boolean>,
 ): () => Promise<boolean> {
+  let cached: { value: boolean; expiresAt: number; revision: number } | null = null;
   let pending: { revision: number; promise: Promise<boolean> } | null = null;
 
   return async function loadBootstrapRequired(): Promise<boolean> {
     const revision = getRevision();
+    if (cached && cached.revision === revision && cached.expiresAt > Date.now()) {
+      return cached.value;
+    }
     if (!pending || pending.revision !== revision) {
-      const promise = run().finally(() => {
-        if (pending?.promise === promise) pending = null;
-      });
+      const promise = run()
+        .then((value) => {
+          if (getRevision() === revision) {
+            cached = { value, expiresAt: Date.now() + BOOTSTRAP_REQUIRED_CACHE_MS, revision };
+          }
+          return value;
+        })
+        .finally(() => {
+          if (pending?.promise === promise) pending = null;
+        });
       pending = { revision, promise };
     }
     const value = await pending.promise;
@@ -158,7 +161,7 @@ export const brandingRoutes: FastifyPluginAsync<BrandingRoutesOptions> = async (
     settings.getBrandingRevision,
     assembleBranding,
   );
-  const loadBootstrapRequired = coalesceBootstrapRequired(
+  const loadBootstrapRequired = memoizeBootstrapRequired(
     auth.getBrandingRevision,
     auth.bootstrapRequired,
   );
