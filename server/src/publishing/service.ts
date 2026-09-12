@@ -302,6 +302,16 @@ interface AuthSwapImpact {
   apiOwned: CredentialRecord[];
 }
 
+/**
+ * `PublishApiRequest` as the route hands it to the service: the CORS body has
+ * already been normalized, so the `origins` input alias is gone and only
+ * {@link CorsConfig} (or `null`) remains.
+ */
+export type PublishApiInput = Omit<PublishApiRequest, 'cors'> & { cors?: CorsConfig | null };
+
+/** `UpdateApiRequest` after the same CORS normalization as {@link PublishApiInput}. */
+export type UpdateApiInput = Omit<UpdateApiRequest, 'cors'> & { cors?: CorsConfig | null };
+
 /** Filters accepted by {@link PublishingService.list}. */
 export interface ApiListFilter {
   mine?: boolean;
@@ -322,9 +332,9 @@ export interface PublishingService {
     apiId: Uuid,
   ): Promise<{ api: Api; spec: ApiSpecSummary | null; stats: ApiStats }>;
   /** Validate the spec, build the Edge objects, then persist the rows. */
-  publish(owner: UserRecord, input: PublishApiRequest, ip?: string | null): Promise<PublishResult>;
+  publish(owner: UserRecord, input: PublishApiInput, ip?: string | null): Promise<PublishResult>;
   /** Change safe runtime settings; reconciles the Edge plugin configs. */
-  update(actor: UserRecord, apiId: Uuid, patch: UpdateApiRequest, ip?: string | null): Promise<Api>;
+  update(actor: UserRecord, apiId: Uuid, patch: UpdateApiInput, ip?: string | null): Promise<Api>;
   /** Store a new spec revision and make it current. */
   updateSpec(
     actor: UserRecord,

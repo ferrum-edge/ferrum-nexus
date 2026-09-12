@@ -94,6 +94,10 @@ export interface CorsConfig {
   /**
    * Origins the gateway will echo back, e.g. `https://app.example.com`. At
    * least one, at most {@link MAX_CORS_ORIGINS}.
+   *
+   * Responses always use this name. Request bodies may send
+   * {@link CorsConfigRequest.origins} instead; that alias is normalized here
+   * and is never returned.
    */
   allowed_origins: string[];
   /** Whether the gateway sets `Access-Control-Allow-Credentials`. */
@@ -101,6 +105,23 @@ export interface CorsConfig {
   /** Extra request headers, in addition to the headers required by authentication. */
   allowed_headers?: string[];
   /** Require an exact CORS origin on WebSocket upgrades. Defaults to true when omitted. */
+  enforce_websocket_origins?: boolean;
+}
+
+/**
+ * CORS body accepted on `POST /api/apis` and `PATCH /api/apis/:id`.
+ *
+ * `origins` is an alias for {@link CorsConfig.allowed_origins}. The server
+ * normalizes it to `allowed_origins` before anything is stored or returned.
+ * Sending both keys with different values is `400 VALIDATION_FAILED` naming
+ * both. Stored {@link Api.cors} and every response remain {@link CorsConfig}.
+ */
+export interface CorsConfigRequest {
+  allowed_origins?: string[];
+  /** Alias for {@link CorsConfig.allowed_origins}; never emitted on the way out. */
+  origins?: string[];
+  allow_credentials?: boolean;
+  allowed_headers?: string[];
   enforce_websocket_origins?: boolean;
 }
 
