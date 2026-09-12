@@ -40,6 +40,19 @@ export {
   type SignAdminJwtOptions,
 } from './jwt.js';
 
+export {
+  assertNamespaceServed,
+  createNamespaceMonitor,
+  namespaceUnserved,
+  namespaceUnservedMessage,
+  parseNamespaceServing,
+  NAMESPACE_UNSERVED_HEADER,
+  NAMESPACE_UNSERVED_HEADER_VALUE,
+  NAMESPACE_UNSERVED_REASON,
+  type EdgeNamespaceServing,
+  type NamespaceMonitor,
+} from './namespace.js';
+
 export type * from './types.js';
 
 /**

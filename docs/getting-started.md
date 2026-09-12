@@ -25,9 +25,17 @@ No database server is needed: Nexus defaults to SQLite.
 
 ## 2. Start a Ferrum Edge gateway
 
-Nexus is a front end for a gateway, so the gateway comes first. The only thing
-that has to match on both sides is the **admin JWT secret** (and, later, the
-namespace).
+Nexus is a front end for a gateway, so the gateway comes first. Two things have
+to match on both sides: the **admin JWT secret**, and **`FERRUM_NAMESPACE`**.
+
+> **`FERRUM_NAMESPACE` must be identical on the gateway and on the portal.**
+> The gateway's Admin API accepts a write into _any_ namespace, but a single
+> gateway process's data plane routes exactly one — the one its own
+> `FERRUM_NAMESPACE` names (`ferrum` when unset). Point Nexus at a different
+> namespace and every publish still succeeds, the catalog still shows an
+> `invoke_url`, and that URL answers `404` forever. This walkthrough sets
+> `nexus` on both sides; [step 3](#3-set-up-ferrum-nexus) shows how the portal
+> reports a mismatch.
 
 The gateway image is distroless `nonroot` and runs as **UID 65532**, and it
 bakes in no `/data` directory. A brand-new named volume is therefore root-owned,
@@ -115,6 +123,9 @@ Edit `.env`:
 NEXUS_SECRET_KEY=<paste `openssl rand -hex 32`>
 FERRUM_ADMIN_URL=http://127.0.0.1:9000
 FERRUM_ADMIN_JWT_SECRET=<the same value you exported in step 2>
+# Must be the SAME value the gateway was started with in step 2. The gateway's
+# data plane routes exactly one namespace; publishing into any other one
+# succeeds on the Admin API and 404s on the listener.
 FERRUM_NAMESPACE=nexus
 NEXUS_PUBLIC_URL=http://127.0.0.1:5173
 
@@ -166,6 +177,52 @@ curl -s http://127.0.0.1:8787/api/health | jq '{status, db: .database.status, ed
 `edge: "down"` (and an overall `degraded`) means Nexus cannot reach the Admin
 API. Check `FERRUM_ADMIN_URL`, that the secret matches on both sides, and that
 `FERRUM_ADMIN_JWT_ISSUER` matches the gateway's issuer.
+
+`edge: "degraded"` means the gateway is up and healthy but does **not route the
+namespace this portal publishes into**. Sign in as an admin and read the detail,
+which names both sides:
+
+```bash
+curl -s http://127.0.0.1:8787/api/health -b cookies.txt | jq '.edge | {status, reason, namespace_routing}'
+```
+
+```json
+{
+  "status": "degraded",
+  "reason": "namespace_unserved",
+  "namespace_routing": {
+    "configured": "nexusiso",
+    "active": "nexus",
+    "serving_scope": "single-namespace-data-plane",
+    "data_plane_single_namespace": true,
+    "unserved": true,
+    "unserved_mutation_observed": false,
+    "checked_at": "2026-09-12T09:12:44.117Z"
+  }
+}
+```
+
+`configured` is the portal's `FERRUM_NAMESPACE`; `active` is the gateway's. The
+gateway reports its own directly too, on the authenticated Admin API:
+
+```bash
+curl -s http://127.0.0.1:9000/health -H "Authorization: Bearer $ADMIN_JWT" | jq .namespace
+```
+
+While they disagree, publishing is refused with `409 EDGE_NAMESPACE_UNSERVED`
+rather than creating an API that cannot answer. Fix it by setting the portal's
+`FERRUM_NAMESPACE` to the gateway's `active`, or by restarting the gateway with
+the portal's value — then restart the portal. Reads and `DELETE` keep working
+either way, so anything already published into the wrong namespace can be
+removed.
+
+> **Watch out for a leftover `export`.** An exported `FERRUM_NAMESPACE` or
+> `FERRUM_ADMIN_URL` beats the value in `.env` — that is how environment
+> variables work, and Nexus does not change it. It does now say so: a
+> disagreement between the two prints a startup banner naming both values and
+> which one won, and outside `NEXUS_ENV=production` the server **refuses to
+> start** until you either `unset` the variable, change `.env` to agree, or set
+> `NEXUS_ALLOW_ENV_OVERRIDE=true` to say the override is deliberate.
 
 ---
 

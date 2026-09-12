@@ -27,6 +27,36 @@ image with no `.env` behaves exactly as if the feature did not exist. The
 path of the file that was read is logged once at startup; its contents never
 are. A relative `NEXUS_SQLITE_PATH` resolves from `server/`.
 
+**When the environment and the file disagree.** For two variables that is
+almost never intentional, so it is no longer silent. If `FERRUM_NAMESPACE` or
+`FERRUM_ADMIN_URL` is set in the process environment to something **other**
+than the value in `.env`, startup prints a banner naming the variable, both
+values and which one won:
+
+```
+============================================================================
+ENVIRONMENT OVERRIDES .env: the exported value wins, not the file.
+
+    FERRUM_NAMESPACE
+        /srv/nexus/.env: nexus
+        environment:  ferrum-foundry-demo   <-- wins
+…
+```
+
+Outside production (`NEXUS_ENV=production`) the server also **refuses to
+start**: a leftover `export FERRUM_NAMESPACE` from other tooling redirects
+every publish into a namespace the gateway does not route while the operator
+reads `.env` and believes otherwise. Resolve it by `unset`ting the variable, by
+editing `.env` to agree with it, or — when the override is deliberate — by
+setting `NEXUS_ALLOW_ENV_OVERRIDE=true`.
+
+In production the environment **is** the configuration: a container runtime or
+orchestrator is supposed to set these, a `.env` file is usually absent
+entirely, and refusing to boot on a disagreement would turn a deployment detail
+into an outage. There it stays warn-only, and `NEXUS_ALLOW_ENV_OVERRIDE` has no
+effect. Nothing about precedence changes in either environment — the exported
+value always wins.
+
 **Vite `npm run dev` only.** The SPA half of `npm run dev` also reads the
 repo-root `.env`. These knobs are not part of the BFF schema above and have no
 effect on a production image, which serves the built SPA from the BFF:
@@ -164,6 +194,75 @@ A malformed claim (an empty or non-string entry) is rejected by Edge at
 authentication time whether or not the flag is on, so an empty
 `FERRUM_NAMESPACE` fails at signing time rather than producing a token the
 gateway will reject.
+
+### Namespace routability
+
+**`FERRUM_NAMESPACE` on the portal must equal the active namespace of the
+gateway process that serves your traffic.** These are two different surfaces of
+one gateway and they do not have the same reach:
+
+- The **Admin API is multi-namespace**. It accepts a create, update or delete
+  under any `X-Ferrum-Namespace`, stores it, and lists it back. Nothing is
+  rejected — a control plane storing several tenants' namespaces is a supported
+  topology.
+- A single gateway process's **data plane serves exactly one namespace**: the
+  one its own `FERRUM_NAMESPACE` names, defaulting to `ferrum`. It projects
+  every configuration snapshot down to that namespace before building its
+  router, plugin, consumer and load-balancer caches.
+
+So a portal configured with `FERRUM_NAMESPACE=nexusiso` in front of a gateway
+started with `FERRUM_NAMESPACE=ferrum` publishes successfully, shows a green
+catalog entry with an `invoke_url` — and that URL answers `404` forever.
+
+**How the portal reports it.** Nexus reads the gateway's `namespace` block from
+the authenticated `GET /health` on every probe (at startup, and on every
+`/api/health`), and watches for the `X-Ferrum-Namespace-Unserved: true` header
+Edge stamps on an accepted write it will not route. While either says the
+namespace is unrouted:
+
+- `GET /api/health` reports `edge.status: "degraded"` with
+  `edge.reason: "namespace_unserved"`, and `edge.namespace_routing` carries
+  `configured` and — for an authenticated admin — `active`. The overall status
+  is `degraded` on a `200`, so load balancers keep the portal in rotation.
+- `POST /api/apis` and `PUT /api/apis/:id/spec` refuse with
+  `409 EDGE_NAMESPACE_UNSERVED`, naming both namespaces, before any gateway
+  write. Reads, runtime `PATCH`es and `DELETE` are deliberately still allowed:
+  cleaning up what was published into the wrong namespace is part of the fix.
+- The startup gateway check logs `MISCONFIGURED NAMESPACE: …` at `error`.
+
+**How to see the gateway's side.** Ask it directly — the block is on the
+authenticated Admin API health endpoint, and absent from the unauthenticated
+one:
+
+```bash
+curl -s "$FERRUM_ADMIN_URL/health" -H "Authorization: Bearer $ADMIN_JWT" | jq .namespace
+```
+
+```json
+{
+  "active": "ferrum",
+  "serving_scope": "single-namespace-data-plane",
+  "data_plane_single_namespace": true
+}
+```
+
+`serving_scope` is `single-namespace-data-plane` (modes `database`, `file`,
+`dp`, `mesh`), `control-plane` (`cp`) or `no-data-plane` (`node_agent`).
+`data_plane_single_namespace` is the field to branch on; a control plane
+reports `false` and `active: null`, and multi-namespace writes against it are
+correct, so the portal never degrades on one.
+
+**Fixing a mismatch.** Either set `FERRUM_NAMESPACE` on the portal to the
+gateway's `active` value, or restart the gateway with the portal's value —
+whichever matches the rest of your deployment — then restart the portal. Note
+that the namespace is also the first segment of every listen path
+(`/<namespace>/<slug>`), so changing the portal's value changes every
+`invoke_url`; APIs published under the old namespace keep their old listen
+paths on the gateway and have to be republished.
+
+A gateway that publishes no `namespace` block at all — every release before the
+field existed — changes nothing: no degradation, no refusal. The portal
+feature-detects, and an unknown topology is never treated as a verdict.
 
 ### Email
 
@@ -1453,7 +1552,14 @@ portal in rotation — the catalog, messaging and audit log all still work while
 the gateway recovers. Publishing, approvals and credential operations will
 return `502 EDGE_UNAVAILABLE` until it comes back.
 
-**`edge.reconciliation` is the other reason for `degraded`, and the one a
+**`edge.status: "degraded"` is a different alarm.** The gateway is up, ready
+and answering — it just does not route the namespace this portal publishes
+into, so everything already published answers `404` on the listener. Read
+`edge.reason` (`"namespace_unserved"`) and `edge.namespace_routing`, and see
+[Namespace routability](#namespace-routability). Nothing recovers on its own
+here; it is a configuration fix.
+
+**`edge.reconciliation` is another reason for `degraded`, and one a
 reachable gateway can still cause.** A gateway that answers is not necessarily
 _the_ gateway: point `FERRUM_ADMIN_URL` at a fresh Edge, or rebuild the one it
 already names, and every probe above stays green while the consumer and proxy

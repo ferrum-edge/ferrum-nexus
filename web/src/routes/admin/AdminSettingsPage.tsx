@@ -6,6 +6,7 @@ import {
   ROLE_LABELS,
   type AdminSettingsResponse,
   type CaptchaProvider,
+  type EdgeNamespaceRouting,
   type EmailTemplateKey,
   type RegistrableRole,
   type ThemePreference,
@@ -332,6 +333,7 @@ function GatewayTab({ settings }: { settings: AdminSettingsResponse }): ReactEle
   const toast = useToast();
   const { canSuperAdmin } = useAuth();
   const [publicUrl, setPublicUrl] = useState(settings.gateway.public_url ?? '');
+  const routing = useEdgeHealth().data?.namespace_routing;
 
   return (
     <div className="flex flex-col gap-5">
@@ -343,6 +345,7 @@ function GatewayTab({ settings }: { settings: AdminSettingsResponse }): ReactEle
         />
         <CardBody className="flex flex-col gap-5">
           {update.error ? <FormNotice>{update.error.message}</FormNotice> : null}
+          {routing?.unserved ? <NamespaceUnservedNotice routing={routing} /> : null}
           <LabeledInput
             label="Public gateway URL"
             placeholder="https://api.example.com"
@@ -377,6 +380,27 @@ function GatewayTab({ settings }: { settings: AdminSettingsResponse }): ReactEle
         </CardBody>
       </Card>
     </div>
+  );
+}
+
+/**
+ * The gateway does not route the namespace this portal publishes into.
+ *
+ * The card next to it is the one that explains the `/<namespace>/<slug>` listen
+ * path, and an admin is the only person who can fix this, so it belongs here
+ * rather than behind a status page nobody opens. `active` is `null` for a
+ * non-admin and for the header-only signal, where the gateway said which
+ * namespace is wrong without saying which one is right.
+ */
+function NamespaceUnservedNotice({ routing }: { routing: EdgeNamespaceRouting }): ReactElement {
+  const gateway =
+    routing.active === null
+      ? "read the gateway's own active namespace from its authenticated GET /health, field namespace.active"
+      : `the gateway's data plane serves '${routing.active}'`;
+  return (
+    <FormNotice tone="danger">
+      {`Published APIs are not reachable. This portal publishes into the Ferrum Edge namespace '${routing.configured}', which this gateway accepts and never routes — ${gateway}. Every API already published here answers 404 on the listener, and new publishes are refused until FERRUM_NAMESPACE matches on the portal and on the gateway.`}
+    </FormNotice>
   );
 }
 

@@ -1233,7 +1233,18 @@ Notes on the deliberate loosenings:
 probe reports `error: "unreachable"` and never the driver's own message, which
 would otherwise hand out internal hostnames, ports and database account names
 (`connect ECONNREFUSED 10.0.3.14:5432`, `password authentication failed for
-user "nexus_app"`). The real text goes to the log at `error` level.
+user "nexus_app"`). The real text goes to the log at `error` level. The gateway
+half follows the same rule: `edge.error`, `edge.mode`,
+`edge.admin_writes_enabled` and — since the namespace-routability check —
+`edge.namespace_routing.active`, `.serving_scope` and
+`.data_plane_single_namespace` are filled in only for an authenticated admin.
+Edge itself publishes its namespace only to an authenticated caller, and the
+portal keeps that line. What stays public is the verdict alone —
+`edge.status: "degraded"`, `edge.reason: "namespace_unserved"` and
+`edge.namespace_routing.unserved` — so an anonymous monitor can alert without
+learning the gateway's deployment topology. `edge.namespace_routing.configured`
+is the portal's own `FERRUM_NAMESPACE`, which is already the first segment of
+every listen path in the public catalog.
 
 **Request URL redaction.** Request and error logs replace query-string token
 values with `[Redacted]`, including password-reset and email-verification links.

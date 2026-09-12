@@ -335,6 +335,19 @@ export interface NexusConfig {
    * gateway's own subnet. Deployments fronting internal services opt in.
    */
   allowPrivateUpstreams: boolean;
+  /**
+   * Permit the process environment to override `.env` for `FERRUM_NAMESPACE`
+   * and `FERRUM_ADMIN_URL` outside production (`NEXUS_ALLOW_ENV_OVERRIDE`).
+   *
+   * The environment always wins over the file — that rule is unchanged — but a
+   * *disagreement* about those two is almost always a leftover `export` from
+   * other tooling redirecting publishes at the wrong gateway or namespace
+   * while the operator reads `.env` and believes otherwise
+   * (ferrum-nexus#231). Outside production the portal refuses to start on one
+   * rather than let it pass; this is the acknowledgement that turns the
+   * refusal back into the warning production always gets.
+   */
+  allowEnvOverride: boolean;
   /** Directory of the built SPA to serve in production; `undefined` disables static serving. */
   webDistPath: string | undefined;
   db: DbConfig;
@@ -456,6 +469,7 @@ const envSchema = z.object({
   NEXUS_MAX_BROADCASTS_PER_DAY: intish(20, 0, 100_000),
   NEXUS_MAX_MASS_EMAIL_RECIPIENTS: intish(5_000, 0, 1_000_000),
   NEXUS_ALLOW_PRIVATE_UPSTREAMS: boolish(false),
+  NEXUS_ALLOW_ENV_OVERRIDE: boolish(false),
   NEXUS_WEB_DIST: optionalString(),
 
   NEXUS_DB_DRIVER: z
@@ -682,6 +696,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     maxBroadcastsPerDay: raw.NEXUS_MAX_BROADCASTS_PER_DAY,
     maxMassEmailRecipients: raw.NEXUS_MAX_MASS_EMAIL_RECIPIENTS,
     allowPrivateUpstreams: raw.NEXUS_ALLOW_PRIVATE_UPSTREAMS,
+    allowEnvOverride: raw.NEXUS_ALLOW_ENV_OVERRIDE,
     webDistPath: raw.NEXUS_WEB_DIST,
     db: {
       driver: raw.NEXUS_DB_DRIVER,

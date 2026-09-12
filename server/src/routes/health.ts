@@ -2,11 +2,12 @@
  * `/api/health` — public liveness/readiness for the portal itself.
  *
  * The Edge probe must never fail the endpoint. A gateway that is unreachable
- * (`edge.status = 'down'`) or reachable-but-unready (`'not_ready'`) both leave
- * the portal `degraded` on **HTTP 200**, so a load balancer keeps it in
- * rotation while the gateway recovers. Only a broken database makes the
- * overall status `down`, and that answers **HTTP 503** — container and
- * load-balancer probes key on the status code, not the body.
+ * (`edge.status = 'down'`), reachable-but-unready (`'not_ready'`) or reachable
+ * but not routing the portal's namespace (`'degraded'`, `edge.reason =
+ * 'namespace_unserved'`) all leave the portal `degraded` on **HTTP 200**, so a
+ * load balancer keeps it in rotation while the gateway recovers. Only a broken
+ * database makes the overall status `down`, and that answers **HTTP 503** —
+ * container and load-balancer probes key on the status code, not the body.
  *
  * **This endpoint is unauthenticated**, so no failure detail crosses it. A
  * driver message ("connect ECONNREFUSED 10.0.3.14:5432", `password
@@ -60,7 +61,9 @@ import {
   type AppHealth,
   type DependencyHealth,
   type EdgeHealth,
+  type EdgeHealthReason,
   type EdgeHealthStatus,
+  type EdgeNamespaceRouting,
   type EdgeReconciliationHealth,
   type GatewayReconciliationReport,
   type HealthStatus,
@@ -69,7 +72,11 @@ import {
 import type { GatewayReconciliationService } from '../admin/gateway-reconciliation.js';
 import type { NexusConfig } from '../config/index.js';
 import type { NexusStore } from '../db/store.js';
-import type { EdgeProbe, FerrumAdminClient } from '../ferrum-admin/index.js';
+import {
+  NAMESPACE_UNSERVED_REASON,
+  type EdgeProbe,
+  type FerrumAdminClient,
+} from '../ferrum-admin/index.js';
 
 /** Version reported by `GET /api/health`. */
 export const NEXUS_VERSION = process.env.npm_package_version ?? '0.1.0';
@@ -160,19 +167,26 @@ function memoizeProbe<T>(ttlMs: number, run: () => Promise<T>): () => Promise<Pr
  */
 function presentEdge(
   result: EdgeProbe,
-  namespace: string,
+  routing: EdgeNamespaceRouting,
   reconciliation: GatewayReconciliationReport | null,
   request: FastifyRequest,
 ): EdgeHealth {
+  const detailAllowed =
+    request.currentUser !== null && roleAtLeast(request.currentUser.role, 'admin');
+  // Reachability comes first: a gateway that did not answer cannot also be
+  // reported as misconfigured, and its last known namespace verdict says
+  // nothing about why it is down.
   const status: EdgeHealthStatus = !result.reachable
     ? 'down'
     : result.ready === false
       ? 'not_ready'
-      : 'ok';
-  const detailAllowed =
-    request.currentUser !== null && roleAtLeast(request.currentUser.role, 'admin');
+      : routing.unserved
+        ? 'degraded'
+        : 'ok';
+  const reason: EdgeHealthReason | null = status === 'degraded' ? NAMESPACE_UNSERVED_REASON : null;
   return {
     status,
+    reason,
     latency_ms: result.latencyMs,
     error: result.error === null ? null : detailAllowed ? result.error : OPAQUE_ERROR,
     ready: result.ready,
@@ -182,7 +196,16 @@ function presentEdge(
     mode: detailAllowed ? result.mode : null,
     admin_writes_enabled: detailAllowed ? result.adminWritesEnabled : null,
     edge_version: result.version,
-    namespace,
+    namespace: routing.configured,
+    // `unserved` and the reason above are the monitor's signal and stay
+    // public; the gateway's *own* namespace and serving scope are deployment
+    // topology Edge itself only tells an authenticated caller, so they follow
+    // `mode` behind the admin gate. The operator who has to fix this is an
+    // admin, and the publish refusal names both namespaces to the provider
+    // who hit it.
+    namespace_routing: detailAllowed
+      ? routing
+      : { ...routing, active: null, serving_scope: null, data_plane_single_namespace: null },
     reconciliation: presentReconciliation(reconciliation, detailAllowed),
   };
 }
@@ -252,6 +275,20 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (app,
         'Ferrum Edge answered but is not ready',
       );
     }
+    // `probe()` folded the payload's `namespace` block into the monitor before
+    // returning, so this reads the verdict the probe just refreshed.
+    const routing = edge.namespaceMonitor.routing();
+    if (result.reachable && routing.unserved) {
+      app.log.error(
+        {
+          configuredNamespace: routing.configured,
+          activeNamespace: routing.active,
+          servingScope: routing.serving_scope,
+        },
+        'Ferrum Edge does not route the namespace Nexus publishes into; ' +
+          'published APIs answer 404 until FERRUM_NAMESPACE matches on both sides',
+      );
+    }
     return result;
   });
 
@@ -267,7 +304,7 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (app,
     };
     const edgeHealth = presentEdge(
       gateway.value,
-      config.edge.namespace,
+      edge.namespaceMonitor.routing(),
       reconciliation.snapshot(),
       request,
     );
@@ -302,6 +339,11 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (app,
 
   app.get('/edge', async (request): Promise<EdgeHealth> => {
     const gateway = await probeEdge();
-    return presentEdge(gateway.value, config.edge.namespace, reconciliation.snapshot(), request);
+    return presentEdge(
+      gateway.value,
+      edge.namespaceMonitor.routing(),
+      reconciliation.snapshot(),
+      request,
+    );
   });
 };

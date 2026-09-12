@@ -46,7 +46,7 @@ import {
   type OnRegistered,
 } from './auth/service.js';
 import { createCatalogService, type CatalogService } from './catalog/service.js';
-import { environmentWithEnvFile } from './config/env-file.js';
+import { environmentWithEnvFile, type EnvOverride } from './config/env-file.js';
 import { loadConfig, type NexusConfig } from './config/index.js';
 import { createConsumerProvisioner } from './credentials/consumers.js';
 import { createCredentialsService, type CredentialsService } from './credentials/service.js';
@@ -67,7 +67,7 @@ import {
 } from './ferrum-admin/index.js';
 import { reconcileGateway } from './ferrum-admin/reconcile.js';
 import { createCrypto, type NexusCrypto } from './lib/crypto.js';
-import { isNexusError } from './lib/errors.js';
+import { isNexusError, NexusError } from './lib/errors.js';
 import {
   createKeyedSerializer,
   SEND_LOCK_CONFLICT_MESSAGE,
@@ -847,11 +847,75 @@ function logGeneratedBootstrapToken(app: FastifyInstance, token: string): void {
   );
 }
 
+/**
+ * The banner that names both values and which one won.
+ *
+ * Deliberately shows the values: `FERRUM_NAMESPACE` and `FERRUM_ADMIN_URL` are
+ * deployment topology, not secrets — they are already in `.env.example`, in
+ * every listen path and in the portal's own health payload — and a warning
+ * that will not say *what* disagreed is a warning nobody can act on.
+ */
+export function envOverrideBanner(overrides: EnvOverride[], envFile: string | null): string {
+  const source = envFile ?? '.env';
+  const rule = '='.repeat(76);
+  const lines: string[] = [];
+  lines.push('');
+  lines.push(rule);
+  lines.push('ENVIRONMENT OVERRIDES .env: the exported value wins, not the file.');
+  lines.push('');
+  for (const override of overrides) {
+    lines.push(`    ${override.key}`);
+    lines.push(`        ${source}: ${override.fromFile}`);
+    lines.push(`        environment:  ${override.fromProcess}   <-- wins`);
+  }
+  lines.push('');
+  lines.push('An exported FERRUM_NAMESPACE or FERRUM_ADMIN_URL left over from other');
+  lines.push('tooling publishes into a namespace or a gateway the file never named,');
+  lines.push('and the portal looks healthy while every invoke_url answers 404.');
+  lines.push('');
+  lines.push('`unset` it to use the file, or edit the file to agree with it.');
+  lines.push(rule);
+  return lines.join('\n');
+}
+
+/**
+ * Refuse to start on a silent override outside production (ferrum-nexus#231).
+ *
+ * Production stays **warn-only**: there, the environment is how a container
+ * runtime or orchestrator is *supposed* to configure the portal, a `.env` file
+ * is usually absent entirely, and refusing to boot on a disagreement would
+ * turn a deployment detail into an outage. Development is the other way round
+ * — the file is what the operator is reading, and a leftover `export` that
+ * quietly beats it is the whole of #231 — so it fails fast unless
+ * `NEXUS_ALLOW_ENV_OVERRIDE=true` says the override is intended.
+ *
+ * @throws NexusError `VALIDATION_FAILED` naming both values and the flag
+ */
+export function assertEnvOverridesAllowed(
+  overrides: EnvOverride[],
+  config: NexusConfig,
+  envFile: string | null,
+): void {
+  if (overrides.length === 0) return;
+  if (config.env === 'production' || config.allowEnvOverride) return;
+  const message = [
+    envOverrideBanner(overrides, envFile),
+    'Refusing to start outside production. Set NEXUS_ALLOW_ENV_OVERRIDE=true',
+    'to keep the exported value and start anyway.',
+  ].join('\n');
+  throw new NexusError('VALIDATION_FAILED', message, {
+    overrides: overrides.map((override) => override.key),
+  });
+}
+
 /** Boot the server from `process.env` and listen. */
 export async function main(): Promise<void> {
   // The documented quickstart edits a root `.env`; exported variables win.
-  const { env, file: envFile } = environmentWithEnvFile();
+  const { env, file: envFile, overrides } = environmentWithEnvFile();
   const loaded = loadConfig(env);
+  // Before the store opens or the gateway is touched: a portal pointed at the
+  // wrong namespace should not migrate a database on the way to failing.
+  assertEnvOverridesAllowed(overrides, loaded, envFile);
   // With no `NEXUS_BOOTSTRAP_TOKEN` the portal still gets one, generated per
   // process, so a fresh deployment is never bootstrappable by whoever reaches
   // the port first — only by whoever can read the log.
@@ -881,6 +945,9 @@ export async function main(): Promise<void> {
     edge: createFerrumAdmin(config, edgeLogger, store.leases),
   });
   if (envFile !== null) app.log.info({ file: envFile }, 'Loaded environment file');
+  // Production reaches here with overrides in hand (they are legitimate there);
+  // development only does so with NEXUS_ALLOW_ENV_OVERRIDE set. Both get told.
+  if (overrides.length > 0) app.log.warn(envOverrideBanner(overrides, envFile));
   if (generatedBootstrapToken !== null && founderSeatOpen) {
     logGeneratedBootstrapToken(app, generatedBootstrapToken);
   }

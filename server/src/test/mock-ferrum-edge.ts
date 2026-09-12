@@ -266,6 +266,21 @@ export interface MockFerrumEdge {
    */
   setHealth(payload: Record<string, unknown>): void;
   /**
+   * Model Edge's single-namespace data plane: `active` is the one namespace
+   * this gateway routes.
+   *
+   * Turns on both halves of the contract at once — the `namespace` block on
+   * `GET /health`, and `X-Ferrum-Namespace-Unserved: true` on every accepted
+   * namespace-scoped mutation aimed anywhere else. `null` restores the
+   * default: a gateway that publishes no block and marks nothing, the way
+   * every release before the feature behaved.
+   *
+   * `announce: false` keeps the header and withholds the block, which is the
+   * only way to exercise the per-write signal on its own — the state a portal
+   * is in when it cannot read the gateway's detailed health tier.
+   */
+  setServedNamespace(active: string | null, options?: { announce?: boolean }): void;
+  /**
    * Make the next matching request fail with `status` and `body`.
    *
    * Narrow with `pathContains` and, when a path is both read and written in one
@@ -400,6 +415,15 @@ export interface MockFerrumEdge {
 }
 
 const DEFAULT_NAMESPACE = 'ferrum';
+
+/**
+ * Marker Edge stamps on a `2xx` mutation its data plane will not route.
+ *
+ * Spelled out here rather than imported from `ferrum-admin/namespace.ts`: this
+ * file is the gateway's stand-in, and a fake that reads the header name out of
+ * the code under test could not catch that code renaming it.
+ */
+const NAMESPACE_UNSERVED_HEADER = 'x-ferrum-namespace-unserved';
 
 /** Fixed `gateway.uptime_seconds`, so a test can assert an exact value. */
 const MOCK_GATEWAY_UPTIME_SECONDS = 3_600;
@@ -1418,6 +1442,23 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
    */
   const droppedAcks = new WeakMap<ServerResponse, { status: number; body: unknown }>();
 
+  /**
+   * Requests whose answer must carry `X-Ferrum-Namespace-Unserved: true`.
+   *
+   * Marked in {@link handle} before dispatch and stamped by {@link send} on the
+   * way out — the same shape the gateway uses, and the only way to cover every
+   * handler's return paths (a lost acknowledgement included) without teaching
+   * each of them about it.
+   */
+  const unservedMarks = new WeakSet<ServerResponse>();
+
+  /**
+   * The one namespace this gateway's data plane routes, or `null` for a
+   * gateway that makes no such claim. See
+   * {@link MockFerrumEdge.setServedNamespace}.
+   */
+  let servedNamespace: string | null = null;
+
   /** `<namespace>|<proxy_id>|<method>|<status>` → cumulative count. */
   const requestCounters = new Map<string, number>();
   /** `<namespace>|<proxy_id>` → observed durations in milliseconds. */
@@ -1595,14 +1636,31 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       droppedAcks.delete(res);
       return send(res, dropped.status, dropped.body);
     }
+    // Only on a 2xx: a rejected write never reached the store, so a marker on
+    // it would describe a proxy that does not exist.
+    const marked = unservedMarks.delete(res) && status >= 200 && status < 300;
+    const extra = marked ? { [NAMESPACE_UNSERVED_HEADER]: 'true' } : {};
     if (body === undefined) {
-      res.writeHead(status);
+      res.writeHead(status, extra);
       res.end();
       return;
     }
     const payload = JSON.stringify(body);
-    res.writeHead(status, { 'content-type': 'application/json' });
+    res.writeHead(status, { 'content-type': 'application/json', ...extra });
     res.end(payload);
+  }
+
+  /**
+   * Whether this process's data plane would refuse to route `target`.
+   *
+   * Keyed on {@link MockFerrumEdge.setServedNamespace} rather than on the
+   * health payload, so the per-write marker and the health block are separate
+   * switches: a fake that derived one from the other could never show that the
+   * portal reads them independently. Unset — the default, and every gateway
+   * released before the marker — nothing is ever marked.
+   */
+  function dataPlaneUnserved(target: string): boolean {
+    return servedNamespace !== null && servedNamespace !== target;
   }
 
   function fail(res: ServerResponse, status: number, message: string): void {
@@ -2639,6 +2697,17 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       return fail(res, 403, `Token is not authorized for namespace '${scopedNamespace}'`);
     }
 
+    // Namespace-scoped mutations only, and never the `/namespaces` registry,
+    // which is a global surface selected by the path rather than the header.
+    if (
+      method !== 'GET' &&
+      segments[0] !== 'namespaces' &&
+      scopedNamespace !== null &&
+      dataPlaneUnserved(namespace)
+    ) {
+      unservedMarks.add(res);
+    }
+
     const held = delays.find(
       (entry) =>
         url.pathname.includes(entry.pathContains) &&
@@ -2788,6 +2857,12 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
       requestCounters.clear();
       requestDurations.clear();
       backendStates.clear();
+      // Undoes both halves of `setServedNamespace`; the rest of a custom
+      // `setHealth` payload is left alone, as it always has been.
+      servedNamespace = null;
+      const restored = { ...health };
+      delete restored.namespace;
+      health = restored;
     },
 
     clearInjections(): void {
@@ -2800,6 +2875,20 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
 
     setHealth(payload: Record<string, unknown>): void {
       health = payload;
+    },
+
+    setServedNamespace(active: string | null, options: { announce?: boolean } = {}): void {
+      servedNamespace = active;
+      const next = { ...health };
+      delete next.namespace;
+      if (active !== null && (options.announce ?? true)) {
+        next.namespace = {
+          active,
+          serving_scope: 'single-namespace-data-plane',
+          data_plane_single_namespace: true,
+        };
+      }
+      health = next;
     },
 
     queueFailure(

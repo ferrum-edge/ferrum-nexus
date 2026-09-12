@@ -14,6 +14,8 @@
 
 import type { AuthPluginType, EdgeCredentialType, HttpMethod } from '@ferrum-nexus/shared';
 
+import type { EdgeNamespaceServing } from './namespace.js';
+
 /* ── Envelopes ──────────────────────────────────────────────────────────── */
 
 /** Pagination block returned by every Edge list endpoint. */
@@ -558,8 +560,25 @@ export interface EdgeApiSpecPage {
 /* ── Health ─────────────────────────────────────────────────────────────── */
 
 /**
- * Authenticated `GET /health`. Nexus watches `mode`, `ready` and
- * `admin_writes_enabled`; the rest is diagnostic.
+ * The `namespace` block of the **authenticated** health payload.
+ *
+ * Absent on an unauthenticated probe (Edge treats the namespace name as
+ * operator-supplied deployment topology) and on any gateway older than the
+ * block itself — so every reader feature-detects. See
+ * `parseNamespaceServing` in `./namespace.ts`.
+ */
+export interface EdgeNamespaceBlock {
+  /** The one namespace this process's data plane routes; `null` for a control plane. */
+  active?: string | null;
+  /** `single-namespace-data-plane` | `control-plane` | `no-data-plane`. */
+  serving_scope?: string;
+  /** True when everything outside `active` is unrouted by this process. */
+  data_plane_single_namespace?: boolean;
+}
+
+/**
+ * Authenticated `GET /health`. Nexus watches `mode`, `ready`,
+ * `admin_writes_enabled` and `namespace`; the rest is diagnostic.
  */
 export interface EdgeHealth {
   status: string;
@@ -570,6 +589,7 @@ export interface EdgeHealth {
   config_rejected?: boolean;
   database?: { status?: string; type?: string };
   cached_config?: { proxy_count?: number; consumer_count?: number };
+  namespace?: EdgeNamespaceBlock;
 }
 
 /** Result of the Nexus-side Edge probe used by `GET /api/health`. */
@@ -601,6 +621,14 @@ export interface EdgeProbe {
   version: string | null;
   /** Failure detail, safe to log; never echoed to browsers. */
   error: string | null;
+  /**
+   * Which namespace the gateway's data plane serves, when it says.
+   *
+   * `null` on an unreachable gateway **and** on one that predates the
+   * `namespace` health block — the two are indistinguishable to a reader and
+   * neither is an assertion about routability.
+   */
+  namespace: EdgeNamespaceServing | null;
 }
 
 /* ── Runtime metrics ────────────────────────────────────────────────────── */

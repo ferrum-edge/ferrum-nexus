@@ -238,7 +238,7 @@ import {
   type CredentialsService,
   type TeardownGatewayIdentityResult,
 } from '../credentials/service.js';
-import type { FerrumAdminClient } from '../ferrum-admin/index.js';
+import { assertNamespaceServed, type FerrumAdminClient } from '../ferrum-admin/index.js';
 import type {
   EdgeCircuitBreakerConfig,
   EdgeConsumer,
@@ -752,6 +752,27 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     return api;
   }
 
+  /**
+   * Refuse to create or move a proxy the gateway's data plane will not route
+   * (ferrum-nexus#230).
+   *
+   * The Admin API would accept every write in this method and the portal would
+   * show a live API whose `invoke_url` answers `404` — the exact failure the
+   * verdict exists to stop, and one no provider can diagnose from the outside.
+   * Reads, runtime `PATCH`es and teardown are deliberately *not* gated: an
+   * operator fixing a mismatched deployment still has to be able to inspect
+   * and delete what the portal already published.
+   *
+   * The verdict never probes; it is refreshed by `GET /api/health`, by the
+   * startup gateway reconciliation, and by the
+   * `X-Ferrum-Namespace-Unserved` header on any write the gateway accepted
+   * but will not route. Against a gateway that reports no namespace block at
+   * all it is always `false`, so an older Edge publishes exactly as before.
+   */
+  function assertNamespaceRoutable(): void {
+    assertNamespaceServed(edge.namespaceMonitor.routing());
+  }
+
   // Every gateway write below goes through the shared binder: the GET-merge-PUT
   // under a per-proxy lock, the create-then-associate pairing, and the undo
   // steps all live in `edge-plugins.ts` so the palette service drives Edge
@@ -933,6 +954,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     },
 
     async publish(owner, input, ip = null): Promise<PublishResult> {
+      assertNamespaceRoutable();
       const name = input.name.trim();
       if (name === '') throw validationFailed('An API name is required');
 
@@ -1894,6 +1916,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     async updateSpec(actor, apiId, specText, version, ip = null): Promise<PublishResult> {
       let api = await loadApi(apiId);
       assertCanAdminister(actor, api);
+      // A revision rewrites the proxy and its spec on the gateway, so it is a
+      // re-publish and gated the same way a first publish is.
+      assertNamespaceRoutable();
 
       const parsed = parseOpenApiSpec(specText);
       let previous = await store.apiSpecs.findCurrentByApi(api.id);

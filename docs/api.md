@@ -148,6 +148,17 @@ reflected into the public error details. Other categories remain `502 EDGE_ERROR
 and gateway 5xx diagnostics remain opaque. This applies to publish, spec revision,
 and enforcement conversion.
 
+A publish or spec revision aimed at a namespace the gateway's **data plane does
+not route** returns `409 EDGE_NAMESPACE_UNSERVED` with
+`details: { configured_namespace, active_namespace, serving_scope, setting }`.
+The Admin API would accept the write and the resulting `invoke_url` would answer
+`404`, so the portal refuses it instead; only `POST /api/apis` and
+`PUT /api/apis/:id/spec` are gated, because reads, runtime `PATCH`es and
+`DELETE` are how the mismatch gets cleaned up. Nothing is refused against a
+gateway that does not report its namespace. See
+[`edge.namespace_routing`](#is-the-published-api-actually-reachable) below and
+[`operations.md`](operations.md#namespace-routability).
+
 An invalid Edge HTTP/JSON response returns `502 EDGE_PROTOCOL_ERROR` with
 `details: { status, kind: "protocol_error", reason }`. The fixed reason identifies
 the contract violation (for example `invalid_utf8`); response bytes and parser
@@ -191,9 +202,10 @@ Container and load-balancer probes key on the code, so a gateway outage alone
 must never take the portal out of rotation — only a broken database does.
 
 The Edge probe therefore never fails the endpoint. An unreachable gateway is
-`edge.status = "down"` and a gateway that answered but reports itself unready is
-`edge.status = "not_ready"`; both leave the overall status `degraded` on a
-`200`.
+`edge.status = "down"`, a gateway that answered but reports itself unready is
+`edge.status = "not_ready"`, and a healthy gateway that does not route the
+portal's namespace is `edge.status = "degraded"`; all three leave the overall
+status `degraded` on a `200`.
 
 ```json
 {
@@ -204,6 +216,7 @@ The Edge probe therefore never fails the endpoint. An unreachable gateway is
   "database": { "status": "ok", "latency_ms": 1, "error": null, "driver": "postgres" },
   "edge": {
     "status": "ok",
+    "reason": null,
     "latency_ms": 7,
     "error": null,
     "ready": true,
@@ -211,6 +224,15 @@ The Edge probe therefore never fails the endpoint. An unreachable gateway is
     "admin_writes_enabled": true,
     "edge_version": null,
     "namespace": "nexus",
+    "namespace_routing": {
+      "configured": "nexus",
+      "active": "nexus",
+      "serving_scope": "single-namespace-data-plane",
+      "data_plane_single_namespace": true,
+      "unserved": false,
+      "unserved_mutation_observed": false,
+      "checked_at": "2026-08-31T09:12:44.117Z"
+    },
     "reconciliation": {
       "status": "ok",
       "checked_at": "2026-08-31T09:05:00.004Z",
@@ -223,10 +245,43 @@ The Edge probe therefore never fails the endpoint. An unreachable gateway is
 ```
 
 Overall `status` is `ok` | `degraded` | `down`; `edge.status` is `ok` |
-`not_ready` | `down`.
+`degraded` | `not_ready` | `down`. `edge.reason` says _why_ a `degraded`
+gateway is degraded and is `null` otherwise; its only value today is
+`"namespace_unserved"`.
 
-`edge.reconciliation` is the **other** reason for `degraded`, and the only one
-a perfectly reachable gateway can cause. It reports whether Edge still holds
+#### Is the published API actually reachable?
+
+The Ferrum Edge **Admin API is multi-namespace**; one gateway process's **data
+plane serves exactly one namespace**. Publish into any other namespace and the
+Admin API answers `201`, `GET /proxies` lists the proxy, and the gateway's
+listener answers `404` forever. `edge.namespace_routing` is how the portal says
+so:
+
+- `configured` — `FERRUM_NAMESPACE` on the portal; where Nexus publishes.
+- `active` — the one namespace the gateway's data plane routes.
+- `serving_scope` — `single-namespace-data-plane`, `control-plane` or
+  `no-data-plane`, straight from the gateway.
+- `data_plane_single_namespace` — `true` when everything outside `active` is
+  unrouted by that process.
+- `unserved` — the verdict. `true` means APIs published here answer `404`.
+- `unserved_mutation_observed` — a write came back carrying
+  `X-Ferrum-Namespace-Unserved: true`, the gateway's per-write marker for the
+  same condition.
+- `checked_at` — when the gateway last reported its namespace, or `null` if it
+  never has.
+
+`active`, `serving_scope` and `data_plane_single_namespace` follow the same
+admin-only rule as `mode` — Edge itself publishes them only to an authenticated
+caller — and are `null` for everyone else. `unserved` and `edge.reason` stay
+public so an anonymous monitor can alert on them, and the `409` a publish gets
+names both namespaces.
+
+A gateway that reports no namespace of its own — every release before the field
+existed — leaves `active` `null`, `unserved` `false` and `checked_at` `null`.
+Nothing degrades and nothing is refused: an unknown topology is never a verdict.
+
+`edge.reconciliation` is another reason for `degraded`, and one a perfectly
+reachable gateway can cause. It reports whether Edge still holds
 the consumer and proxy ids Nexus stored: retarget `FERRUM_ADMIN_URL` at a fresh
 gateway, or rebuild the one it names, and every probe above stays green while
 every account and API that predates the change is broken. Its `status` is `ok`
