@@ -46,6 +46,24 @@ Cross-adapter smoke tests default to SQLite; export
 to also exercise those adapters — always do this when touching
 `server/src/db/adapters/`.
 
+## Coverage
+
+```bash
+npm run test:coverage   # server (node --experimental-test-coverage) then web (vitest --coverage)
+```
+
+Per workspace:
+
+```bash
+npm run test:coverage --workspace server   # prints Node's coverage table
+npm run test:coverage --workspace web      # prints a text summary, writes web/coverage/lcov.info
+```
+
+CI runs the same root script in a non-blocking `coverage` job and uploads the
+text summary plus `web/coverage/lcov.info` as the `coverage-report` artifact.
+The job never gates a merge — it exists so coverage regressions are visible.
+`coverage/` is git- and Prettier-ignored.
+
 ## Ground rules
 
 1. Persistence only through the `NexusStore` interface — never import a DB

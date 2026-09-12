@@ -44,6 +44,21 @@ export default defineConfig(({ mode }) => {
       environment: 'jsdom',
       setupFiles: ['./vitest.setup.ts'],
       globals: false,
+      coverage: {
+        provider: 'v8',
+        // `text` prints the summary CI captures; `lcov` writes web/coverage/lcov.info
+        // for artifact upload and editor gutters. `coverage/` is git- and
+        // prettier-ignored.
+        reporter: ['text', 'lcov'],
+        reportsDirectory: './coverage',
+        include: ['src/**/*.{ts,tsx}'],
+        exclude: [
+          'src/**/*.test.{ts,tsx}',
+          'src/**/*.d.ts',
+          // Browser entrypoint: never imported by a jsdom test.
+          'src/main.tsx',
+        ],
+      },
     },
   };
 });
