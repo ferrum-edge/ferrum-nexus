@@ -245,7 +245,7 @@ status `degraded` on a `200`.
 ```
 
 Overall `status` is `ok` | `degraded` | `down`; `edge.status` is `ok` |
-`degraded` | `not_ready` | `down`. `edge.reason` says *why* a `degraded`
+`degraded` | `not_ready` | `down`. `edge.reason` says _why_ a `degraded`
 gateway is degraded and is `null` otherwise; its only value today is
 `"namespace_unserved"`.
 

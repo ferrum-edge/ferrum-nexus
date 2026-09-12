@@ -34,7 +34,7 @@ than the value in `.env`, startup prints a banner naming the variable, both
 values and which one won:
 
 ```
-=====================================================================
+============================================================================
 ENVIRONMENT OVERRIDES .env: the exported value wins, not the file.
 
     FERRUM_NAMESPACE
@@ -56,7 +56,7 @@ entirely, and refusing to boot on a disagreement would turn a deployment detail
 into an outage. There it stays warn-only, and `NEXUS_ALLOW_ENV_OVERRIDE` has no
 effect. Nothing about precedence changes in either environment — the exported
 value always wins.
-=======
+
 **Vite `npm run dev` only.** The SPA half of `npm run dev` also reads the
 repo-root `.env`. These knobs are not part of the BFF schema above and have no
 effect on a production image, which serves the built SPA from the BFF:

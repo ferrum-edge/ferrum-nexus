@@ -29,7 +29,7 @@ Nexus is a front end for a gateway, so the gateway comes first. Two things have
 to match on both sides: the **admin JWT secret**, and **`FERRUM_NAMESPACE`**.
 
 > **`FERRUM_NAMESPACE` must be identical on the gateway and on the portal.**
-> The gateway's Admin API accepts a write into *any* namespace, but a single
+> The gateway's Admin API accepts a write into _any_ namespace, but a single
 > gateway process's data plane routes exactly one — the one its own
 > `FERRUM_NAMESPACE` names (`ferrum` when unset). Point Nexus at a different
 > namespace and every publish still succeeds, the catalog still shows an
