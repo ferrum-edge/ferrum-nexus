@@ -64,6 +64,7 @@ import { jwtVerify } from 'jose';
 
 /** One recorded Admin API call. */
 export interface RecordedRequest {
+  provisionedBy?: string;
   method: string;
   /** Path without the query string. */
   path: string;
@@ -76,6 +77,7 @@ export interface RecordedRequest {
 
 /** A consumer as the mock stores it (unredacted). */
 export interface StoredConsumer {
+  labels?: Record<string, string>;
   id: string;
   username: string;
   namespace: string;
@@ -450,6 +452,7 @@ const KNOWN_CREDENTIAL_TYPES = new Set(['basicauth', 'keyauth', 'jwt', 'hmac_aut
  * subset; the rest is here so a test can represent an operator-enriched proxy.
  */
 const PROXY_KEYS = new Set([
+  'labels',
   'id',
   'name',
   'namespace',
@@ -705,6 +708,7 @@ const MAX_CORS_ORIGINS = 64;
  * `namespace`, `created_at` and `updated_at` are accepted but server-owned.
  */
 const PLUGIN_CONFIG_KEYS = new Set([
+  'labels',
   'id',
   'plugin_name',
   'namespace',
@@ -719,7 +723,14 @@ const PLUGIN_CONFIG_KEYS = new Set([
   'updated_at',
 ]);
 
-const CONSUMER_KEYS = new Set(['id', 'username', 'custom_id', 'credentials', 'acl_groups']);
+const CONSUMER_KEYS = new Set([
+  'labels',
+  'id',
+  'username',
+  'custom_id',
+  'credentials',
+  'acl_groups',
+]);
 
 /* ── API specs ──────────────────────────────────────────────────────────── */
 
@@ -1410,6 +1421,7 @@ function project(consumer: StoredConsumer): Record<string, unknown> {
     custom_id: consumer.custom_id,
     credentials,
     acl_groups: [...consumer.acl_groups],
+    ...(consumer.labels && { labels: consumer.labels }),
     created_at: consumer.created_at,
     updated_at: consumer.updated_at,
   };
@@ -1795,6 +1807,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
         }
         const stored: StoredConsumer = {
           id: newId,
+          ...(isRecord(body.labels) && { labels: body.labels as Record<string, string> }),
           username,
           namespace,
           custom_id: customId,
@@ -1832,6 +1845,7 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
             'Consumer identity or credential conflicts with another Consumer in the namespace',
           );
         }
+        if (isRecord(body.labels)) stored.labels = body.labels as Record<string, string>;
         stored.username = username;
         stored.custom_id = customId;
         stored.acl_groups = Array.isArray(body.acl_groups) ? body.acl_groups.map(String) : [];
@@ -2670,6 +2684,10 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     const verified = await verifyToken(req);
     const claims = verified instanceof Error ? null : verified;
     requests.push({
+      provisionedBy:
+        typeof req.headers['x-ferrum-provisioned-by'] === 'string'
+          ? req.headers['x-ferrum-provisioned-by']
+          : undefined,
       method,
       path: url.pathname,
       query: Object.fromEntries(url.searchParams),

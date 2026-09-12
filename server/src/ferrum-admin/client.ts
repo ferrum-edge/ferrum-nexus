@@ -787,6 +787,7 @@ export function createFerrumAdminClient(
     const headers: Record<string, string> = {
       authorization: `Bearer ${token}`,
       'x-ferrum-namespace': namespace,
+      'x-ferrum-provisioned-by': 'ferrum-nexus',
       accept: 'application/json',
     };
     const hasBody = options.body !== undefined;
@@ -1033,6 +1034,7 @@ export function createFerrumAdminClient(
         headers: {
           authorization: `Bearer ${token}`,
           'x-ferrum-namespace': namespace,
+          'x-ferrum-provisioned-by': 'ferrum-nexus',
           accept,
         },
         dispatcher,

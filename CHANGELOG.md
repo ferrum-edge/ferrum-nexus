@@ -8,6 +8,7 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Added
 
+- Gateway resource attribution via `labels.provisioned-by: ferrum-nexus`, including API-spec-generated resources (requires Ferrum Edge resource-label support).
 - Test coverage collection: `npm run test:coverage` runs the server suite
   under `node --experimental-test-coverage` and then the web suite under
   `vitest run --coverage` (`@vitest/coverage-v8`, text + lcov reporters). CI
