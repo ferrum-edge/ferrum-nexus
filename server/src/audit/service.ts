@@ -83,15 +83,18 @@ export const AuditAction = {
    */
   API_PUBLISH_ROLLBACK: 'api.publish_rollback',
   /**
-   * An `auth_plugin` change was confirmed, so the credentials the outgoing
-   * plugin was what made usable were revoked with it.
+   * An `auth_plugin` change went through on a live API, summarising what it
+   * disrupted.
    *
-   * The summary of a sweep whose individual revocations each write their own
-   * `credential.revoke` row: how many were in scope, how many actually came
-   * off, and — `failed` — the ones the gateway would not let go of, which are
-   * live-looking portal rows for keys that no longer open this API.
+   * The companion to the `api.update` row: how many grantee accounts lost
+   * access to this API until they issue a credential of the new flavour (their
+   * own credentials are left alone — they serve other APIs), and how many of
+   * the API's **own** credentials, on its `nexus-test-<api_id>` consumer, were
+   * revoked because the change really did make them useless. Each of those
+   * revocations also writes its own `credential.revoke` row; `failed` names the
+   * ones the gateway would not let go of.
    */
-  API_CREDENTIALS_INVALIDATED: 'api.credentials_invalidated',
+  API_AUTH_PLUGIN_CHANGED: 'api.auth_plugin_changed',
   TEST_CONSUMER_CREATE: 'test_consumer.create',
 
   /* access workflow */

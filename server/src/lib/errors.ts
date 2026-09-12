@@ -116,16 +116,19 @@ export function lastSuperAdmin(
 }
 
 /**
- * 409 — the change would strand live gateway credentials and was not confirmed.
+ * 409 — the change would cut live callers off and was not confirmed.
  *
  * Not `CONFLICT`: nothing about the request is wrong and nothing needs to
  * change before it can succeed — it only needs the caller to say, in the body,
  * that they accept the consequence. `details` is
- * {@link CredentialInvalidationDetails}, which names the field to resend and
- * how many credentials are at stake.
+ * {@link AccessDisruptionDetails}, which names the field to resend and how many
+ * accounts lose access until they re-issue.
  */
-export function credentialInvalidationRequired(message: string, details: unknown): NexusError {
-  return new NexusError('CREDENTIAL_INVALIDATION_REQUIRED', message, details);
+export function accessDisruptionConfirmationRequired(
+  message: string,
+  details: unknown,
+): NexusError {
+  return new NexusError('ACCESS_DISRUPTION_CONFIRMATION_REQUIRED', message, details);
 }
 
 /** 410 — show-once credential material was already retrieved. */

@@ -372,12 +372,17 @@ export interface CredentialsService {
    * unusable, on behalf of whoever made that change.
    *
    * The same gateway delete and row settlement as {@link
-   * CredentialsService.revoke}, without its ownership check: the caller is the
-   * API's owner or an administrator, not the credential's, and what authorises
-   * the revocation is the `auth_plugin` change they confirmed rather than any
-   * claim on the account holding the key. `details` is merged into the
-   * `credential.revoke` row, so the log can say why somebody else's credential
-   * went away.
+   * CredentialsService.revoke}, without its ownership check: what authorises
+   * the revocation is the change made to the API the credential belongs to, not
+   * a claim on the account the row happens to be attributed to. Today's only
+   * caller is an `auth_plugin` change sweeping the API's **own**
+   * `nexus-test-<api_id>` consumer, whose rows are attributed to whichever
+   * administrator created that consumer rather than to whoever is making the
+   * change now. `details` is merged into the `credential.revoke` row so the log
+   * says which of the two paths wrote it.
+   *
+   * Never point this at a credential a *grantee* holds: theirs hangs off their
+   * own consumer and goes on serving every other API of that flavour.
    *
    * Returns `false` when the row was already revoked — nothing was written and
    * nothing was audited.
@@ -1176,10 +1181,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    *
    * Everything {@link CredentialsService.revoke} does below its ownership
    * check, factored out because a second caller needs it *without* that check:
-   * a confirmed `auth_plugin` change revokes credentials belonging to other
-   * accounts, and what authorises that is the API the change was made on, not
-   * the credential's owner. `details` is merged into the `credential.revoke`
-   * row so the log says which of the two wrote it.
+   * an `auth_plugin` change revokes the API's own test-consumer credentials,
+   * which are attributed to the administrator who created that consumer rather
+   * than to whoever is making the change. `details` is merged into the
+   * `credential.revoke` row so the log says which of the two wrote it.
    *
    * Returns `false` when the row was already retired by the time the consumer's
    * queue reached it — a no-op that wrote nothing and audits nothing.

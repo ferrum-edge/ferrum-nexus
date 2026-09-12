@@ -378,7 +378,8 @@ The bell in the header. You are notified when:
 - someone **messages** you;
 - one of your **credentials is rotated**;
 - an API you have access to **changes its authentication method** — which
-  revokes your credential of the old type — or is **removed**;
+  stops your credential of the old type working _on that API_ — or is
+  **removed**;
 - an administrator sends a **platform announcement**.
 
 Click one to jump to the relevant page; **Mark all read** clears the badge.
@@ -396,9 +397,11 @@ credential and update your integration with the new secret.
 
 **"My integration broke overnight and I changed nothing."** In order of
 likelihood: your grant was revoked (check the catalog badge — you would have
-been notified); the provider changed the API's **authentication method**, which
-revokes credentials of the old type (you are notified, and issue one of the new
-type); the provider retired or deleted the API.
+been notified); the provider changed the API's **authentication method**, so
+credentials of the old type no longer satisfy that API (you are notified; your
+credential is not revoked and still works on your other APIs of that type —
+issue one of the new type for this one); the provider retired or deleted the
+API.
 
 **"I get 401 with a credential I just issued."** Check you are using the right
 _type_ for that API, and the right header. For `basicauth`, the username is

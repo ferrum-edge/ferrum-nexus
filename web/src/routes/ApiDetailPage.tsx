@@ -74,14 +74,16 @@ const WINDOW_OPTIONS = [
  * **live** API.
  *
  * Edge runs one flavour of authentication per proxy, so the swap stops every
- * credential of the outgoing flavour the moment it lands — from the client's
- * side, a `401` on a key this portal still lists as active (issue #234). The
+ * credential of the outgoing flavour at this API the moment it lands — from the
+ * client's side, a `401` on a key this portal still lists as active (issue
+ * #234). Nobody's credential is taken away, because it still serves their other
+ * APIs; what they lose is this one, until they issue a matching credential. The
  * server refuses the change outright unless the request acknowledges that, so
  * the checkbox below is not decoration: without it the save comes back as a
- * `409` naming the number of credentials at stake.
+ * `409` naming how many accounts are cut off.
  */
 const AUTH_SWAP_WARNING =
-  'Changing this breaks every credential issued for the old method. Saving revokes them, and everyone holding access is told to issue a replacement — including any credential of theirs that other APIs of the old method were using.';
+  'Everyone holding access with a credential of the old method loses access to this API until they issue one of the new method. Their credentials are not revoked — they keep working on other APIs — and saving notifies everyone affected. Any test-consumer credential of this API is revoked, since it can no longer authenticate anything.';
 
 /** Hint under the CORS origins box; the empty case is the one worth spelling out. */
 const CORS_ORIGINS_HINT =
@@ -126,10 +128,10 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
   const [specEnforcement, setSpecEnforcement] = useState<SpecEnforcementLevel>(
     api.spec_enforcement,
   );
-  const [confirmInvalidation, setConfirmInvalidation] = useState(false);
+  const [confirmDisruption, setConfirmDisruption] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
-  /** Whether this form is about to strand the API's existing credentials. */
+  /** Whether this form is about to cut existing callers off from this API. */
   const authSwapped = authPlugin !== api.auth_plugin;
 
   // The current document is not on this page, so it is fetched to offer the
@@ -210,7 +212,7 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
           // Only ever sent alongside a real swap, and only once the provider
           // has ticked the box: the flag is an acknowledgement of a specific
           // consequence, not a standing preference.
-          ...(authSwapped && confirmInvalidation ? { confirm_credential_invalidation: true } : {}),
+          ...(authSwapped && confirmDisruption ? { confirm_access_disruption: true } : {}),
           spec_enforcement: specEnforcement,
           ...(upstreamUrl.trim() ? { upstream_url: upstreamUrl.trim() } : {}),
         },
@@ -293,9 +295,9 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
             {authSwapped ? (
               <div className="md:col-span-2">
                 <Checkbox
-                  label="Revoke the credentials this breaks and notify everyone holding access"
-                  checked={confirmInvalidation}
-                  onChange={(event) => setConfirmInvalidation(event.target.checked)}
+                  label="Cut off everyone using the old method until they re-issue, and notify them"
+                  checked={confirmDisruption}
+                  onChange={(event) => setConfirmDisruption(event.target.checked)}
                 />
               </div>
             ) : null}

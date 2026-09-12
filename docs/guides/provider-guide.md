@@ -575,45 +575,48 @@ backend-state read fails, counters remain valid and the backend is Unknown.
 **My APIs → the API → Settings.** Everything here is safe to change on a live
 API, but two of them have consequences worth reading first.
 
-| Change                     | Effect                                                                                                                     |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| Name, description, version | Catalog metadata only.                                                                                                     |
-| Visibility                 | Listing only. Existing grants and calls are unaffected.                                                                    |
-| Upstream URL               | Re-points the gateway's backend. Takes effect immediately, and the upstream shown on the API page updates with it.         |
-| Rate limit                 | Attaches, updates, or (cleared) removes the quota.                                                                         |
-| CORS                       | Attaches, replaces, or (cleared) removes the browser CORS policy and its default-on WebSocket origin check.                |
-| Allowed methods            | Takes effect immediately. Untick everything to accept every method again.                                                  |
-| Timeouts, circuit breaker  | Take effect immediately. Clearing the timeout boxes restores the gateway defaults.                                         |
-| **Requestable → off**      | ⚠️ Removes the access gate. **Every authenticated consumer can now call this API.** Existing grants stay but become inert. |
-| **Authentication plugin**  | ⚠️ Refused while credentials for the old method are live, unless you confirm; confirming revokes every one of them.        |
+| Change                     | Effect                                                                                                                                                                 |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Name, description, version | Catalog metadata only.                                                                                                                                                 |
+| Visibility                 | Listing only. Existing grants and calls are unaffected.                                                                                                                |
+| Upstream URL               | Re-points the gateway's backend. Takes effect immediately, and the upstream shown on the API page updates with it.                                                     |
+| Rate limit                 | Attaches, updates, or (cleared) removes the quota.                                                                                                                     |
+| CORS                       | Attaches, replaces, or (cleared) removes the browser CORS policy and its default-on WebSocket origin check.                                                            |
+| Allowed methods            | Takes effect immediately. Untick everything to accept every method again.                                                                                              |
+| Timeouts, circuit breaker  | Take effect immediately. Clearing the timeout boxes restores the gateway defaults.                                                                                     |
+| **Requestable → off**      | ⚠️ Removes the access gate. **Every authenticated consumer can now call this API.** Existing grants stay but become inert.                                             |
+| **Authentication plugin**  | ⚠️ Refused while anyone holding access has a live credential of the old method, unless you confirm; they keep their credentials but lose this API until they re-issue. |
 
 ### Changing the authentication plugin
 
 Credentials are typed. Switching from API Key to JWT does not convert anyone's
 key — it makes their key stop satisfying this API, from the moment you save.
 
-**The portal will not let you do it by accident.** If anybody holds a live
-credential of the old type for this API, the save is refused and the error says
-how many. Tick **Revoke the credentials this breaks and notify everyone holding
-access** on the Settings tab and save again to go ahead.
+**The portal will not let you do it by accident.** If anybody holding access has
+a live credential of the old type, the save is refused and the error says how
+many accounts that is. Tick **Cut off everyone using the old method until they
+re-issue, and notify them** on the Settings tab and save again to go ahead.
 
-Confirming is not a formality. Those credentials are **revoked** — deleted from
-the gateway and marked revoked in the portal — so the change cannot leave a
-client holding a key that looks live and is not. That is also the sting: a
-grantee's key is theirs, not this API's, so revoking it stops it working for
-any _other_ API of the old type too. Everyone affected is notified in-app, told
-the credential is gone and pointed at their credentials page to issue a new
-one.
+Nobody's credential is taken away. A credential belongs to the account that
+issued it, not to your API, and the same key authenticates every other API of
+that type they have access to — so the portal will not revoke it to settle a
+change on yours. What each of them loses is _this_ API, until they issue a
+credential of the new type; they are notified in-app and pointed at their
+credentials page to do exactly that.
 
-So coordinate it: tell your consumers first, agree a window, then switch. If
-you only want to know who would be affected, send the change without the
-confirmation and read the count off the refusal — nothing is written.
+The one exception is the API's own **test consumer**: its key exists to call
+this API and nothing else, so the change really does make it useless and it is
+revoked with the swap. **Create test consumer** again afterwards to get a key
+of the new type.
 
-The count covers the accounts with an active grant on this API, plus the API's
-own test consumer. An API with **Requestable off** gates nobody, so there is no
-list of callers to count or notify: a swap on one of those is never refused,
-and its callers find out when their key stops working. Announce that one
-yourself.
+So coordinate it: tell your consumers first, agree a window, then switch. If you
+only want to know how many accounts would be affected, send the change without
+the confirmation and read the count off the refusal — nothing is written.
+
+The count covers accounts with an active grant on this API. An API with
+**Requestable off** gates nobody, so there is no list of callers to count or
+notify: a swap on one of those is never refused, and its callers find out when
+their key stops working. Announce that one yourself.
 
 ---
 
