@@ -207,6 +207,9 @@ The Edge probe therefore never fails the endpoint. An unreachable gateway is
 portal's namespace is `edge.status = "degraded"`; all three leave the overall
 status `degraded` on a `200`.
 
+_Authenticated admin session_ — the same healthy stack; admin-only fields are
+filled in:
+
 ```json
 {
   "status": "ok",
@@ -243,6 +246,50 @@ status `degraded` on a `200`.
   }
 }
 ```
+
+_Anonymous request_ — the same response with admin-only fields nulled:
+
+```json
+{
+  "status": "ok",
+  "version": "0.1.0",
+  "uptime_seconds": 1284,
+  "checked_at": "2026-08-31T09:12:44.117Z",
+  "database": { "status": "ok", "latency_ms": 1, "error": null, "driver": "postgres" },
+  "edge": {
+    "status": "ok",
+    "reason": null,
+    "latency_ms": 7,
+    "error": null,
+    "ready": true,
+    "mode": null,
+    "admin_writes_enabled": null,
+    "edge_version": null,
+    "namespace": "nexus",
+    "namespace_routing": {
+      "configured": "nexus",
+      "active": null,
+      "serving_scope": null,
+      "data_plane_single_namespace": null,
+      "unserved": false,
+      "unserved_mutation_observed": false,
+      "checked_at": "2026-08-31T09:12:44.117Z"
+    },
+    "reconciliation": {
+      "status": "ok",
+      "checked_at": "2026-08-31T09:05:00.004Z",
+      "orphaned_consumers": null,
+      "orphaned_proxies": null,
+      "complete": null
+    }
+  }
+}
+```
+
+The two examples differ only in `edge.mode`, `edge.admin_writes_enabled`,
+`edge.namespace_routing.active`, `edge.namespace_routing.serving_scope`,
+`edge.namespace_routing.data_plane_single_namespace`, and the three
+`edge.reconciliation` count fields — all `null` for anonymous callers.
 
 Overall `status` is `ok` | `degraded` | `down`; `edge.status` is `ok` |
 `degraded` | `not_ready` | `down`. `edge.reason` says _why_ a `degraded`
