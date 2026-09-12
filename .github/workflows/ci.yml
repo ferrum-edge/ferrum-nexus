@@ -33,6 +33,40 @@ jobs:
           fi
       - run: npm run build
 
+  # Non-blocking: coverage is reported for visibility, not enforced as a gate.
+  # Keep this out of the required-checks list.
+  coverage:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Collect server + web coverage
+        run: |
+          mkdir -p coverage-report
+          set -o pipefail
+          npm run test:coverage 2>&1 | tee coverage-report/coverage-summary.txt
+      - name: Gather lcov output
+        if: always()
+        run: |
+          mkdir -p coverage-report
+          if [ -f web/coverage/lcov.info ]; then
+            cp web/coverage/lcov.info coverage-report/web-lcov.info
+          fi
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage-report/
+          if-no-files-found: warn
+          retention-days: 14
+
   store-contracts:
     runs-on: ubuntu-latest
     timeout-minutes: 15

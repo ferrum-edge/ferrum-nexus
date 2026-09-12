@@ -8,6 +8,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Added
 
+- Test coverage collection: `npm run test:coverage` runs the server suite
+  under `node --experimental-test-coverage` and then the web suite under
+  `vitest run --coverage` (`@vitest/coverage-v8`, text + lcov reporters). CI
+  runs it in a non-blocking `coverage` job that uploads the text summary and
+  `web/coverage/lcov.info` as an artifact; no required check changes.
 - `NEXUS_WEB_PORT` (alias `VITE_DEV_PORT`) and `NEXUS_API_PROXY_TARGET` for
   `npm run dev`, so a second Nexus (or Foundry) stack can pick free ports
   without editing `web/vite.config.ts`. Defaults stay 5173 and
