@@ -75,6 +75,26 @@ scripts run.
 
 Open <http://127.0.0.1:5173>. The backend serves on `http://127.0.0.1:8787`.
 
+Those are the defaults. The Vite half reads the same repo-root `.env` as the
+BFF: `NEXUS_WEB_PORT` (alias `VITE_DEV_PORT`) is the SPA listen port, and
+`/api` is proxied to `NEXUS_API_PROXY_TARGET` or, when that is unset, to
+`http://127.0.0.1:<NEXUS_PORT>` (`NEXUS_PORT` is the existing API bind port).
+A taken port fails the Vite process instead of silently moving to the next
+one. Invalid values fail with the variable name in the error.
+
+To run a second clone beside a stack that already holds 5173/8787, point that
+checkout's `.env` at a free pair and a separate SQLite file:
+
+```bash
+NEXUS_PORT=8788
+NEXUS_WEB_PORT=5175
+NEXUS_PUBLIC_URL=http://127.0.0.1:5175
+NEXUS_SQLITE_PATH=./data/nexus-b.sqlite
+```
+
+Give the second stack its own Edge namespace and gateway ports too if it is
+not sharing the first gateway.
+
 The first user to register becomes the initial `super_admin`, so that one
 registration has to prove it comes from you: while the portal has no super
 admin the sign-up form asks for a **bootstrap token**. Set

@@ -14,7 +14,7 @@ Thanks for helping improve Ferrum Nexus!
 npm install
 cp .env.example .env   # set NEXUS_SECRET_KEY, FERRUM_ADMIN_URL, FERRUM_ADMIN_JWT_SECRET
 npm run migrate        # builds shared, then applies migrations
-npm run dev            # backend on :8787, web on :5173
+npm run dev            # backend on :8787, web on :5173 (override with NEXUS_PORT / NEXUS_WEB_PORT)
 ```
 
 ## Project layout

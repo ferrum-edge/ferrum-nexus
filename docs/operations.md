@@ -12,10 +12,10 @@ and the credential mirror.
 
 ## 1. Environment variables
 
-`server/src/config/index.ts` is the **only** reader of the environment. It
-validates everything with zod at startup and refuses to boot half-configured:
-the process prints every offending variable and exits non-zero. The repo-root
-[`.env.example`](../.env.example) mirrors this table.
+`server/src/config/index.ts` is the **only** reader of the environment in the
+BFF. It validates everything with zod at startup and refuses to boot
+half-configured: the process prints every offending variable and exits
+non-zero. The repo-root [`.env.example`](../.env.example) mirrors this table.
 
 **Where the environment comes from.** The server (`npm run dev`, `npm start`)
 and the migration CLI (`npm run migrate`) read a `.env` file if one exists in
@@ -26,6 +26,17 @@ container runtime or injected by an orchestrator always wins, and a deployed
 image with no `.env` behaves exactly as if the feature did not exist. The
 path of the file that was read is logged once at startup; its contents never
 are. A relative `NEXUS_SQLITE_PATH` resolves from `server/`.
+
+**Vite `npm run dev` only.** The SPA half of `npm run dev` also reads the
+repo-root `.env`. These knobs are not part of the BFF schema above and have no
+effect on a production image, which serves the built SPA from the BFF:
+
+| Variable                 | Default                         | Notes                                                                                                                                                                                                                          |
+| ------------------------ | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `NEXUS_WEB_PORT`         | `5173`                          | Vite listen port. Alias: `VITE_DEV_PORT` (ignored when `NEXUS_WEB_PORT` is set). Integer 1–65535. A taken port fails the process (`strictPort`) instead of silently binding the next free one.                                  |
+| `NEXUS_API_PROXY_TARGET` | derived from `NEXUS_PORT`       | Absolute `http(s)` origin for the `/api` proxy (no path, query, credentials, or fragment). When unset, derived as `http://<host>:<NEXUS_PORT>` where `<host>` is `NEXUS_HOST` and wildcard binds (`0.0.0.0`, `::`) become `127.0.0.1`. |
+
+See the README for a two-stack example.
 
 ### Required
 
