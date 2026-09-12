@@ -37,6 +37,20 @@
  * `NEXUS_HEALTH_CACHE_MS=0` disables the cache and probes on every request.
  * The request rate itself is bounded by the route-scoped limiter
  * (`HEALTH_RATE_LIMIT` in `server/src/index.ts`).
+ *
+ * ## `edge.reconciliation` is read, never taken
+ *
+ * A reachable Admin API is not the same thing as *the* Admin API: retarget
+ * `FERRUM_ADMIN_URL` at a fresh gateway and every probe here stays green while
+ * every consumer and proxy id the portal stored points at nothing
+ * (issue #235). `edge.reconciliation` is the signal for that, and an
+ * `orphaned` verdict degrades the portal exactly as an unreachable gateway
+ * does.
+ *
+ * It is filled from the cached result of the background pass in
+ * `admin/gateway-reconciliation.ts` — these routes never run one. The pass
+ * costs an Admin API read per stored reference, which is the last thing an
+ * unauthenticated endpoint should be able to trigger.
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
@@ -47,9 +61,12 @@ import {
   type DependencyHealth,
   type EdgeHealth,
   type EdgeHealthStatus,
+  type EdgeReconciliationHealth,
+  type GatewayReconciliationReport,
   type HealthStatus,
 } from '@ferrum-nexus/shared';
 
+import type { GatewayReconciliationService } from '../admin/gateway-reconciliation.js';
 import type { NexusConfig } from '../config/index.js';
 import type { NexusStore } from '../db/store.js';
 import type { EdgeProbe, FerrumAdminClient } from '../ferrum-admin/index.js';
@@ -62,6 +79,15 @@ export interface HealthRoutesOptions {
   config: NexusConfig;
   store: NexusStore;
   edge: FerrumAdminClient;
+  /**
+   * Read-only view of the gateway-reference reconciliation pass.
+   *
+   * Only `snapshot()` is taken, and deliberately so: the pass costs one Admin
+   * API read per stored consumer and proxy reference, and these routes are
+   * unauthenticated. Triggering one from here would rebuild exactly the
+   * amplifier the probe cache exists to remove.
+   */
+  reconciliation: Pick<GatewayReconciliationService, 'snapshot'>;
 }
 
 const startedAt = Date.now();
@@ -132,7 +158,12 @@ function memoizeProbe<T>(ttlMs: number, run: () => Promise<T>): () => Promise<Pr
  * recovering gateway behind a connectivity diagnostic. A gateway that answered
  * without a `ready` field at all is taken at its word and reads `ok`.
  */
-function presentEdge(result: EdgeProbe, namespace: string, request: FastifyRequest): EdgeHealth {
+function presentEdge(
+  result: EdgeProbe,
+  namespace: string,
+  reconciliation: GatewayReconciliationReport | null,
+  request: FastifyRequest,
+): EdgeHealth {
   const status: EdgeHealthStatus = !result.reachable
     ? 'down'
     : result.ready === false
@@ -152,12 +183,48 @@ function presentEdge(result: EdgeProbe, namespace: string, request: FastifyReque
     admin_writes_enabled: detailAllowed ? result.adminWritesEnabled : null,
     edge_version: result.version,
     namespace,
+    reconciliation: presentReconciliation(reconciliation, detailAllowed),
+  };
+}
+
+/**
+ * Render the last reconciliation pass for one caller.
+ *
+ * The verdict and its timestamp are public: a monitor has to be able to see
+ * that the portal is talking to a gateway which does not hold the ids it
+ * stored, and how stale that reading is. How *many* accounts and APIs are
+ * affected is a size-of-the-portal signal and follows the same admin-only rule
+ * as the Edge diagnostic text above.
+ *
+ * No pass having run yet reads `unknown` with a `null` timestamp — the same
+ * shape as a pass that could not reach the gateway, because neither is
+ * evidence about the references either way.
+ */
+function presentReconciliation(
+  report: GatewayReconciliationReport | null,
+  detailAllowed: boolean,
+): EdgeReconciliationHealth {
+  if (report === null || report.status === 'unknown') {
+    return {
+      status: 'unknown',
+      checked_at: report?.checked_at ?? null,
+      orphaned_consumers: null,
+      orphaned_proxies: null,
+      complete: null,
+    };
+  }
+  return {
+    status: report.status,
+    checked_at: report.checked_at,
+    orphaned_consumers: detailAllowed ? report.consumers.orphaned : null,
+    orphaned_proxies: detailAllowed ? report.proxies.orphaned : null,
+    complete: detailAllowed ? report.consumers.complete && report.proxies.complete : null,
   };
 }
 
 /** `/api/health` route plugin. */
 export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (app, options) => {
-  const { config, store, edge } = options;
+  const { config, store, edge, reconciliation } = options;
 
   // Logging lives inside the memo rather than in the handler: a cached `down`
   // is served for the whole window, and re-logging it on every hit would
@@ -198,13 +265,21 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (app,
       error: dbResult.ok ? null : OPAQUE_ERROR,
       driver: config.db.driver,
     };
-    const edgeHealth = presentEdge(gateway.value, config.edge.namespace, request);
+    const edgeHealth = presentEdge(
+      gateway.value,
+      config.edge.namespace,
+      reconciliation.snapshot(),
+      request,
+    );
 
     // The database is load-bearing; the gateway only degrades the portal —
     // both `not_ready` and `down` on the Edge side keep the portal serving.
+    // Orphaned references degrade it too: the gateway answers perfectly, and
+    // the half of the portal that predates the retarget is nonetheless broken,
+    // which is precisely the failure this endpoint used to report as `ok`.
     const status: HealthStatus = !dbResult.ok
       ? 'down'
-      : edgeHealth.status === 'ok'
+      : edgeHealth.status === 'ok' && edgeHealth.reconciliation.status !== 'orphaned'
         ? 'ok'
         : 'degraded';
 
@@ -227,6 +302,6 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (app,
 
   app.get('/edge', async (request): Promise<EdgeHealth> => {
     const gateway = await probeEdge();
-    return presentEdge(gateway.value, config.edge.namespace, request);
+    return presentEdge(gateway.value, config.edge.namespace, reconciliation.snapshot(), request);
   });
 };

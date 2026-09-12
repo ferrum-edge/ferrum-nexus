@@ -228,6 +228,26 @@ export interface NexusConfig {
   /** Shared deadline for the health route's Edge calls; below the 10 s image healthcheck. */
   healthProbeTimeoutMs: number;
   /**
+   * How often the gateway-reference reconciliation pass runs
+   * (`NEXUS_GATEWAY_RECONCILE_INTERVAL_MS`). `0` disables the periodic pass;
+   * the admin endpoint still runs one on demand.
+   *
+   * Deliberately slow — fifteen minutes by default. The pass costs one Admin
+   * API read per stored consumer and proxy reference, and what it detects
+   * (a gateway that no longer holds the ids the portal stored) changes only
+   * when an operator retargets or rebuilds the gateway.
+   */
+  gatewayReconcileIntervalMs: number;
+  /**
+   * Most stored references of each kind one pass checks
+   * (`NEXUS_GATEWAY_RECONCILE_SAMPLE`).
+   *
+   * A bound on the Admin API traffic a portal with a very large catalog
+   * generates. A pass that stops at the bound reports `complete: false`, so
+   * "no orphans found" is never confused with "not looked at".
+   */
+  gatewayReconcileSample: number;
+  /**
    * How many APIs one account may own at a time (`NEXUS_MAX_APIS_PER_OWNER`).
    * `0` disables the ceiling.
    *
@@ -425,6 +445,9 @@ const envSchema = z.object({
   // Reserve at least 5 s for the database, scheduling and HTTP overhead in the
   // shipped 10 s healthcheck. External healthcheck overrides cannot be verified here.
   NEXUS_HEALTH_PROBE_TIMEOUT_MS: intish(1_500, 100, 5_000),
+  // 0 disables the periodic pass; anything else is clamped to a day.
+  NEXUS_GATEWAY_RECONCILE_INTERVAL_MS: intish(15 * 60_000, 0, 24 * 60 * 60_000),
+  NEXUS_GATEWAY_RECONCILE_SAMPLE: intish(200, 1, 100_000),
   NEXUS_MAX_APIS_PER_OWNER: intish(DEFAULT_MAX_APIS_PER_OWNER, 0, 100_000),
   NEXUS_SPEC_HISTORY_LIMIT: intish(DEFAULT_SPEC_HISTORY_LIMIT, 1, 10_000),
   NEXUS_MAX_MESSAGES_PER_USER_PER_DAY: intish(200, 0, 1_000_000),
@@ -649,6 +672,8 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     healthCacheMs: raw.NEXUS_HEALTH_CACHE_MS,
     brandingCacheMs: raw.NEXUS_BRANDING_CACHE_MS,
     healthProbeTimeoutMs: raw.NEXUS_HEALTH_PROBE_TIMEOUT_MS,
+    gatewayReconcileIntervalMs: raw.NEXUS_GATEWAY_RECONCILE_INTERVAL_MS,
+    gatewayReconcileSample: raw.NEXUS_GATEWAY_RECONCILE_SAMPLE,
     maxApisPerOwner: raw.NEXUS_MAX_APIS_PER_OWNER,
     specHistoryLimit: raw.NEXUS_SPEC_HISTORY_LIMIT,
     maxMessagesPerUserPerDay: raw.NEXUS_MAX_MESSAGES_PER_USER_PER_DAY,

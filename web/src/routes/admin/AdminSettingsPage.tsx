@@ -17,6 +17,11 @@ import {
   useUpdateAdminSettings,
   useUpdateEmailTemplate,
 } from '../../hooks/useAdminSettings';
+import { useEdgeHealth } from '../../hooks/useHealth';
+import {
+  useReconcileGateway,
+  useRepairGatewayReferences,
+} from '../../hooks/useGatewayReconciliation';
 import { useAuth } from '../../stores/auth';
 import { useToast } from '../../stores/toast';
 import { RoleGuard } from '../../components/layout/RoleGuard';
@@ -218,6 +223,104 @@ function BrandingTab({ settings }: { settings: AdminSettingsResponse }): ReactEl
 }
 
 /**
+ * Prose the warning card closes with.
+ *
+ * Held as a constant rather than as JSX text so the repair's two hard limits —
+ * credentials cannot come back, proxies have to be republished — are stated in
+ * one place and read the same as the operations guide.
+ */
+const REPAIR_EXPLANATION =
+  'Repairing recreates each account’s gateway consumer under the same identity and replays its ' +
+  'approved access. Credentials cannot be recovered, because their secrets were only ever shown ' +
+  'once, so the portal’s rows are revoked and each holder issues new ones. An API whose ' +
+  'proxy is gone has the dead id cleared and must be published again by its provider.';
+
+/**
+ * The gateway-reference reconciliation warning.
+ *
+ * Retargeting `FERRUM_ADMIN_URL` at a fresh gateway, or rebuilding the one it
+ * points at, leaves the portal holding consumer and proxy ids nothing answers
+ * for: new accounts and new publishes keep working while every account and API
+ * that predates the change breaks (issue #235). The server reports that on the
+ * Edge health payload; this is the operator-facing half of it.
+ *
+ * The verdict comes from `GET /api/health/edge`, which reads a cached
+ * background pass rather than probing — so re-checking is an explicit button,
+ * and so is the repair.
+ */
+function GatewayReconciliationCard(): ReactElement | null {
+  const health = useEdgeHealth();
+  const { canSuperAdmin } = useAuth();
+  const reconcile = useReconcileGateway();
+  const repair = useRepairGatewayReferences();
+  const toast = useToast();
+  const state = health.data?.reconciliation;
+
+  // Nothing to say while the first pass is still outstanding, and nothing to
+  // say when the references are fine — an operator surface that reports “all
+  // good” on every page load is one nobody reads when it stops saying that.
+  if (!state || state.status !== 'orphaned') return null;
+
+  const consumers = state.orphaned_consumers ?? 0;
+  const apis = state.orphaned_proxies ?? 0;
+  const checked = state.checked_at ? new Date(state.checked_at).toLocaleString() : 'unknown';
+  const summary =
+    `${consumers} account(s) have no gateway consumer and ${apis} published API(s) point at a ` +
+    'proxy that no longer exists. Approvals and credential operations on those accounts fail, ' +
+    `and those APIs serve nothing. Last checked ${checked}.`;
+
+  return (
+    <Card>
+      <CardHeader
+        title="Gateway references need repair"
+        description="The gateway no longer holds objects this portal created — what a retargeted or rebuilt gateway looks like."
+      />
+      <CardBody className="flex flex-col gap-4">
+        <p className="flex items-start gap-2 rounded-md border border-border bg-inset px-3 py-2.5 text-sm text-fg-muted">
+          <Icon name="alert" className="mt-0.5 h-4 w-4 shrink-0 text-fg-subtle" />
+          <span>{summary}</span>
+        </p>
+        {canSuperAdmin ? (
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="secondary"
+              loading={reconcile.isPending}
+              onClick={() =>
+                reconcile.mutate(undefined, {
+                  onSuccess: (report) =>
+                    toast.success(
+                      report.status === 'orphaned'
+                        ? `${report.consumers.orphaned + report.proxies.orphaned} references are still orphaned`
+                        : 'Every stored gateway reference is live',
+                    ),
+                })
+              }
+            >
+              Re-check now
+            </Button>
+            <Button
+              variant="primary"
+              loading={repair.isPending}
+              onClick={() =>
+                repair.mutate(
+                  { all: true },
+                  { onSuccess: () => toast.success('Gateway references repaired') },
+                )
+              }
+            >
+              Repair all
+            </Button>
+          </div>
+        ) : (
+          <SuperAdminOnlyNotice what="the portal’s gateway references" />
+        )}
+        <p className="text-sm text-fg-muted">{REPAIR_EXPLANATION}</p>
+      </CardBody>
+    </Card>
+  );
+}
+
+/**
  * Where the gateway's proxy listener answers.
  *
  * Restricted to super admins because clients trust this origin with gateway
@@ -231,46 +334,49 @@ function GatewayTab({ settings }: { settings: AdminSettingsResponse }): ReactEle
   const [publicUrl, setPublicUrl] = useState(settings.gateway.public_url ?? '');
 
   return (
-    <Card>
-      <CardHeader
-        title="Gateway"
-        description="The public address of the gateway's proxy listener, shown to clients in the catalog."
-      />
-      <CardBody className="flex flex-col gap-5">
-        {update.error ? <FormNotice>{update.error.message}</FormNotice> : null}
-        <LabeledInput
-          label="Public gateway URL"
-          placeholder="https://api.example.com"
-          value={publicUrl}
-          onChange={(event) => setPublicUrl(event.target.value)}
-          disabled={!canSuperAdmin}
-          hint="Scheme, host and port only — no path. This is where clients send API traffic, which is not this portal’s own address. Leave it blank to fall back to FERRUM_GATEWAY_PUBLIC_URL."
+    <div className="flex flex-col gap-5">
+      <GatewayReconciliationCard />
+      <Card>
+        <CardHeader
+          title="Gateway"
+          description="The public address of the gateway's proxy listener, shown to clients in the catalog."
         />
-        <p className="text-sm text-fg-muted">
-          Each published API is called at this origin followed by its{' '}
-          <code className="font-mono text-xs">/&lt;namespace&gt;/&lt;slug&gt;</code> listen path.
-          While it is unset the catalog can only show the listen path.
-        </p>
-        {canSuperAdmin ? (
-          <div>
-            <Button
-              variant="primary"
-              loading={update.isPending}
-              onClick={() =>
-                update.mutate(
-                  { gateway: { public_url: publicUrl.trim() || null } },
-                  { onSuccess: () => toast.success('Gateway address saved') },
-                )
-              }
-            >
-              Save gateway
-            </Button>
-          </div>
-        ) : (
-          <SuperAdminOnlyNotice what="the public gateway URL" />
-        )}
-      </CardBody>
-    </Card>
+        <CardBody className="flex flex-col gap-5">
+          {update.error ? <FormNotice>{update.error.message}</FormNotice> : null}
+          <LabeledInput
+            label="Public gateway URL"
+            placeholder="https://api.example.com"
+            value={publicUrl}
+            onChange={(event) => setPublicUrl(event.target.value)}
+            disabled={!canSuperAdmin}
+            hint="Scheme, host and port only — no path. This is where clients send API traffic, which is not this portal’s own address. Leave it blank to fall back to FERRUM_GATEWAY_PUBLIC_URL."
+          />
+          <p className="text-sm text-fg-muted">
+            Each published API is called at this origin followed by its{' '}
+            <code className="font-mono text-xs">/&lt;namespace&gt;/&lt;slug&gt;</code> listen path.
+            While it is unset the catalog can only show the listen path.
+          </p>
+          {canSuperAdmin ? (
+            <div>
+              <Button
+                variant="primary"
+                loading={update.isPending}
+                onClick={() =>
+                  update.mutate(
+                    { gateway: { public_url: publicUrl.trim() || null } },
+                    { onSuccess: () => toast.success('Gateway address saved') },
+                  )
+                }
+              >
+                Save gateway
+              </Button>
+            </div>
+          ) : (
+            <SuperAdminOnlyNotice what="the public gateway URL" />
+          )}
+        </CardBody>
+      </Card>
+    </div>
   );
 }
 
