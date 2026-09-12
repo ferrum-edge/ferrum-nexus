@@ -219,7 +219,8 @@ export interface NexusConfig {
    * settings reads on every SPA load. Within this window the payload is taken
    * once and shared, and the response is marked cacheable so a CDN or browser
    * can absorb repeat traffic. Committed local settings writes invalidate
-   * immediately and `bootstrap_required` is never cached; the TTL bounds
+   * immediately, and an open founder seat (`bootstrap_required: true`) is never
+   * cached — only a taken one, and only for a second; the TTL bounds
    * cross-instance staleness of the other fields. Browser/CDN copies retain
    * their max-age. `0` disables the cache.
    */

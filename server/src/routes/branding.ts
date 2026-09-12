@@ -28,6 +28,12 @@ import type { CaptchaService } from '../auth/captcha.js';
 import type { AuthService } from '../auth/service.js';
 import type { NexusConfig } from '../config/index.js';
 
+/**
+ * How long a *taken* founder seat is trusted without re-reading the database.
+ * Only the `false` answer is ever held; see {@link memoizeBootstrapRequired}.
+ */
+const BOOTSTRAP_REQUIRED_CACHE_MS = 1_000;
+
 /** Services this route plugin needs. */
 export interface BrandingRoutesOptions {
   config: NexusConfig;
@@ -99,29 +105,52 @@ function memoizeBranding(
 }
 
 /**
- * Coalesce concurrent database-backed founder-seat checks onto one query.
+ * Coalesce database-backed founder-seat checks, and briefly hold a *taken* seat.
  *
- * Deliberately NOT a cache: the founder seat is a cross-instance state
- * transition, so no result is retained once the query settles and every
- * request that arrives afterwards reads the database again. What this bounds
- * is anonymous amplification — however many `/api/branding` requests arrive
- * while one count query is in flight, they all wait on that single query, so
- * an instance never holds more than one seat check against the pool at a
- * time. A same-instance seat claim bumps the revision, which makes callers
- * that were waiting on a pre-claim query re-read rather than trust its answer.
+ * An open seat is **never** cached. `bootstrap_required: true` is a
+ * cross-instance state transition waiting to happen — any instance over the
+ * same database may claim the seat at any moment, and this one has to stop
+ * advertising it as open on the very next request. So once a `true` query
+ * settles nothing is retained, and every request arriving afterwards reads the
+ * database again. What bounds anonymous amplification while the seat is open
+ * is coalescing alone: however many `/api/branding` requests arrive while one
+ * count query is in flight, they all wait on that single query, so an instance
+ * never holds more than one seat check against the pool at a time.
+ *
+ * A settled `false` is the opposite: the seat is taken, and the last active
+ * super admin can be neither demoted, disabled nor removed, so it cannot
+ * reopen. That answer is held for {@link BOOTSTRAP_REQUIRED_CACHE_MS}, which
+ * is what keeps sustained unauthenticated traffic against this public endpoint
+ * from mapping one-for-one onto database count queries in the steady state a
+ * bootstrapped portal spends its life in.
+ *
+ * A same-instance seat claim bumps the revision, which both drops the held
+ * answer and makes callers that were waiting on a pre-claim query re-read
+ * rather than trust its answer.
  */
-function coalesceBootstrapRequired(
+function memoizeBootstrapRequired(
   getRevision: () => number,
   run: () => Promise<boolean>,
 ): () => Promise<boolean> {
+  let seatTaken: { expiresAt: number; revision: number } | null = null;
   let pending: { revision: number; promise: Promise<boolean> } | null = null;
 
   return async function loadBootstrapRequired(): Promise<boolean> {
     const revision = getRevision();
+    if (seatTaken && seatTaken.revision === revision && seatTaken.expiresAt > Date.now()) {
+      return false;
+    }
     if (!pending || pending.revision !== revision) {
-      const promise = run().finally(() => {
-        if (pending?.promise === promise) pending = null;
-      });
+      const promise = run()
+        .then((value) => {
+          if (!value && getRevision() === revision) {
+            seatTaken = { expiresAt: Date.now() + BOOTSTRAP_REQUIRED_CACHE_MS, revision };
+          }
+          return value;
+        })
+        .finally(() => {
+          if (pending?.promise === promise) pending = null;
+        });
       pending = { revision, promise };
     }
     const value = await pending.promise;
@@ -158,7 +187,7 @@ export const brandingRoutes: FastifyPluginAsync<BrandingRoutesOptions> = async (
     settings.getBrandingRevision,
     assembleBranding,
   );
-  const loadBootstrapRequired = coalesceBootstrapRequired(
+  const loadBootstrapRequired = memoizeBootstrapRequired(
     auth.getBrandingRevision,
     auth.bootstrapRequired,
   );
