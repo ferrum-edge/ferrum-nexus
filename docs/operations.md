@@ -31,10 +31,10 @@ are. A relative `NEXUS_SQLITE_PATH` resolves from `server/`.
 repo-root `.env`. These knobs are not part of the BFF schema above and have no
 effect on a production image, which serves the built SPA from the BFF:
 
-| Variable                 | Default                         | Notes                                                                                                                                                                                                                          |
-| ------------------------ | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `NEXUS_WEB_PORT`         | `5173`                          | Vite listen port. Alias: `VITE_DEV_PORT` (ignored when `NEXUS_WEB_PORT` is set). Integer 1–65535. A taken port fails the process (`strictPort`) instead of silently binding the next free one.                                  |
-| `NEXUS_API_PROXY_TARGET` | derived from `NEXUS_PORT`       | Absolute `http(s)` origin for the `/api` proxy (no path, query, credentials, or fragment). When unset, derived as `http://<host>:<NEXUS_PORT>` where `<host>` is `NEXUS_HOST` and wildcard binds (`0.0.0.0`, `::`) become `127.0.0.1`. |
+| Variable                 | Default                   | Notes                                                                                                                                                                                                                                  |
+| ------------------------ | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NEXUS_WEB_PORT`         | `5173`                    | Vite listen port. Alias: `VITE_DEV_PORT` (ignored when `NEXUS_WEB_PORT` is set). Integer 1–65535. A taken port fails the process (`strictPort`) instead of silently binding the next free one.                                         |
+| `NEXUS_API_PROXY_TARGET` | derived from `NEXUS_PORT` | Absolute `http(s)` origin for the `/api` proxy (no path, query, credentials, or fragment). When unset, derived as `http://<host>:<NEXUS_PORT>` where `<host>` is `NEXUS_HOST` and wildcard binds (`0.0.0.0`, `::`) become `127.0.0.1`. |
 
 See the README for a two-stack example.
 

@@ -42,24 +42,24 @@ describe('resolveDevServerPorts', () => {
   });
 
   it('lets NEXUS_WEB_PORT win over VITE_DEV_PORT', () => {
-    expect(
-      resolveDevServerPorts({ NEXUS_WEB_PORT: '5175', VITE_DEV_PORT: '5180' }).webPort,
-    ).toBe(5175);
+    expect(resolveDevServerPorts({ NEXUS_WEB_PORT: '5175', VITE_DEV_PORT: '5180' }).webPort).toBe(
+      5175,
+    );
   });
 
   it('treats a wildcard API bind as loopback in the derived proxy URL', () => {
     expect(
       resolveDevServerPorts({ NEXUS_HOST: '0.0.0.0', NEXUS_PORT: '8788' }).apiProxyTarget,
     ).toBe('http://127.0.0.1:8788');
-    expect(
-      resolveDevServerPorts({ NEXUS_HOST: '[::]', NEXUS_PORT: '8788' }).apiProxyTarget,
-    ).toBe('http://127.0.0.1:8788');
+    expect(resolveDevServerPorts({ NEXUS_HOST: '[::]', NEXUS_PORT: '8788' }).apiProxyTarget).toBe(
+      'http://127.0.0.1:8788',
+    );
   });
 
   it('brackets an IPv6 API host in the derived proxy URL', () => {
-    expect(
-      resolveDevServerPorts({ NEXUS_HOST: '::1', NEXUS_PORT: '8788' }).apiProxyTarget,
-    ).toBe('http://[::1]:8788');
+    expect(resolveDevServerPorts({ NEXUS_HOST: '::1', NEXUS_PORT: '8788' }).apiProxyTarget).toBe(
+      'http://[::1]:8788',
+    );
   });
 
   it('lets NEXUS_API_PROXY_TARGET override the derived origin', () => {
@@ -77,9 +77,7 @@ describe('resolveDevServerPorts', () => {
     );
     expect(() => resolveDevServerPorts({ VITE_DEV_PORT: '0' })).toThrow(/VITE_DEV_PORT/);
     expect(() => resolveDevServerPorts({ NEXUS_PORT: '65536' })).toThrow(/NEXUS_PORT/);
-    expect(() => resolveDevServerPorts({ NEXUS_WEB_PORT: '5173.5' })).toThrow(
-      /NEXUS_WEB_PORT/,
-    );
+    expect(() => resolveDevServerPorts({ NEXUS_WEB_PORT: '5173.5' })).toThrow(/NEXUS_WEB_PORT/);
   });
 
   it('does not parse NEXUS_PORT when an explicit proxy target is set', () => {
@@ -95,9 +93,7 @@ describe('resolveDevServerPorts', () => {
 describe('parseApiProxyTarget', () => {
   it('accepts http and https origins and strips a trailing slash', () => {
     expect(parseApiProxyTarget('http://127.0.0.1:8788/')).toBe('http://127.0.0.1:8788');
-    expect(parseApiProxyTarget(' https://nexus.example.test ')).toBe(
-      'https://nexus.example.test',
-    );
+    expect(parseApiProxyTarget(' https://nexus.example.test ')).toBe('https://nexus.example.test');
   });
 
   it('rejects anything that is not a bare origin', () => {

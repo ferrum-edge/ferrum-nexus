@@ -120,9 +120,7 @@ export function resolveDevServerPorts(
   env: Record<string, string | undefined> = {},
 ): DevServerPorts {
   const web = firstPresent(env, ['NEXUS_WEB_PORT', 'VITE_DEV_PORT']);
-  const webPort = web
-    ? parsePort(web.name, web.value, DEFAULT_WEB_PORT)
-    : DEFAULT_WEB_PORT;
+  const webPort = web ? parsePort(web.name, web.value, DEFAULT_WEB_PORT) : DEFAULT_WEB_PORT;
 
   const proxy = firstPresent(env, ['NEXUS_API_PROXY_TARGET']);
   if (proxy) {
