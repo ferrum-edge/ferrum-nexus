@@ -117,9 +117,7 @@ const rateLimitSchema = z
  * {@link parseOrThrow}.
  */
 const corsOriginListSchema = z
-  .array(
-    z.string().trim().min(1).max(255).regex(/^\S+$/, 'An origin cannot contain whitespace'),
-  )
+  .array(z.string().trim().min(1).max(255).regex(/^\S+$/, 'An origin cannot contain whitespace'))
   .min(1, 'allowed_origins (or the origins alias) must list at least one origin')
   .max(
     MAX_CORS_ORIGINS,
