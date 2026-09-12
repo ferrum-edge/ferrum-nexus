@@ -8,6 +8,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Added
 
+- `NEXUS_WEB_PORT` (alias `VITE_DEV_PORT`) and `NEXUS_API_PROXY_TARGET` for
+  `npm run dev`, so a second Nexus (or Foundry) stack can pick free ports
+  without editing `web/vite.config.ts`. Defaults stay 5173 and
+  `http://127.0.0.1:8787`; the `/api` proxy follows `NEXUS_PORT` when the
+  explicit target is unset.
 - Ground-up rewrite of the portal: Fastify BFF (`server/`), React SPA
   (`web/`), shared types (`shared/`).
 - Portal accounts with sessions, CSRF protection, and role-based access

@@ -1,29 +1,49 @@
-import { defineConfig } from 'vitest/config';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
+import { loadEnv } from 'vite';
+import { defineConfig } from 'vitest/config';
 
-export default defineConfig({
-  plugins: [react(), tailwindcss()],
-  server: {
-    // Vite's default `localhost` resolves to `[::1]` on some hosts and to
-    // `127.0.0.1` on others, so the documented http://127.0.0.1:5173 is not
-    // always reachable. Bind the literal address the docs print.
-    host: '127.0.0.1',
-    port: 5173,
-    proxy: {
-      '/api': {
-        target: 'http://127.0.0.1:8787',
-        changeOrigin: false,
+import { resolveDevServerPorts } from './src/lib/dev-ports';
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+export default defineConfig(({ mode }) => {
+  // The documented `.env` lives at the repo root; Vite's default envDir is `web/`.
+  const { webPort, apiProxyTarget } = resolveDevServerPorts({
+    ...loadEnv(mode, repoRoot, 'NEXUS_'),
+    ...loadEnv(mode, repoRoot, 'VITE_'),
+  });
+
+  return {
+    envDir: repoRoot,
+    plugins: [react(), tailwindcss()],
+    server: {
+      // Vite's default `localhost` resolves to `[::1]` on some hosts and to
+      // `127.0.0.1` on others, so the documented http://127.0.0.1:5173 is not
+      // always reachable. Bind the literal address the docs print.
+      host: '127.0.0.1',
+      port: webPort,
+      // Fail instead of silently binding 5174 while `/api` still proxies to
+      // whatever already owns 8787 (usually another Nexus stack).
+      strictPort: true,
+      proxy: {
+        '/api': {
+          target: apiProxyTarget,
+          changeOrigin: false,
+        },
       },
     },
-  },
-  build: {
-    outDir: 'dist',
-    sourcemap: false,
-  },
-  test: {
-    environment: 'jsdom',
-    setupFiles: ['./vitest.setup.ts'],
-    globals: false,
-  },
+    build: {
+      outDir: 'dist',
+      sourcemap: false,
+    },
+    test: {
+      environment: 'jsdom',
+      setupFiles: ['./vitest.setup.ts'],
+      globals: false,
+    },
+  };
 });
