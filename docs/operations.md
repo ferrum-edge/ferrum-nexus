@@ -61,6 +61,8 @@ are. A relative `NEXUS_SQLITE_PATH` resolves from `server/`.
 | `NEXUS_ALLOW_PRIVATE_UPSTREAMS`              | `false`                                      | Whether providers may publish an API whose upstream is a loopback, RFC 1918 / CGNAT / link-local address or a `.local` / `.internal` / `.localhost` / `.home.arpa` name. A proxy is an egress path from the gateway's network, so the default refuses them with `400 SPEC_INVALID` (`details.reason = private_upstream`). At `false` the portal also **resolves** every other upstream hostname (A + AAAA, ~5 s) and refuses it if any answer is private, or if the name cannot be resolved at all (`details.reason = unresolvable_upstream`) — so **the Nexus process must be able to resolve public DNS**, or nothing publishes. `true` skips all of it, including the lookup. Set `true` only for a portal that fronts internal services — and for local development, where the upstream is `host.docker.internal`. See [`security.md`](security.md#1-threat-model). |
 | `NEXUS_WEB_DIST`                             | _(unset)_                                    | Directory of the built SPA to serve. When unset, the server looks for `../../web/dist` relative to itself and then `./web/dist` under the CWD; if neither has an `index.html`, static serving is disabled and only the API is exposed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `NEXUS_BOOTSTRAP_TOKEN`                      | _(unset)_                                    | Secret the founding registration must present to become the portal's `super_admin` (see [First run](#first-run-and-the-bootstrap-token)). Minimum 16 characters when set; generate with `openssl rand -hex 32`. When unset the server generates one **per process** and prints it at `warn` while the portal has no active super admin — so set it for any deployment running more than one instance. Ignored once an active `super_admin` exists.                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `NEXUS_GATEWAY_RECONCILE_INTERVAL_MS`        | `900000` (15 min)                            | How often Nexus checks that the gateway still holds the consumer and proxy ids it stored; `0` disables the periodic pass (`POST /api/admin/gateway/reconcile` still runs one on demand). Range 0 – 86 400 000. A pass runs once at startup, which is when a retarget is most likely to have just happened. See [§13](#13-retargeting-or-rebuilding-ferrum-edge).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `NEXUS_GATEWAY_RECONCILE_SAMPLE`             | `200`                                        | Most stored references of each kind one reconciliation pass checks — a bound on the Admin API reads a very large portal generates. A pass that stops at the bound reports `complete: false`, so “no orphans found” is never confused with “not looked at”. Range 1 – 100 000.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 
 Health deadline configuration: `NEXUS_HEALTH_PROBE_TIMEOUT_MS` defaults to `1500`
 milliseconds and accepts integers from `100` to `5000`. It bounds the health
@@ -1435,6 +1437,38 @@ portal in rotation — the catalog, messaging and audit log all still work while
 the gateway recovers. Publishing, approvals and credential operations will
 return `502 EDGE_UNAVAILABLE` until it comes back.
 
+**`edge.reconciliation` is the other reason for `degraded`, and the one a
+reachable gateway can still cause.** A gateway that answers is not necessarily
+*the* gateway: point `FERRUM_ADMIN_URL` at a fresh Edge, or rebuild the one it
+already names, and every probe above stays green while the consumer and proxy
+ids in the Nexus database point at nothing. The `edge.reconciliation` block
+reports the last reconciliation pass:
+
+```json
+{
+  "status": "orphaned",
+  "checked_at": "2026-09-11T18:22:05.412Z",
+  "orphaned_consumers": 14,
+  "orphaned_proxies": 3,
+  "complete": true
+}
+```
+
+`status` is `ok`, `orphaned`, or `unknown` — the last meaning no pass has
+finished yet, or the last one could not read the gateway, neither of which is
+evidence that the references are wrong. **Alert on `orphaned`**: nothing
+repairs it by itself, and the repair is [§13](#13-retargeting-or-rebuilding-ferrum-edge).
+The three count fields are `null` for anyone below `admin`, the same rule the
+Edge diagnostic text follows; `status` and `checked_at` stay public so an
+anonymous monitor can act on them.
+
+The pass behind the block runs on a timer
+(`NEXUS_GATEWAY_RECONCILE_INTERVAL_MS`, 15 minutes by default, and once at
+startup) and is **never** run by these routes — it costs one Admin API read per
+stored reference, which is the last thing an unauthenticated endpoint should be
+able to trigger. `checked_at` is therefore usually older than the `checked_at`
+at the top of the payload.
+
 **The probes behind these endpoints are cached and rate limited.** Both routes
 are unauthenticated, and each request used to cost a database query plus a
 signed Ferrum Edge Admin API call — an amplifier that let anonymous traffic set
@@ -2029,3 +2063,163 @@ SELECT created_at, target_id AS consumer_id, details
   WHERE action = 'credential.append_rollback'
   ORDER BY created_at DESC;
 ```
+
+---
+
+## 13. Retargeting or rebuilding Ferrum Edge
+
+Nexus keeps two foreign keys into the gateway: `consumers.ferrum_consumer_id`,
+one canonical consumer per account per namespace, and `apis.ferrum_proxy_id`,
+one proxy per published API. Neither can be re-derived — they **are** the
+mapping.
+
+Point `FERRUM_ADMIN_URL` at a different Edge, or rebuild the one it already
+names, and every one of those ids refers to something that no longer exists.
+The portal does not fail loudly, because the half of it that does not depend on
+those ids keeps working perfectly:
+
+- new accounts provision new consumers, new publishes create new proxies, and
+  both work end to end;
+- `GET /api/health` used to stay `ok`, because the Admin API is reachable and
+  ready;
+- approving access or issuing a credential for an account that predates the
+  change answers **`502 EDGE_ERROR`** — _“The gateway consumer for this account
+  no longer exists”_ — and, in the UI, leaves the access request sitting at
+  `pending`;
+- an API that predates the change keeps a `ferrum_proxy_id` that `404`s, with
+  no symptom at all until somebody tries to change it. It serves nothing.
+
+### The signal
+
+A reconciliation pass walks the stored references and asks Edge about each one.
+It runs at startup, every `NEXUS_GATEWAY_RECONCILE_INTERVAL_MS` (15 minutes by
+default), and on demand; the result is cached and rendered as
+`edge.reconciliation` on both health endpoints
+([§9](#9-health-checks)). `status: "orphaned"` degrades the portal.
+
+A `404` is the only thing counted as an orphan. Anything else — a refused
+connection, a `500`, an expired admin JWT — abandons the pass and reports
+`status: "unknown"` with the error, because a gateway that cannot be read is not
+a gateway full of orphans, and acting on that difference is what keeps one flaky
+minute from being mistaken for a cutover.
+
+Each pass checks at most `NEXUS_GATEWAY_RECONCILE_SAMPLE` references of each
+kind (200 by default). A pass that stops at that bound reports
+`complete: false`; raise the bound for a portal larger than that if you need a
+whole-portal answer in one pass.
+
+To run one now and see everything it found, including which accounts and APIs:
+
+```http
+POST /api/admin/gateway/reconcile
+```
+
+`super_admin` only. It answers the full report — per-kind `checked`/`orphaned`/
+`complete` counts, plus `orphaned_consumers` (`user_id`, `ferrum_consumer_id`,
+`ferrum_username`) and `orphaned_proxies` (`api_id`, `slug`,
+`ferrum_proxy_id`) — and writes a `gateway.reconcile` audit row.
+
+### The repair
+
+**Nothing is repaired automatically, ever.** From inside the process, "the
+operator retargeted the gateway" and "a staging portal was pointed at production
+for ten minutes" look identical, and only one of them should result in gateway
+identities being recreated. The repair is an explicit, audited request:
+
+```http
+POST /api/admin/gateway/repair
+{ "all": true, "reason": "Edge 0.9.4 rebuild" }
+```
+
+`super_admin` only. Name specific targets instead with `user_ids` and/or
+`api_ids`; at least one of the three fields is required. It always takes a
+**fresh** pass first, and refuses with `502 EDGE_UNAVAILABLE` if that pass could
+not read the gateway.
+
+For each orphaned account it:
+
+1. takes the account's provisioning lock and re-checks the consumer, so a
+   concurrent first-use provisioning cannot be raced;
+2. recreates the consumer under the **same identity** — username
+   `nexus-user-<user_id>`, `custom_id` back to the Nexus user id, and the
+   derived consumer id, which on a fresh gateway is the same string the portal
+   already held;
+3. replays the `nexus:api:<api_id>:approved` ACL groups from the portal's own
+   `active` grants, so approvals granted before the change work again;
+4. re-links the `consumers` row and moves every live `credential_metadata` row
+   for the old consumer to `revoked`, in one transaction;
+5. writes a `gateway.consumer_repair` audit row and notifies the account holder.
+
+**Credentials cannot be recovered and are not replaced.** They are show-once by
+design: Nexus stores a SHA-256 fingerprint and the last four characters, never
+the secret, and Edge never discloses an entry on read. Minting replacements here
+would hand new secrets to nobody, so the portal revokes its rows instead and
+reports the count as `credentials_requiring_reissue`. Each account holder issues
+new credentials from the credentials page. Leaving those rows `active` would be
+worse than useless — the mirror's `edge_ordinal` positions would describe an
+array that no longer exists, and the next rotate or revoke would refuse as drift
+([§12](#12-the-credential-mirror)).
+
+For each orphaned API the repair **clears the dead `ferrum_proxy_id`** and
+records an `api.gateway_repair_required` audit row with `phase:
+"orphaned_proxy"`. No proxy is rebuilt: doing that needs the provider's current
+spec revision, upstream, plugin palette and enforcement mode replayed in order,
+which is what publishing already does. The cleared row reads as "has no gateway
+proxy", which is a state the rest of the portal already models — the plugin
+palette refuses to attach to it, and every proxy write is skipped — and the
+provider republishes through the ordinary flow. The API's catalog entry, its
+grants and its access requests are untouched. The owner is notified.
+
+The response reports every target it touched, with a per-target `error` for
+anything it could not do:
+
+```json
+{
+  "report": { "status": "orphaned", "...": "..." },
+  "consumers": [
+    {
+      "user_id": "…",
+      "previous_ferrum_consumer_id": "…",
+      "ferrum_consumer_id": "…",
+      "credentials_requiring_reissue": 1,
+      "restored_groups": 3,
+      "error": null
+    }
+  ],
+  "apis": [{ "api_id": "…", "previous_ferrum_proxy_id": "…", "flagged": true, "error": null }]
+}
+```
+
+### Cutover checklist
+
+1. Stop Nexus, or accept that operations on legacy rows fail until step 5.
+2. Point `FERRUM_ADMIN_URL` (and `FERRUM_ADMIN_JWT_SECRET` /
+   `FERRUM_ADMIN_JWT_ISSUER`, which must match the new gateway) at the new Edge.
+3. Start Nexus. The startup pass runs; `GET /api/health` reports `degraded` with
+   `edge.reconciliation.status: "orphaned"`.
+4. `POST /api/admin/gateway/reconcile` and read the report. Confirm the orphan
+   counts match what you expect from the cutover — if they do not, you may be
+   pointing at the wrong gateway or the wrong `FERRUM_NAMESPACE`.
+5. `POST /api/admin/gateway/repair` with `{ "all": true, "reason": "…" }`.
+6. Tell every account holder named in `consumers[]` to issue new credentials,
+   and every provider named in `apis[]` to republish. Both are also notified
+   in-app by the repair itself.
+7. Re-run step 4; `status` should be `ok` and health back to `ok`.
+
+Restoring the *old* gateway's data instead is the other valid answer, and the
+better one when the old Edge's database still exists: a restore keeps the
+credentials working, which no repair can. Nothing here is destructive to the
+gateway — the repair only ever creates — so a pass may be run at any time to
+decide between the two.
+
+### Keeping this from being a surprise
+
+- Back up the Nexus database and the Edge database together. The mapping is only
+  meaningful as a pair.
+- Never change a consumer's id or canonical username on Edge by hand
+  ([§12](#12-the-credential-mirror)).
+- A portal that fronts more than one environment should use a distinct
+  `FERRUM_NAMESPACE` per environment, so a misaimed `FERRUM_ADMIN_URL` finds an
+  empty namespace rather than somebody else's consumers.
+- Alert on `edge.reconciliation.status == "orphaned"` and on the server's
+  `warn` line, _“The gateway no longer holds references the portal stored”_.

@@ -34,6 +34,7 @@ import type {
   CredentialType,
   EdgeHealth,
   EmailTemplate,
+  GatewayReconciliationReport,
   GatewaySettings,
   GatewayTeardownOutcome,
   GatewayTeardownState,
@@ -1048,6 +1049,77 @@ export interface ReconcileCredentialsResponse {
   revoked_credentials: number;
   /** `false` when the gateway consumer no longer existed, so only rows changed. */
   gateway_cleared: boolean;
+}
+
+/* ── Admin: gateway reference reconciliation ────────────────────────────── */
+
+/**
+ * `POST /api/admin/gateway/reconcile` — run one reconciliation pass now and
+ * return what it found. Reads only; the repair below is the write.
+ */
+export type ReconcileGatewayResponse = GatewayReconciliationReport;
+
+/**
+ * `POST /api/admin/gateway/repair` — re-link the gateway references a
+ * reconciliation pass found orphaned.
+ *
+ * Retargeting `FERRUM_ADMIN_URL` at a fresh gateway, or rebuilding the one it
+ * already points at, leaves the portal holding consumer and proxy ids nothing
+ * answers for. This is the explicit repair: never a startup side effect, and
+ * never anything that mints credential material.
+ *
+ * Name the accounts and APIs to repair, or pass `all` for every orphan the
+ * pass finds. At least one of the three is required — an empty body would
+ * otherwise read as either "everything" or "nothing".
+ */
+export interface RepairGatewayReferencesRequest {
+  /** Accounts whose gateway consumer should be recreated. */
+  user_ids?: Uuid[];
+  /** APIs whose dead proxy id should be cleared and flagged for republishing. */
+  api_ids?: Uuid[];
+  /** Repair every orphan the pass finds. */
+  all?: boolean;
+  /** Recorded on the audit rows. */
+  reason?: string | null;
+}
+
+/** One account's consumer repair. */
+export interface RepairedGatewayConsumer {
+  user_id: Uuid;
+  /** The stale id the portal held; empty when this account was not orphaned. */
+  previous_ferrum_consumer_id: string;
+  /** The id now recorded, or `null` when the repair failed. */
+  ferrum_consumer_id: string | null;
+  /**
+   * Portal credential rows moved to `revoked` because their gateway material
+   * is unrecoverable. **The account holder has to issue new credentials** —
+   * nothing is minted here, because show-once material can only be delivered
+   * to the person who asked for it.
+   */
+  credentials_requiring_reissue: number;
+  /** ACL groups replayed onto the new consumer from the portal's own grants. */
+  restored_groups: number;
+  /** Why this account was not repaired; `null` when it was. */
+  error: string | null;
+}
+
+/** One API's proxy repair. */
+export interface FlaggedGatewayApi {
+  api_id: Uuid;
+  /** The dead id the portal held; empty when this API was not orphaned. */
+  previous_ferrum_proxy_id: string;
+  /** Whether the dead id was cleared and the API flagged for republishing. */
+  flagged: boolean;
+  /** Why this API was not flagged; `null` when it was. */
+  error: string | null;
+}
+
+/** `POST /api/admin/gateway/repair` */
+export interface RepairGatewayReferencesResponse {
+  /** The pass the repair acted on, taken fresh rather than from the cache. */
+  report: GatewayReconciliationReport;
+  consumers: RepairedGatewayConsumer[];
+  apis: FlaggedGatewayApi[];
 }
 
 /* ── Admin: god mode (super_admin only) ─────────────────────────────────── */

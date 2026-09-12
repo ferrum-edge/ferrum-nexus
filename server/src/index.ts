@@ -26,6 +26,10 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import type { EmailTemplateKey } from '@ferrum-nexus/shared';
 
 import { createAccessService, type AccessService } from './access/service.js';
+import {
+  createGatewayReconciliationService,
+  type GatewayReconciliationService,
+} from './admin/gateway-reconciliation.js';
 import { createGodService, type GodService } from './admin/god-service.js';
 import { createMassEmailService, type MassEmailService } from './admin/mass-email-service.js';
 import { createSettingsService, type SettingsService } from './admin/settings-service.js';
@@ -122,6 +126,12 @@ export interface NexusServices {
   apiPlugins: ApiPluginsService;
   access: AccessService;
   god: GodService;
+  /**
+   * Gateway-reference reconciliation: detection, the cached report
+   * `/api/health` renders, and the `super_admin` repair. `scan()` runs one
+   * pass deterministically in tests.
+   */
+  reconciliation: GatewayReconciliationService;
 }
 
 /** Everything `buildServer` hangs off the Fastify instance. */
@@ -171,6 +181,12 @@ export interface BuildServerDeps {
    * `services.teardown.tick()` themselves.
    */
   startTeardownWorker?: boolean;
+  /**
+   * Start the periodic gateway-reference reconciliation pass. Same default as
+   * {@link BuildServerDeps.startOutboxWorker}: tests drive
+   * `services.reconciliation.scan()` themselves, so no pass ever runs mid-assert.
+   */
+  startReconciliationWorker?: boolean;
   /** Serve the built SPA. Defaults to "yes when the dist directory exists". */
   serveStatic?: boolean;
   /**
@@ -456,6 +472,18 @@ export async function buildServer(
     log: warn,
   });
 
+  // Reads only, on a slow timer, until a super admin asks for a repair: the
+  // pass that notices `FERRUM_ADMIN_URL` now points at a gateway which does not
+  // hold the consumer and proxy ids this database stores (issue #235).
+  const reconciliation = createGatewayReconciliationService({
+    config,
+    store: deps.store,
+    edge: deps.edge,
+    audit,
+    notifications,
+    log: warn,
+  });
+
   const services: NexusServices = {
     audit,
     captcha,
@@ -475,6 +503,7 @@ export async function buildServer(
     apiPlugins,
     access,
     god,
+    reconciliation,
   };
   const webDist = (deps.serveStatic ?? true) ? resolveWebDist(config) : null;
 
@@ -556,7 +585,12 @@ export async function buildServer(
       if (config.rateLimitEnabled) {
         await scope.register(rateLimit, { ...HEALTH_RATE_LIMIT });
       }
-      await scope.register(healthRoutes, { config, store: deps.store, edge: deps.edge });
+      await scope.register(healthRoutes, {
+        config,
+        store: deps.store,
+        edge: deps.edge,
+        reconciliation,
+      });
     },
     { prefix: '/api/health' },
   );
@@ -612,7 +646,15 @@ export async function buildServer(
 
   await app.register(
     async (scope) =>
-      scope.register(adminRoutes, { settings, massEmail, email, audit, god, credentials }),
+      scope.register(adminRoutes, {
+        settings,
+        massEmail,
+        email,
+        audit,
+        god,
+        credentials,
+        reconciliation,
+      }),
     { prefix: '/api/admin' },
   );
 
@@ -659,15 +701,17 @@ export async function buildServer(
   app.addHook('onClose', async () => {
     await outbox.stop();
     await teardown.stop();
+    await reconciliation.stop();
     await deps.edge.close();
   });
 
   await app.ready();
 
-  // Tests drive `services.outbox.tick()` and `services.teardown.tick()` by hand
-  // so no timer ever fires mid-assert.
+  // Tests drive `services.outbox.tick()`, `services.teardown.tick()` and
+  // `services.reconciliation.scan()` by hand so no timer ever fires mid-assert.
   if (deps.startOutboxWorker ?? config.env !== 'test') outbox.start();
   if (deps.startTeardownWorker ?? config.env !== 'test') teardown.start();
+  if (deps.startReconciliationWorker ?? config.env !== 'test') reconciliation.start();
 
   return app;
 }

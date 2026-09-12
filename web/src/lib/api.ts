@@ -108,6 +108,9 @@ import {
   type RevokeGrantResponse,
   type ReconcileCredentialsRequest,
   type ReconcileCredentialsResponse,
+  type ReconcileGatewayResponse,
+  type RepairGatewayReferencesRequest,
+  type RepairGatewayReferencesResponse,
   type RotateCredentialRequest,
   type RotateCredentialResponse,
   type SendMessageRequest,
@@ -508,6 +511,12 @@ export const adminApi = {
     body: ReconcileCredentialsRequest,
   ): Promise<ReconcileCredentialsResponse> =>
     post<ReconcileCredentialsResponse>('/admin/credentials/reconcile', body),
+  reconcileGateway: (): Promise<ReconcileGatewayResponse> =>
+    post<ReconcileGatewayResponse>('/admin/gateway/reconcile', {}),
+  repairGatewayReferences: (
+    body: RepairGatewayReferencesRequest,
+  ): Promise<RepairGatewayReferencesResponse> =>
+    post<RepairGatewayReferencesResponse>('/admin/gateway/repair', body),
 };
 
 /* ── Admin: god mode (super_admin only) ─────────────────────────────────── */

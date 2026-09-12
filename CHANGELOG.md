@@ -95,6 +95,22 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   forms and the validation; configs are proxy-scoped and associated on the
   proxy like the first-class ones. Operator plugins (logging, telemetry,
   mesh, chaos) and the auth family stay out of the palette.
+- **Gateway reference reconciliation.** Retargeting `FERRUM_ADMIN_URL` at a
+  different Ferrum Edge — or rebuilding the one it already names — left every
+  stored `ferrum_consumer_id` and `ferrum_proxy_id` pointing at nothing, with
+  `GET /api/health` still green: legacy accounts failed approvals and
+  credential issuance with `502 EDGE_ERROR`, and legacy APIs kept dead proxy
+  ids that served no traffic. A background pass
+  (`NEXUS_GATEWAY_RECONCILE_INTERVAL_MS`, 15 min, plus one at startup, bounded
+  by `NEXUS_GATEWAY_RECONCILE_SAMPLE`) now checks those references against the
+  gateway and reports `edge.reconciliation` on both health endpoints, degrading
+  the portal when any are orphaned. Nothing is ever repaired automatically:
+  `POST /api/admin/gateway/reconcile` and `POST /api/admin/gateway/repair` are
+  `super_admin` only and audited, and the repair recreates each consumer under
+  the same identity with its approved ACL groups replayed, revokes the
+  credential rows whose show-once material died with the old gateway rather
+  than minting replacements, and clears dead proxy ids so providers republish
+  through the ordinary flow. See `docs/operations.md` §13.
 
 ### Changed
 
