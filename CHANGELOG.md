@@ -119,6 +119,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- `POST /api/apis` and `PATCH /api/apis/:id` accept `cors.origins` as an alias
+  for `cors.allowed_origins`. Sending both with different values is `400`
+  naming both keys. Responses still emit `allowed_origins` only.
 - The branding response cache invalidates immediately after local settings writes,
   including reads overlapping those changes, and never caches `bootstrap_required`.
   Its TTL bounds cross-instance server staleness of the remaining fields; changed
