@@ -101,7 +101,7 @@ docs/      this tree
 | `messaging/service.ts`                         | 1:1 threads and the platform inbox.                                                                                                             |
 | `notifications/service.ts`                     | The header bell. Courtesy channel only — never the record.                                                                                      |
 | `email/`                                       | `service.ts` (render + enqueue), `outbox-worker.ts` (the only SMTP caller), `templates.ts`.                                                     |
-| `admin/`                                       | `settings-service.ts`, `mass-email-service.ts`, `god-service.ts`.                                                                               |
+| `admin/`                                       | `settings-service.ts`, `mass-email-service.ts`, `god-service.ts`, `gateway-reconciliation.ts` (orphaned Edge references).                       |
 | `routes/`                                      | One plugin per domain. Routes validate shapes and delegate; they never import a service module.                                                 |
 | `test/`                                        | `helpers.ts` boots the real app on in-memory SQLite; `mock-ferrum-edge.ts` is a real HTTP server.                                               |
 

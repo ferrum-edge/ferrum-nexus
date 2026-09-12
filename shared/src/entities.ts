@@ -710,4 +710,87 @@ export interface EdgeHealth extends Omit<DependencyHealth, 'status'> {
   namespace: string;
   /** Namespace routability; `unserved` is what makes `status` `degraded`. */
   namespace_routing: EdgeNamespaceRouting;
+  /**
+   * Whether the gateway still holds the consumer and proxy ids Nexus stored.
+   *
+   * Filled from the last completed reconciliation pass, never by probing Edge
+   * inside the health request — see {@link EdgeReconciliationHealth}.
+   */
+  reconciliation: EdgeReconciliationHealth;
+}
+
+/* ── Gateway reference reconciliation ───────────────────────────────────── */
+
+/**
+ * Verdict of the last gateway-reference reconciliation pass.
+ *
+ * `unknown` covers both "no pass has finished yet" and "the last pass could not
+ * reach the gateway": neither is evidence that the stored ids are wrong, so
+ * neither degrades the portal on its own — an unreachable gateway is already
+ * reported by {@link EdgeHealthStatus}.
+ */
+export type GatewayReconciliationStatus = 'ok' | 'orphaned' | 'unknown';
+
+/** What one pass asked the gateway about, for one kind of stored reference. */
+export interface GatewayReferenceScan {
+  /** Stored references this pass asked the gateway about. */
+  checked: number;
+  /** How many of those the gateway answered `404` for. */
+  orphaned: number;
+  /** Whether the pass reached the end of the stored references. */
+  complete: boolean;
+}
+
+/** An account whose stored Edge consumer id the gateway no longer holds. */
+export interface OrphanedConsumerRef {
+  user_id: Uuid;
+  ferrum_consumer_id: string;
+  ferrum_username: string;
+}
+
+/** An API whose stored Edge proxy id the gateway no longer holds. */
+export interface OrphanedProxyRef {
+  api_id: Uuid;
+  slug: string;
+  ferrum_proxy_id: string;
+}
+
+/**
+ * Full result of one reconciliation pass. Admin-facing only — it names
+ * accounts and APIs, so the unauthenticated health payload carries
+ * {@link EdgeReconciliationHealth} instead.
+ */
+export interface GatewayReconciliationReport {
+  status: GatewayReconciliationStatus;
+  /** When the pass ran. */
+  checked_at: IsoTimestamp;
+  /** Ferrum namespace the pass covered. */
+  namespace: string;
+  consumers: GatewayReferenceScan;
+  proxies: GatewayReferenceScan;
+  orphaned_consumers: OrphanedConsumerRef[];
+  orphaned_proxies: OrphanedProxyRef[];
+  /** Why the pass could not finish; `null` when it did. */
+  error: string | null;
+}
+
+/**
+ * The reconciliation signal carried on the public health payload.
+ *
+ * `status` and `checked_at` are public — a monitor has to be able to see that
+ * the portal is pointing at a gateway that does not hold its references, and
+ * when that was last established. The counts and `complete` name how much of
+ * the portal is affected, so they follow the same admin-only rule as the Edge
+ * diagnostic text and read `null` for everyone else.
+ */
+export interface EdgeReconciliationHealth {
+  status: GatewayReconciliationStatus;
+  /** When the last pass ran, or `null` when none has finished. */
+  checked_at: IsoTimestamp | null;
+  /** Admin-only: accounts whose gateway consumer is gone. */
+  orphaned_consumers: number | null;
+  /** Admin-only: APIs whose gateway proxy is gone. */
+  orphaned_proxies: number | null;
+  /** Admin-only: whether the pass covered every stored reference. */
+  complete: boolean | null;
 }

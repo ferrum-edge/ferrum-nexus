@@ -8,6 +8,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Added
 
+- `NEXUS_WEB_PORT` (alias `VITE_DEV_PORT`) and `NEXUS_API_PROXY_TARGET` for
+  `npm run dev`, so a second Nexus (or Foundry) stack can pick free ports
+  without editing `web/vite.config.ts`. Defaults stay 5173 and
+  `http://127.0.0.1:8787`; the `/api` proxy follows `NEXUS_PORT` when the
+  explicit target is unset.
 - Ground-up rewrite of the portal: Fastify BFF (`server/`), React SPA
   (`web/`), shared types (`shared/`).
 - Portal accounts with sessions, CSRF protection, and role-based access
@@ -95,6 +100,22 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   forms and the validation; configs are proxy-scoped and associated on the
   proxy like the first-class ones. Operator plugins (logging, telemetry,
   mesh, chaos) and the auth family stay out of the palette.
+- **Gateway reference reconciliation.** Retargeting `FERRUM_ADMIN_URL` at a
+  different Ferrum Edge — or rebuilding the one it already names — left every
+  stored `ferrum_consumer_id` and `ferrum_proxy_id` pointing at nothing, with
+  `GET /api/health` still green: legacy accounts failed approvals and
+  credential issuance with `502 EDGE_ERROR`, and legacy APIs kept dead proxy
+  ids that served no traffic. A background pass
+  (`NEXUS_GATEWAY_RECONCILE_INTERVAL_MS`, 15 min, plus one at startup, bounded
+  by `NEXUS_GATEWAY_RECONCILE_SAMPLE`) now checks those references against the
+  gateway and reports `edge.reconciliation` on both health endpoints, degrading
+  the portal when any are orphaned. Nothing is ever repaired automatically:
+  `POST /api/admin/gateway/reconcile` and `POST /api/admin/gateway/repair` are
+  `super_admin` only and audited, and the repair recreates each consumer under
+  the same identity with its approved ACL groups replayed, revokes the
+  credential rows whose show-once material died with the old gateway rather
+  than minting replacements, and clears dead proxy ids so providers republish
+  through the ordinary flow. See `docs/operations.md` §13.
 
 ### Changed
 
@@ -415,6 +436,24 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   references it, so the foreign key's shared lock and the `last_message_at`
   update cannot form a cycle; one of the two replies used to be rolled back as
   the deadlock victim and lost behind a `500`.
+- **Changing an API's `auth_plugin` no longer cuts clients off in silence.**
+  Edge runs one authentication plugin per proxy, so swapping `key_auth` for
+  `basic_auth` on a published API turned every issued key into a `401` the
+  instant it landed, while `PATCH /api/apis/:id` answered `200` and the
+  credentials page went on offering the dead keys (#234). Such a change is now
+  refused with `409 ACCESS_DISRUPTION_CONFIRMATION_REQUIRED` — nothing written
+  on either side — and `details` says which credential flavour breaks and how
+  many accounts holding access are carrying one. Re-sending with
+  `"confirm_access_disruption": true` carries the change out and notifies every
+  grantee to issue a credential of the new flavour. **No grantee credential is
+  revoked**: a credential belongs to its holder's consumer, not to one API, and
+  it goes on serving every other API of that flavour — what a grantee loses is
+  this API, until they re-issue. The API's own `nexus-test-<api_id>`
+  credentials, which can no longer authenticate anything, are revoked with the
+  change, each with its own `credential.revoke` row and one
+  `api.auth_plugin_changed` summary. Those revocations run last, after the swap
+  is durable, so a swap the gateway refuses leaves every credential exactly as
+  it was. The settings form warns and carries the acknowledgement.
 
 ### Security
 

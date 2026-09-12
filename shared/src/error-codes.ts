@@ -37,6 +37,17 @@ export const ERROR_CODES = {
   USER_DISABLED: 'USER_DISABLED',
   /** Refused: would remove, demote, or disable the last active super_admin. HTTP 409. */
   LAST_SUPER_ADMIN: 'LAST_SUPER_ADMIN',
+  /**
+   * Refused: the change would cut live callers off from the resource, and the
+   * request did not acknowledge that. HTTP 409.
+   *
+   * Distinct from `CONFLICT`, which reports a state the caller cannot argue
+   * with: this one is a request that *will* be carried out once it says so.
+   * `details` names the field to resend (`confirm_field`), who is disrupted and
+   * how many of them, so a client can put the count in front of a human rather
+   * than parsing the message.
+   */
+  ACCESS_DISRUPTION_CONFIRMATION_REQUIRED: 'ACCESS_DISRUPTION_CONFIRMATION_REQUIRED',
   /** Show-once credential material was already retrieved and cannot be shown again. HTTP 410. */
   SHOW_ONCE_ALREADY: 'SHOW_ONCE_ALREADY',
   /** Ferrum Edge Admin API unreachable (network error / timeout). HTTP 502. */
@@ -90,6 +101,7 @@ export const ERROR_CODE_STATUS: Readonly<Record<ErrorCode, number>> = {
   EMAIL_NOT_VERIFIED: 403,
   USER_DISABLED: 403,
   LAST_SUPER_ADMIN: 409,
+  ACCESS_DISRUPTION_CONFIRMATION_REQUIRED: 409,
   SHOW_ONCE_ALREADY: 410,
   EDGE_UNAVAILABLE: 502,
   EDGE_ERROR: 502,

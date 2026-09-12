@@ -115,6 +115,22 @@ export function lastSuperAdmin(
   return new NexusError('LAST_SUPER_ADMIN', message);
 }
 
+/**
+ * 409 — the change would cut live callers off and was not confirmed.
+ *
+ * Not `CONFLICT`: nothing about the request is wrong and nothing needs to
+ * change before it can succeed — it only needs the caller to say, in the body,
+ * that they accept the consequence. `details` is
+ * {@link AccessDisruptionDetails}, which names the field to resend and how many
+ * accounts lose access until they re-issue.
+ */
+export function accessDisruptionConfirmationRequired(
+  message: string,
+  details: unknown,
+): NexusError {
+  return new NexusError('ACCESS_DISRUPTION_CONFIRMATION_REQUIRED', message, details);
+}
+
 /** 410 — show-once credential material was already retrieved. */
 export function showOnceAlready(
   message = 'This secret was already shown and cannot be shown again',

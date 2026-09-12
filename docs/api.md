@@ -114,26 +114,27 @@ booleans accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`.
 change; `details` is present only when there is structured context (per-field
 validation issues, a conflicting slug, an Edge status).
 
-| Code                 | HTTP | When                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| -------------------- | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `VALIDATION_FAILED`  | 400  | Body, query or params failed schema validation.                                                                                                                                                                                                                                                                                                                                                                               |
-| `UNAUTHORIZED`       | 401  | No valid session, or it expired.                                                                                                                                                                                                                                                                                                                                                                                              |
-| `FORBIDDEN`          | 403  | Authenticated, but the role or ownership check failed.                                                                                                                                                                                                                                                                                                                                                                        |
-| `NOT_FOUND`          | 404  | Target does not exist, or is not visible to the caller.                                                                                                                                                                                                                                                                                                                                                                       |
-| `CONFLICT`           | 409  | Uniqueness or state conflict (duplicate email/slug, active grant, already decided).                                                                                                                                                                                                                                                                                                                                           |
-| `CSRF_MISMATCH`      | 403  | `X-Nexus-CSRF` missing or not matching the cookie/session.                                                                                                                                                                                                                                                                                                                                                                    |
-| `CAPTCHA_FAILED`     | 400  | CAPTCHA token missing, expired, or rejected by the vendor.                                                                                                                                                                                                                                                                                                                                                                    |
-| `RATE_LIMITED`       | 429  | Too many requests from this identity/IP.                                                                                                                                                                                                                                                                                                                                                                                      |
-| `QUOTA_EXCEEDED`     | 429  | A configured per-account allowance is already fully used. `details` is `{ limit, setting, … }` naming the environment variable an operator would raise — `{ limit, current, setting }` for a standing ceiling such as the API quota, `{ limit, window, setting }` for a period budget such as the daily message budget. Distinct from `RATE_LIMITED`, which is about request frequency and clears on its own.                 |
-| `EMAIL_NOT_VERIFIED` | 403  | Account exists but its email is unverified and verification is required.                                                                                                                                                                                                                                                                                                                                                      |
-| `USER_DISABLED`      | 403  | Account has been disabled by an admin.                                                                                                                                                                                                                                                                                                                                                                                        |
-| `LAST_SUPER_ADMIN`   | 409  | Refused: would remove, demote or disable the last active `super_admin`.                                                                                                                                                                                                                                                                                                                                                       |
-| `SHOW_ONCE_ALREADY`  | 410  | Show-once material was already retrieved and cannot be shown again.                                                                                                                                                                                                                                                                                                                                                           |
-| `EDGE_UNAVAILABLE`   | 502  | Ferrum Edge Admin API unreachable (network error / timeout).                                                                                                                                                                                                                                                                                                                                                                  |
-| `EDGE_ERROR`         | 502  | Ferrum Edge Admin API returned an error response. On a gateway **validation** refusal (`400`, `409`, `422`) `details` is `{ status, gateway_message }`, where `gateway_message` is Edge's own text about the request, trimmed to 500 characters, and the top-level `message` repeats it. A `401`, `403` or `5xx` from the gateway stays opaque — that text is about the gateway's own configuration and only reaches the log. |
-| `SPEC_INVALID`       | 400  | Uploaded OpenAPI document could not be parsed or failed validation.                                                                                                                                                                                                                                                                                                                                                           |
-| `OUTBOX_FAILURE`     | 500  | Email could not be enqueued, or exhausted its outbox retries.                                                                                                                                                                                                                                                                                                                                                                 |
-| `INTERNAL`           | 500  | Unexpected server-side failure.                                                                                                                                                                                                                                                                                                                                                                                               |
+| Code                                      | HTTP | When                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ----------------------------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VALIDATION_FAILED`                       | 400  | Body, query or params failed schema validation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `UNAUTHORIZED`                            | 401  | No valid session, or it expired.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `FORBIDDEN`                               | 403  | Authenticated, but the role or ownership check failed.                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `NOT_FOUND`                               | 404  | Target does not exist, or is not visible to the caller.                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `CONFLICT`                                | 409  | Uniqueness or state conflict (duplicate email/slug, active grant, already decided).                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `CSRF_MISMATCH`                           | 403  | `X-Nexus-CSRF` missing or not matching the cookie/session.                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `CAPTCHA_FAILED`                          | 400  | CAPTCHA token missing, expired, or rejected by the vendor.                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `RATE_LIMITED`                            | 429  | Too many requests from this identity/IP.                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `QUOTA_EXCEEDED`                          | 429  | A configured per-account allowance is already fully used. `details` is `{ limit, setting, … }` naming the environment variable an operator would raise — `{ limit, current, setting }` for a standing ceiling such as the API quota, `{ limit, window, setting }` for a period budget such as the daily message budget. Distinct from `RATE_LIMITED`, which is about request frequency and clears on its own.                                                                                                       |
+| `EMAIL_NOT_VERIFIED`                      | 403  | Account exists but its email is unverified and verification is required.                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `USER_DISABLED`                           | 403  | Account has been disabled by an admin.                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `LAST_SUPER_ADMIN`                        | 409  | Refused: would remove, demote or disable the last active `super_admin`.                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `ACCESS_DISRUPTION_CONFIRMATION_REQUIRED` | 409  | Refused: the change would cut live callers off from the resource and the request did not say it accepts that. Today only a `PATCH /api/apis/:id` that moves `auth_plugin`. `details` is `{ field, current_auth_plugin, requested_auth_plugin, credential_type, affected_grantees, confirm_field }`; resending with `confirm_access_disruption: true` makes the change. No grantee credential is revoked — `affected_grantees` counts the accounts that must issue one of the new flavour to go on calling that API. |
+| `SHOW_ONCE_ALREADY`                       | 410  | Show-once material was already retrieved and cannot be shown again.                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `EDGE_UNAVAILABLE`                        | 502  | Ferrum Edge Admin API unreachable (network error / timeout).                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `EDGE_ERROR`                              | 502  | Ferrum Edge Admin API returned an error response. On a gateway **validation** refusal (`400`, `409`, `422`) `details` is `{ status, gateway_message }`, where `gateway_message` is Edge's own text about the request, trimmed to 500 characters, and the top-level `message` repeats it. A `401`, `403` or `5xx` from the gateway stays opaque — that text is about the gateway's own configuration and only reaches the log.                                                                                       |
+| `SPEC_INVALID`                            | 400  | Uploaded OpenAPI document could not be parsed or failed validation.                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `OUTBOX_FAILURE`                          | 500  | Email could not be enqueued, or exhausted its outbox retries.                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `INTERNAL`                                | 500  | Unexpected server-side failure.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
 An Edge API-spec write rejected with a 4xx `Spec parse failed` or
 `Spec validation failed` category returns `400 EDGE_REJECTED_SPEC` (except
@@ -231,6 +232,13 @@ status `degraded` on a `200`.
       "unserved": false,
       "unserved_mutation_observed": false,
       "checked_at": "2026-08-31T09:12:44.117Z"
+    },
+    "reconciliation": {
+      "status": "ok",
+      "checked_at": "2026-08-31T09:05:00.004Z",
+      "orphaned_consumers": 0,
+      "orphaned_proxies": 0,
+      "complete": true
     }
   }
 }
@@ -271,6 +279,30 @@ names both namespaces.
 A gateway that reports no namespace of its own — every release before the field
 existed — leaves `active` `null`, `unserved` `false` and `checked_at` `null`.
 Nothing degrades and nothing is refused: an unknown topology is never a verdict.
+
+`edge.reconciliation` is another reason for `degraded`, and one a perfectly
+reachable gateway can cause. It reports whether Edge still holds
+the consumer and proxy ids Nexus stored: retarget `FERRUM_ADMIN_URL` at a fresh
+gateway, or rebuild the one it names, and every probe above stays green while
+every account and API that predates the change is broken. Its `status` is `ok`
+| `orphaned` | `unknown`, and `orphaned` degrades the portal.
+
+`unknown` means no pass has finished yet, or the last one could not read the
+gateway — neither is evidence about the references either way, so neither
+degrades anything on its own. `checked_at` is `null` in the first of those
+cases.
+
+`orphaned_consumers`, `orphaned_proxies` and `complete` are admin-only and read
+`null` for everyone else, the same rule `error` follows; `status` and
+`checked_at` stay public so an anonymous monitor can act on them. `complete` is
+`false` when the pass stopped at `NEXUS_GATEWAY_RECONCILE_SAMPLE` rather than at
+the end of the stored references.
+
+**These endpoints never run a pass.** They render the cached result of the
+background one (`NEXUS_GATEWAY_RECONCILE_INTERVAL_MS`, 15 minutes by default,
+plus one at startup), so `edge.reconciliation.checked_at` is usually older than
+the payload's own `checked_at`. Repair is
+[`POST /api/admin/gateway/repair`](#post-apiadmingatewayrepair).
 
 `not_ready` exists because Edge answers `GET /health` with **`503` and a
 complete health payload** while it is `starting`, `draining` or `unavailable`.
@@ -866,6 +898,89 @@ which case only the portal rows changed. Idempotent: a second call revokes
 nothing and clears an already-empty type. Errors: `400 VALIDATION_FAILED`,
 `502 EDGE_ERROR` / `502 EDGE_UNAVAILABLE` (nothing is revoked when the gateway
 call fails).
+
+### `POST /api/admin/gateway/reconcile`
+
+_super admin_ — check whether the gateway still holds the consumer and proxy
+ids the portal stored, and cache the answer for the health endpoints. Reads
+only; `POST` because it costs one Admin API read per stored reference and is
+not something to poll. Writes a `gateway.reconcile` audit row.
+
+No body.
+
+```json
+{
+  "status": "orphaned",
+  "checked_at": "2026-09-11T18:22:05.412Z",
+  "namespace": "nexus",
+  "consumers": { "checked": 42, "orphaned": 14, "complete": true },
+  "proxies": { "checked": 9, "orphaned": 3, "complete": true },
+  "orphaned_consumers": [
+    { "user_id": "…", "ferrum_consumer_id": "…", "ferrum_username": "nexus-user-…" }
+  ],
+  "orphaned_proxies": [{ "api_id": "…", "slug": "billing", "ferrum_proxy_id": "…" }],
+  "error": null
+}
+```
+
+`status` is `ok` | `orphaned` | `unknown`. A reference is counted as orphaned
+only when Edge answers `404` for it; any other failure abandons the pass and
+answers `unknown` with the message in `error` and both orphan lists empty — a
+gateway that cannot be read is not a gateway full of orphans. `complete` is
+`false` when the pass stopped at `NEXUS_GATEWAY_RECONCILE_SAMPLE`.
+
+### `POST /api/admin/gateway/repair`
+
+_super admin_ — recreate the gateway consumers a pass found missing and clear
+the dead proxy ids. Always takes a fresh pass first. See the operations guide,
+"Retargeting or rebuilding Ferrum Edge".
+
+Body: `user_ids` (≤ 1000 account ids), `api_ids` (≤ 1000 API ids), `all`
+(repair every orphan found), optional `reason` (≤ 500, nullable; recorded on
+every audit row). **At least one of `user_ids`, `api_ids` and `all` is
+required** — an empty body would otherwise read as either "everything" or
+"nothing".
+
+```json
+{
+  "report": { "status": "orphaned", "namespace": "nexus", "error": null },
+  "consumers": [
+    {
+      "user_id": "…",
+      "previous_ferrum_consumer_id": "…",
+      "ferrum_consumer_id": "…",
+      "credentials_requiring_reissue": 1,
+      "restored_groups": 3,
+      "error": null
+    }
+  ],
+  "apis": [{ "api_id": "…", "previous_ferrum_proxy_id": "…", "flagged": true, "error": null }]
+}
+```
+
+A consumer is recreated under the **same identity** — username
+`nexus-user-<user_id>`, `custom_id` back to the Nexus user id, and the derived
+consumer id — and its `nexus:api:<api_id>:approved` ACL groups are replayed
+from the portal's own `active` grants, so approvals granted before the change
+work again (`restored_groups`).
+
+**No credential material is ever minted.** Show-once secrets cannot be
+recovered from either side, so the portal moves its live
+`credential_metadata` rows to `revoked` and reports the count as
+`credentials_requiring_reissue`; each account holder issues new credentials
+themselves. Each repaired account gets a `gateway.consumer_repair` audit row
+and an in-app notification.
+
+An orphaned API is **not** republished: its dead `ferrum_proxy_id` is cleared,
+an `api.gateway_repair_required` audit row with `phase: "orphaned_proxy"` is
+written, and the owner is asked to publish it again through the ordinary flow.
+Its catalog entry, grants and access requests are untouched.
+
+Per-target failures are reported in `error` rather than failing the request; a
+named target that is not actually orphaned comes back with an `error` saying
+so. Errors: `400 VALIDATION_FAILED` (no target named), `403 FORBIDDEN` (below
+`super_admin`), `502 EDGE_UNAVAILABLE` (the fresh pass could not read the
+gateway, so there is nothing to act on).
 
 ### `GET /api/admin/settings`
 
@@ -1601,7 +1716,7 @@ route. Every field optional; nothing supplied returns the row unchanged.
 | `visibility`                     | `public` ⇄ `internal`; catalog listing only                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `status`                         | `published` ⇄ `retired` — **catalog state only**, the proxy and every live grant keep working                                                                                                                                                                                                                                                                                                                                                                              |
 | `upstream_url`                   | re-points the Edge proxy's backend and records the normalized form on the row; everything else on the proxy is left as it was found                                                                                                                                                                                                                                                                                                                                        |
-| `auth_plugin`                    | attaches and associates the new auth plugin config before detaching and deleting the old one; existing credentials of the old flavour no longer satisfy this API, and every grantee is notified                                                                                                                                                                                                                                                                            |
+| `auth_plugin`                    | attaches and associates the new auth plugin config before detaching and deleting the old one. **Refused with `409 ACCESS_DISRUPTION_CONFIRMATION_REQUIRED` while anyone holding access has a live credential of the outgoing flavour**; send `confirm_access_disruption: true` to make the change anyway. Grantee credentials are never revoked — the API's own `nexus-test-<api_id>` credentials are. Every grantee is notified either way                                |
 | `requestable`                    | attaches or deletes `access_control`. Turning it **off** opens the API to every authenticated consumer; existing grants stay on the consumers and become inert                                                                                                                                                                                                                                                                                                             |
 | `rate_limit`                     | attaches, replaces, or (with `null`) deletes `rate_limiting`; `limit` 1–1 000 000                                                                                                                                                                                                                                                                                                                                                                                          |
 | `cors`                           | attaches, replaces, or (with `null`) deletes `cors`. Omitting the field leaves the existing policy alone — only an explicit `null` removes it. Also re-derives the proxy's `allowed_ws_origins` and the `OPTIONS` entry of its `allowed_methods`. It does **not** touch a `routes` API's operation table: `cors` runs at priority 100 and `openapi_validator` at 2960, so a browser preflight is answered and short-circuited before the unknown-operation check ever runs |
@@ -1609,11 +1724,38 @@ route. Every field optional; nothing supplied returns the row unchanged.
 | `timeouts`                       | replaces all three backend timeouts, or (with `null`) writes the gateway defaults back explicitly. Omitting it leaves whatever is on the proxy alone, including values an operator set by hand                                                                                                                                                                                                                                                                             |
 | `circuit_breaker`                | attaches Edge's default breaker config to the proxy, or removes it                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `spec_enforcement`               | **rebuilds the proxy.** `routes` recreates it through the API-spec importer from the API's **current** spec revision; `docs_only` recreates it as a plain proxy. Omitting the field leaves the level alone. See the note below — the API is briefly unreachable                                                                                                                                                                                                            |
+| `confirm_access_disruption`      | acknowledgement, not a setting: it only means anything alongside an `auth_plugin` change, and only as `true`. See that row                                                                                                                                                                                                                                                                                                                                                 |
 
 → `{ "api": Api }`. Errors: `400 SPEC_INVALID` (bad or, by default, private
 `upstream_url` — see `POST /api/apis`; or `details.reason = "no_operations"`
 when `routes` is asked for and the current revision declares nothing to allow),
+`409 ACCESS_DISRUPTION_CONFIRMATION_REQUIRED` (an `auth_plugin` change that
+would lock grantees out of the API, without `confirm_access_disruption: true`),
 `502 EDGE_ERROR`.
+
+> **Changing `auth_plugin` locks every credential of the old flavour out of
+> this API.** Edge runs one authentication plugin per proxy, so the moment the
+> swap lands every key of the outgoing flavour is a `401` here — a break the
+> client sees before the portal does. Nexus therefore refuses the change while
+> anyone holding access is carrying such a key, and `details.affected_grantees`
+> says how many accounts that is; the provider re-sends with
+> `"confirm_access_disruption": true` to go ahead.
+>
+> **That path revokes nothing of theirs.** A credential hangs off its holder's
+> _consumer_, not off an API, and the same key goes on authenticating every other
+> API of that flavour they have access to — so taking it away to settle a change
+> on this one API would break integrations this API has no standing over. What
+> each grantee loses is this API, until they issue a credential of the new
+> flavour, which is what the notification asks them to do. The credentials the
+> API owns outright are a different matter: the keys on its
+> `nexus-test-<api_id>` consumer exist to call this one proxy, the swap really
+> has made them useless, and they are revoked — each with its own
+> `credential.revoke` row — whether or not the change needed confirming. One
+> `api.auth_plugin_changed` row summarises both halves.
+>
+> The refusal counts grantees, so an API published with `requestable: false`
+> gates nobody, has no enumerable callers, and is never refused: its holders get
+> the notification and nothing else. Announce such a change yourself.
 
 > **Changing `spec_enforcement` interrupts the API for a moment.** Edge attaches
 > an `api_spec` to a proxy only at import, detaches one only by deleting the

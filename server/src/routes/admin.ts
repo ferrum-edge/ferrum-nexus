@@ -6,6 +6,12 @@
  * so do the `smtp`/`captcha` sections of `PUT /settings`, which are escalation
  * surfaces rather than preferences. Secrets are write-only everywhere here:
  * `smtp.password` and `captcha.secret_key` go in and are never read back out.
+ *
+ * The two `/gateway/*` endpoints raise the bar the same way: one reports which
+ * of the portal's stored Ferrum Edge references the gateway no longer holds,
+ * the other recreates them. Both name accounts and APIs and both exist for the
+ * cutover case — a retargeted or rebuilt gateway — so neither is an `admin`
+ * operation.
  */
 
 import type { FastifyPluginAsync } from 'fastify';
@@ -24,11 +30,14 @@ import {
   type ListEmailTemplatesResponse,
   type MassEmailResponse,
   type ReconcileCredentialsResponse,
+  type ReconcileGatewayResponse,
+  type RepairGatewayReferencesResponse,
   type SmtpTestResponse,
   type UpdateEmailTemplateResponse,
   type UpdateSettingsResponse,
 } from '@ferrum-nexus/shared';
 
+import type { GatewayReconciliationService } from '../admin/gateway-reconciliation.js';
 import type { GodService } from '../admin/god-service.js';
 import type { MassEmailService } from '../admin/mass-email-service.js';
 import type { SettingsService } from '../admin/settings-service.js';
@@ -48,6 +57,7 @@ export interface AdminRoutesOptions {
   audit: AuditService;
   god: GodService;
   credentials: CredentialsService;
+  reconciliation: GatewayReconciliationService;
 }
 
 /** Largest accepted logo, as a data URL. Roughly 384 KiB of binary. */
@@ -164,6 +174,28 @@ const reconcileCredentialsBody = z.object({
   reason: z.string().trim().max(500).nullish(),
 });
 
+/** Whether a gateway repair body names at least one explicit target. */
+function namesRepairTargets(body: { user_ids?: string[]; api_ids?: string[] }): boolean {
+  return (body.user_ids?.length ?? 0) > 0 || (body.api_ids?.length ?? 0) > 0;
+}
+
+/**
+ * At least one of `all`, `user_ids` and `api_ids` is required — an empty body
+ * would otherwise read as either "repair everything" or "repair nothing", and
+ * the first of those is not a thing to guess at. The id lists are capped the
+ * way the audience selectors are.
+ */
+const repairGatewayBody = z
+  .object({
+    user_ids: z.array(z.string().trim().min(1).max(64)).max(1_000).optional(),
+    api_ids: z.array(z.string().trim().min(1).max(64)).max(1_000).optional(),
+    all: z.boolean().optional(),
+    reason: z.string().trim().max(500).nullish(),
+  })
+  .refine((value) => value.all === true || namesRepairTargets(value), {
+    message: 'Provide account ids, API ids, or all: true',
+  });
+
 const godRevokeGrantBody = z.object({
   grant_id: z.string().trim().min(1).max(64),
   reason: godReason,
@@ -197,7 +229,7 @@ const godBroadcastBody = z.object({
 
 /** `/api/admin` route plugin. */
 export const adminRoutes: FastifyPluginAsync<AdminRoutesOptions> = async (app, options) => {
-  const { settings, massEmail, email, audit, god, credentials } = options;
+  const { settings, massEmail, email, audit, god, credentials, reconciliation } = options;
   app.addHook('onRequest', requireRole('admin'));
 
   /* ── Settings ─────────────────────────────────────────────────────────── */
@@ -299,6 +331,59 @@ export const adminRoutes: FastifyPluginAsync<AdminRoutesOptions> = async (app, o
       {
         consumerId: body.consumer_id,
         credentialType: body.credential_type,
+        reason: body.reason ?? null,
+      },
+      clientIp(request),
+    );
+  });
+
+  /* ── Gateway reference reconciliation ─────────────────────────────────── */
+
+  /**
+   * Check whether the gateway still holds the consumer and proxy ids the portal
+   * stored, and cache the answer for `/api/health`.
+   *
+   * `super_admin` rather than `admin`: the report names every account and API
+   * whose gateway object is missing, and it is the reconnaissance step of a
+   * repair that recreates gateway identities. A `POST` because it costs one
+   * Admin API read per stored reference — this is not something a dashboard
+   * should be able to poll.
+   */
+  app.post('/gateway/reconcile', async (request): Promise<ReconcileGatewayResponse> => {
+    const { user } = assertRole(request, 'super_admin');
+    const report = await reconciliation.scan();
+    await audit.record(
+      { id: user.id, role: user.role },
+      AuditAction.GATEWAY_RECONCILE,
+      { type: 'gateway', id: report.namespace },
+      {
+        status: report.status,
+        checked_consumers: report.consumers.checked,
+        orphaned_consumers: report.consumers.orphaned,
+        checked_proxies: report.proxies.checked,
+        orphaned_proxies: report.proxies.orphaned,
+        complete: report.consumers.complete && report.proxies.complete,
+        ...(report.error === null ? {} : { error: report.error }),
+      },
+      clientIp(request),
+    );
+    return report;
+  });
+
+  /**
+   * Re-link the references a fresh pass finds orphaned: recreate the missing
+   * gateway consumers, clear the dead proxy ids. `super_admin` only, audited
+   * per account and per API by the service. See `docs/operations.md` §13.
+   */
+  app.post('/gateway/repair', async (request): Promise<RepairGatewayReferencesResponse> => {
+    const { user } = assertRole(request, 'super_admin');
+    const body = parseOrThrow(repairGatewayBody, request.body);
+    return reconciliation.repair(
+      user,
+      {
+        ...(body.user_ids === undefined ? {} : { userIds: body.user_ids }),
+        ...(body.api_ids === undefined ? {} : { apiIds: body.api_ids }),
+        ...(body.all === undefined ? {} : { all: body.all }),
         reason: body.reason ?? null,
       },
       clientIp(request),

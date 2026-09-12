@@ -19,6 +19,23 @@ import type { AuditLogFilter, AuditLogRecord, ListOptions, NexusStore } from '..
 export const AuditAction = {
   /** Startup created the namespace-global request metrics prerequisite. */
   GATEWAY_METRICS_ENABLE: 'gateway.metrics_enable',
+  /**
+   * An administrator ran the gateway-reference reconciliation pass on demand.
+   *
+   * A read-only action, recorded because it is the entry in the trail that
+   * dates a retarget: the row says when somebody last established whether the
+   * gateway still holds the consumer and proxy ids the portal stored.
+   */
+  GATEWAY_RECONCILE: 'gateway.reconcile',
+  /**
+   * A super admin recreated an account's missing gateway consumer and re-linked
+   * the portal row.
+   *
+   * The details carry the credential rows revoked with it — their show-once
+   * material died with the old consumer and **nothing is minted here**, so the
+   * count is the number of credentials the account holder has to re-issue.
+   */
+  GATEWAY_CONSUMER_REPAIR: 'gateway.consumer_repair',
   /* auth */
   AUTH_REGISTER: 'auth.register',
   AUTH_LOGIN: 'auth.login',
@@ -68,6 +85,12 @@ export const AuditAction = {
    * The details carry the proxy document and the hand-owned plugin configs as
    * they were before the conversion — the only surviving copy — so an
    * administrator can rebuild the API from this row.
+   *
+   * `phase: 'orphaned_proxy'` is the same state reached from the other
+   * direction: the gateway was retargeted or rebuilt, the stored
+   * `ferrum_proxy_id` answers `404`, and the reconciliation repair cleared it
+   * so the API reads as having no proxy — which is the state the rest of the
+   * portal already models — and can be republished through the ordinary flow.
    */
   API_GATEWAY_REPAIR_REQUIRED: 'api.gateway_repair_required',
   /**
@@ -82,6 +105,19 @@ export const AuditAction = {
    * no `apis` row — the only record that it exists.
    */
   API_PUBLISH_ROLLBACK: 'api.publish_rollback',
+  /**
+   * An `auth_plugin` change went through on a live API, summarising what it
+   * disrupted.
+   *
+   * The companion to the `api.update` row: how many grantee accounts lost
+   * access to this API until they issue a credential of the new flavour (their
+   * own credentials are left alone — they serve other APIs), and how many of
+   * the API's **own** credentials, on its `nexus-test-<api_id>` consumer, were
+   * revoked because the change really did make them useless. Each of those
+   * revocations also writes its own `credential.revoke` row; `failed` names the
+   * ones the gateway would not let go of.
+   */
+  API_AUTH_PLUGIN_CHANGED: 'api.auth_plugin_changed',
   TEST_CONSUMER_CREATE: 'test_consumer.create',
 
   /* access workflow */

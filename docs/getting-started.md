@@ -155,7 +155,7 @@ Then:
 
 ```bash
 npm run migrate   # also runs automatically at startup
-npm run dev       # backend :8787, web :5173
+npm run dev       # backend :8787, web :5173 (NEXUS_PORT / NEXUS_WEB_PORT)
 ```
 
 > Run `npm run migrate` from the repo root, not

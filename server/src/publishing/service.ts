@@ -202,6 +202,7 @@ import {
   listenPathFor,
   roleAtLeast,
   testConsumerUsername,
+  type AccessDisruptionDetails,
   type Api,
   type ApiSpecSummary,
   type ApiStats,
@@ -226,6 +227,7 @@ import type {
   ApiFilter,
   ApiRecord,
   ApiSpecRecord,
+  CredentialRecord,
   GrantRecord,
   ListOptions,
   NexusStore,
@@ -246,6 +248,7 @@ import type {
   EdgeProxyWrite,
 } from '../ferrum-admin/types.js';
 import {
+  accessDisruptionConfirmationRequired,
   conflict,
   edgeError,
   forbidden,
@@ -282,6 +285,21 @@ import {
 export interface PublishResult {
   api: Api;
   spec: ApiSpecSummary;
+}
+
+/**
+ * The reach of an `auth_plugin` change, read before the change is made.
+ *
+ * Two disjoint halves with two different owners: accounts that lose access to
+ * this API until they re-issue, and credentials the API itself owns and can
+ * therefore retire. See `authSwapImpact` for why the distinction is the whole
+ * point.
+ */
+interface AuthSwapImpact {
+  /** Accounts with an active grant holding a live credential of the outgoing flavour. */
+  grantees: Uuid[];
+  /** Live rows of the outgoing flavour on the API's own `nexus-test-<api_id>` consumer. */
+  apiOwned: CredentialRecord[];
 }
 
 /** Filters accepted by {@link PublishingService.list}. */
@@ -1284,6 +1302,56 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           );
         }
 
+        // ── The auth swap's blast radius, measured before anything moves ──
+        //
+        // Edge runs exactly one flavour of authentication for this proxy, so
+        // replacing the plugin stops every credential of the outgoing flavour
+        // at *this* proxy the moment the swap lands — silently, from the
+        // client's side, as a `401` on a key the portal still lists as active
+        // (issue #234). That is not a change a provider should be able to make
+        // by accident, so it is refused while anyone holding access would be
+        // cut off, and the refusal happens **here**: before the undo stack
+        // exists, before a single gateway write, so a `409` mutates nothing on
+        // either side.
+        //
+        // Read under the proxy lease, with the API re-read inside it, so what
+        // the refusal counts and what the confirmed change acts on are the same
+        // reading. A grant approved after this point brings its own credential
+        // in behind the swap — that account is told to issue a matching one by
+        // the notification below, exactly as an existing grantee is.
+        const swappedAuthPlugin =
+          patch.auth_plugin !== undefined && patch.auth_plugin !== api.auth_plugin && proxyId
+            ? patch.auth_plugin
+            : null;
+        const impact: AuthSwapImpact = swappedAuthPlugin
+          ? await authSwapImpact(api)
+          : { grantees: [], apiOwned: [] };
+        if (
+          swappedAuthPlugin &&
+          impact.grantees.length > 0 &&
+          patch.confirm_access_disruption !== true
+        ) {
+          const count = impact.grantees.length;
+          const refusal: AccessDisruptionDetails = {
+            field: 'auth_plugin',
+            current_auth_plugin: api.auth_plugin,
+            requested_auth_plugin: swappedAuthPlugin,
+            credential_type: CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin],
+            affected_grantees: count,
+            confirm_field: 'confirm_access_disruption',
+          };
+          throw accessDisruptionConfirmationRequired(
+            `Changing this API's authentication from ${api.auth_plugin} to ${swappedAuthPlugin} ` +
+              `would lock ${count} account${count === 1 ? '' : 's'} holding access out of it: ` +
+              `${count === 1 ? 'it holds' : 'they hold'} a ${refusal.credential_type} ` +
+              'credential, which this API will no longer accept. Resend with ' +
+              '"confirm_access_disruption": true to make the change anyway — those accounts keep ' +
+              'their credentials, which go on serving every other API of that kind, and are told ' +
+              'to issue one of the new kind for this API.',
+            refusal,
+          );
+        }
+
         // Edge has no cross-resource transaction, so every gateway mutation below
         // records the call that undoes it. Any later failure — the next plugin
         // call, or the Nexus row update itself — unwinds them in reverse, so a
@@ -1744,12 +1812,88 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           ip,
         );
 
+        // ── What the swap actually cost, settled after it landed ──────────
+        //
+        // **Last**, and only once the swap is durable on both sides. A
+        // revocation deletes the material from the gateway, which no
+        // compensation can put back — so it must never run on a PATCH that can
+        // still unwind, and there is nothing above this line left to fail.
+        //
+        // Only the API's **own** credentials are revoked: the keys on its
+        // `nexus-test-<api_id>` consumer, which exists to call this one proxy
+        // and nothing else, so the swap really has made them useless and
+        // retiring the rows is the portal agreeing with the gateway. A
+        // grantee's credential is not touched. It hangs off *their* consumer,
+        // one per account per namespace, and it goes on authenticating every
+        // other API of that flavour they hold access to; revoking it here would
+        // take those down to settle an account this API has no standing to
+        // settle. What they lose is this API, until they issue a credential of
+        // the new flavour — which is what the notification below asks for and
+        // what the confirmation above was asking the provider to accept.
+        //
+        // The revocations are best-effort and audited rather than thrown: the
+        // PATCH itself succeeded, and a revocation Edge refuses leaves an
+        // active-looking row for a test key that no longer opens this API —
+        // worth an operator's attention, but not a `500` on a request that did
+        // what it said.
+        const swapped = changed.includes('auth_plugin');
+        const revoked: Uuid[] = [];
+        const unrevoked: { credential_id: Uuid; error: string }[] = [];
+        if (swapped && impact.apiOwned.length > 0) {
+          for (const credential of impact.apiOwned) {
+            try {
+              const didRevoke = await credentials.revokeInvalidated(
+                { id: actor.id, role: actor.role },
+                credential.id,
+                {
+                  reason: 'auth_plugin_change',
+                  api_id: api.id,
+                  previous_auth_plugin: api.auth_plugin,
+                  auth_plugin: updated.auth_plugin,
+                },
+                ip,
+              );
+              if (didRevoke) revoked.push(credential.id);
+            } catch (error) {
+              unrevoked.push({ credential_id: credential.id, error: errorMessage(error) });
+            }
+          }
+        }
+        if (swapped && (impact.grantees.length > 0 || impact.apiOwned.length > 0)) {
+          const summary = {
+            previous_auth_plugin: api.auth_plugin,
+            auth_plugin: updated.auth_plugin,
+            previous_credential_type: CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin],
+            // Accounts cut off from this API until they re-issue. Their
+            // credentials were deliberately left alone.
+            affected_grantees: impact.grantees.length,
+            affected_grantee_ids: impact.grantees,
+            api_owned_credentials: impact.apiOwned.length,
+            revoked_api_credentials: revoked.length,
+            failed: unrevoked.map((entry) => entry.credential_id),
+            failure_errors: unrevoked.map((entry) => entry.error),
+          };
+          if (unrevoked.length > 0) {
+            deps.log?.(
+              { api_id: api.id, ...summary },
+              'an auth_plugin change could not revoke every credential the API itself owned',
+            );
+          }
+          await audit.record(
+            { id: actor.id, role: actor.role },
+            AuditAction.API_AUTH_PLUGIN_CHANGED,
+            { type: 'api', id: api.id },
+            summary,
+            ip,
+          );
+        }
+
         if (details.existing_credentials_invalidated === true) {
           await notifyGrantees(
             api.id,
             'system',
             `${updated.name} changed its authentication method`,
-            `This API now uses ${updated.auth_plugin}. Issue a matching credential from your credentials page to keep calling it.`,
+            `This API now requires a ${CREDENTIAL_TYPE_FOR_PLUGIN[updated.auth_plugin]} credential (${updated.auth_plugin}). Your existing credentials are still valid for your other APIs, but you need to issue one of the new kind from your credentials page to keep calling this one.`,
             '/credentials',
           );
         }
@@ -2846,6 +2990,62 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     return async () => {
       await binder.mutateProxyLocked(previous.id, (proxy) => ({ ...proxy, ...backend }), subject);
     };
+  }
+
+  /**
+   * What an `auth_plugin` swap on `api` would cost, split by who owns the
+   * material it breaks.
+   *
+   * Credential material hangs off a **consumer**, not an API — one canonical
+   * consumer per portal account per namespace, plus the throwaway
+   * `nexus-test-<api_id>` consumer a provider makes for their own API — so the
+   * reach of a swap is a derived reading rather than a column, and the two
+   * halves of it are owned by different people and must be treated differently.
+   *
+   * `grantees` are the accounts with an active grant on this API that hold a
+   * live credential of its current flavour. They are what the refusal counts
+   * and who the confirmed change notifies, and **nothing of theirs is
+   * revoked**: their credential is their consumer's, not this API's, and it
+   * goes on authenticating every other API of that flavour. What the swap takes
+   * from them is this API, until they issue a credential of the new flavour.
+   *
+   * `apiOwned` is the credentials the API owns outright — the live rows of the
+   * current flavour on its test consumer, which exists to call this one proxy
+   * and is deleted with it. The swap genuinely makes those useless, so the
+   * confirmed change revokes them and the portal stops offering keys that
+   * cannot authenticate anything.
+   *
+   * Neither half is "every credential of that type in the namespace": an API
+   * published with `requestable: false` carries no `access_control` plugin and
+   * is callable by any authenticated consumer, but those callers are not
+   * enumerable per API and their keys serve every other open API too. Such a
+   * swap is therefore never refused; `provider-guide.md` says so, and says to
+   * announce it.
+   */
+  async function authSwapImpact(api: ApiRecord): Promise<AuthSwapImpact> {
+    const type = CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin];
+    const grantees = new Set<Uuid>();
+    for (const grant of await store.grants.listActiveByApi(api.id)) {
+      if (grantees.has(grant.user_id)) continue;
+      const consumer = await credentials.provisioner.findConsumer(grant.user_id);
+      if (!consumer) continue;
+      const rows = await store.credentials.listByConsumer(consumer.ferrum_consumer_id, type);
+      if (rows.some((row) => row.status !== 'revoked')) grantees.add(grant.user_id);
+    }
+
+    const apiOwned: CredentialRecord[] = [];
+    const testIdentity = await store.gatewayIdentities.findByUsername(
+      namespace,
+      testConsumerUsername(api.id),
+    );
+    if (testIdentity?.ferrum_consumer_id) {
+      const rows = await store.credentials.listByConsumer(testIdentity.ferrum_consumer_id, type);
+      for (const row of rows) {
+        if (row.status !== 'revoked') apiOwned.push(row);
+      }
+    }
+
+    return { grantees: [...grantees], apiOwned };
   }
 
   /** Best-effort in-app notice to everyone holding an active grant on `apiId`. */
