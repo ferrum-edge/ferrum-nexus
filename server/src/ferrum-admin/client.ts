@@ -41,6 +41,13 @@ import type { LeaseRepo } from '../db/store.js';
 import { conflict, edgeError, edgeUnavailable, internal, NexusError } from '../lib/errors.js';
 import { createKeyedSerializer, type KeyedSerializer } from '../lib/keyed-serializer.js';
 import { createAdminTokenMinter, DEFAULT_ADMIN_SUBJECT, type AdminTokenMinter } from './jwt.js';
+import {
+  createNamespaceMonitor,
+  parseNamespaceServing,
+  NAMESPACE_UNSERVED_HEADER,
+  NAMESPACE_UNSERVED_HEADER_VALUE,
+  type NamespaceMonitor,
+} from './namespace.js';
 import { parsePrometheusText, type PrometheusSample } from './prometheus.js';
 import type {
   EdgeApiSpecDocument,
@@ -124,6 +131,16 @@ interface CallOptions {
 export interface FerrumAdminClient {
   /** Namespace sent in `X-Ferrum-Namespace` on every namespace-scoped call. */
   readonly namespace: string;
+
+  /**
+   * Whether the gateway's data plane actually routes {@link namespace}.
+   *
+   * Fed by {@link probe} (the `namespace` block of the authenticated health
+   * payload) and by the `X-Ferrum-Namespace-Unserved` header this client
+   * watches on every accepted mutation. Reading it costs nothing — it never
+   * touches the network — so a request path may gate on it per call.
+   */
+  readonly namespaceMonitor: NamespaceMonitor;
 
   /**
    * Authenticated `GET /health` — reports `status`, `ready`, `mode` and
@@ -716,6 +733,7 @@ export function createFerrumAdminClient(
     deps.leases === undefined ? {} : { leases: deps.leases },
   );
   const namespace = config.namespace;
+  const namespaceMonitor = createNamespaceMonitor(namespace);
 
   function urlFor(path: string, query?: CallOptions['query']): string {
     const url = new URL(config.adminUrl + path);
@@ -723,6 +741,39 @@ export function createFerrumAdminClient(
       if (value !== undefined) url.searchParams.set(key, String(value));
     }
     return url.toString();
+  }
+
+  /**
+   * Watch for `X-Ferrum-Namespace-Unserved: true` on an accepted mutation.
+   *
+   * Edge stamps it only on a `2xx` answer to a `POST`/`PUT`/`PATCH`/`DELETE`
+   * whose `X-Ferrum-Namespace` its data plane does not route: the write
+   * committed, is Admin-visible, and will never be matched by the router. Its
+   * absence asserts nothing — an older gateway never sends it — so only the
+   * literal `true` is read, and the status filter is repeated here rather than
+   * trusted, because a header on a `4xx` would describe a write that never
+   * happened.
+   *
+   * Logged once per transition, not once per write: a misconfigured portal
+   * makes many gateway calls per publish and the condition is one fact.
+   */
+  function noteUnservedNamespace(
+    method: string,
+    path: string,
+    status: number,
+    headers: Record<string, string | string[] | undefined>,
+  ): void {
+    if (method === 'GET') return;
+    if (status < 200 || status >= 300) return;
+    const raw = headers[NAMESPACE_UNSERVED_HEADER];
+    const value = Array.isArray(raw) ? raw[0] : raw;
+    if (value !== NAMESPACE_UNSERVED_HEADER_VALUE) return;
+    if (!namespaceMonitor.observeUnservedMutation()) return;
+    logger.error(
+      { namespace, method, path, header: NAMESPACE_UNSERVED_HEADER },
+      'Ferrum Edge accepted a write into a namespace its data plane does not serve; ' +
+        'published APIs in this namespace will answer 404',
+    );
   }
 
   async function call<T>(
@@ -761,6 +812,7 @@ export function createFerrumAdminClient(
         signal: options.signal ?? AbortSignal.timeout(config.timeoutMs),
       });
       statusCode = response.statusCode;
+      noteUnservedNamespace(method, path, statusCode, response.headers);
       bytes = await readBoundedBody(
         response.body,
         options.maxResponseBytes ?? ADMIN_RESPONSE_MAX_BYTES,
@@ -1127,6 +1179,7 @@ export function createFerrumAdminClient(
 
   return {
     namespace,
+    namespaceMonitor,
 
     async health(): Promise<EdgeHealth> {
       // `503` is reachable-but-not-ready only with a valid health payload.
@@ -1163,6 +1216,12 @@ export function createFerrumAdminClient(
         } catch {
           version = null;
         }
+        // Folded in here rather than by the caller so that *every* probe
+        // refreshes the verdict — `/api/health`, the startup check, and any
+        // future one — and an operator who fixes the gateway sees the portal
+        // recover without restarting it.
+        const serving = parseNamespaceServing(health.namespace);
+        namespaceMonitor.observeHealth(serving);
         return {
           reachable: true,
           latencyMs: Date.now() - started,
@@ -1173,6 +1232,7 @@ export function createFerrumAdminClient(
             typeof health.admin_writes_enabled === 'boolean' ? health.admin_writes_enabled : null,
           version,
           error: null,
+          namespace: serving,
         };
       } catch (error) {
         return {
@@ -1184,6 +1244,7 @@ export function createFerrumAdminClient(
           adminWritesEnabled: null,
           version: null,
           error: error instanceof Error ? error.message : 'unknown error',
+          namespace: null,
         };
       }
     },

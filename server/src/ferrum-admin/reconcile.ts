@@ -1,5 +1,36 @@
 import { AuditAction, SYSTEM_ACTOR, type AuditService } from '../audit/service.js';
 import type { EdgeLogger, FerrumAdminClient } from './client.js';
+import { namespaceUnservedMessage } from './namespace.js';
+
+/**
+ * Seed the namespace-routability verdict from the gateway's own health, and
+ * say so loudly when the two sides disagree (ferrum-nexus#230).
+ *
+ * Nothing else probes until `GET /api/health` is called, so without this a
+ * portal nobody monitors would publish into an unrouted namespace for as long
+ * as it took someone to notice the `404`s. `probe()` never throws and an
+ * unreachable gateway asserts nothing: the verdict simply stays unknown, and
+ * the metrics reconciliation below reports the outage anyway.
+ *
+ * @returns whether the gateway routes the namespace Nexus publishes into
+ */
+export async function checkNamespaceRoutability(
+  edge: FerrumAdminClient,
+  logger: EdgeLogger,
+): Promise<boolean> {
+  await edge.probe();
+  const routing = edge.namespaceMonitor.routing();
+  if (!routing.unserved) return true;
+  logger.error(
+    {
+      namespace: routing.configured,
+      activeNamespace: routing.active,
+      servingScope: routing.serving_scope,
+    },
+    `MISCONFIGURED NAMESPACE: ${namespaceUnservedMessage(routing)}`,
+  );
+  return false;
+}
 
 /** Best-effort startup prerequisites; a gateway outage must not prevent portal startup. */
 export async function reconcileGateway(
@@ -7,6 +38,7 @@ export async function reconcileGateway(
   audit: AuditService,
   logger: EdgeLogger,
 ): Promise<void> {
+  await checkNamespaceRoutability(edge, logger);
   await edge.ensureNamespace('Managed by Ferrum Nexus');
   try {
     const created = await edge.ensureMetricsConfig();

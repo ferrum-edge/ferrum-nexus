@@ -635,12 +635,65 @@ export type DbDriver = 'sqlite' | 'postgres' | 'mysql' | 'mongodb';
  * `not_ready` is its own state on purpose: Edge answers `503` with a complete
  * health payload while it is `starting`, `draining` or `unavailable`, which is
  * a reachable gateway reporting itself unready — not an unreachable one.
+ *
+ * `degraded` is a gateway that is up, ready, and answering the Admin API while
+ * something about the portal's relationship with it is wrong. Read
+ * {@link EdgeHealth.reason} for which one.
  */
-export type EdgeHealthStatus = 'ok' | 'not_ready' | 'down';
+export type EdgeHealthStatus = 'ok' | 'degraded' | 'not_ready' | 'down';
+
+/**
+ * Why the gateway reads `degraded`.
+ *
+ * `namespace_unserved` — the gateway's data plane routes exactly one
+ * namespace and it is not the one Nexus publishes into, so every proxy the
+ * portal has created answers `404` on the listener. See
+ * {@link EdgeNamespaceRouting}.
+ */
+export type EdgeHealthReason = 'namespace_unserved';
+
+/**
+ * Which namespace the portal writes to and which one the gateway's data plane
+ * actually serves.
+ *
+ * The Admin API is multi-namespace; a single gateway process projects every
+ * configuration snapshot down to its own `FERRUM_NAMESPACE` before building
+ * the router. A write to any other namespace is accepted and never routed.
+ *
+ * `active`, `serving_scope` and `data_plane_single_namespace` come from the
+ * `namespace` block on Edge's authenticated `GET /health`. A gateway that
+ * predates that block reports `null`/`null`/`null` here, and
+ * {@link EdgeNamespaceRouting.unserved} then stays `false` — an unknown
+ * topology is never a verdict. `active` and `serving_scope` are also `null`
+ * for a caller below `admin`, the same way {@link EdgeHealth.mode} is.
+ */
+export interface EdgeNamespaceRouting {
+  /** Namespace Nexus publishes into (`FERRUM_NAMESPACE` on the portal). */
+  configured: string;
+  /** The one namespace the gateway's data plane routes, when it says. */
+  active: string | null;
+  /** `single-namespace-data-plane`, `control-plane`, `no-data-plane`, or `null`. */
+  serving_scope: string | null;
+  /** True when everything outside `active` is unrouted by that process. */
+  data_plane_single_namespace: boolean | null;
+  /** True when `configured` is provably not served — proxies exist but 404. */
+  unserved: boolean;
+  /**
+   * True when the gateway stamped `X-Ferrum-Namespace-Unserved: true` on a
+   * mutation the portal made. The per-write half of the same signal, and the
+   * one that catches a gateway restarted into a different namespace between
+   * health probes.
+   */
+  unserved_mutation_observed: boolean;
+  /** When the verdict was last refreshed, or `null` if the gateway never said. */
+  checked_at: IsoTimestamp | null;
+}
 
 /** Health of the Ferrum Edge Admin API, as reported by `GET /api/health/edge`. */
 export interface EdgeHealth extends Omit<DependencyHealth, 'status'> {
   status: EdgeHealthStatus;
+  /** Set when `status` is `degraded`; `null` otherwise. */
+  reason: EdgeHealthReason | null;
   /** Edge's own readiness verdict, or `null` when it did not answer. */
   ready: boolean | null;
   /** Gateway operating mode (`database`, `file`, `cp`, `dp`, …), or `null`. */
@@ -655,4 +708,6 @@ export interface EdgeHealth extends Omit<DependencyHealth, 'status'> {
    */
   edge_version: string | null;
   namespace: string;
+  /** Namespace routability; `unserved` is what makes `status` `degraded`. */
+  namespace_routing: EdgeNamespaceRouting;
 }

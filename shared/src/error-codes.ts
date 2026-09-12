@@ -47,6 +47,16 @@ export const ERROR_CODES = {
   EDGE_REJECTED_SPEC: 'EDGE_REJECTED_SPEC',
   /** Ferrum Edge Admin API violated its HTTP/JSON response contract. HTTP 502. */
   EDGE_PROTOCOL_ERROR: 'EDGE_PROTOCOL_ERROR',
+  /**
+   * The gateway's data plane does not serve `FERRUM_NAMESPACE`. HTTP 409.
+   *
+   * The Admin API is multi-namespace, but one gateway process routes exactly
+   * one namespace. A proxy written into any other namespace is accepted,
+   * stays Admin-visible, and is never matched by the router — the portal
+   * would report a live API whose `invoke_url` answers `404`. Only an
+   * operator can fix it, by aligning the two `FERRUM_NAMESPACE` values.
+   */
+  EDGE_NAMESPACE_UNSERVED: 'EDGE_NAMESPACE_UNSERVED',
   /** Uploaded OpenAPI document could not be parsed or failed validation. HTTP 400. */
   SPEC_INVALID: 'SPEC_INVALID',
   /** Email could not be enqueued or exhausted its outbox retries. HTTP 500. */
@@ -85,6 +95,7 @@ export const ERROR_CODE_STATUS: Readonly<Record<ErrorCode, number>> = {
   EDGE_ERROR: 502,
   EDGE_REJECTED_SPEC: 400,
   EDGE_PROTOCOL_ERROR: 502,
+  EDGE_NAMESPACE_UNSERVED: 409,
   SPEC_INVALID: 400,
   OUTBOX_FAILURE: 500,
   INTERNAL: 500,
