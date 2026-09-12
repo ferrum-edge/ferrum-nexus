@@ -449,11 +449,46 @@ export interface UpdateApiRequest {
    */
   spec_enforcement?: SpecEnforcementLevel;
   status?: ApiStatus;
+  /**
+   * Acknowledge that changing `auth_plugin` cuts everyone holding a credential
+   * of the outgoing flavour off from **this** API until they issue one of the
+   * new flavour.
+   *
+   * Without it such a change is refused with
+   * `409 ACCESS_DISRUPTION_CONFIRMATION_REQUIRED` and nothing is written — a
+   * provider cannot break live integrations by accident. With it the change
+   * goes ahead and every grantee is notified to issue a matching credential.
+   * Their credentials are **not** revoked: a credential belongs to its holder's
+   * consumer, not to one API, and it goes on serving every other API of that
+   * flavour. Ignored when the PATCH does not move `auth_plugin`.
+   */
+  confirm_access_disruption?: boolean;
 }
 
 /** `PATCH /api/apis/:id` */
 export interface UpdateApiResponse {
   api: Api;
+}
+
+/**
+ * `details` of the `409 ACCESS_DISRUPTION_CONFIRMATION_REQUIRED` that refuses
+ * an `auth_plugin` change while live callers still depend on the outgoing
+ * plugin.
+ *
+ * `affected_grantees` counts *accounts*, not credentials: every account holding
+ * an active grant on this API that also holds at least one live credential of
+ * `credential_type`. Those are the integrations the change breaks, and the
+ * people the confirmed change notifies. Nothing is revoked on their side.
+ */
+export interface AccessDisruptionDetails {
+  field: 'auth_plugin';
+  current_auth_plugin: AuthPluginType;
+  requested_auth_plugin: AuthPluginType;
+  /** Credential flavour the outgoing plugin accepts, and therefore what stops working here. */
+  credential_type: CredentialType;
+  affected_grantees: number;
+  /** Body field to resend as `true` to carry the change out anyway. */
+  confirm_field: 'confirm_access_disruption';
 }
 
 /** `DELETE /api/apis/:id` — removes the Edge proxy and its plugins. */
