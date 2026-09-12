@@ -246,20 +246,39 @@ export function createSmtpTransport(
   // One underlying attempt at a time, so `current` is never ambiguous and a
   // relay cannot accumulate live sockets after callers' deadlines expire.
   let queue: Promise<unknown> = Promise.resolve();
-  function serialize<T>(task: () => { result: Promise<T>; settled: Promise<void> }): Promise<T> {
-    const started = queue.then(task, task);
+  function serialize<T>(
+    task: (remainingBudgetMs: number) => { result: Promise<T>; settled: Promise<void> },
+  ): Promise<T> {
+    const deadline = Date.now() + budgetMs;
+    let expired = false;
+    let timer: NodeJS.Timeout | undefined;
+    const queueBudget = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        expired = true;
+        reject(new SmtpBudgetExceededError(budgetMs));
+      }, budgetMs);
+      timer.unref?.();
+    });
+    const start = (): ReturnType<typeof task> => {
+      if (expired) throw new SmtpBudgetExceededError(budgetMs);
+      if (timer) clearTimeout(timer);
+      return task(Math.max(1, deadline - Date.now()));
+    };
+    const started = queue.then(start, start);
     queue = started
       .then(({ settled }) => settled)
       .then(
         () => undefined,
         () => undefined,
       );
-    return started.then(({ result }) => result);
+    return Promise.race([started.then(({ result }) => result), queueBudget]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
   }
 
   return {
     async send(mail) {
-      await serialize(() => {
+      await serialize((remainingBudgetMs) => {
         const state: SendState = { phase: 'unknown' };
         current = state;
         let timer: NodeJS.Timeout | undefined;
@@ -279,7 +298,10 @@ export function createSmtpTransport(
             // that answers slowly can otherwise outlive the stale threshold and
             // have its claim reclaimed mid-flight.
             await new Promise<void>((resolve, reject) => {
-              timer = setTimeout(() => reject(new SmtpBudgetExceededError(budgetMs)), budgetMs);
+              timer = setTimeout(
+                () => reject(new SmtpBudgetExceededError(budgetMs)),
+                remainingBudgetMs,
+              );
               timer.unref?.();
               attempt.then(resolve, reject);
             });

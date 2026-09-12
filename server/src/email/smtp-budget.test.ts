@@ -192,11 +192,16 @@ describe('SMTP send budget', { timeout: 30_000 }, () => {
     assert.deepEqual(relay.received, [], 'the relay never saw a complete message');
 
     // The timed-out Nodemailer operation cannot be cancelled. A later caller
-    // must wait for it instead of adding another live connection.
+    // must not add another live connection, but waiting for it is bounded too.
     const queuedAt = Date.now();
     const queuedError = await failureOf(transport, MAIL);
-    assert.ok(Date.now() - queuedAt > 500, 'the next send waited for the underlying operation');
-    assert.ok(isDeliveredUnacknowledged(queuedError));
+    assert.ok(Date.now() - queuedAt < 500, 'the queued send observed its own budget');
+    assert.equal(
+      isDeliveredUnacknowledged(queuedError),
+      false,
+      'a send that never started remains safe to retry',
+    );
+    await new Promise((resolve) => setTimeout(resolve, 750));
     assert.equal(relay.received.length, 1, 'the original operation continued to delivery');
   });
 
