@@ -585,18 +585,35 @@ API, but two of them have consequences worth reading first.
 | Allowed methods            | Takes effect immediately. Untick everything to accept every method again.                                                  |
 | Timeouts, circuit breaker  | Take effect immediately. Clearing the timeout boxes restores the gateway defaults.                                         |
 | **Requestable → off**      | ⚠️ Removes the access gate. **Every authenticated consumer can now call this API.** Existing grants stay but become inert. |
-| **Authentication plugin**  | ⚠️ Breaks every existing client until they issue a new credential.                                                         |
+| **Authentication plugin**  | ⚠️ Refused while credentials for the old method are live, unless you confirm; confirming revokes every one of them.        |
 
 ### Changing the authentication plugin
 
 Credentials are typed. Switching from API Key to JWT does not convert anyone's
-key — it makes their key stop satisfying this API. Every grantee is notified
-in-app that the method changed and that they need a matching credential, but
-their integration is broken from the moment you save until they act.
+key — it makes their key stop satisfying this API, from the moment you save.
 
-If you have live consumers, coordinate it: tell them first, agree a window,
-then switch. Their old credentials keep working for any _other_ API of the old
-type, so nothing else breaks.
+**The portal will not let you do it by accident.** If anybody holds a live
+credential of the old type for this API, the save is refused and the error says
+how many. Tick **Revoke the credentials this breaks and notify everyone holding
+access** on the Settings tab and save again to go ahead.
+
+Confirming is not a formality. Those credentials are **revoked** — deleted from
+the gateway and marked revoked in the portal — so the change cannot leave a
+client holding a key that looks live and is not. That is also the sting: a
+grantee's key is theirs, not this API's, so revoking it stops it working for
+any _other_ API of the old type too. Everyone affected is notified in-app, told
+the credential is gone and pointed at their credentials page to issue a new
+one.
+
+So coordinate it: tell your consumers first, agree a window, then switch. If
+you only want to know who would be affected, send the change without the
+confirmation and read the count off the refusal — nothing is written.
+
+The count covers the accounts with an active grant on this API, plus the API's
+own test consumer. An API with **Requestable off** gates nobody, so there is no
+list of callers to count or notify: a swap on one of those is never refused,
+and its callers find out when their key stops working. Announce that one
+yourself.
 
 ---
 

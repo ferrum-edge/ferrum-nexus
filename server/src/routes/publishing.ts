@@ -231,6 +231,11 @@ const updateBody = z.object({
   // `undefined` leaves the level — and therefore the validator plugin — alone.
   spec_enforcement: z.enum(SPEC_ENFORCEMENT_LEVELS).optional(),
   status: z.enum(['published', 'retired']).optional(),
+  // Acknowledges that an `auth_plugin` change strands every credential of the
+  // outgoing flavour. Only `true` means anything: without it the service
+  // refuses such a change with `409 CREDENTIAL_INVALIDATION_REQUIRED` rather
+  // than breaking live integrations silently.
+  confirm_credential_invalidation: z.boolean().optional(),
 });
 
 const specBody = z.object({

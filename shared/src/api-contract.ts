@@ -449,11 +449,43 @@ export interface UpdateApiRequest {
    */
   spec_enforcement?: SpecEnforcementLevel;
   status?: ApiStatus;
+  /**
+   * Acknowledge that changing `auth_plugin` strands every live credential the
+   * outgoing plugin was what made usable, and revoke them as part of the
+   * change.
+   *
+   * Without it a swap that would strand credentials is refused with
+   * `409 CREDENTIAL_INVALIDATION_REQUIRED` and nothing is written — a client
+   * cannot brick an integration by accident. With it the swap goes ahead, the
+   * stranded credentials are revoked on the gateway and in the portal, and
+   * every grantee is notified to issue a replacement. Ignored when the PATCH
+   * does not move `auth_plugin`.
+   */
+  confirm_credential_invalidation?: boolean;
 }
 
 /** `PATCH /api/apis/:id` */
 export interface UpdateApiResponse {
   api: Api;
+}
+
+/**
+ * `details` of the `409 CREDENTIAL_INVALIDATION_REQUIRED` that refuses an
+ * `auth_plugin` change while credentials still depend on the outgoing plugin.
+ *
+ * `active_credentials` is what the change would strand and what confirming it
+ * would revoke, counted across every account holding an active grant on the
+ * API plus its provider test consumer.
+ */
+export interface CredentialInvalidationDetails {
+  field: 'auth_plugin';
+  current_auth_plugin: AuthPluginType;
+  requested_auth_plugin: AuthPluginType;
+  /** Credential flavour the outgoing plugin accepts, and therefore what breaks. */
+  credential_type: CredentialType;
+  active_credentials: number;
+  /** Body field to resend as `true` to carry the change out anyway. */
+  confirm_field: 'confirm_credential_invalidation';
 }
 
 /** `DELETE /api/apis/:id` — removes the Edge proxy and its plugins. */

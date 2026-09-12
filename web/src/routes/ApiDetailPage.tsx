@@ -69,6 +69,20 @@ const WINDOW_OPTIONS = [
   { value: '3600', label: 'per hour' },
 ];
 
+/**
+ * What a provider is told before they change the authentication method of a
+ * **live** API.
+ *
+ * Edge runs one flavour of authentication per proxy, so the swap stops every
+ * credential of the outgoing flavour the moment it lands — from the client's
+ * side, a `401` on a key this portal still lists as active (issue #234). The
+ * server refuses the change outright unless the request acknowledges that, so
+ * the checkbox below is not decoration: without it the save comes back as a
+ * `409` naming the number of credentials at stake.
+ */
+const AUTH_SWAP_WARNING =
+  'Changing this breaks every credential issued for the old method. Saving revokes them, and everyone holding access is told to issue a replacement — including any credential of theirs that other APIs of the old method were using.';
+
 /** Hint under the CORS origins box; the empty case is the one worth spelling out. */
 const CORS_ORIGINS_HINT =
   `One origin per line, up to ${MAX_CORS_ORIGINS}, e.g. https://app.example.com. ` +
@@ -112,7 +126,11 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
   const [specEnforcement, setSpecEnforcement] = useState<SpecEnforcementLevel>(
     api.spec_enforcement,
   );
+  const [confirmInvalidation, setConfirmInvalidation] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+
+  /** Whether this form is about to strand the API's existing credentials. */
+  const authSwapped = authPlugin !== api.auth_plugin;
 
   // The current document is not on this page, so it is fetched to offer the
   // same "use the methods declared in the spec" shortcut the publish form has.
@@ -189,6 +207,10 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
           ...(methodsChanged ? { allowed_methods: methods.length > 0 ? methods : null } : {}),
           ...(timeoutsChanged ? { timeouts: parsedTimeouts } : {}),
           ...(circuitBreakerChanged ? { circuit_breaker: circuitBreaker } : {}),
+          // Only ever sent alongside a real swap, and only once the provider
+          // has ticked the box: the flag is an acknowledgement of a specific
+          // consequence, not a standing preference.
+          ...(authSwapped && confirmInvalidation ? { confirm_credential_invalidation: true } : {}),
           spec_enforcement: specEnforcement,
           ...(upstreamUrl.trim() ? { upstream_url: upstreamUrl.trim() } : {}),
         },
@@ -260,7 +282,23 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
                 value,
                 label: AUTH_PLUGIN_LABELS[value],
               }))}
+              hint={
+                authSwapped ? (
+                  <strong className="block font-medium text-amber-700 dark:text-amber-500">
+                    {AUTH_SWAP_WARNING}
+                  </strong>
+                ) : undefined
+              }
             />
+            {authSwapped ? (
+              <div className="md:col-span-2">
+                <Checkbox
+                  label="Revoke the credentials this breaks and notify everyone holding access"
+                  checked={confirmInvalidation}
+                  onChange={(event) => setConfirmInvalidation(event.target.checked)}
+                />
+              </div>
+            ) : null}
             <LabeledSelect<ApiVisibility>
               label="Visibility"
               value={visibility}

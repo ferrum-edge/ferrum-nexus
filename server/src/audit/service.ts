@@ -82,6 +82,16 @@ export const AuditAction = {
    * no `apis` row — the only record that it exists.
    */
   API_PUBLISH_ROLLBACK: 'api.publish_rollback',
+  /**
+   * An `auth_plugin` change was confirmed, so the credentials the outgoing
+   * plugin was what made usable were revoked with it.
+   *
+   * The summary of a sweep whose individual revocations each write their own
+   * `credential.revoke` row: how many were in scope, how many actually came
+   * off, and — `failed` — the ones the gateway would not let go of, which are
+   * live-looking portal rows for keys that no longer open this API.
+   */
+  API_CREDENTIALS_INVALIDATED: 'api.credentials_invalidated',
   TEST_CONSUMER_CREATE: 'test_consumer.create',
 
   /* access workflow */

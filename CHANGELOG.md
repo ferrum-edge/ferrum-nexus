@@ -415,6 +415,20 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   references it, so the foreign key's shared lock and the `last_message_at`
   update cannot form a cycle; one of the two replies used to be rolled back as
   the deadlock victim and lost behind a `500`.
+- **Changing an API's `auth_plugin` no longer breaks live credentials in
+  silence.** Edge runs one authentication plugin per proxy, so swapping
+  `key_auth` for `basic_auth` on a published API turned every issued key into a
+  `401` the instant it landed, while `PATCH /api/apis/:id` answered `200` and
+  the credentials page went on offering the dead keys (#234). Such a swap is now
+  refused with `409 CREDENTIAL_INVALIDATION_REQUIRED` — nothing written on
+  either side — and `details` says how many credentials are at stake and which
+  flavour. Re-sending with `"confirm_credential_invalidation": true` carries the
+  change out and revokes those credentials on the gateway and in the portal,
+  writing a `credential.revoke` row for each and one
+  `api.credentials_invalidated` summary, and every grantee is notified to issue
+  a replacement. The revocations run last, after the swap is durable, so a swap
+  the gateway refuses leaves every credential exactly as it was. The settings
+  form warns and carries the acknowledgement.
 
 ### Security
 

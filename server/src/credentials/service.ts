@@ -368,6 +368,27 @@ export interface CredentialsService {
   /** Delete the entry from Edge and mark the row revoked. */
   revoke(user: UserRecord, credentialId: Uuid, ip?: string | null): Promise<void>;
   /**
+   * Revoke a credential an administrative change to an API has already made
+   * unusable, on behalf of whoever made that change.
+   *
+   * The same gateway delete and row settlement as {@link
+   * CredentialsService.revoke}, without its ownership check: the caller is the
+   * API's owner or an administrator, not the credential's, and what authorises
+   * the revocation is the `auth_plugin` change they confirmed rather than any
+   * claim on the account holding the key. `details` is merged into the
+   * `credential.revoke` row, so the log can say why somebody else's credential
+   * went away.
+   *
+   * Returns `false` when the row was already revoked — nothing was written and
+   * nothing was audited.
+   */
+  revokeInvalidated(
+    actor: { id: Uuid; role: Role },
+    credentialId: Uuid,
+    details: Record<string, unknown>,
+    ip?: string | null,
+  ): Promise<boolean>;
+  /**
    * Empty one credential type on a consumer, on both sides: `DELETE
    * /consumers/{id}/credentials/{type}` on Edge, every live portal row for the
    * pair moved to `revoked`. Administrators only.
@@ -1148,6 +1169,98 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       cause: input.cause,
       ip: input.ip,
     });
+  }
+
+  /**
+   * Take one credential off the gateway and settle its row, then audit it.
+   *
+   * Everything {@link CredentialsService.revoke} does below its ownership
+   * check, factored out because a second caller needs it *without* that check:
+   * a confirmed `auth_plugin` change revokes credentials belonging to other
+   * accounts, and what authorises that is the API the change was made on, not
+   * the credential's owner. `details` is merged into the `credential.revoke`
+   * row so the log says which of the two wrote it.
+   *
+   * Returns `false` when the row was already retired by the time the consumer's
+   * queue reached it — a no-op that wrote nothing and audits nothing.
+   */
+  async function revokeCredentialRow(
+    target: CredentialRecord,
+    actor: { id: Uuid; role: Role },
+    ip: string | null,
+    details: Record<string, unknown> = {},
+  ): Promise<boolean> {
+    const type = target.credential_type;
+    const consumerId = target.ferrum_consumer_id;
+
+    const removed = await edge.serializePerKey(consumerId, async () => {
+      // Re-read inside the queue: an earlier queued operation on the same row
+      // may already have retired it, and deleting by the index that copy
+      // carried would take somebody else's live credential with it.
+      const current = await store.credentials.findById(target.id);
+      if (!current || !LIVE_STATUSES.has(current.status)) return false;
+
+      const consumer = await edge.consumers.get(consumerId);
+      // A consumer deleted out from under us means the entry is already gone;
+      // the row still has to be marked so the UI stops offering it.
+      if (consumer) {
+        const live = await liveRows(consumerId, type);
+        const length = edgeArrayLength(consumer.credentials, type, live.length);
+        // Settle a retirement Edge applied but never acknowledged before
+        // resolving anything: the drift it leaves used to refuse this very
+        // call, which is the one an incident response cannot do without.
+        const rows = await settleLostRetirement({
+          consumerId,
+          type,
+          rows: live,
+          edgeLength: length,
+          actor: { id: actor.id, role: actor.role },
+          ip,
+        });
+        const position = resolveCredentialIndex(rows, current, length);
+        // `not-live` follows the status check above whenever the settlement
+        // was this very row — its entry is already gone. Either way, treat it
+        // as a completed revoke rather than a whole-type delete.
+        if (position !== 'not-live') {
+          // The intent before the act, so a lost acknowledgement leaves a row
+          // the next call can settle instead of a mirror one row too long.
+          await store.credentials.update(current.id, { status: 'retiring' });
+          try {
+            await removeAt(consumerId, type, position, actor.id);
+          } catch (error) {
+            // A delete the array proves never happened is not a lost
+            // acknowledgement. Leaving the row `retiring` over an entry that
+            // is demonstrably live is the one input that could make a later
+            // {@link settleLostRetirement} settle the wrong row — after
+            // which a positional delete takes somebody else's live key — so
+            // the intent is withdrawn and the caller retries the revoke.
+            // An outcome that cannot be proved stays `retiring`, which is
+            // the safe reading.
+            if (await deleteDidNotApply(consumerId, type, length)) {
+              await store.credentials
+                .update(current.id, { status: 'active' })
+                .catch(() => undefined);
+            }
+            throw error;
+          }
+        }
+      }
+      await store.credentials.update(current.id, { status: 'revoked' });
+      return true;
+    });
+
+    // A no-op revoke of an already-retired credential stays silent: it wrote
+    // nothing, so there is nothing to audit.
+    if (!removed) return false;
+
+    await audit.record(
+      { id: actor.id, role: actor.role },
+      AuditAction.CREDENTIAL_REVOKE,
+      { type: 'credential', id: target.id },
+      { credential_type: type, consumer_id: consumerId, last4: target.last4, ...details },
+      ip,
+    );
+    return true;
   }
 
   async function loadOwned(user: UserRecord, credentialId: Uuid): Promise<CredentialRecord> {
@@ -1950,76 +2063,15 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     async revoke(user, credentialId, ip = null): Promise<void> {
       const target = await loadOwned(user, credentialId);
       if (target.status === 'revoked') return;
-      const type = target.credential_type;
-      const consumerId = target.ferrum_consumer_id;
+      await revokeCredentialRow(target, { id: user.id, role: user.role }, ip);
+    },
 
-      const removed = await edge.serializePerKey(consumerId, async () => {
-        // Re-read inside the queue: an earlier queued operation on the same row
-        // may already have retired it, and deleting by the index that copy
-        // carried would take somebody else's live credential with it.
-        const current = await store.credentials.findById(target.id);
-        if (!current || !LIVE_STATUSES.has(current.status)) return false;
-
-        const consumer = await edge.consumers.get(consumerId);
-        // A consumer deleted out from under us means the entry is already gone;
-        // the row still has to be marked so the UI stops offering it.
-        if (consumer) {
-          const live = await liveRows(consumerId, type);
-          const length = edgeArrayLength(consumer.credentials, type, live.length);
-          // Settle a retirement Edge applied but never acknowledged before
-          // resolving anything: the drift it leaves used to refuse this very
-          // call, which is the one an incident response cannot do without.
-          const rows = await settleLostRetirement({
-            consumerId,
-            type,
-            rows: live,
-            edgeLength: length,
-            actor: { id: user.id, role: user.role },
-            ip,
-          });
-          const position = resolveCredentialIndex(rows, current, length);
-          // `not-live` follows the status check above whenever the settlement
-          // was this very row — its entry is already gone. Either way, treat it
-          // as a completed revoke rather than a whole-type delete.
-          if (position !== 'not-live') {
-            // The intent before the act, so a lost acknowledgement leaves a row
-            // the next call can settle instead of a mirror one row too long.
-            await store.credentials.update(current.id, { status: 'retiring' });
-            try {
-              await removeAt(consumerId, type, position, user.id);
-            } catch (error) {
-              // A delete the array proves never happened is not a lost
-              // acknowledgement. Leaving the row `retiring` over an entry that
-              // is demonstrably live is the one input that could make a later
-              // {@link settleLostRetirement} settle the wrong row — after
-              // which a positional delete takes somebody else's live key — so
-              // the intent is withdrawn and the caller retries the revoke.
-              // An outcome that cannot be proved stays `retiring`, which is
-              // the safe reading.
-              if (await deleteDidNotApply(consumerId, type, length)) {
-                await store.credentials
-                  .update(current.id, { status: 'active' })
-                  .catch(() => undefined);
-              }
-              throw error;
-            }
-          }
-        }
-        await store.credentials.update(current.id, { status: 'revoked' });
-        return true;
-      });
-
-      // A no-op revoke of an already-retired credential stays silent: it wrote
-      // nothing, so there is nothing to audit.
-      if (!removed) return;
-
-      await audit.record(
-        { id: user.id, role: user.role },
-        AuditAction.CREDENTIAL_REVOKE,
-        { type: 'credential', id: target.id },
-        { credential_type: type, consumer_id: consumerId, last4: target.last4 },
-        ip,
-      );
+    async revokeInvalidated(actor, credentialId, details, ip = null): Promise<boolean> {
+      const target = await store.credentials.findById(credentialId);
+      // Gone, or already settled by a concurrent revoke of the same row: both
+      // are the outcome this asked for, and neither is this caller's failure.
+      if (!target || target.status === 'revoked') return false;
+      return revokeCredentialRow(target, actor, ip, details);
     },
 
     async reconcile(actor, input, ip = null): Promise<ReconcileCredentialsResponse> {

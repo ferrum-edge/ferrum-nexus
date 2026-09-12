@@ -210,6 +210,7 @@ import {
   type AuthPluginType,
   type CorsConfig,
   type CreateTestConsumerResponse,
+  type CredentialInvalidationDetails,
   type GetApiSpecResponse,
   type HttpMethod,
   type Paginated,
@@ -226,6 +227,7 @@ import type {
   ApiFilter,
   ApiRecord,
   ApiSpecRecord,
+  CredentialRecord,
   GrantRecord,
   ListOptions,
   NexusStore,
@@ -247,6 +249,7 @@ import type {
 } from '../ferrum-admin/types.js';
 import {
   conflict,
+  credentialInvalidationRequired,
   edgeError,
   forbidden,
   notFound,
@@ -1262,6 +1265,52 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           );
         }
 
+        // ── The auth swap's blast radius, measured before anything moves ──
+        //
+        // Edge runs exactly one flavour of authentication for this proxy, so
+        // replacing the plugin stops every credential of the outgoing flavour
+        // at the gateway the moment the swap lands — silently, from the
+        // client's side, as a `401` on a key the portal still lists as active
+        // (issue #234). That is not a change a provider should be able to make
+        // by accident, so it is refused unless the body says otherwise, and
+        // the refusal happens **here**: before the undo stack exists, before a
+        // single gateway write, so a `409` mutates nothing on either side.
+        //
+        // Read under the proxy lease, with the API re-read inside it, so the
+        // count in the refusal and the rows the confirmation revokes are the
+        // same set. A grant approved after this point brings its own
+        // credential in behind the swap — that account is told to issue a
+        // matching one by the notification below, exactly as an existing
+        // grantee is.
+        const swappedAuthPlugin =
+          patch.auth_plugin !== undefined && patch.auth_plugin !== api.auth_plugin && proxyId
+            ? patch.auth_plugin
+            : null;
+        const stranded = swappedAuthPlugin ? await credentialsServingApi(api) : [];
+        if (
+          swappedAuthPlugin &&
+          stranded.length > 0 &&
+          patch.confirm_credential_invalidation !== true
+        ) {
+          const refusal: CredentialInvalidationDetails = {
+            field: 'auth_plugin',
+            current_auth_plugin: api.auth_plugin,
+            requested_auth_plugin: swappedAuthPlugin,
+            credential_type: CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin],
+            active_credentials: stranded.length,
+            confirm_field: 'confirm_credential_invalidation',
+          };
+          throw credentialInvalidationRequired(
+            `Changing this API's authentication from ${api.auth_plugin} to ${swappedAuthPlugin} ` +
+              `would stop ${stranded.length} active ${refusal.credential_type} ` +
+              `credential${stranded.length === 1 ? '' : 's'} from working. Resend with ` +
+              '"confirm_credential_invalidation": true to make the change anyway — those ' +
+              'credentials will be revoked and everyone holding access will be told to issue a ' +
+              'replacement.',
+            refusal,
+          );
+        }
+
         // Edge has no cross-resource transaction, so every gateway mutation below
         // records the call that undoes it. Any later failure — the next plugin
         // call, or the Nexus row update itself — unwinds them in reverse, so a
@@ -1722,12 +1771,76 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           ip,
         );
 
+        // ── The credentials the swap stranded ─────────────────────────────
+        //
+        // **Last**, and only once the swap is durable on both sides. A
+        // revocation deletes the material from the gateway, which no
+        // compensation can put back — so it must never run on a PATCH that can
+        // still unwind, and there is nothing above this line left to fail. By
+        // the time control reaches here the proxy enforces the new plugin and
+        // the row records it, which is precisely what has already killed these
+        // credentials; revoking them settles the portal's account of a decision
+        // that has been taken, rather than taking one.
+        //
+        // Best-effort, therefore, and audited rather than thrown: the PATCH
+        // itself succeeded, and a revocation Edge refuses leaves an active-
+        // looking row for a key that no longer opens this API — the state
+        // before this change, for that one credential — which is worth an
+        // operator's attention but not a `500` on a request that did what it
+        // said.
+        const revoked: Uuid[] = [];
+        const unrevoked: { credential_id: Uuid; error: string }[] = [];
+        if (stranded.length > 0 && changed.includes('auth_plugin')) {
+          for (const credential of stranded) {
+            try {
+              const didRevoke = await credentials.revokeInvalidated(
+                { id: actor.id, role: actor.role },
+                credential.id,
+                {
+                  reason: 'auth_plugin_change',
+                  api_id: api.id,
+                  previous_auth_plugin: api.auth_plugin,
+                  auth_plugin: updated.auth_plugin,
+                },
+                ip,
+              );
+              if (didRevoke) revoked.push(credential.id);
+            } catch (error) {
+              unrevoked.push({ credential_id: credential.id, error: errorMessage(error) });
+            }
+          }
+          const sweep = {
+            previous_auth_plugin: api.auth_plugin,
+            auth_plugin: updated.auth_plugin,
+            credential_type: CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin],
+            stranded: stranded.length,
+            revoked: revoked.length,
+            failed: unrevoked.map((entry) => entry.credential_id),
+            failure_errors: unrevoked.map((entry) => entry.error),
+          };
+          if (unrevoked.length > 0) {
+            deps.log?.(
+              { api_id: api.id, ...sweep },
+              'an auth_plugin change could not revoke every credential it invalidated',
+            );
+          }
+          await audit.record(
+            { id: actor.id, role: actor.role },
+            AuditAction.API_CREDENTIALS_INVALIDATED,
+            { type: 'api', id: api.id },
+            sweep,
+            ip,
+          );
+        }
+
         if (details.existing_credentials_invalidated === true) {
+          const revokedNote =
+            revoked.length > 0 ? ' Any credential you held for it has been revoked.' : '';
           await notifyGrantees(
             api.id,
             'system',
             `${updated.name} changed its authentication method`,
-            `This API now uses ${updated.auth_plugin}. Issue a matching credential from your credentials page to keep calling it.`,
+            `This API now uses ${updated.auth_plugin}.${revokedNote} Issue a matching credential from your credentials page to keep calling it.`,
             '/credentials',
           );
         }
@@ -2821,6 +2934,53 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     return async () => {
       await binder.mutateProxyLocked(previous.id, (proxy) => ({ ...proxy, ...backend }), subject);
     };
+  }
+
+  /**
+   * The live credentials this API's current `auth_plugin` is what makes work.
+   *
+   * Credential material hangs off a **consumer**, not an API — one canonical
+   * consumer per portal account per namespace, plus the throwaway
+   * `nexus-test-<api_id>` consumer a provider makes for their own API — so "a
+   * credential of this API" is a derived set rather than a column: every live
+   * row of the API's current credential type held by an account with an active
+   * grant on it, plus every live row on its test consumer.
+   *
+   * That is the set an `auth_plugin` swap strands, the set the confirmation
+   * counts, and the set the confirmed swap revokes. It is deliberately **not**
+   * "every credential of that type in the namespace": an API published with
+   * `requestable: false` carries no `access_control` plugin and is therefore
+   * callable by any authenticated consumer, but those consumers' keys serve
+   * every other open API too — nothing here may revoke a credential on account
+   * of an API that never gated it. An open API's callers are not enumerable
+   * per API at all, so such a swap is never refused; `provider-guide.md` says
+   * so, and says to announce it.
+   *
+   * A grantee's canonical credential does serve their other APIs of the same
+   * flavour, and revoking it takes those with it. That is the cost the
+   * confirmation is asking the provider to accept, and it is why the refusal
+   * is the default.
+   */
+  async function credentialsServingApi(api: ApiRecord): Promise<CredentialRecord[]> {
+    const type = CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin];
+    const consumerIds = new Set<string>();
+    for (const grant of await store.grants.listActiveByApi(api.id)) {
+      const consumer = await credentials.provisioner.findConsumer(grant.user_id);
+      if (consumer) consumerIds.add(consumer.ferrum_consumer_id);
+    }
+    const testIdentity = await store.gatewayIdentities.findByUsername(
+      namespace,
+      testConsumerUsername(api.id),
+    );
+    if (testIdentity?.ferrum_consumer_id) consumerIds.add(testIdentity.ferrum_consumer_id);
+
+    const rows: CredentialRecord[] = [];
+    for (const consumerId of consumerIds) {
+      for (const row of await store.credentials.listByConsumer(consumerId, type)) {
+        if (row.status !== 'revoked') rows.push(row);
+      }
+    }
+    return rows;
   }
 
   /** Best-effort in-app notice to everyone holding an active grant on `apiId`. */

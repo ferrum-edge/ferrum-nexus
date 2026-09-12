@@ -115,6 +115,19 @@ export function lastSuperAdmin(
   return new NexusError('LAST_SUPER_ADMIN', message);
 }
 
+/**
+ * 409 — the change would strand live gateway credentials and was not confirmed.
+ *
+ * Not `CONFLICT`: nothing about the request is wrong and nothing needs to
+ * change before it can succeed — it only needs the caller to say, in the body,
+ * that they accept the consequence. `details` is
+ * {@link CredentialInvalidationDetails}, which names the field to resend and
+ * how many credentials are at stake.
+ */
+export function credentialInvalidationRequired(message: string, details: unknown): NexusError {
+  return new NexusError('CREDENTIAL_INVALIDATION_REQUIRED', message, details);
+}
+
 /** 410 — show-once credential material was already retrieved. */
 export function showOnceAlready(
   message = 'This secret was already shown and cannot be shown again',
