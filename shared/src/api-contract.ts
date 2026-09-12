@@ -29,7 +29,7 @@ import type {
   CaptchaProvider,
   CaptchaPublicConfig,
   CatalogApi,
-  CorsConfig,
+  CorsConfigRequest,
   CredentialMetadata,
   CredentialType,
   EdgeHealth,
@@ -385,8 +385,12 @@ export interface PublishApiRequest {
   requestable: boolean;
   visibility: ApiVisibility;
   rate_limit?: RateLimitConfig | null;
-  /** Browser CORS policy; omit or send `null` for no gateway CORS headers. */
-  cors?: CorsConfig | null;
+  /**
+   * Browser CORS policy; omit or send `null` for no gateway CORS headers.
+   * `origins` is accepted as an alias for `allowed_origins` and is normalized
+   * before anything is stored. Responses emit `allowed_origins` only.
+   */
+  cors?: CorsConfigRequest | null;
   /**
    * HTTP methods the gateway accepts. Omit or send `null` to accept every
    * method. `OPTIONS` is added to the list written to the gateway whenever
@@ -436,8 +440,12 @@ export interface UpdateApiRequest {
   requestable?: boolean;
   visibility?: ApiVisibility;
   rate_limit?: RateLimitConfig | null;
-  /** Replace the CORS policy, or send `null` to remove it from the gateway. */
-  cors?: CorsConfig | null;
+  /**
+   * Replace the CORS policy, or send `null` to remove it from the gateway.
+   * `origins` is accepted as an alias for `allowed_origins`; see
+   * {@link CorsConfigRequest}.
+   */
+  cors?: CorsConfigRequest | null;
   /** Replace the method allow-list, or send `null` to accept every method again. */
   allowed_methods?: HttpMethod[] | null;
   /** Replace the backend timeouts, or send `null` to restore the gateway defaults. */

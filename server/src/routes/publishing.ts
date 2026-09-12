@@ -109,15 +109,31 @@ const rateLimitSchema = z
  *
  * An *empty* origin list is rejected rather than accepted as "no CORS": that is
  * what `null` means, and the two are different plugin states on the gateway.
+ *
+ * `origins` is an input alias for `allowed_origins` (common OpenAPI/CORS
+ * naming). Both keys with different values are refused. Normalization to
+ * `allowed_origins` happens in {@link corsOrNull} rather than a zod
+ * `.transform()`, so this schema's input and output types stay identical for
+ * {@link parseOrThrow}.
  */
+const corsOriginListSchema = z
+  .array(
+    z.string().trim().min(1).max(255).regex(/^\S+$/, 'An origin cannot contain whitespace'),
+  )
+  .min(1, 'allowed_origins (or the origins alias) must list at least one origin')
+  .max(
+    MAX_CORS_ORIGINS,
+    `allowed_origins (or the origins alias) accepts at most ${MAX_CORS_ORIGINS} origins`,
+  );
+
+function sameOriginList(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((item, index) => item === right[index]);
+}
+
 const corsSchema = z
   .object({
-    allowed_origins: z
-      .array(
-        z.string().trim().min(1).max(255).regex(/^\S+$/, 'An origin cannot contain whitespace'),
-      )
-      .min(1)
-      .max(MAX_CORS_ORIGINS),
+    allowed_origins: corsOriginListSchema.optional(),
+    origins: corsOriginListSchema.optional(),
     allow_credentials: z.boolean().optional(),
     allowed_headers: z
       .array(
@@ -131,15 +147,39 @@ const corsSchema = z
       .optional(),
     enforce_websocket_origins: z.boolean().optional(),
   })
-  .refine(
-    (value) =>
-      !value.enforce_websocket_origins ||
-      value.allowed_origins.every((origin) => /^https?:\/\/[^*\s/]+$/.test(origin)),
-    { message: 'WebSocket origin enforcement requires exact HTTP(S) origins without wildcards' },
-  );
+  .superRefine((value, ctx) => {
+    const canonical = value.allowed_origins;
+    const alias = value.origins;
+    if (canonical === undefined && alias === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['allowed_origins'],
+        message: 'Provide allowed_origins, or the origins alias',
+      });
+      return;
+    }
+    if (canonical !== undefined && alias !== undefined && !sameOriginList(canonical, alias)) {
+      const message = 'allowed_origins and origins must be the same list when both are supplied';
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['allowed_origins'], message });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['origins'], message });
+      return;
+    }
+    const resolved = canonical ?? alias;
+    if (
+      value.enforce_websocket_origins &&
+      resolved !== undefined &&
+      !resolved.every((origin) => /^https?:\/\/[^*\s/]+$/.test(origin))
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'WebSocket origin enforcement requires exact HTTP(S) origins without wildcards',
+      });
+    }
+  });
 
 /**
- * Apply the `allow_credentials` default and collapse "absent" onto `null`.
+ * Apply the `allow_credentials` default, fold `origins` onto
+ * `allowed_origins`, and collapse "absent" onto `null`.
  *
  * The default lives here rather than as `z.boolean().default(false)` because a
  * zod default makes a schema's input and output types differ, which
@@ -147,8 +187,10 @@ const corsSchema = z
  */
 function corsOrNull(value: z.infer<typeof corsSchema> | null | undefined): CorsConfig | null {
   if (value === undefined || value === null) return null;
+  const allowed_origins = value.allowed_origins ?? value.origins;
+  if (allowed_origins === undefined) return null;
   return {
-    allowed_origins: value.allowed_origins,
+    allowed_origins,
     allow_credentials: value.allow_credentials ?? false,
     ...(value.allowed_headers === undefined ? {} : { allowed_headers: value.allowed_headers }),
     ...(value.enforce_websocket_origins === undefined

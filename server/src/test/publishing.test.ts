@@ -43,6 +43,12 @@ function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
 }
 
+function validationIssues(body: string): { path: string; message: string }[] {
+  const details = (JSON.parse(body) as ApiErrorBody).error.details;
+  assert.ok(Array.isArray(details), body);
+  return details as { path: string; message: string }[];
+}
+
 /**
  * Make the next `store.transaction(...)` reject, then put the real one back.
  *
@@ -971,6 +977,76 @@ describe('publishing', () => {
       });
     });
 
+    it('accepts cors.origins as an alias and returns allowed_origins only', async () => {
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'cors-origins-alias',
+          cors: { origins: ['https://app.example'] },
+        }),
+      });
+      assert.equal(response.statusCode, 201, response.body);
+      const cors = response.json<PublishApiResponse>().api.cors;
+      assert.deepEqual(cors, {
+        allowed_origins: ['https://app.example'],
+        allow_credentials: false,
+      });
+      assert.equal(cors !== null && 'origins' in cors, false);
+      const proxyId = String(response.json<PublishApiResponse>().api.ferrum_proxy_id);
+      assert.deepEqual(harness.edge.pluginForProxy(proxyId, 'cors')?.config, {
+        allowed_origins: ['https://app.example'],
+        allow_credentials: false,
+        allowed_methods: CORS_METHODS,
+        allowed_headers: CORS_HEADERS,
+      });
+    });
+
+    it('accepts matching cors.origins and cors.allowed_origins on publish', async () => {
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'cors-origins-agree',
+          cors: {
+            allowed_origins: ['https://app.example'],
+            origins: ['https://app.example'],
+          },
+        }),
+      });
+      assert.equal(response.statusCode, 201, response.body);
+      assert.deepEqual(response.json<PublishApiResponse>().api.cors, {
+        allowed_origins: ['https://app.example'],
+        allow_credentials: false,
+      });
+    });
+
+    it('rejects disagreeing cors.origins and cors.allowed_origins, naming both keys', async () => {
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'cors-origins-conflict',
+          cors: {
+            allowed_origins: ['https://app.example'],
+            origins: ['https://other.example'],
+          },
+        }),
+      });
+      assert.equal(response.statusCode, 400, response.body);
+      assert.equal(errorCode(response.body), 'VALIDATION_FAILED');
+      const issues = validationIssues(response.body);
+      const paths = issues.map((issue) => issue.path);
+      assert.ok(paths.includes('cors.allowed_origins'), response.body);
+      assert.ok(paths.includes('cors.origins'), response.body);
+      assert.ok(
+        issues.some(
+          (issue) => issue.message.includes('allowed_origins') && issue.message.includes('origins'),
+        ),
+        response.body,
+      );
+    });
+
     it('defaults allow_credentials to false, and omitting cors means no policy', async () => {
       const withDefault = await harness.authed(provider, {
         method: 'POST',
@@ -1004,6 +1080,8 @@ describe('publishing', () => {
         },
         { allowed_origins: ['https://app.example.com', 42], allow_credentials: false },
         { allowed_origins: ['https://a.example.com https://b.example.com'] },
+        { origins: [] },
+        { allow_credentials: false },
       ];
       for (const [index, cors] of bodies.entries()) {
         const response = await harness.authed(provider, {
@@ -1013,7 +1091,39 @@ describe('publishing', () => {
         });
         assert.equal(response.statusCode, 400, `body ${index} should not have been accepted`);
         assert.equal(errorCode(response.body), 'VALIDATION_FAILED');
+        assert.ok(
+          validationIssues(response.body).some(
+            (issue) =>
+              issue.path.startsWith('cors.allowed_origins') ||
+              issue.path.startsWith('cors.origins') ||
+              /allowed_origins|origins/.test(issue.message),
+          ),
+          response.body,
+        );
       }
+    });
+
+    it('names allowed_origins and the origins alias when neither list is sent', async () => {
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: 'cors-missing-origin-list',
+          cors: { allow_credentials: true },
+        }),
+      });
+      assert.equal(response.statusCode, 400, response.body);
+      assert.equal(errorCode(response.body), 'VALIDATION_FAILED');
+      const issues = validationIssues(response.body);
+      assert.ok(
+        issues.some(
+          (issue) =>
+            issue.path === 'cors.allowed_origins' &&
+            issue.message.includes('allowed_origins') &&
+            issue.message.includes('origins'),
+        ),
+        response.body,
+      );
     });
 
     it("refuses a rate limit above Edge's ceiling instead of letting the gateway 400", async () => {
@@ -1354,6 +1464,62 @@ describe('publishing', () => {
       assert.ok(!associatedIds(harness, proxyId).includes(corsId));
       assert.deepEqual(effectiveNames(harness, proxyId), ['access_control', 'key_auth']);
       assert.deepEqual(associatedIds(harness, proxyId), writtenIds(harness, proxyId));
+    });
+
+    it('accepts cors.origins on PATCH and still returns allowed_origins only', async () => {
+      const added = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { cors: { origins: ['https://app.example'] } },
+      });
+      assert.equal(added.statusCode, 200, added.body);
+      const cors = added.json<UpdateApiResponse>().api.cors;
+      assert.deepEqual(cors, {
+        allowed_origins: ['https://app.example'],
+        allow_credentials: false,
+      });
+      assert.equal(cors !== null && 'origins' in cors, false);
+      assert.deepEqual(harness.edge.pluginForProxy(proxyId, 'cors')?.config, {
+        allowed_origins: ['https://app.example'],
+        allow_credentials: false,
+        allowed_methods: CORS_METHODS,
+        allowed_headers: CORS_HEADERS,
+      });
+    });
+
+    it('rejects disagreeing CORS origin keys on PATCH, naming both', async () => {
+      const response = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: {
+          cors: {
+            allowed_origins: ['https://app.example'],
+            origins: ['https://other.example'],
+          },
+        },
+      });
+      assert.equal(response.statusCode, 400, response.body);
+      assert.equal(errorCode(response.body), 'VALIDATION_FAILED');
+      const issues = validationIssues(response.body);
+      const paths = issues.map((issue) => issue.path);
+      assert.ok(paths.includes('cors.allowed_origins'), response.body);
+      assert.ok(paths.includes('cors.origins'), response.body);
+      assert.equal(harness.edge.pluginForProxy(proxyId, 'cors'), undefined);
+    });
+
+    it('leaves a canonical allowed_origins PATCH unchanged', async () => {
+      const added = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: {
+          cors: { allowed_origins: ['https://app.example.com'], allow_credentials: false },
+        },
+      });
+      assert.equal(added.statusCode, 200, added.body);
+      assert.deepEqual(added.json<UpdateApiResponse>().api.cors, {
+        allowed_origins: ['https://app.example.com'],
+        allow_credentials: false,
+      });
     });
 
     /* ── Operator tuning on the two plugin-backed settings (issue #150) ── */
