@@ -1439,7 +1439,7 @@ return `502 EDGE_UNAVAILABLE` until it comes back.
 
 **`edge.reconciliation` is the other reason for `degraded`, and the one a
 reachable gateway can still cause.** A gateway that answers is not necessarily
-*the* gateway: point `FERRUM_ADMIN_URL` at a fresh Edge, or rebuild the one it
+_the_ gateway: point `FERRUM_ADMIN_URL` at a fresh Edge, or rebuild the one it
 already names, and every probe above stays green while the consumer and proxy
 ids in the Nexus database point at nothing. The `edge.reconciliation` block
 reports the last reconciliation pass:
@@ -2206,7 +2206,7 @@ anything it could not do:
    in-app by the repair itself.
 7. Re-run step 4; `status` should be `ok` and health back to `ok`.
 
-Restoring the *old* gateway's data instead is the other valid answer, and the
+Restoring the _old_ gateway's data instead is the other valid answer, and the
 better one when the old Edge's database still exists: a restore keeps the
 credentials working, which no repair can. Nothing here is destructive to the
 gateway — the repair only ever creates — so a pass may be run at any time to
