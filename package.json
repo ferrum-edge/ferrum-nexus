@@ -22,6 +22,8 @@
     "lint": "npm run typecheck",
     "pretest": "npm run build --workspace shared",
     "test": "npm test --workspaces",
+    "pretest:coverage": "npm run build --workspace shared",
+    "test:coverage": "npm run test:coverage --workspace server && npm run test:coverage --workspace web",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },
