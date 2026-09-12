@@ -1111,11 +1111,15 @@ The limiter is the ceiling; the cache is what keeps traffic under it from
 reaching the database on every repeat load.
 
 Committed local settings writes (including CAPTCHA and registration policy)
-invalidate the server memo before the mutation responds, and `bootstrap_required`
-is read live rather than memoised, so no instance keeps advertising an open
-founder seat after another instance fills it. Concurrent anonymous requests
-coalesce onto one in-flight count query per instance, so a burst cannot hold
-more than one seat check against the database pool at a time. The TTL bounds
+invalidate the server memo before the mutation responds. An **open** founder
+seat (`bootstrap_required: true`) is read live rather than memoised, so no
+instance keeps advertising it after another instance fills it; concurrent
+anonymous requests coalesce onto one in-flight count query per instance, so a
+burst cannot hold more than one seat check against the database pool at a time.
+A **taken** seat cannot reopen — the last active super admin can be neither
+demoted, disabled nor removed — so that answer is held for 1 s, which is what
+stops sustained sequential anonymous traffic from mapping one-for-one onto count
+queries in the state a bootstrapped portal spends its life in. The TTL bounds
 cross-instance server staleness of the remaining fields only; browser/CDN copies
 retain their advertised `max-age`.
 
