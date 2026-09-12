@@ -8,6 +8,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Added
 
+- Gateway resource attribution via `labels.provisioned-by: ferrum-nexus`, including API-spec-generated resources (requires Ferrum Edge resource-label support).
+
 - `NEXUS_WEB_PORT` (alias `VITE_DEV_PORT`) and `NEXUS_API_PROXY_TARGET` for
   `npm run dev`, so a second Nexus (or Foundry) stack can pick free ports
   without editing `web/vite.config.ts`. Defaults stay 5173 and

@@ -95,6 +95,7 @@ export type EdgeCredentialMap = Partial<Record<EdgeCredentialType, EdgeCredentia
 
 /** A Ferrum consumer as returned by the Admin API (credentials redacted). */
 export interface EdgeConsumer {
+  labels?: Record<string, string>;
   id: string;
   username: string;
   namespace: string;
@@ -115,6 +116,7 @@ export interface EdgeConsumer {
  * omitted credential types are not deleted.
  */
 export interface EdgeConsumerWrite {
+  labels?: Record<string, string>;
   id?: string;
   username: string;
   custom_id?: string | null;
@@ -153,6 +155,7 @@ export interface EdgeCircuitBreakerConfig {
 
 /** A Ferrum proxy (HTTP-family subset). */
 export interface EdgeProxy {
+  labels?: Record<string, string>;
   id: string;
   namespace: string;
   name?: string | null;
@@ -205,6 +208,7 @@ export interface EdgePluginAssociation {
  * {@link EdgeProxyReplace}, which is the shape every *later* write takes.
  */
 export interface EdgeProxyWrite {
+  labels?: Record<string, string>;
   id?: string;
   name?: string | null;
   /** `/<namespace>/<slug>` for a Nexus-published API. */
@@ -450,6 +454,7 @@ export interface EdgePluginTrigger {
 
 /** A plugin config resource. */
 export interface EdgePluginConfig {
+  labels?: Record<string, string>;
   id: string;
   namespace: string;
   plugin_name: string;
@@ -468,6 +473,7 @@ export interface EdgePluginConfig {
 
 /** Body for `POST /plugins/config` / `PUT /plugins/config/{id}`. */
 export interface EdgePluginConfigWrite {
+  labels?: Record<string, string>;
   id?: string;
   /** One of `GET /plugins`; `key_auth`, `basic_auth`, `jwt_auth`, `access_control`, `rate_limiting`. */
   plugin_name: AuthPluginType | 'access_control' | 'rate_limiting' | string;

@@ -66,6 +66,7 @@ describe('ferrum admin client', () => {
     await client.consumers.list();
     const recorded = edge.requests.at(-1);
     assert.equal(recorded?.namespace, 'nexus');
+    assert.equal(recorded?.provisionedBy, 'ferrum-nexus');
     assert.equal(recorded?.claims?.role, 'admin');
     assert.equal(recorded?.claims?.iss, 'ferrum-edge');
     assert.equal(recorded?.claims?.sub, 'ferrum-nexus');
@@ -99,6 +100,50 @@ describe('ferrum admin client', () => {
       [{ key: '[REDACTED]' }],
       'a [REDACTED] placeholder restores the stored key rather than overwriting it',
     );
+  });
+
+  it('attributes every provisioning path while retaining caller labels and actor subjects', async () => {
+    await client.consumers.create(
+      { id: 'attribution-user', username: 'attribution-user', labels: { team: 'platform' } },
+      'admin-user',
+    );
+    await client.proxies.create({
+      id: 'attribution-proxy',
+      listen_path: '/nexus/attribution',
+      backend_host: 'example.com',
+      backend_port: 443,
+    });
+    await client.pluginConfigs.create({
+      id: 'attribution-cors',
+      plugin_name: 'cors',
+      scope: 'proxy',
+      proxy_id: 'attribution-proxy',
+      enabled: false,
+      config: {},
+    });
+    await client.apiSpecs.create({
+      openapi: '3.0.3',
+      info: { title: 'Attribution', version: '1' },
+      paths: {},
+      'x-ferrum-proxy': {
+        id: 'attribution-spec',
+        listen_path: '/nexus/attribution-spec',
+        backend_host: 'example.com',
+        backend_port: 443,
+      },
+    });
+    for (const path of ['/consumers', '/proxies', '/plugins/config', '/api-specs']) {
+      const recorded = edge.callsTo('POST', path).at(-1);
+      assert.equal(recorded?.provisionedBy, 'ferrum-nexus', path);
+    }
+    const consumer = edge.callsTo('POST', '/consumers').at(-1);
+    assert.deepEqual((consumer?.body as { labels: Record<string, string> }).labels, {
+      team: 'platform',
+    });
+    assert.equal(consumer?.claims?.sub, 'admin-user');
+    assert.deepEqual((await client.consumers.get('attribution-user'))?.labels, {
+      team: 'platform',
+    });
   });
 
   it('finds a consumer by username by scanning the list endpoint', async () => {
