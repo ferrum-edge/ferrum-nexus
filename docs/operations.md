@@ -350,10 +350,15 @@ Committed settings writes (including branding, CAPTCHA secrets/site keys and
 registration policy/roles) invalidate the server memo on the instance handling
 the mutation before its response is sent. The next `GET /api/branding` reaching
 that instance reflects the change, with a new ETag when the payload changes.
-`bootstrap_required` is never memoised: it is read live, so a founder seated on
-any instance is reflected by every instance at once. Concurrent anonymous
-requests coalesce onto one in-flight count query per instance, which bounds the
-database work a burst can cause without retaining the answer.
+An **open** founder seat (`bootstrap_required: true`) is never memoised: it is
+read live, so a founder seated on any instance is reflected by every instance at
+once. Concurrent anonymous requests coalesce onto one in-flight count query per
+instance, which bounds the database work a burst can cause without retaining the
+answer. A **taken** seat (`false`) cannot reopen — the last active super admin
+can be neither demoted, disabled nor removed — so it is held for **1 s**, which
+bounds sustained sequential anonymous traffic to roughly one count query per
+second per instance. A seat claimed on the instance serving the request drops
+that held answer immediately.
 `NEXUS_BRANDING_CACHE_MS` therefore bounds only cross-instance staleness of the
 remaining fields in the server memo. Browser/CDN copies may still be
 served until their advertised `max-age` expires.

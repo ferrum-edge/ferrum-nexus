@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 
-import type { ApiErrorBody } from '@ferrum-nexus/shared';
+import type { ApiErrorBody, BrandingResponse } from '@ferrum-nexus/shared';
 
 import { brandingEtag } from '../routes/branding.js';
 import { buildTestApp, type TestApp } from './helpers.js';
@@ -233,6 +233,80 @@ describe('branding response cache', () => {
       assert.equal(calls, 1);
     } finally {
       users.countActiveSuperAdmins = countActiveSuperAdmins;
+    }
+  });
+
+  it('briefly holds a taken founder seat across sequential and conditional requests', async () => {
+    const seated = await buildTestApp({
+      env: { NEXUS_BRANDING_CACHE_MS: '5000', NEXUS_LOG_LEVEL: 'silent' },
+      deps: { startOutboxWorker: false },
+    });
+    // The founder seat is the steady state this bounds: once it is taken the
+    // answer cannot flip back, so anonymous traffic may share one count query.
+    await seated.registerUser();
+    const users = seated.store.users;
+    const countActiveSuperAdmins = users.countActiveSuperAdmins.bind(users);
+    let calls = 0;
+    users.countActiveSuperAdmins = async (excludeUserId?: string): Promise<number> => {
+      calls += 1;
+      return countActiveSuperAdmins(excludeUserId);
+    };
+
+    try {
+      const first = await seated.app.inject({ method: 'GET', url: '/api/branding' });
+      assert.equal(first.statusCode, 200, first.body);
+      assert.equal(first.json<BrandingResponse>().bootstrap_required, false);
+      const etag = first.headers.etag;
+      assert.ok(etag);
+
+      for (let request = 0; request < 5; request += 1) {
+        const response = await seated.app.inject({ method: 'GET', url: '/api/branding' });
+        assert.equal(response.statusCode, 200, response.body);
+      }
+      const conditional = await seated.app.inject({
+        method: 'GET',
+        url: '/api/branding',
+        headers: { 'if-none-match': etag },
+      });
+      assert.equal(conditional.statusCode, 304, conditional.body);
+      assert.equal(calls, 1, 'a taken seat is counted once per cache window');
+    } finally {
+      users.countActiveSuperAdmins = countActiveSuperAdmins;
+      await seated.close();
+    }
+  });
+
+  it('never holds an open founder seat, only coalesces the burst', async () => {
+    const open = await buildTestApp({
+      env: { NEXUS_BRANDING_CACHE_MS: '5000', NEXUS_LOG_LEVEL: 'silent' },
+      deps: { startOutboxWorker: false },
+    });
+    const users = open.store.users;
+    const countActiveSuperAdmins = users.countActiveSuperAdmins.bind(users);
+    let calls = 0;
+    users.countActiveSuperAdmins = async (excludeUserId?: string): Promise<number> => {
+      calls += 1;
+      return countActiveSuperAdmins(excludeUserId);
+    };
+
+    try {
+      // Another instance over the same rows may claim the seat between any two
+      // requests, so a settled `true` is never reused: each read hits the row.
+      for (let request = 0; request < 3; request += 1) {
+        const response = await open.app.inject({ method: 'GET', url: '/api/branding' });
+        assert.equal(response.statusCode, 200, response.body);
+        assert.equal(response.json<BrandingResponse>().bootstrap_required, true);
+      }
+      assert.equal(calls, 3, 'an open seat is re-read on every sequential request');
+
+      const burst = await Promise.all(
+        Array.from({ length: 10 }, () => open.app.inject({ method: 'GET', url: '/api/branding' })),
+      );
+      assert.ok(burst.every((response) => response.statusCode === 200));
+      assert.equal(calls, 4, 'a concurrent burst still collapses onto one query');
+    } finally {
+      users.countActiveSuperAdmins = countActiveSuperAdmins;
+      await open.close();
     }
   });
 
