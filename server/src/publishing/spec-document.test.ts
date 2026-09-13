@@ -75,22 +75,31 @@ function config(overrides: Partial<EdgePluginConfig> = {}): EdgePluginConfig {
 }
 
 describe('routesSpecDocument', () => {
-  it('replaces servers with the listen path', () => {
-    // The load-bearing rewrite: Edge builds each generated operation matcher
-    // from the Paths key prefixed by this pathname, so a document left with its
-    // upstream here generates `^/invoices$` and nothing arriving at
-    // `/nexus/billing/invoices` can ever match it.
+  it('normalizes the server base while keeping the listen path and backend explicit', () => {
+    // Edge adds the listen prefix itself. A server base containing that prefix
+    // would mount every declared operation beneath it twice.
     const submitted = routesSpecDocument(document(), {
-      listenPath: '/nexus/billing',
-      proxy: { id: 'proxy-1' },
+      proxy: {
+        id: 'proxy-1',
+        listen_path: '/nexus/billing',
+        backend_host: 'billing.example.com',
+        backend_path: '/v2',
+        upstream_id: 'operator-pool',
+      },
     });
 
-    assert.deepEqual(submitted.servers, [{ url: '/nexus/billing' }]);
+    assert.deepEqual(submitted.servers, [{ url: '/' }]);
+    assert.deepEqual(submitted['x-ferrum-proxy'], {
+      id: 'proxy-1',
+      listen_path: '/nexus/billing',
+      backend_host: 'billing.example.com',
+      backend_path: '/v2',
+      upstream_id: 'operator-pool',
+    });
   });
 
   it('stamps the routes-only validate extension', () => {
     const submitted = routesSpecDocument(document(), {
-      listenPath: '/nexus/billing',
       proxy: { id: 'proxy-1' },
     });
 
@@ -104,7 +113,6 @@ describe('routesSpecDocument', () => {
 
   it('hands the extension a copy, so one document cannot mutate the next', () => {
     const submitted = routesSpecDocument(document(), {
-      listenPath: '/nexus/billing',
       proxy: { id: 'proxy-1' },
     });
     (submitted['x-ferrum-validate'] as Record<string, unknown>).fail_on_unknown_operation = false;
@@ -115,7 +123,7 @@ describe('routesSpecDocument', () => {
   it('carries the proxy body through as x-ferrum-proxy', () => {
     const proxy = { id: 'proxy-1', listen_path: '/nexus/billing', backend_port: 8443 };
 
-    const submitted = routesSpecDocument(document(), { listenPath: '/nexus/billing', proxy });
+    const submitted = routesSpecDocument(document(), { proxy });
 
     assert.deepEqual(submitted['x-ferrum-proxy'], proxy);
   });
@@ -133,7 +141,7 @@ describe('routesSpecDocument', () => {
         'x-ferrum-validate': { fail_on_unknown_operation: false },
         'x-ferrum-external-refs': true,
       }),
-      { listenPath: '/nexus/billing', proxy: { id: 'proxy-1' } },
+      { proxy: { id: 'proxy-1' } },
     );
 
     assert.equal(submitted['x-ferrum-upstream'], undefined);
@@ -154,7 +162,6 @@ describe('routesSpecDocument', () => {
     });
 
     const submitted = routesSpecDocument(source, {
-      listenPath: '/nexus/billing',
       proxy: { id: 'proxy-1' },
     });
 
@@ -169,7 +176,7 @@ describe('routesSpecDocument', () => {
   it('does not mutate the document it was given', () => {
     const source = document();
 
-    routesSpecDocument(source, { listenPath: '/nexus/billing', proxy: { id: 'proxy-1' } });
+    routesSpecDocument(source, { proxy: { id: 'proxy-1' } });
 
     assert.deepEqual(source.servers, [{ url: 'https://billing.example.com:8443/v2' }]);
     assert.equal(source['x-ferrum-proxy'], undefined);
@@ -178,7 +185,7 @@ describe('routesSpecDocument', () => {
   it('strips servers from path items and operations', () => {
     // OpenAPI resolves `servers` at three levels and the nearest wins, so a
     // path-level or operation-level entry survives the root rewrite and Edge
-    // builds the matcher from it — `^/other/invoices$` for an API published at
+    // builds `/nexus/billing/other/invoices` for an API published at
     // `/nexus/billing`. With `fail_on_unknown_operation` that is a `400` on
     // every declared operation of an API the publish just reported as live.
     const submitted = routesSpecDocument(
@@ -194,12 +201,12 @@ describe('routesSpecDocument', () => {
           },
         },
       }),
-      { listenPath: '/nexus/billing', proxy: { id: 'proxy-1' } },
+      { proxy: { id: 'proxy-1' } },
     );
 
     const paths = submitted.paths as Record<string, Record<string, unknown>>;
     const item = paths['/invoices'] as Record<string, unknown>;
-    assert.deepEqual(submitted.servers, [{ url: '/nexus/billing' }]);
+    assert.deepEqual(submitted.servers, [{ url: '/' }]);
     assert.equal('servers' in item, false);
     assert.equal('servers' in (item.post as Record<string, unknown>), false);
     // Everything else about the operations is the provider's, untouched.
@@ -226,7 +233,7 @@ describe('routesSpecDocument', () => {
           },
         },
       }),
-      { listenPath: '/nexus/billing', proxy: { id: 'proxy-1' } },
+      { proxy: { id: 'proxy-1' } },
     );
 
     const components = submitted.components as Record<string, Record<string, unknown>>;
@@ -257,7 +264,6 @@ describe('routesSpecDocument', () => {
     });
 
     const submitted = routesSpecDocument(source, {
-      listenPath: '/nexus/billing',
       proxy: { id: 'proxy-1' },
     });
 
@@ -271,7 +277,6 @@ describe('routesSpecDocument', () => {
     const source = document({ components: { schemas: { Invoice: { type: 'object' } } } });
 
     const submitted = routesSpecDocument(source, {
-      listenPath: '/nexus/billing',
       proxy: { id: 'proxy-1' },
     });
 
@@ -289,7 +294,7 @@ describe('routesSpecDocument', () => {
       },
     });
 
-    routesSpecDocument(source, { listenPath: '/nexus/billing', proxy: { id: 'proxy-1' } });
+    routesSpecDocument(source, { proxy: { id: 'proxy-1' } });
 
     const item = (source.paths as Record<string, Record<string, unknown>>)['/invoices'];
     assert.deepEqual(item?.servers, [{ url: '/other' }]);
@@ -299,8 +304,8 @@ describe('routesSpecDocument', () => {
   it('strips servers from a $ref-able webhook path item', () => {
     // Edge indexes `webhooks` as a resolution target, so a path that is a
     // `$ref` to one produces an ordinary operation-table entry — built from
-    // that webhook's `servers`. `^/other/invoices$` for an API published at
-    // `/nexus/billing`, and a `400` on the only operation it declares.
+    // that webhook's `servers`: `/nexus/billing/other/invoices` for an API
+    // published at `/nexus/billing`, and a `400` on the only operation it declares.
     const submitted = routesSpecDocument(
       document({
         paths: { '/invoices': { $ref: '#/webhooks/Invoices' } },
@@ -314,12 +319,12 @@ describe('routesSpecDocument', () => {
           },
         },
       }),
-      { listenPath: '/nexus/billing', proxy: { id: 'proxy-1' } },
+      { proxy: { id: 'proxy-1' } },
     );
 
     const webhooks = submitted.webhooks as Record<string, Record<string, unknown>>;
     const item = webhooks.Invoices as Record<string, unknown>;
-    assert.deepEqual(submitted.servers, [{ url: '/nexus/billing' }]);
+    assert.deepEqual(submitted.servers, [{ url: '/' }]);
     assert.equal('servers' in item, false);
     assert.equal('servers' in (item.post as Record<string, unknown>), false);
   });
@@ -342,7 +347,7 @@ describe('routesSpecDocument', () => {
           },
         },
       }),
-      { listenPath: '/nexus/billing', proxy: { id: 'proxy-1' } },
+      { proxy: { id: 'proxy-1' } },
     );
 
     const components = submitted.components as Record<string, Record<string, unknown>>;
@@ -363,7 +368,7 @@ describe('routesSpecDocument', () => {
         document({
           paths: { '/invoices': { $ref: '#/components/callbacks/onPaid/expression' } },
         }),
-        { listenPath: '/nexus/billing', proxy: { id: 'proxy-1' } },
+        { proxy: { id: 'proxy-1' } },
       ),
     );
 

@@ -606,11 +606,11 @@ bits of entropy is what makes "unguessable" a claim rather than a hope.
 | 3   | `PUT /proxies/{id}` — the association write         | `PUT /proxies/{id}` — the association write |
 | 4   | `PUT /proxies/{id}` — **cutover** to `/<ns>/<slug>` | `PUT /api-specs/{id}` — **cutover**         |
 
-Step 4 is `cutOverToListenPath`. For a spec-owned proxy both `servers[0].url`
-and `x-ferrum-proxy.listen_path` move in the same write, because Edge prefixes
-every generated operation matcher with the former — sending one without the
-other would leave the validator rejecting every request on the new path as an
-unknown operation. Edge accepts the move: `PUT /api-specs/{id}` updates the
+Step 4 is `cutOverToListenPath`. For a spec-owned proxy the spec PUT moves
+`x-ferrum-proxy.listen_path` and regenerates the operation table beneath that
+prefix. `servers[0].url` stays `/` through staging and cutover. Moving only the
+proxy would leave the validator matching the staging path and rejecting every
+request on the new path. Edge accepts the move: `PUT /api-specs/{id}` updates the
 proxy row in place (same id, same `created_at`) and its uniqueness check
 excludes the proxy being written, at admission and again inside the write
 transaction.
@@ -664,13 +664,15 @@ importer. So an API at the `routes` level does not get its proxy from
 `POST /proxies` at all. The whole proxy is created by `POST /api-specs`, from a
 document Nexus builds out of the provider's own (`publishing/spec-document.ts`):
 
-- **`servers` is replaced** with `[{ url: <listen_path> }]`. Edge's extractor
-  builds each generated operation matcher from the Paths key prefixed by the
-  pathname of `servers[0]`, so a document left with the provider's upstream
-  there generates `^/invoices$` — and every request arriving at
-  `/nexus/<slug>/invoices` is rejected as an unknown operation, including the
-  declared ones. The provider's `servers[0]` stays authoritative for the
-  _backend_ fields; only the submitted copy is rewritten.
+- **`servers` is replaced** with `[{ url: '/' }]`. Edge's extractor mounts
+  each operation as listen prefix + effective server pathname + Paths key.
+  A root server base makes `/invoices` match `/nexus/<slug>/invoices` with
+  exactly one listen prefix. Nested Path Item and operation servers are stripped,
+  including those in referenceable components, callbacks and webhooks, so they
+  cannot add a base back. The provider's upstream remains in the explicit
+  `x-ferrum-proxy` backend fields; only the enforcement copy is normalized.
+  Stored provider bytes remain unchanged, and catalog documents still rewrite
+  structural servers to the externally callable invoke URL, preserving examples.
 - **`x-ferrum-proxy`** carries the proxy body, including a Nexus-minted `id` so
   `ferrum_proxy_id` is a plain proxy id whatever the mode.
 - **`x-ferrum-validate`** is `{ mode: 'block', request: { enabled: false },
@@ -681,6 +683,28 @@ response: { enabled: false }, fail_on_unknown_operation: true }` — a closed
   provider's `$ref`ed schemas are meant as enforcement or as documentation.
 - **every root `x-ferrum-*` key the provider wrote is stripped.** A document is
   input, not configuration.
+
+**Supported Edge importer contract.** Routes enforcement requires an Edge build
+containing [ferrum-edge#5470](https://github.com/ferrum-edge/ferrum-edge/pull/5470)
+(listen-prefix mounting, merged September 12, 2026) and
+[ferrum-edge#5491](https://github.com/ferrum-edge/ferrum-edge/pull/5491)
+(literal root-path matching, merged September 13, 2026). Older importers, before
+ferrum-edge#5470, are not supported; Nexus does not switch contracts by version.
+See Edge's [API-spec contract](https://github.com/ferrum-edge/ferrum-edge/blob/main/docs/api_specs.md)
+and [validator matching rules](https://github.com/ferrum-edge/ferrum-edge/blob/main/docs/openapi_validator.md).
+
+The listen prefix's trailing slashes are trimmed when joining non-root Paths
+keys. With a root server base, Paths key `/` matches the literal listen path:
+`/p2/oas2` generates `^/p2/oas2$`, while `/p2/oas2/` generates `^/p2/oas2/$`.
+Other Paths-key trailing slashes remain literal. Backend paths and
+`strip_listen_path` govern forwarding, not operation matching. A non-root server
+base would be appended after the listen prefix, which is why Nexus normalizes
+it rather than submitting the provider's server pathname.
+
+This change does not rewrite previously generated validators at startup. To
+repair an API published with a doubled prefix, upload its current provider spec
+as a new revision after upgrading Nexus and Edge to this contract. The spec PUT
+regenerates the matchers while carrying the live proxy's runtime settings.
 
 Edge creates the proxy, generates the validator and associates it in one
 transaction, then tags both with the spec's id. Three consequences:

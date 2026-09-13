@@ -1047,7 +1047,6 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           if (specEnforcement === 'routes') {
             const ref = await createSpecOwnedProxy(
               parsed.document,
-              stagingPath,
               { id: proxyId, ...proxyBody },
               owner.id,
             );
@@ -1989,12 +1988,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               // this call would immediately overwrite. Hand-owned plugin configs
               // and their associations are untouched by it, so there is no window
               // in which the API is unauthenticated.
-              const listenPath = listenPathFor(api.namespace, api.slug);
               const build = (
                 document: Record<string, unknown>,
                 proxyBody: Record<string, unknown>,
-              ): Record<string, unknown> =>
-                routesSpecDocument(document, { listenPath, proxy: proxyBody });
+              ): Record<string, unknown> => routesSpecDocument(document, { proxy: proxyBody });
 
               const specId = await specIdForProxy(proxyId);
               // Captured before the write: the compensation has to put back the
@@ -2521,12 +2518,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    */
   async function createSpecOwnedProxy(
     document: Record<string, unknown>,
-    listenPath: string,
     proxyBody: Record<string, unknown> & { id: string },
     subject: string,
   ): Promise<{ id: string; specId: string }> {
     const ref = await edge.apiSpecs.create(
-      routesSpecDocument(document, { listenPath, proxy: proxyBody }),
+      routesSpecDocument(document, { proxy: proxyBody }),
       subject,
     );
     const id = ref.proxy_id || proxyBody.id;
@@ -2543,17 +2539,16 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * `404`; after it lands the proxy already carries every plugin the portal
    * promised. There is no ordering in which it is briefly open.
    *
-   * Two shapes, because a spec-owned proxy has two sources of truth for its
-   * path and they have to move together:
+   * Two shapes, because a spec-owned proxy's generated operation table has to
+   * move with its listen path:
    *
    * - `docs_only` — a GET-merge-PUT under the per-proxy lock, exactly like
    *   every other proxy write;
    * - `routes` — a `PUT /api-specs/{id}` re-inserting the proxy from
-   *   `x-ferrum-proxy` with the new path, and `servers[0]` rewritten to match,
-   *   because Edge prefixes every generated operation matcher with it. Sending
-   *   only one of the two would leave the validator rejecting every request as
-   *   an unknown operation. Hand-owned plugin configs and their associations
-   *   survive the re-insert; the validator is regenerated for the new path.
+   *   `x-ferrum-proxy` with the new path and a root server base. Edge regenerates
+   *   every operation matcher beneath that listen path; a proxy-only move would
+   *   leave the validator matching the staging path. Hand-owned plugin configs
+   *   and their associations survive the re-insert.
    */
   async function cutOverToListenPath(
     proxyId: string,
@@ -2595,7 +2590,6 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     await edge.apiSpecs.replace(
       id,
       routesSpecDocument(document, {
-        listenPath,
         proxy: { ...submittableProxyBody(proxy), listen_path: listenPath },
       }),
       subject,
@@ -2690,7 +2684,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       const staged = { ...body, listen_path: stagingPath };
       let specId: string | null = null;
       if (level === 'routes') {
-        specId = (await createSpecOwnedProxy(document, stagingPath, staged, subject)).specId;
+        specId = (await createSpecOwnedProxy(document, staged, subject)).specId;
       } else {
         // A document read off the wire, not one composed here: `EdgeProxyWrite`
         // models only the narrow subset Nexus sets, and every unmodelled key an

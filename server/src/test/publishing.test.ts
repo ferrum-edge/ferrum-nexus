@@ -7,6 +7,7 @@ import {
   aclGroupForApi,
   MAX_SPEC_DEPTH,
   type ApiErrorBody,
+  type CatalogDetailResponse,
   type CatalogListResponse,
   type CreateTestConsumerResponse,
   type GetApiResponse,
@@ -2922,8 +2923,8 @@ describe('publishing', () => {
       assert.equal(harness.edge.callsTo('POST', '/api-specs').length, 1);
 
       // The import lands on a staging path; the cutover `PUT /api-specs/{id}`
-      // moves both `servers[0]` and `x-ferrum-proxy.listen_path` onto the real
-      // one once the plugins are associated. Everything asserted below is the
+      // moves `x-ferrum-proxy.listen_path` onto the real one and regenerates the
+      // matchers once the plugins are associated. Everything asserted below is the
       // document as it stands *after* that move.
       const imported = harness.edge.callsTo('POST', '/api-specs')[0]?.body as Record<
         string,
@@ -2933,16 +2934,12 @@ describe('publishing', () => {
         String((imported['x-ferrum-proxy'] as Record<string, unknown>).listen_path),
         /^\/nexus\/\.staging\/[0-9a-f]{32}$/,
       );
-      assert.deepEqual(imported.servers, [
-        { url: String((imported['x-ferrum-proxy'] as Record<string, unknown>).listen_path) },
-      ]);
+      assert.deepEqual(imported.servers, [{ url: '/' }]);
 
       const document = submittedDocument(proxyId);
-      // `servers` is the load-bearing rewrite. Edge builds each operation
-      // matcher from the Paths key prefixed by this pathname, so leaving the
-      // provider's upstream here would generate `^/invoices$` and every request
-      // arriving at `/nexus/enf-routes/invoices` would be an unknown operation.
-      assert.deepEqual(document.servers, [{ url: '/nexus/enf-routes' }]);
+      // Edge adds the listen prefix independently of the server base. Keeping
+      // the server base at root prevents an extra prefix on every operation.
+      assert.deepEqual(document.servers, [{ url: '/' }]);
       assert.deepEqual(document['x-ferrum-validate'], {
         mode: 'block',
         request: { enabled: false },
@@ -3077,9 +3074,8 @@ describe('publishing', () => {
     }
 
     it('strips path-level and operation-level servers before submitting', async () => {
-      // The whole point of the root rewrite is that the listen path is the base
-      // for every operation. A nested `servers` overrides it and Edge builds
-      // `^/other/invoices$` — a matcher nothing arriving at
+      // A nested `servers` overrides the root base and Edge would build
+      // `/nexus/enf-nested/other/invoices` — a matcher nothing arriving at
       // `/nexus/enf-nested/invoices` can hit, which
       // `fail_on_unknown_operation` turns into a `400` on a publish that
       // answered `201`.
@@ -3096,7 +3092,7 @@ describe('publishing', () => {
       const proxyId = String(response.json<PublishApiResponse>().api.ferrum_proxy_id);
 
       const document = submittedDocument(proxyId);
-      assert.deepEqual(document.servers, [{ url: '/nexus/enf-nested' }]);
+      assert.deepEqual(document.servers, [{ url: '/' }]);
       assert.deepEqual(nestedServerSites(document), []);
       assert.deepEqual(operationLabels(proxyId), [
         'GET /nexus/enf-nested/invoices',
@@ -3637,7 +3633,7 @@ describe('publishing', () => {
         'GET /nexus/enf-spec/payments',
         'POST /nexus/enf-spec/payments',
       ]);
-      assert.deepEqual(submittedDocument(proxyId).servers, [{ url: '/nexus/enf-spec' }]);
+      assert.deepEqual(submittedDocument(proxyId).servers, [{ url: '/' }]);
       // The spec keeps its id; the validator it owns is regenerated, so that one
       // does not — and there is still exactly one of it.
       assert.equal(harness.edge.apiSpecForProxy(proxyId)?.id, specId);
@@ -3987,11 +3983,10 @@ describe('publishing', () => {
       assert.equal(cutover.at, harness.edge.requests.length - 1);
       for (const at of pluginCreateIndexes()) assert.ok(at < cutover.at);
 
-      // The importer prefixes every generated matcher with `servers[0]`, so the
-      // rewrite has to move in the same write or the validator would reject
-      // every request on the new path as an unknown operation.
+      // The spec PUT regenerates the operation table beneath the new listen
+      // prefix. The server base remains root through staging and cutover.
       const document = harness.edge.apiSpecForProxy(proxyId)?.document ?? {};
-      assert.deepEqual(document.servers, [{ url: finalPath }]);
+      assert.deepEqual(document.servers, [{ url: '/' }]);
       const operations = harness.edge.pluginForProxy(proxyId, 'openapi_validator')?.config as
         { operations?: { method: string; path_template: string }[] } | undefined;
       assert.deepEqual(
@@ -4277,6 +4272,220 @@ describe('publishing with Redis-synced rate limits', () => {
       redis_tls: true,
     });
   });
+});
+
+describe('routes enforcement at catalog invoke URLs (issue #249)', () => {
+  const namespace = 'ferrum-audit-main';
+  const origin = 'https://gateway.example.test';
+  let harness: TestApp;
+  let provider: TestSession;
+
+  before(async () => {
+    harness = await buildTestApp({
+      env: { FERRUM_NAMESPACE: namespace, FERRUM_GATEWAY_PUBLIC_URL: `${origin}/` },
+    });
+    await harness.registerUser({ role: 'client' });
+    provider = await harness.registerUser({ role: 'provider' });
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  beforeEach(() => {
+    harness.edge.reset();
+  });
+
+  /** Evaluate only routes admission from the effective generated plugin, not auth or HTTP I/O. */
+  function assertAdmission(
+    proxyId: string,
+    invokeUrl: string,
+    method: string,
+    suffix: string,
+    allowed: boolean,
+  ): void {
+    const listenPath = new URL(invokeUrl).pathname;
+    assert.equal(harness.edge.proxyServing(listenPath, namespace)?.id, proxyId);
+    const validator = harness.edge
+      .effectivePluginsForProxy(proxyId, namespace)
+      .find((plugin) => plugin.plugin_name === 'openapi_validator');
+    if (!validator) {
+      assert.equal(allowed, true, 'documentation-only mode leaves routes unrestricted');
+      return;
+    }
+    const config = validator.config as Record<string, unknown>;
+    assert.equal(config.enforcement_mode, 'block');
+    assert.equal(config.fail_on_unknown_operation, true);
+    assert.ok(Array.isArray(config.operations));
+    const path = new URL(`${invokeUrl}${suffix}`).pathname;
+    const matches = config.operations.some(
+      (operation: Record<string, unknown>) =>
+        operation.method === method && new RegExp(String(operation.path_regex)).test(path),
+    );
+    assert.equal(matches, allowed, `${method} ${path}`);
+  }
+
+  const cases = [
+    { slug: 'audit-browser-publish', server: undefined, upstream: 'https://backend.example.test' },
+    {
+      slug: 'absolute-server-base',
+      server: 'https://provider.example.test/private/v1/',
+      upstream: 'https://backend.example.test/backend/v2/',
+    },
+    {
+      slug: 'repeated-server-base',
+      server: `/${namespace}/repeated-server-base`,
+      upstream: 'https://backend.example.test/backend/v2/',
+    },
+  ];
+
+  for (const entry of cases) {
+    it(`keeps ${entry.slug} available through publish, conversion and revision`, async () => {
+      const responses = { '200': { description: 'OK' } };
+      const initial = {
+        openapi: '3.1.0',
+        info: { title: 'Invoke paths', version: '1.0.0' },
+        ...(entry.server === undefined ? {} : { servers: [{ url: entry.server }] }),
+        paths: {
+          '/': { get: { responses } },
+          '/health': { get: { responses } },
+          '/echo': { post: { responses } },
+          '/items/': { get: { responses } },
+        },
+      };
+      const raw = JSON.stringify(initial, null, 2);
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({
+          slug: entry.slug,
+          spec: raw,
+          spec_enforcement: 'routes',
+          upstream_url: entry.upstream,
+          timeouts: { connect_ms: 1_500, read_ms: 20_000, write_ms: 25_000 },
+          rate_limit: { limit: 100, window_seconds: 60 },
+        }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const api = published.json<PublishApiResponse>().api;
+      const proxyId = String(api.ferrum_proxy_id);
+      const detail = await harness.authed(provider, {
+        method: 'GET',
+        url: `/api/catalog/${entry.slug}`,
+      });
+      assert.equal(detail.statusCode, 200, detail.body);
+      const invokeUrl = detail.json<CatalogDetailResponse>().api.invoke_url;
+      assert.equal(invokeUrl, `${origin}/${namespace}/${entry.slug}`);
+      assert.ok(invokeUrl);
+      const proxy = harness.edge.proxyServing(`/${namespace}/${entry.slug}`, namespace);
+      assert.ok(proxy);
+      proxy.preserve_host_header = true;
+      proxy.backend_tls_verify_server_cert = false;
+      const { api_spec_id: _specId, plugins: _plugins, ...runtime } = proxy;
+      const handOwned = harness.edge
+        .pluginsForProxy(proxyId, namespace)
+        .filter((plugin) => plugin.plugin_name !== 'openapi_validator');
+
+      const assertAvailable = (level: 'routes' | 'docs_only'): void => {
+        const current = harness.edge.proxyServing(`/${namespace}/${entry.slug}`, namespace);
+        assert.ok(current);
+        for (const [field, value] of Object.entries(runtime)) {
+          if (field === 'created_at' || field === 'updated_at') continue;
+          assert.deepEqual(current[field], value, field);
+        }
+        assert.equal(current.backend_host, 'backend.example.test');
+        assert.equal(
+          current.backend_path ?? null,
+          entry.server === undefined ? null : '/backend/v2',
+        );
+        for (const plugin of handOwned) {
+          const carried = harness.edge.pluginConfigs.get(`${namespace}/${plugin.id}`);
+          assert.equal(carried?.plugin_name, plugin.plugin_name);
+          assert.equal(carried?.enabled, plugin.enabled);
+          assert.deepEqual(carried?.config, plugin.config);
+          assert.ok(
+            harness.edge
+              .effectivePluginsForProxy(proxyId, namespace)
+              .some((effective) => effective.id === plugin.id),
+          );
+        }
+        assert.equal(
+          !!harness.edge.pluginForProxy(proxyId, 'openapi_validator', namespace),
+          level === 'routes',
+        );
+        for (const [method, suffix] of [
+          ['GET', ''],
+          ['GET', '/health'],
+          ['POST', '/echo'],
+          ['GET', '/items/'],
+        ] as const) {
+          assertAdmission(proxyId, invokeUrl, method, suffix, true);
+        }
+        for (const [method, suffix] of [
+          ['GET', '/'],
+          ['GET', '/unknown'],
+          ['DELETE', '/health'],
+          ['GET', '/echo'],
+          ['GET', '/items'],
+          ['GET', `/${namespace}/${entry.slug}/health`],
+          ['GET', '/backend/v2/health'],
+        ] as const) {
+          assertAdmission(proxyId, invokeUrl, method, suffix, level === 'docs_only');
+        }
+      };
+
+      assertAvailable('routes');
+      assert.equal((await harness.store.apiSpecs.findCurrentByApi(api.id))?.raw_spec, raw);
+      for (const level of ['docs_only', 'routes'] as const) {
+        const converted = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${api.id}`,
+          payload: { spec_enforcement: level },
+        });
+        assert.equal(converted.statusCode, 200, converted.body);
+        assertAvailable(level);
+      }
+
+      const referenced = {
+        servers: [{ url: '/referenced-base' }],
+        get: { responses },
+        post: { servers: [{ url: '/referenced-operation' }], responses },
+      };
+      const revisedRaw = JSON.stringify({
+        ...initial,
+        info: { ...initial.info, version: '2.0.0' },
+        paths: {
+          ...initial.paths,
+          '/health': { servers: [{ url: '/path-base' }], get: { responses } },
+          '/echo': { post: { servers: [{ url: '/operation-base' }], responses } },
+          '/shared': { $ref: '#/components/pathItems/Shared' },
+          '/hook': { $ref: '#/webhooks/Shared' },
+          '/alias': { $ref: '#/paths/~1health', servers: [{ url: '/sibling-base' }] },
+        },
+        components: { pathItems: { Shared: referenced } },
+        webhooks: { Shared: referenced },
+      });
+      const revised = await harness.authed(provider, {
+        method: 'PUT',
+        url: `/api/apis/${api.id}/spec`,
+        payload: { spec: revisedRaw },
+      });
+      assert.equal(revised.statusCode, 200, revised.body);
+      assertAvailable('routes');
+      for (const suffix of ['/shared', '/hook']) {
+        assertAdmission(proxyId, invokeUrl, 'GET', suffix, true);
+        assertAdmission(proxyId, invokeUrl, 'POST', suffix, true);
+        assertAdmission(proxyId, invokeUrl, 'DELETE', suffix, false);
+      }
+      assertAdmission(proxyId, invokeUrl, 'GET', '/alias', true);
+      assertAdmission(proxyId, invokeUrl, 'GET', '/path-base/health', false);
+      assertAdmission(proxyId, invokeUrl, 'POST', '/operation-base/echo', false);
+      assert.equal((await harness.store.apiSpecs.findCurrentByApi(api.id))?.raw_spec, revisedRaw);
+      assert.deepEqual(harness.edge.apiSpecForProxy(proxyId, namespace)?.document.servers, [
+        { url: '/' },
+      ]);
+    });
+  }
 });
 
 describe('publishing — an upstream name that resolves to a private address', () => {
