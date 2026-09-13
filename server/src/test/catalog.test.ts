@@ -332,8 +332,13 @@ describe('catalog visibility', () => {
     });
 
     for (const format of ['json', 'yaml'] as const) {
-      for (const visibility of ['public', 'internal'] as const) {
-        it(`rewrites structural servers in ${visibility} ${format} specs for non-grantees`, async () => {
+      for (const [visibility, spec_enforcement] of [
+        ['public', 'docs_only'],
+        ['public', 'routes'],
+        ['internal', 'docs_only'],
+        ['internal', 'routes'],
+      ] as const) {
+        it(`rewrites ${visibility} ${format} ${spec_enforcement} structural servers`, async () => {
           const upstream = 'https://origin.example.test/private';
           const freeForm = { servers: [{ url: upstream }], server: { url: upstream } };
           const schema = {
@@ -370,8 +375,13 @@ describe('catalog visibility', () => {
           };
           const document = makeDocument({ url: upstream, description: upstream });
           const raw = format === 'json' ? JSON.stringify(document) : stringifyYaml(document);
-          const slug = `cat-servers-${visibility}-${format}`;
-          const id = await publish(provider, slug, { spec: raw, visibility });
+          const mode = spec_enforcement === 'routes' ? 'routes' : 'docs';
+          const slug = `cat-servers-${visibility}-${format}-${mode}`;
+          const id = await publish(provider, slug, {
+            spec: raw,
+            visibility,
+            spec_enforcement,
+          });
           const response = await harness.authed(client, {
             method: 'GET',
             url: `/api/catalog/${slug}/spec`,

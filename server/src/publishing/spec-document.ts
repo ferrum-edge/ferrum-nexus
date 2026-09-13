@@ -44,26 +44,26 @@
  * Edge matches operations against the **canonical policy path** — the full
  * client request path, which still carries the proxy's listen path
  * (`strip_listen_path` governs what goes *upstream*, not what policy sees). Its
- * extractor builds each matcher from the Paths key prefixed by the pathname of
- * `servers[0]`, so a document declaring `/invoices` and published at
- * `/nexus/billing` generates `^/nexus/billing/invoices$` only if the submitted
- * document says `servers: [{ url: "/nexus/billing" }]`.
+ * extractor mounts each matcher beneath `x-ferrum-proxy.listen_path`, followed
+ * by the effective server pathname and the Paths key (Edge #5470 and #5491).
+ * A document declaring `/invoices` and published at `/nexus/billing` therefore
+ * needs `servers: [{ url: "/" }]` to generate `^/nexus/billing/invoices$`.
+ * Repeating the listen path in `servers` would double the prefix (issue #249).
  *
  * That is why {@link routesSpecDocument} **replaces** `servers`. The provider's
  * own `servers[0]` is their upstream — it is where `backend_scheme`,
  * `backend_host`, `backend_port` and `backend_path` come from, and it stays
  * authoritative for those on the `apis` row. The copy submitted to Edge is
- * rewritten so the generated matchers line up with what clients actually send;
- * the catalog also uses {@link rewriteSpecServers} to hide provider servers.
- * Leave the enforcement copy alone and every request 400s as an unknown
- * operation — including the declared ones.
+ * normalized to a root server base so only the proxy supplies the mount. The
+ * catalog separately uses {@link rewriteSpecServers} with the externally
+ * callable invoke URL to hide provider servers without changing examples.
  *
  * Replacing the root is not enough on its own. OpenAPI resolves `servers` at
  * three levels — root, Path Item, Operation — and the **nearest one wins**, so
  * a document that overrides `servers` on a path or an operation keeps that
  * override through the rewrite and Edge builds the matcher from it. The result
- * is a matcher describing a path no client can send (`^/other/one$` for an API
- * published at `/nexus/relserver`), and with
+ * is a matcher with an unwanted extra base (`/nexus/relserver/other/one` for
+ * an API published at `/nexus/relserver`), and with
  * `fail_on_unknown_operation: true` that is a `400` on every declared
  * operation of an API the portal just reported as published. So every nested
  * `servers` is **stripped** as well — see {@link routesSpecDocument} for the
@@ -293,8 +293,8 @@ const RESOLVABLE_PATH_ITEM_POINTERS = [
  *
  * The `servers` strip is only a guarantee if it cannot be side-stepped, and one
  * `$ref` side-steps it: Edge resolves the pointer, reads `servers` off the
- * resolved item and generates `^/other/invoices$` for an API published at
- * `/nexus/billing` — a matcher no client can hit, and with
+ * resolved item and generates `/nexus/billing/other/invoices` for an API
+ * published at `/nexus/billing` — a matcher no client can hit, and with
  * `fail_on_unknown_operation: true` a `400` on every declared operation of an
  * API the portal just reported as published. Nexus could chase an arbitrary
  * pointer and rewrite whatever it finds, but that is a second implementation of
@@ -341,11 +341,10 @@ export function assertRoutesSubmittable(
 
 /** Inputs beyond the provider's document. */
 export interface RoutesSpecDocumentOptions {
-  /** The proxy's listen path, e.g. `/nexus/billing`. */
-  listenPath: string;
   /**
-   * The `x-ferrum-proxy` body: a create body carrying an `id` for a new proxy,
-   * or {@link submittableProxyBody} of an existing one for a replace.
+   * The `x-ferrum-proxy` body, including the listen path and backend fields:
+   * a create body carrying an `id` for a new proxy, or
+   * {@link submittableProxyBody} of an existing one for a replace.
    */
   proxy: Record<string, unknown>;
 }
@@ -360,8 +359,8 @@ export interface RoutesSpecDocumentOptions {
  *    otherwise repoint the backend, and `x-ferrum-consumers` — which Edge
  *    rejects outright — would make the upload fail for a reason no provider
  *    could act on;
- * 2. `servers` is replaced with the listen path, so the generated operation
- *    matchers cover the path clients actually send (see the module docblock),
+ * 2. `servers` is replaced with `/`, so Edge adds the proxy's listen path
+ *    exactly once to the operation matchers (see the module docblock),
  *    and every **nested** `servers` is stripped so nothing can override that
  *    replacement back to a path no client can reach;
  * 3. `x-ferrum-proxy` and `x-ferrum-validate` are stamped on.
@@ -406,7 +405,7 @@ export function routesSpecDocument(
     if (key.startsWith('x-ferrum-')) continue;
     submitted[key] = value;
   }
-  const rewritten = rewriteSpecServers(submitted, options.listenPath);
+  const rewritten = rewriteSpecServers(submitted, '/');
   rewritten['x-ferrum-proxy'] = options.proxy;
   rewritten['x-ferrum-validate'] = { ...ROUTES_VALIDATE_EXTENSION };
   return rewritten;

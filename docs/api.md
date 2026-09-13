@@ -1559,8 +1559,8 @@ CORS clears the gate. Existing gateway lists are not changed at startup: save
 the CORS policy to apply this choice to an older API.
 
 **`routes` mode rewrites the document Edge receives, and only that copy.** The
-submitted document has its root `servers` replaced with the API's listen path,
-so the operation matchers Edge generates cover the path clients actually send —
+submitted document has its root `servers` replaced with `/`, because Edge adds
+the proxy's listen prefix itself when generating operation matchers —
 and every `servers` **below** the root is stripped along with it: on a path
 item, on an operation, and on every Path Item a `$ref`'d path can resolve to,
 which means `components.pathItems`, `webhooks` and `components.callbacks`
@@ -1580,8 +1580,10 @@ provider a document they can act on instead of an API that answers `201` and
 then rejects every request. `docs_only` documents are not checked — Edge
 generates no matchers from them.
 
-The provider's stored revision is never modified by any of this: it is what the
-catalog, the docs viewer and `docs_only` publication all hand over unchanged.
+The provider's stored revision is never modified by any of this. Catalog and
+docs-viewer copies still rewrite structural servers to the API's invoke URL,
+leaving examples and schema data unchanged. See the
+[supported Edge importer contract](architecture.md#spec-owned-proxies).
 
 ### `GET /api/apis`
 
