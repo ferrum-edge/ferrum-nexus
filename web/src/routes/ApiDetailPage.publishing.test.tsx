@@ -45,7 +45,9 @@ beforeEach(() => {
   }));
   vi.spyOn(apisApi, 'usage').mockRejectedValue(new Error('Usage unavailable'));
   vi.spyOn(apisApi, 'update').mockImplementation(async (_id, body) => {
-    api = { ...api, ...body };
+    // The request shape mirrors the record for every field these tests send;
+    // only the CORS request alias differs, and no test here patches CORS.
+    api = { ...api, ...body } as Api;
     return { api };
   });
   vi.spyOn(apisApi, 'updateSpec').mockImplementation(async (_id, body) => {

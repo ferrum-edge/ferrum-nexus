@@ -1,14 +1,12 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, type RenderResult } from '@testing-library/react';
 import { useId, type ReactElement, type ReactNode } from 'react';
 import type { LabeledSelectProps } from '../src/components/ui/Select';
 import { ToastProvider } from '../src/stores/toast';
 
 const clients: QueryClient[] = [];
 
-export function renderPage(
-  element: ReactElement,
-): ReturnType<typeof render> & { client: QueryClient } {
+export function renderPage(element: ReactElement): RenderResult & { client: QueryClient } {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   clients.push(client);
   const wrapper = ({ children }: { children: ReactNode }): ReactElement => (
@@ -16,7 +14,7 @@ export function renderPage(
       <ToastProvider>{children}</ToastProvider>
     </QueryClientProvider>
   );
-  return { ...render(element, { wrapper }), client };
+  return Object.assign(render(element, { wrapper }), { client });
 }
 
 export function clearClients(): void {
