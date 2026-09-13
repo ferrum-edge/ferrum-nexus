@@ -617,7 +617,9 @@ whoever can still authenticate is always one save away from switching it off.
    reports `captcha.enforcement: "disabled"`, so the state is never invisible.
    The activation self-test still applies here — the widget is rendered from the
    pending configuration — so a repaired configuration is proven before it is
-   stored.
+   stored. If the repair moves to a different vendor, enter that vendor's secret
+   key in the same save: the stored secret belongs to the previous one and is
+   never posted to another (`400 VALIDATION_FAILED` otherwise).
 4. **Remove the variable and restart.** Confirm `captcha.enforcement` reads
    `enforced` again, then sign out and in once to prove the challenge works.
 

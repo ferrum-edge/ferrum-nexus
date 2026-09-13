@@ -41,9 +41,11 @@ export const TEST_PASSWORD = 'correct-horse-battery-staple';
  *
  * Enabling CAPTCHA — and moving its provider, site key or secret afterwards —
  * needs a token the new configuration verifies, so every suite that touches the
- * `captcha` settings section sends this one. The stub also guarantees no test
- * ever reaches a real vendor: the harness installs it unless the caller passes
- * its own `deps.captchaTransport`.
+ * `captcha` settings section sends this one. The stub also guarantees no suite
+ * built through this harness ever reaches a real vendor: the harness installs
+ * it unless the caller passes its own `deps.captchaTransport`. A suite that
+ * composes `createCaptchaService` itself has to pass it too — `smoke.test.ts`
+ * does.
  */
 export const TEST_CAPTCHA_TOKEN = 'test-captcha-token';
 

@@ -115,6 +115,15 @@ export type CaptchaVerifyOutcome = 'not_required' | 'verified' | 'bypassed';
 export interface CaptchaSelfTestInput {
   /** Vendor of the configuration being saved, never `none`. */
   provider: Exclude<CaptchaProvider, 'none'>;
+  /**
+   * The site key being saved.
+   *
+   * Forwarded to hCaptcha, whose secret is account-scoped and may cover many
+   * site keys, so the token is bound to *this* one rather than to any site the
+   * account owns. Turnstile and reCAPTCHA pair a secret with a single site key,
+   * so they are not sent it.
+   */
+  siteKey: string;
   /** The secret being saved — the new one when the patch carries it, else the stored one. */
   secret: string;
   /** Token minted by the widget rendered with that same configuration. */
@@ -141,7 +150,9 @@ export interface CaptchaService {
    * Prove a CAPTCHA configuration before an admin's settings write adopts it.
    *
    * Runs the **same** vendor verification a login does, against the
-   * configuration in the patch rather than the stored one, and throws
+   * configuration in the patch rather than the stored one — for hCaptcha the
+   * site key travels with it, so an account-scoped secret cannot bless a token
+   * minted for some other site of the same account — and throws
    * `CAPTCHA_SELF_TEST_FAILED` when there is no token, the vendor rejects it,
    * or the vendor cannot be reached. Unlike {@link CaptchaService.verify} it
    * ignores enforcement: a portal recovering under the break-glass switch must
@@ -221,15 +232,26 @@ export function createCaptchaService(deps: CaptchaServiceDeps): CaptchaService {
     );
   }
 
-  /** Run the vendor call both {@link CaptchaService.verify} and the self-test share. */
+  /**
+   * Run the vendor call both {@link CaptchaService.verify} and the self-test share.
+   *
+   * `sitekey` is hCaptcha-only, and deliberately so. Turnstile and reCAPTCHA
+   * issue a secret per site, so verifying the token already proves which site
+   * key minted it; hCaptcha's secret is account-scoped and may cover many site
+   * keys, and its `siteverify` takes the optional `sitekey` parameter precisely
+   * to bind the two. Sending it to the other two vendors would be an unknown
+   * field on a closed form.
+   */
   async function askVendor(
     provider: Exclude<CaptchaProvider, 'none'>,
     secret: string,
     token: string,
     remoteIp: string | null,
+    siteKey: string | null = null,
   ): Promise<CaptchaVerifyResult> {
     const params = new URLSearchParams({ secret, response: token });
     if (remoteIp) params.set('remoteip', remoteIp);
+    if (provider === 'hcaptcha' && siteKey) params.set('sitekey', siteKey);
     return transport(CAPTCHA_VERIFY_URLS[provider], params);
   }
 
@@ -284,6 +306,11 @@ export function createCaptchaService(deps: CaptchaServiceDeps): CaptchaService {
       const provider = settings.provider as Exclude<CaptchaProvider, 'none'>;
       let result: CaptchaVerifyResult;
       try {
+        // No `sitekey` here: this token came from the widget the portal itself
+        // rendered from `settings.site_key`, and the write path already proved
+        // that pair against the vendor. Binding it again could only turn a
+        // proven configuration into a login failure — the lockout this whole
+        // module exists to prevent.
         result = await askVendor(provider, secret, token, remoteIp);
       } catch (error) {
         deps.log?.(
@@ -313,7 +340,13 @@ export function createCaptchaService(deps: CaptchaServiceDeps): CaptchaService {
 
       let result: CaptchaVerifyResult;
       try {
-        result = await askVendor(input.provider, input.secret, token, input.remoteIp ?? null);
+        result = await askVendor(
+          input.provider,
+          input.secret,
+          token,
+          input.remoteIp ?? null,
+          input.siteKey,
+        );
       } catch (error) {
         deps.log?.(
           { provider: input.provider, error: error instanceof Error ? error.message : null },

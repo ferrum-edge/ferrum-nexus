@@ -1192,7 +1192,8 @@ providers: Cloudflare Turnstile, hCaptcha, reCAPTCHA. When enabled, a
 `captcha_token` is required on register and login.
 
 - The site key is public (`GET /api/auth/captcha`, `GET /api/branding`); the
-  secret is encrypted at rest and never returned.
+  secret is encrypted at rest and never returned — and never sent to a vendor
+  other than the one it was stored for (below).
 - Verification is a server-side POST to the vendor with a 5-second budget, and
   the client IP is forwarded as `remoteip`.
 - **It fails closed.** Enabled-but-no-secret, an unreachable vendor, or a
@@ -1216,6 +1217,27 @@ describes. The server verifies it with the vendor — the same call a login make
 `captcha_self_test: "passed"` in its `admin.settings_update` row. Turning
 CAPTCHA **off** needs no token, so a working configuration is never a trap for
 whoever can still sign in.
+
+Three details make that proof worth what it claims:
+
+- **The site key is bound for hCaptcha.** An hCaptcha secret is account-scoped
+  and may cover many sites, so the self-test sends the pending `site_key` as
+  `sitekey` and the vendor refuses a token solved for a different site of the
+  same account. Turnstile and reCAPTCHA issue a secret per site, so verifying
+  the token already proves which site key minted it.
+- **A provider change must bring its own secret.** `provider` cannot move while
+  CAPTCHA is (or becomes) enabled unless the same patch carries `secret_key`
+  (`400 VALIDATION_FAILED`). A vendor secret is write-only state issued by one
+  vendor; posting the stored one to another's `siteverify` would disclose it to
+  a third party the operator never chose. `smtp` enforces the same rule on a
+  connection change.
+- **The write is a compare-and-swap.** The vendor round-trip cannot run inside
+  the transaction (a pooled adapter re-runs a body the engine rolled back), so
+  the stored `captcha` rows are re-read under the transaction and the patch is
+  refused with `409 CONFLICT` if either has moved since the proof was made.
+  Without that, two concurrent saves could merge into a `site_key`/secret pair
+  no self-test ever saw together — the lockout again, with both saves reporting
+  success.
 
 **An operator break-glass switch, for when nobody can sign in.**
 `NEXUS_CAPTCHA_ENFORCEMENT=disabled` (accepted values: `enforced`, `disabled`)

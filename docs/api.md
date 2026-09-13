@@ -567,11 +567,20 @@ _public_ — widget configuration. Never carries the vendor secret.
 { "enabled": true, "provider": "turnstile", "site_key": "0x4AAA…" }
 ```
 
-`enabled` is `false` — with a `null` `site_key` — whenever a token is not
-actually required, which includes a server running with
-`NEXUS_CAPTCHA_ENFORCEMENT=disabled`. A client can therefore always take this
-endpoint at its word: no widget here means no `captcha_token` on login or
-register.
+`enabled` is `false` — with a `null` `site_key` — whenever there is no widget to
+render: CAPTCHA switched off, no provider, no site key, no stored secret, or a
+server running with `NEXUS_CAPTCHA_ENFORCEMENT=disabled`.
+
+It answers "what should I render", not "what will login accept", and those come
+apart on a portal that is configured only half way. An enabled configuration
+with no `site_key` reports `enabled: false` **and** refuses every sign-in with
+`400 CAPTCHA_FAILED`; an enabled one whose encrypted secret no longer decrypts
+(after a `NEXUS_SECRET_KEY` rotation, say) reports a widget whose every answer
+is then refused the same way. Verification fails closed in both directions —
+see the fail-closed paragraph under
+[`PUT /api/admin/settings`](#put-apiadminsettings). So no widget here means no
+`captcha_token` is worth sending, never that an incomplete portal will let the
+request through.
 
 ---
 
@@ -1105,7 +1114,7 @@ send its gateway credentials.
 | Section        | Fields                                                                                                                                                                                                                                                                                                                                                                                                       |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `branding`     | `portal_name` (1–120), `logo_data_url` (base64 image data URL, ≤ 512 KiB, nullable), `primary_color` / `accent_color` (CSS hex `#rgb`–`#rrggbbaa`), `default_theme` (`dark`\|`light`\|`system`), `tagline` (≤ 280, nullable), `support_email` (nullable)                                                                                                                                                     |
-| `captcha`      | _super_admin_ — `enabled`, `provider` (`none`\|`recaptcha`\|`hcaptcha`\|`turnstile`), `site_key` (nullable), `secret_key` — **write-only**, stored AES-256-GCM encrypted; pass `null` or `""` to clear — and `captcha_token`, the activation self-test's proof (below)                                                                                                                                       |
+| `captcha`      | _super_admin_ — `enabled`, `provider` (`none`\|`recaptcha`\|`hcaptcha`\|`turnstile`), `site_key` (nullable), `secret_key` — **write-only**, stored AES-256-GCM encrypted; pass `null` or `""` to clear — and `captcha_token`, the activation self-test's proof (below). Changing `provider` while CAPTCHA is (or becomes) enabled requires a `secret_key` in the same request                                |
 | `smtp`         | _super_admin_ — `host`, `port` (1–65535), `secure`, `username`, `password` — **write-only**, encrypted; `null`/`""` clears — `from_address`. Changing `host`, `port`, `secure` or `username` while a password is stored (or set by env) requires sending a fresh `password` in the same request (`400 VALIDATION_FAILED` otherwise), so a stored credential can never be replayed against a different server |
 | `registration` | `open_registration`, `require_email_verification`, `allowed_roles` (array of roles)                                                                                                                                                                                                                                                                                                                          |
 | `gateway`      | _super_admin_ — `public_url` — absolute `http(s)` **origin** of the gateway's proxy listener, no path, query or credentials; a trailing slash is stripped. `null` or `""` clears the override and falls back to `FERRUM_GATEWAY_PUBLIC_URL`. Whoever controls it directs clients to send their gateway credentials to that origin, so it needs `super_admin` like `smtp` and `captcha`.                      |
@@ -1126,17 +1135,28 @@ non-empty site key, and a usable secret (supplied now or already stored).
 CAPTCHA in the same patch before clearing a required key. An unreadable stored
 secret must be replaced or re-encrypted before activation can be saved.
 
+Moving `provider` while CAPTCHA is (or becomes) enabled also requires a
+`secret_key` in the same request, or the whole patch is refused with
+`400 VALIDATION_FAILED`. A vendor secret is issued by one vendor: replaying the
+stored one against another's `siteverify` would disclose a write-only
+credential to a third party the operator never chose, and could not have worked
+anyway. This is the rule `smtp` applies to a connection change, for the same
+reason.
+
 **The activation self-test.** A patch that turns CAPTCHA on, or that changes
 `provider`, `site_key` or `secret_key` while it is on, must also carry a
 `captcha_token` minted by the **configuration the patch describes**. The server
 verifies it with the vendor — the same call a login makes — before it writes
-anything, and a patch that cannot be proven is refused with
-`400 CAPTCHA_SELF_TEST_FAILED` (`details.reason`: `token_required`, `rejected`,
-`provider_unreachable`) leaving every setting exactly as it was. Without this a
-mistaken save made register **and login** demand a challenge the portal could
-not verify, locking out every account including the super admin who saved it
-(ferrum-nexus#252). The admin settings page renders the widget from the pending
-values, which is where the token comes from.
+anything. For hCaptcha the site key goes with it as `sitekey`, because an
+hCaptcha secret is account-scoped and may cover many sites; Turnstile and
+reCAPTCHA pair a secret with a single site key, so verifying the token there
+already proves which site key minted it. A patch that cannot be proven is
+refused with `400 CAPTCHA_SELF_TEST_FAILED` (`details.reason`: `token_required`,
+`rejected`, `provider_unreachable`) leaving every setting exactly as it was.
+Without this a mistaken save made register **and login** demand a challenge the
+portal could not verify, locking out every account including the super admin who
+saved it (ferrum-nexus#252). The admin settings page renders the widget from the
+pending values, which is where the token comes from.
 
 Nothing else needs a token: re-saving an unchanged configuration does not, and
 turning CAPTCHA **off** never does — that is the in-portal way back for whoever
@@ -1153,6 +1173,12 @@ sign-in or registration from a configured challenge.
 → the same shape as `GET /api/admin/settings`. The audit row records the
 **names** of the changed keys and never their values.
 
+Two super admins editing CAPTCHA at once do not merge. The vendor round-trip
+cannot happen inside the transaction, so the write is a compare-and-swap on the
+`captcha` rows the proof was made against: if either has moved in between, the
+patch is refused with `409 CONFLICT` and nothing is written. Re-read
+`GET /api/admin/settings`, solve a fresh challenge and send it again.
+
 ```bash
 curl -sS -b cookies.txt -X PUT http://127.0.0.1:8787/api/admin/settings \
   -H 'content-type: application/json' \
@@ -1161,6 +1187,11 @@ curl -sS -b cookies.txt -X PUT http://127.0.0.1:8787/api/admin/settings \
         "site_key":"0x4AAA…","secret_key":"0x4AAA…secret",
         "captcha_token":"<token solved with those values>"}}'
 ```
+
+Solve that token from the same address this request is sent from: the caller's
+address is forwarded to the vendor as `remoteip`, exactly as a login forwards
+the visitor's, and Turnstile and hCaptcha may reject a token that was solved
+somewhere else.
 
 ### `POST /api/admin/settings/smtp-test`
 

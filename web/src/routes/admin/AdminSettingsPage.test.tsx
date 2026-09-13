@@ -16,7 +16,7 @@
  * server's activation self-test requires (ferrum-nexus#252).
  */
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AdminSettingsResponse, CaptchaAdminSettings, Role } from '@ferrum-nexus/shared';
 import { CaptchaCard, RegistrationCard } from './AdminSettingsPage';
@@ -42,6 +42,40 @@ interface StubWidgetProps {
   config: { enabled: boolean; provider: string; site_key: string | null };
   onToken: (token: string | null) => void;
 }
+
+/** Props the real `LabeledSelect` takes; only the four the card passes are used. */
+interface StubSelectProps {
+  label: string;
+  value: string;
+  onValueChange: (value: string) => void;
+  options: ReadonlyArray<{ value: string; label: string }>;
+}
+
+// The real provider select is built on Radix, which drives its listbox through
+// pointer-capture and scroll APIs jsdom does not implement. The card's contract
+// with it is "hand back the chosen value", so that is what is stubbed — a
+// labelled native select, which `getByLabelText('Provider')` drives directly.
+vi.mock('../../components/ui/Select', async () => {
+  const { createElement } = await import('react');
+  return {
+    LabeledSelect: ({ label, value, onValueChange, options }: StubSelectProps) =>
+      createElement(
+        'label',
+        null,
+        label,
+        createElement(
+          'select',
+          {
+            value,
+            onChange: (event: { target: { value: string } }) => onValueChange(event.target.value),
+          },
+          options.map((option) =>
+            createElement('option', { key: option.value, value: option.value }, option.label),
+          ),
+        ),
+      ),
+  };
+});
 
 // The real widget injects a vendor script and renders a cross-origin iframe.
 // The card's contract with it is "hand back a token", so that is what is stubbed.
@@ -185,6 +219,86 @@ describe('CAPTCHA activation card', () => {
   it('needs no challenge to re-save a configuration that is not moving', () => {
     const stored = { ...READY_TO_ENABLE, enabled: true };
     render(<CaptchaCard settings={settingsWith(['client'], stored)} />);
+    expect(screen.queryByRole('button', { name: /Test this CAPTCHA/ })).toBeNull();
+    fireEvent.click(save());
+    expect(update).toHaveBeenCalledWith(
+      { captcha: { enabled: true, provider: 'turnstile', site_key: 'public-site' } },
+      expect.any(Object),
+    );
+  });
+
+  it('offers a fresh challenge after a save that spent the token and failed', () => {
+    render(<CaptchaCard settings={settingsWith(['client'], READY_TO_ENABLE)} />);
+    fireEvent.click(screen.getByLabelText('Require a CAPTCHA challenge'));
+    fireEvent.click(screen.getByRole('button', { name: /Test this CAPTCHA/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'solve the challenge' }));
+    fireEvent.click(save());
+
+    // The self-test runs before anything is written, so a patch that failed
+    // afterwards — a validation error elsewhere in it, a CONFLICT, a transient
+    // fault — has already spent this token. Vendor tokens are single-use, so
+    // re-sending it would come back as "the provider rejected the challenge"
+    // about a configuration that may be perfectly correct.
+    const handlers = update.mock.calls[0]?.[1] as { onError?: () => void } | undefined;
+    expect(handlers?.onError).toBeTypeOf('function');
+    act(() => {
+      handlers?.onError?.();
+    });
+
+    expect(screen.queryByText(/Challenge solved/)).toBeNull();
+    expect(screen.getByRole('button', { name: /Test this CAPTCHA/ })).toBeInTheDocument();
+    expect(save()).toBeDisabled();
+  });
+
+  it('asks for a secret of its own before the provider may move', () => {
+    const stored = { ...READY_TO_ENABLE, enabled: true };
+    render(<CaptchaCard settings={settingsWith(['client'], stored)} />);
+    fireEvent.change(screen.getByLabelText('Provider'), { target: { value: 'hcaptcha' } });
+
+    // The stored secret was issued by Turnstile; the server refuses to post it
+    // to hCaptcha's siteverify, so there is nothing to solve a challenge with.
+    expect(screen.getByRole('alert')).toHaveTextContent(/secret key for the new provider/);
+    expect(save()).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /Test this CAPTCHA/ })).toBeNull();
+
+    fireEvent.change(screen.getByLabelText('Secret key'), { target: { value: 'hcaptcha-secret' } });
+    expect(screen.queryByRole('alert')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Test this CAPTCHA/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'solve the challenge' }));
+    fireEvent.click(save());
+    expect(update).toHaveBeenCalledWith(
+      {
+        captcha: {
+          enabled: true,
+          provider: 'hcaptcha',
+          site_key: 'public-site',
+          secret_key: 'hcaptcha-secret',
+          captcha_token: 'solved-for-public-site',
+        },
+      },
+      expect.any(Object),
+    );
+  });
+
+  it('trims the stored site key before comparing, as the server does', () => {
+    const stored = { ...READY_TO_ENABLE, enabled: true, site_key: '  public-site  ' };
+    render(<CaptchaCard settings={settingsWith(['client'], stored)} />);
+    // Only a legacy or direct-database write can store stray whitespace, and it
+    // must not make this card demand a challenge the server would not.
+    expect(screen.queryByRole('button', { name: /Test this CAPTCHA/ })).toBeNull();
+    fireEvent.click(save());
+    expect(update).toHaveBeenCalledWith(
+      { captcha: { enabled: true, provider: 'turnstile', site_key: 'public-site' } },
+      expect.any(Object),
+    );
+  });
+
+  it('keeps the stored secret when the secret field holds only whitespace', () => {
+    const stored = { ...READY_TO_ENABLE, enabled: true };
+    render(<CaptchaCard settings={settingsWith(['client'], stored)} />);
+    fireEvent.change(screen.getByLabelText('Secret key'), { target: { value: '   ' } });
+    // Sent as `secret_key: " "` the server would trim it to `""` and refuse the
+    // patch as "enabled with no usable secret". Omitted, the stored one stands.
     expect(screen.queryByRole('button', { name: /Test this CAPTCHA/ })).toBeNull();
     fireEvent.click(save());
     expect(update).toHaveBeenCalledWith(

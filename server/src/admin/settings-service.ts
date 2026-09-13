@@ -30,7 +30,9 @@
  *    enabling super admin included, so the patch has to carry a
  *    `captcha_token` the new configuration accepts or nothing is written
  *    (ferrum-nexus#252). The vendor call happens **before** the transaction
- *    opens, because a transaction body here must be re-runnable.
+ *    opens, because a transaction body here must be re-runnable; the write is
+ *    therefore a compare-and-swap against the rows that proof was made on, and
+ *    a concurrent CAPTCHA edit gets `409 CONFLICT` rather than a lost update.
  */
 
 import { createHash } from 'node:crypto';
@@ -73,7 +75,7 @@ import {
   TEMPLATE_VARIABLES,
 } from '../email/templates.js';
 import type { NexusCrypto } from '../lib/crypto.js';
-import { forbidden, validationFailed } from '../lib/errors.js';
+import { conflict, forbidden, validationFailed } from '../lib/errors.js';
 import { GATEWAY_PUBLIC_URL_RULE, normalizeGatewayPublicUrl } from '../lib/gateway-url.js';
 import { newId, nowIso } from '../lib/ids.js';
 
@@ -150,6 +152,14 @@ const EMPTY_SMTP: StoredSmtpSettings = {
 interface CaptchaUpdatePlan {
   /** The `captcha` row exactly as it will be written. */
   next: StoredCaptchaSettings;
+  /**
+   * {@link captchaFingerprint} of the rows `next` was merged over.
+   *
+   * Re-checked under the transaction: the merge and the self-test both used a
+   * snapshot taken before the body opened, so the write is a compare-and-swap
+   * against it rather than a blind overwrite.
+   */
+  fingerprint: string;
   /** True when a self-test actually ran, for the audit row. */
   selfTested: boolean;
 }
@@ -227,6 +237,35 @@ export async function readEncryptedSetting(
   } catch {
     return null;
   }
+}
+
+/**
+ * Fingerprint of the two rows a {@link CaptchaUpdatePlan} is resolved against.
+ *
+ * The plan merges the patch over a snapshot read — and proven with the vendor —
+ * before the transaction opens, so the write has to establish that the snapshot
+ * is still current. Both rows count: the self-test blessed one
+ * `{provider, site_key, secret}` triple, and either half moving underneath
+ * would store a combination nothing has ever proven.
+ *
+ * `updated_at` alone would be too coarse (two writes can land in the same
+ * millisecond), so the stored value goes in as well — the secret only ever as
+ * the opaque ciphertext the store holds, never decrypted, and only ever as a
+ * SHA-256 digest of it.
+ */
+async function captchaFingerprint(reader: NexusStore): Promise<string> {
+  const hash = createHash('sha256');
+  // Sequentially, not `Promise.all`: a transaction-scoped store is one
+  // connection, and the pooled adapters expect one statement at a time on it.
+  for (const key of [CAPTCHA_SETTINGS_KEY, CAPTCHA_SECRET_SETTINGS_KEY]) {
+    const row = await reader.settings.get(key);
+    // The separators keep the fields and the rows apart, so no pair of stored
+    // values can collide with a different pair by running together.
+    const part =
+      row === null ? 'absent' : `${row.updated_at}\u0000${JSON.stringify(row.value ?? null)}`;
+    hash.update(`${part}\u0001`);
+  }
+  return hash.digest('hex');
 }
 
 /* ── Service ────────────────────────────────────────────────────────────── */
@@ -344,7 +383,12 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
    * Two refusals live here, both before a single row is written:
    *
    * 1. **Completeness** — an enabled configuration needs a real provider, a
-   *    site key and a usable secret (`400 VALIDATION_FAILED`).
+   *    site key and a usable secret (`400 VALIDATION_FAILED`). Moving
+   *    `provider` while CAPTCHA is (or becomes) on additionally requires a
+   *    `secret_key` in the same patch: a stored secret belongs to the vendor
+   *    that issued it, and replaying it against another vendor's `siteverify`
+   *    would disclose a write-only credential to a third party the operator
+   *    never chose. `smtp` applies the same rule to a connection change.
    * 2. **The activation self-test** — turning CAPTCHA on, or moving its
    *    provider, site key or secret while it is on, makes every password login
    *    demand a token, so the patch has to carry one the *new* configuration
@@ -359,21 +403,27 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
    * `{"captcha":{"enabled":false}}` away for whoever can still authenticate.
    *
    * Read outside the transaction, against `store`: the vendor call cannot sit
-   * in a body a pooled adapter may re-run. The rows are re-read under the
-   * transaction when they are written, and the only interleaving this leaves
-   * open is a second super admin editing CAPTCHA at the same moment.
+   * in a body a pooled adapter may re-run. What that would otherwise leave open
+   * — a second super admin editing CAPTCHA between this snapshot and the commit
+   * — is closed by {@link CaptchaUpdatePlan.fingerprint}, which the transaction
+   * body re-checks before it writes.
    */
   async function planCaptchaUpdate(
     patch: NonNullable<UpdateSettingsRequest['captcha']>,
     ip: string | null,
   ): Promise<CaptchaUpdatePlan> {
+    // Fingerprinted *before* the rows are read for the merge, never after: a
+    // write landing between the two then makes the fingerprint stale and the
+    // patch fails closed with `CONFLICT`. The other order would let a merge
+    // built on rows newer than the fingerprint commit as if it were current.
+    const fingerprint = await captchaFingerprint(store);
     const current = await readCaptcha();
     const next: StoredCaptchaSettings = {
       enabled: patch.enabled ?? current.enabled,
       provider: patch.provider ?? current.provider,
       site_key: patch.site_key === undefined ? current.site_key : patch.site_key,
     };
-    if (!next.enabled) return { next, selfTested: false };
+    if (!next.enabled) return { next, fingerprint, selfTested: false };
 
     const provider = next.provider;
     const siteKey = next.site_key?.trim() ?? '';
@@ -390,6 +440,16 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
       );
     }
 
+    // Refused before the self-test, which is the call that would have posted
+    // the stored secret to the new vendor's `siteverify`. A secret is issued by
+    // one vendor and is useless — and disclosed — at another.
+    if (provider !== current.provider && patch.secret_key === undefined) {
+      throw validationFailed(
+        'Changing the CAPTCHA provider requires sending captcha.secret_key in the same request, ' +
+          'because the stored secret belongs to the previous provider',
+      );
+    }
+
     // Any of these makes the challenge visitors are about to face a different
     // one from the challenge that was last proven to work.
     const selfTestRequired =
@@ -397,10 +457,16 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
       provider !== current.provider ||
       siteKey !== (current.site_key?.trim() ?? '') ||
       patch.secret_key !== undefined;
-    if (!selfTestRequired) return { next, selfTested: false };
+    if (!selfTestRequired) return { next, fingerprint, selfTested: false };
 
-    await captcha.selfTest({ provider, secret, token: patch.captcha_token, remoteIp: ip });
-    return { next, selfTested: true };
+    await captcha.selfTest({
+      provider,
+      siteKey,
+      secret,
+      token: patch.captcha_token,
+      remoteIp: ip,
+    });
+    return { next, fingerprint, selfTested: true };
   }
 
   async function snapshot(): Promise<AdminSettingsResponse> {
@@ -507,6 +573,19 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
         }
 
         if (patch.captcha && captchaPlan) {
+          // Compare-and-swap. `captchaPlan.next` is a merge over rows read
+          // before the vendor round-trip, so writing it blind would silently
+          // revert a concurrent CAPTCHA edit — and could store a
+          // `{site_key, secret}` pair neither save ever proved, which is
+          // exactly the lockout this section exists to prevent. Re-checking
+          // here also means a body a pooled adapter re-runs after a rollback
+          // re-fails instead of re-applying a merge that has gone stale.
+          if ((await captchaFingerprint(tx)) !== captchaPlan.fingerprint) {
+            throw conflict(
+              'The CAPTCHA settings changed while this patch was being verified with the ' +
+                'provider; reload the settings and try again',
+            );
+          }
           for (const field of ['enabled', 'provider', 'site_key'] as const) {
             if (patch.captcha[field] !== undefined) changed.push(`captcha.${field}`);
           }
