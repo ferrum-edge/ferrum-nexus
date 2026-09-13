@@ -885,7 +885,7 @@ describe('ferrum admin client', () => {
       return {
         openapi: '3.1.0',
         info: { title: 'Spec API', version: '1.0.0' },
-        servers: [{ url: listenPath }],
+        servers: [{ url: '/' }],
         paths: Object.fromEntries(
           paths.map((path) => [path, { get: { responses: { '200': { description: 'OK' } } } }]),
         ),
@@ -924,8 +924,8 @@ describe('ferrum admin client', () => {
         edge.effectivePluginsForProxy('spec-proxy').map((plugin) => plugin.plugin_name),
         ['openapi_validator'],
       );
-      // Operation matchers carry the `servers[0]` pathname, which is why Nexus
-      // rewrites `servers` to the listen path before submitting.
+      // Edge mounts operations beneath the listen prefix itself. A root server
+      // base keeps that prefix from appearing twice.
       assert.deepEqual((validator.config as { operations: unknown[] }).operations, [
         {
           method: 'GET',
@@ -938,6 +938,95 @@ describe('ferrum admin client', () => {
           path_regex: '^/nexus/spec/invoices/[^/]+$',
         },
       ]);
+    });
+
+    it('models literal root paths and listen/server joins in the importer', async () => {
+      const cases = [
+        { listen: '/p2/oas2', server: '/', root: '/p2/oas2', item: '/p2/oas2/items/' },
+        { listen: '/p2/oas2/', server: '/', root: '/p2/oas2/', item: '/p2/oas2/items/' },
+        { listen: '/p2/oas2', server: undefined, root: '/p2/oas2', item: '/p2/oas2/items/' },
+        { listen: '/p2/oas2/', server: undefined, root: '/p2/oas2/', item: '/p2/oas2/items/' },
+        { listen: '/p2/oas2/', server: '/v1/', root: '/p2/oas2/v1', item: '/p2/oas2/v1/items/' },
+        { listen: '/', server: '/', root: '/', item: '/items/' },
+        {
+          listen: '/audit-main/api-slug/',
+          server: 'https://backend.example.test/v1',
+          root: '/audit-main/api-slug/v1',
+          item: '/audit-main/api-slug/v1/items/',
+        },
+        {
+          listen: '/audit-main/api-slug',
+          server: '/audit-main/api-slug',
+          root: '/audit-main/api-slug/audit-main/api-slug',
+          item: '/audit-main/api-slug/audit-main/api-slug/items/',
+        },
+      ];
+      for (const [index, entry] of cases.entries()) {
+        for (const strip of [true, false]) {
+          const proxyId = `mount-${index}-${strip}`;
+          const document = specDocument(proxyId, entry.listen, ['/', '/items/']);
+          if (entry.server === undefined) delete document.servers;
+          else document.servers = [{ url: entry.server }];
+          const proxy = document['x-ferrum-proxy'] as Record<string, unknown>;
+          proxy.strip_listen_path = strip;
+          proxy.backend_path = '/backend/base/';
+          const ref = await client.apiSpecs.create(document);
+          const validator = edge.pluginForProxy(proxyId, 'openapi_validator');
+          assert.ok(validator);
+          const { operations } = validator.config as { operations: Record<string, unknown>[] };
+          assert.deepEqual(
+            operations.map((operation) => operation.path_template),
+            [entry.root, entry.item],
+          );
+          for (const [operationIndex, path] of [entry.root, entry.item].entries()) {
+            const regex = new RegExp(String(operations[operationIndex]?.path_regex));
+            assert.ok(regex.test(path), `${proxyId}: ${path}`);
+            assert.ok(!regex.test(`${path}extra`), `${proxyId}: anchored matcher`);
+            const alternateSlash = path.endsWith('/') ? path.slice(0, -1) : `${path}/`;
+            assert.ok(!regex.test(alternateSlash), `${proxyId}: literal trailing slash`);
+          }
+          await client.apiSpecs.delete(ref.id);
+        }
+      }
+    });
+
+    it('mounts resolved Path Items using the nearest server override', async () => {
+      const document = specDocument('nested-mount', '/audit-main/api-slug/', []);
+      document.servers = [{ url: '/root-base' }];
+      document.paths = {
+        '/root': { get: { responses: { '200': { description: 'OK' } } } },
+        '/items': {
+          $ref: '#/components/pathItems/Items',
+          servers: [{ url: '/sibling-base' }],
+        },
+        '/alias': { $ref: '#/paths/~1items' },
+      };
+      document.components = {
+        pathItems: {
+          Items: {
+            servers: [{ url: '/referenced-base' }],
+            get: { responses: { '200': { description: 'OK' } } },
+            post: {
+              servers: [{ url: 'https://backend.example.test/operation-base/' }],
+              responses: { '201': { description: 'Created' } },
+            },
+          },
+        },
+      };
+      await client.apiSpecs.create(document);
+      const validator = edge.pluginForProxy('nested-mount', 'openapi_validator');
+      assert.ok(validator);
+      const { operations } = validator.config as { operations: Record<string, unknown>[] };
+      assert.deepEqual(
+        operations.map((operation) => `${operation.method} ${operation.path_template}`),
+        [
+          'GET /audit-main/api-slug/root-base/root',
+          'GET /audit-main/api-slug/sibling-base/items',
+          'POST /audit-main/api-slug/operation-base/items',
+          'GET /audit-main/api-slug/sibling-base/alias',
+          'POST /audit-main/api-slug/operation-base/alias',
+        ],
+      );
     });
 
     it('refuses a hand-built openapi_validator on a proxy with no spec', async () => {

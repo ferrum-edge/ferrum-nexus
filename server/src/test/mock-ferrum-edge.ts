@@ -39,8 +39,8 @@
  *   associated.
  * - API specs: `POST`/`PUT /api-specs` create the proxy from `x-ferrum-proxy`,
  *   stamp `api_spec_id` on it, and generate an associated `openapi_validator`
- *   whose operation table is built from the document's paths prefixed by the
- *   `servers[]` pathnames — resolved the way OpenAPI defines it, with a Path
+ *   whose operation table mounts the document's paths beneath the literal
+ *   listen prefix and effective `servers[]` pathnames, with a resolved Path
  *   Item's or an Operation's own `servers` overriding the root's — plus the
  *   admission rule that makes issue #49 fail here as loudly as it does on a
  *   real gateway: a hand-built `openapi_validator` on a proxy with no attached
@@ -789,10 +789,8 @@ function pathTemplateRegex(template: string): string {
  *
  * Only the *pathname* of each server URL counts — scheme, authority, query and
  * fragment are dropped — and distinct pathnames each emit their own matcher, in
- * document order. No `servers` at all leaves the Paths keys unprefixed, which
- * is the trap Nexus avoids by rewriting `servers` to the listen path: a
- * document left with its upstream there generates `^/invoices$` and nothing
- * arriving at `/nexus/<slug>/invoices` can ever match it.
+ * document order. Absent or root-only `servers` add no server base; Edge still
+ * mounts the Paths keys beneath the literal proxy listen prefix.
  *
  * Called once per level — see {@link generateOperations} — because the nearest
  * declaration wins, not the union of all of them.
@@ -803,10 +801,34 @@ function serverBases(servers: unknown): string[] {
   for (const entry of servers) {
     if (!isRecord(entry) || typeof entry.url !== 'string') continue;
     const { pathname } = new URL(entry.url, 'http://spec.invalid');
-    const base = pathname === '/' ? '' : pathname.replace(/\/$/, '');
+    const base = pathname.replace(/\/+$/, '');
     if (!bases.includes(base)) bases.push(base);
   }
   return bases.length === 0 ? [''] : bases;
+}
+
+/** Resolve local Path Item pointers and sibling overlays used by the fixtures. */
+function resolvedPathItem(
+  document: Record<string, unknown>,
+  value: unknown,
+  seen = new Set<string>(),
+): Record<string, unknown> | undefined {
+  if (!isRecord(value)) return undefined;
+  if (typeof value.$ref !== 'string') return value;
+  const reference = value.$ref;
+  if (!reference.startsWith('#/') || seen.has(reference) || seen.size >= 64) {
+    throw new Error('Mock importer requires an acyclic local Path Item reference');
+  }
+  seen.add(reference);
+  let target: unknown = document;
+  for (const token of decodeURIComponent(reference.slice(2)).split('/')) {
+    const key = token.replace(/~1/g, '/').replace(/~0/g, '~');
+    target = isRecord(target) && Object.hasOwn(target, key) ? target[key] : undefined;
+  }
+  const resolved = resolvedPathItem(document, target, seen);
+  if (!resolved) throw new Error('Mock importer could not resolve a Path Item reference');
+  const { $ref: _reference, ...siblings } = value;
+  return { ...resolved, ...siblings };
 }
 
 /**
@@ -815,30 +837,39 @@ function serverBases(servers: unknown): string[] {
  * `servers` is resolved the way OpenAPI defines it and Edge's extractor
  * implements it: root, Path Item and Operation each may declare one, and the
  * **nearest** declaration wins for the operation being extracted. Modelling
- * only the root — which this fake used to do — makes it generate the correct
- * matcher for a document the real gateway gets wrong, which is how issue #140
- * survived a green suite: a nested `servers` produced `^/other/one$` on a live
- * gateway and `400`ed every request while the mock reported the listen path.
+ * only the root hid issue #140. Omitting the listen-prefix mount hid issue #249:
+ * Edge now joins listen prefix + server base + Paths key (Edge #5470/#5491).
+ * Root operations preserve the literal listen path, including its trailing
+ * slash; other operations trim trailing listen slashes at the join boundary.
  */
 function generateOperations(document: Record<string, unknown>): Record<string, unknown>[] {
   const paths = isRecord(document.paths) ? document.paths : {};
+  const proxy = isRecord(document['x-ferrum-proxy']) ? document['x-ferrum-proxy'] : {};
+  const literalListenPrefix =
+    typeof proxy.listen_path === 'string' && proxy.listen_path.startsWith('/')
+      ? proxy.listen_path
+      : '';
+  const listenPrefix = literalListenPrefix.replace(/\/+$/, '');
   const rootBases = serverBases(document.servers);
   const operations: Record<string, unknown>[] = [];
-  for (const [template, item] of Object.entries(paths)) {
-    if (!isRecord(item)) continue;
+  for (const [template, value] of Object.entries(paths)) {
+    if (!template.startsWith('/')) continue;
+    const item = resolvedPathItem(document, value);
+    if (!item) continue;
     const itemBases = item.servers === undefined ? rootBases : serverBases(item.servers);
     for (const method of OPENAPI_METHOD_KEYS) {
       const operation = item[method];
-      if (operation === undefined) continue;
-      const bases =
-        isRecord(operation) && operation.servers !== undefined
-          ? serverBases(operation.servers)
-          : itemBases;
+      if (!isRecord(operation)) continue;
+      const bases = operation.servers !== undefined ? serverBases(operation.servers) : itemBases;
       for (const base of bases) {
+        const specTemplate = base && template === '/' ? base : `${base}${template}`;
+        const literalRoot = listenPrefix !== '' && specTemplate === '/';
+        const prefix = literalRoot ? literalListenPrefix : listenPrefix;
+        const tail = literalRoot ? '' : specTemplate;
         operations.push({
           method: method.toUpperCase(),
-          path_template: `${base}${template}`,
-          path_regex: `^${escapeRegex(base)}${pathTemplateRegex(template)}$`,
+          path_template: `${prefix}${tail}`,
+          path_regex: `^${escapeRegex(prefix)}${pathTemplateRegex(tail)}$`,
         });
       }
     }
