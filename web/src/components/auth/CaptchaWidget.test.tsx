@@ -196,8 +196,7 @@ describe('CaptchaWidget', () => {
       'script[src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"]';
     const retried = document.querySelector(selector) !== failedScript;
     const reported =
-      screen.queryByRole('status') !== null &&
-      onToken.mock.calls.some(([token]) => token === null);
+      screen.queryByRole('status') !== null && onToken.mock.calls.some(([token]) => token === null);
     expect(retried || reported).toBe(true);
   });
 
