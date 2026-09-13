@@ -164,6 +164,49 @@ retain their driver's own timeout; a stalled database can still fail healthcheck
 > After flipping the switch on a live portal, re-save the rate limit of every
 > API you care about, or accept that older APIs stay on per-process counters.
 
+#### Connection pooling and the gateway's idle bound
+
+Nexus reaches the Admin API over pooled keep-alive connections (an undici
+`Agent`), so one publish does not pay a TCP — and, over TLS, a handshake —
+round trip per call. Edge closes an idle admin connection at
+`FERRUM_HTTP_HEADER_READ_TIMEOUT_SECONDS` (10 seconds by default), and the
+client's own idle lifetime is deliberately held well under it:
+
+- `keepAliveTimeout` — **4 s**. Six seconds of margin under the gateway's
+  10-second idle bound.
+- `keepAliveMaxTimeout` — **8 s**. Ceiling on a longer lifetime a gateway asks
+  for with a `Keep-Alive: timeout=N` response header.
+- `keepAliveTimeoutThreshold` — **2 s**. Subtracted from such a hint before it
+  is adopted, so the client always gives up on a socket first.
+
+None of the three is configurable; they are documented constants in
+[`server/src/ferrum-admin/client.ts`](../server/src/ferrum-admin/client.ts).
+An idle lifetime _equal_ to the gateway's is what this replaces: the client
+occasionally reused a socket in the same instant Edge was closing it, the read
+failed with `ECONNRESET` against a perfectly healthy gateway, and `/api/health`
+then reported the dependency down for a whole `NEXUS_HEALTH_CACHE_MS` interval.
+
+Margin alone cannot close that window everywhere — a reverse proxy in front of
+Edge, or a gateway whose header-read timeout was lowered, puts the boundary
+back under the client — so a **read** that loses the race is retried exactly
+once, on a fresh connection:
+
+- only `GET`/`HEAD`, and only when no byte of the response had arrived. A
+  `POST`, `PUT`, `PATCH` or `DELETE` whose socket dies is never replayed: the
+  gateway may already have applied it.
+- only for a socket-level close (`UND_ERR_SOCKET`, `ECONNRESET`, `EPIPE`). A
+  refused connection (`ECONNREFUSED`), a DNS or TLS failure and every timeout
+  are reported as `EDGE_UNAVAILABLE` on the first attempt, so a gateway that is
+  genuinely down still fails fast.
+- inside the **original** deadline — `FERRUM_ADMIN_TIMEOUT_MS`, or
+  `NEXUS_HEALTH_PROBE_TIMEOUT_MS` for the health route's probe. The retry
+  spends what is left of that budget and never opens a second one, so no
+  timeout in this document doubles.
+
+A recovered reset is still logged at `warn` (`Ferrum Edge Admin API closed a
+pooled connection`), so a gateway that resets constantly stays visible even
+while no portal request fails.
+
 #### Set on the gateway, not on Nexus
 
 Two gateway-side variables change what Nexus can successfully publish, so they
