@@ -13,7 +13,7 @@ import type {
 
 import { SMTP_PASSWORD_SETTINGS_KEY } from '../admin/settings-service.js';
 import { CAPTCHA_SECRET_SETTINGS_KEY } from '../auth/captcha.js';
-import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
+import { buildTestApp, TEST_CAPTCHA_TOKEN, type TestApp, type TestSession } from './helpers.js';
 
 const SMTP_PASSWORD = 'hunter2-but-longer';
 const CAPTCHA_SECRET = 'turnstile-secret-value';
@@ -289,6 +289,7 @@ describe('admin settings', () => {
           provider: 'turnstile',
           site_key: 'site-key-123',
           secret_key: CAPTCHA_SECRET,
+          captcha_token: TEST_CAPTCHA_TOKEN,
         },
       },
     });

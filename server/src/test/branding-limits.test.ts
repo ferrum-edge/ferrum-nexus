@@ -11,7 +11,7 @@ import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 import type { ApiErrorBody, BrandingResponse } from '@ferrum-nexus/shared';
 
 import { brandingEtag } from '../routes/branding.js';
-import { buildTestApp, type TestApp } from './helpers.js';
+import { buildTestApp, TEST_CAPTCHA_TOKEN, type TestApp } from './helpers.js';
 
 describe('branding rate limiting', () => {
   let harness: TestApp;
@@ -134,6 +134,7 @@ describe('branding cache invalidation', () => {
         provider: 'turnstile',
         site_key: 'public-site-key',
         secret_key: 'test-vendor-secret',
+        captcha_token: TEST_CAPTCHA_TOKEN,
       },
       registration: { open_registration: false, allowed_roles: ['provider'] },
     });

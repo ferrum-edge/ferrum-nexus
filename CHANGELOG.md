@@ -8,6 +8,23 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Added
 
+- CAPTCHA lockout recovery (#252). Enabling CAPTCHA — or changing its
+  `provider`, `site_key` or `secret_key` while it is on — now requires a
+  `captcha_token` that the **new** configuration verifies with the vendor, and
+  the whole patch is refused with `400 CAPTCHA_SELF_TEST_FAILED` (a new error
+  code) without storing anything if it cannot be proven. The admin settings page
+  renders the widget from the pending values to mint that token. For a portal
+  already stuck, `NEXUS_CAPTCHA_ENFORCEMENT=disabled` (accepted values
+  `enforced` — the default — and `disabled`) makes register and login skip
+  verification and hides the widget without touching a stored setting; it logs a
+  startup banner, is reported as `captcha.enforcement` on
+  `GET /api/admin/settings`, marks the sessions it admits with
+  `captcha_bypassed: true` in the audit log, and cannot be set through the API.
+  Two supporting rules come with the self-test: `provider` cannot move while
+  CAPTCHA is enabled unless the same patch carries `secret_key` (a vendor secret
+  is never posted to another vendor), and a `captcha` patch is refused with
+  `409 CONFLICT` when the stored rows moved while the vendor was being asked,
+  rather than committing a merge nothing proved.
 - Gateway resource attribution via `labels.provisioned-by: ferrum-nexus`, including API-spec-generated resources (requires Ferrum Edge resource-label support).
 - Test coverage collection: `npm run test:coverage` runs the server suite
   under `node --experimental-test-coverage` and then the web suite under

@@ -48,6 +48,7 @@ describe('loadConfig', () => {
     assert.equal(config.allowPrivateUpstreams, false);
     assert.equal(config.logLevel, 'info');
     assert.equal(config.sessionTtlSeconds, 43_200);
+    assert.equal(config.captchaEnforcement, 'enforced');
     assert.equal(config.db.driver, 'sqlite');
     assert.equal(config.db.sqlitePath, './data/nexus.sqlite');
     assert.equal(config.db.allowStandalone, false);
@@ -336,6 +337,33 @@ describe('loadConfig', () => {
       }),
       'FERRUM_RATE_LIMIT_REDIS_URL must be a redis:// or rediss:// URL',
     );
+  });
+
+  describe('NEXUS_CAPTCHA_ENFORCEMENT', () => {
+    it('is enforced unless the operator spells out the break-glass value', () => {
+      for (const value of [undefined, '', '  ', 'enforced', 'ENFORCED']) {
+        assert.equal(
+          loadConfig(baseEnv(value === undefined ? {} : { NEXUS_CAPTCHA_ENFORCEMENT: value }))
+            .captchaEnforcement,
+          'enforced',
+        );
+      }
+      assert.equal(
+        loadConfig(baseEnv({ NEXUS_CAPTCHA_ENFORCEMENT: ' Disabled ' })).captchaEnforcement,
+        'disabled',
+      );
+    });
+
+    // Deliberately not a boolean: `=0` or `=false` would sit one typo away from
+    // turning the registration brake off for a portal open to the internet.
+    for (const value of ['false', '0', 'off', 'no', 'none', 'yes']) {
+      it(`refuses to read ${value} as an enforcement mode`, () => {
+        expectConfigError(
+          baseEnv({ NEXUS_CAPTCHA_ENFORCEMENT: value }),
+          'NEXUS_CAPTCHA_ENFORCEMENT must be one of enforced, disabled',
+        );
+      });
+    }
   });
 
   it('reads NEXUS_ALLOW_PRIVATE_UPSTREAMS as a boolean', () => {

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ChangeEvent, type ReactElement } from 'react';
+import { useCallback, useEffect, useState, type ChangeEvent, type ReactElement } from 'react';
 import {
   EMAIL_TEMPLATE_KEYS,
   EMAIL_TEMPLATE_LABELS,
@@ -25,6 +25,7 @@ import {
 } from '../../hooks/useGatewayReconciliation';
 import { useAuth } from '../../stores/auth';
 import { useToast } from '../../stores/toast';
+import { CaptchaWidget } from '../../components/auth/CaptchaWidget';
 import { RoleGuard } from '../../components/layout/RoleGuard';
 import { Button } from '../../components/ui/Button';
 import { Card, CardBody, CardHeader, PageHeader } from '../../components/ui/Card';
@@ -47,6 +48,20 @@ const THEME_OPTIONS: ReadonlyArray<{ value: ThemePreference; label: string }> = 
   { value: 'light', label: 'Light' },
   { value: 'system', label: 'Follow the visitor’s system setting' },
 ];
+
+/** The provider and site key an in-progress activation self-test belongs to. */
+interface PendingChallenge {
+  provider: CaptchaProvider;
+  siteKey: string;
+  /**
+   * Bumped on every press of "Test this CAPTCHA configuration", and used as the
+   * widget's React key, so asking again for the same provider and site key
+   * remounts the vendor widget and mints a fresh token. Vendor tokens are
+   * single-use and expire, so re-solving has to be possible without editing a
+   * field first.
+   */
+  attempt: number;
+}
 
 const CAPTCHA_PROVIDERS: ReadonlyArray<{ value: CaptchaProvider; label: string }> = [
   { value: 'none', label: 'Disabled' },
@@ -492,98 +507,234 @@ export function RegistrationCard({ settings }: { settings: AdminSettingsResponse
   );
 }
 
-function CaptchaTab({ settings }: { settings: AdminSettingsResponse }): ReactElement {
+/**
+ * CAPTCHA configuration, with the activation self-test the server demands.
+ *
+ * Turning the challenge on — or moving its provider, site key or secret while
+ * it is on — makes register *and login* require a token from every account,
+ * this administrator included. So `PUT /api/admin/settings` refuses such a
+ * patch unless it carries a `captcha_token` the **new** configuration verifies
+ * (`400 CAPTCHA_SELF_TEST_FAILED`), and this card is where that token is
+ * minted: the widget below is rendered from the values in the form, not from
+ * the stored ones, so solving it proves the site key, the secret and the vendor
+ * script all work together before anything is saved (ferrum-nexus#252).
+ *
+ * The challenge is frozen when "Test this CAPTCHA configuration" is pressed, so
+ * typing in the site-key field does not re-render the vendor's widget on every
+ * keystroke; editing either field afterwards drops the token and asks again.
+ * Vendor tokens are single-use, so that button stays on screen until one has
+ * been solved, and a failed save drops the spent token rather than offering it
+ * again.
+ *
+ * Changing the provider also requires typing a secret key: the stored one
+ * belongs to the previous vendor, and the server refuses to replay it against
+ * another.
+ *
+ * Exported for its test.
+ */
+export function CaptchaCard({ settings }: { settings: AdminSettingsResponse }): ReactElement {
   const update = useUpdateAdminSettings();
   const toast = useToast();
-  // The CAPTCHA card below is super_admin-only; the Registration card is not.
+  // This card is super_admin-only; the Registration card below it is not.
   const { canSuperAdmin } = useAuth();
   const [enabled, setEnabled] = useState(settings.captcha.enabled);
   const [provider, setProvider] = useState<CaptchaProvider>(settings.captcha.provider);
   const [siteKey, setSiteKey] = useState(settings.captcha.site_key ?? '');
   const [secretKey, setSecretKey] = useState('');
+  /** The configuration the rendered widget belongs to; `null` before it is asked for. */
+  const [challenge, setChallenge] = useState<PendingChallenge | null>(null);
+  const [token, setToken] = useState<string | null>(null);
+  const onToken = useCallback((value: string | null) => setToken(value), []);
+
+  const trimmedSiteKey = siteKey.trim();
+  const trimmedSecretKey = secretKey.trim();
+  // Trimmed on both sides of the comparison, as the server trims both: a stored
+  // key with stray whitespace (reachable only from a legacy or direct-database
+  // write) must not make this card ask for a challenge the server would not.
+  const storedSiteKey = settings.captcha.site_key?.trim() ?? '';
+  // The stored secret was issued by the stored provider, so the server refuses
+  // a provider move that does not bring its own secret rather than replaying
+  // the old one against the new vendor.
+  const providerChangeNeedsSecret =
+    enabled && provider !== settings.captcha.provider && trimmedSecretKey === '';
   const captchaIncomplete =
     enabled &&
-    (provider === 'none' || !siteKey.trim() || (!secretKey.trim() && !settings.captcha.secret_set));
+    (provider === 'none' || !trimmedSiteKey || (!secretKey.trim() && !settings.captcha.secret_set));
+  // The same four conditions the server checks before it demands a self-test.
+  const selfTestRequired =
+    enabled &&
+    (!settings.captcha.enabled ||
+      provider !== settings.captcha.provider ||
+      trimmedSiteKey !== storedSiteKey ||
+      trimmedSecretKey !== '');
+  const challengeCurrent =
+    challenge !== null && challenge.provider === provider && challenge.siteKey === trimmedSiteKey;
+  // A token minted for a configuration the form has since moved away from would
+  // be rejected by the server, so it is not offered to it.
+  const provenToken = challengeCurrent ? token : null;
+  const canSelfTest =
+    canSuperAdmin && selfTestRequired && !captchaIncomplete && !providerChangeNeedsSecret;
+
+  /** Freeze the values the widget below is rendered from, and drop any old token. */
+  const startSelfTest = (): void => {
+    setToken(null);
+    setChallenge((previous) => ({
+      provider,
+      siteKey: trimmedSiteKey,
+      attempt: (previous?.attempt ?? 0) + 1,
+    }));
+  };
+
+  /**
+   * Forget the solved challenge.
+   *
+   * Vendor tokens are single-use, so a save that reached the self-test and then
+   * failed for any other reason — a validation error elsewhere in the patch, a
+   * `CONFLICT`, a transient database fault — has already spent this one.
+   * Keeping it would let the next Save resend a burnt token and come back with
+   * "the provider rejected the challenge", which reads as "your keys are
+   * wrong" about a configuration that may be perfectly correct.
+   */
+  const forgetChallenge = (): void => {
+    setToken(null);
+    setChallenge(null);
+  };
 
   return (
-    <div className="flex flex-col gap-6">
-      <Card>
-        <CardHeader
-          title="CAPTCHA"
-          description="Applied to sign-in and registration. The secret key is stored AES-256-GCM encrypted and never returned."
-        />
-        <CardBody className="grid gap-5 md:grid-cols-2">
+    <Card>
+      <CardHeader
+        title="CAPTCHA"
+        description="Applied to sign-in and registration. The secret key is stored AES-256-GCM encrypted and never returned."
+      />
+      <CardBody className="grid gap-5 md:grid-cols-2">
+        {settings.captcha.enforcement === 'disabled' ? (
           <div className="md:col-span-2">
-            <Checkbox
-              label="Require a CAPTCHA challenge"
-              checked={enabled}
-              disabled={!canSuperAdmin}
-              onChange={(event) => setEnabled(event.target.checked)}
-            />
+            <FormNotice tone="warning">
+              {`This server runs with NEXUS_CAPTCHA_ENFORCEMENT=disabled, so sign-in and registration accept every request whatever this card says. It is the break-glass setting for a portal locked out by a CAPTCHA it cannot verify: fix the configuration here, then remove that variable from the server environment and restart. Sessions created meanwhile are recorded in the audit log with captcha_bypassed: true.`}
+            </FormNotice>
           </div>
-          <LabeledSelect<CaptchaProvider>
-            label="Provider"
-            value={provider}
+        ) : null}
+        <div className="md:col-span-2">
+          <Checkbox
+            label="Require a CAPTCHA challenge"
+            checked={enabled}
             disabled={!canSuperAdmin}
-            onValueChange={setProvider}
-            options={CAPTCHA_PROVIDERS.map((option) => ({ ...option }))}
+            onChange={(event) => setEnabled(event.target.checked)}
           />
-          <LabeledInput
-            label="Site key"
-            value={siteKey}
-            disabled={!canSuperAdmin}
-            onChange={(event) => setSiteKey(event.target.value)}
-          />
-          <LabeledInput
-            className="md:col-span-2"
-            label="Secret key"
-            type="password"
-            autoComplete="off"
-            placeholder={settings.captcha.secret_set ? '•••••••• (stored)' : 'Not set'}
-            value={secretKey}
-            disabled={!canSuperAdmin}
-            onChange={(event) => setSecretKey(event.target.value)}
-            hint="Leave blank to keep the stored value."
-          />
-          {captchaIncomplete ? (
-            <p className="text-sm text-danger md:col-span-2" role="alert">
-              Choose a provider and enter a site key and secret key before enabling CAPTCHA.
+        </div>
+        <LabeledSelect<CaptchaProvider>
+          label="Provider"
+          value={provider}
+          disabled={!canSuperAdmin}
+          onValueChange={setProvider}
+          options={CAPTCHA_PROVIDERS.map((option) => ({ ...option }))}
+        />
+        <LabeledInput
+          label="Site key"
+          value={siteKey}
+          disabled={!canSuperAdmin}
+          onChange={(event) => setSiteKey(event.target.value)}
+        />
+        <LabeledInput
+          className="md:col-span-2"
+          label="Secret key"
+          type="password"
+          autoComplete="off"
+          placeholder={settings.captcha.secret_set ? '•••••••• (stored)' : 'Not set'}
+          value={secretKey}
+          disabled={!canSuperAdmin}
+          onChange={(event) => setSecretKey(event.target.value)}
+          hint="Leave blank to keep the stored value."
+        />
+        {captchaIncomplete ? (
+          <p className="text-sm text-danger md:col-span-2" role="alert">
+            Choose a provider and enter a site key and secret key before enabling CAPTCHA.
+          </p>
+        ) : null}
+        {!captchaIncomplete && providerChangeNeedsSecret ? (
+          <p className="text-sm text-danger md:col-span-2" role="alert">
+            Enter the secret key for the new provider. The stored one was issued by the previous
+            provider and is never sent to another vendor.
+          </p>
+        ) : null}
+        {canSelfTest ? (
+          <div className="flex flex-col gap-3 md:col-span-2">
+            <p className="text-sm text-fg-muted">
+              This change makes every sign-in require a challenge, including yours. Solve one with
+              the configuration above and the portal will save it only if the vendor accepts the
+              answer.
             </p>
-          ) : null}
-          <div className="md:col-span-2">
-            {canSuperAdmin ? (
-              <Button
-                variant="primary"
-                loading={update.isPending}
-                disabled={captchaIncomplete}
-                onClick={() =>
-                  update.mutate(
-                    {
-                      captcha: {
-                        enabled,
-                        provider,
-                        site_key: siteKey.trim() || null,
-                        ...(secretKey ? { secret_key: secretKey } : {}),
-                      },
-                    },
-                    {
-                      onSuccess: () => {
-                        setSecretKey('');
-                        toast.success('CAPTCHA settings saved');
-                      },
-                    },
-                  )
-                }
-              >
-                Save CAPTCHA settings
-              </Button>
+            {challenge !== null && challengeCurrent && provider !== 'none' ? (
+              <CaptchaWidget
+                key={challenge.attempt}
+                config={{ enabled: true, provider, site_key: trimmedSiteKey }}
+                onToken={onToken}
+              />
+            ) : null}
+            {provenToken === null ? (
+              <div>
+                <Button onClick={startSelfTest}>Test this CAPTCHA configuration</Button>
+              </div>
             ) : (
-              <SuperAdminOnlyNotice what="the CAPTCHA settings" />
+              <p className="text-sm text-success" role="status">
+                Challenge solved. Save to apply this configuration.
+              </p>
             )}
           </div>
-        </CardBody>
-      </Card>
+        ) : null}
+        <div className="md:col-span-2">
+          {canSuperAdmin ? (
+            <Button
+              variant="primary"
+              loading={update.isPending}
+              disabled={
+                captchaIncomplete ||
+                providerChangeNeedsSecret ||
+                (selfTestRequired && provenToken === null)
+              }
+              onClick={() =>
+                update.mutate(
+                  {
+                    captcha: {
+                      enabled,
+                      provider,
+                      site_key: trimmedSiteKey || null,
+                      // Trimmed, so a field holding only whitespace keeps the
+                      // stored secret instead of being sent as an empty one,
+                      // which the server reads as "enabled with no usable
+                      // secret" and refuses.
+                      ...(trimmedSecretKey ? { secret_key: trimmedSecretKey } : {}),
+                      ...(provenToken ? { captcha_token: provenToken } : {}),
+                    },
+                  },
+                  {
+                    onSuccess: () => {
+                      setSecretKey('');
+                      forgetChallenge();
+                      toast.success('CAPTCHA settings saved');
+                    },
+                    // The self-test runs before anything is written, so a save
+                    // that failed afterwards has spent this token either way.
+                    onError: forgetChallenge,
+                  },
+                )
+              }
+            >
+              Save CAPTCHA settings
+            </Button>
+          ) : (
+            <SuperAdminOnlyNotice what="the CAPTCHA settings" />
+          )}
+        </div>
+      </CardBody>
+    </Card>
+  );
+}
 
+function CaptchaTab({ settings }: { settings: AdminSettingsResponse }): ReactElement {
+  return (
+    <div className="flex flex-col gap-6">
+      <CaptchaCard settings={settings} />
       <RegistrationCard settings={settings} />
     </div>
   );

@@ -199,9 +199,12 @@ Setup, whichever you pick:
 1. Create a site at the vendor and register your portal's domain.
 2. Copy the **site key** and the **secret key**.
 3. In Settings → CAPTCHA: choose the provider, paste the site key, paste the
-   secret key, tick **Enabled**, save.
-4. Sign out and load the login page in a private window. The widget should
-   render; complete it and sign in.
+   secret key, tick **Enabled**.
+4. Press **Test this CAPTCHA configuration** and complete the challenge that
+   appears. **Save** stays disabled until you do: the portal will not store a
+   challenge it has not just verified with the vendor itself.
+5. Save, then sign out and load the login page in a private window. The widget
+   should render; complete it and sign in.
 
 Two things to know:
 
@@ -211,10 +214,16 @@ Two things to know:
   [`../operations.md`](../operations.md#7-rotating-nexus_secret_key)).
 - **It fails closed.** Enabled with a missing or wrong secret, or an
   unreachable vendor, means **nobody can register or sign in** — every attempt
-  returns a CAPTCHA error. Always verify with a real sign-in in a private
-  window immediately after enabling. If you lock yourself out, an operator can
-  clear the setting directly in the database or re-run with a corrected
-  configuration.
+  returns a CAPTCHA error. The self-test in step 4 is what stops you saving
+  into that state, and it runs again whenever you change the provider, the site
+  key or the secret key. Turning CAPTCHA **off** never needs a challenge, so
+  you can always switch it off while you are still signed in.
+- **If the vendor breaks later**, and nobody can sign in to switch it off, an
+  operator restarts the server with `NEXUS_CAPTCHA_ENFORCEMENT=disabled`. Sign-in
+  and registration then skip the challenge without any of your settings
+  changing, this card shows a warning while it is in force, and the sessions it
+  admits are recorded in the audit log. No database editing is involved. See
+  [`../operations.md`](../operations.md#recovering-a-portal-locked-out-by-captcha).
 
 The site key is public by design (it appears in the login page's config). The
 secret never leaves the server.
@@ -661,8 +670,13 @@ of noise for a newsletter.
 an administrator and you are only an admin, or it is your own account.
 
 **"Nobody can sign in or register after I enabled CAPTCHA."** CAPTCHA fails
-closed. The secret key is missing or wrong, or the vendor is unreachable. An
-operator can clear the CAPTCHA settings server-side to restore access.
+closed, so a secret that is missing or wrong, or a vendor that is unreachable,
+refuses every sign-in. Saving an activation now requires passing a self-test in
+Settings → CAPTCHA first, so this should only happen if the vendor breaks
+afterwards. While you are still signed in, untick **Enabled** and save — that
+needs no challenge. If nobody is signed in, an operator restarts the server with
+`NEXUS_CAPTCHA_ENFORCEMENT=disabled`
+([runbook](../operations.md#recovering-a-portal-locked-out-by-captcha)).
 
 **"New users never get their verification email."** SMTP is unconfigured or
 broken, so verification mail is sitting in the queue. Fix SMTP and send a test;

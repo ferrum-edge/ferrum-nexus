@@ -1,35 +1,110 @@
+/**
+ * Admission and the activation self-test for the `captcha` settings section.
+ *
+ * Two rules meet here, and both refuse *before* anything is written:
+ *
+ * 1. **Completeness** — an enabled configuration needs a provider other than
+ *    `none`, a site key and a usable secret; and a provider move has to bring
+ *    its own secret, because the stored one belongs to the vendor that issued
+ *    it and must never be posted to another.
+ * 2. **The self-test** — turning CAPTCHA on, or moving its provider, site key
+ *    or secret while it is on, makes register *and login* demand a token from
+ *    every account, the enabling super admin included. So the patch has to
+ *    carry a `captcha_token` that the **new** configuration verifies, through
+ *    the same vendor call a login makes. A portal can no longer adopt a
+ *    challenge it cannot check and lock everybody out of sign-in
+ *    (ferrum-nexus#252).
+ *
+ * Turning CAPTCHA *off* deliberately needs no token: that is the in-portal half
+ * of the recovery path, for whoever can still authenticate.
+ *
+ * The vendor round-trip cannot sit inside the transaction (a pooled adapter
+ * re-runs a body the engine rolled back), so the write is a compare-and-swap on
+ * the rows the proof was made against, and a second super admin landing a
+ * CAPTCHA change in that window gets a `409 CONFLICT` rather than a lost update
+ * that stores a site key and a secret nothing ever proved together.
+ */
+
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
 
-import type { UpdateSettingsRequest } from '@ferrum-nexus/shared';
+import type { ApiErrorBody, UpdateSettingsRequest } from '@ferrum-nexus/shared';
 
+import type { CaptchaTransport } from '../auth/captcha.js';
+import type { AuditLogRecord, SettingRecord } from '../db/store.js';
 import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
+
+/** A token the stub vendor accepts for any secret. */
+const GOOD_TOKEN = 'solved-challenge';
 
 const complete = {
   enabled: true,
   provider: 'turnstile' as const,
   site_key: 'public-site',
   secret_key: 'private-captcha',
+  captcha_token: GOOD_TOKEN,
 };
+
+/**
+ * One recorded call to the vendor's `siteverify` endpoint.
+ *
+ * `remoteip` is the administrator's request address, forwarded exactly as a
+ * login forwards the visitor's (the harness injects from `127.0.0.1`); a direct
+ * `verify()` call with no address records `null`.
+ */
+interface VendorCall {
+  secret: string;
+  response: string;
+  remoteip: string | null;
+  /** hCaptcha only; `null` for the vendors whose secret already names one site. */
+  sitekey: string | null;
+}
 
 describe('CAPTCHA activation admission', () => {
   let harness: TestApp;
   let founder: TestSession;
-  let verified: number;
+  let calls: VendorCall[];
+  /** Swapped per test to model a rejecting or unreachable vendor. */
+  let accept: (secret: string, token: string) => boolean;
+  let unreachable: boolean;
+  /**
+   * Runs once, from inside the vendor call, then clears itself.
+   *
+   * The self-test is the whole window between the plan's snapshot of the
+   * `captcha` rows and the transaction that writes them, so this is where a
+   * second super admin's save has to land to model the race.
+   */
+  let interleaved: (() => Promise<void>) | null;
+
+  const transport: CaptchaTransport = async (_url, params) => {
+    const secret = params.get('secret') ?? '';
+    const response = params.get('response') ?? '';
+    calls.push({
+      secret,
+      response,
+      remoteip: params.get('remoteip'),
+      sitekey: params.get('sitekey'),
+    });
+    if (unreachable) throw new Error('vendor unreachable');
+    // Taken and cleared before it runs: the interleaved save goes through this
+    // same transport, and must not interleave itself.
+    const concurrent = interleaved;
+    interleaved = null;
+    await concurrent?.();
+    return accept(secret, response)
+      ? { success: true, errors: [] }
+      : { success: false, errors: ['invalid-input-response'] };
+  };
 
   before(async () => {
-    harness = await buildTestApp({
-      deps: {
-        captchaTransport: async () => {
-          verified += 1;
-          return { success: true, errors: [] };
-        },
-      },
-    });
+    harness = await buildTestApp({ deps: { captchaTransport: transport } });
     founder = await harness.registerUser();
   });
   beforeEach(async () => {
-    verified = 0;
+    calls = [];
+    accept = (_secret, token) => token === GOOD_TOKEN;
+    unreachable = false;
+    interleaved = null;
     await harness.store.settings.delete('captcha');
     await harness.store.settings.delete('captcha.secret_key');
   });
@@ -45,6 +120,27 @@ describe('CAPTCHA activation admission', () => {
     });
   }
 
+  /** Every row a refused patch must have left exactly as it found it. */
+  interface Baseline {
+    rows: SettingRecord[];
+    audit: AuditLogRecord[];
+  }
+
+  async function snapshot(): Promise<Baseline> {
+    return {
+      rows: await harness.store.settings.all(),
+      audit: await harness.auditRows('admin.settings_update'),
+    };
+  }
+
+  /** Assert a refusal stored nothing at all — no setting row, no audit row. */
+  async function assertNothingCommitted(baseline: Baseline): Promise<void> {
+    assert.deepEqual(await harness.store.settings.all(), baseline.rows);
+    assert.deepEqual(await harness.auditRows('admin.settings_update'), baseline.audit);
+  }
+
+  /* ── Completeness ─────────────────────────────────────────────────────── */
+
   const invalid: UpdateSettingsRequest['captcha'][] = [
     { ...complete, site_key: null },
     { ...complete, site_key: '   ' },
@@ -55,38 +151,238 @@ describe('CAPTCHA activation admission', () => {
   ];
   for (const [index, captcha] of invalid.entries()) {
     it(`rejects incomplete activation ${index + 1} without committing a patch prefix`, async () => {
-      const beforeRows = await harness.store.settings.all();
-      const beforeAudit = await harness.auditRows('admin.settings_update');
+      const baseline = await snapshot();
       const response = await save(captcha);
       assert.equal(response.statusCode, 400);
-      assert.equal(response.json().error.code, 'VALIDATION_FAILED');
-      assert.deepEqual(await harness.store.settings.all(), beforeRows);
-      assert.deepEqual(await harness.auditRows('admin.settings_update'), beforeAudit);
+      assert.equal(response.json<ApiErrorBody>().error.code, 'VALIDATION_FAILED');
+      await assertNothingCommitted(baseline);
       assert.equal((await harness.services.captcha.getPublicConfig()).enabled, false);
       assert.doesNotMatch(response.body, /private-captcha/);
+      // An unusable configuration is refused on its own terms; the vendor is
+      // never asked about a site key and secret that cannot both be present.
+      assert.deepEqual(calls, []);
     });
   }
 
-  it('accepts new/stored secrets and refuses to clear active keys', async () => {
+  /* ── The activation self-test ─────────────────────────────────────────── */
+
+  it('refuses an activation carrying no token and stores nothing', async () => {
+    const baseline = await snapshot();
+    const response = await save({ ...complete, captcha_token: undefined });
+    assert.equal(response.statusCode, 400, response.body);
+    const body = response.json<ApiErrorBody>();
+    assert.equal(body.error.code, 'CAPTCHA_SELF_TEST_FAILED');
+    assert.deepEqual(body.error.details, { reason: 'token_required' });
+    await assertNothingCommitted(baseline);
+    assert.equal((await harness.services.captcha.getPublicConfig()).enabled, false);
+    assert.deepEqual(calls, []);
+  });
+
+  it('refuses an activation whose token the new configuration rejects', async () => {
+    const baseline = await snapshot();
+    const response = await save({ ...complete, captcha_token: 'stale-token' });
+    assert.equal(response.statusCode, 400, response.body);
+    const body = response.json<ApiErrorBody>();
+    assert.equal(body.error.code, 'CAPTCHA_SELF_TEST_FAILED');
+    assert.deepEqual(body.error.details, { reason: 'rejected' });
+    await assertNothingCommitted(baseline);
+    assert.equal((await harness.services.captcha.getPublicConfig()).enabled, false);
+    // Verified against the configuration being saved, not the stored one.
+    assert.deepEqual(calls, [
+      {
+        secret: 'private-captcha',
+        response: 'stale-token',
+        remoteip: '127.0.0.1',
+        sitekey: null,
+      },
+    ]);
+    assert.doesNotMatch(response.body, /private-captcha/);
+  });
+
+  it('refuses an activation the vendor could not be reached to confirm', async () => {
+    unreachable = true;
+    const baseline = await snapshot();
+    const response = await save(complete);
+    assert.equal(response.statusCode, 400, response.body);
+    const body = response.json<ApiErrorBody>();
+    assert.equal(body.error.code, 'CAPTCHA_SELF_TEST_FAILED');
+    assert.deepEqual(body.error.details, { reason: 'provider_unreachable' });
+    await assertNothingCommitted(baseline);
+    assert.equal((await harness.services.captcha.getPublicConfig()).enabled, false);
+  });
+
+  it('stores an activation whose token the new configuration accepts', async () => {
+    const beforeAudit = await harness.auditRows('admin.settings_update');
     assert.equal((await save(complete)).statusCode, 200);
     assert.deepEqual(await harness.services.captcha.getPublicConfig(), {
       enabled: true,
       provider: 'turnstile',
       site_key: 'public-site',
     });
-    await harness.services.captcha.verify('synthetic-token');
-    assert.equal(verified, 1);
+    assert.deepEqual(calls, [
+      { secret: 'private-captcha', response: GOOD_TOKEN, remoteip: '127.0.0.1', sitekey: null },
+    ]);
+    const audit = await harness.auditRows('admin.settings_update');
+    assert.equal(audit.length, beforeAudit.length + 1);
+    assert.equal(audit[0]?.details?.captcha_self_test, 'passed');
+    assert.doesNotMatch(JSON.stringify(audit), /private-captcha/);
+  });
+
+  it('proves the secret in the patch rather than the one already stored', async () => {
+    assert.equal((await save(complete)).statusCode, 200);
+    // From here the stub vendor answers for one secret only, so which secret
+    // the self-test sends is the whole difference between the two saves below.
+    accept = (secret) => secret === 'replacement-secret';
+
+    const stale = await save({ secret_key: 'private-captcha', captcha_token: GOOD_TOKEN });
+    assert.equal(stale.statusCode, 400, stale.body);
+    assert.deepEqual(stale.json<ApiErrorBody>().error.details, { reason: 'rejected' });
+
+    const accepted = await save({ secret_key: 'replacement-secret', captcha_token: GOOD_TOKEN });
+    assert.equal(accepted.statusCode, 200, accepted.body);
+    assert.deepEqual(calls.at(-1), {
+      secret: 'replacement-secret',
+      response: GOOD_TOKEN,
+      remoteip: '127.0.0.1',
+      sitekey: null,
+    });
+  });
+
+  type CaptchaPatch = NonNullable<UpdateSettingsRequest['captcha']>;
+  const moves: { name: string; patch: CaptchaPatch }[] = [
+    // A provider move has to bring its own secret; that rule has its own case
+    // below, and this one is about the token the move still needs on top of it.
+    { name: 'provider', patch: { provider: 'hcaptcha', secret_key: 'hcaptcha-secret' } },
+    { name: 'site key', patch: { site_key: 'another-site' } },
+    { name: 'secret key', patch: { secret_key: 'another-secret' } },
+  ];
+  for (const move of moves) {
+    it(`re-requires a token when the ${move.name} changes while CAPTCHA is on`, async () => {
+      assert.equal((await save(complete)).statusCode, 200);
+      const baseline = await snapshot();
+      const refused = await save(move.patch);
+      assert.equal(refused.statusCode, 400, refused.body);
+      assert.equal(refused.json<ApiErrorBody>().error.code, 'CAPTCHA_SELF_TEST_FAILED');
+      await assertNothingCommitted(baseline);
+      const accepted = await save({ ...move.patch, captcha_token: GOOD_TOKEN });
+      assert.equal(accepted.statusCode, 200, accepted.body);
+    });
+  }
+
+  it('binds the self-test token to the site key for hCaptcha, and only for it', async () => {
+    // hCaptcha's secret is account-scoped and may cover many site keys, so its
+    // `siteverify` takes the site key to bind the token to one of them. Without
+    // it a token solved for another of the account's sites would prove a typo'd
+    // `site_key` — the self-test blessing the very lockout it exists to stop.
+    const hcaptcha = await save({ ...complete, provider: 'hcaptcha' });
+    assert.equal(hcaptcha.statusCode, 200, hcaptcha.body);
+    assert.deepEqual(calls.at(-1), {
+      secret: 'private-captcha',
+      response: GOOD_TOKEN,
+      remoteip: '127.0.0.1',
+      sitekey: 'public-site',
+    });
+
+    // Turnstile and reCAPTCHA issue a secret per site, so verifying the token
+    // already proves the site key and the parameter would be an unknown field.
+    for (const provider of ['turnstile', 'recaptcha'] as const) {
+      const response = await save({ ...complete, provider });
+      assert.equal(response.statusCode, 200, response.body);
+      assert.equal(calls.at(-1)?.sitekey, null);
+    }
+  });
+
+  it('refuses a provider change that does not bring its own secret key', async () => {
+    assert.equal((await save(complete)).statusCode, 200);
+    const baseline = await snapshot();
+    calls = [];
+
+    const refused = await save({ provider: 'hcaptcha', captcha_token: GOOD_TOKEN });
+    assert.equal(refused.statusCode, 400, refused.body);
+    const body = refused.json<ApiErrorBody>();
+    assert.equal(body.error.code, 'VALIDATION_FAILED');
+    assert.match(body.error.message, /secret_key/);
+    await assertNothingCommitted(baseline);
+    // The point of refusing before the self-test: a secret issued by Turnstile
+    // is never posted to hCaptcha's `siteverify`, where it would be both
+    // useless and disclosed.
+    assert.deepEqual(calls, []);
+
+    const accepted = await save({
+      provider: 'hcaptcha',
+      secret_key: 'hcaptcha-secret',
+      captcha_token: GOOD_TOKEN,
+    });
+    assert.equal(accepted.statusCode, 200, accepted.body);
+  });
+
+  it('refuses a patch whose CAPTCHA rows moved while the vendor was answering', async () => {
+    assert.equal((await save(complete)).statusCode, 200);
+    // Everything the interleaved save leaves behind, read the moment it commits.
+    let winnerRows: SettingRecord[] = [];
+    let winnerAudit: AuditLogRecord[] = [];
+    // A second super admin proves and commits a CAPTCHA change inside the
+    // window this patch spends waiting on the vendor — the one window the plan
+    // cannot hold a transaction across.
+    interleaved = async () => {
+      const other = await save({ site_key: 'another-site', captcha_token: GOOD_TOKEN });
+      assert.equal(other.statusCode, 200, other.body);
+      winnerRows = await harness.store.settings.all();
+      winnerAudit = await harness.auditRows('admin.settings_update');
+    };
+
+    const response = await save({ secret_key: 'replacement-secret', captcha_token: GOOD_TOKEN });
+    assert.equal(response.statusCode, 409, response.body);
+    assert.equal(response.json<ApiErrorBody>().error.code, 'CONFLICT');
+
+    assert.notEqual(winnerRows.length, 0);
+    // Nothing of the losing patch survived: not the secret it had just proved,
+    // not the `site_key` its stale merge would have reverted, not its branding
+    // field, not an audit row. Silently keeping the last writer would have
+    // stored a site key and a secret no self-test ever saw together.
+    assert.deepEqual(await harness.store.settings.all(), winnerRows);
+    assert.deepEqual(await harness.auditRows('admin.settings_update'), winnerAudit);
+    assert.equal((await harness.services.captcha.getPublicConfig()).site_key, 'another-site');
+  });
+
+  it('needs no token to re-save an unchanged configuration', async () => {
+    assert.equal((await save(complete)).statusCode, 200);
+    calls = [];
     assert.equal((await save({ enabled: true })).statusCode, 200);
-    assert.equal((await save({ site_key: null })).statusCode, 400);
-    assert.equal((await save({ secret_key: null })).statusCode, 400);
-    assert.equal((await save({ provider: 'none' })).statusCode, 400);
-    assert.equal(
-      (await save({ enabled: false, secret_key: null, site_key: null })).statusCode,
-      200,
-    );
+    assert.equal((await save({ site_key: 'public-site' })).statusCode, 200);
+    assert.equal((await save({ provider: 'turnstile' })).statusCode, 200);
+    // Nothing about the challenge moved, so nothing was asked of the vendor.
+    assert.deepEqual(calls, []);
+  });
+
+  it('needs no token to turn CAPTCHA off, which is the in-portal way back', async () => {
+    assert.equal((await save(complete)).statusCode, 200);
+    calls = [];
+    const disabled = await save({ enabled: false, secret_key: null, site_key: null });
+    assert.equal(disabled.statusCode, 200, disabled.body);
     assert.equal((await harness.services.captcha.getPublicConfig()).enabled, false);
-    await harness.services.captcha.verify(undefined);
-    assert.equal(verified, 1);
+    assert.deepEqual(calls, []);
+    assert.equal(await harness.services.captcha.verify(undefined), 'not_required');
+  });
+
+  it('leaves an unrelated patch alone', async () => {
+    const response = await harness.authed(founder, {
+      method: 'PUT',
+      url: '/api/admin/settings',
+      payload: { branding: { tagline: 'No CAPTCHA section here' } },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.deepEqual(calls, []);
+  });
+
+  /* ── Refusals that survive the self-test ──────────────────────────────── */
+
+  it('refuses to clear a key the active configuration needs', async () => {
+    assert.equal((await save(complete)).statusCode, 200);
+    assert.equal((await save({ site_key: null, captcha_token: GOOD_TOKEN })).statusCode, 400);
+    assert.equal((await save({ secret_key: null, captcha_token: GOOD_TOKEN })).statusCode, 400);
+    assert.equal((await save({ provider: 'none', captcha_token: GOOD_TOKEN })).statusCode, 400);
+    assert.equal((await harness.services.captcha.getPublicConfig()).enabled, true);
   });
 
   it('keeps verification closed when an encrypted secret is unreadable', async () => {
@@ -97,9 +393,11 @@ describe('CAPTCHA activation admission', () => {
       harness.services.captcha.verify('synthetic-token'),
       /not fully configured/,
     );
-    assert.equal(verified, 0);
+    // Re-saving the same block cannot repair it: with no readable secret there
+    // is nothing to prove the configuration with.
     assert.equal((await save({ enabled: true })).statusCode, 400);
-    assert.equal((await save({ secret_key: 'replacement-secret' })).statusCode, 200);
+    const replaced = await save({ secret_key: 'replacement-secret', captcha_token: GOOD_TOKEN });
+    assert.equal(replaced.statusCode, 200, replaced.body);
   });
 
   it('hides incomplete legacy widgets and keeps verification closed', async () => {
@@ -118,6 +416,15 @@ describe('CAPTCHA activation admission', () => {
       harness.services.captcha.verify('synthetic-token'),
       /not fully configured/,
     );
-    assert.equal(verified, 0);
+    assert.deepEqual(calls, []);
+  });
+
+  it('verifies a solved challenge on login once activation has been proven', async () => {
+    assert.equal((await save(complete)).statusCode, 200);
+    calls = [];
+    assert.equal(await harness.services.captcha.verify(GOOD_TOKEN), 'verified');
+    assert.deepEqual(calls, [
+      { secret: 'private-captcha', response: GOOD_TOKEN, remoteip: null, sitekey: null },
+    ]);
   });
 });

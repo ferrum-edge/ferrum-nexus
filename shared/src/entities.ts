@@ -594,6 +594,18 @@ export interface GatewaySettings {
 /** Supported CAPTCHA vendors. */
 export type CaptchaProvider = 'none' | 'recaptcha' | 'hcaptcha' | 'turnstile';
 
+/**
+ * Whether the server acts on the stored CAPTCHA configuration at all.
+ *
+ * Set from the environment (`NEXUS_CAPTCHA_ENFORCEMENT`) and never through the
+ * API: it is the operator's break-glass switch for a portal whose stored
+ * CAPTCHA configuration is wrong or whose vendor is unreachable, which would
+ * otherwise refuse every sign-in — including the super admin's. `disabled`
+ * makes register and login skip verification and hides the widget; the stored
+ * configuration is left exactly as it was.
+ */
+export type CaptchaEnforcement = 'enforced' | 'disabled';
+
 /** CAPTCHA configuration safe for the browser — never carries the secret key. */
 export interface CaptchaPublicConfig {
   enabled: boolean;

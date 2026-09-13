@@ -110,6 +110,20 @@ FIRST-RUN BOOTSTRAP: this portal has no super_admin yet.
 The generated token lives for the life of that process and differs per
 instance, so pin `NEXUS_BOOTSTRAP_TOKEN` for anything running more than one.
 
+### Locked out by CAPTCHA
+
+CAPTCHA is configured in **Admin → Settings** and fails closed, so a wrong site
+key or an unreachable vendor refuses every password login, the super admin's
+included. Saving an activation therefore requires solving the challenge in that
+settings page first — the portal verifies the token with the vendor before it
+stores the configuration. If a portal is stuck anyway (the vendor broke after
+the fact, say), start the server with `NEXUS_CAPTCHA_ENFORCEMENT=disabled`,
+which makes sign-in and registration skip the challenge without changing a
+stored setting, fix the configuration, then remove the variable and restart.
+Every session admitted that way is audited, and the running server says so at
+startup. Full runbook:
+[`docs/operations.md`](docs/operations.md#recovering-a-portal-locked-out-by-captcha).
+
 ## Database
 
 Ferrum Nexus uses string UUIDs across all databases so PostgreSQL, MySQL,

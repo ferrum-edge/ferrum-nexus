@@ -98,6 +98,22 @@ export function captchaFailed(message = 'CAPTCHA verification failed'): NexusErr
   return new NexusError('CAPTCHA_FAILED', message);
 }
 
+/** Why a CAPTCHA activation self-test did not pass. */
+export type CaptchaSelfTestReason = 'token_required' | 'rejected' | 'provider_unreachable';
+
+/**
+ * 400 — a CAPTCHA settings change did not prove the configuration it describes.
+ *
+ * Separate from {@link captchaFailed} on purpose: that one is a visitor failing
+ * a challenge the portal already demands, while this is the administrator's own
+ * activation self-test, and the patch that raised it stored nothing. `reason`
+ * lets the settings page say which half is wrong — no token was minted at all,
+ * the vendor rejected the one that was, or the vendor could not be reached.
+ */
+export function captchaSelfTestFailed(reason: CaptchaSelfTestReason, message: string): NexusError {
+  return new NexusError('CAPTCHA_SELF_TEST_FAILED', message, { reason });
+}
+
 /** 403 — the account exists but its email address is not verified yet. */
 export function emailNotVerified(message = 'Email address has not been verified'): NexusError {
   return new NexusError('EMAIL_NOT_VERIFIED', message);

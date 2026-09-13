@@ -57,6 +57,7 @@ import {
   SUPER_ADMIN_LOCK_CONFLICT_MESSAGE,
 } from '../lib/keyed-serializer.js';
 import { faultInjectingStore } from './fault-injection.js';
+import { testCaptchaTransport } from './helpers.js';
 import { runMessageBudgetContract } from './message-budget-contract.js';
 import { runOutboxFencingContract } from './outbox-fencing-contract.js';
 import { runPasswordChangeContract } from './password-change-contract.js';
@@ -88,7 +89,9 @@ function authServiceOver(store: NexusStore): AuthService {
     store,
     crypto,
     audit: createAuditService(store),
-    captcha: createCaptchaService({ store, crypto }),
+    // The stub transport, so a suite that ever does configure CAPTCHA cannot
+    // reach a real vendor from here either.
+    captcha: createCaptchaService({ store, crypto, transport: testCaptchaTransport }),
     locks: createKeyedSerializer({
       leases: store.leases,
       conflictMessage: SUPER_ADMIN_LOCK_CONFLICT_MESSAGE,
