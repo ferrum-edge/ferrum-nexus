@@ -89,6 +89,7 @@ See the README for a two-stack example.
 | `NEXUS_COOKIE_SECURE`                        | `true` unless `NEXUS_ENV=development`        | Marks `nexus_session` and `nexus_csrf` `Secure` and turns on HSTS. Set `false` only to serve the portal over plaintext `http://`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `NEXUS_LOG_LEVEL`                            | `info`                                       | One of `fatal`, `error`, `warn`, `info`, `debug`, `trace`, `silent`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `NEXUS_SESSION_TTL`                          | `43200` (12 h)                               | Session idle lifetime in seconds; 60 – 2 592 000. Sliding.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `NEXUS_CAPTCHA_ENFORCEMENT`                  | `enforced`                                   | `enforced` \| `disabled` (case-insensitive; blank means `enforced`). **The CAPTCHA break-glass switch.** CAPTCHA is configured from the admin UI and fails closed, so a wrong site key, an undecryptable secret or an unreachable vendor refuses **every** password login, the super admin who enabled it included. `disabled` makes register and login skip verification and hides the widget **without touching a stored setting**; it logs a startup banner while it is set, is reported to administrators as `captcha.enforcement` on `GET /api/admin/settings`, and marks every session it lets through with `captcha_bypassed: true` in the audit log. Deliberately not a boolean — `=0` and `=false` are refused at startup — and not settable through the API. See [Recovering a portal locked out by CAPTCHA](#recovering-a-portal-locked-out-by-captcha).     |
 | `NEXUS_RATE_LIMIT_ENABLED`                   | `true`                                       | Installs the 20 req/min limiter on `/api/auth/*`, the 120 req/min limiters on `/api/health*` and `/api/branding` (all per client IP), the 30 req/min limiter on the mutating `/api/apis/*` routes, the 10 req/min (new threads) and 30 req/min (replies) limiters on `/api/threads/*`, and the 10 req/min (create) and 30 req/min (cancel) limiters on `/api/access-requests/*` (all three per account). Forced off when `NEXUS_ENV=test`. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                                                                       |
 | `NEXUS_HEALTH_CACHE_MS`                      | `5000`                                       | How long `GET /api/health` and `GET /api/health/edge` reuse a dependency probe. Within the window the database and gateway are each probed once and the result — including a failing one — is shared by every caller; concurrent callers also share the one in-flight probe. `0` disables the cache and probes on every request. Range 0–60000. See [§9](#9-health-checks).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `NEXUS_BRANDING_CACHE_MS`                    | `5000`                                       | How long `GET /api/branding` reuses its assembled payload. Within the window the settings reads run once and the response is marked `Cache-Control: public, max-age=…` with an `ETag`; concurrent callers share the one in-flight assembly. `0` disables the cache. Range 0–60000. See [Abuse controls](#abuse-controls).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -578,6 +579,52 @@ administrator has been seated. To recover:
 No database surgery is involved, and nothing here lets a portal that already
 has a super admin mint another one: with a seated administrator the token is
 inert and registration follows the ordinary policy.
+
+### Recovering a portal locked out by CAPTCHA
+
+Enabling CAPTCHA makes `POST /api/auth/login` and `POST /api/auth/register`
+require a `captcha_token`, and verification **fails closed**: a wrong site key,
+a secret that no longer decrypts, an unreachable vendor or a CAPTCHA script the
+browser cannot load all answer `400 CAPTCHA_FAILED`. Every account is affected,
+including the super admin who turned it on, and no session is left to turn it
+off with (ferrum-nexus#252).
+
+Two things now stand between a portal and that state.
+
+**The activation self-test.** `PUT /api/admin/settings` refuses a `captcha`
+section that turns the challenge on, or that moves its `provider`, `site_key` or
+`secret_key` while it is on, unless the patch carries a `captcha_token` the
+**new** configuration verifies. The server makes the same vendor call a login
+makes, before it writes anything; a patch that fails is answered
+`400 CAPTCHA_SELF_TEST_FAILED` (`details.reason` is `token_required`,
+`rejected` or `provider_unreachable`) and stores nothing at all. **Admin →
+Settings → CAPTCHA** renders the widget from the values in the form, so solving
+it there is what mints the token. Turning CAPTCHA **off** needs no token, so
+whoever can still authenticate is always one save away from switching it off.
+
+**The break-glass variable**, for when nobody can authenticate any more:
+
+1. **Set `NEXUS_CAPTCHA_ENFORCEMENT=disabled`** in the server's environment and
+   restart every instance. Each one logs a banner naming the variable for as
+   long as it is set. Nothing in the database changes.
+2. **Sign in.** Register and login now accept requests without a token, and the
+   widget is hidden (`GET /api/auth/captcha` reports `enabled: false`), so a
+   vendor script that will not load cannot block the form either. Sessions
+   created this way are audited: the `auth.login` and `auth.register` rows carry
+   `captcha_bypassed: true`.
+3. **Fix or switch off the configuration** in **Admin → Settings → CAPTCHA**.
+   The card shows a warning that enforcement is off, and the settings response
+   reports `captcha.enforcement: "disabled"`, so the state is never invisible.
+   The activation self-test still applies here — the widget is rendered from the
+   pending configuration — so a repaired configuration is proven before it is
+   stored.
+4. **Remove the variable and restart.** Confirm `captcha.enforcement` reads
+   `enforced` again, then sign out and in once to prove the challenge works.
+
+Leaving the variable set leaves registration unprotected, which is why it is
+loud in three places at once. It is not a permanent setting: to run without a
+challenge, turn CAPTCHA off in the settings, which is a recorded and audited
+administrative decision rather than an invisible host-level one.
 
 ---
 

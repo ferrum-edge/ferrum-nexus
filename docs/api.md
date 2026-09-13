@@ -123,6 +123,7 @@ validation issues, a conflicting slug, an Edge status).
 | `CONFLICT`                                | 409  | Uniqueness or state conflict (duplicate email/slug, active grant, already decided).                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `CSRF_MISMATCH`                           | 403  | `X-Nexus-CSRF` missing or not matching the cookie/session.                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `CAPTCHA_FAILED`                          | 400  | CAPTCHA token missing, expired, or rejected by the vendor.                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `CAPTCHA_SELF_TEST_FAILED`                | 400  | A `captcha` settings change did not prove the configuration it describes. Distinct from `CAPTCHA_FAILED`, which is a visitor failing a challenge the portal already demands: this is the administrator's own activation self-test, and **nothing is stored** when it fails. `details.reason` is `token_required`, `rejected` or `provider_unreachable`.                                                                                                                                                             |
 | `RATE_LIMITED`                            | 429  | Too many requests from this identity/IP.                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `QUOTA_EXCEEDED`                          | 429  | A configured per-account allowance is already fully used. `details` is `{ limit, setting, … }` naming the environment variable an operator would raise — `{ limit, current, setting }` for a standing ceiling such as the API quota, `{ limit, window, setting }` for a period budget such as the daily message budget. Distinct from `RATE_LIMITED`, which is about request frequency and clears on its own.                                                                                                       |
 | `EMAIL_NOT_VERIFIED`                      | 403  | Account exists but its email is unverified and verification is required.                                                                                                                                                                                                                                                                                                                                                                                                                                            |
@@ -565,6 +566,12 @@ _public_ — widget configuration. Never carries the vendor secret.
 ```json
 { "enabled": true, "provider": "turnstile", "site_key": "0x4AAA…" }
 ```
+
+`enabled` is `false` — with a `null` `site_key` — whenever a token is not
+actually required, which includes a server running with
+`NEXUS_CAPTCHA_ENFORCEMENT=disabled`. A client can therefore always take this
+endpoint at its word: no widget here means no `captcha_token` on login or
+register.
 
 ---
 
@@ -1045,7 +1052,13 @@ report whether one is stored.
     "tagline": null,
     "support_email": null
   },
-  "captcha": { "enabled": false, "provider": "none", "site_key": null, "secret_set": false },
+  "captcha": {
+    "enabled": false,
+    "provider": "none",
+    "site_key": null,
+    "secret_set": false,
+    "enforcement": "enforced"
+  },
   "smtp": {
     "host": "smtp.example.com",
     "port": 587,
@@ -1066,6 +1079,15 @@ report whether one is stored.
 `gateway.public_url` is the stored override when one is set, otherwise the
 `FERRUM_GATEWAY_PUBLIC_URL` environment default, otherwise `null`.
 
+`captcha.enforcement` is `enforced` or `disabled`, read from the server's
+`NEXUS_CAPTCHA_ENFORCEMENT` and **not settable through this API**. `disabled` is
+the operator's break-glass switch for a portal whose stored CAPTCHA
+configuration refuses every sign-in: register and login skip verification and
+the widget is hidden, whatever `captcha.enabled` says. It is reported here so an
+administrator can tell an inert configuration from a portal ignoring its own
+settings — see
+[`operations.md`](operations.md#recovering-a-portal-locked-out-by-captcha).
+
 ### `PUT /api/admin/settings`
 
 _admin_, except `smtp` and `captcha` which are **_super_admin_** — partial
@@ -1083,7 +1105,7 @@ send its gateway credentials.
 | Section        | Fields                                                                                                                                                                                                                                                                                                                                                                                                       |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `branding`     | `portal_name` (1–120), `logo_data_url` (base64 image data URL, ≤ 512 KiB, nullable), `primary_color` / `accent_color` (CSS hex `#rgb`–`#rrggbbaa`), `default_theme` (`dark`\|`light`\|`system`), `tagline` (≤ 280, nullable), `support_email` (nullable)                                                                                                                                                     |
-| `captcha`      | _super_admin_ — `enabled`, `provider` (`none`\|`recaptcha`\|`hcaptcha`\|`turnstile`), `site_key` (nullable), `secret_key` — **write-only**, stored AES-256-GCM encrypted; pass `null` or `""` to clear                                                                                                                                                                                                       |
+| `captcha`      | _super_admin_ — `enabled`, `provider` (`none`\|`recaptcha`\|`hcaptcha`\|`turnstile`), `site_key` (nullable), `secret_key` — **write-only**, stored AES-256-GCM encrypted; pass `null` or `""` to clear — and `captcha_token`, the activation self-test's proof (below)                                                                                                                                       |
 | `smtp`         | _super_admin_ — `host`, `port` (1–65535), `secure`, `username`, `password` — **write-only**, encrypted; `null`/`""` clears — `from_address`. Changing `host`, `port`, `secure` or `username` while a password is stored (or set by env) requires sending a fresh `password` in the same request (`400 VALIDATION_FAILED` otherwise), so a stored credential can never be replayed against a different server |
 | `registration` | `open_registration`, `require_email_verification`, `allowed_roles` (array of roles)                                                                                                                                                                                                                                                                                                                          |
 | `gateway`      | _super_admin_ — `public_url` — absolute `http(s)` **origin** of the gateway's proxy listener, no path, query or credentials; a trailing slash is stripped. `null` or `""` clears the override and falls back to `FERRUM_GATEWAY_PUBLIC_URL`. Whoever controls it directs clients to send their gateway credentials to that origin, so it needs `super_admin` like `smtp` and `captcha`.                      |
@@ -1104,6 +1126,25 @@ non-empty site key, and a usable secret (supplied now or already stored).
 CAPTCHA in the same patch before clearing a required key. An unreadable stored
 secret must be replaced or re-encrypted before activation can be saved.
 
+**The activation self-test.** A patch that turns CAPTCHA on, or that changes
+`provider`, `site_key` or `secret_key` while it is on, must also carry a
+`captcha_token` minted by the **configuration the patch describes**. The server
+verifies it with the vendor — the same call a login makes — before it writes
+anything, and a patch that cannot be proven is refused with
+`400 CAPTCHA_SELF_TEST_FAILED` (`details.reason`: `token_required`, `rejected`,
+`provider_unreachable`) leaving every setting exactly as it was. Without this a
+mistaken save made register **and login** demand a challenge the portal could
+not verify, locking out every account including the super admin who saved it
+(ferrum-nexus#252). The admin settings page renders the widget from the pending
+values, which is where the token comes from.
+
+Nothing else needs a token: re-saving an unchanged configuration does not, and
+turning CAPTCHA **off** never does — that is the in-portal way back for whoever
+can still authenticate. When the change is proven, the `admin.settings_update`
+audit row records `captcha_self_test: "passed"`. For a portal where nobody can
+authenticate any more, see
+[`operations.md`](operations.md#recovering-a-portal-locked-out-by-captcha).
+
 The public CAPTCHA configuration advertises an active widget only with a site
 key and a stored secret. Incomplete legacy settings and unreadable secrets
 still fail verification closed; missing configuration never silently exempts
@@ -1117,7 +1158,8 @@ curl -sS -b cookies.txt -X PUT http://127.0.0.1:8787/api/admin/settings \
   -H 'content-type: application/json' \
   -H "X-Nexus-CSRF: $CSRF" \
   -d '{"captcha":{"enabled":true,"provider":"turnstile",
-        "site_key":"0x4AAA…","secret_key":"0x4AAA…secret"}}'
+        "site_key":"0x4AAA…","secret_key":"0x4AAA…secret",
+        "captcha_token":"<token solved with those values>"}}'
 ```
 
 ### `POST /api/admin/settings/smtp-test`

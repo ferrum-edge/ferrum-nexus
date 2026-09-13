@@ -20,6 +20,18 @@ export const ERROR_CODES = {
   CSRF_MISMATCH: 'CSRF_MISMATCH',
   /** CAPTCHA token missing, expired, or rejected by the provider. HTTP 400. */
   CAPTCHA_FAILED: 'CAPTCHA_FAILED',
+  /**
+   * A CAPTCHA settings change did not prove the configuration it describes
+   * works. HTTP 400.
+   *
+   * Distinct from `CAPTCHA_FAILED`, which is a visitor failing a challenge the
+   * portal already demands: this one is the administrator's own activation
+   * self-test, and nothing is stored when it fails — the portal keeps whatever
+   * CAPTCHA configuration it had rather than adopting one that would refuse
+   * every sign-in. `details.reason` is `token_required`, `rejected` or
+   * `provider_unreachable`.
+   */
+  CAPTCHA_SELF_TEST_FAILED: 'CAPTCHA_SELF_TEST_FAILED',
   /** Too many requests from this identity/IP. HTTP 429. */
   RATE_LIMITED: 'RATE_LIMITED',
   /**
@@ -96,6 +108,7 @@ export const ERROR_CODE_STATUS: Readonly<Record<ErrorCode, number>> = {
   CONFLICT: 409,
   CSRF_MISMATCH: 403,
   CAPTCHA_FAILED: 400,
+  CAPTCHA_SELF_TEST_FAILED: 400,
   RATE_LIMITED: 429,
   QUOTA_EXCEEDED: 429,
   EMAIL_NOT_VERIFIED: 403,

@@ -5,7 +5,7 @@ import type { ApiErrorBody, UpdateSettingsRequest } from '@ferrum-nexus/shared';
 
 import type { NexusStore } from '../db/store.js';
 import { faultInjectingStore, type FaultInjectingStore } from './fault-injection.js';
-import { buildTestApp, type TestApp, type TestSession } from './helpers.js';
+import { buildTestApp, TEST_CAPTCHA_TOKEN, type TestApp, type TestSession } from './helpers.js';
 
 /** The real settings endpoint must roll back configuration and audit on every adapter. */
 export function runSettingsTransactionContract(
@@ -76,6 +76,9 @@ export function runSettingsTransactionContract(
             provider: 'turnstile',
             site_key: 'public-site',
             secret_key: 'private-captcha',
+            // Activating CAPTCHA has to prove the configuration first; the
+            // harness's stub vendor accepts exactly this token.
+            captcha_token: TEST_CAPTCHA_TOKEN,
           },
         },
         repo: 'settings',
@@ -106,6 +109,9 @@ export function runSettingsTransactionContract(
             provider: 'turnstile',
             site_key: 'public-site',
             secret_key: 'private-captcha',
+            // Activating CAPTCHA has to prove the configuration first; the
+            // harness's stub vendor accepts exactly this token.
+            captcha_token: TEST_CAPTCHA_TOKEN,
           },
           smtp: { host: 'mail.example.test', password: 'private-smtp' },
           registration: { open_registration: false },

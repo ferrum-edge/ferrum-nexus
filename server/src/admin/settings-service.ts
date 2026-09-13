@@ -14,7 +14,7 @@
  * | `smtp.password`   | SMTP password                              | **yes**   |
  * | `registration`    | open registration / verification policy    | no        |
  *
- * Three invariants the rest of the server relies on:
+ * Four invariants the rest of the server relies on:
  *
  * 1. **Secrets are write-only.** `password`/`secret_key` are never returned;
  *    the DTOs expose `password_set`/`secret_set` booleans instead.
@@ -24,6 +24,13 @@
  * 3. **`smtp`, `captcha`, and `gateway` are `super_admin`-only** (see
  *    {@link PRIVILEGED_SETTINGS_SECTIONS}); `branding` and `registration` are
  *    editable by any `admin`.
+ * 4. **A CAPTCHA activation proves itself before it is stored.** Turning
+ *    CAPTCHA on — or moving its provider, site key or secret while it is on —
+ *    makes register *and login* demand a token from every account, the
+ *    enabling super admin included, so the patch has to carry a
+ *    `captcha_token` the new configuration accepts or nothing is written
+ *    (ferrum-nexus#252). The vendor call happens **before** the transaction
+ *    opens, because a transaction body here must be re-runnable.
  */
 
 import { createHash } from 'node:crypto';
@@ -46,7 +53,12 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { AuditAction, type AuditActor, type AuditService } from '../audit/service.js';
-import { CAPTCHA_SECRET_SETTINGS_KEY, CAPTCHA_SETTINGS_KEY } from '../auth/captcha.js';
+import {
+  CAPTCHA_SECRET_SETTINGS_KEY,
+  CAPTCHA_SETTINGS_KEY,
+  type CaptchaService,
+  type StoredCaptchaSettings,
+} from '../auth/captcha.js';
 import {
   REGISTRATION_SETTINGS_KEY,
   readRegistrationPolicy,
@@ -126,6 +138,21 @@ const EMPTY_SMTP: StoredSmtpSettings = {
   username: null,
   from_address: null,
 };
+
+/**
+ * A `captcha` section resolved against what is stored, decided before the
+ * transaction opens.
+ *
+ * Everything slow or refusable lives here — the completeness rule and the
+ * vendor round-trip of the activation self-test — so the transaction body is
+ * pure writes and can be re-run by a pooled adapter without repeating either.
+ */
+interface CaptchaUpdatePlan {
+  /** The `captcha` row exactly as it will be written. */
+  next: StoredCaptchaSettings;
+  /** True when a self-test actually ran, for the audit row. */
+  selfTested: boolean;
+}
 
 const THEMES: readonly ThemePreference[] = ['dark', 'light', 'system'];
 
@@ -248,11 +275,19 @@ export interface SettingsServiceDeps {
   audit: AuditService;
   /** Source of truth for the registration policy defaults. */
   auth: AuthService;
+  /**
+   * Runs the activation self-test, and reports whether enforcement is on.
+   *
+   * The same service the login path uses, so "the configuration this patch
+   * describes works" is decided by exactly the code that will demand a token
+   * from every visitor a moment later.
+   */
+  captcha: CaptchaService;
 }
 
 /** Build the settings service. */
 export function createSettingsService(deps: SettingsServiceDeps): SettingsService {
-  const { config, store, crypto, audit, auth } = deps;
+  const { config, store, crypto, audit, auth, captcha } = deps;
   let brandingRevision = 0;
 
   /** Memoised gateway origin; dropped the moment a write changes it. */
@@ -274,15 +309,19 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
     return { public_url: await getGatewayPublicUrl() };
   }
 
-  async function readCaptcha(scoped: NexusStore = store): Promise<CaptchaAdminSettings> {
-    const row = await scoped.settings.get(CAPTCHA_SETTINGS_KEY);
+  async function readCaptcha(): Promise<CaptchaAdminSettings> {
+    const row = await store.settings.get(CAPTCHA_SETTINGS_KEY);
     const value = asRecord(row?.value);
-    const secret = await scoped.settings.get(CAPTCHA_SECRET_SETTINGS_KEY);
+    const secret = await store.settings.get(CAPTCHA_SECRET_SETTINGS_KEY);
     return {
       enabled: value.enabled === true,
       provider: (str(value.provider) ?? 'none') as CaptchaProvider,
       site_key: str(value.site_key),
       secret_set: secret !== null,
+      // Environment, not storage: an administrator reading a block that says
+      // `enabled: true` has to be able to see that the server is not acting on
+      // it, rather than concluding the portal ignores its own settings.
+      enforcement: captcha.getEnforcement(),
     };
   }
 
@@ -297,6 +336,71 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
       password_set: password !== null || config.smtp.password !== undefined,
       from_address: stored.from_address ?? config.smtp.from,
     };
+  }
+
+  /**
+   * Resolve a `captcha` patch against what is stored, and make it prove itself.
+   *
+   * Two refusals live here, both before a single row is written:
+   *
+   * 1. **Completeness** — an enabled configuration needs a real provider, a
+   *    site key and a usable secret (`400 VALIDATION_FAILED`).
+   * 2. **The activation self-test** — turning CAPTCHA on, or moving its
+   *    provider, site key or secret while it is on, makes every password login
+   *    demand a token, so the patch has to carry one the *new* configuration
+   *    accepts (`400 CAPTCHA_SELF_TEST_FAILED`). Enforcement being disabled
+   *    does not waive it: the admin page renders the widget from the pending
+   *    configuration, so a token can be minted even while the break-glass
+   *    switch is holding the portal open, and an operator recovering from a
+   *    bad configuration is precisely who must not store another one.
+   *
+   * A patch that only turns CAPTCHA **off** — or that leaves an already-proven
+   * configuration alone — needs no token, so a lockout is always one
+   * `{"captcha":{"enabled":false}}` away for whoever can still authenticate.
+   *
+   * Read outside the transaction, against `store`: the vendor call cannot sit
+   * in a body a pooled adapter may re-run. The rows are re-read under the
+   * transaction when they are written, and the only interleaving this leaves
+   * open is a second super admin editing CAPTCHA at the same moment.
+   */
+  async function planCaptchaUpdate(
+    patch: NonNullable<UpdateSettingsRequest['captcha']>,
+    ip: string | null,
+  ): Promise<CaptchaUpdatePlan> {
+    const current = await readCaptcha();
+    const next: StoredCaptchaSettings = {
+      enabled: patch.enabled ?? current.enabled,
+      provider: patch.provider ?? current.provider,
+      site_key: patch.site_key === undefined ? current.site_key : patch.site_key,
+    };
+    if (!next.enabled) return { next, selfTested: false };
+
+    const provider = next.provider;
+    const siteKey = next.site_key?.trim() ?? '';
+    const storedSecret =
+      patch.secret_key === undefined
+        ? await readEncryptedSetting(store, crypto, CAPTCHA_SECRET_SETTINGS_KEY)
+        : patch.secret_key;
+    // An unreadable encrypted row and a cleared one both read as absent here,
+    // which is the same "unusable" the `verify` path fails closed on.
+    const secret = storedSecret ?? '';
+    if (provider === 'none' || siteKey === '' || secret.trim() === '') {
+      throw validationFailed(
+        'Enabling CAPTCHA requires a provider, a site key, and a usable secret key',
+      );
+    }
+
+    // Any of these makes the challenge visitors are about to face a different
+    // one from the challenge that was last proven to work.
+    const selfTestRequired =
+      !current.enabled ||
+      provider !== current.provider ||
+      siteKey !== (current.site_key?.trim() ?? '') ||
+      patch.secret_key !== undefined;
+    if (!selfTestRequired) return { next, selfTested: false };
+
+    await captcha.selfTest({ provider, secret, token: patch.captcha_token, remoteIp: ip });
+    return { next, selfTested: true };
   }
 
   async function snapshot(): Promise<AdminSettingsResponse> {
@@ -369,6 +473,13 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
         }
       }
 
+      // Resolved, validated and — when the change would move the challenge —
+      // proven against the vendor here, for the same reason the gateway URL is:
+      // a refusal must not leave a half-applied patch behind, and a transaction
+      // body that a pooled adapter may re-run must never make a network call.
+      const captchaPlan =
+        patch.captcha === undefined ? undefined : await planCaptchaUpdate(patch.captcha, ip);
+
       // Every settings row and its audit record share one transaction-scoped
       // store. In particular, secret writes cannot split from their config.
       await store.transaction(async (tx) => {
@@ -395,29 +506,11 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
           changed.push('gateway.public_url');
         }
 
-        if (patch.captcha) {
-          const current = await readCaptcha(tx);
-          const next = {
-            enabled: patch.captcha.enabled ?? current.enabled,
-            provider: patch.captcha.provider ?? current.provider,
-            site_key:
-              patch.captcha.site_key === undefined ? current.site_key : patch.captcha.site_key,
-          };
-          if (next.enabled) {
-            const secret =
-              patch.captcha.secret_key === undefined
-                ? await readEncryptedSetting(tx, crypto, CAPTCHA_SECRET_SETTINGS_KEY)
-                : patch.captcha.secret_key;
-            if (next.provider === 'none' || !next.site_key?.trim() || !secret?.trim()) {
-              throw validationFailed(
-                'Enabling CAPTCHA requires a provider, a site key, and a usable secret key',
-              );
-            }
-          }
+        if (patch.captcha && captchaPlan) {
           for (const field of ['enabled', 'provider', 'site_key'] as const) {
             if (patch.captcha[field] !== undefined) changed.push(`captcha.${field}`);
           }
-          await tx.settings.set(CAPTCHA_SETTINGS_KEY, next, false);
+          await tx.settings.set(CAPTCHA_SETTINGS_KEY, captchaPlan.next, false);
 
           if (patch.captcha.secret_key !== undefined) {
             changed.push('captcha.secret_key');
@@ -524,6 +617,10 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
             ...(smtpPasswordSourceChange
               ? { smtp_password_source_change: smtpPasswordSourceChange }
               : {}),
+            // Recorded because it is the evidence that this activation was
+            // provably usable at the moment it was stored, and because its
+            // absence on a `captcha.enabled` change would be an anomaly.
+            ...(captchaPlan?.selfTested ? { captcha_self_test: 'passed' } : {}),
           },
           ip,
         );

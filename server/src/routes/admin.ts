@@ -7,6 +7,11 @@
  * surfaces rather than preferences. Secrets are write-only everywhere here:
  * `smtp.password` and `captcha.secret_key` go in and are never read back out.
  *
+ * A `captcha` section that turns the challenge on, or moves it, also has to
+ * carry a `captcha_token` the new configuration accepts — the settings service
+ * verifies it with the vendor before storing anything, so a portal cannot adopt
+ * a challenge it is unable to check and lock every account out of sign-in.
+ *
  * The two `/gateway/*` endpoints raise the bar the same way: one reports which
  * of the portal's stored Ferrum Edge references the gateway no longer holds,
  * the other recreates them. Both name accounts and APIs and both exist for the
@@ -91,6 +96,10 @@ const updateSettingsBody = z.object({
       provider: z.enum(['none', 'recaptcha', 'hcaptcha', 'turnstile']).optional(),
       site_key: z.string().trim().max(512).nullish(),
       secret_key: z.string().trim().max(512).nullish(),
+      // The activation self-test's token, bounded like the login one. The
+      // service decides when it is required and verifies it against the
+      // configuration this patch describes.
+      captcha_token: z.string().max(4096).optional(),
     })
     .optional(),
   smtp: z

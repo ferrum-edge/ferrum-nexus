@@ -317,9 +317,14 @@ export async function buildServer(
   const captcha = createCaptchaService({
     store: deps.store,
     crypto,
+    enforcement: config.captchaEnforcement,
     ...(deps.captchaTransport ? { transport: deps.captchaTransport } : {}),
     log: warn,
   });
+  // Loud, once, for as long as the portal is running with the brake off: the
+  // stored settings still say CAPTCHA is on, and nothing else in the log would
+  // say that register and login are letting every request through unverified.
+  if (config.captchaEnforcement === 'disabled') logCaptchaEnforcementDisabled(app);
   const email = createEmailService({
     config,
     store: deps.store,
@@ -350,7 +355,14 @@ export async function buildServer(
       urlVar: 'reset_url',
     }),
   });
-  const settings = createSettingsService({ config, store: deps.store, crypto, audit, auth });
+  const settings = createSettingsService({
+    config,
+    store: deps.store,
+    crypto,
+    audit,
+    auth,
+    captcha,
+  });
   const messaging = createMessagingService({
     config,
     store: deps.store,
@@ -843,6 +855,36 @@ function logGeneratedBootstrapToken(app: FastifyInstance, token: string): void {
       'It was generated for this process only: it changes on every restart and\n' +
       'differs between instances. Set NEXUS_BOOTSTRAP_TOKEN to pin one value\n' +
       'across restarts and across a multi-instance deployment.\n' +
+      '='.repeat(76),
+  );
+}
+
+/**
+ * Announce that the CAPTCHA break-glass switch is on.
+ *
+ * `NEXUS_CAPTCHA_ENFORCEMENT=disabled` is meant to be temporary — it is how an
+ * operator gets back into a portal whose stored CAPTCHA configuration refuses
+ * every password login — and the danger is that it is quietly left on, with an
+ * admin settings page that still reads "Require a CAPTCHA challenge". So the
+ * portal says so at startup, `GET /api/admin/settings` reports
+ * `captcha.enforcement`, and every `auth.login` / `auth.register` row written
+ * this way carries `captcha_bypassed: true`.
+ *
+ * No secret appears here: the variable holds a mode, not a credential.
+ */
+function logCaptchaEnforcementDisabled(app: FastifyInstance): void {
+  app.log.warn(
+    '\n' +
+      '='.repeat(76) +
+      '\n' +
+      'CAPTCHA ENFORCEMENT IS DISABLED (NEXUS_CAPTCHA_ENFORCEMENT=disabled).\n' +
+      '\n' +
+      'Registration and sign-in accept any request, whatever the stored CAPTCHA\n' +
+      'settings say. This is the break-glass path for a portal locked out by a\n' +
+      'CAPTCHA configuration that cannot be verified — use it to sign in, fix\n' +
+      'the configuration in Admin -> Settings -> CAPTCHA, then REMOVE this\n' +
+      'variable and restart. Sessions created meanwhile are audited with\n' +
+      'captcha_bypassed: true.\n' +
       '='.repeat(76),
   );
 }

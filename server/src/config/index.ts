@@ -17,7 +17,7 @@
 import { z } from 'zod';
 
 import { DEFAULT_FERRUM_NAMESPACE, DEFAULT_SESSION_TTL_SECONDS } from '@ferrum-nexus/shared';
-import type { DbDriver } from '@ferrum-nexus/shared';
+import type { CaptchaEnforcement, DbDriver } from '@ferrum-nexus/shared';
 import { NexusError } from '../lib/errors.js';
 import { GATEWAY_PUBLIC_URL_RULE, normalizeGatewayPublicUrl } from '../lib/gateway-url.js';
 
@@ -65,6 +65,19 @@ export const DEFAULT_MAX_APIS_PER_OWNER = 50;
  * revision rolls back to.
  */
 export const DEFAULT_SPEC_HISTORY_LIMIT = 10;
+
+/**
+ * Accepted values of `NEXUS_CAPTCHA_ENFORCEMENT`, in that exact spelling.
+ *
+ * Deliberately two words rather than a boolean: `NEXUS_CAPTCHA_ENFORCEMENT=0`
+ * would sit one typo away from turning the registration brake off, and this
+ * variable is the one thing in the configuration that can make a configured
+ * CAPTCHA stop applying.
+ */
+export const CAPTCHA_ENFORCEMENT_VALUES: readonly CaptchaEnforcement[] = [
+  'enforced',
+  'disabled',
+] as const;
 
 /** Aliases `proxy-addr` understands in place of a literal CIDR. */
 const PROXY_KEYWORDS = ['loopback', 'linklocal', 'uniquelocal'] as const;
@@ -194,6 +207,26 @@ export interface NexusConfig {
   bootstrapToken: string | undefined;
   /** Session idle lifetime in seconds (sliding). */
   sessionTtlSeconds: number;
+  /**
+   * Whether the stored CAPTCHA configuration applies at all
+   * (`NEXUS_CAPTCHA_ENFORCEMENT`); `enforced` by default.
+   *
+   * The operator's break-glass switch. CAPTCHA is configured from the admin UI
+   * and fails closed, so a wrong site key, a rotated-away secret or an
+   * unreachable vendor refuses **every** password login — including the super
+   * admin who turned it on — and the only recovery used to be editing the
+   * `app_settings` row by hand (ferrum-nexus#252). `disabled` makes
+   * register and login skip verification and hides the widget, without
+   * touching a single stored setting, so an operator with host access can sign
+   * in, fix the configuration and put the variable back.
+   *
+   * Environment-only on purpose: an API-settable bypass would be an
+   * escalation path out of the very control it disables. `GET
+   * /api/admin/settings` reports it (`captcha.enforcement`) so an
+   * administrator can see that the stored block is inert, and the server logs
+   * a startup banner for as long as it is set.
+   */
+  captchaEnforcement: CaptchaEnforcement;
   /** Whether the `/api/auth/*`, `/api/health`, `/api/branding`, `/api/apis/*`, `/api/threads/*` and `/api/access-requests/*` rate limiters are installed. Off under `NEXUS_ENV=test`. */
   rateLimitEnabled: boolean;
   /**
@@ -452,6 +485,21 @@ const envSchema = z.object({
       return z.NEVER;
     }),
   NEXUS_SESSION_TTL: intish(DEFAULT_SESSION_TTL_SECONDS, 60, 60 * 60 * 24 * 30),
+  NEXUS_CAPTCHA_ENFORCEMENT: z
+    .string()
+    .optional()
+    .transform((raw, ctx) => {
+      if (raw === undefined || raw.trim() === '') return 'enforced' as CaptchaEnforcement;
+      const value = raw.trim().toLowerCase();
+      if ((CAPTCHA_ENFORCEMENT_VALUES as readonly string[]).includes(value)) {
+        return value as CaptchaEnforcement;
+      }
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `must be one of ${CAPTCHA_ENFORCEMENT_VALUES.join(', ')}`,
+      });
+      return z.NEVER;
+    }),
   NEXUS_RATE_LIMIT_ENABLED: boolish(true),
   NEXUS_HEALTH_CACHE_MS: intish(5_000, 0, 60_000),
   NEXUS_BRANDING_CACHE_MS: intish(5_000, 0, 60_000),
@@ -682,6 +730,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     secretKey: raw.NEXUS_SECRET_KEY,
     bootstrapToken,
     sessionTtlSeconds: raw.NEXUS_SESSION_TTL,
+    captchaEnforcement: raw.NEXUS_CAPTCHA_ENFORCEMENT,
     rateLimitEnabled: nodeEnv === 'test' ? false : raw.NEXUS_RATE_LIMIT_ENABLED,
     healthCacheMs: raw.NEXUS_HEALTH_CACHE_MS,
     brandingCacheMs: raw.NEXUS_BRANDING_CACHE_MS,

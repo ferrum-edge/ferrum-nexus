@@ -26,6 +26,7 @@ import type {
   AppHealth,
   AuditLog,
   BrandingSettings,
+  CaptchaEnforcement,
   CaptchaProvider,
   CaptchaPublicConfig,
   CatalogApi,
@@ -924,6 +925,16 @@ export interface CaptchaAdminSettings {
   site_key: string | null;
   /** True when an encrypted secret is stored; the value itself is never returned. */
   secret_set: boolean;
+  /**
+   * Whether the server acts on the block above, from `NEXUS_CAPTCHA_ENFORCEMENT`.
+   *
+   * `disabled` is the operator's break-glass switch: register and login skip
+   * verification and the widget is hidden, whatever `enabled` says. Reported
+   * here so an administrator can see that the stored configuration is inert
+   * instead of concluding the portal ignores its own settings. It cannot be
+   * changed through this endpoint — only in the server's environment.
+   */
+  enforcement: CaptchaEnforcement;
 }
 
 /** `GET /api/admin/settings` */
@@ -945,6 +956,17 @@ export interface UpdateSettingsRequest {
     site_key?: string | null;
     /** Write-only; stored AES-256-GCM encrypted. Pass `null` to clear. */
     secret_key?: string | null;
+    /**
+     * A vendor token minted by the **configuration this patch describes**,
+     * proving the widget and the secret actually work before the portal starts
+     * demanding one on every sign-in.
+     *
+     * Required when the patch turns CAPTCHA on, or changes `provider`,
+     * `site_key` or `secret_key` while it is on; ignored otherwise. A patch
+     * that needs one and does not carry a token the new configuration accepts
+     * is refused with `400 CAPTCHA_SELF_TEST_FAILED` and stores nothing.
+     */
+    captcha_token?: string;
   };
   smtp?: {
     host?: string | null;

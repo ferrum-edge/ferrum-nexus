@@ -188,6 +188,16 @@ interface RegistrationDraft {
   phone: string | null;
   requireEmailVerification: boolean;
   ip: string | null;
+  /**
+   * True when a configured CAPTCHA would have demanded a token and
+   * `NEXUS_CAPTCHA_ENFORCEMENT=disabled` waived it.
+   *
+   * Carried into the audit row rather than inferred later: the break-glass
+   * switch is a runtime flag with no trace in the database, so the rows written
+   * while it was on are the only record that these accounts were seated without
+   * the brake the settings page says is active.
+   */
+  captchaBypassed: boolean;
 }
 
 /** What a committed registration transaction produced. */
@@ -512,6 +522,7 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         role: record.role,
         first_user: founder,
         verification_required: requiresVerification,
+        ...(draft.captchaBypassed ? { captcha_bypassed: true } : {}),
       },
       draft.ip,
     );
@@ -575,7 +586,7 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         throw validationFailed('Role must be client or provider');
       }
 
-      await captcha.verify(input.captcha_token, context.ip);
+      const captchaOutcome = await captcha.verify(input.captcha_token, context.ip);
 
       // Advisory only: it decides whether the registration policy applies, and
       // whether this registration stands for the founder's seat below. It is
@@ -615,6 +626,7 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         phone: input.phone ?? null,
         requireEmailVerification: policy.require_email_verification,
         ip: context.ip,
+        captchaBypassed: captchaOutcome === 'bypassed',
       };
 
       // The lock is taken *outside* the transaction (see `KeyedSerializer`):
@@ -642,7 +654,7 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
 
     async login(input, context): Promise<LoginResult> {
       const email = input.email.trim().toLowerCase();
-      await captcha.verify(input.captcha_token, context.ip);
+      const captchaOutcome = await captcha.verify(input.captcha_token, context.ip);
 
       const record = await store.users.findByEmail(email);
       // Always run a real scrypt derivation so "no such account" and "wrong
@@ -672,7 +684,10 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         { id: record.id, role: record.role },
         AuditAction.AUTH_LOGIN,
         { type: 'user', id: record.id },
-        { email },
+        // `captcha_bypassed` only ever appears while the operator's break-glass
+        // switch is on, which is the one state where a sign-in that looks
+        // CAPTCHA-protected was not.
+        { email, ...(captchaOutcome === 'bypassed' ? { captcha_bypassed: true } : {}) },
         context.ip,
       );
 

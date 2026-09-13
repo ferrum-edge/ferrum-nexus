@@ -17,6 +17,7 @@ import {
   type User,
 } from '@ferrum-nexus/shared';
 
+import type { CaptchaTransport } from '../auth/captcha.js';
 import { loadConfig, type EnvRecord, type NexusConfig } from '../config/index.js';
 import { createStore } from '../db/index.js';
 import type { AuditLogRecord, EmailOutboxRecord, NexusStore } from '../db/store.js';
@@ -34,6 +35,23 @@ export const TEST_EDGE_JWT_SECRET = 'test-ferrum-admin-jwt-secret-0123456789';
 
 /** Default password used by {@link TestApp.registerUser}. */
 export const TEST_PASSWORD = 'correct-horse-battery-staple';
+
+/**
+ * The only CAPTCHA token {@link buildTestApp}'s default vendor accepts.
+ *
+ * Enabling CAPTCHA — and moving its provider, site key or secret afterwards —
+ * needs a token the new configuration verifies, so every suite that touches the
+ * `captcha` settings section sends this one. The stub also guarantees no test
+ * ever reaches a real vendor: the harness installs it unless the caller passes
+ * its own `deps.captchaTransport`.
+ */
+export const TEST_CAPTCHA_TOKEN = 'test-captcha-token';
+
+/** Accepts {@link TEST_CAPTCHA_TOKEN} and nothing else; never touches the network. */
+export const testCaptchaTransport: CaptchaTransport = async (_url, params) => {
+  const accepted = params.get('response') === TEST_CAPTCHA_TOKEN;
+  return { success: accepted, errors: accepted ? [] : ['invalid-input-response'] };
+};
 
 /**
  * `NEXUS_BOOTSTRAP_TOKEN` every harness is built with.
@@ -316,6 +334,7 @@ export async function buildTestApp(options: BuildTestAppOptions = {}): Promise<T
     serveStatic: false,
     mailTransportFactory: factory,
     upstreamResolver: publicUpstreamResolver(),
+    captchaTransport: testCaptchaTransport,
     ...options.deps,
   });
 

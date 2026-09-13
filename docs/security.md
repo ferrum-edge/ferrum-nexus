@@ -1200,6 +1200,44 @@ providers: Cloudflare Turnstile, hCaptcha, reCAPTCHA. When enabled, a
   unverified.
 - Vendor error codes are logged, never returned to the browser.
 
+Failing closed is what makes a mistaken activation dangerous: it stops
+**login** as well as registration, for every account including the super admin
+who saved it, and the only way back used to be an `UPDATE` against
+`app_settings` (ferrum-nexus#252). Two mechanisms bound that now, and neither of
+them weakens the verification itself.
+
+**An activation self-test, in front of the write.** A `captcha` patch that turns
+the challenge on, or that moves `provider`, `site_key` or `secret_key` while it
+is on, must carry a `captcha_token` minted by the configuration the patch
+describes. The server verifies it with the vendor — the same call a login makes
+— before storing anything, and refuses the whole patch with
+`400 CAPTCHA_SELF_TEST_FAILED` otherwise (`details.reason`: `token_required`,
+`rejected`, `provider_unreachable`). A proven change records
+`captcha_self_test: "passed"` in its `admin.settings_update` row. Turning
+CAPTCHA **off** needs no token, so a working configuration is never a trap for
+whoever can still sign in.
+
+**An operator break-glass switch, for when nobody can sign in.**
+`NEXUS_CAPTCHA_ENFORCEMENT=disabled` (accepted values: `enforced`, `disabled`)
+makes register and login skip verification and hides the widget, leaving every
+stored setting untouched. It is deliberately hard to set by accident and
+impossible to hide:
+
+- It is **environment-only**. No API, no role and no session can set it — a
+  bypass reachable through the portal would be an escalation path out of the
+  very control it disables.
+- It is **not a boolean**: `0`, `false` and `off` are refused at startup, so a
+  typo cannot quietly remove the registration brake.
+- The server logs a banner naming it at every startup for as long as it is set,
+  `GET /api/admin/settings` reports `captcha.enforcement`, the admin CAPTCHA
+  card shows a warning, and every session it admits is audited with
+  `captcha_bypassed: true`.
+
+While it is set the portal has **no bot protection on registration**, so it is a
+recovery step, not a configuration: fix or disable CAPTCHA in the settings, then
+remove the variable. The runbook is in
+[`operations.md`](operations.md#recovering-a-portal-locked-out-by-captcha).
+
 ---
 
 ## 8. CSP and response headers
@@ -1387,8 +1425,8 @@ ordinary reporting.
 
 | Action                        | Target type | Description                                                                                                                                                                                 |
 | ----------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `auth.register`               | `user`      | An account was created. `details`: email, role, `first_user`, `verification_required`. The actor is the new account itself.                                                                 |
-| `auth.login`                  | `user`      | A successful sign-in. Failed sign-ins are **not** audited (they are rate-limited instead).                                                                                                  |
+| `auth.register`               | `user`      | An account was created. `details`: email, role, `first_user`, `verification_required`, plus `captcha_bypassed` when enforcement was off. The actor is the new account itself.               |
+| `auth.login`                  | `user`      | A successful sign-in; `details.captcha_bypassed` marks one let through with CAPTCHA enforcement off. Failed sign-ins are **not** audited (they are rate-limited instead).                   |
 | `auth.logout`                 | `session`   | A session was destroyed by its owner.                                                                                                                                                       |
 | `auth.verify_email`           | `user`      | An email-verification token was redeemed.                                                                                                                                                   |
 | `auth.verification_resend`    | `user`      | A fresh verification link was issued and queued. Written **only** when a link was really sent, so it is what distinguishes the four outcomes the endpoint's response deliberately does not. |
@@ -1545,7 +1583,12 @@ Before going live:
 - [ ] Ferrum Edge runs with `FERRUM_BACKEND_ALLOW_IPS=public` (or equivalent
       network egress policy), which is the layer that survives a backend name
       being re-pointed after publish.
-- [ ] CAPTCHA configured if registration is open to the internet.
+- [ ] CAPTCHA configured if registration is open to the internet, and its
+      activation self-test passed (an enabled configuration cannot be saved
+      without one).
+- [ ] `NEXUS_CAPTCHA_ENFORCEMENT` is **unset** — it is a recovery switch, and a
+      portal left running with `disabled` has no CAPTCHA on registration
+      whatever the settings page shows.
 - [ ] Registration policy reviewed: `open_registration`, `allowed_roles`,
       `require_email_verification`.
 - [ ] SMTP configured, and a test message delivered — otherwise verification
