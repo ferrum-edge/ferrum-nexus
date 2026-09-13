@@ -23,6 +23,7 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { AuditAction } from '../audit/service.js';
+import { canonicalConsumerLockKey } from '../credentials/consumers.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
 describe('gateway reference reconciliation', () => {
@@ -238,12 +239,37 @@ describe('gateway reference reconciliation', () => {
   });
 
   it('recreates the consumer under the same identity and replays its approved access', async () => {
-    const response = await harness.authed(superAdmin, {
-      method: 'POST',
-      url: '/api/admin/gateway/repair',
-      payload: { all: true, reason: 'Edge 0.9.4 rebuild' },
-    });
+    const stale = await harness.store.consumers.findByUserAndNamespace(
+      client.user.id,
+      harness.config.edge.namespace,
+    );
+    assert.ok(stale);
+    const nameKey = canonicalConsumerLockKey(harness.config.edge.namespace, stale.ferrum_username);
+    const serialize = harness.edgeClient.serializePerKey.bind(harness.edgeClient);
+    let nameLockHeld = false;
+    let staleIdLockNested = false;
+    harness.edgeClient.serializePerKey = (key, work) =>
+      serialize(key, async () => {
+        if (key === nameKey) nameLockHeld = true;
+        if (key === stale.ferrum_consumer_id && nameLockHeld) staleIdLockNested = true;
+        try {
+          return await work();
+        } finally {
+          if (key === nameKey) nameLockHeld = false;
+        }
+      });
+
+    const response = await harness
+      .authed(superAdmin, {
+        method: 'POST',
+        url: '/api/admin/gateway/repair',
+        payload: { all: true, reason: 'Edge 0.9.4 rebuild' },
+      })
+      .finally(() => {
+        harness.edgeClient.serializePerKey = serialize;
+      });
     assert.equal(response.statusCode, 200, response.body);
+    assert.ok(staleIdLockNested, 'repair holds the name lock while taking the stale-id lock');
     const body = response.json<RepairGatewayReferencesResponse>();
 
     const repaired = body.consumers.find((entry) => entry.user_id === client.user.id);

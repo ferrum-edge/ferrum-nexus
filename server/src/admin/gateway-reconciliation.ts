@@ -367,10 +367,10 @@ export function createGatewayReconciliationService(
   /**
    * Recreate one account's gateway consumer and re-link the portal row.
    *
-   * Runs under the provisioning key `ensureConsumer` takes — the
-   * namespace/username one, not the consumer-id one — because the id is
-   * precisely what is in doubt, and because that is the key any concurrent
-   * first-time provisioning of this account is already holding.
+   * Takes the provisioning key `ensureConsumer` uses before the stored
+   * consumer-id key used by every ordinary mutation. Keeping that lock order
+   * makes recreation race-free with both provisioning and credential/ACL
+   * changes while the portal still exposes the stale id.
    */
   async function repairConsumer(
     actor: UserRecord,
@@ -395,44 +395,46 @@ export function createGatewayReconciliationService(
           // provisioning call, may have rebuilt this consumer already.
           const row = await store.consumers.findByUserAndNamespace(orphan.user_id, namespace);
           if (!row) return { kind: 'gone' } as const;
-          if ((await edge.consumers.get(row.ferrum_consumer_id)) !== null) {
-            return { kind: 'present', consumerId: row.ferrum_consumer_id } as const;
-          }
-
-          const { consumer } = await edge.consumers.ensure(
-            {
-              username: row.ferrum_username,
-              custom_id: orphan.user_id,
-              acl_groups: groups,
-            },
-            actor.id,
-          );
-
-          // Gateway first, then the portal — and both store writes together, so
-          // a relink can never commit without the revocations that make the
-          // credential mirror agree with the empty consumer it now points at.
           const staleId = row.ferrum_consumer_id;
-          const revoked = await store.transaction(async (tx) => {
-            if (consumer.id !== staleId) {
-              await tx.consumers.update(row.id, { ferrum_consumer_id: consumer.id });
+          return edge.serializePerKey(staleId, async () => {
+            if ((await edge.consumers.get(staleId)) !== null) {
+              return { kind: 'present', consumerId: staleId } as const;
             }
-            const ids: Uuid[] = [];
-            for (let offset = 0; ; offset += MAX_PAGE_SIZE) {
-              const page = await tx.credentials.list(
-                { ferrum_consumer_id: staleId },
-                { limit: MAX_PAGE_SIZE, offset },
-              );
-              for (const credential of page.items) {
-                if (!LIVE_CREDENTIAL_STATUSES.has(credential.status)) continue;
-                await tx.credentials.update(credential.id, { status: 'revoked' });
-                ids.push(credential.id);
-              }
-              if (page.items.length === 0 || offset + page.items.length >= page.total) break;
-            }
-            return ids;
-          });
 
-          return { kind: 'repaired', consumerId: consumer.id, revoked } as const;
+            const { consumer } = await edge.consumers.ensure(
+              {
+                username: row.ferrum_username,
+                custom_id: orphan.user_id,
+                acl_groups: groups,
+              },
+              actor.id,
+            );
+
+            // Gateway first, then the portal — and both store writes together, so
+            // a relink can never commit without the revocations that make the
+            // credential mirror agree with the empty consumer it now points at.
+            const revoked = await store.transaction(async (tx) => {
+              if (consumer.id !== staleId) {
+                await tx.consumers.update(row.id, { ferrum_consumer_id: consumer.id });
+              }
+              const ids: Uuid[] = [];
+              for (let offset = 0; ; offset += MAX_PAGE_SIZE) {
+                const page = await tx.credentials.list(
+                  { ferrum_consumer_id: staleId },
+                  { limit: MAX_PAGE_SIZE, offset },
+                );
+                for (const credential of page.items) {
+                  if (!LIVE_CREDENTIAL_STATUSES.has(credential.status)) continue;
+                  await tx.credentials.update(credential.id, { status: 'revoked' });
+                  ids.push(credential.id);
+                }
+                if (page.items.length === 0 || offset + page.items.length >= page.total) break;
+              }
+              return ids;
+            });
+
+            return { kind: 'repaired', consumerId: consumer.id, revoked } as const;
+          });
         },
       );
 
