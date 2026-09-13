@@ -331,6 +331,19 @@ lifetime drops below `min(60, ttl / 4)` seconds. The namespace goes on every
 namespace-scoped call as `X-Ferrum-Namespace`, which overrides any `namespace`
 in the body.
 
+Every call rides a pooled keep-alive connection. The client's idle lifetime —
+4 s, raised no further than 8 s by a `Keep-Alive: timeout=N` hint, itself cut
+by a 2 s threshold — is held under Edge's own admin idle bound
+(`FERRUM_HTTP_HEADER_READ_TIMEOUT_SECONDS`, 10 s by default). Equal lifetimes
+were the bug: the client reused a socket in the instant the gateway closed it
+and reported a healthy gateway unreachable. Because margin alone cannot close
+that window on every deployment, a **read** that loses the race — `GET`/`HEAD`,
+no response byte yet, a socket-level close rather than a refusal or a timeout —
+is retried exactly once on a fresh connection, inside the original deadline. A
+mutation is never replayed, and a gateway that is genuinely down still answers
+`EDGE_UNAVAILABLE` after one attempt. See
+[`operations.md`](operations.md#connection-pooling-and-the-gateways-idle-bound).
+
 Failures classify into four codes: `EDGE_UNAVAILABLE` (DNS, connect, TLS,
 socket or timeout; a write may already have reached the gateway), `EDGE_ERROR`
 (the gateway refused the request), `EDGE_REJECTED_SPEC` (HTTP 400 for an API-spec

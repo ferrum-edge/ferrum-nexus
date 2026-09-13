@@ -5,7 +5,10 @@
  * classified into four codes:
  *
  * - `EDGE_UNAVAILABLE` — DNS, connect, TLS, socket or timeout. A write may
- *   already have reached the gateway; the client never retries it.
+ *   already have reached the gateway; the client never retries it. A **read**
+ *   whose pooled connection the gateway closed before answering is retried
+ *   once on a fresh connection inside the same deadline first — see
+ *   {@link shouldRetryOnFreshConnection}.
  * - `EDGE_ERROR` — a refused request.
  * - `EDGE_REJECTED_SPEC` — a 4xx API-spec parse/validation refusal (HTTP 400).
  * - `EDGE_PROTOCOL_ERROR` — an invalid HTTP/JSON response.
@@ -665,6 +668,49 @@ function numberAt(value: unknown, key: string): number | null {
  */
 const ECHOED_EDGE_STATUSES = new Set([400, 409, 422]);
 
+/* ── Connection pooling ─────────────────────────────────────────────────── */
+
+/**
+ * Edge's default admin idle/header bound
+ * (`FERRUM_HTTP_HEADER_READ_TIMEOUT_SECONDS=10`), in milliseconds.
+ *
+ * Nexus cannot read the gateway's configuration, so this is the number the
+ * client's own keep-alive settings are held under. An operator who *lowers*
+ * Edge's bound below {@link ADMIN_KEEP_ALIVE_TIMEOUT_MS} moves the boundary
+ * back under this client — the bounded read retry below is what keeps that
+ * from surfacing as a false `EDGE_UNAVAILABLE`.
+ */
+export const EDGE_DEFAULT_IDLE_TIMEOUT_MS = 10_000;
+
+/**
+ * How long this client keeps an idle pooled socket before closing it itself.
+ *
+ * It used to be {@link EDGE_DEFAULT_IDLE_TIMEOUT_MS} exactly, which is a race
+ * the client loses intermittently: a socket reused in the same instant the
+ * gateway closes it fails with `ECONNRESET` against a perfectly healthy Edge,
+ * and `/api/health` then reports the dependency down for a whole cache
+ * interval (#248). Six seconds of margin is far more than any plausible
+ * scheduling, timer or loopback delay, and four seconds still amortises the
+ * TCP (and TLS) handshake across the burst of calls one publish makes.
+ */
+export const ADMIN_KEEP_ALIVE_TIMEOUT_MS = 4_000;
+
+/**
+ * Ceiling on the idle lifetime a gateway may negotiate upwards through a
+ * `Keep-Alive: timeout=N` response header. Held below
+ * {@link EDGE_DEFAULT_IDLE_TIMEOUT_MS} so a gateway that advertises its own
+ * bound verbatim cannot put this client back on the boundary.
+ */
+export const ADMIN_KEEP_ALIVE_MAX_TIMEOUT_MS = 8_000;
+
+/**
+ * Safety margin undici subtracts from a server-advertised keep-alive hint
+ * before adopting it, so the client always abandons a socket first. A hint
+ * this margin cannot fit under (`timeout=1`, say) closes the connection after
+ * the response instead of pooling it.
+ */
+export const ADMIN_KEEP_ALIVE_TIMEOUT_THRESHOLD_MS = 2_000;
+
 function buildDispatcher(config: EdgeConfig): Dispatcher {
   const isHttps = config.adminUrl.startsWith('https://');
   let ca: string | undefined;
@@ -682,10 +728,98 @@ function buildDispatcher(config: EdgeConfig): Dispatcher {
     },
     headersTimeout: Math.max(config.timeoutMs, 30_000),
     bodyTimeout: Math.max(config.timeoutMs, 30_000),
-    keepAliveTimeout: 10_000,
-    keepAliveMaxTimeout: 60_000,
+    keepAliveTimeout: ADMIN_KEEP_ALIVE_TIMEOUT_MS,
+    keepAliveMaxTimeout: ADMIN_KEEP_ALIVE_MAX_TIMEOUT_MS,
+    keepAliveTimeoutThreshold: ADMIN_KEEP_ALIVE_TIMEOUT_THRESHOLD_MS,
   });
 }
+
+/* ── Stale pooled sockets ───────────────────────────────────────────────── */
+
+/** Methods whose replay is free of side effects, so a lost socket may be redone. */
+const REPLAYABLE_METHODS = new Set(['GET', 'HEAD']);
+
+/**
+ * Socket-level failures a connection closed under the client produces.
+ *
+ * An **allowlist**, deliberately: a connect-phase refusal (`ECONNREFUSED`), a
+ * DNS failure, a TLS failure and every timeout describe the gateway or the
+ * network, not a pooled socket that outlived its welcome, and none of them may
+ * buy a second attempt.
+ */
+const STALE_SOCKET_CODES = new Set(['UND_ERR_SOCKET', 'ECONNRESET', 'EPIPE']);
+
+/**
+ * Every `code` on an error's `cause` chain, outermost first.
+ *
+ * undici reports a connection the peer closed as its own `SocketError`
+ * (`UND_ERR_SOCKET`) and carries the operating system's `ECONNRESET` beneath
+ * it, but which of the two surfaces depends on where in the exchange the
+ * socket died — so both are inspected. The walk is bounded because a `cause`
+ * chain can be cyclic.
+ */
+function errorCodes(error: unknown): string[] {
+  const codes: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current instanceof Error; depth += 1) {
+    const code = (current as NodeJS.ErrnoException).code;
+    if (typeof code === 'string') codes.push(code);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return codes;
+}
+
+/**
+ * Whether a transport failure looks like a pooled connection the peer closed
+ * rather than a gateway that is not answering.
+ *
+ * An abort or a timeout is never one of these: the deadline expiring says
+ * nothing about the socket, and retrying it would spend a budget the caller
+ * already declared exhausted.
+ */
+export function isStalePooledSocketError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === 'AbortError' || error.name === 'TimeoutError') return false;
+  return errorCodes(error).some((code) => STALE_SOCKET_CODES.has(code));
+}
+
+/**
+ * Whether one more attempt is owed to a failed Admin API request.
+ *
+ * Three conditions, all required:
+ *
+ * - the method is a **read**, so a replay cannot duplicate a gateway change —
+ *   a `POST`/`PUT`/`PATCH`/`DELETE` whose socket died may already have been
+ *   applied and is never repeated;
+ * - **no response byte arrived**, so the gateway had not begun answering;
+ * - the failure is a {@link isStalePooledSocketError stale socket}, and the
+ *   caller's deadline has not expired — the retry rides inside the original
+ *   overall request/probe budget, it does not extend it.
+ *
+ * The retry itself needs no special dispatcher handling: undici destroys and
+ * evicts a socket that errors, so the next request opens a fresh connection.
+ */
+export function shouldRetryOnFreshConnection(
+  method: string,
+  error: unknown,
+  responseStarted: boolean,
+  signal: AbortSignal,
+): boolean {
+  if (!REPLAYABLE_METHODS.has(method)) return false;
+  if (responseStarted || signal.aborted) return false;
+  return isStalePooledSocketError(error);
+}
+
+/**
+ * The outcome of one transport attempt.
+ *
+ * A transport failure is returned rather than thrown so the retry decision can
+ * see whether the gateway had started to answer before deciding, and so the
+ * classification below runs exactly once however many attempts were made.
+ */
+type TransportAttempt =
+  | { ok: true; bytes: Buffer }
+  | { ok: false; error: unknown; responseStarted: boolean };
 
 function isUnavailable(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
@@ -802,23 +936,49 @@ export function createFerrumAdminClient(
     }
 
     let statusCode = 0;
-    let bytes: Buffer;
-    try {
-      const response = await request(url, {
-        method,
-        headers,
-        dispatcher,
-        // undici.request does not follow redirects; do not install a redirect interceptor.
-        ...(hasBody ? { body: serializedBody } : {}),
-        signal: options.signal ?? AbortSignal.timeout(config.timeoutMs),
-      });
-      statusCode = response.statusCode;
-      noteUnservedNamespace(method, path, statusCode, response.headers);
-      bytes = await readBoundedBody(
-        response.body,
-        options.maxResponseBytes ?? ADMIN_RESPONSE_MAX_BYTES,
+    // One deadline for the whole call, created once so that a retry below
+    // spends what is left of it rather than starting a second budget.
+    const signal = options.signal ?? AbortSignal.timeout(config.timeoutMs);
+
+    async function send(): Promise<TransportAttempt> {
+      let responseStarted = false;
+      try {
+        const response = await request(url, {
+          method,
+          headers,
+          dispatcher,
+          // undici.request does not follow redirects; do not install a redirect interceptor.
+          ...(hasBody ? { body: serializedBody } : {}),
+          signal,
+        });
+        responseStarted = true;
+        statusCode = response.statusCode;
+        noteUnservedNamespace(method, path, statusCode, response.headers);
+        return {
+          ok: true,
+          bytes: await readBoundedBody(
+            response.body,
+            options.maxResponseBytes ?? ADMIN_RESPONSE_MAX_BYTES,
+          ),
+        };
+      } catch (error) {
+        return { ok: false, error, responseStarted };
+      }
+    }
+
+    let attempt = await send();
+    if (
+      !attempt.ok &&
+      shouldRetryOnFreshConnection(method, attempt.error, attempt.responseStarted, signal)
+    ) {
+      logger.warn(
+        { method, path, code: errorCodes(attempt.error)[0] ?? null },
+        'Ferrum Edge Admin API closed a pooled connection; retrying the read on a fresh one',
       );
-    } catch (cause) {
+      attempt = await send();
+    }
+    if (!attempt.ok) {
+      const cause = attempt.error;
       if (cause instanceof ResponseTooLargeError) {
         throw protocolError(statusCode, 'response_too_large', method, path);
       }
@@ -829,6 +989,7 @@ export function createFerrumAdminClient(
       if (isUnavailable(cause)) throw edgeUnavailable(undefined, cause);
       throw edgeUnavailable('The Ferrum Edge Admin API request failed', cause);
     }
+    const bytes = attempt.bytes;
 
     if (statusCode === 404 && options.allow404) return null;
     // These are explicit best-effort namespace/version exceptions, never
@@ -1028,8 +1189,9 @@ export function createFerrumAdminClient(
     accept: string,
   ): Promise<{ statusCode: number; body: string } | null> {
     const token = await minter.getToken(DEFAULT_ADMIN_SUBJECT);
-    try {
-      const response = await request(urlFor(path), {
+    const signal = AbortSignal.timeout(config.timeoutMs);
+    const send = () =>
+      request(urlFor(path), {
         method: 'GET',
         headers: {
           authorization: `Bearer ${token}`,
@@ -1038,7 +1200,15 @@ export function createFerrumAdminClient(
           accept,
         },
         dispatcher,
-        signal: AbortSignal.timeout(config.timeoutMs),
+        signal,
+      });
+    try {
+      // The same stale-pooled-socket recovery as `call`, on the one other read
+      // this client makes. Nothing has been read yet, so no response byte can
+      // have arrived.
+      const response = await send().catch((error: unknown) => {
+        if (!shouldRetryOnFreshConnection('GET', error, false, signal)) throw error;
+        return send();
       });
       return {
         statusCode: response.statusCode,
