@@ -37,7 +37,13 @@ const complete = {
   captcha_token: GOOD_TOKEN,
 };
 
-/** One recorded call to the vendor's `siteverify` endpoint. */
+/**
+ * One recorded call to the vendor's `siteverify` endpoint.
+ *
+ * `remoteip` is the administrator's request address, forwarded exactly as a
+ * login forwards the visitor's (the harness injects from `127.0.0.1`); a direct
+ * `verify()` call with no address records `null`.
+ */
 interface VendorCall {
   secret: string;
   response: string;
@@ -154,7 +160,7 @@ describe('CAPTCHA activation admission', () => {
     assert.equal((await harness.services.captcha.getPublicConfig()).enabled, false);
     // Verified against the configuration being saved, not the stored one.
     assert.deepEqual(calls, [
-      { secret: 'private-captcha', response: 'stale-token', remoteip: null },
+      { secret: 'private-captcha', response: 'stale-token', remoteip: '127.0.0.1' },
     ]);
     assert.doesNotMatch(response.body, /private-captcha/);
   });
@@ -179,7 +185,9 @@ describe('CAPTCHA activation admission', () => {
       provider: 'turnstile',
       site_key: 'public-site',
     });
-    assert.deepEqual(calls, [{ secret: 'private-captcha', response: GOOD_TOKEN, remoteip: null }]);
+    assert.deepEqual(calls, [
+      { secret: 'private-captcha', response: GOOD_TOKEN, remoteip: '127.0.0.1' },
+    ]);
     const audit = await harness.auditRows('admin.settings_update');
     assert.equal(audit.length, beforeAudit.length + 1);
     assert.equal(audit[0]?.details?.captcha_self_test, 'passed');
@@ -201,7 +209,7 @@ describe('CAPTCHA activation admission', () => {
     assert.deepEqual(calls.at(-1), {
       secret: 'replacement-secret',
       response: GOOD_TOKEN,
-      remoteip: null,
+      remoteip: '127.0.0.1',
     });
   });
 
