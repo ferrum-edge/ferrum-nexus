@@ -818,8 +818,7 @@ export function shouldRetryOnFreshConnection(
  * classification below runs exactly once however many attempts were made.
  */
 type TransportAttempt =
-  | { ok: true; bytes: Buffer }
-  | { ok: false; error: unknown; responseStarted: boolean };
+  { ok: true; bytes: Buffer } | { ok: false; error: unknown; responseStarted: boolean };
 
 function isUnavailable(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
