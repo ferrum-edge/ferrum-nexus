@@ -14,12 +14,15 @@
  *     brand colour never leaves half the palette on the built-in default.
  *   - `data-radius` (none | sm | md | lg) scales every corner through
  *     `--radius-factor`.
+ *   - The selectors are element-scoped (not `:root`-only) so the settings page
+ *     can nest a live preview of another theme or preset inside the page.
  *   - `data-sidebar` (surface | contrast) switches the navigation rail between
  *     a surface-coloured rail and a high-contrast dark rail.
  *   - `--font-sans-stack` is swapped by the typography preset.
  */
 
-:root {
+:root,
+[data-theme='dark'] {
   color-scheme: dark;
 
   /* Surfaces, from furthest back to furthest forward. */
@@ -85,7 +88,7 @@
     ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
 }
 
-:root[data-theme='light'] {
+[data-theme='light'] {
   color-scheme: light;
 
   --base: #f4f6f9;
@@ -136,7 +139,7 @@
 }
 
 /* High-contrast navigation rail: always a deep slate, whatever the theme. */
-:root[data-sidebar='contrast'] {
+[data-sidebar='contrast'] {
   --sidebar-bg: #0b0f17;
   --sidebar-fg: #aab4c3;
   --sidebar-fg-strong: #f1f5f9;
@@ -148,13 +151,13 @@
 }
 
 /* Corner presets. */
-:root[data-radius='none'] {
+[data-radius='none'] {
   --radius-factor: 0;
 }
-:root[data-radius='sm'] {
+[data-radius='sm'] {
   --radius-factor: 0.6;
 }
-:root[data-radius='lg'] {
+[data-radius='lg'] {
   --radius-factor: 1.5;
 }
 

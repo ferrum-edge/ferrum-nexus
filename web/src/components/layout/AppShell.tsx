@@ -3,6 +3,7 @@ import { useEffect, useState, type ReactElement } from 'react';
 import { useBranding } from '../../hooks/useBranding';
 import { useAuth } from '../../stores/auth';
 import { Spinner } from '../ui/Spinner';
+import { BrandingFooter } from '../auth/AuthShell';
 import { Icon } from '../ui/Icon';
 import { Header } from './Header';
 import { Sidebar } from './Sidebar';
@@ -57,6 +58,8 @@ export function AppShell(): ReactElement {
 
   const portalName = branding?.portal_name ?? 'Ferrum Nexus';
   const supportEmail = branding?.support_email ?? null;
+  const footerText = branding?.footer_text ?? null;
+  const footerLinks = branding?.footer_links ?? [];
 
   return (
     <div className="min-h-full">
@@ -89,8 +92,8 @@ export function AppShell(): ReactElement {
         >
           <Outlet />
         </main>
-        <footer className="mx-auto flex w-full max-w-7xl flex-wrap items-center justify-between gap-2 px-4 py-4 text-xs text-fg-subtle sm:px-6 lg:px-8">
-          <span>{portalName}</span>
+        <footer className="mx-auto flex w-full max-w-7xl flex-wrap items-center justify-between gap-x-6 gap-y-2 px-4 py-4 text-xs text-fg-subtle sm:px-6 lg:px-8">
+          <BrandingFooter text={footerText ?? portalName} links={footerLinks} />
           {supportEmail ? (
             <a className="transition-colors hover:text-fg" href={`mailto:${supportEmail}`}>
               Support: {supportEmail}
