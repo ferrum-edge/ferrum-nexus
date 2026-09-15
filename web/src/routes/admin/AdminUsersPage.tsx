@@ -9,7 +9,7 @@ import {
   type User,
   type UserStatus,
 } from '@ferrum-nexus/shared';
-import { formatDateTime } from '../../lib/format';
+import { formatDateTime, formatRelative } from '../../lib/format';
 import {
   useOrganizations,
   useRetryGatewayTeardown,
@@ -27,7 +27,7 @@ import { DataTable, type Columns } from '../../components/ui/DataTable';
 import { Dialog } from '../../components/ui/Dialog';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { Icon } from '../../components/ui/Icon';
-import { Input, LabeledInput } from '../../components/ui/Input';
+import { LabeledInput, SearchInput } from '../../components/ui/Input';
 import { LabeledSelect, Select } from '../../components/ui/Select';
 import { RoleBadge, StatusPill } from '../../components/ui/StatusPill';
 import { Tooltip } from '../../components/ui/Tooltip';
@@ -37,6 +37,15 @@ import { Tooltip } from '../../components/ui/Tooltip';
  * string, so the absence of an organization needs a value of its own.
  */
 const NO_ORG = '__none__';
+
+/** One or two letters standing in for an account, used by the directory rows. */
+function initials(displayName: string): string {
+  const words = displayName.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return '?';
+  const first = words[0]?.[0] ?? '';
+  const last = words.length > 1 ? (words[words.length - 1]?.[0] ?? '') : '';
+  return `${first}${last}`.toUpperCase();
+}
 
 /**
  * "The account is off but its gateway credentials are not."
@@ -55,7 +64,7 @@ function GatewayTeardownBadge({ userId }: { userId: string }): ReactElement | nu
   if (!teardown || teardown.status === 'done') return null;
 
   return (
-    <span className="mt-1 flex items-center gap-1.5">
+    <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
       <Tooltip
         label={
           teardown.status === 'sending'
@@ -65,7 +74,7 @@ function GatewayTeardownBadge({ userId }: { userId: string }): ReactElement | nu
               : 'Queued; the gateway teardown worker is retrying.'
         }
       >
-        <Badge tone="warning">
+        <Badge tone="warning" dot>
           {teardown.status === 'sending'
             ? 'Gateway revocation in progress'
             : 'Gateway revocation pending'}
@@ -217,10 +226,20 @@ function UsersTable(): ReactElement {
         id: 'user',
         header: 'User',
         cell: ({ row }) => (
-          <span>
-            <span className="block font-medium text-fg">{row.original.display_name}</span>
-            <span className="block text-xs text-fg-subtle">{row.original.email}</span>
-          </span>
+          <div className="flex items-center gap-3">
+            <span
+              aria-hidden="true"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent-soft text-xs font-semibold text-accent"
+            >
+              {initials(row.original.display_name)}
+            </span>
+            <span className="min-w-0">
+              <span className="block truncate font-medium text-fg">
+                {row.original.display_name}
+              </span>
+              <span className="block truncate text-xs text-fg-subtle">{row.original.email}</span>
+            </span>
+          </div>
         ),
       },
       {
@@ -231,7 +250,7 @@ function UsersTable(): ReactElement {
             <RoleBadge role={row.original.role} />
             <Select<Role>
               aria-label={`Change role for ${row.original.display_name}`}
-              className="h-8 w-36"
+              className="h-8 w-32 text-xs"
               value={row.original.role}
               onValueChange={(role) => {
                 if (role === row.original.role) return;
@@ -250,7 +269,7 @@ function UsersTable(): ReactElement {
         header: 'Organization',
         cell: ({ row }) => {
           const orgId = row.original.org_id;
-          if (orgId === null) return <span className="text-xs text-fg-subtle">—</span>;
+          if (orgId === null) return <span className="text-fg-subtle">—</span>;
           return <span className="text-fg-muted">{orgNames.get(orgId) ?? orgId}</span>;
         },
       },
@@ -280,7 +299,12 @@ function UsersTable(): ReactElement {
         id: 'last_login',
         header: 'Last sign-in',
         cell: ({ row }) => (
-          <span className="text-fg-muted">{formatDateTime(row.original.last_login_at)}</span>
+          <span
+            className="whitespace-nowrap text-fg-muted tabular-nums"
+            title={formatDateTime(row.original.last_login_at)}
+          >
+            {formatRelative(row.original.last_login_at)}
+          </span>
         ),
       },
       {
@@ -296,7 +320,7 @@ function UsersTable(): ReactElement {
             >
               Edit
             </Button>
-            <Button size="sm" variant="secondary" onClick={() => setStatusTarget(row.original)}>
+            <Button size="sm" variant="outline" onClick={() => setStatusTarget(row.original)}>
               {row.original.status === 'active' ? 'Disable' : 'Enable'}
             </Button>
           </div>
@@ -308,68 +332,6 @@ function UsersTable(): ReactElement {
 
   return (
     <>
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <div className="relative w-full max-w-sm">
-          <Icon
-            name="search"
-            className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-fg-subtle"
-          />
-          <Input
-            className="pl-9"
-            aria-label="Search users"
-            placeholder="Search by name or email"
-            value={search}
-            onChange={(event) => {
-              setSearch(event.target.value);
-              setOffset(0);
-            }}
-          />
-        </div>
-        <Select<Role | 'all'>
-          aria-label="Filter by role"
-          className="w-44"
-          value={roleFilter}
-          onValueChange={(value) => {
-            setRoleFilter(value);
-            setOffset(0);
-          }}
-          options={[
-            { value: 'all', label: 'All roles' },
-            ...ROLE_ORDER.map((value) => ({
-              value: value as Role | 'all',
-              label: ROLE_LABELS[value],
-            })),
-          ]}
-        />
-        <Select<UserStatus | 'all'>
-          aria-label="Filter by status"
-          className="w-44"
-          value={statusFilter}
-          onValueChange={(value) => {
-            setStatusFilter(value);
-            setOffset(0);
-          }}
-          options={[
-            { value: 'all', label: 'All statuses' },
-            { value: 'active', label: 'Active' },
-            { value: 'disabled', label: 'Disabled' },
-          ]}
-        />
-        <Select
-          aria-label="Filter by organization"
-          className="w-56"
-          value={orgFilter}
-          onValueChange={(value) => {
-            setOrgFilter(value);
-            setOffset(0);
-          }}
-          options={[
-            { value: 'all', label: 'All organizations' },
-            ...orgs.map((org) => ({ value: org.id, label: org.name })),
-          ]}
-        />
-      </div>
-
       <DataTable<User>
         columns={columns}
         data={query.data?.items ?? []}
@@ -378,7 +340,70 @@ function UsersTable(): ReactElement {
         limit={limit}
         onOffsetChange={setOffset}
         loading={query.isLoading}
-        empty={<EmptyState icon="users" title="No accounts match these filters" />}
+        toolbar={
+          <>
+            <SearchInput
+              wrapperClassName="w-full sm:w-64"
+              aria-label="Search users"
+              placeholder="Search by name or email"
+              value={search}
+              onChange={(event) => {
+                setSearch(event.target.value);
+                setOffset(0);
+              }}
+            />
+            <Select<Role | 'all'>
+              aria-label="Filter by role"
+              className="w-40"
+              value={roleFilter}
+              onValueChange={(value) => {
+                setRoleFilter(value);
+                setOffset(0);
+              }}
+              options={[
+                { value: 'all', label: 'All roles' },
+                ...ROLE_ORDER.map((value) => ({
+                  value: value as Role | 'all',
+                  label: ROLE_LABELS[value],
+                })),
+              ]}
+            />
+            <Select<UserStatus | 'all'>
+              aria-label="Filter by status"
+              className="w-40"
+              value={statusFilter}
+              onValueChange={(value) => {
+                setStatusFilter(value);
+                setOffset(0);
+              }}
+              options={[
+                { value: 'all', label: 'All statuses' },
+                { value: 'active', label: 'Active' },
+                { value: 'disabled', label: 'Disabled' },
+              ]}
+            />
+            <Select
+              aria-label="Filter by organization"
+              className="w-48"
+              value={orgFilter}
+              onValueChange={(value) => {
+                setOrgFilter(value);
+                setOffset(0);
+              }}
+              options={[
+                { value: 'all', label: 'All organizations' },
+                ...orgs.map((org) => ({ value: org.id, label: org.name })),
+              ]}
+            />
+          </>
+        }
+        empty={
+          <EmptyState
+            icon="users"
+            title="No accounts match these filters"
+            description="Widen the search or clear a filter to see more of the directory."
+          />
+        }
       />
 
       {editTarget ? (

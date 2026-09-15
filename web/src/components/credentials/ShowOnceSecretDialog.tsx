@@ -1,9 +1,11 @@
 import { useState, type ReactElement } from 'react';
 import type { ShowOnceSecret } from '@ferrum-nexus/shared';
+import { FormNotice } from '../auth/AuthShell';
+import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
 import { CopyField } from '../ui/CopyField';
 import { Dialog } from '../ui/Dialog';
-import { Icon } from '../ui/Icon';
+import { Checkbox } from '../ui/Input';
 
 /** Field labels for each credential flavour, in display order. */
 const SECRET_FIELDS: ReadonlyArray<{ key: keyof ShowOnceSecret; label: string }> = [
@@ -53,6 +55,7 @@ export function ShowOnceSecretDialog({
       footer={
         <Button
           variant="primary"
+          className="w-full sm:w-auto"
           disabled={!acknowledged}
           onClick={() => {
             setAcknowledged(false);
@@ -64,18 +67,28 @@ export function ShowOnceSecretDialog({
       }
     >
       <div className="flex flex-col gap-4">
-        <div className="flex items-start gap-2.5 rounded-md border border-warning/40 bg-warning-soft p-3">
-          <Icon name="alert" className="mt-0.5 h-4 w-4 text-warning" />
-          <p className="text-sm text-fg">
-            Copy these values into your secret store before closing this dialog.
+        <FormNotice tone="warning">
+          <p className="font-medium text-fg">Copy these values before closing this dialog.</p>
+          <p className="mt-0.5 text-fg-muted">
+            They are never shown again, and nothing here can be recovered later.
           </p>
+        </FormNotice>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs font-medium tracking-wide text-fg-subtle uppercase">
+            Credential type
+          </span>
+          <Badge tone="accent" mono>
+            {secret.type}
+          </Badge>
         </div>
 
-        <CopyField label="Consumer" value={consumerUsername} />
-        <CopyField label="Credential type" value={secret.type} mono={false} />
-        {fields.map((field) => (
-          <CopyField key={field.key} label={field.label} value={String(secret[field.key])} />
-        ))}
+        <div className="flex flex-col gap-4 rounded-md border border-border bg-inset/50 p-4">
+          <CopyField label="Consumer" value={consumerUsername} />
+          {fields.map((field) => (
+            <CopyField key={field.key} label={field.label} value={String(secret[field.key])} />
+          ))}
+        </div>
 
         {secret.type === 'jwt' ? (
           <p className="text-sm text-fg-muted">
@@ -83,15 +96,13 @@ export function ShowOnceSecretDialog({
           </p>
         ) : null}
 
-        <label className="flex items-start gap-2.5 text-sm text-fg">
-          <input
-            type="checkbox"
+        <div className="rounded-md border border-border bg-inset/60 p-3">
+          <Checkbox
+            label="I have saved these values somewhere safe."
             checked={acknowledged}
             onChange={(event) => setAcknowledged(event.target.checked)}
-            className="mt-0.5 h-4 w-4 accent-[var(--accent)]"
           />
-          I have saved these values somewhere safe.
-        </label>
+        </div>
       </div>
     </Dialog>
   );

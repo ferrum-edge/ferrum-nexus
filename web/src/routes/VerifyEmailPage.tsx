@@ -1,6 +1,8 @@
 import { Link, useSearch } from '@tanstack/react-router';
 import { useEffect, useRef, useState, type ReactElement } from 'react';
 import { AuthShell, FormNotice } from '../components/auth/AuthShell';
+import { buttonClassName } from '../components/ui/Button';
+import { Icon } from '../components/ui/Icon';
 import { Spinner } from '../components/ui/Spinner';
 import { ApiError, authApi } from '../lib/api';
 
@@ -45,7 +47,9 @@ export function VerifyEmailPage(): ReactElement {
     <AuthShell title="Email verification">
       <div className="flex flex-col gap-4">
         {state.kind === 'verifying' || state.kind === 'idle' ? (
-          <Spinner label="Verifying your email address" />
+          <div className="flex justify-center rounded-md border border-border bg-inset py-6">
+            <Spinner label="Verifying your email address" />
+          </div>
         ) : null}
         {state.kind === 'verified' ? (
           <FormNotice tone="success">
@@ -55,9 +59,14 @@ export function VerifyEmailPage(): ReactElement {
         {state.kind === 'failed' ? <FormNotice>{state.message}</FormNotice> : null}
         <Link
           to="/login"
-          className="inline-flex h-11 items-center justify-center rounded-md bg-accent px-4 text-sm font-medium text-accent-fg hover:bg-accent-hover"
+          className={buttonClassName({
+            variant: state.kind === 'verified' ? 'primary' : 'secondary',
+            size: 'lg',
+            className: 'w-full',
+          })}
         >
           Go to sign in
+          <Icon name="arrow-right" className="h-4 w-4" />
         </Link>
       </div>
     </AuthShell>

@@ -87,7 +87,7 @@ export function PageHeader({
   meta,
 }: PageHeaderProps): ReactElement {
   return (
-    <header className="mb-6 flex flex-wrap items-end justify-between gap-x-6 gap-y-4">
+    <header className="mb-6 flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between sm:gap-x-6">
       <div className="min-w-0 flex-1">
         {breadcrumbs && breadcrumbs.length > 0 ? (
           <nav aria-label="Breadcrumb" className="mb-2">
@@ -119,7 +119,9 @@ export function PageHeader({
           <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-fg-muted">{description}</p>
         ) : null}
       </div>
-      {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
+      {actions ? (
+        <div className="flex flex-wrap items-center gap-2 sm:shrink-0">{actions}</div>
+      ) : null}
     </header>
   );
 }

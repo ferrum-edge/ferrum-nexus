@@ -1,4 +1,4 @@
-import { type ReactElement } from 'react';
+import { useId, useState, type ReactElement } from 'react';
 import {
   DEFAULT_BACKEND_CONNECT_TIMEOUT_MS,
   DEFAULT_BACKEND_READ_TIMEOUT_MS,
@@ -10,6 +10,7 @@ import {
   type HttpMethod,
 } from '@ferrum-nexus/shared';
 import { Button } from '../ui/Button';
+import { Icon } from '../ui/Icon';
 import { Checkbox, Field, Input } from '../ui/Input';
 
 /** The three timeout boxes as the provider typed them; blank means "default". */
@@ -83,6 +84,23 @@ export interface AdvancedProxySettingsProps {
    * what happens when no document is available to read.
    */
   specMethods?: HttpMethod[];
+  /**
+   * Render inside a collapsed disclosure. The fields stay mounted either way,
+   * so a draft survives folding the section away.
+   */
+  collapsible?: boolean;
+}
+
+/** Short reading of the current draft, shown on the collapsed summary row. */
+function summarise(methods: HttpMethod[], timeouts: TimeoutDraft, circuitBreaker: boolean): string {
+  const parts: string[] = [
+    methods.length === 0 ? 'Every method' : methods.join(', '),
+    Object.values(timeouts).some((entry) => entry.trim() !== '')
+      ? 'custom timeouts'
+      : 'default timeouts',
+  ];
+  if (circuitBreaker) parts.push('circuit breaker on');
+  return parts.join(' · ');
 }
 
 /**
@@ -99,7 +117,19 @@ export function AdvancedProxySettings({
   circuitBreaker,
   onCircuitBreakerChange,
   specMethods = [],
+  collapsible = false,
 }: AdvancedProxySettingsProps): ReactElement {
+  const panelId = useId();
+  // Open when the draft already departs from the gateway defaults, so an API
+  // that carries advanced settings never hides them behind a closed disclosure.
+  const [open, setOpen] = useState(
+    () =>
+      !collapsible ||
+      methods.length > 0 ||
+      circuitBreaker ||
+      Object.values(timeouts).some((entry) => entry.trim() !== ''),
+  );
+
   const toggle = (method: HttpMethod, checked: boolean): void => {
     onMethodsChange(
       checked
@@ -108,8 +138,8 @@ export function AdvancedProxySettings({
     );
   };
 
-  return (
-    <div className="flex flex-col gap-4 md:col-span-2">
+  const fields = (
+    <div className="flex flex-col gap-4">
       <Field
         label="Allowed HTTP methods"
         htmlFor="allowed-methods"
@@ -140,7 +170,7 @@ export function AdvancedProxySettings({
         </div>
       ) : null}
 
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3">
         <Field label="Connect timeout (ms)" htmlFor="timeout-connect">
           <Input
             id="timeout-connect"
@@ -187,6 +217,37 @@ export function AdvancedProxySettings({
         checked={circuitBreaker}
         onChange={(event) => onCircuitBreakerChange(event.target.checked)}
       />
+    </div>
+  );
+
+  if (!collapsible) return fields;
+
+  // A local disclosure rather than <details>: the fields stay mounted so a
+  // half-typed timeout is not lost by folding the section, and the summary row
+  // reports what is set without opening it.
+  return (
+    <div className="rounded-md border border-border bg-inset/40">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={panelId}
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full items-center gap-3 rounded-md px-4 py-3 text-left transition-colors hover:bg-surface-hover focus-visible:ring-2 focus-visible:ring-accent-ring focus-visible:outline-none"
+      >
+        <Icon
+          name="chevron-right"
+          className={`text-fg-subtle transition-transform ${open ? 'rotate-90' : ''}`}
+        />
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm font-medium text-fg">Advanced proxy settings</span>
+          <span className="block truncate text-xs text-fg-subtle">
+            {summarise(methods, timeouts, circuitBreaker)}
+          </span>
+        </span>
+      </button>
+      <div id={panelId} className={open ? 'border-t border-border px-4 py-4' : 'hidden'}>
+        {fields}
+      </div>
     </div>
   );
 }

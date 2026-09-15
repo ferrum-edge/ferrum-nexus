@@ -28,6 +28,7 @@ import {
   type PluginFieldSpec,
   type ProviderPluginDescriptor,
 } from '@ferrum-nexus/shared';
+import { FormNotice } from '../auth/AuthShell';
 import { Checkbox, Field, Input, Textarea } from '../ui/Input';
 import { Select } from '../ui/Select';
 
@@ -311,6 +312,16 @@ function OptionList({
   );
 }
 
+/**
+ * Whether a field is narrow enough to share a row with its neighbour.
+ *
+ * Numbers and closed choices are short; text, lists and booleans carry help
+ * text or multi-line input and read better across the full width.
+ */
+function isCompact(field: PluginFieldSpec): boolean {
+  return field.kind === 'integer' || field.kind === 'enum';
+}
+
 /** One descriptor field as a labelled control. */
 function PluginField({
   field,
@@ -327,11 +338,13 @@ function PluginField({
 }): ReactElement {
   const id = useId();
   const value = draft[field.key];
+  const span = isCompact(field) ? undefined : 'sm:col-span-2';
 
   if (field.kind === 'boolean') {
     return (
       <Checkbox
         id={id}
+        className={span}
         label={field.label}
         {...(field.help === undefined ? {} : { description: field.help })}
         checked={value === true}
@@ -366,6 +379,7 @@ function PluginField({
       <Field
         label={field.label}
         htmlFor={id}
+        className={span}
         {...(field.help === undefined ? {} : { hint: field.help })}
         {...(error === undefined ? {} : { error })}
       >
@@ -384,6 +398,7 @@ function PluginField({
       <Field
         label={field.label}
         htmlFor={id}
+        className={span}
         {...(field.help === undefined ? {} : { hint: field.help })}
         {...(error === undefined ? {} : { error })}
       >
@@ -408,6 +423,7 @@ function PluginField({
     <Field
       label={field.label}
       htmlFor={id}
+      className={span}
       {...(hint === undefined ? {} : { hint })}
       {...(error === undefined ? {} : { error })}
       required={field.required === true}
@@ -438,11 +454,11 @@ export function PluginForm({
   disabled,
 }: PluginFormProps): ReactElement {
   return (
-    <div className="flex flex-col gap-4">
+    <div className="grid gap-x-5 gap-y-4 sm:grid-cols-2">
       {errors[FORM_ERROR_KEY] ? (
-        <p className="text-xs text-danger" role="alert">
-          {errors[FORM_ERROR_KEY]}
-        </p>
+        <div className="sm:col-span-2">
+          <FormNotice tone="danger">{errors[FORM_ERROR_KEY]}</FormNotice>
+        </div>
       ) : null}
       {descriptor.fields.map((field) => (
         <PluginField

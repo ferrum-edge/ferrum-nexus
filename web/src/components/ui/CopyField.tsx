@@ -35,10 +35,12 @@ export function CopyField({ label, value, mono = true, className }: CopyFieldPro
   return (
     <div className={cn('flex flex-col gap-1.5', className)}>
       <span className="text-xs font-medium tracking-wide text-fg-subtle uppercase">{label}</span>
-      <div className="flex items-stretch gap-2">
+      <div className="group flex items-stretch gap-2">
         <code
           className={cn(
-            'min-w-0 flex-1 overflow-x-auto rounded-md border border-border bg-inset px-3 py-2 text-sm break-all text-fg',
+            'min-w-0 flex-1 overflow-x-auto rounded-md border border-border bg-inset px-3 py-2 text-sm break-all text-fg select-all',
+            'transition-colors group-hover:border-border-strong group-hover:bg-surface-hover',
+            copied && 'border-success/40',
             mono && 'font-mono text-xs',
           )}
         >
@@ -49,7 +51,8 @@ export function CopyField({ label, value, mono = true, className }: CopyFieldPro
           variant="secondary"
           onClick={() => void copy()}
           aria-label={copied ? `${label} copied` : `Copy ${label}`}
-          title={`Copy ${label}`}
+          title={copied ? 'Copied' : `Copy ${label}`}
+          className={cn(copied && 'border-success/40')}
         >
           <Icon name={copied ? 'check' : 'copy'} className={copied ? 'text-success' : undefined} />
         </Button>

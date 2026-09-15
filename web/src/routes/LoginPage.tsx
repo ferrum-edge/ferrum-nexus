@@ -3,8 +3,10 @@ import { useCallback, useEffect, useState, type FormEvent, type ReactElement } f
 import { ERROR_CODES } from '@ferrum-nexus/shared';
 import { AuthShell, FormNotice } from '../components/auth/AuthShell';
 import { CaptchaWidget } from '../components/auth/CaptchaWidget';
+import { PasswordField } from '../components/auth/PasswordField';
 import { ResendVerification } from '../components/auth/ResendVerification';
 import { Button } from '../components/ui/Button';
+import { Icon } from '../components/ui/Icon';
 import { LabeledInput } from '../components/ui/Input';
 import { useCaptchaConfig } from '../hooks/useBranding';
 import { ApiError } from '../lib/api';
@@ -92,28 +94,29 @@ export function LoginPage(): ReactElement {
           label="Email"
           type="email"
           autoComplete="email"
+          placeholder="you@company.com"
           required
           value={email}
           onChange={(event) => setEmail(event.target.value)}
         />
         <div className="flex flex-col gap-1.5">
-          <LabeledInput
+          <PasswordField
             label="Password"
-            type="password"
             autoComplete="current-password"
             required
             value={password}
             onChange={(event) => setPassword(event.target.value)}
           />
-          <Link to="/forgot-password" className="self-start text-xs text-accent hover:underline">
+          <Link to="/forgot-password" className="self-end text-xs text-accent hover:underline">
             Forgot password?
           </Link>
         </div>
 
         <CaptchaWidget config={captcha} onToken={onToken} />
 
-        <Button type="submit" variant="primary" size="lg" loading={submitting}>
+        <Button type="submit" variant="primary" size="lg" className="w-full" loading={submitting}>
           Sign in
+          <Icon name="arrow-right" className="h-4 w-4" />
         </Button>
       </form>
     </AuthShell>

@@ -70,7 +70,7 @@ export function chargeNode(budget: RenderBudget): boolean {
  */
 export function TruncationNotice(): ReactElement {
   return (
-    <p className="text-xs text-fg-subtle">
+    <p className="text-xs text-fg-subtle italic">
       …truncated — download the specification to read the rest.
     </p>
   );
@@ -296,21 +296,23 @@ function renderNode(
       ) : null}
 
       {composition && compositionRows.length > 0 ? (
-        <div className="mt-1 border-l border-border pl-3">
-          <p className="text-xs font-medium text-fg-subtle">{composition.key}</p>
+        <div className="mt-1 ml-3 border-l border-border pl-3">
+          <p className="font-mono text-[0.7rem] tracking-wide text-fg-subtle">{composition.key}</p>
           {compositionRows}
         </div>
       ) : null}
 
       {itemsRow ? (
-        <div className="mt-1 border-l border-border pl-3">
-          <p className="text-xs font-medium text-fg-subtle">items</p>
+        <div className="mt-1 ml-3 border-l border-border pl-3">
+          <p className="font-mono text-[0.7rem] tracking-wide text-fg-subtle">items</p>
           {itemsRow}
         </div>
       ) : null}
 
       {propertyRows.length > 0 ? (
-        <div className="mt-1 flex flex-col gap-2 border-l border-border pl-3">{propertyRows}</div>
+        <div className="mt-1 ml-3 flex flex-col gap-2 border-l border-border pl-3">
+          {propertyRows}
+        </div>
       ) : null}
     </div>
   );
@@ -328,10 +330,10 @@ function SchemaRow({
   children: ReactNode;
 }): ReactElement {
   return (
-    <div className={cn('flex flex-wrap items-center gap-2', depth > 0 && 'pl-0')}>
+    <div className={cn('flex flex-wrap items-center gap-2 py-px', depth > 0 && 'pl-0')}>
       {name ? <code className="font-mono text-xs font-semibold text-fg">{name}</code> : null}
       {required ? (
-        <span className="text-[0.65rem] font-medium tracking-wide text-danger uppercase">
+        <span className="text-[0.65rem] font-semibold tracking-[0.08em] text-danger uppercase">
           required
         </span>
       ) : null}
