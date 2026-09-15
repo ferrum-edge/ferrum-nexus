@@ -217,10 +217,8 @@ export interface ApiPluginRecord extends ApiPlugin {
    * matched on the name alone replaced or deleted the operator's hand-made
    * config as well (issue #153).
    *
-   * `null` on a row written before the column existed, and on one whose gateway
-   * config an operator has since removed. `plugins/service.ts` backfills the
-   * first case by matching the plugin name on the proxy — the rule that
-   * resolved it then — and creates a fresh config for the second.
+   * `null` means no gateway config is claimed. A save creates a fresh config
+   * and records its id; removal never adopts an unowned config by name.
    */
   ferrum_plugin_config_id: string | null;
 }
@@ -837,7 +835,7 @@ export interface CredentialRepo {
    * `CONFLICT` rather than two rows claiming one Edge slot.
    *
    * Pass `edge_ordinal: null` only to record a row whose gateway position is
-   * unknown — the state the migration backfill leaves ambiguous legacy rows in.
+   * unknown. Multiple unresolved rows cannot be addressed individually.
    * No service does this.
    */
   create(input: CreateInput<CredentialRecord>): Promise<CredentialRecord>;

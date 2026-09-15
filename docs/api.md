@@ -2300,8 +2300,7 @@ is no path back to the plaintext on either side.
 
 _session_ — `Paginated<CredentialMetadata>`. Never contains a secret.
 `edge_ordinal` is the row's durable append position within its consumer and
-type (`null` for a row written before `011_credential_ordinal` whose position
-could not be recovered); the portal derives an entry's gateway array index from
+type (`null` when the gateway position is unknown); the portal derives an entry's gateway array index from
 it.
 
 | Query             | Type                                | Notes                                                                                     |

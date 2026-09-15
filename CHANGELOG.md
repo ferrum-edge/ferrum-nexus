@@ -142,6 +142,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- Consolidated the buildout database history into one `001_initial` schema per
+  SQL dialect and one MongoDB initial index setup. Removed legacy backfills and
+  upgrade runbooks. Development databases must be recreated after baseline changes.
+  Server builds now ship SQL assets beside the compiled runner.
+
 - `POST /api/apis` and `PATCH /api/apis/:id` accept `cors.origins` as an alias
   for `cors.allowed_origins`. Sending both with different values is `400`
   naming both keys. Responses still emit `allowed_origins` only.
@@ -326,10 +331,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   name.** Ownership was inferred from the plugin name, so every other config
   of that name on the proxy looked like a leftover duplicate and was removed —
   including a per-path deny gate Nexus never created. `api_plugins` now records
-  the Edge config id it produced (migration `015_api_plugin_config_id`) and
-  saves, removals and reconciliation act on that config alone; a row written
-  before the column adopts a single name match on its next save and never
-  deletes the rest. The `api.plugin_set` and `api.plugin_remove` audit rows name
+  the Edge config id it produced (`ferrum_plugin_config_id`) and
+  saves, removals and reconciliation act on that config alone. A row without
+  a recorded id creates a fresh config on save and leaves existing configs alone. The `api.plugin_set` and `api.plugin_remove` audit rows name
   the config id they touched.
 - **An ordinary portal save reset an operator's `priority_override`.** The body
   sent to `PUT /plugins/config/{id}` was built from scratch, and that endpoint
@@ -584,10 +588,10 @@ fails without the fix.
   template now announces activity instead of quoting a message. One
   self-registered account could previously mail-bomb every administrator
   and grow the message, audit, notification and outbox tables without limit.
-  Migration `010_message_sender_index` adds the index the budget check runs on.
+  The initial schema includes the sender index the budget check runs on.
 - **Gateway writes are exclusive across Nexus instances.** Every consumer
   and proxy read-modify-write now holds a database lease (`edge_leases`,
-  migration `009`, 60 s TTL, renewed while held, up to 30 s wait, then
+  60 s TTL, renewed while held, up to 30 s wait, then
   `409 CONFLICT`) in addition to the in-process queue, so two instances over
   one database can no longer restore a revoked ACL group or drop a proxy's
   auth association by overwriting each other's whole-resource `PUT`. The
