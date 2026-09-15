@@ -56,7 +56,6 @@
 
 import {
   MongoClient,
-  type AnyBulkWriteOperation,
   type ClientSession,
   type Collection,
   type Db,
@@ -408,10 +407,8 @@ function mapSession(row: Row): SessionRecord {
 /**
  * Decode the `spec_enforcement` field, falling back to `docs_only`.
  *
- * Unlike the SQL adapters there is no migration to backfill: a document
- * written before this field existed simply does not carry it, and neither it
- * nor a level a newer build introduced may read back as enforcement this
- * binary cannot generate a plugin config for.
+ * Missing or invalid values must not enable enforcement this binary cannot
+ * generate a plugin config for.
  */
 function specEnforcement(value: unknown): SpecEnforcementLevel {
   return isSpecEnforcementLevel(value) ? value : DEFAULT_SPEC_ENFORCEMENT;
@@ -520,8 +517,7 @@ function mapCredential(row: Row): CredentialRecord {
     label: strOrNull(row.label),
     status: str(row.status) as CredentialStatus,
     rotated_from_id: strOrNull(row.rotated_from_id),
-    // Absent on a document written before `011_credential_ordinal` ran, which
-    // reads back exactly like the SQL backfill's unresolved NULL.
+    // Missing positions read back exactly like an unresolved SQL NULL.
     edge_ordinal: numOrNull(row.edge_ordinal),
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
@@ -560,8 +556,7 @@ function mapMessage(row: Row): MessageRecord {
     thread_id: str(row.thread_id),
     sender_user_id: str(row.sender_user_id),
     body: str(row.body),
-    // Documents written before `017_message_broadcast` carry no field at all,
-    // and every one of them is an ordinary message.
+    // Only an explicit true marks a broadcast; the default is ordinary mail.
     broadcast: row.broadcast === true,
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
@@ -784,17 +779,6 @@ interface IndexDefinition {
   partialFilterExpression?: Document;
 }
 
-/** Indexes added by `007_api_plugins`. */
-const API_PLUGIN_INDEXES: IndexDefinition[] = [
-  {
-    collection: 'api_plugins',
-    name: 'ux_api_plugins_api_name',
-    key: { api_id: 1, plugin_name: 1 },
-    unique: true,
-  },
-  { collection: 'api_plugins', name: 'ix_api_plugins_api', key: { api_id: 1, created_at: 1 } },
-];
-
 /**
  * Every index of `001_initial`, translated.
  *
@@ -845,7 +829,13 @@ const INDEXES: IndexDefinition[] = [
   },
   { collection: 'api_specs', name: 'ix_api_specs_api', key: { api_id: 1, created_at: 1 } },
 
-  ...API_PLUGIN_INDEXES,
+  {
+    collection: 'api_plugins',
+    name: 'ux_api_plugins_api_name',
+    key: { api_id: 1, plugin_name: 1 },
+    unique: true,
+  },
+  { collection: 'api_plugins', name: 'ix_api_plugins_api', key: { api_id: 1, created_at: 1 } },
 
   {
     collection: 'access_requests',
@@ -970,28 +960,19 @@ const INDEXES: IndexDefinition[] = [
     name: 'ix_verification_tokens_expires',
     key: { expires_at: 1 },
   },
-];
 
-/** Indexes added by `010_message_sender_index`. */
-const SENDER_INDEXES: IndexDefinition[] = [
   {
     collection: 'messages',
     name: 'ix_messages_sender',
     key: { sender_user_id: 1, created_at: 1 },
   },
-];
 
-/** Indexes added by `003_verification_token_purpose`. */
-const PURPOSE_INDEXES: IndexDefinition[] = [
   {
     collection: 'email_verification_tokens',
     name: 'ix_verification_tokens_user_purpose',
     key: { user_id: 1, purpose: 1 },
   },
-];
 
-/** Indexes added by `008_gateway_teardown_jobs`. */
-const TEARDOWN_JOB_INDEXES: IndexDefinition[] = [
   {
     collection: 'gateway_teardown_jobs',
     name: 'ux_gateway_teardown_jobs_user',
@@ -1003,19 +984,13 @@ const TEARDOWN_JOB_INDEXES: IndexDefinition[] = [
     name: 'ix_gateway_teardown_jobs_due',
     key: { status: 1, next_attempt_at: 1 },
   },
-];
 
-/** Indexes added by `009_edge_leases`. */
-const LEASE_INDEXES: IndexDefinition[] = [
   // `_id` already carries the key, so this is the redundant-but-explicit
   // counterpart of the SQL primary key; the expiry index backs the
   // housekeeping sweep.
   { collection: 'edge_leases', name: 'ux_edge_leases_key', key: { key: 1 }, unique: true },
   { collection: 'edge_leases', name: 'ix_edge_leases_expires', key: { expires_at: 1 } },
-];
 
-/** Indexes added by `012_gateway_identities`. */
-const IDENTITY_INDEXES: IndexDefinition[] = [
   // One registration per identity name: `claim` upserts on this key, which is
   // what moves a recreated test consumer to its new owner instead of
   // recording two.
@@ -1030,11 +1005,8 @@ const IDENTITY_INDEXES: IndexDefinition[] = [
     name: 'ix_gateway_identities_user',
     key: { user_id: 1, namespace: 1 },
   },
-];
 
-/** Indexes added by `011_credential_ordinal`. */
-const ORDINAL_INDEXES: IndexDefinition[] = [
-  // Partial, so any number of unresolved legacy documents (no ordinal) coexist
+  // Partial, so documents with an unknown ordinal can coexist
   // — the SQL dialects get that from NULLs being distinct in a unique index.
   // Two *assigned* ordinals can never collide within a consumer and type.
   {
@@ -1045,69 +1017,6 @@ const ORDINAL_INDEXES: IndexDefinition[] = [
     partialFilterExpression: { edge_ordinal: { $type: 'number' } },
   },
 ];
-
-/**
- * Backfill `edge_ordinal` — the Mongo half of `011_credential_ordinal.sql`.
- *
- * Same rule as the SQL dialects: within one `(ferrum_consumer_id,
- * credential_type)` group the documents are numbered from 1 in `(created_at,
- * _id)` order, but only when no two *live* documents of the group share a
- * `created_at`. An ambiguous group is set to `null` throughout and left for an
- * administrator's reconciliation (`docs/operations.md` §12), because nothing on
- * either side can say which gateway entry is which.
- */
-async function backfillCredentialOrdinals(db: Db): Promise<void> {
-  const collection = db.collection<NexusDoc>('credential_metadata');
-  const groups = new Map<string, Row[]>();
-  const cursor = collection.find(
-    {},
-    { projection: { _id: 1, ferrum_consumer_id: 1, credential_type: 1, created_at: 1, status: 1 } },
-  );
-  for await (const doc of cursor) {
-    const row = doc as Row;
-    const key = `${str(row.ferrum_consumer_id)}\u0000${str(row.credential_type)}`;
-    const group = groups.get(key);
-    if (group) group.push(row);
-    else groups.set(key, [row]);
-  }
-
-  // Plain code-point order, matching the binary collation the SQL sort uses.
-  const byAppend = (a: Row, b: Row): number => {
-    const stamp = compareStrings(str(a.created_at), str(b.created_at));
-    return stamp !== 0 ? stamp : compareStrings(str(a._id), str(b._id));
-  };
-
-  const writes: AnyBulkWriteOperation<NexusDoc>[] = [];
-  for (const group of groups.values()) {
-    group.sort(byAppend);
-    const liveStamps = new Set<string>();
-    let ambiguous = false;
-    for (const row of group) {
-      if (str(row.status) === 'revoked') continue;
-      const stamp = str(row.created_at);
-      if (liveStamps.has(stamp)) {
-        ambiguous = true;
-        break;
-      }
-      liveStamps.add(stamp);
-    }
-    group.forEach((row, index) => {
-      writes.push({
-        updateOne: {
-          filter: { _id: str(row._id) },
-          update: { $set: { edge_ordinal: ambiguous ? null : index + 1 } },
-        },
-      });
-    });
-  }
-  if (writes.length > 0) await collection.bulkWrite(writes, { ordered: false });
-}
-
-function compareStrings(a: string, b: string): number {
-  if (a < b) return -1;
-  if (a > b) return 1;
-  return 0;
-}
 
 /** Create one batch of {@link IndexDefinition}s. */
 async function createIndexes(db: Db, indexes: IndexDefinition[]): Promise<void> {
@@ -1122,121 +1031,11 @@ async function createIndexes(db: Db, indexes: IndexDefinition[]): Promise<void> 
   }
 }
 
-/** Keep the most recently updated document for each API/plugin pair. */
-async function deduplicateApiPlugins(db: Db): Promise<void> {
-  const collection = db.collection<NexusDoc>('api_plugins');
-  const duplicateGroups = collection.aggregate<{ duplicate_ids: string[] }>([
-    { $sort: { api_id: 1, plugin_name: 1, updated_at: -1, created_at: -1, _id: -1 } },
-    {
-      $group: {
-        _id: { api_id: '$api_id', plugin_name: '$plugin_name' },
-        ids: { $push: '$_id' },
-        count: { $sum: 1 },
-      },
-    },
-    { $match: { count: { $gt: 1 } } },
-    {
-      $project: {
-        _id: 0,
-        duplicate_ids: { $slice: ['$ids', 1, { $subtract: ['$count', 1] }] },
-      },
-    },
-  ]);
-  for await (const group of duplicateGroups) {
-    await collection.deleteMany({ _id: { $in: group.duplicate_ids } });
-  }
-}
-
-/**
- * Mongo's "migrations".
- *
- * Mostly index creation rather than DDL, but the ids stay in lockstep with the
- * SQL variants so `schema_migrations` means the same thing on every driver and
- * each step lands exactly once here too.
- */
+/** The buildout baseline creates every index; document fields are written by repositories. */
 const MONGO_MIGRATIONS: { id: string; apply: (db: Db) => Promise<void> }[] = [
   {
     id: '001_initial',
     apply: (db: Db): Promise<void> => createIndexes(db, INDEXES),
-  },
-  {
-    id: '003_verification_token_purpose',
-    apply: async (db: Db): Promise<void> => {
-      // The SQL dialects backfill through a column default; Mongo has to write
-      // the field. Every document that predates the column is a verification
-      // token, since that was the only kind the table held.
-      await db
-        .collection('email_verification_tokens')
-        .updateMany({ purpose: { $exists: false } }, { $set: { purpose: 'email_verification' } });
-      await createIndexes(db, PURPOSE_INDEXES);
-    },
-  },
-  {
-    id: '006_email_token_issue_claims',
-    apply: async (): Promise<void> => undefined,
-  },
-  {
-    id: '007_api_plugins',
-    // Upgraded databases have already run `001_initial`, so install the new
-    // indexes explicitly. Remove any duplicates created before the unique
-    // index existed, retaining the configuration with the latest update.
-    apply: async (db: Db): Promise<void> => {
-      await deduplicateApiPlugins(db);
-      await createIndexes(db, API_PLUGIN_INDEXES);
-    },
-  },
-  {
-    id: '008_gateway_teardown_jobs',
-    // The unique index on `user_id` is what makes `upsertPending` a per-account
-    // reset rather than a queue of duplicate revocations; the collection itself
-    // is created on the first insert.
-    apply: (db: Db): Promise<void> => createIndexes(db, TEARDOWN_JOB_INDEXES),
-  },
-  {
-    id: '009_edge_leases',
-    apply: (db: Db): Promise<void> => createIndexes(db, LEASE_INDEXES),
-  },
-  {
-    id: '010_message_sender_index',
-    apply: (db: Db): Promise<void> => createIndexes(db, SENDER_INDEXES),
-  },
-  {
-    id: '011_credential_ordinal',
-    // Backfill first: the unique index would otherwise be built over documents
-    // that are about to change under it.
-    apply: async (db: Db): Promise<void> => {
-      await backfillCredentialOrdinals(db);
-      await createIndexes(db, ORDINAL_INDEXES);
-    },
-  },
-  {
-    id: '012_gateway_identities',
-    // The unique name index is what makes `claim` a per-identity upsert; the
-    // collection itself is created on the first insert.
-    apply: (db: Db): Promise<void> => createIndexes(db, IDENTITY_INDEXES),
-  },
-  {
-    id: '013_teardown_generation',
-    apply: async (db: Db): Promise<void> => {
-      await db
-        .collection('gateway_teardown_jobs')
-        .updateMany({ generation: { $exists: false } }, { $set: { generation: '' } });
-    },
-  },
-  {
-    // Nothing to do: the SQL dialects add a nullable column, and a document
-    // with no `ferrum_plugin_config_id` already maps to the same `null`. The id
-    // is recorded anyway so `schema_migrations` means the same thing here.
-    id: '015_api_plugin_config_id',
-    apply: async (): Promise<void> => undefined,
-  },
-  {
-    id: '016_outbox_generation',
-    apply: async (db: Db): Promise<void> => {
-      await db
-        .collection('email_outbox')
-        .updateMany({ generation: { $exists: false } }, { $set: { generation: '' } });
-    },
   },
 ];
 
@@ -2705,8 +2504,7 @@ class MongoStore implements NexusStore {
 
     countBySenderSince: async (senderUserId, sinceIso) =>
       this.col(COLLECTIONS.messages).countDocuments(
-        // `$ne: true` rather than `false`, so documents written before
-        // `017_message_broadcast` — which have no such field — still count.
+        // Match mapMessage: only explicitly marked broadcasts are exempt.
         { sender_user_id: senderUserId, created_at: { $gte: sinceIso }, broadcast: { $ne: true } },
         this.opts,
       ),

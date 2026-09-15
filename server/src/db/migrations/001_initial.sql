@@ -1,5 +1,7 @@
 -- Ferrum Nexus initial schema — SQLite dialect.
 --
+-- Buildout baseline: edit this schema directly; recreate development databases.
+--
 -- Conventions shared by every dialect variant of this migration:
 --   * every id is a TEXT string UUID;
 --   * every timestamp is a TEXT ISO-8601 string (UTC, millisecond precision);
@@ -62,22 +64,28 @@ CREATE INDEX IF NOT EXISTS ix_sessions_expires_at ON sessions (expires_at);
 
 -- ── APIs ───────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS apis (
-  id              TEXT PRIMARY KEY,
-  name            TEXT NOT NULL,
-  slug            TEXT NOT NULL,
-  description     TEXT,
-  owner_user_id   TEXT NOT NULL REFERENCES users (id) ON DELETE RESTRICT,
-  ferrum_proxy_id TEXT,
-  namespace       TEXT NOT NULL,
-  version         TEXT NOT NULL,
-  spec_format     TEXT NOT NULL DEFAULT 'openapi' CHECK (spec_format IN ('openapi')),
-  requestable     INTEGER NOT NULL DEFAULT 0 CHECK (requestable IN (0, 1)),
-  auth_plugin     TEXT NOT NULL CHECK (auth_plugin IN ('key_auth', 'basic_auth', 'jwt_auth')),
-  rate_limit_json TEXT,
-  status          TEXT NOT NULL DEFAULT 'published' CHECK (status IN ('published', 'retired')),
-  visibility      TEXT NOT NULL DEFAULT 'public' CHECK (visibility IN ('public', 'internal')),
-  created_at      TEXT NOT NULL,
-  updated_at      TEXT NOT NULL
+  id                   TEXT PRIMARY KEY,
+  upstream_url         TEXT,
+  cors_json            TEXT,
+  allowed_methods_json TEXT,
+  timeouts_json        TEXT,
+  circuit_breaker      INTEGER NOT NULL DEFAULT 0 CHECK (circuit_breaker IN (0, 1)),
+  spec_enforcement     TEXT NOT NULL DEFAULT 'docs_only' CHECK (spec_enforcement IN ('docs_only', 'routes')),
+  name                 TEXT NOT NULL,
+  slug                 TEXT NOT NULL,
+  description          TEXT,
+  owner_user_id        TEXT NOT NULL REFERENCES users (id) ON DELETE RESTRICT,
+  ferrum_proxy_id      TEXT,
+  namespace            TEXT NOT NULL,
+  version              TEXT NOT NULL,
+  spec_format          TEXT NOT NULL DEFAULT 'openapi' CHECK (spec_format IN ('openapi')),
+  requestable          INTEGER NOT NULL DEFAULT 0 CHECK (requestable IN (0, 1)),
+  auth_plugin          TEXT NOT NULL CHECK (auth_plugin IN ('key_auth', 'basic_auth', 'jwt_auth')),
+  rate_limit_json      TEXT,
+  status               TEXT NOT NULL DEFAULT 'published' CHECK (status IN ('published', 'retired')),
+  visibility           TEXT NOT NULL DEFAULT 'public' CHECK (visibility IN ('public', 'internal')),
+  created_at           TEXT NOT NULL,
+  updated_at           TEXT NOT NULL
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_apis_slug ON apis (lower(slug));
@@ -89,15 +97,15 @@ CREATE INDEX IF NOT EXISTS ix_apis_created_at ON apis (created_at);
 
 -- ── API specs ──────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS api_specs (
-  id            TEXT PRIMARY KEY,
-  api_id        TEXT NOT NULL REFERENCES apis (id) ON DELETE CASCADE,
-  version       TEXT NOT NULL,
-  raw_spec      TEXT NOT NULL,
-  parsed_title  TEXT,
+  id             TEXT PRIMARY KEY,
+  api_id         TEXT NOT NULL REFERENCES apis (id) ON DELETE CASCADE,
+  version        TEXT NOT NULL,
+  raw_spec       TEXT NOT NULL,
+  parsed_title   TEXT,
   parsed_version TEXT,
-  is_current    INTEGER NOT NULL DEFAULT 0 CHECK (is_current IN (0, 1)),
-  created_at    TEXT NOT NULL,
-  updated_at    TEXT NOT NULL
+  is_current     INTEGER NOT NULL DEFAULT 0 CHECK (is_current IN (0, 1)),
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL
 );
 
 -- At most one current revision per API.
@@ -165,6 +173,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_consumers_username ON consumers (namespace,
 -- ── Credential metadata (show-once: fingerprint + last4 only) ──────────────
 CREATE TABLE IF NOT EXISTS credential_metadata (
   id                   TEXT PRIMARY KEY,
+  edge_ordinal         INTEGER,
   user_id              TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
   ferrum_consumer_id   TEXT NOT NULL,
   credential_type      TEXT NOT NULL CHECK (credential_type IN ('keyauth', 'basicauth', 'jwt')),
@@ -178,6 +187,9 @@ CREATE TABLE IF NOT EXISTS credential_metadata (
   created_at           TEXT NOT NULL,
   updated_at           TEXT NOT NULL
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_credentials_ordinal
+  ON credential_metadata (ferrum_consumer_id, credential_type, edge_ordinal);
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_credentials_fingerprint ON credential_metadata (fingerprint);
 CREATE INDEX IF NOT EXISTS ix_credentials_user_status ON credential_metadata (user_id, status);
@@ -203,12 +215,16 @@ CREATE INDEX IF NOT EXISTS ix_threads_api ON message_threads (api_id);
 
 CREATE TABLE IF NOT EXISTS messages (
   id             TEXT PRIMARY KEY,
+  broadcast      INTEGER NOT NULL DEFAULT 0 CHECK (broadcast IN (0, 1)),
   thread_id      TEXT NOT NULL REFERENCES message_threads (id) ON DELETE CASCADE,
   sender_user_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
   body           TEXT NOT NULL,
   created_at     TEXT NOT NULL,
   updated_at     TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS ix_messages_sender
+  ON messages (sender_user_id, created_at);
 
 CREATE INDEX IF NOT EXISTS ix_messages_thread ON messages (thread_id, created_at);
 
@@ -231,6 +247,7 @@ CREATE INDEX IF NOT EXISTS ix_notifications_unread ON notifications (user_id) WH
 -- ── Email outbox ───────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS email_outbox (
   id              TEXT PRIMARY KEY,
+  generation      TEXT NOT NULL DEFAULT '',
   to_email        TEXT NOT NULL,
   subject         TEXT NOT NULL,
   body_html       TEXT NOT NULL,
@@ -293,6 +310,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_email_templates_key ON email_templates (key
 -- ── Email verification tokens ──────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS email_verification_tokens (
   id         TEXT PRIMARY KEY,
+  purpose    TEXT NOT NULL DEFAULT 'email_verification',
   user_id    TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
   token_hash TEXT NOT NULL,
   expires_at TEXT NOT NULL,
@@ -301,8 +319,82 @@ CREATE TABLE IF NOT EXISTS email_verification_tokens (
   updated_at TEXT NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS ix_verification_tokens_user_purpose
+  ON email_verification_tokens (user_id, purpose);
+
 CREATE UNIQUE INDEX IF NOT EXISTS ux_verification_tokens_hash
   ON email_verification_tokens (token_hash);
 CREATE INDEX IF NOT EXISTS ix_verification_tokens_user ON email_verification_tokens (user_id);
 CREATE INDEX IF NOT EXISTS ix_verification_tokens_expires
   ON email_verification_tokens (expires_at);
+
+-- ── Email token issue claims ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS email_token_issue_claims (
+  user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  purpose   TEXT NOT NULL,
+  issued_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, purpose)
+);
+
+-- ── API palette plugins ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS api_plugins (
+  id                      TEXT PRIMARY KEY,
+  ferrum_plugin_config_id TEXT,
+  api_id                  TEXT NOT NULL REFERENCES apis (id) ON DELETE CASCADE,
+  plugin_name             TEXT NOT NULL,
+  enabled                 INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  config_json             TEXT NOT NULL,
+  trigger_json            TEXT,
+  created_at              TEXT NOT NULL,
+  updated_at              TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_api_plugins_api_name
+  ON api_plugins (api_id, plugin_name);
+CREATE INDEX IF NOT EXISTS ix_api_plugins_api ON api_plugins (api_id, created_at);
+
+-- ── Gateway teardown jobs ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS gateway_teardown_jobs (
+  id              TEXT PRIMARY KEY,
+  generation      TEXT NOT NULL DEFAULT '',
+  user_id         TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'sending', 'done')),
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT,
+  last_error      TEXT,
+  -- The admin who asked for the disable; NULL once the row outlives them.
+  requested_by    TEXT REFERENCES users (id) ON DELETE SET NULL,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL,
+  completed_at    TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_gateway_teardown_jobs_user ON gateway_teardown_jobs (user_id);
+CREATE INDEX IF NOT EXISTS ix_gateway_teardown_jobs_due ON gateway_teardown_jobs (status, next_attempt_at);
+
+-- ── Edge leases ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS edge_leases (
+  key        TEXT PRIMARY KEY,
+  owner      TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_edge_leases_expires ON edge_leases (expires_at);
+
+-- ── Gateway identities ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS gateway_identities (
+  id                 TEXT PRIMARY KEY,
+  user_id            TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  namespace          TEXT NOT NULL,
+  ferrum_username    TEXT NOT NULL,
+  ferrum_consumer_id TEXT,
+  created_at         TEXT NOT NULL,
+  updated_at         TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_gateway_identities_username
+  ON gateway_identities (namespace, ferrum_username);
+CREATE INDEX IF NOT EXISTS ix_gateway_identities_user ON gateway_identities (user_id, namespace);

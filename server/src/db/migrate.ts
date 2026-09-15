@@ -14,9 +14,9 @@
  * dialects and a database can never be migrated twice.
  */
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, resolve } from 'node:path';
+import { join } from 'node:path';
 
 import { internal } from '../lib/errors.js';
 
@@ -94,24 +94,9 @@ function patternFor(dialect: MigrationDialect): RegExp {
   return SQLITE_FILE;
 }
 
-/**
- * Directory holding the `.sql` files.
- *
- * Resolved relative to this module so it works from `src/` under tsx and from
- * `dist/` after `tsc`. When the compiled tree does not carry the `.sql` files
- * (plain `tsc` does not copy assets), it falls back to the source tree.
- */
+/** SQL assets beside this module, in both source and compiled builds. */
 export function migrationsDir(): string {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    join(here, 'migrations'),
-    resolve(here, '..', '..', 'src', 'db', 'migrations'),
-    resolve(here, '..', '..', '..', 'src', 'db', 'migrations'),
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
-  }
-  throw internal(`Could not locate the migrations directory (looked in ${candidates.join(', ')})`);
+  return fileURLToPath(new URL('./migrations/', import.meta.url));
 }
 
 /** Read every migration for a dialect from {@link migrationsDir}, sorted by id. */

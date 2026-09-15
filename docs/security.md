@@ -174,7 +174,7 @@ they are built to answer nothing:
   return `400 VALIDATION_FAILED` with the same message, so a caller working
   through guessed tokens learns nothing from how close it got.
 - **Tokens cannot cross flows.** `email_verification_tokens.purpose`
-  (migration `002`) marks each token `email_verification` or `password_reset`,
+  marks each token `email_verification` or `password_reset`,
   and every lookup names the purpose it expects. A 24-hour verification link is
   therefore not spendable as a password reset, which would otherwise turn
   one-time read access to a mailbox into account takeover a day later.
@@ -800,9 +800,8 @@ appended_ — precisely because `basicauth` is not deleted at all: an append of
 that type that has to be undone is recorded as an orphan for an administrator,
 never guessed at.
 
-Rows that predate the ordinal were backfilled only where their timestamps were
-distinct. Where two live rows of one type share a timestamp, both stay without
-an ordinal and any rotate or revoke of them is refused with `409 CONFLICT`
+If multiple live rows of one consumer and type have unknown positions
+(`edge_ordinal = NULL`), rotating or revoking those rows is refused with `409 CONFLICT`
 until an administrator reconciles the consumer through
 `POST /api/admin/credentials/reconcile`, which clears the type on the gateway
 and revokes the rows — nothing finer-grained is possible without storing or

@@ -339,8 +339,7 @@ describe('sqlite store', () => {
       assert.equal(cleared?.timeouts, null);
       assert.equal(cleared?.circuit_breaker, false);
 
-      // Omitting them on create leaves NULL / the column default, which is what
-      // every row published before migration 004 reads back as.
+      // Omitting settings on create leaves NULL / the column default.
       const bare = await store.apis.create({
         name: 'Untuned',
         slug: `untuned-${newId().slice(0, 8)}`,
@@ -380,7 +379,7 @@ describe('sqlite store', () => {
       assert.equal(relaxed?.spec_enforcement, 'docs_only');
 
       // Omitting it on create takes the column default, which is what every row
-      // published before migration 005 reads back as.
+      // created without an enforcement setting reads back as.
       const bare = await store.apis.create({
         name: 'Unenforced',
         slug: `unenforced-${newId().slice(0, 8)}`,
