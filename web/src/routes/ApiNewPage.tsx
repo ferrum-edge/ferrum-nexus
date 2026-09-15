@@ -227,8 +227,10 @@ function PublishForm(): ReactElement {
       {/* The settings rail: it scrolls on its own beside the document, with the
           publish action pinned to the bottom of the rail so it is never
           hidden behind the rail's own scroll. */}
-      <aside className="flex min-w-0 flex-col gap-5 lg:sticky lg:top-24 lg:max-h-[calc(100dvh-7.5rem)]">
-        <div className="flex min-h-0 flex-col gap-5 lg:flex-1 lg:overflow-y-auto lg:pr-1">
+      {/* The rail flows with the page: a sticky column that scrolls inside
+          itself hides half the form at ordinary viewport heights. */}
+      <aside className="flex min-w-0 flex-col gap-5">
+        <div className="flex min-h-0 flex-col gap-5">
           <Card>
             <CardHeader
               icon="catalog"
