@@ -8,6 +8,19 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Added
 
+- Branding presets, so a portal can be re-skinned from **Administration →
+  Settings → Branding** without touching CSS. `PUT /api/admin/settings`
+  `branding` and `GET /api/branding` gain `radius` (`none`|`sm`|`md`|`lg`),
+  `font_preset` (`system`|`inter`|`manrope` — the two named faces are bundled
+  and self-hosted, loaded only when selected), `sidebar_style`
+  (`surface`|`contrast`), `login_layout` (`split`|`centered`), `footer_text`
+  (≤ 200) and `footer_links` (≤ 5 `{ label, url }`, `http(s)` only; anything
+  else is `400`, and a malformed stored link is dropped on read). The branding
+  tab groups Identity / Appearance / Footer, previews both themes live from the
+  unsaved values (colours, corners, typeface, rail), and replaces the native
+  file input with a styled logo upload. `DEFAULT_BRANDING` now matches the
+  stylesheet's ember identity (`#f97316` / `#38bdf8`) instead of the indigo
+  pair the SPA never used.
 - CAPTCHA lockout recovery (#252). Enabling CAPTCHA — or changing its
   `provider`, `site_key` or `secret_key` while it is on — now requires a
   `captcha_token` that the **new** configuration verifies with the vendor, and

@@ -325,7 +325,103 @@ describe('admin settings', () => {
     assert.equal(body.portal_name, 'Acme Gateway');
     assert.equal(body.accent_color, '#ff8800');
     assert.equal(body.tagline, 'Ship APIs');
-    assert.equal(body.primary_color, '#4f46e5', 'untouched fields keep their default');
+    assert.equal(body.primary_color, '#f97316', 'untouched fields keep their default');
+    assert.equal(body.radius, 'md', 'appearance presets default when never saved');
+    assert.equal(body.login_layout, 'split');
+    assert.deepEqual(body.footer_links, []);
+  });
+
+  it('stores appearance presets and footer links', async () => {
+    const response = await harness.authed(founder, {
+      method: 'PUT',
+      url: '/api/admin/settings',
+      payload: {
+        branding: {
+          radius: 'lg',
+          font_preset: 'inter',
+          sidebar_style: 'contrast',
+          login_layout: 'centered',
+          footer_text: '© Acme Corp',
+          footer_links: [
+            { label: 'Terms', url: 'https://acme.example/terms' },
+            { label: 'Privacy', url: 'https://acme.example/privacy' },
+          ],
+        },
+      },
+    });
+    assert.equal(response.statusCode, 200);
+
+    const branding = await harness.app.inject({ method: 'GET', url: '/api/branding' });
+    const body = branding.json<BrandingResponse>();
+    assert.equal(body.radius, 'lg');
+    assert.equal(body.font_preset, 'inter');
+    assert.equal(body.sidebar_style, 'contrast');
+    assert.equal(body.login_layout, 'centered');
+    assert.equal(body.footer_text, '© Acme Corp');
+    assert.deepEqual(body.footer_links, [
+      { label: 'Terms', url: 'https://acme.example/terms' },
+      { label: 'Privacy', url: 'https://acme.example/privacy' },
+    ]);
+
+    // Clearing the text and the links works the same way as the other nullable fields.
+    const cleared = await harness.authed(founder, {
+      method: 'PUT',
+      url: '/api/admin/settings',
+      payload: { branding: { footer_text: null, footer_links: [] } },
+    });
+    assert.equal(cleared.statusCode, 200);
+    const after = (
+      await harness.app.inject({ method: 'GET', url: '/api/branding' })
+    ).json<BrandingResponse>();
+    assert.equal(after.footer_text, null);
+    assert.deepEqual(after.footer_links, []);
+    assert.equal(after.radius, 'lg', 'presets untouched by the clearing patch stay');
+  });
+
+  it('refuses footer links that are not http(s) and unknown presets', async () => {
+    for (const branding of [
+      { footer_links: [{ label: 'Run', url: 'javascript:alert(1)' }] },
+      { footer_links: [{ label: 'Mail', url: 'mailto:ops@acme.example' }] },
+      {
+        footer_links: Array.from({ length: 6 }, (_, i) => ({
+          label: `L${i}`,
+          url: 'https://acme.example',
+        })),
+      },
+      { radius: 'pill' },
+      { font_preset: 'comic-sans' },
+    ]) {
+      const response = await harness.authed(founder, {
+        method: 'PUT',
+        url: '/api/admin/settings',
+        payload: { branding },
+      });
+      assert.equal(response.statusCode, 400, JSON.stringify(branding));
+      assert.equal(errorCode(response.body), 'VALIDATION_FAILED');
+    }
+  });
+
+  it('drops malformed footer links that reach the store by hand', async () => {
+    await harness.store.settings.set(
+      'branding',
+      {
+        footer_links: [
+          { label: 'Ok', url: 'https://acme.example/ok' },
+          { label: 'Bad', url: 'javascript:alert(1)' },
+          { label: 'Missing' },
+          'not-a-link',
+        ],
+        radius: 'weird',
+      },
+      false,
+    );
+    // The admin snapshot reads the store directly (the public endpoint is
+    // memoised and only invalidated by service writes).
+    const response = await harness.authed(founder, { method: 'GET', url: '/api/admin/settings' });
+    assert.equal(response.statusCode, 200);
+    const body = response.json<AdminSettingsResponse>().branding;
+    assert.deepEqual(body.footer_links, [{ label: 'Ok', url: 'https://acme.example/ok' }]);
+    assert.equal(body.radius, 'md', 'an unknown preset falls back to the default');
   });
 
   it('rejects a malformed logo or colour', async () => {

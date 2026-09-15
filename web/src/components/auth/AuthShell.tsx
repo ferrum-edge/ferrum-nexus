@@ -1,4 +1,5 @@
 import type { ReactElement, ReactNode } from 'react';
+import type { BrandingLink } from '@ferrum-nexus/shared';
 import { useBranding } from '../../hooks/useBranding';
 import { cn } from '../../lib/cn';
 import { ThemeToggle } from '../layout/Header';
@@ -32,9 +33,46 @@ const FEATURES: ReadonlyArray<{ icon: IconName; title: string; body: string }> =
   },
 ];
 
+/** Operator footer: a text line and/or links, or nothing. */
+export function BrandingFooter({
+  text,
+  links,
+  className,
+}: {
+  text: string | null;
+  links: readonly BrandingLink[];
+  className?: string;
+}): ReactElement | null {
+  if (!text && links.length === 0) return null;
+  return (
+    <div
+      className={cn(
+        'flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-fg-subtle',
+        className,
+      )}
+    >
+      {text ? <span>{text}</span> : null}
+      {links.map((link) => (
+        <a
+          key={`${link.label}-${link.url}`}
+          href={link.url}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="transition-colors hover:text-fg"
+        >
+          {link.label}
+        </a>
+      ))}
+    </div>
+  );
+}
+
 /**
- * Layout shared by the public login/register/verify pages: a branded hero on
- * wide screens beside the form, collapsing to a centred card on small ones.
+ * Layout shared by the public login/register/verify pages.
+ *
+ * `login_layout: 'split'` (the default) shows a branded hero on wide screens
+ * beside the form; `'centered'` shows the form alone. Both collapse to a
+ * centred card on small screens.
  */
 export function AuthShell({ title, description, children, footer }: AuthShellProps): ReactElement {
   const { data: branding } = useBranding();
@@ -42,55 +80,59 @@ export function AuthShell({ title, description, children, footer }: AuthShellPro
   const logo = branding?.logo_data_url ?? null;
   const tagline = branding?.tagline ?? DEFAULT_TAGLINE;
   const supportEmail = branding?.support_email ?? null;
+  const split = (branding?.login_layout ?? 'split') === 'split';
+  const footerText = branding?.footer_text ?? null;
+  const footerLinks = branding?.footer_links ?? [];
 
   return (
     <div className="flex min-h-full flex-col lg:flex-row">
-      {/* Hero panel */}
-      <section
-        aria-hidden="true"
-        className={cn(
-          'fx-brand-gradient relative hidden overflow-hidden border-r border-border lg:flex lg:w-[46%] lg:max-w-2xl lg:flex-col lg:justify-between lg:p-12',
-        )}
-      >
-        <div className="fx-dot-grid pointer-events-none absolute inset-0" />
-        <div className="relative flex items-center gap-3">
-          <BrandMark logoDataUrl={logo} portalName={portalName} className="h-10 w-10 text-base" />
-          <div>
-            <p className="text-base font-semibold text-fg">{portalName}</p>
-            <p className="text-[0.7rem] tracking-[0.14em] text-fg-subtle uppercase">
-              Developer portal
+      {split ? (
+        <section
+          aria-hidden="true"
+          className="fx-brand-gradient relative hidden overflow-hidden border-r border-border lg:flex lg:w-[46%] lg:max-w-2xl lg:flex-col lg:justify-between lg:p-12"
+        >
+          <div className="fx-dot-grid pointer-events-none absolute inset-0" />
+          <div className="relative flex items-center gap-3">
+            <BrandMark logoDataUrl={logo} portalName={portalName} className="h-10 w-10 text-base" />
+            <div>
+              <p className="text-base font-semibold text-fg">{portalName}</p>
+              <p className="text-[0.7rem] tracking-[0.14em] text-fg-subtle uppercase">
+                Developer portal
+              </p>
+            </div>
+          </div>
+          <div className="relative max-w-md">
+            <h2 className="text-3xl leading-tight font-semibold tracking-tight text-fg text-balance">
+              {tagline}
+            </h2>
+            <ul className="mt-10 flex flex-col gap-6">
+              {FEATURES.map((feature) => (
+                <li key={feature.title} className="flex items-start gap-3.5">
+                  <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent ring-1 ring-accent/20">
+                    <Icon name={feature.icon} className="h-4.5 w-4.5" />
+                  </span>
+                  <span>
+                    <span className="block text-sm font-semibold text-fg">{feature.title}</span>
+                    <span className="mt-0.5 block text-sm leading-relaxed text-fg-muted">
+                      {feature.body}
+                    </span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+          <div className="relative flex flex-col gap-1.5">
+            <BrandingFooter text={footerText} links={footerLinks} />
+            <p className="text-xs text-fg-subtle">
+              {supportEmail ? <>Need help? {supportEmail}</> : <>Powered by Ferrum Nexus</>}
             </p>
           </div>
-        </div>
-        <div className="relative max-w-md">
-          <h2 className="text-3xl leading-tight font-semibold tracking-tight text-fg text-balance">
-            {tagline}
-          </h2>
-          <ul className="mt-10 flex flex-col gap-6">
-            {FEATURES.map((feature) => (
-              <li key={feature.title} className="flex items-start gap-3.5">
-                <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent ring-1 ring-accent/20">
-                  <Icon name={feature.icon} className="h-4.5 w-4.5" />
-                </span>
-                <span>
-                  <span className="block text-sm font-semibold text-fg">{feature.title}</span>
-                  <span className="mt-0.5 block text-sm leading-relaxed text-fg-muted">
-                    {feature.body}
-                  </span>
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-        <p className="relative text-xs text-fg-subtle">
-          {supportEmail ? <>Need help? {supportEmail}</> : <>Powered by Ferrum Nexus</>}
-        </p>
-      </section>
+        </section>
+      ) : null}
 
-      {/* Form column */}
       <div className="flex min-h-full flex-1 flex-col">
         <div className="flex items-center justify-between px-4 py-3 sm:px-6">
-          <div className="flex items-center gap-2.5 lg:invisible">
+          <div className={cn('flex items-center gap-2.5', split && 'lg:invisible')}>
             <BrandMark logoDataUrl={logo} portalName={portalName} />
             <span className="text-sm font-semibold text-fg">{portalName}</span>
           </div>
@@ -99,6 +141,17 @@ export function AuthShell({ title, description, children, footer }: AuthShellPro
 
         <div className="flex flex-1 items-center justify-center px-4 py-8 sm:px-6">
           <div className="animate-slide-up w-full max-w-md">
+            {!split ? (
+              <div className="mb-6 flex flex-col items-center text-center">
+                <BrandMark
+                  logoDataUrl={logo}
+                  portalName={portalName}
+                  className="h-12 w-12 text-lg"
+                />
+                <p className="mt-3 text-lg font-semibold text-fg">{portalName}</p>
+                <p className="mt-1 max-w-sm text-sm text-fg-muted text-balance">{tagline}</p>
+              </div>
+            ) : null}
             <div className="fx-card p-6 sm:p-8">
               <h1 className="text-xl font-semibold tracking-tight text-fg">{title}</h1>
               {description ? (
@@ -108,13 +161,18 @@ export function AuthShell({ title, description, children, footer }: AuthShellPro
             </div>
             {footer ? <div className="mt-5 text-center text-sm text-fg-muted">{footer}</div> : null}
             {supportEmail ? (
-              <p className="mt-4 text-center text-xs text-fg-subtle lg:hidden">
+              <p className={cn('mt-4 text-center text-xs text-fg-subtle', split && 'lg:hidden')}>
                 Need help? Contact{' '}
                 <a className="text-accent hover:underline" href={`mailto:${supportEmail}`}>
                   {supportEmail}
                 </a>
               </p>
             ) : null}
+            <BrandingFooter
+              text={footerText}
+              links={footerLinks}
+              className={cn('mt-4 justify-center', split && 'lg:hidden')}
+            />
           </div>
         </div>
       </div>

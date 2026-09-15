@@ -104,6 +104,12 @@ function settingsWith(
       default_theme: 'dark',
       tagline: null,
       support_email: null,
+      radius: 'md',
+      font_preset: 'system',
+      sidebar_style: 'surface',
+      login_layout: 'split',
+      footer_text: null,
+      footer_links: [],
     },
     captcha: {
       enabled: false,
