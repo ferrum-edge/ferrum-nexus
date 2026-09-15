@@ -64,8 +64,9 @@ describe('App', () => {
     // Required fields render an asterisk inside the label, hence the pattern.
     expect(await screen.findByLabelText(/^Email/)).toBeInTheDocument();
     expect(screen.getByLabelText(/^Password/)).toBeInTheDocument();
-    // Branding is applied to the public shell.
-    expect(await screen.findByText('Acme Developer Portal')).toBeInTheDocument();
+    // Branding is applied to the public shell (the hero panel and the compact
+    // brand row both carry the name; which one is visible depends on viewport).
+    expect((await screen.findAllByText('Acme Developer Portal')).length).toBeGreaterThan(0);
     // Nothing from the authenticated shell leaks into the public page.
     expect(screen.queryByRole('navigation', { name: 'Primary' })).not.toBeInTheDocument();
   });

@@ -4,12 +4,22 @@ import type { Message, MessagePage } from '@ferrum-nexus/shared';
 import { formatDateTime } from '../lib/format';
 import { useOlderMessages, useSendMessage, useThread } from '../hooks/useThreads';
 import { useAuth } from '../stores/auth';
-import { Button } from '../components/ui/Button';
+import { Badge } from '../components/ui/Badge';
+import { Button, buttonClassName } from '../components/ui/Button';
 import { Card, PageHeader } from '../components/ui/Card';
 import { EmptyState } from '../components/ui/EmptyState';
+import { Icon } from '../components/ui/Icon';
 import { Textarea } from '../components/ui/Input';
 import { LoadingPanel } from '../components/ui/Spinner';
 import { cn } from '../lib/cn';
+
+/** Initials for a sender tile: first letters of up to two words. */
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
+  return `${parts[0]![0] ?? ''}${parts[parts.length - 1]![0] ?? ''}`.toUpperCase();
+}
 
 /**
  * Fold `incoming` into `current`, de-duplicated by id and back in reading order.
@@ -146,7 +156,8 @@ export function MessageThreadPage(): ReactElement {
           title="Conversation not found"
           description="It may have been removed, or you may not be a participant."
           action={
-            <Link to="/messages" className="text-sm text-accent hover:underline">
+            <Link to="/messages" className={buttonClassName({ variant: 'secondary' })}>
+              <Icon name="arrow-left" className="h-4 w-4" />
               Back to messages
             </Link>
           }
@@ -190,68 +201,100 @@ export function MessageThreadPage(): ReactElement {
   return (
     <>
       <PageHeader
+        breadcrumbs={[{ label: 'Messages', to: '/messages' }, { label: thread.subject }]}
         title={thread.subject}
-        description={
-          <>
-            {counterpart ? counterpart.display_name : 'Portal administrators'}
-            {thread.api ? ` · ${thread.api.name}` : ''}
-          </>
-        }
+        description={counterpart ? counterpart.display_name : 'Portal administrators'}
+        meta={thread.api ? <Badge tone="info">{thread.api.name}</Badge> : null}
         actions={
-          <Link to="/messages" className="text-sm text-accent hover:underline">
+          <Link to="/messages" className={buttonClassName({ variant: 'ghost' })}>
+            <Icon name="arrow-left" className="h-4 w-4" />
             All conversations
           </Link>
         }
       />
 
       <Card className="flex flex-col overflow-hidden">
-        <div className="flex flex-col gap-4 px-5 py-5">
-          <div className="flex flex-col items-center gap-1">
+        <div className="flex flex-col gap-5 px-5 py-5">
+          <div className="flex flex-col items-center gap-1.5">
             {nextBefore ? (
-              <Button type="button" variant="ghost" loading={loadOlder.isPending} onClick={older}>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                loading={loadOlder.isPending}
+                onClick={older}
+              >
                 Load older messages
               </Button>
             ) : null}
-            <span className="text-xs text-fg-subtle">
+            <span className="text-[0.7rem] text-fg-subtle tabular-nums">
               Showing {messages.length} of {Math.max(history.total, thread.messages.total)} messages
             </span>
           </div>
 
           {messages.length === 0 ? (
-            <p className="text-sm text-fg-muted">No messages in this conversation yet.</p>
+            <EmptyState
+              compact
+              icon="message"
+              title="No messages yet"
+              description="Write the first message in this conversation below."
+            />
           ) : (
             messages.map((message) => {
               const mine = message.sender_user_id === user?.id;
+              const senderName = mine
+                ? 'You'
+                : (message.sender?.display_name ?? counterpart?.display_name ?? 'Participant');
               return (
                 <div
                   key={message.id}
-                  className={cn('flex flex-col gap-1', mine ? 'items-end' : 'items-start')}
+                  className={cn('flex items-start gap-2.5', mine && 'flex-row-reverse')}
                 >
-                  <span className="text-xs text-fg-subtle">
-                    {mine ? 'You' : (message.sender?.display_name ?? 'Participant')} ·{' '}
-                    {formatDateTime(message.created_at)}
-                  </span>
-                  <p
+                  {mine ? null : (
+                    <span
+                      aria-hidden="true"
+                      className="mt-5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-neutral-soft text-[0.65rem] font-semibold text-fg-muted ring-1 ring-border"
+                    >
+                      {initials(senderName)}
+                    </span>
+                  )}
+                  <div
                     className={cn(
-                      'max-w-[42rem] rounded-lg px-3.5 py-2.5 text-sm whitespace-pre-line',
-                      mine ? 'bg-accent-soft text-fg' : 'bg-inset text-fg',
+                      'flex min-w-0 max-w-[75%] flex-col gap-1',
+                      mine ? 'items-end' : 'items-start',
                     )}
                   >
-                    {message.body}
-                  </p>
+                    <span className="px-1 text-[0.7rem] text-fg-subtle">
+                      {senderName} · {formatDateTime(message.created_at)}
+                    </span>
+                    <p
+                      className={cn(
+                        'rounded-2xl px-3.5 py-2.5 text-sm whitespace-pre-line text-fg',
+                        mine
+                          ? 'rounded-tr-sm bg-accent-soft ring-1 ring-accent/15'
+                          : 'rounded-tl-sm bg-inset ring-1 ring-border',
+                      )}
+                    >
+                      {message.body}
+                    </p>
+                  </div>
                 </div>
               );
             })
           )}
         </div>
 
-        <form className="flex flex-col gap-2 border-t border-border px-5 py-4" onSubmit={submit}>
+        <form
+          className="flex flex-col gap-2 border-t border-border bg-inset/40 px-5 py-4"
+          onSubmit={submit}
+        >
           <label htmlFor="reply-body" className="text-sm font-medium text-fg">
             Reply
           </label>
           <Textarea
             id="reply-body"
             rows={4}
+            className="bg-surface"
             value={body}
             onChange={(event) => setBody(event.target.value)}
             placeholder="Write a reply…"
@@ -263,6 +306,7 @@ export function MessageThreadPage(): ReactElement {
               loading={send.isPending}
               disabled={body.trim().length === 0}
             >
+              <Icon name="send" className="h-4 w-4" />
               Send reply
             </Button>
           </div>

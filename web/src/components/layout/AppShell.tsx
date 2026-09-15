@@ -12,9 +12,9 @@ function VerifyEmailBanner(): ReactElement {
   return (
     <div
       role="status"
-      className="flex items-start gap-2.5 border-b border-warning/40 bg-warning-soft px-4 py-2.5 text-sm text-fg"
+      className="flex items-start gap-2.5 border-b border-warning/30 bg-warning-soft px-4 py-2.5 text-sm text-fg sm:px-6"
     >
-      <Icon name="alert" className="mt-0.5 h-4 w-4 text-warning" />
+      <Icon name="alert" className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
       <p>
         <span className="font-medium">Verify your email address.</span> Some actions stay locked
         until you open the verification link we sent you. Check your inbox and spam folder.
@@ -56,6 +56,7 @@ export function AppShell(): ReactElement {
   }
 
   const portalName = branding?.portal_name ?? 'Ferrum Nexus';
+  const supportEmail = branding?.support_email ?? null;
 
   return (
     <div className="min-h-full">
@@ -65,25 +66,37 @@ export function AppShell(): ReactElement {
         onNavigate={() => setSidebarOpen(false)}
         portalName={portalName}
         logoDataUrl={branding?.logo_data_url ?? null}
+        user={user}
       />
       {sidebarOpen ? (
         <button
           type="button"
           aria-label="Close navigation"
           onClick={() => setSidebarOpen(false)}
-          className="fixed inset-0 z-30 bg-overlay lg:hidden"
+          className="animate-fade-in fixed inset-0 z-30 bg-overlay backdrop-blur-[2px] lg:hidden"
         />
       ) : null}
-      <div className="lg:pl-64">
+      <div className="flex min-h-full flex-col lg:pl-64">
         <Header
           portalName={portalName}
           user={user}
           onToggleSidebar={() => setSidebarOpen((open) => !open)}
         />
         {needsEmailVerification ? <VerifyEmailBanner /> : null}
-        <main className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6">
+        <main
+          key={location.pathname}
+          className="animate-fade-in mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6 lg:px-8 lg:py-8"
+        >
           <Outlet />
         </main>
+        <footer className="mx-auto flex w-full max-w-7xl flex-wrap items-center justify-between gap-2 px-4 py-4 text-xs text-fg-subtle sm:px-6 lg:px-8">
+          <span>{portalName}</span>
+          {supportEmail ? (
+            <a className="transition-colors hover:text-fg" href={`mailto:${supportEmail}`}>
+              Support: {supportEmail}
+            </a>
+          ) : null}
+        </footer>
       </div>
     </div>
   );

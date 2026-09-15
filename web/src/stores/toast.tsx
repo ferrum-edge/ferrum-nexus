@@ -18,6 +18,7 @@ import {
   type ReactNode,
 } from 'react';
 import { cn } from '../lib/cn';
+import { Icon, type IconName } from '../components/ui/Icon';
 
 /** Visual severity of a toast. */
 export type ToastVariant = 'success' | 'error' | 'info';
@@ -55,6 +56,18 @@ export function emitToast(title: string, options?: ToastOptions): void {
 }
 
 let nextId = 0;
+
+const TOAST_TONES: Readonly<Record<ToastVariant, string>> = {
+  success: 'bg-success-soft text-success',
+  error: 'bg-danger-soft text-danger',
+  info: 'bg-info-soft text-info',
+};
+
+const TOAST_ICONS: Readonly<Record<ToastVariant, IconName>> = {
+  success: 'check',
+  error: 'alert',
+  info: 'info',
+};
 
 export function ToastProvider({ children }: { children: ReactNode }): ReactElement {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -108,13 +121,19 @@ export function ToastProvider({ children }: { children: ReactNode }): ReactEleme
               if (!open) dismiss(entry.id);
             }}
             className={cn(
-              'fx-pop grid grid-cols-[1fr_auto] items-start gap-3 p-4',
-              'data-[state=closed]:opacity-0',
-              entry.variant === 'success' && 'border-l-4 border-l-success',
-              entry.variant === 'error' && 'border-l-4 border-l-danger',
-              entry.variant === 'info' && 'border-l-4 border-l-info',
+              'fx-pop animate-slide-in-right grid grid-cols-[auto_1fr_auto] items-start gap-3 p-4',
+              'data-[state=closed]:opacity-0 data-[swipe=move]:translate-x-[var(--radix-toast-swipe-move-x)]',
             )}
           >
+            <span
+              className={cn(
+                'mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full',
+                TOAST_TONES[entry.variant],
+              )}
+              aria-hidden="true"
+            >
+              <Icon name={TOAST_ICONS[entry.variant]} className="h-3.5 w-3.5" />
+            </span>
             <div className="min-w-0">
               <ToastPrimitive.Title className="text-sm font-semibold text-fg">
                 {entry.title}
@@ -127,9 +146,9 @@ export function ToastProvider({ children }: { children: ReactNode }): ReactEleme
             </div>
             <ToastPrimitive.Close
               aria-label="Dismiss notification"
-              className="rounded-sm px-1 text-fg-subtle hover:text-fg"
+              className="-mt-1 -mr-1 rounded-md p-1 text-fg-subtle transition-colors hover:bg-neutral-soft hover:text-fg"
             >
-              ✕
+              <Icon name="x" className="h-3.5 w-3.5" />
             </ToastPrimitive.Close>
           </ToastPrimitive.Root>
         ))}

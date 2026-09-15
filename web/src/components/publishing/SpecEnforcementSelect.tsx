@@ -1,5 +1,6 @@
 import { type ReactElement } from 'react';
 import { SPEC_ENFORCEMENT_LEVELS, type SpecEnforcementLevel } from '@ferrum-nexus/shared';
+import { Icon } from '../ui/Icon';
 import { LabeledSelect } from '../ui/Select';
 
 /**
@@ -72,8 +73,9 @@ export function SpecEnforcementSelect({
         willRebuild ? (
           <>
             {BODY_CAVEAT}
-            <strong className="mt-1 block font-medium text-amber-700 dark:text-amber-500">
-              {REBUILD_WARNING}
+            <strong className="mt-1 flex items-start gap-1.5 font-medium text-warning">
+              <Icon name="alert" className="mt-px h-3.5 w-3.5" />
+              <span>{REBUILD_WARNING}</span>
             </strong>
           </>
         ) : (

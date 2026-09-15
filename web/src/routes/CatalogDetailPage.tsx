@@ -1,5 +1,5 @@
 import { Link, useParams } from '@tanstack/react-router';
-import { useState, type ReactElement } from 'react';
+import { useState, type ReactElement, type ReactNode } from 'react';
 import {
   AUTH_PLUGIN_LABELS,
   MAX_JUSTIFICATION_LENGTH,
@@ -13,46 +13,108 @@ import { useToast } from '../stores/toast';
 import { CallApiPanel } from '../components/catalog/CallApiPanel';
 import { OpenApiView } from '../components/openapi/OpenApiView';
 import { StartThreadDialog } from '../components/messaging/StartThreadDialog';
+import { FormNotice } from '../components/auth/AuthShell';
 import { Badge } from '../components/ui/Badge';
-import { Button } from '../components/ui/Button';
+import { Button, buttonClassName } from '../components/ui/Button';
 import { Card, CardBody, CardHeader, DetailRow, PageHeader } from '../components/ui/Card';
+import { CopyField } from '../components/ui/CopyField';
 import { EmptyState } from '../components/ui/EmptyState';
+import { Icon, type IconName } from '../components/ui/Icon';
 import { LabeledTextarea } from '../components/ui/Input';
 import { LoadingPanel } from '../components/ui/Spinner';
 import { StatusPill } from '../components/ui/StatusPill';
 import { Tabs } from '../components/ui/Tabs';
 
+/** One tile in the strip of runtime facts under the page header. */
+function GlanceTile({
+  icon,
+  label,
+  value,
+  hint,
+}: {
+  icon: IconName;
+  label: string;
+  value: ReactNode;
+  hint?: string;
+}): ReactElement {
+  return (
+    <div className="fx-card flex items-start gap-3 p-3">
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-neutral-soft text-fg-muted">
+        <Icon name={icon} className="h-4 w-4" />
+      </span>
+      <span className="min-w-0">
+        <span className="block text-[0.7rem] font-medium tracking-[0.08em] text-fg-subtle uppercase">
+          {label}
+        </span>
+        <span className="block truncate text-sm font-medium text-fg">{value}</span>
+        {hint ? <span className="block truncate text-xs text-fg-subtle">{hint}</span> : null}
+      </span>
+    </div>
+  );
+}
+
+/** Runtime facts a caller needs before reading anything else. */
+function AtAGlance({ detail }: { detail: CatalogDetailResponse }): ReactElement {
+  const { api, spec } = detail;
+  return (
+    <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <GlanceTile
+        icon="lock"
+        label="Authentication"
+        value={AUTH_PLUGIN_LABELS[api.auth_plugin]}
+        hint="Required on every request"
+      />
+      <GlanceTile
+        icon="zap"
+        label="Rate limit"
+        value={
+          api.rate_limit
+            ? `${api.rate_limit.limit} requests / ${api.rate_limit.window_seconds}s`
+            : 'Unlimited'
+        }
+        hint={api.rate_limit ? 'Per consumer, per window' : 'No throttling configured'}
+      />
+      <GlanceTile
+        icon="shield"
+        label="Access"
+        value={api.requestable ? 'Approval required' : 'Open access'}
+        hint={api.requestable ? 'Ask the provider for a grant' : 'Any portal account may call it'}
+      />
+      <GlanceTile
+        icon="spec"
+        label="Version"
+        value={`v${api.version}`}
+        hint={spec ? 'OpenAPI document' : 'No document'}
+      />
+    </div>
+  );
+}
+
 function Overview({ detail }: { detail: CatalogDetailResponse }): ReactElement {
   const { api, spec } = detail;
   return (
     <Card>
-      <CardHeader title="API details" />
-      <CardBody>
-        <dl>
-          <DetailRow label="Description">{api.description ?? '—'}</DetailRow>
-          <DetailRow label="Invoke URL">
-            {api.invoke_url ? (
-              <code className="font-mono text-xs">{api.invoke_url}</code>
-            ) : (
-              <span className="text-fg-muted">
-                Not published — ask your administrator for the gateway address.
+      <CardHeader title="API details" icon="layout" />
+      <CardBody className="flex flex-col gap-5">
+        <div className="grid gap-4 md:grid-cols-2">
+          {api.invoke_url ? (
+            <CopyField label="Invoke URL" value={api.invoke_url} />
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium tracking-wide text-fg-subtle uppercase">
+                Invoke URL
               </span>
-            )}
-          </DetailRow>
-          <DetailRow label="Gateway path">
-            <code className="font-mono text-xs">{api.listen_path}</code>
-          </DetailRow>
-          <DetailRow label="Version">{api.version}</DetailRow>
-          <DetailRow label="Authentication">{AUTH_PLUGIN_LABELS[api.auth_plugin]}</DetailRow>
-          <DetailRow label="Rate limit">
-            {api.rate_limit
-              ? `${api.rate_limit.limit} requests / ${api.rate_limit.window_seconds}s`
-              : 'Not enforced'}
-          </DetailRow>
+              <p className="rounded-md border border-border border-dashed bg-inset px-3 py-2 text-sm text-fg-muted">
+                Not published — ask your administrator for the gateway address.
+              </p>
+            </div>
+          )}
+          <CopyField label="Gateway path" value={api.listen_path} />
+        </div>
+        {/* Version, authentication, rate limit and access already sit in the
+            at-a-glance strip above, so the record below holds the rest. */}
+        <dl>
           <DetailRow label="Visibility">{api.visibility}</DetailRow>
-          <DetailRow label="Access">
-            {api.requestable ? 'Requires an approved access request' : 'Open to all portal users'}
-          </DetailRow>
           <DetailRow label="Owner">{api.owner?.display_name ?? '—'}</DetailRow>
           <DetailRow label="Specification">
             {spec
@@ -123,7 +185,7 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
             <Link
               to="/apis/$apiId"
               params={{ apiId: api.id }}
-              className="inline-flex h-9 items-center rounded-md bg-accent px-3.5 text-sm font-medium text-accent-fg hover:bg-accent-hover"
+              className={buttonClassName({ variant: 'primary' })}
             >
               Manage API
             </Link>
@@ -138,6 +200,7 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
       <Card>
         <CardHeader
           title="Your access"
+          icon="grant"
           actions={<StatusPill status={api.access_state} />}
           description={
             api.requestable
@@ -147,25 +210,31 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
         />
         <CardBody>
           {myGrant && myGrant.status === 'active' ? (
-            <div className="flex flex-col gap-3">
-              <p className="text-sm text-fg">
+            <div className="flex flex-col gap-4">
+              <FormNotice tone="success">
                 Access granted {formatDateTime(myGrant.created_at)}. Your gateway consumer carries{' '}
-                <code className="font-mono text-xs">{myGrant.acl_group}</code>.
-              </p>
-              <p className="text-sm text-fg-muted">
-                Call it with a credential of type{' '}
-                <Badge tone="info">{AUTH_PLUGIN_LABELS[api.auth_plugin]}</Badge> — the address and
+                <code className="font-mono text-xs break-all">{myGrant.acl_group}</code>.
+              </FormNotice>
+              <p className="flex flex-wrap items-center gap-1.5 text-sm text-fg-muted">
+                Call it with a credential of type
+                <Badge tone="info">{AUTH_PLUGIN_LABELS[api.auth_plugin]}</Badge>— the address and
                 the header are below.
               </p>
-              <Link to="/credentials" className="text-sm text-accent hover:underline">
-                Manage your credentials →
-              </Link>
+              <div>
+                <Link
+                  to="/credentials"
+                  className={buttonClassName({ variant: 'secondary', size: 'sm' })}
+                >
+                  <Icon name="key" />
+                  Manage your credentials
+                </Link>
+              </div>
             </div>
           ) : myRequest && myRequest.status === 'pending' ? (
-            <div className="flex flex-col gap-3">
-              <p className="text-sm text-fg">
+            <div className="flex flex-col gap-4">
+              <FormNotice tone="info">
                 Your request is awaiting review (submitted {formatDateTime(myRequest.created_at)}).
-              </p>
+              </FormNotice>
               <div>
                 <Button
                   variant="secondary"
@@ -187,7 +256,7 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
             </p>
           ) : (
             <form
-              className="flex flex-col gap-3"
+              className="flex flex-col gap-4"
               onSubmit={(event) => {
                 event.preventDefault();
                 createRequest.mutate(
@@ -208,7 +277,15 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
                 maxLength={MAX_JUSTIFICATION_LENGTH}
                 value={justification}
                 onChange={(event) => setJustification(event.target.value)}
-                hint={`The provider reviews this note. ${justification.length}/${MAX_JUSTIFICATION_LENGTH} characters.`}
+                placeholder="Which product or workflow needs this data, and what will you do with it?"
+                hint={
+                  <span className="flex flex-wrap items-center justify-between gap-2">
+                    <span>The provider reviews this note.</span>
+                    <span className="tabular-nums">
+                      {justification.length}/{MAX_JUSTIFICATION_LENGTH} characters
+                    </span>
+                  </span>
+                }
               />
               <div>
                 <Button
@@ -224,10 +301,13 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
           )}
 
           {myRequest && myRequest.status !== 'pending' ? (
-            <p className="mt-4 text-sm text-fg-muted">
-              Last decision: <StatusPill status={myRequest.status} />{' '}
-              {myRequest.decision_note ? `— “${myRequest.decision_note}”` : null}
-            </p>
+            <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-border pt-4 text-sm text-fg-muted">
+              <span>Last decision:</span>
+              <StatusPill status={myRequest.status} />
+              {myRequest.decision_note ? (
+                <span className="min-w-0 italic">“{myRequest.decision_note}”</span>
+              ) : null}
+            </div>
           ) : null}
         </CardBody>
       </Card>
@@ -261,7 +341,7 @@ export function CatalogDetailPage(): ReactElement {
           title="API not found"
           description="It may have been retired, or you may not have permission to view it."
           action={
-            <Link to="/catalog" className="text-sm text-accent hover:underline">
+            <Link to="/catalog" className={buttonClassName({ variant: 'secondary' })}>
               Back to catalog
             </Link>
           }
@@ -281,21 +361,33 @@ export function CatalogDetailPage(): ReactElement {
   return (
     <>
       <PageHeader
+        breadcrumbs={[{ label: 'API catalog', to: '/catalog' }, { label: api.name }]}
         title={api.name}
         description={api.description ?? undefined}
+        meta={
+          <>
+            <Badge mono tone="accent">
+              v{api.version}
+            </Badge>
+            <Badge tone="info">{AUTH_PLUGIN_LABELS[api.auth_plugin]}</Badge>
+            <StatusPill status={api.status} />
+            <StatusPill status={api.access_state} />
+          </>
+        }
         actions={
           <>
             {canManage ? (
               <Link
                 to="/apis/$apiId"
                 params={{ apiId: api.id }}
-                className="inline-flex h-9 items-center rounded-md bg-accent px-3.5 text-sm font-medium text-accent-fg hover:bg-accent-hover"
+                className={buttonClassName({ variant: 'primary' })}
               >
                 Manage API
               </Link>
             ) : null}
             {api.owner && api.access_state !== 'owner' ? (
               <Button variant="secondary" onClick={() => setMessageOpen(true)}>
+                <Icon name="message" />
                 Message provider
               </Button>
             ) : null}
@@ -303,12 +395,7 @@ export function CatalogDetailPage(): ReactElement {
         }
       />
 
-      <div className="mb-4 flex flex-wrap items-center gap-1.5">
-        <Badge tone="accent">v{api.version}</Badge>
-        <Badge tone="info">{AUTH_PLUGIN_LABELS[api.auth_plugin]}</Badge>
-        <StatusPill status={api.status} />
-        <StatusPill status={api.access_state} />
-      </div>
+      <AtAGlance detail={detail} />
 
       <Tabs
         value={tab}

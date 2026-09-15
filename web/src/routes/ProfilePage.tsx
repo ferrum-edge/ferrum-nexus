@@ -5,10 +5,20 @@ import { useUpdateProfile } from '../hooks/useUsers';
 import { useAuth } from '../stores/auth';
 import { useToast } from '../stores/toast';
 import { Button } from '../components/ui/Button';
-import { Card, CardBody, CardHeader, DetailRow, PageHeader } from '../components/ui/Card';
+import { Card, CardBody, CardHeader, PageHeader } from '../components/ui/Card';
+import { Icon } from '../components/ui/Icon';
 import { LabeledInput } from '../components/ui/Input';
 import { RoleBadge, StatusPill } from '../components/ui/StatusPill';
 import { FormNotice } from '../components/auth/AuthShell';
+import { PasswordField } from '../components/auth/PasswordField';
+
+/** Initials for the identity tile: first letters of up to two words. */
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
+  return `${parts[0]![0] ?? ''}${parts[parts.length - 1]![0] ?? ''}`.toUpperCase();
+}
 
 /** Self-service profile and password management. */
 export function ProfilePage(): ReactElement {
@@ -65,94 +75,141 @@ export function ProfilePage(): ReactElement {
     <>
       <PageHeader title="Profile" description="Your account details and contact information." />
 
-      <div className="grid gap-6 lg:grid-cols-2">
+      <Card className="mb-6 overflow-hidden">
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-4 px-5 py-5">
+          <span
+            aria-hidden="true"
+            className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-accent-soft text-lg font-semibold text-accent ring-1 ring-accent/20"
+          >
+            {initials(user.display_name)}
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-lg font-semibold tracking-tight text-fg">
+              {user.display_name}
+            </p>
+            <p className="truncate text-sm text-fg-muted">{user.email}</p>
+          </div>
+          <div className="flex w-full shrink-0 flex-wrap items-center gap-1.5 sm:w-auto">
+            <RoleBadge role={user.role} />
+            <StatusPill status={user.status} />
+          </div>
+        </div>
+        {/* Hairline-separated facts: one `bg-border` gap between surface cells. */}
+        <dl className="grid gap-px border-t border-border bg-border sm:grid-cols-3">
+          <div className="bg-surface px-5 py-3">
+            <dt className="text-[0.7rem] font-semibold tracking-[0.08em] text-fg-subtle uppercase">
+              Member since
+            </dt>
+            <dd className="mt-0.5 text-sm text-fg tabular-nums">
+              {formatDateTime(user.created_at)}
+            </dd>
+          </div>
+          <div className="bg-surface px-5 py-3">
+            <dt className="text-[0.7rem] font-semibold tracking-[0.08em] text-fg-subtle uppercase">
+              Last sign-in
+            </dt>
+            <dd className="mt-0.5 text-sm text-fg tabular-nums">
+              {formatDateTime(user.last_login_at)}
+            </dd>
+          </div>
+          <div className="bg-surface px-5 py-3">
+            <dt className="text-[0.7rem] font-semibold tracking-[0.08em] text-fg-subtle uppercase">
+              Email address
+            </dt>
+            <dd className="mt-0.5 text-sm">
+              {user.email_verified ? (
+                <span className="inline-flex items-center gap-1.5 text-success">
+                  <Icon name="check" className="h-4 w-4" />
+                  Verified
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 text-warning">
+                  <Icon name="alert" className="h-4 w-4" />
+                  Not verified
+                </span>
+              )}
+            </dd>
+          </div>
+        </dl>
+      </Card>
+
+      <div className="grid items-start gap-6 lg:grid-cols-2">
         <Card>
-          <CardHeader title="Account" />
+          <CardHeader
+            icon="user"
+            title="Contact details"
+            description="How providers and administrators reach you."
+          />
           <CardBody>
-            <dl>
-              <DetailRow label="Email">{user.email}</DetailRow>
-              <DetailRow label="Role">
-                <RoleBadge role={user.role} />
-              </DetailRow>
-              <DetailRow label="Status">
-                <StatusPill status={user.status} />
-              </DetailRow>
-              <DetailRow label="Email verified">{user.email_verified ? 'Yes' : 'No'}</DetailRow>
-              <DetailRow label="Last sign-in">{formatDateTime(user.last_login_at)}</DetailRow>
-              <DetailRow label="Member since">{formatDateTime(user.created_at)}</DetailRow>
-            </dl>
+            <form className="flex flex-col gap-4" onSubmit={saveProfile}>
+              {updateProfile.error && updateProfile.variables?.display_name !== undefined ? (
+                <FormNotice>{updateProfile.error.message}</FormNotice>
+              ) : null}
+              <LabeledInput
+                label="Display name"
+                required
+                hint="Shown on your access requests and in conversations."
+                value={displayName}
+                onChange={(event) => setDisplayName(event.target.value)}
+              />
+              <LabeledInput
+                label="Company"
+                autoComplete="organization"
+                value={company}
+                onChange={(event) => setCompany(event.target.value)}
+              />
+              <LabeledInput
+                label="Phone"
+                type="tel"
+                autoComplete="tel"
+                value={phone}
+                onChange={(event) => setPhone(event.target.value)}
+              />
+              <div>
+                <Button type="submit" variant="primary" loading={updateProfile.isPending}>
+                  Save changes
+                </Button>
+              </div>
+            </form>
           </CardBody>
         </Card>
 
-        <div className="flex flex-col gap-6">
-          <Card>
-            <CardHeader title="Contact details" />
-            <CardBody>
-              <form className="flex flex-col gap-4" onSubmit={saveProfile}>
-                {updateProfile.error && updateProfile.variables?.display_name !== undefined ? (
-                  <FormNotice>{updateProfile.error.message}</FormNotice>
-                ) : null}
-                <LabeledInput
-                  label="Display name"
-                  required
-                  value={displayName}
-                  onChange={(event) => setDisplayName(event.target.value)}
-                />
-                <LabeledInput
-                  label="Company"
-                  value={company}
-                  onChange={(event) => setCompany(event.target.value)}
-                />
-                <LabeledInput
-                  label="Phone"
-                  type="tel"
-                  value={phone}
-                  onChange={(event) => setPhone(event.target.value)}
-                />
-                <div>
-                  <Button type="submit" variant="primary" loading={updateProfile.isPending}>
-                    Save changes
-                  </Button>
-                </div>
-              </form>
-            </CardBody>
-          </Card>
-
-          <Card>
-            <CardHeader title="Change password" />
-            <CardBody>
-              <form className="flex flex-col gap-4" onSubmit={savePassword}>
-                {updateProfile.error && updateProfile.variables?.new_password !== undefined ? (
-                  <FormNotice>{updateProfile.error.message}</FormNotice>
-                ) : null}
-                <LabeledInput
-                  label="Current password"
-                  type="password"
-                  autoComplete="current-password"
-                  required
-                  value={currentPassword}
-                  onChange={(event) => setCurrentPassword(event.target.value)}
-                />
-                <LabeledInput
-                  label="New password"
-                  type="password"
-                  autoComplete="new-password"
-                  required
-                  minLength={MIN_PASSWORD_LENGTH}
-                  error={passwordError}
-                  hint={`At least ${MIN_PASSWORD_LENGTH} characters.`}
-                  value={newPassword}
-                  onChange={(event) => setNewPassword(event.target.value)}
-                />
-                <div>
-                  <Button type="submit" variant="primary" loading={updateProfile.isPending}>
-                    Change password
-                  </Button>
-                </div>
-              </form>
-            </CardBody>
-          </Card>
-        </div>
+        <Card>
+          <CardHeader
+            icon="lock"
+            title="Change password"
+            description="Choose a new password for this account."
+          />
+          <CardBody>
+            <form className="flex flex-col gap-4" onSubmit={savePassword}>
+              {updateProfile.error && updateProfile.variables?.new_password !== undefined ? (
+                <FormNotice>{updateProfile.error.message}</FormNotice>
+              ) : null}
+              <PasswordField
+                label="Current password"
+                autoComplete="current-password"
+                required
+                value={currentPassword}
+                onChange={(event) => setCurrentPassword(event.target.value)}
+              />
+              <PasswordField
+                label="New password"
+                autoComplete="new-password"
+                required
+                minLength={MIN_PASSWORD_LENGTH}
+                error={passwordError}
+                hint={`At least ${MIN_PASSWORD_LENGTH} characters.`}
+                value={newPassword}
+                onChange={(event) => setNewPassword(event.target.value)}
+              />
+              <div>
+                <Button type="submit" variant="primary" loading={updateProfile.isPending}>
+                  Change password
+                </Button>
+              </div>
+            </form>
+          </CardBody>
+        </Card>
       </div>
     </>
   );

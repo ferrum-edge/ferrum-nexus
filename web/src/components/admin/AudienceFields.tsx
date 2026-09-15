@@ -29,8 +29,10 @@ import {
   type Role,
   type UserStatus,
 } from '@ferrum-nexus/shared';
+import { cn } from '../../lib/cn';
 import { useOrganizations, useUsers } from '../../hooks/useUsers';
 import { Button } from '../ui/Button';
+import { Icon } from '../ui/Icon';
 import { Checkbox, Field, FieldGroup, Input } from '../ui/Input';
 import { LabeledSelect } from '../ui/Select';
 
@@ -128,7 +130,10 @@ const SCOPES: ReadonlyArray<{
   },
 ];
 
-/** A native radio, so the group stays keyboard- and test-reachable. */
+/**
+ * A native radio, so the group stays keyboard- and test-reachable, dressed as
+ * a selectable row so the chosen scope is legible at a glance.
+ */
 function Radio({
   id,
   name,
@@ -145,7 +150,14 @@ function Radio({
   onSelect: () => void;
 }): ReactElement {
   return (
-    <div className="flex items-start gap-2.5">
+    <div
+      className={cn(
+        'flex items-start gap-2.5 rounded-md border px-3 py-2.5 transition-colors',
+        checked
+          ? 'border-accent-ring bg-accent-soft'
+          : 'border-border bg-surface hover:border-border-strong',
+      )}
+    >
       <input
         type="radio"
         id={id}
@@ -155,7 +167,7 @@ function Radio({
         onChange={onSelect}
       />
       <div className="min-w-0">
-        <label htmlFor={id} className="text-sm font-medium text-fg">
+        <label htmlFor={id} className="cursor-pointer text-sm font-medium text-fg">
           {label}
         </label>
         <p className="text-xs text-fg-subtle">{description}</p>
@@ -173,10 +185,16 @@ function RecipientChip({
   onRemove: () => void;
 }): ReactElement {
   return (
-    <li className="flex items-center gap-1.5 rounded-full border border-border px-2.5 py-1 text-xs text-fg">
+    <li className="flex items-center gap-1 rounded-full border border-border bg-surface py-1 pr-1 pl-3 text-xs text-fg">
       {recipient.label}
-      <Button size="sm" variant="ghost" onClick={onRemove}>
-        {`Remove ${recipient.label}`}
+      <Button
+        size="icon-sm"
+        variant="ghost"
+        className="h-5 w-5 rounded-full"
+        aria-label={`Remove ${recipient.label}`}
+        onClick={onRemove}
+      >
+        <Icon name="x" className="h-3.5 w-3.5" />
       </Button>
     </li>
   );
@@ -258,7 +276,7 @@ export function AudienceFields({
       </FieldGroup>
 
       {value.scope === 'filtered' ? (
-        <div className="flex flex-col gap-4 rounded-md border border-border bg-inset p-4">
+        <div className="grid gap-4 rounded-md border border-border bg-inset p-4 md:grid-cols-2">
           <FieldGroup label="Roles" hint={ROLE_HINT}>
             <div className="flex flex-col gap-2">
               {ROLE_ORDER.map((role) => (
@@ -269,7 +287,7 @@ export function AudienceFields({
                   onChange={(event) => toggleRole(role, event.target.checked)}
                 />
               ))}
-              <div>
+              <div className="pt-1">
                 <Button
                   size="sm"
                   variant="secondary"
@@ -301,6 +319,7 @@ export function AudienceFields({
             </div>
           </FieldGroup>
           <LabeledSelect
+            className="md:col-span-2"
             label="Organization"
             value={value.orgId ?? ANY_ORG}
             onValueChange={chooseOrg}
@@ -313,40 +332,46 @@ export function AudienceFields({
       ) : null}
 
       {value.scope === 'explicit' ? (
-        <div className="flex flex-col gap-3 rounded-md border border-border bg-inset p-4">
-          {self ? (
-            <div>
-              <Button size="sm" variant="secondary" onClick={() => addRecipient(self)}>
-                Add myself
-              </Button>
-            </div>
-          ) : null}
+        <div className="flex flex-col gap-4 rounded-md border border-border bg-inset p-4">
           <Field
             label="Find an account"
             htmlFor={`${name}-recipient-search`}
             hint="Search by name or email, then add each recipient."
           >
-            <Input
-              id={`${name}-recipient-search`}
-              placeholder="Search by name or email"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-            />
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="min-w-0 flex-1">
+                <Input
+                  id={`${name}-recipient-search`}
+                  placeholder="Search by name or email"
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                />
+              </span>
+              {self ? (
+                <Button variant="secondary" onClick={() => addRecipient(self)}>
+                  Add myself
+                </Button>
+              ) : null}
+            </div>
           </Field>
           {term.length > 0 ? (
-            <ul className="flex flex-col gap-1">
+            <ul className="divide-y divide-border overflow-hidden rounded-md border border-border bg-surface">
               {(matches.data?.items ?? []).map((user) => (
-                <li key={user.id} className="flex items-center justify-between gap-3">
-                  <span className="min-w-0 truncate text-sm text-fg-muted">
-                    {user.display_name} <span className="text-fg-subtle">{user.email}</span>
+                <li
+                  key={user.id}
+                  className="flex items-center justify-between gap-3 px-3 py-2 transition-colors hover:bg-surface-hover"
+                >
+                  <span className="min-w-0 truncate text-sm text-fg">
+                    {user.display_name} <span className="text-xs text-fg-subtle">{user.email}</span>
                   </span>
                   <Button
                     size="sm"
-                    variant="ghost"
+                    variant="outline"
+                    aria-label={`Add ${user.display_name}`}
                     disabled={chosen.has(user.id)}
                     onClick={() => addRecipient({ id: user.id, label: user.display_name })}
                   >
-                    {chosen.has(user.id) ? 'Added' : `Add ${user.display_name}`}
+                    {chosen.has(user.id) ? 'Added' : 'Add'}
                   </Button>
                 </li>
               ))}

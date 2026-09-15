@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
 import {
   DEFAULT_PAGE_SIZE,
   MAX_PAGE_SIZE,
@@ -17,12 +17,14 @@ import {
 import { useGrants } from '../hooks/useGrants';
 import { useToast } from '../stores/toast';
 import { ShowOnceSecretDialog } from '../components/credentials/ShowOnceSecretDialog';
+import { FormNotice } from '../components/auth/AuthShell';
 import { Button } from '../components/ui/Button';
 import { Card, CardHeader, PageHeader } from '../components/ui/Card';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { DataTable, type Columns } from '../components/ui/DataTable';
 import { Dialog } from '../components/ui/Dialog';
 import { EmptyState } from '../components/ui/EmptyState';
+import { Icon, type IconName } from '../components/ui/Icon';
 import { LabeledInput } from '../components/ui/Input';
 import { LabeledSelect } from '../components/ui/Select';
 import { StatusPill } from '../components/ui/StatusPill';
@@ -31,6 +33,62 @@ interface ShowOnceState {
   secret: ShowOnceSecret;
   consumerUsername: string;
   title: string;
+}
+
+/** Glyph per credential flavour, so a row is recognisable before it is read. */
+const CREDENTIAL_TYPE_ICONS: Readonly<Record<CredentialType, IconName>> = {
+  keyauth: 'key',
+  basicauth: 'lock',
+  jwt: 'code',
+};
+
+/** One line on the issue form explaining what the chosen type is used for. */
+const CREDENTIAL_TYPE_HINTS: Readonly<Record<CredentialType, string>> = {
+  keyauth: 'Sent as the X-API-Key header on every request.',
+  basicauth: 'The password half of HTTP Basic; the username is your consumer username.',
+  jwt: 'A signing secret for the short-lived HS256 tokens you mint yourself.',
+};
+
+/** Read-only value with a copy affordance, sized for a list row. */
+function CopyableValue({ label, value }: { label: string; value: string }): ReactElement {
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
+  const copy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+    } catch {
+      // Clipboard access can be denied (insecure context, permissions); the
+      // value stays selectable so it can be copied by hand.
+      setCopied(false);
+    }
+  }, [value]);
+
+  return (
+    <span className="flex min-w-0 items-center gap-1">
+      <code className="min-w-0 truncate rounded-sm bg-inset px-1.5 py-0.5 font-mono text-xs text-fg-muted">
+        {value}
+      </code>
+      <Button
+        size="icon-sm"
+        variant="ghost"
+        onClick={() => void copy()}
+        aria-label={copied ? `${label} copied` : `Copy ${label}`}
+        title={`Copy ${label}`}
+      >
+        <Icon
+          name={copied ? 'check' : 'copy'}
+          className={copied ? 'h-3.5 w-3.5 text-success' : 'h-3.5 w-3.5'}
+        />
+      </Button>
+    </span>
+  );
 }
 
 /**
@@ -51,29 +109,34 @@ function MyAccessCard(): ReactElement {
     <Card className="mt-6">
       <CardHeader
         title="Your API access"
+        icon="grant"
         description="Every API your active grants cover, with the URL to send requests to."
       />
       <ul>
-        {items.map((grant) => (
-          <li
-            key={grant.id}
-            className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3 last:border-b-0"
-          >
-            <span className="min-w-0">
-              <span className="block truncate text-sm font-medium text-fg">
-                {grant.api?.name ?? grant.api_id}
+        {items.map((grant) => {
+          const name = grant.api?.name ?? grant.api_id;
+          const address = grant.api ? (grant.api.invoke_url ?? grant.api.listen_path) : null;
+          return (
+            <li
+              key={grant.id}
+              className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border px-5 py-3 last:border-b-0"
+            >
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-sm font-medium text-fg">{name}</span>
+                {address ? (
+                  <CopyableValue label={`${name} address`} value={address} />
+                ) : (
+                  <code className="block font-mono text-xs text-fg-subtle">—</code>
+                )}
               </span>
-              <code className="block truncate font-mono text-xs text-fg-subtle">
-                {grant.api?.invoke_url ?? grant.api?.listen_path ?? '—'}
-              </code>
-            </span>
-            {grant.api && grant.api.invoke_url === null ? (
-              <span className="text-xs text-fg-subtle">
-                Gateway address not published — ask your administrator.
-              </span>
-            ) : null}
-          </li>
-        ))}
+              {grant.api && grant.api.invoke_url === null ? (
+                <span className="text-xs text-fg-subtle">
+                  Gateway address not published — ask your administrator.
+                </span>
+              ) : null}
+            </li>
+          );
+        })}
       </ul>
     </Card>
   );
@@ -103,15 +166,27 @@ export function CredentialsPage(): ReactElement {
         id: 'label',
         header: 'Label',
         cell: ({ row }) => (
-          <span className="font-medium text-fg">
-            {row.original.label ?? CREDENTIAL_TYPE_LABELS[row.original.credential_type]}
+          <span className="flex items-center gap-2.5">
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent-soft text-accent">
+              <Icon
+                name={CREDENTIAL_TYPE_ICONS[row.original.credential_type]}
+                className="h-3.5 w-3.5"
+              />
+            </span>
+            <span className="font-medium text-fg">
+              {row.original.label ?? CREDENTIAL_TYPE_LABELS[row.original.credential_type]}
+            </span>
           </span>
         ),
       },
       {
         id: 'type',
         header: 'Type',
-        cell: ({ row }) => CREDENTIAL_TYPE_LABELS[row.original.credential_type],
+        cell: ({ row }) => (
+          <span className="text-fg-muted">
+            {CREDENTIAL_TYPE_LABELS[row.original.credential_type]}
+          </span>
+        ),
       },
       {
         id: 'last4',
@@ -129,7 +204,9 @@ export function CredentialsPage(): ReactElement {
         id: 'created',
         header: 'Created',
         cell: ({ row }) => (
-          <span className="text-fg-muted">{formatDateTime(row.original.created_at)}</span>
+          <span className="text-xs whitespace-nowrap text-fg-muted tabular-nums">
+            {formatDateTime(row.original.created_at)}
+          </span>
         ),
       },
       {
@@ -140,7 +217,12 @@ export function CredentialsPage(): ReactElement {
             <Button size="sm" variant="secondary" onClick={() => setRotating(row.original)}>
               Rotate
             </Button>
-            <Button size="sm" variant="ghost" onClick={() => setRevoking(row.original)}>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="hover:bg-danger-soft hover:text-danger"
+              onClick={() => setRevoking(row.original)}
+            >
               Revoke
             </Button>
           </div>
@@ -154,13 +236,21 @@ export function CredentialsPage(): ReactElement {
     <>
       <PageHeader
         title="Credentials"
-        description="Gateway credentials for your Ferrum consumer. Secrets are shown once at issue and rotation time and are never stored."
+        description="Gateway credentials for your Ferrum consumer. Secrets are shown once and never stored."
         actions={
           <Button variant="primary" onClick={() => setIssueOpen(true)}>
+            <Icon name="plus" />
             Issue credential
           </Button>
         }
       />
+
+      <div className="mb-4">
+        <FormNotice tone="info">
+          Rotation appends a new credential on the gateway before retiring the old one, so callers
+          have a window to switch over. Revoking removes the credential immediately.
+        </FormNotice>
+      </div>
 
       <DataTable<CredentialMetadata>
         columns={columns}
@@ -185,11 +275,6 @@ export function CredentialsPage(): ReactElement {
       />
 
       <MyAccessCard />
-
-      <Card className="mt-4 p-4 text-sm text-fg-muted">
-        Rotation appends a new credential on the gateway before retiring the old one, so callers
-        have a window to switch over. Revoking removes the credential immediately.
-      </Card>
 
       <Dialog
         open={issueOpen}
@@ -231,6 +316,7 @@ export function CredentialsPage(): ReactElement {
             label="Credential type"
             value={credentialType}
             onValueChange={setCredentialType}
+            hint={CREDENTIAL_TYPE_HINTS[credentialType]}
             options={CREDENTIAL_TYPES.map((value) => ({
               value,
               label: CREDENTIAL_TYPE_LABELS[value],
