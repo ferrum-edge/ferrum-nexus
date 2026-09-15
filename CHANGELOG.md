@@ -178,6 +178,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- `npm run dev` proxied every path starting with `/api` to the backend —
+  including the SPA's own `/apis`, `/apis/new` and `/apis/:id` routes — so a
+  reload or deep link on the publishing pages returned the backend's JSON 404
+  instead of the page. The proxy now matches `/api` and `/api/...` only.
 - Email templates use `reset_url` and `verification_url` for account action
   links. Retired raw-token placeholders render empty and are rejected on save;
   template update audit events now include SHA-256 hashes of both body fields.
