@@ -16,11 +16,14 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   children?: ReactNode;
 }
 
+// No press-nudge here: `active:translate-y-px` shares `--tw-translate-y` with
+// the `-translate-y-1/2` some callers use to centre an icon button inside a
+// field, so the button jumped out from under the cursor and the click was lost.
 const BASE =
   'inline-flex shrink-0 items-center justify-center rounded-md border font-medium whitespace-nowrap ' +
   'transition-[background-color,border-color,color,box-shadow,transform] duration-150 ' +
   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-ring focus-visible:ring-offset-2 focus-visible:ring-offset-base ' +
-  'disabled:cursor-not-allowed disabled:opacity-55 disabled:shadow-none active:translate-y-px';
+  'disabled:cursor-not-allowed disabled:opacity-55 disabled:shadow-none';
 
 const VARIANTS: Readonly<Record<ButtonVariant, string>> = {
   primary:
