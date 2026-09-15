@@ -28,8 +28,9 @@ export function Tabs({ tabs, value, onValueChange, className }: TabsProps): Reac
             key={tab.value}
             value={tab.value}
             className={cn(
-              '-mb-px inline-flex items-center gap-2 border-b-2 border-transparent px-3 py-2 text-sm font-medium text-fg-muted',
+              'relative -mb-px inline-flex items-center gap-2 rounded-t-md border-b-2 border-transparent px-3 py-2.5 text-sm font-medium text-fg-muted',
               'transition-colors hover:text-fg',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-ring',
               'data-[state=active]:border-accent data-[state=active]:text-fg',
             )}
           >
@@ -39,7 +40,11 @@ export function Tabs({ tabs, value, onValueChange, className }: TabsProps): Reac
         ))}
       </TabsPrimitive.List>
       {tabs.map((tab) => (
-        <TabsPrimitive.Content key={tab.value} value={tab.value} className="pt-5 outline-none">
+        <TabsPrimitive.Content
+          key={tab.value}
+          value={tab.value}
+          className="animate-fade-in pt-5 outline-none"
+        >
           {tab.content}
         </TabsPrimitive.Content>
       ))}

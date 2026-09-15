@@ -2,6 +2,7 @@ import { Link } from '@tanstack/react-router';
 import type { ReactElement, ReactNode } from 'react';
 import { ROLE_LABELS, type Role } from '@ferrum-nexus/shared';
 import { useAuth } from '../../stores/auth';
+import { buttonClassName } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
 import { Card } from '../ui/Card';
 
@@ -26,10 +27,7 @@ export function RoleGuard({ minRole, children }: RoleGuardProps): ReactElement {
         title="You do not have access to this area"
         description={`This section requires the ${ROLE_LABELS[minRole]} role or higher. If you believe this is a mistake, contact a portal administrator.`}
         action={
-          <Link
-            to="/"
-            className="inline-flex h-9 items-center rounded-md border border-border bg-elevated px-3.5 text-sm font-medium text-fg hover:border-border-strong"
-          >
+          <Link to="/" className={buttonClassName({ variant: 'secondary' })}>
             Back to dashboard
           </Link>
         }

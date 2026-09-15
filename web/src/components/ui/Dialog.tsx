@@ -45,7 +45,7 @@ export function Dialog({
       }}
     >
       <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-overlay backdrop-blur-[2px]" />
+        <DialogPrimitive.Overlay className="animate-fade-in fixed inset-0 z-50 bg-overlay backdrop-blur-[3px]" />
         <DialogPrimitive.Content
           onEscapeKeyDown={(event) => {
             if (!dismissible) event.preventDefault();
@@ -57,7 +57,8 @@ export function Dialog({
             if (!dismissible) event.preventDefault();
           }}
           className={cn(
-            'fx-pop fixed top-1/2 left-1/2 z-50 flex max-h-[88vh] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col',
+            'fx-pop animate-pop-in fixed top-1/2 left-1/2 z-50 flex max-h-[88vh] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col',
+            'focus:outline-none',
             SIZES[size],
           )}
         >
@@ -67,7 +68,7 @@ export function Dialog({
                 {title}
               </DialogPrimitive.Title>
               {description ? (
-                <DialogPrimitive.Description className="mt-1 text-sm text-fg-muted">
+                <DialogPrimitive.Description className="mt-1 text-sm leading-relaxed text-fg-muted">
                   {description}
                 </DialogPrimitive.Description>
               ) : null}
@@ -75,7 +76,7 @@ export function Dialog({
             {dismissible ? (
               <DialogPrimitive.Close
                 aria-label="Close dialog"
-                className="rounded-md p-1 text-fg-subtle hover:bg-neutral-soft hover:text-fg"
+                className="-mt-1 -mr-1.5 rounded-md p-1.5 text-fg-subtle transition-colors hover:bg-neutral-soft hover:text-fg focus-visible:ring-2 focus-visible:ring-accent-ring focus-visible:outline-none"
               >
                 <Icon name="x" />
               </DialogPrimitive.Close>
@@ -83,7 +84,7 @@ export function Dialog({
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
           {footer ? (
-            <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border px-5 py-3">
+            <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border bg-inset/40 px-5 py-3">
               {footer}
             </div>
           ) : null}

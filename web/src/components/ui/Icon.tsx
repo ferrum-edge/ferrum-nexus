@@ -41,7 +41,31 @@ export type IconName =
   | 'trash'
   | 'user'
   | 'users'
-  | 'x';
+  | 'x'
+  | 'activity'
+  | 'arrow-left'
+  | 'arrow-right'
+  | 'chevron-left'
+  | 'clock'
+  | 'code'
+  | 'eye'
+  | 'eye-off'
+  | 'filter'
+  | 'globe'
+  | 'help'
+  | 'home'
+  | 'image'
+  | 'inbox'
+  | 'info'
+  | 'layout'
+  | 'link'
+  | 'lock'
+  | 'message'
+  | 'palette'
+  | 'sparkles'
+  | 'type'
+  | 'upload'
+  | 'zap';
 
 const PATHS: Readonly<Record<IconName, ReactNode>> = {
   alert: (
@@ -218,6 +242,160 @@ const PATHS: Readonly<Record<IconName, ReactNode>> = {
     </>
   ),
   x: <path d="m6 6 12 12M18 6 6 18" />,
+  activity: (
+    <>
+      <path d="M3 12h4l3-8 4 16 3-8h4" />
+    </>
+  ),
+  'arrow-left': (
+    <>
+      <path d="M19 12H5" />
+      <path d="m11 18-6-6 6-6" />
+    </>
+  ),
+  'arrow-right': (
+    <>
+      <path d="M5 12h14" />
+      <path d="m13 6 6 6-6 6" />
+    </>
+  ),
+  'chevron-left': (
+    <>
+      <path d="m15 6-6 6 6 6" />
+    </>
+  ),
+  clock: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
+    </>
+  ),
+  code: (
+    <>
+      <path d="m8 8-4 4 4 4" />
+      <path d="m16 8 4 4-4 4" />
+      <path d="m14 5-4 14" />
+    </>
+  ),
+  eye: (
+    <>
+      <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" />
+      <circle cx="12" cy="12" r="3" />
+    </>
+  ),
+  'eye-off': (
+    <>
+      <path d="M3 3l18 18" />
+      <path d="M10.6 6.1A9.8 9.8 0 0 1 12 6c6 0 9.5 6 9.5 6a17.5 17.5 0 0 1-3.2 3.9" />
+      <path d="M6.6 6.6C4 8.4 2.5 12 2.5 12s3.5 6 9.5 6c1.6 0 3-.4 4.2-1" />
+      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+    </>
+  ),
+  filter: (
+    <>
+      <path d="M4 5h16l-6.5 8v5l-3 2v-7L4 5Z" />
+    </>
+  ),
+  globe: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M3.5 12h17" />
+      <path d="M12 3.5c2.5 2.6 3.7 5.4 3.7 8.5s-1.2 5.9-3.7 8.5c-2.5-2.6-3.7-5.4-3.7-8.5S9.5 6.1 12 3.5Z" />
+    </>
+  ),
+  help: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M9.6 9.5a2.4 2.4 0 1 1 3.4 2.2c-.7.4-1 .9-1 1.6" />
+      <path d="M12 16.5v.5" />
+    </>
+  ),
+  home: (
+    <>
+      <path d="m4 11 8-7 8 7" />
+      <path d="M6 9.5V20h12V9.5" />
+      <path d="M10 20v-6h4v6" />
+    </>
+  ),
+  image: (
+    <>
+      <rect x="4" y="5" width="16" height="14" rx="2" />
+      <circle cx="9" cy="10" r="1.5" />
+      <path d="m20 15-4.5-4.5L8 18" />
+    </>
+  ),
+  inbox: (
+    <>
+      <path d="M4 13h4l1.5 2.5h5L16 13h4" />
+      <path d="M5.5 5h13l1.5 8v6H4v-6l1.5-8Z" />
+    </>
+  ),
+  info: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 11v5" />
+      <path d="M12 7.5v.5" />
+    </>
+  ),
+  layout: (
+    <>
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+      <path d="M4 9.5h16" />
+      <path d="M9.5 9.5V20" />
+    </>
+  ),
+  link: (
+    <>
+      <path d="M10 14a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 0 0-5-5l-1 1" />
+      <path d="M14 10a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 0 0 5 5l1-1" />
+    </>
+  ),
+  lock: (
+    <>
+      <rect x="5" y="10.5" width="14" height="10" rx="2" />
+      <path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" />
+      <path d="M12 15v2" />
+    </>
+  ),
+  message: (
+    <>
+      <path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 3.5V17H6.5A2.5 2.5 0 0 1 4 14.5v-8Z" />
+    </>
+  ),
+  palette: (
+    <>
+      <path d="M12 3.5a8.5 8.5 0 0 0 0 17c1.2 0 1.8-.8 1.8-1.6 0-.9-.6-1.2-.6-2 0-.9.7-1.4 1.6-1.4h1.7a4 4 0 0 0 4-4C20.5 7 16.7 3.5 12 3.5Z" />
+      <circle cx="8" cy="11" r="1" />
+      <circle cx="10.5" cy="7.5" r="1" />
+      <circle cx="15" cy="7.5" r="1" />
+    </>
+  ),
+  sparkles: (
+    <>
+      <path d="M12 4l1.6 4.4L18 10l-4.4 1.6L12 16l-1.6-4.4L6 10l4.4-1.6L12 4Z" />
+      <path d="M5 17l.7 1.8L7.5 19.5l-1.8.7L5 22l-.7-1.8-1.8-.7 1.8-.7L5 17Z" />
+      <path d="M19 3l.5 1.3L20.8 4.8l-1.3.5L19 6.6l-.5-1.3-1.3-.5 1.3-.5L19 3Z" />
+    </>
+  ),
+  type: (
+    <>
+      <path d="M5 6.5V4.5h14v2" />
+      <path d="M12 4.5v15" />
+      <path d="M9 19.5h6" />
+    </>
+  ),
+  upload: (
+    <>
+      <path d="M12 16V5" />
+      <path d="m7 10 5-5 5 5" />
+      <path d="M4.5 16.5v1a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-1" />
+    </>
+  ),
+  zap: (
+    <>
+      <path d="M13 3 5 13.5h6L10.5 21 19 10.5h-6L13 3Z" />
+    </>
+  ),
 };
 
 export interface IconProps {

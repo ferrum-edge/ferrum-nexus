@@ -215,6 +215,12 @@ export const CSRF_HEADER_LOWER = 'x-nexus-csrf';
 /** localStorage key persisting the user's light/dark theme choice. */
 export const THEME_STORAGE_KEY = 'nexus:theme';
 
+/**
+ * `localStorage` key caching the portal's configured `default_theme`, so the
+ * pre-paint bootstrap script can honour it before the branding payload loads.
+ */
+export const THEME_DEFAULT_STORAGE_KEY = 'nexus:theme-default';
+
 /* ── Email templates ────────────────────────────────────────────────────── */
 
 /** Key identifying a stored, admin-editable email template. */
