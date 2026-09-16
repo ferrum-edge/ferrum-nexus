@@ -24,6 +24,13 @@ and per-user authorization before forwarding to Edge.
 
 > Required Notice: Copyright Ferrum Nexus (https://github.com/ferrum-edge)
 
+## Development status
+
+Ferrum Nexus is in active buildout, with no users or production data to preserve.
+Breaking changes are expected. Database changes are folded into one initial schema
+per SQL dialect; recreate disposable development databases when that schema changes.
+See [database setup and reset](docs/operations.md#buildout-schema-policy).
+
 ## Features
 
 - **API clients** can register, verify their email (and re-send the link),
@@ -116,7 +123,7 @@ cp .env.example .env
 # edit .env — at minimum set NEXUS_SECRET_KEY and FERRUM_ADMIN_JWT_SECRET
 # (both at least 32 characters; FERRUM_ADMIN_URL defaults to http://127.0.0.1:9000)
 
-npm run migrate   # builds shared, then applies migrations
+npm run migrate   # builds shared, then initializes the schema
 npm run dev
 ```
 

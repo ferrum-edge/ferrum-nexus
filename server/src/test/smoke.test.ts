@@ -788,7 +788,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(cleared?.timeouts, null);
       assert.equal(cleared?.circuit_breaker, false);
 
-      // A row created without them — every row predating migration 004 — reads
+      // A row created without these settings reads
       // back as "no restriction, gateway defaults, no breaker".
       const bare = await store.apis.findById((await makeApi(owner.id)).id);
       assert.equal(bare?.allowed_methods, null);
@@ -820,7 +820,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       const untouched = await store.apis.update(api.id, { version: '2.0.0' });
       assert.equal(untouched?.spec_enforcement, 'docs_only', 'an untouched column is left alone');
 
-      // A row created without it — every row predating migration 005 — reads
+      // A row created without an enforcement setting reads
       // back as "the document is catalog metadata only".
       const bare = await store.apis.findById((await makeApi(owner.id)).id);
       assert.equal(bare?.spec_enforcement, 'docs_only');
@@ -1074,7 +1074,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       );
 
       // An operator deleted the gateway config by hand: the row survives with
-      // no claim, which is the same shape a pre-015 row has.
+      // no claim, so the palette cannot address an existing gateway config.
       const orphaned = await store.apiPlugins.upsert({
         api_id: api.id,
         plugin_name: 'ip_restriction',

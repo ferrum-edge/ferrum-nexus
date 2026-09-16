@@ -8,6 +8,15 @@ Ferrum Nexus is a **Backend-for-Frontend (BFF)** sitting in front of [Ferrum Edg
 
 The browser **never** talks to the Ferrum Edge Admin API directly. Every gateway mutation flows through the Nexus server (`server/`), which enforces RBAC + audit logging before forwarding.
 
+## Buildout status
+
+Ferrum Nexus is in active buildout and has no users or production data to preserve.
+Breaking changes are acceptable during this phase. Keep database changes in the
+single `001_initial` schema for each SQL dialect and the MongoDB initial index
+setup; do not add incremental migrations, legacy backfills, or upgrade paths.
+Recreate disposable development databases after schema changes. Introduce versioned
+upgrade migrations when the application begins serving users.
+
 ## Workspace layout
 
 npm workspaces — order of build dependency matters:
@@ -25,7 +34,7 @@ Run from repo root unless noted.
 npm install                              # install all workspaces
 
 cp .env.example .env                     # then set NEXUS_SECRET_KEY + FERRUM_ADMIN_URL + FERRUM_ADMIN_JWT_SECRET
-npm run migrate                          # build shared + apply migrations (also runs at server startup)
+npm run migrate                          # build shared + initialize the schema (also runs at server startup)
                                          # `npm run migrate --workspace server` needs shared built first
 
 npm run dev                              # concurrently: server (tsx watch) + web (vite). Backend :8787, web :5173
@@ -75,7 +84,7 @@ Backend tests boot the full Fastify app against in-memory SQLite plus a mock Fer
 ## Where to start when…
 
 - **Adding a route**: register it in the appropriate file under `server/src/routes/`, wire any new services into `server/src/index.ts` (COMPOSITION sections), add DTOs to `shared/src/api-contract.ts`, and add the call in `web/src/lib/api.ts`.
-- **Adding a DB column / table**: add a migration under `server/src/db/migrations/` (`.sql` = SQLite, `.pg.sql`, `.mysql.sql`; Mongo indexes are created in its adapter), update `NexusStore`, implement in sqlite + sql-repos + mongodb, extend the smoke suite.
+- **Adding a DB column / table**: edit `server/src/db/migrations/001_initial.sql`, `001_initial.pg.sql`, and `001_initial.mysql.sql` in place (Mongo indexes are defined in its adapter), update `NexusStore`, implement in sqlite + sql-repos + mongodb, extend the smoke suite.
 - **Touching the Ferrum Edge integration**: only through `server/src/ferrum-admin/`; extend the mock in `server/src/test/mock-ferrum-edge.ts` to match.
 - **Adding an audit event**: extend the `AuditAction` catalog in [server/src/audit/service.ts](server/src/audit/service.ts) and the table in [docs/security.md](docs/security.md).
 

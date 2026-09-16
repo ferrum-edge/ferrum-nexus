@@ -1,5 +1,7 @@
 -- Ferrum Nexus initial schema — MySQL 8 dialect.
 --
+-- Buildout baseline: edit this schema directly; recreate development databases.
+--
 -- Mirrors 001_initial.sql table for table, column for column and index for
 -- index. The conventions are identical to the SQLite variant:
 --   * every id is a string UUID (VARCHAR(64), never a native UUID/BINARY type);
@@ -107,22 +109,29 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 -- ── APIs ───────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS apis (
-  id              VARCHAR(64)  NOT NULL,
-  name            VARCHAR(255) NOT NULL,
-  slug            VARCHAR(255) NOT NULL,
-  description     TEXT,
-  owner_user_id   VARCHAR(64)  NOT NULL,
-  ferrum_proxy_id VARCHAR(128) DEFAULT NULL,
-  namespace       VARCHAR(128) NOT NULL,
-  version         VARCHAR(64)  NOT NULL,
-  spec_format     VARCHAR(32)  NOT NULL DEFAULT 'openapi',
-  requestable     TINYINT      NOT NULL DEFAULT 0,
-  auth_plugin     VARCHAR(32)  NOT NULL,
-  rate_limit_json TEXT,
-  status          VARCHAR(32)  NOT NULL DEFAULT 'published',
-  visibility      VARCHAR(32)  NOT NULL DEFAULT 'public',
-  created_at      VARCHAR(32)  NOT NULL,
-  updated_at      VARCHAR(32)  NOT NULL,
+  id                   VARCHAR(64)  NOT NULL,
+  upstream_url         TEXT,
+  cors_json            TEXT,
+  allowed_methods_json TEXT,
+  timeouts_json        TEXT,
+  circuit_breaker      TINYINT NOT NULL DEFAULT 0,
+  spec_enforcement     VARCHAR(32) NOT NULL DEFAULT 'docs_only',
+  name                 VARCHAR(255) NOT NULL,
+  slug                 VARCHAR(255) NOT NULL,
+  description          TEXT,
+  owner_user_id        VARCHAR(64)  NOT NULL,
+  ferrum_proxy_id      VARCHAR(128) DEFAULT NULL,
+  namespace            VARCHAR(128) NOT NULL,
+  version              VARCHAR(64)  NOT NULL,
+  spec_format          VARCHAR(32)  NOT NULL DEFAULT 'openapi',
+  requestable          TINYINT      NOT NULL DEFAULT 0,
+  auth_plugin          VARCHAR(32)  NOT NULL,
+  rate_limit_json      TEXT,
+  status               VARCHAR(32)  NOT NULL DEFAULT 'published',
+  visibility           VARCHAR(32)  NOT NULL DEFAULT 'public',
+  created_at           VARCHAR(32)  NOT NULL,
+  updated_at           VARCHAR(32)  NOT NULL,
+  CONSTRAINT ck_apis_spec_enforcement CHECK (spec_enforcement IN ('docs_only', 'routes')),
   PRIMARY KEY (id),
   UNIQUE KEY ux_apis_slug ((lower(slug))),
   -- A plain UNIQUE index tolerates unlimited NULLs, matching SQLite's
@@ -244,6 +253,7 @@ CREATE TABLE IF NOT EXISTS consumers (
 -- ── Credential metadata (show-once: fingerprint + last4 only) ──────────────
 CREATE TABLE IF NOT EXISTS credential_metadata (
   id                   VARCHAR(64)  NOT NULL,
+  edge_ordinal         INT DEFAULT NULL,
   user_id              VARCHAR(64)  NOT NULL,
   ferrum_consumer_id   VARCHAR(128) NOT NULL,
   credential_type      VARCHAR(32)  NOT NULL,
@@ -255,6 +265,7 @@ CREATE TABLE IF NOT EXISTS credential_metadata (
   rotated_from_id      VARCHAR(64)  DEFAULT NULL,
   created_at           VARCHAR(32)  NOT NULL,
   updated_at           VARCHAR(32)  NOT NULL,
+  UNIQUE KEY ux_credentials_ordinal (ferrum_consumer_id, credential_type, edge_ordinal),
   PRIMARY KEY (id),
   UNIQUE KEY ux_credentials_fingerprint (fingerprint),
   KEY ix_credentials_user_status (user_id, status),
@@ -269,7 +280,7 @@ CREATE TABLE IF NOT EXISTS credential_metadata (
 -- ── Messaging ──────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS message_threads (
   id              VARCHAR(64)  NOT NULL,
-  subject         VARCHAR(255) NOT NULL,
+  subject         VARCHAR(300) NOT NULL,
   api_id          VARCHAR(64)  DEFAULT NULL,
   created_by      VARCHAR(64)  NOT NULL,
   participant_a   VARCHAR(64)  NOT NULL,
@@ -291,11 +302,14 @@ CREATE TABLE IF NOT EXISTS message_threads (
 
 CREATE TABLE IF NOT EXISTS messages (
   id             VARCHAR(64) NOT NULL,
+  broadcast      TINYINT NOT NULL DEFAULT 0,
   thread_id      VARCHAR(64) NOT NULL,
   sender_user_id VARCHAR(64) NOT NULL,
   body           TEXT        NOT NULL,
   created_at     VARCHAR(32) NOT NULL,
   updated_at     VARCHAR(32) NOT NULL,
+  CONSTRAINT ck_messages_broadcast CHECK (broadcast IN (0, 1)),
+  KEY ix_messages_sender (sender_user_id, created_at),
   PRIMARY KEY (id),
   KEY ix_messages_thread (thread_id, created_at),
   CONSTRAINT fk_messages_thread
@@ -309,7 +323,7 @@ CREATE TABLE IF NOT EXISTS notifications (
   id         VARCHAR(64)  NOT NULL,
   user_id    VARCHAR(64)  NOT NULL,
   type       VARCHAR(64)  NOT NULL,
-  title      VARCHAR(255) NOT NULL,
+  title      VARCHAR(300) NOT NULL,
   body       TEXT         NOT NULL,
   link       VARCHAR(512) DEFAULT NULL,
   read_at    VARCHAR(32)  DEFAULT NULL,
@@ -327,6 +341,7 @@ CREATE TABLE IF NOT EXISTS notifications (
 -- ── Email outbox ───────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS email_outbox (
   id              VARCHAR(64)  NOT NULL,
+  generation      VARCHAR(64) NOT NULL DEFAULT '',
   to_email        VARCHAR(320) NOT NULL,
   subject         VARCHAR(998) NOT NULL,
   body_html       LONGTEXT     NOT NULL,
@@ -392,16 +407,92 @@ CREATE TABLE IF NOT EXISTS email_templates (
 -- ── Email verification tokens ──────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS email_verification_tokens (
   id         VARCHAR(64)  NOT NULL,
+  purpose    VARCHAR(32) NOT NULL DEFAULT 'email_verification',
   user_id    VARCHAR(64)  NOT NULL,
   token_hash VARCHAR(255) NOT NULL,
   expires_at VARCHAR(32)  NOT NULL,
   used_at    VARCHAR(32)  DEFAULT NULL,
   created_at VARCHAR(32)  NOT NULL,
   updated_at VARCHAR(32)  NOT NULL,
+  KEY ix_verification_tokens_user_purpose (user_id, purpose),
   PRIMARY KEY (id),
   UNIQUE KEY ux_verification_tokens_hash (token_hash),
   KEY ix_verification_tokens_user (user_id),
   KEY ix_verification_tokens_expires (expires_at),
   CONSTRAINT fk_verification_tokens_user
     FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- ── Email token issue claims ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS email_token_issue_claims (
+  user_id   VARCHAR(64) NOT NULL,
+  purpose   VARCHAR(32) NOT NULL,
+  issued_at VARCHAR(30) NOT NULL,
+  PRIMARY KEY (user_id, purpose),
+  CONSTRAINT fk_token_issue_claim_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- ── API palette plugins ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS api_plugins (
+  id                      VARCHAR(64) NOT NULL,
+  ferrum_plugin_config_id VARCHAR(64) DEFAULT NULL,
+  api_id                  VARCHAR(64) NOT NULL,
+  plugin_name             VARCHAR(64) NOT NULL,
+  enabled                 TINYINT     NOT NULL DEFAULT 1,
+  config_json             LONGTEXT    NOT NULL,
+  trigger_json            LONGTEXT    DEFAULT NULL,
+  created_at              VARCHAR(32) NOT NULL,
+  updated_at              VARCHAR(32) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY ux_api_plugins_api_name (api_id, plugin_name),
+  KEY ix_api_plugins_api (api_id, created_at),
+  CONSTRAINT ck_api_plugins_enabled CHECK (enabled IN (0, 1)),
+  CONSTRAINT fk_api_plugins_api FOREIGN KEY (api_id) REFERENCES apis (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- ── Gateway teardown jobs ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS gateway_teardown_jobs (
+  id              VARCHAR(64) NOT NULL,
+  generation      VARCHAR(64) NOT NULL DEFAULT '',
+  user_id         VARCHAR(64) NOT NULL,
+  status          VARCHAR(16) NOT NULL DEFAULT 'pending',
+  attempts        INT         NOT NULL DEFAULT 0,
+  next_attempt_at VARCHAR(32) DEFAULT NULL,
+  last_error      TEXT,
+  requested_by    VARCHAR(64) DEFAULT NULL,
+  created_at      VARCHAR(32) NOT NULL,
+  updated_at      VARCHAR(32) NOT NULL,
+  completed_at    VARCHAR(32) DEFAULT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY ux_gateway_teardown_jobs_user (user_id),
+  KEY ix_gateway_teardown_jobs_due (status, next_attempt_at),
+  CONSTRAINT ck_gateway_teardown_jobs_status CHECK (status IN ('pending', 'sending', 'done')),
+  CONSTRAINT fk_gateway_teardown_jobs_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+  CONSTRAINT fk_gateway_teardown_jobs_requested_by FOREIGN KEY (requested_by) REFERENCES users (id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- ── Edge leases ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS edge_leases (
+  `key`      VARCHAR(255) NOT NULL,
+  owner      VARCHAR(64)  NOT NULL,
+  expires_at VARCHAR(32)  NOT NULL,
+  created_at VARCHAR(32)  NOT NULL,
+  updated_at VARCHAR(32)  NOT NULL,
+  PRIMARY KEY (`key`),
+  KEY ix_edge_leases_expires (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- ── Gateway identities ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS gateway_identities (
+  id                 VARCHAR(64)  NOT NULL,
+  user_id            VARCHAR(64)  NOT NULL,
+  namespace          VARCHAR(128) NOT NULL,
+  ferrum_username    VARCHAR(255) NOT NULL,
+  ferrum_consumer_id VARCHAR(128) DEFAULT NULL,
+  created_at         VARCHAR(32)  NOT NULL,
+  updated_at         VARCHAR(32)  NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY ux_gateway_identities_username (namespace, ferrum_username),
+  KEY ix_gateway_identities_user (user_id, namespace),
+  CONSTRAINT fk_gateway_identities_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;

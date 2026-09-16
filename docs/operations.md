@@ -1,7 +1,7 @@
 # Operations
 
-Running Ferrum Nexus in production: configuration, databases, containers, TLS,
-backups, key rotation, the email outbox, scaling limits, health checks, metrics,
+Deployment reference for Ferrum Nexus (currently in buildout, with no users):
+configuration, databases, containers, TLS, backups, key rotation, the email outbox, scaling limits, health checks, metrics,
 and the credential mirror.
 
 - Architecture background: [`architecture.md`](architecture.md)
@@ -682,14 +682,28 @@ Migrations are **applied automatically at startup**: `main()` calls
 is idempotent — applied ids are recorded in a `schema_migrations` table (or
 collection) and skipped on the next boot.
 
-Because they run at the first upgraded instance's boot, a migration that
-changes what a row must carry needs every pre-upgrade instance **stopped
-first**. `011_credential_ordinal` is one: an instance still running the
-previous version writes `credential_metadata` rows without an `edge_ordinal`,
-and the upgraded code reads such a row as a legacy row of unknown position —
-index 0 when it is alone, `409 CONFLICT` beside another — which is exactly the
-wrong-key deletion the ordinal exists to prevent. Stop all instances, start
-one upgraded instance (or run `npm run migrate`), then roll out the rest.
+### Buildout schema policy
+
+Ferrum Nexus is in active buildout and has no users or production data to preserve.
+The entire SQL schema lives in `001_initial.sql`, `001_initial.pg.sql`, and
+`001_initial.mysql.sql` under `server/src/db/migrations/`. MongoDB creates its
+initial indexes in `server/src/db/adapters/mongodb/index.ts` under the same
+`001_initial` id. Edit these baselines directly; do not add incremental migrations,
+legacy data backfills, or mixed-version upgrade procedures during buildout.
+
+**Recreate disposable development databases after a schema change.** Stop all Nexus
+instances and workers first. For SQLite, remove the configured development database
+and its `-wal` and `-shm` sidecars. For PostgreSQL, MySQL, or MongoDB, drop and recreate
+only the dedicated development database. Then run the schema command or start Nexus
+and register the initial administrator again. Never delete only `schema_migrations`:
+replaying `CREATE TABLE IF NOT EXISTS` does not update an older table definition.
+The application does not reset databases automatically.
+
+This baseline replaces the former 001–017 history. Old buildout databases must be
+recreated even if their ledger already contains `001_initial`. Versioned migrations
+and upgrade procedures become necessary once the application begins serving users.
+
+### Initializing the schema
 
 For deployments that prefer a separate schema step:
 
@@ -706,7 +720,7 @@ until you have run `npm run build --workspace shared` yourself.
 
 The root script is **not available inside the runtime image**, for the same
 reason: the image is built with `npm ci --omit=dev` and its runtime stage copies
-only `shared/dist`, `server/dist`, `web/dist` and `server/src/db/migrations`, so
+only `shared/dist`, `server/dist` (including SQL assets), and `web/dist`, so
 neither `tsc` nor the workspace source is present. Inside a container the
 compiled entry point is the only path — as the container's own command, or as a
 one-shot run with the same environment:
@@ -720,11 +734,11 @@ The CLI loads the same env, applies pending migrations, prints
 `Migrations applied (driver: postgres).` and exits. It exits non-zero on
 failure.
 
-Migration files live in `server/src/db/migrations/` with three dialect
-variants: `NNN_name.sql` (SQLite), `NNN_name.pg.sql`, `NNN_name.mysql.sql`.
-The id is the `NNN_name` prefix, shared across dialects. The Docker image
-copies `server/src/db/migrations` into the runtime stage explicitly, because
-`tsc` does not copy `.sql` assets.
+`npm run build --workspace server` copies the three SQL baselines from
+`server/src/db/migrations/` into `server/dist/db/migrations/`, removing stale SQL
+assets first. The runtime image includes them as part of `server/dist`; it needs
+no source-tree fallback. The loader resolves the adjacent `migrations/` directory
+relative to its module, independently of the working directory.
 
 ### SQLite
 
@@ -775,35 +789,15 @@ NEXUS_DB_URL=mysql://nexus:secret@db.internal:3306/nexus
   server timezone settings cannot reinterpret them.
 - Use a `utf8mb4` database/collation.
 
-### Recovering an interrupted MySQL upgrade
+### Retrying interrupted MySQL initialization
 
-Keep all application writers stopped during an upgrade, including recovery.
-Take a backup before applying migrations. MySQL DDL commits independently of
-its migration ledger; wrapping an ALTER in a transaction cannot change that.
-The runner now holds a database-specific advisory lock on one dedicated
-connection for the whole migration pass. Another migrator waits up to 30
-seconds, then reports that migrations are busy and can be retried.
-
-`schema_migration_steps` records each completed statement with its hash. The
-credential ordinal backfill and its checkpoint commit in one transaction.
-Pending ALTER steps inspect their complete expected columns, defaults,
-nullability, collations, indexes and check constraint before proceeding. An
-already committed matching ALTER is recognized even when an older deployment
-left no step journal or migration ledger row. The migration ledger is written
-only after every step succeeds. Atomic `CREATE TABLE IF NOT EXISTS` steps
-retain their existing replay behavior.
-
-After an interrupted upgrade, keep writers stopped and restart the upgraded
-migration command. This also repairs the original migration 002 condition:
-both nullable TEXT columns already committed, but 002 missing from the ledger.
-No manual ledger insertion or column removal is needed. A partial or
-incompatible ALTER definition, or an edited checkpointed statement, stops
-migration with an explicit error. Preserve the database and its ledgers, compare
-the reported object with the shipped migration, and restore the pre-upgrade
-backup or have an operator review a forward schema repair. Do not suppress
-these errors or mark a migration complete based on one column's existence.
-New ALTER/backfill migrations must add reviewed recovery handling and hosted
-interruption tests; unrecognized non-idempotent steps are rejected.
+MySQL DDL commits independently of the schema ledger. The initial schema uses only
+`CREATE TABLE IF NOT EXISTS`, with each table's indexes and constraints declared
+inline, so a retry can finish an interrupted initialization of the same baseline.
+A database-specific advisory lock serializes initializers across instances. The
+runner records `001_initial` only after every table succeeds; there is no per-step
+journal or legacy ALTER/backfill recovery. If the baseline itself changed, recreate
+the development database according to the buildout policy above.
 
 ### MongoDB
 
@@ -830,8 +824,9 @@ failure part-way through an approval or a rotation leaves the earlier writes in
 place, and you can end up with a grant row whose ACL group was never written
 (or vice versa). Do not set it in production.
 
-Collections and indexes are created in code on `init()`; there are no `.sql`
-files for Mongo, but the same `schema_migrations` bookkeeping applies.
+Indexes are created in code on `migrate()`; collections without indexes appear
+on their first write. There are no `.sql` files for Mongo, but the same
+`schema_migrations` bookkeeping applies.
 
 ### Transactions and contention retries
 
@@ -922,7 +917,7 @@ queries and closes SQLite in the final production image. What it bakes in:
 - `NEXUS_WEB_DIST=/app/web/dist`, so the container serves the SPA and the API
   on one origin
 - `NODE_ENV=production`, runs as the unprivileged `node` user
-- `server/src/db/migrations` copied explicitly (tsc does not copy `.sql`)
+- `server/dist/db/migrations` included by the server build alongside compiled code
 
 The image includes a `HEALTHCHECK` against `GET /api/health` every 30 seconds,
 with a 10-second timeout, 20-second startup grace, and three retries. Database
@@ -1232,22 +1227,6 @@ way keeps its `idempotency_key`, so it will not be duplicated by a re-send from
 the UI. A `delivered-unacknowledged:` row should be confirmed with the recipient
 or the relay's own logs before anything is re-sent; if you decide to re-send it
 anyway, expect the recipient to receive two copies.
-
-### Upgrading outbox ownership (migration 014)
-
-Drain and stop **all** Nexus application instances and workers before upgrading.
-Run the normal migrations, then start only the new version. Do not mix old and
-new writers: an old binary can still settle a row by ID without checking the new
-token. This is an additive schema migration, not a safe mixed-version rolling
-deployment, and the same drain requirement applies before rolling back binaries.
-
-SQLite and PostgreSQL add the column transactionally. MySQL uses its existing
-resumable DDL journal and verifies the column definition on restart. MongoDB
-backfills only documents missing the field. Existing rows keep their ID, status,
-counters, error and timestamps; their initial empty token is replaced the next
-time the row is claimed, and an existing `sending` row recovers through the
-normal stale sweep. No queued mail needs to be discarded, and no API response
-shape changes.
 
 SMTP settings are re-read on **every** tick, so an admin fixing them in the UI
 takes effect on the next poll with no restart.
@@ -1898,23 +1877,6 @@ Worker cancellation also rechecks account status under the same lifecycle lease
 as disable/re-enable, inside a transaction. Inline failures return their own claim
 to `pending`; a failed queue write leaves `sending` for stale recovery.
 
-### Upgrading teardown ownership (migration 013)
-
-Drain and stop **all** Nexus application instances and workers before upgrading.
-Run the normal migrations, then start only the new version. Do not mix old and
-new writers: old binaries can still settle jobs by row ID without checking the
-new token. This is an additive schema migration, not a safe mixed-version rolling
-deployment. The same drain requirement applies before rolling back binaries.
-
-SQLite and PostgreSQL add the column transactionally. MySQL uses its existing
-resumable DDL journal and verifies the column definition on restart. MongoDB
-backfills only documents missing the field and preserves immutable `_id` values.
-Existing jobs retain their ID, state, counters, and timestamps; their initial empty
-token is replaced when claimed or requeued. Existing `sending` jobs recover through
-the normal stale sweep. No job data needs to be discarded. API response shapes
-are unchanged; the token is internal, and `attempts` includes inline attempts as
-specified by the shared contract.
-
 ### Which identities a teardown finds
 
 The canonical consumer comes from `consumers`. Every other identity — a
@@ -2172,14 +2134,11 @@ while equal lengths mean the delete never landed and the operation has to be
 retried. More than one such row — or none, with the lengths still disagreeing —
 means the reconciliation below.
 
-### What an ambiguous legacy consumer looks like
+### What an unresolved credential position looks like
 
-Rows written before `011_credential_ordinal` have no ordinal of their own. The
-migration numbers them from the old `(created_at, id)` sort where that sort was
-unambiguous — no two live rows of the consumer and type share a timestamp — and
-leaves the whole group `NULL` where it was not, because nothing on either side
-can say which gateway entry is which. A lone unresolved row is still index 0
-and works normally. Two or more make every rotate or revoke of them return
+Normal credential creation assigns an `edge_ordinal` under the consumer lock.
+A row with `edge_ordinal = NULL` has an unknown gateway position. A lone unresolved
+row is index 0; two or more make rotation or revocation of those rows return
 `409 CONFLICT`:
 
 > The gateway position of this credential cannot be determined …

@@ -32,12 +32,8 @@
  * replace or delete. Resolving by name did exactly that: an unchanged palette
  * save deleted it, silently (issue #153).
  *
- * A row written before the column existed carries no id, so the first save or
- * removal after the upgrade backfills one by matching the plugin name on the
- * proxy — the rule that resolved it then. Exactly one match is adopted; when
- * there are several the first is adopted and the rest are left alone. Adopting
- * the wrong config is recoverable by hand; deleting somebody's security control
- * is not.
+ * A row without a recorded config id owns no gateway config. Saving it creates
+ * a new config and records that id; removal leaves unowned configs alone.
  *
  * ## Ordering, and what a failure leaves behind
  *
@@ -256,11 +252,8 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
    * The gateway config this API's palette row owns, or `undefined` when there
    * is none to reuse and a fresh one has to be created.
    *
-   * The recorded id is the whole answer, with one exception: a row written
-   * before the column existed carries none, so it is backfilled by matching the
-   * plugin name — how ownership was resolved then. A single match is adopted;
-   * with several, the first is, and every other config of that name is left
-   * exactly where it is (issue #153).
+   * Ownership requires a recorded id. A missing id never authorizes adopting
+   * or deleting an operator's config with the same plugin name.
    *
    * A recorded id that is no longer on the proxy means an operator deleted the
    * config by hand. That is not an error and not a licence to adopt whatever
@@ -271,9 +264,8 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
     onProxy: EdgePluginConfig[],
     pluginName: string,
   ): EdgePluginConfig | undefined {
-    if (!row) return undefined;
+    if (!row?.ferrum_plugin_config_id) return undefined;
     const named = onProxy.filter((plugin) => plugin.plugin_name === pluginName);
-    if (row.ferrum_plugin_config_id === null) return named[0];
     return named.find((plugin) => plugin.id === row.ferrum_plugin_config_id);
   }
 

@@ -50,9 +50,8 @@
  * first. Either way a revoke deleted *another* live key while marking the
  * requested one revoked. Nothing here reads `created_at` for position any more.
  *
- * Rows written before the ordinal existed were backfilled from the old sort
- * where that sort was unambiguous (distinct timestamps). Where it was not, they
- * carry `edge_ordinal = null`: they all precede every row that has an ordinal,
+ * Rows with unknown gateway positions carry `edge_ordinal = null`: they
+ * precede every row that has an ordinal,
  * but their order among themselves is unknowable. A single such row still has
  * a definite index (0); two or more make the target **ambiguous**, and
  * {@link resolveCredentialIndex} refuses to act on it until an administrator

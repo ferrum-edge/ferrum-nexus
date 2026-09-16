@@ -2,6 +2,15 @@
 
 Thanks for helping improve Ferrum Nexus!
 
+## Buildout policy
+
+Ferrum Nexus is in active buildout and has no users or production data to preserve.
+Breaking changes are acceptable during this phase. Keep database changes in the
+single `001_initial` schema for each SQL dialect and the MongoDB initial index
+setup; do not add incremental migrations, legacy backfills, or upgrade paths.
+Recreate disposable development databases after schema changes. Introduce versioned
+upgrade migrations when the application begins serving users.
+
 ## Prerequisites
 
 - Node.js 22.14+ — see `.nvmrc`.
@@ -13,7 +22,7 @@ Thanks for helping improve Ferrum Nexus!
 ```bash
 npm install
 cp .env.example .env   # set NEXUS_SECRET_KEY, FERRUM_ADMIN_URL, FERRUM_ADMIN_JWT_SECRET
-npm run migrate        # builds shared, then applies migrations
+npm run migrate        # builds shared, then initializes the schema
 npm run dev            # backend on :8787, web on :5173 (override with NEXUS_PORT / NEXUS_WEB_PORT)
 ```
 

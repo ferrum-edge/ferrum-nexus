@@ -87,7 +87,7 @@ docs/      this tree
 | `db/store.ts`                                  | The `NexusStore` interface: 17 repositories plus `init`/`migrate`/`close`/`healthCheck`/`transaction`.                                          |
 | `db/adapters/{sqlite,postgres,mysql,mongodb}/` | The four implementations.                                                                                                                       |
 | `db/adapters/sql-common.ts`, `sql-repos.ts`    | Dialect shims and the repo bodies shared by PG + MySQL.                                                                                         |
-| `db/migrations/`                               | `NNN_name.sql` (SQLite), `.pg.sql`, `.mysql.sql`. Mongo builds collections and indexes in code.                                                 |
+| `db/migrations/`                               | One `001_initial` baseline per SQL dialect: `.sql` (SQLite), `.pg.sql`, `.mysql.sql`. Mongo defines its initial indexes in code.                |
 | `ferrum-admin/`                                | The **only** module that knows the Edge HTTP shape: `client.ts`, `jwt.ts`, `types.ts`.                                                          |
 | `middleware/auth-plugin.ts`                    | Session resolution, sliding expiry, CSRF double-submit, RBAC guards.                                                                            |
 | `middleware/error-handler.ts`                  | The single place an exception becomes an HTTP response.                                                                                         |
@@ -300,6 +300,13 @@ supply three primitives (`ensureMigrationsTable`, `listApplied`,
 `applyMigration`). Applied ids are recorded in `schema_migrations`. The numeric
 prefix plus description (`001_initial`) is the id, shared across dialects, so
 the same logical migration can never be applied twice on one database.
+
+During buildout there is only `001_initial`: edit its three SQL variants and the
+MongoDB initial index definitions directly. There are no incremental upgrades or
+data backfills. Recreate development databases after schema changes; the application
+has no users or production data to preserve. The server build copies SQL assets to
+`server/dist/db/migrations/`; both source and compiled runners load the directory
+beside their own module, without searching another source tree.
 
 ---
 
@@ -883,15 +890,14 @@ Three further points of fidelity:
   [ferrum-edge#4844](https://github.com/ferrum-edge/ferrum-edge/pull/4844).
 
 **The portal owns configs it created, by id.** The `api_plugins` row records the
-Edge plugin config id it produced (`ferrum_plugin_config_id`, migration 015),
+Edge plugin config id it produced (`ferrum_plugin_config_id`),
 and a save or a removal acts on that config alone. Edge genuinely allows several
 configs of one plugin name on a proxy — distinct `trigger`s, distinct
 `priority_override`s — so a name is not an identity: an operator's hand-made
 per-path deny gate lives happily beside the palette's config of the same name,
-and the portal never replaces or deletes it. A row written before the column
-existed carries no id, so the next save backfills one by matching the plugin
-name, adopting a single match (or, when several exist, the first) and leaving
-every other config where it is. A recorded id that is no longer on the gateway
+and the portal never replaces or deletes it. A row with no recorded id owns no
+gateway config; a save creates a fresh config and records its id, while removal
+leaves unowned configs alone. A recorded id that is no longer on the gateway
 means an operator removed it; the next save creates a fresh config and records
 the new id rather than adopting somebody else's.
 
@@ -961,11 +967,9 @@ a clock stepped backwards between two appends puts the later one first — eithe
 way a revoke deleted _another_ live key while marking the requested one revoked
 (#77). Nothing reads `created_at` for position any more.
 
-Rows written before the ordinal existed were backfilled from the old sort by
-`011_credential_ordinal` where that sort was unambiguous (distinct timestamps
-among the live rows of a group). Where it was not, the whole group carries
-`edge_ordinal = NULL`: those rows all precede every row that has an ordinal,
-but their order among themselves is unknowable. A lone such row is still index
+A row with an unknown gateway position carries `edge_ordinal = NULL`. Such
+rows precede every row that has an ordinal, but their order among themselves is
+unknowable. A lone such row is still index
 0; two or more make a target **ambiguous**, and the operation is refused with
 `409 CONFLICT` until an administrator runs
 `POST /api/admin/credentials/reconcile`, which empties the type on both sides

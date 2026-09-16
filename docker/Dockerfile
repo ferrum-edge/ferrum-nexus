@@ -32,7 +32,6 @@ COPY --from=build /app/shared/package.json shared/package.json
 COPY --from=build /app/shared/dist shared/dist
 COPY --from=build /app/server/package.json server/package.json
 COPY --from=build /app/server/dist server/dist
-COPY --from=build /app/server/src/db/migrations server/src/db/migrations
 COPY --from=build /app/web/dist web/dist
 
 # SQLite data lives here by default; mount a volume to persist it
