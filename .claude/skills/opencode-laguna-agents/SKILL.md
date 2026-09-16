@@ -37,11 +37,11 @@ prompt, including continuation prompts and any permitted nested delegation.
 
 ## Dispatch command (exact shape)
 
-Resolve the absolute path to this repository's `.agents/skills/opencode-agents` directory, write a
+Resolve the absolute path to this repository's `.agents/skills/opencode-laguna-agents` directory, write a
 prompt file outside the repo, then launch:
 
 ```bash
-<ABS_REPO>/.agents/skills/opencode-agents/scripts/dispatch-agent.sh \
+<ABS_REPO>/.agents/skills/opencode-laguna-agents/scripts/dispatch-agent.sh \
   --worktree <ABS_PATH_TO_WORKER_WORKTREE> \
   --prompt-file <ABS_PROMPT_FILE>
 ```
@@ -64,13 +64,13 @@ Non-negotiables:
 ## Prompt construction (all modes)
 
 Every prompt starts with:
-`First read <ABS_REPO>/.agents/skills/opencode-agents/references/agent-brief.md and follow it exactly`
+`First read <ABS_REPO>/.agents/skills/opencode-laguna-agents/references/agent-brief.md and follow it exactly`
 (implementer) or
-`Read <ABS_REPO>/.agents/skills/opencode-agents/references/continuation-brief.md AND
-<ABS_REPO>/.agents/skills/opencode-agents/references/agent-brief.md and follow them`
+`Read <ABS_REPO>/.agents/skills/opencode-laguna-agents/references/continuation-brief.md AND
+<ABS_REPO>/.agents/skills/opencode-laguna-agents/references/agent-brief.md and follow them`
 (fix/shepherd — give BOTH absolute paths).
 
-Use only those `.agents/skills/opencode-agents/references/` paths so Claude and Codex/GPT
+Use only those `.agents/skills/opencode-laguna-agents/references/` paths so Claude and Codex/GPT
 orchestrators share one source of truth.
 
 Every prompt must also PIN THE WORKER'S ROLE:
