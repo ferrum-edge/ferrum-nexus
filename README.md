@@ -68,11 +68,11 @@ Edge Admin API. Dark theme; a light theme ships too.
   <tr>
     <td width="50%" valign="top">
       <img src="docs/screenshots/provider-overview.png" alt="Provider view of an API with usage read from the gateway" />
-      <sub><b>Provider overview</b> — listen path, upstream, rate limit and usage read straight from the gateway; Nexus stores no metrics of its own.</sub>
+      <sub><b>Provider overview</b> — the configured listen path, upstream and rate limit beside usage read straight from the gateway; Nexus stores no metrics of its own.</sub>
     </td>
     <td width="50%" valign="top">
       <img src="docs/screenshots/credentials.png" alt="A client's gateway credentials" />
-      <sub><b>Credentials</b> — show-once API keys, basic auth and JWT secrets, rotated append-then-retire so callers get a switch-over window.</sub>
+      <sub><b>Credentials</b> — show-once API keys, basic auth and JWT secrets that clients issue, rotate and revoke themselves; a rotation returns the new secret once and retires the old one in the same operation.</sub>
     </td>
   </tr>
   <tr>
@@ -82,7 +82,7 @@ Edge Admin API. Dark theme; a light theme ships too.
     </td>
     <td width="50%" valign="top">
       <img src="docs/screenshots/admin-settings.png" alt="Admin branding settings with a live preview" />
-      <sub><b>White-label branding</b> — portal name, logo, colours, typeface, radius and sign-in layout, previewed in both themes as you edit.</sub>
+      <sub><b>White-label branding</b> — portal name, logo, colours, typeface, radius and sidebar style, with the portal shell previewed in both themes as you edit; the sign-in layout is configurable too.</sub>
     </td>
   </tr>
 </table>
