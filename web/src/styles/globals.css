@@ -3,39 +3,53 @@
 /*
  * Ferrum Nexus design tokens.
  *
- * Ferrum = iron: cool slate/zinc neutrals with a heated ember accent. Dark is
- * the default theme (declared on bare `:root`); the light palette overrides the
+ * Ferrum = iron: cool slate neutrals with a heated ember accent. Dark is the
+ * default theme (declared on bare `:root`); the light palette overrides the
  * same variables under `:root[data-theme='light']`. Every colour used anywhere
- * in the SPA resolves through one of these variables, so adding or restyling a
- * colour only ever means editing this file.
+ * in the SPA resolves through one of these variables, so restyling only ever
+ * means editing this file — or, for an operator, saving branding settings:
+ *
+ *   - `BrandingStyles` derives the whole `--accent-*` scale from the configured
+ *     primary colour and `--info-*` from the secondary one, per theme, so a
+ *     brand colour never leaves half the palette on the built-in default.
+ *   - `data-radius` (none | sm | md | lg) scales every corner through
+ *     `--radius-factor`.
+ *   - The selectors are element-scoped (not `:root`-only) so the settings page
+ *     can nest a live preview of another theme or preset inside the page.
+ *   - `data-sidebar` (surface | contrast) switches the navigation rail between
+ *     a surface-coloured rail and a high-contrast dark rail.
+ *   - `--font-sans-stack` is swapped by the typography preset.
  */
 
-:root {
+:root,
+[data-theme='dark'] {
   color-scheme: dark;
 
   /* Surfaces, from furthest back to furthest forward. */
-  --base: #0b0d10;
-  --surface: #12151a;
-  --elevated: #171b21;
-  --inset: #0e1116;
+  --base: #0a0c10;
+  --surface: #12151b;
+  --surface-hover: #161a21;
+  --elevated: #181c24;
+  --inset: #0d1015;
   --overlay: rgb(3 5 8 / 0.72);
 
   /* Lines. */
-  --border: #262b33;
-  --border-strong: #39414d;
+  --border: #232932;
+  --border-strong: #363d49;
 
   /* Text. */
-  --fg: #e8ecf2;
-  --fg-muted: #a3adbb;
-  --fg-subtle: #6c7787;
+  --fg: #e9edf3;
+  --fg-muted: #a4aebc;
+  --fg-subtle: #6e7888;
 
-  /* Ember accent (branding may override --accent at runtime). */
+  /* Ember accent (branding overrides the whole scale at runtime). */
   --accent: #f97316;
   --accent-hover: #fb8b3c;
   --accent-active: #ea640c;
   --accent-fg: #1a0d02;
-  --accent-soft: rgb(249 115 22 / 0.14);
+  --accent-soft: rgb(249 115 22 / 0.16);
   --accent-ring: rgb(249 115 22 / 0.45);
+  --accent-glow: rgb(249 115 22 / 0.28);
 
   /* Semantic states. */
   --success: #34d399;
@@ -45,37 +59,59 @@
   --danger: #f87171;
   --danger-hover: #fb8f8f;
   --danger-soft: rgb(248 113 113 / 0.14);
-  --info: #60a5fa;
-  --info-soft: rgb(96 165 250 / 0.14);
-  --neutral-soft: rgb(163 173 187 / 0.12);
+  --info: #38bdf8;
+  --info-soft: rgb(56 189 248 / 0.14);
+  --neutral-soft: rgb(164 174 188 / 0.12);
+
+  /* Navigation rail (`data-sidebar='surface'`, the default). */
+  --sidebar-bg: var(--surface);
+  --sidebar-fg: var(--fg-muted);
+  --sidebar-fg-strong: var(--fg);
+  --sidebar-subtle: var(--fg-subtle);
+  --sidebar-border: var(--border);
+  --sidebar-hover: var(--neutral-soft);
+  --sidebar-active-bg: var(--accent-soft);
+  --sidebar-active-fg: var(--accent);
 
   /* Elevation. */
-  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4);
-  --shadow-pop: 0 12px 32px -8px rgb(0 0 0 / 0.6);
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.35), 0 0 0 1px rgb(255 255 255 / 0.015) inset;
+  --shadow-raised: 0 4px 16px -6px rgb(0 0 0 / 0.55);
+  --shadow-pop: 0 16px 40px -12px rgb(0 0 0 / 0.65), 0 0 0 1px rgb(255 255 255 / 0.03) inset;
+
+  /* Shape: every radius is `base × factor`; presets set the factor. */
+  --radius-factor: 1;
+
+  /* Typography: presets swap the stack at runtime. */
+  --font-sans-stack:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono-stack:
+    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
 }
 
-:root[data-theme='light'] {
+[data-theme='light'] {
   color-scheme: light;
 
-  --base: #f6f7f9;
+  --base: #f4f6f9;
   --surface: #ffffff;
+  --surface-hover: #f8fafc;
   --elevated: #ffffff;
-  --inset: #f1f3f6;
-  --overlay: rgb(15 23 42 / 0.35);
+  --inset: #f1f4f8;
+  --overlay: rgb(15 23 42 / 0.4);
 
-  --border: #dfe3e9;
-  --border-strong: #c3cad4;
+  --border: #e2e6ec;
+  --border-strong: #c5ccd6;
 
-  --fg: #101419;
-  --fg-muted: #4d5866;
-  --fg-subtle: #77828f;
+  --fg: #0f1419;
+  --fg-muted: #4b5563;
+  --fg-subtle: #7b8494;
 
   --accent: #ea580c;
   --accent-hover: #c2410c;
   --accent-active: #9a3412;
   --accent-fg: #ffffff;
-  --accent-soft: rgb(234 88 12 / 0.1);
+  --accent-soft: rgb(234 88 12 / 0.12);
   --accent-ring: rgb(234 88 12 / 0.35);
+  --accent-glow: rgb(234 88 12 / 0.18);
 
   --success: #059669;
   --success-soft: rgb(5 150 105 / 0.1);
@@ -84,18 +120,52 @@
   --danger: #dc2626;
   --danger-hover: #b91c1c;
   --danger-soft: rgb(220 38 38 / 0.1);
-  --info: #2563eb;
-  --info-soft: rgb(37 99 235 / 0.1);
-  --neutral-soft: rgb(77 88 102 / 0.09);
+  --info: #0284c7;
+  --info-soft: rgb(2 132 199 / 0.1);
+  --neutral-soft: rgb(75 85 99 / 0.09);
 
-  --shadow-card: 0 1px 2px rgb(15 23 42 / 0.06);
-  --shadow-pop: 0 12px 32px -8px rgb(15 23 42 / 0.18);
+  --sidebar-bg: var(--surface);
+  --sidebar-fg: var(--fg-muted);
+  --sidebar-fg-strong: var(--fg);
+  --sidebar-subtle: var(--fg-subtle);
+  --sidebar-border: var(--border);
+  --sidebar-hover: var(--neutral-soft);
+  --sidebar-active-bg: var(--accent-soft);
+  --sidebar-active-fg: var(--accent);
+
+  --shadow-card: 0 1px 2px rgb(15 23 42 / 0.05), 0 1px 3px rgb(15 23 42 / 0.04);
+  --shadow-raised: 0 6px 20px -8px rgb(15 23 42 / 0.18);
+  --shadow-pop: 0 16px 40px -12px rgb(15 23 42 / 0.22);
+}
+
+/* High-contrast navigation rail: always a deep slate, whatever the theme. */
+[data-sidebar='contrast'] {
+  --sidebar-bg: #0b0f17;
+  --sidebar-fg: #aab4c3;
+  --sidebar-fg-strong: #f1f5f9;
+  --sidebar-subtle: #66718a;
+  --sidebar-border: #1c2230;
+  --sidebar-hover: rgb(255 255 255 / 0.05);
+  --sidebar-active-bg: rgb(255 255 255 / 0.08);
+  --sidebar-active-fg: #ffffff;
+}
+
+/* Corner presets. */
+[data-radius='none'] {
+  --radius-factor: 0;
+}
+[data-radius='sm'] {
+  --radius-factor: 0.6;
+}
+[data-radius='lg'] {
+  --radius-factor: 1.5;
 }
 
 /* Re-export the tokens as Tailwind theme values so utilities exist for them. */
 @theme inline {
   --color-base: var(--base);
   --color-surface: var(--surface);
+  --color-surface-hover: var(--surface-hover);
   --color-elevated: var(--elevated);
   --color-inset: var(--inset);
   --color-overlay: var(--overlay);
@@ -113,6 +183,7 @@
   --color-accent-fg: var(--accent-fg);
   --color-accent-soft: var(--accent-soft);
   --color-accent-ring: var(--accent-ring);
+  --color-accent-glow: var(--accent-glow);
 
   --color-success: var(--success);
   --color-success-soft: var(--success-soft);
@@ -125,19 +196,81 @@
   --color-info-soft: var(--info-soft);
   --color-neutral-soft: var(--neutral-soft);
 
-  --radius-xs: 0.25rem;
-  --radius-sm: 0.375rem;
-  --radius-md: 0.5rem;
-  --radius-lg: 0.75rem;
-  --radius-xl: 1rem;
+  --color-sidebar: var(--sidebar-bg);
+  --color-sidebar-fg: var(--sidebar-fg);
+  --color-sidebar-fg-strong: var(--sidebar-fg-strong);
+  --color-sidebar-subtle: var(--sidebar-subtle);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-hover: var(--sidebar-hover);
+  --color-sidebar-active: var(--sidebar-active-bg);
+  --color-sidebar-active-fg: var(--sidebar-active-fg);
+
+  --radius-xs: calc(0.25rem * var(--radius-factor));
+  --radius-sm: calc(0.375rem * var(--radius-factor));
+  --radius-md: calc(0.5rem * var(--radius-factor));
+  --radius-lg: calc(0.75rem * var(--radius-factor));
+  --radius-xl: calc(1rem * var(--radius-factor));
+  --radius-2xl: calc(1.25rem * var(--radius-factor));
 
   --shadow-card: var(--shadow-card);
+  --shadow-raised: var(--shadow-raised);
   --shadow-pop: var(--shadow-pop);
 
-  --font-sans:
-    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --font-mono:
-    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  --font-sans: var(--font-sans-stack);
+  --font-mono: var(--font-mono-stack);
+
+  --animate-fade-in: fade-in 160ms ease-out;
+  --animate-pop-in: pop-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  --animate-slide-up: slide-up 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  --animate-slide-in-right: slide-in-right 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  --animate-shimmer: shimmer 1.6s linear infinite;
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes pop-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+  @keyframes slide-up {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @keyframes slide-in-right {
+    from {
+      opacity: 0;
+      transform: translateX(16px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+  @keyframes shimmer {
+    from {
+      background-position: -200% 0;
+    }
+    to {
+      background-position: 200% 0;
+    }
+  }
 }
 
 @layer base {
@@ -155,6 +288,7 @@
     background-color: var(--base);
     color: var(--fg);
     font-family: var(--font-sans);
+    font-feature-settings: 'cv11', 'ss01', 'calt';
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
@@ -184,6 +318,12 @@
     border: 2px solid transparent;
     background-clip: content-box;
   }
+
+  code,
+  kbd,
+  pre {
+    font-family: var(--font-mono);
+  }
 }
 
 @layer components {
@@ -195,11 +335,71 @@
     box-shadow: var(--shadow-card);
   }
 
+  /* A card that is also a link or button: lifts and brightens on hover. */
+  .fx-card-interactive {
+    transition:
+      border-color 150ms ease,
+      background-color 150ms ease,
+      box-shadow 150ms ease,
+      transform 150ms ease;
+  }
+  .fx-card-interactive:hover {
+    border-color: var(--border-strong);
+    background-color: var(--surface-hover);
+    box-shadow: var(--shadow-raised);
+    transform: translateY(-1px);
+  }
+
   .fx-pop {
     background-color: var(--elevated);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow-pop);
+  }
+
+  /* Translucent bar (header) that lets content scroll beneath it. */
+  .fx-glass {
+    background-color: color-mix(in srgb, var(--base) 82%, transparent);
+    backdrop-filter: saturate(160%) blur(10px);
+    -webkit-backdrop-filter: saturate(160%) blur(10px);
+  }
+
+  /* Brand gradient used by the sign-in hero and the primary button sheen. */
+  .fx-brand-gradient {
+    background-image:
+      radial-gradient(120% 120% at 0% 0%, var(--accent-glow) 0%, transparent 55%),
+      radial-gradient(90% 90% at 100% 100%, var(--info-soft) 0%, transparent 60%),
+      linear-gradient(160deg, var(--surface) 0%, var(--base) 100%);
+  }
+
+  /* Faint dot grid, used as a backdrop texture behind hero panels. */
+  .fx-dot-grid {
+    background-image: radial-gradient(var(--border-strong) 1px, transparent 1px);
+    background-size: 22px 22px;
+    mask-image: linear-gradient(to bottom, rgb(0 0 0 / 0.5), transparent 85%);
+    -webkit-mask-image: linear-gradient(to bottom, rgb(0 0 0 / 0.5), transparent 85%);
+  }
+
+  /* Skeleton placeholder while a query is in flight. */
+  .fx-skeleton {
+    border-radius: var(--radius-sm);
+    background: linear-gradient(90deg, var(--inset) 0%, var(--elevated) 50%, var(--inset) 100%);
+    background-size: 200% 100%;
+    animation: var(--animate-shimmer);
+  }
+
+  .fx-kbd {
+    display: inline-flex;
+    align-items: center;
+    padding: 0 0.35rem;
+    height: 1.25rem;
+    border: 1px solid var(--border-strong);
+    border-bottom-width: 2px;
+    border-radius: var(--radius-xs);
+    background: var(--inset);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    color: var(--fg-muted);
   }
 }
 

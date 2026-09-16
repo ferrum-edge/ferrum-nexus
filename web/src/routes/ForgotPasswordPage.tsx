@@ -1,7 +1,8 @@
 import { Link } from '@tanstack/react-router';
 import { useState, type FormEvent, type ReactElement } from 'react';
 import { AuthShell, FormNotice } from '../components/auth/AuthShell';
-import { Button } from '../components/ui/Button';
+import { Button, buttonClassName } from '../components/ui/Button';
+import { Icon } from '../components/ui/Icon';
 import { LabeledInput } from '../components/ui/Input';
 import { ApiError, authApi } from '../lib/api';
 
@@ -46,9 +47,10 @@ export function ForgotPasswordPage(): ReactElement {
           </FormNotice>
           <Link
             to="/login"
-            className="inline-flex h-11 items-center justify-center rounded-md bg-accent px-4 text-sm font-medium text-accent-fg hover:bg-accent-hover"
+            className={buttonClassName({ variant: 'primary', size: 'lg', className: 'w-full' })}
           >
             Back to sign in
+            <Icon name="arrow-right" className="h-4 w-4" />
           </Link>
         </div>
       </AuthShell>
@@ -75,13 +77,16 @@ export function ForgotPasswordPage(): ReactElement {
           label="Email"
           type="email"
           autoComplete="email"
+          placeholder="you@company.com"
+          hint="We answer the same way for every address, known or not."
           required
           value={email}
           onChange={(event) => setEmail(event.target.value)}
         />
 
-        <Button type="submit" variant="primary" size="lg" loading={submitting}>
+        <Button type="submit" variant="primary" size="lg" className="w-full" loading={submitting}>
           Email me a reset link
+          <Icon name="arrow-right" className="h-4 w-4" />
         </Button>
       </form>
     </AuthShell>

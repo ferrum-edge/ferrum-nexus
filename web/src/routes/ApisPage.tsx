@@ -5,9 +5,11 @@ import { formatDateTime } from '../lib/format';
 import { useMyApis } from '../hooks/useApis';
 import { RoleGuard } from '../components/layout/RoleGuard';
 import { Badge } from '../components/ui/Badge';
+import { buttonClassName } from '../components/ui/Button';
 import { PageHeader } from '../components/ui/Card';
 import { DataTable, type Columns } from '../components/ui/DataTable';
 import { EmptyState } from '../components/ui/EmptyState';
+import { Icon } from '../components/ui/Icon';
 import { StatusPill } from '../components/ui/StatusPill';
 
 function MyApisTable(): ReactElement {
@@ -22,13 +24,19 @@ function MyApisTable(): ReactElement {
         id: 'name',
         header: 'API',
         cell: ({ row }) => (
-          <span>
-            <span className="block font-medium text-fg">{row.original.name}</span>
-            <span className="block font-mono text-xs text-fg-subtle">/{row.original.slug}</span>
+          <span className="block min-w-0">
+            <span className="block truncate text-sm font-medium text-fg">{row.original.name}</span>
+            <span className="block truncate font-mono text-xs text-fg-subtle">
+              /{row.original.slug}
+            </span>
           </span>
         ),
       },
-      { id: 'version', header: 'Version', cell: ({ row }) => `v${row.original.version}` },
+      {
+        id: 'version',
+        header: 'Version',
+        cell: ({ row }) => <Badge mono>v{row.original.version}</Badge>,
+      },
       {
         id: 'auth',
         header: 'Auth',
@@ -51,7 +59,9 @@ function MyApisTable(): ReactElement {
         id: 'updated',
         header: 'Updated',
         cell: ({ row }) => (
-          <span className="text-fg-muted">{formatDateTime(row.original.updated_at)}</span>
+          <span className="text-xs whitespace-nowrap text-fg-muted tabular-nums">
+            {formatDateTime(row.original.updated_at)}
+          </span>
         ),
       },
     ],
@@ -74,10 +84,8 @@ function MyApisTable(): ReactElement {
           title="You have not published an API yet"
           description="Publishing creates a gateway proxy from your OpenAPI document and attaches the auth and access-control plugins."
           action={
-            <Link
-              to="/apis/new"
-              className="inline-flex h-9 items-center rounded-md bg-accent px-3.5 text-sm font-medium text-accent-fg hover:bg-accent-hover"
-            >
+            <Link to="/apis/new" className={buttonClassName({ variant: 'primary' })}>
+              <Icon name="plus" />
               Publish an API
             </Link>
           }
@@ -95,10 +103,8 @@ export function ApisPage(): ReactElement {
         title="My APIs"
         description="APIs you publish on this portal, and the gateway proxies behind them."
         actions={
-          <Link
-            to="/apis/new"
-            className="inline-flex h-9 items-center rounded-md bg-accent px-3.5 text-sm font-medium text-accent-fg hover:bg-accent-hover"
-          >
+          <Link to="/apis/new" className={buttonClassName({ variant: 'primary' })}>
+            <Icon name="plus" />
             Publish API
           </Link>
         }

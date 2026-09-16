@@ -8,6 +8,19 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Added
 
+- Branding presets, so a portal can be re-skinned from **Administration →
+  Settings → Branding** without touching CSS. `PUT /api/admin/settings`
+  `branding` and `GET /api/branding` gain `radius` (`none`|`sm`|`md`|`lg`),
+  `font_preset` (`system`|`inter`|`manrope` — the two named faces are bundled
+  and self-hosted, loaded only when selected), `sidebar_style`
+  (`surface`|`contrast`), `login_layout` (`split`|`centered`), `footer_text`
+  (≤ 200) and `footer_links` (≤ 5 `{ label, url }`, `http(s)` only; anything
+  else is `400`, and a malformed stored link is dropped on read). The branding
+  tab groups Identity / Appearance / Footer, previews both themes live from the
+  unsaved values (colours, corners, typeface, rail), and replaces the native
+  file input with a styled logo upload. `DEFAULT_BRANDING` now matches the
+  stylesheet's ember identity (`#f97316` / `#38bdf8`) instead of the indigo
+  pair the SPA never used.
 - CAPTCHA lockout recovery (#252). Enabling CAPTCHA — or changing its
   `provider`, `site_key` or `secret_key` while it is on — now requires a
   `captcha_token` that the **new** configuration verifies with the vendor, and
@@ -142,11 +155,25 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- Portal redesign. A design-system foundation (`web/src/styles/globals.css`,
+  `web/src/components/ui/`) now carries every page: sidebar tokens with an
+  active-rail indicator and a signed-in card, a translucent header that shows the
+  current section and page instead of repeating the portal name, page headers
+  with breadcrumbs and inline badges, stat tiles, skeleton loading rows, search
+  inputs, toolbar-hosted table filters, status dots on badges, animated dialogs,
+  popovers and toasts with tone icons, a split-hero sign-in layout, a designed
+  404, and 24 more icons. Every route was reworked on top of it — dashboard with
+  quick actions, catalog cards with owners and result counts, catalog and API
+  workspace headers with an at-a-glance strip and copyable URLs, a two-column
+  publish form with a sticky settings rail, avatar-led lists for requests,
+  grants, users, threads and audit entries, a card footer convention for forms,
+  a sober danger-zone treatment for god mode, radio-card role choice and
+  password reveal toggles on the public forms, and a tidier OpenAPI viewer.
+  Behaviour, routes, API calls and copy that tests assert on are unchanged.
 - Consolidated the buildout database history into one `001_initial` schema per
   SQL dialect and one MongoDB initial index setup. Removed legacy backfills and
   upgrade runbooks. Development databases must be recreated after baseline changes.
   Server builds now ship SQL assets beside the compiled runner.
-
 - `POST /api/apis` and `PATCH /api/apis/:id` accept `cors.origins` as an alias
   for `cors.allowed_origins`. Sending both with different values is `400`
   naming both keys. Responses still emit `allowed_origins` only.
@@ -183,6 +210,22 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- `npm run dev` proxied every path starting with `/api` to the backend —
+  including the SPA's own `/apis`, `/apis/new` and `/apis/:id` routes — so a
+  reload or deep link on the publishing pages returned the backend's JSON 404
+  instead of the page. The proxy now matches `/api` and `/api/...` only.
+- Branding colours now drive the whole accent scale. `BrandingStyles` derives
+  hover and active shades, a readable button foreground, the soft tint, the
+  focus ring and a glow from `primary_color` per theme (and the `info` tokens
+  from `accent_color`), instead of writing `--accent` alone and leaving the
+  tints on the stylesheet's ember default — which put orange highlights under
+  indigo icons on every active navigation item, stat tile and message bubble.
+- The portal's configured `default_theme` is honoured until a visitor picks a
+  theme; it is cached under `nexus:theme-default` so the pre-paint bootstrap
+  script applies it on the next visit too. The portal name sets the document
+  title, the logo doubles as the favicon, and a default favicon ships.
+- `Select` accepts a width class without fighting its default full width, so
+  the users page's role/status/organization filters no longer stack full-width.
 - Email templates use `reset_url` and `verification_url` for account action
   links. Retired raw-token placeholders render empty and are rejected on save;
   template update audit events now include SHA-256 hashes of both body fields.

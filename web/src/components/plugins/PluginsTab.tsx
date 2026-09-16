@@ -20,6 +20,7 @@ import {
   type ApiPlugin,
   type ApiPluginTrigger,
   type HttpMethod,
+  type PluginCategory,
   type ProviderPluginDescriptor,
 } from '@ferrum-nexus/shared';
 import { useApiPlugins, useRemoveApiPlugin, useSetApiPlugin } from '../../hooks/useApis';
@@ -27,6 +28,7 @@ import { useToast } from '../../stores/toast';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
 import { Card, CardBody, CardHeader } from '../ui/Card';
+import { Icon, type IconName } from '../ui/Icon';
 import { Checkbox, Field, Input } from '../ui/Input';
 import { LoadingPanel } from '../ui/Spinner';
 import {
@@ -41,6 +43,35 @@ import {
 
 /** Methods the trigger editor offers. Matches Edge's `PluginTriggerMatch`. */
 const TRIGGER_METHODS: HttpMethod[] = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
+
+/**
+ * Glyph per palette plugin, so a card is recognisable before its name is read.
+ * A plugin with no entry falls back to its category's icon.
+ */
+const PLUGIN_ICONS: Readonly<Record<string, IconName>> = {
+  security_headers: 'shield',
+  request_size_limiting: 'download',
+  response_size_limiting: 'upload',
+  ip_restriction: 'globe',
+  bot_detection: 'eye',
+  correlation_id: 'link',
+  compression: 'zap',
+  request_deduplication: 'copy',
+  request_termination: 'x',
+  response_caching: 'stack',
+};
+
+const CATEGORY_ICONS: Readonly<Record<PluginCategory, IconName>> = {
+  protection: 'shield',
+  traffic: 'activity',
+  contract: 'spec',
+  experience: 'sparkles',
+  transform: 'refresh',
+};
+
+function pluginIcon(descriptor: ProviderPluginDescriptor): IconName {
+  return PLUGIN_ICONS[descriptor.name] ?? CATEGORY_ICONS[descriptor.category];
+}
 
 /**
  * The two conditions the portal exposes from Edge's predicate tree.
@@ -150,29 +181,47 @@ function PluginCard({ api, descriptor, saved }: PluginCardProps): ReactElement {
   const busy = setPlugin.isPending || removePlugin.isPending;
 
   return (
-    <Card>
-      <CardHeader
-        title={descriptor.label}
-        description={descriptor.summary}
-        actions={
-          <div className="flex items-center gap-2">
-            {saved ? (
-              <Badge tone={saved.enabled ? 'success' : 'neutral'}>
-                {saved.enabled ? 'On' : 'Paused'}
-              </Badge>
-            ) : null}
-            <Button size="sm" variant="ghost" onClick={() => setOpen((value) => !value)}>
-              {open ? 'Close' : saved ? 'Edit' : 'Configure'}
-            </Button>
+    <Card className={saved ? 'border-accent/30' : undefined}>
+      <div className="flex items-start justify-between gap-4 px-5 py-4">
+        <div className="flex min-w-0 flex-1 items-start gap-3">
+          <span
+            className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${
+              saved ? 'bg-accent-soft text-accent' : 'bg-neutral-soft text-fg-subtle'
+            }`}
+          >
+            <Icon name={pluginIcon(descriptor)} className="h-4 w-4" />
+          </span>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h4 className="text-sm font-semibold text-fg">{descriptor.label}</h4>
+              {saved ? (
+                <Badge tone={saved.enabled ? 'success' : 'neutral'} dot>
+                  {saved.enabled ? 'On' : 'Paused'}
+                </Badge>
+              ) : null}
+            </div>
+            <p className="mt-1 max-w-3xl text-sm leading-relaxed text-fg-muted">
+              {descriptor.summary}
+            </p>
           </div>
-        }
-      />
+        </div>
+        <Button
+          size="sm"
+          variant={open ? 'ghost' : saved ? 'secondary' : 'outline'}
+          onClick={() => setOpen((value) => !value)}
+        >
+          {open ? 'Close' : saved ? 'Edit' : 'Configure'}
+        </Button>
+      </div>
       {open ? (
-        <CardBody className="flex flex-col gap-4">
+        <CardBody className="flex flex-col gap-4 border-t border-border">
           {descriptor.consumer_recipe ? (
-            <p className="rounded-md border border-border bg-inset px-3 py-2 text-xs text-fg-muted">
-              <span className="font-medium text-fg">What consumers see: </span>
-              {descriptor.consumer_recipe}
+            <p className="flex items-start gap-2 rounded-md border border-border bg-inset px-3 py-2.5 text-xs leading-relaxed text-fg-muted">
+              <Icon name="info" className="mt-px h-3.5 w-3.5 shrink-0 text-info" />
+              <span>
+                <span className="font-medium text-fg">What consumers see: </span>
+                {descriptor.consumer_recipe}
+              </span>
             </p>
           ) : null}
 
@@ -253,9 +302,10 @@ function PluginCard({ api, descriptor, saved }: PluginCardProps): ReactElement {
             </div>
           ) : null}
 
-          <div className="flex flex-wrap items-center gap-2 border-t border-border pt-4">
+          <div className="-mx-5 -mb-4 flex flex-wrap items-center gap-x-4 gap-y-3 border-t border-border bg-inset/40 px-5 py-3.5">
             <Button
               variant="primary"
+              size="sm"
               onClick={save}
               disabled={invalid}
               loading={setPlugin.isPending}
@@ -273,10 +323,12 @@ function PluginCard({ api, descriptor, saved }: PluginCardProps): ReactElement {
                 />
                 <Button
                   variant="danger"
+                  size="sm"
                   className="ml-auto"
                   onClick={remove}
                   loading={removePlugin.isPending}
                 >
+                  <Icon name="trash" />
                   Remove
                 </Button>
               </>
@@ -299,13 +351,16 @@ function RetiredCache({ api }: { api: Api }): ReactElement {
   const remove = useRemoveApiPlugin();
   const toast = useToast();
   return (
-    <Card>
+    <Card className="border-warning/40">
       <CardHeader
+        icon="alert"
         title="Response caching (retired)"
         description="Authenticated responses require explicit backend cache permission. This plugin can no longer be enabled from the portal."
       />
       <CardBody>
         <Button
+          variant="danger"
+          size="sm"
           disabled={remove.isPending}
           onClick={() =>
             remove.mutate(
@@ -341,21 +396,27 @@ export function PluginsTab({ api }: { api: Api }): ReactElement {
   );
 
   return (
-    <div className="flex flex-col gap-6">
-      <p className="text-sm text-fg-muted">
-        Gateway behaviour you can add to this API without leaving the portal. Authentication, the
-        access gate, quotas, CORS and OpenAPI enforcement are on the{' '}
-        <span className="font-medium text-fg">Settings</span> tab — they are part of what the API
-        is, so they have their own controls there.
+    <div className="flex flex-col gap-7">
+      <p className="flex max-w-3xl items-start gap-2.5 rounded-md border border-border bg-inset/60 px-4 py-3 text-sm leading-relaxed text-fg-muted">
+        <Icon name="info" className="mt-0.5 h-4 w-4 shrink-0 text-info" />
+        <span>
+          Gateway behaviour you can add to this API without leaving the portal. Authentication, the
+          access gate, quotas, CORS and OpenAPI enforcement are on the{' '}
+          <span className="font-medium text-fg">Settings</span> tab — they are part of what the API
+          is, so they have their own controls there.
+        </span>
       </p>
 
       {configured.has('response_caching') ? <RetiredCache api={api} /> : null}
 
       {categories.map((category) => (
         <section key={category} className="flex flex-col gap-3">
-          <h3 className="text-sm font-semibold tracking-wide text-fg-muted uppercase">
-            {PLUGIN_CATEGORY_LABELS[category]}
-          </h3>
+          <div className="flex items-center gap-3">
+            <h3 className="text-[0.7rem] font-semibold tracking-[0.12em] text-fg-subtle uppercase">
+              {PLUGIN_CATEGORY_LABELS[category]}
+            </h3>
+            <span className="h-px flex-1 bg-border" aria-hidden="true" />
+          </div>
           {PROVIDER_PLUGINS.filter((plugin) => plugin.category === category).map((descriptor) => {
             const saved = configured.get(descriptor.name) ?? null;
             return (

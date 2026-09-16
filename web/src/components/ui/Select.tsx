@@ -19,9 +19,15 @@ export interface SelectProps<T extends string = string> {
   id?: string;
   placeholder?: string;
   disabled?: boolean;
+  /**
+   * Extra classes. A width utility here (`w-44`, `w-full`) replaces the
+   * default full width instead of fighting it.
+   */
   className?: string;
   'aria-label'?: string;
 }
+
+const HAS_WIDTH = /(^|\s)(w-|min-w-|max-w-|basis-|flex-1)/;
 
 /** Accessible select built on Radix; pages never import Radix directly. */
 export function Select<T extends string = string>({
@@ -44,22 +50,27 @@ export function Select<T extends string = string>({
         id={id}
         aria-label={ariaLabel}
         className={cn(
-          'flex h-9 w-full items-center justify-between gap-2 rounded-md border border-border bg-inset px-3 text-sm text-fg',
-          'transition-colors hover:border-border-strong focus:border-accent focus:outline-none',
+          'flex h-9 items-center justify-between gap-2 rounded-md border border-border bg-inset px-3 text-left text-sm text-fg shadow-[0_1px_2px_rgb(0_0_0/0.06)_inset]',
+          'transition-[border-color,box-shadow] hover:border-border-strong',
+          'focus:border-accent focus:ring-2 focus:ring-accent-ring focus:outline-none',
+          'data-[placeholder]:text-fg-subtle',
           'disabled:cursor-not-allowed disabled:opacity-60',
+          !(className && HAS_WIDTH.test(className)) && 'w-full',
           className,
         )}
       >
-        <SelectPrimitive.Value placeholder={placeholder} />
+        <span className="truncate">
+          <SelectPrimitive.Value placeholder={placeholder} />
+        </span>
         <SelectPrimitive.Icon>
-          <Icon name="chevron-down" className="h-4 w-4 text-fg-subtle" />
+          <Icon name="chevron-down" className="h-4 w-4 shrink-0 text-fg-subtle" />
         </SelectPrimitive.Icon>
       </SelectPrimitive.Trigger>
       <SelectPrimitive.Portal>
         <SelectPrimitive.Content
           position="popper"
-          sideOffset={4}
-          className="fx-pop z-50 max-h-72 min-w-[var(--radix-select-trigger-width)] overflow-hidden"
+          sideOffset={6}
+          className="fx-pop animate-pop-in z-50 max-h-72 min-w-[var(--radix-select-trigger-width)] overflow-hidden"
         >
           <SelectPrimitive.Viewport className="p-1">
             {options.map((option) => (
@@ -68,11 +79,14 @@ export function Select<T extends string = string>({
                 value={option.value}
                 disabled={option.disabled}
                 className={cn(
-                  'relative flex cursor-pointer flex-col rounded-sm px-2.5 py-1.5 text-sm text-fg outline-none select-none',
+                  'relative flex cursor-pointer flex-col rounded-sm py-1.5 pr-3 pl-7 text-sm text-fg outline-none select-none',
                   'data-[highlighted]:bg-accent-soft data-[highlighted]:text-accent',
                   'data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50',
                 )}
               >
+                <SelectPrimitive.ItemIndicator className="absolute top-2 left-2 text-accent">
+                  <Icon name="check" className="h-3.5 w-3.5" />
+                </SelectPrimitive.ItemIndicator>
                 <SelectPrimitive.ItemText>{option.label}</SelectPrimitive.ItemText>
                 {option.description ? (
                   <span className="text-xs text-fg-subtle">{option.description}</span>

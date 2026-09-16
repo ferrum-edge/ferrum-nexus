@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactElement, type ReactNode } from 'react';
 import { Button } from './Button';
 import { Dialog } from './Dialog';
+import { Icon } from './Icon';
 import { Input } from './Input';
 
 export interface ConfirmDialogProps {
@@ -66,6 +67,7 @@ export function ConfirmDialog({
             loading={loading}
             disabled={!phraseSatisfied || confirmDisabled}
           >
+            {confirmPhrase && !loading ? <Icon name="lock" className="h-3.5 w-3.5" /> : null}
             {confirmLabel}
           </Button>
         </>
@@ -74,17 +76,26 @@ export function ConfirmDialog({
       <div className="flex flex-col gap-4">
         {children}
         {confirmPhrase ? (
-          <div className="flex flex-col gap-1.5">
+          <div className="flex flex-col gap-2 rounded-md border border-border bg-inset p-3">
             <label htmlFor="confirm-phrase" className="text-sm text-fg-muted">
-              Type <code className="font-mono text-fg">{confirmPhrase}</code> to confirm
+              Type{' '}
+              <code className="rounded-xs bg-neutral-soft px-1 font-mono text-fg">
+                {confirmPhrase}
+              </code>{' '}
+              to confirm
             </label>
             <Input
               id="confirm-phrase"
               value={typed}
               autoComplete="off"
+              spellCheck={false}
+              className="font-mono"
               onChange={(event) => setTyped(event.target.value)}
               placeholder={confirmPhrase}
             />
+            <p className="text-xs text-fg-subtle">
+              The button stays disabled until the phrase matches exactly.
+            </p>
           </div>
         ) : null}
       </div>

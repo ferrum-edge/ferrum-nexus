@@ -1,20 +1,26 @@
 import { useNavigate } from '@tanstack/react-router';
 import { useMemo, useState, type ReactElement } from 'react';
-import { AUTH_PLUGIN_LABELS, DEFAULT_PAGE_SIZE, type Api } from '@ferrum-nexus/shared';
-import { formatDateTime } from '../../lib/format';
+import {
+  AUTH_PLUGIN_LABELS,
+  DEFAULT_PAGE_SIZE,
+  type Api,
+  type ApiStatus,
+} from '@ferrum-nexus/shared';
+import { formatDateTime, formatRelative } from '../../lib/format';
 import { useApis } from '../../hooks/useApis';
 import { RoleGuard } from '../../components/layout/RoleGuard';
 import { Badge } from '../../components/ui/Badge';
 import { PageHeader } from '../../components/ui/Card';
 import { DataTable, type Columns } from '../../components/ui/DataTable';
 import { EmptyState } from '../../components/ui/EmptyState';
-import { Icon } from '../../components/ui/Icon';
-import { Input } from '../../components/ui/Input';
+import { SearchInput } from '../../components/ui/Input';
+import { Select } from '../../components/ui/Select';
 import { StatusPill } from '../../components/ui/StatusPill';
 
 function AllApisTable(): ReactElement {
   const [offset, setOffset] = useState(0);
   const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<ApiStatus | 'all'>('all');
   const limit = DEFAULT_PAGE_SIZE;
   const navigate = useNavigate();
 
@@ -23,6 +29,7 @@ function AllApisTable(): ReactElement {
     limit,
     offset,
     ...(search.trim() ? { q: search.trim() } : {}),
+    ...(statusFilter === 'all' ? {} : { status: statusFilter }),
   });
 
   const columns = useMemo<Columns<Api>>(
@@ -31,13 +38,19 @@ function AllApisTable(): ReactElement {
         id: 'name',
         header: 'API',
         cell: ({ row }) => (
-          <span>
-            <span className="block font-medium text-fg">{row.original.name}</span>
-            <span className="block font-mono text-xs text-fg-subtle">/{row.original.slug}</span>
+          <span className="block min-w-0">
+            <span className="block truncate font-medium text-fg">{row.original.name}</span>
+            <span className="block truncate font-mono text-xs text-fg-subtle">
+              {row.original.listen_path}
+            </span>
           </span>
         ),
       },
-      { id: 'version', header: 'Version', cell: ({ row }) => `v${row.original.version}` },
+      {
+        id: 'version',
+        header: 'Version',
+        cell: ({ row }) => <Badge mono>{`v${row.original.version}`}</Badge>,
+      },
       {
         id: 'auth',
         header: 'Auth',
@@ -56,6 +69,16 @@ function AllApisTable(): ReactElement {
           ),
       },
       {
+        id: 'access',
+        header: 'Access',
+        cell: ({ row }) =>
+          row.original.requestable ? (
+            <Badge tone="accent">Requestable</Badge>
+          ) : (
+            <span className="text-xs text-fg-subtle">Open</span>
+          ),
+      },
+      {
         id: 'status',
         header: 'Status',
         cell: ({ row }) => <StatusPill status={row.original.status} />,
@@ -64,7 +87,12 @@ function AllApisTable(): ReactElement {
         id: 'updated',
         header: 'Updated',
         cell: ({ row }) => (
-          <span className="text-fg-muted">{formatDateTime(row.original.updated_at)}</span>
+          <span
+            className="whitespace-nowrap text-fg-muted tabular-nums"
+            title={formatDateTime(row.original.updated_at)}
+          >
+            {formatRelative(row.original.updated_at)}
+          </span>
         ),
       },
     ],
@@ -72,15 +100,19 @@ function AllApisTable(): ReactElement {
   );
 
   return (
-    <>
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <div className="relative w-full max-w-sm">
-          <Icon
-            name="search"
-            className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-fg-subtle"
-          />
-          <Input
-            className="pl-9"
+    <DataTable<Api>
+      columns={columns}
+      data={query.data?.items ?? []}
+      total={query.data?.total ?? 0}
+      offset={offset}
+      limit={limit}
+      onOffsetChange={setOffset}
+      loading={query.isLoading}
+      onRowClick={(api) => void navigate({ to: '/apis/$apiId', params: { apiId: api.id } })}
+      toolbar={
+        <>
+          <SearchInput
+            wrapperClassName="w-full sm:w-72"
             aria-label="Search APIs"
             placeholder="Search by name or slug"
             value={search}
@@ -89,21 +121,30 @@ function AllApisTable(): ReactElement {
               setOffset(0);
             }}
           />
-        </div>
-      </div>
-
-      <DataTable<Api>
-        columns={columns}
-        data={query.data?.items ?? []}
-        total={query.data?.total ?? 0}
-        offset={offset}
-        limit={limit}
-        onOffsetChange={setOffset}
-        loading={query.isLoading}
-        onRowClick={(api) => void navigate({ to: '/apis/$apiId', params: { apiId: api.id } })}
-        empty={<EmptyState icon="spec" title="No APIs published yet" />}
-      />
-    </>
+          <Select<ApiStatus | 'all'>
+            aria-label="Filter by status"
+            className="w-40"
+            value={statusFilter}
+            onValueChange={(value) => {
+              setStatusFilter(value);
+              setOffset(0);
+            }}
+            options={[
+              { value: 'all', label: 'All statuses' },
+              { value: 'published', label: 'Published' },
+              { value: 'retired', label: 'Retired' },
+            ]}
+          />
+        </>
+      }
+      empty={
+        <EmptyState
+          icon="spec"
+          title="No APIs match these filters"
+          description="Providers publish from their own workspace; published APIs appear here for every administrator."
+        />
+      }
+    />
   );
 }
 

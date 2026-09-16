@@ -1,11 +1,14 @@
 import { useId, type InputHTMLAttributes, type ReactElement, type ReactNode } from 'react';
 import type { TextareaHTMLAttributes } from 'react';
 import { cn } from '../../lib/cn';
+import { Icon } from './Icon';
 
 const CONTROL_CLASS =
   'w-full rounded-md border border-border bg-inset px-3 py-2 text-sm text-fg placeholder:text-fg-subtle ' +
-  'transition-colors hover:border-border-strong focus:border-accent focus:outline-none ' +
-  'disabled:cursor-not-allowed disabled:opacity-60';
+  'shadow-[0_1px_2px_rgb(0_0_0/0.06)_inset] transition-[border-color,box-shadow] ' +
+  'hover:border-border-strong focus:border-accent focus:ring-2 focus:ring-accent-ring focus:outline-none ' +
+  'disabled:cursor-not-allowed disabled:opacity-60 ' +
+  'file:mr-3 file:rounded-sm file:border-0 file:bg-neutral-soft file:px-2.5 file:py-1 file:text-xs file:font-medium file:text-fg';
 
 export interface FieldProps {
   label: string;
@@ -39,7 +42,8 @@ export function Field({
       </label>
       {children}
       {error ? (
-        <p className="text-xs text-danger" role="alert">
+        <p className="flex items-start gap-1 text-xs text-danger" role="alert">
+          <Icon name="alert" className="mt-px h-3.5 w-3.5" />
           {error}
         </p>
       ) : hint ? (
@@ -73,7 +77,8 @@ export function FieldGroup({
       <legend className="text-sm font-medium text-fg">{label}</legend>
       {children}
       {error ? (
-        <p className="text-xs text-danger" role="alert">
+        <p className="flex items-start gap-1 text-xs text-danger" role="alert">
+          <Icon name="alert" className="mt-px h-3.5 w-3.5" />
           {error}
         </p>
       ) : hint ? (
@@ -91,10 +96,36 @@ export interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
 export function Input({ className, invalid, ...rest }: InputProps): ReactElement {
   return (
     <input
-      className={cn(CONTROL_CLASS, invalid && 'border-danger', className)}
+      className={cn(
+        CONTROL_CLASS,
+        invalid && 'border-danger focus:border-danger focus:ring-danger/30',
+        className,
+      )}
       aria-invalid={invalid || undefined}
       {...rest}
     />
+  );
+}
+
+export interface SearchInputProps extends InputProps {
+  /** Width of the wrapper; defaults to a comfortable filter-bar width. */
+  wrapperClassName?: string;
+}
+
+/** Search box with a leading magnifier, used by every filterable list. */
+export function SearchInput({
+  wrapperClassName,
+  className,
+  ...rest
+}: SearchInputProps): ReactElement {
+  return (
+    <div className={cn('relative w-full max-w-sm', wrapperClassName)}>
+      <Icon
+        name="search"
+        className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-fg-subtle"
+      />
+      <Input type="search" className={cn('pl-9', className)} {...rest} />
+    </div>
   );
 }
 
@@ -111,7 +142,7 @@ export function Textarea({ className, invalid, mono, ...rest }: TextareaProps): 
         CONTROL_CLASS,
         'min-h-24 resize-y',
         mono && 'font-mono text-xs leading-relaxed',
-        invalid && 'border-danger',
+        invalid && 'border-danger focus:border-danger focus:ring-danger/30',
         className,
       )}
       aria-invalid={invalid || undefined}
@@ -196,7 +227,7 @@ export function Checkbox({
       <input
         id={id}
         type="checkbox"
-        className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--accent)]"
+        className="mt-0.5 h-4 w-4 shrink-0 rounded-xs accent-[var(--accent)]"
         {...rest}
       />
       <div className="min-w-0">

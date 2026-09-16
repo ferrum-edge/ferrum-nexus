@@ -2,8 +2,9 @@ import { Link, useNavigate, useSearch } from '@tanstack/react-router';
 import { useState, type FormEvent, type ReactElement } from 'react';
 import { MIN_PASSWORD_LENGTH } from '@ferrum-nexus/shared';
 import { AuthShell, FormNotice } from '../components/auth/AuthShell';
-import { Button } from '../components/ui/Button';
-import { LabeledInput } from '../components/ui/Input';
+import { PasswordField } from '../components/auth/PasswordField';
+import { Button, buttonClassName } from '../components/ui/Button';
+import { Icon } from '../components/ui/Icon';
 import { ApiError, authApi } from '../lib/api';
 
 /**
@@ -51,9 +52,10 @@ export function ResetPasswordPage(): ReactElement {
           <FormNotice>This link is missing its reset token.</FormNotice>
           <Link
             to="/forgot-password"
-            className="inline-flex h-11 items-center justify-center rounded-md bg-accent px-4 text-sm font-medium text-accent-fg hover:bg-accent-hover"
+            className={buttonClassName({ variant: 'primary', size: 'lg', className: 'w-full' })}
           >
             Request a new link
+            <Icon name="arrow-right" className="h-4 w-4" />
           </Link>
         </div>
       </AuthShell>
@@ -76,26 +78,26 @@ export function ResetPasswordPage(): ReactElement {
       <form className="flex flex-col gap-4" onSubmit={(event) => void submit(event)}>
         {error ? <FormNotice>{error}</FormNotice> : null}
 
-        <LabeledInput
+        <PasswordField
           label="New password"
-          type="password"
           autoComplete="new-password"
           required
           hint={`At least ${MIN_PASSWORD_LENGTH} characters.`}
           value={password}
           onChange={(event) => setPassword(event.target.value)}
         />
-        <LabeledInput
+        <PasswordField
           label="Confirm new password"
-          type="password"
           autoComplete="new-password"
           required
+          hint="Both entries have to match."
           value={confirmation}
           onChange={(event) => setConfirmation(event.target.value)}
         />
 
-        <Button type="submit" variant="primary" size="lg" loading={submitting}>
+        <Button type="submit" variant="primary" size="lg" className="w-full" loading={submitting}>
           Set new password
+          <Icon name="arrow-right" className="h-4 w-4" />
         </Button>
       </form>
     </AuthShell>

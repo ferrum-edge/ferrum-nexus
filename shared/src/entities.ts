@@ -558,9 +558,12 @@ export interface BrandingSettings {
   portal_name: string;
   /** Logo encoded as a `data:` URL, or `null` when unset. */
   logo_data_url: string | null;
-  /** Primary accent colour as a CSS hex string. */
+  /**
+   * Primary brand colour as a CSS hex string. The SPA derives the whole accent
+   * scale (hover, active, readable foreground, tints, focus ring) from it.
+   */
   primary_color: string;
-  /** Accent colour used for secondary emphasis. */
+  /** Secondary emphasis colour (informational badges, hero glow). */
   accent_color: string;
   /** Theme applied before the user makes a choice. */
   default_theme: ThemePreference;
@@ -568,6 +571,38 @@ export interface BrandingSettings {
   tagline: string | null;
   /** Optional support contact surfaced in the footer. */
   support_email: string | null;
+  /** Corner rounding preset applied to every control and card. */
+  radius: BrandingRadius;
+  /** Typeface preset; `system` uses the visitor's UI font, the rest are bundled. */
+  font_preset: BrandingFontPreset;
+  /** Navigation rail treatment: matches the surfaces, or always a dark high-contrast rail. */
+  sidebar_style: BrandingSidebarStyle;
+  /** Sign-in page composition: a branded hero beside the form, or the form alone. */
+  login_layout: BrandingLoginLayout;
+  /** Optional footer line (copyright, legal notice) shown in the shell and on the sign-in page. */
+  footer_text: string | null;
+  /** Optional footer links (terms, privacy, docs), `https` only. */
+  footer_links: BrandingLink[];
+}
+
+/** Corner rounding presets; see `--radius-factor` in the SPA stylesheet. */
+export type BrandingRadius = 'none' | 'sm' | 'md' | 'lg';
+
+/** Bundled typeface presets. */
+export type BrandingFontPreset = 'system' | 'inter' | 'manrope';
+
+/** Navigation rail treatments. */
+export type BrandingSidebarStyle = 'surface' | 'contrast';
+
+/** Sign-in page compositions. */
+export type BrandingLoginLayout = 'split' | 'centered';
+
+/** One operator-configured footer link. */
+export interface BrandingLink {
+  /** Visible label, 1–60 characters. */
+  label: string;
+  /** Absolute `https://` (or `http://`) URL. */
+  url: string;
 }
 
 /** Theme selection persisted under `nexus:theme`. */

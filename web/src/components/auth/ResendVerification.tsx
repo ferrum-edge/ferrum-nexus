@@ -1,6 +1,7 @@
 import { useState, type ReactElement } from 'react';
 import { ApiError, authApi } from '../../lib/api';
 import { Button } from '../ui/Button';
+import { Icon } from '../ui/Icon';
 
 export interface ResendVerificationProps {
   /** Address to re-send to. Blank disables the control. */
@@ -33,7 +34,8 @@ export function ResendVerification({ email }: ResendVerificationProps): ReactEle
 
   if (state === 'sent') {
     return (
-      <p className="text-sm text-fg-muted">
+      <p className="flex items-start gap-1.5 text-sm text-fg-muted">
+        <Icon name="check" className="mt-0.5 h-4 w-4 shrink-0 text-success" />
         If that address needs verifying, a new link is on its way. It expires in 24 hours.
       </p>
     );
@@ -49,9 +51,15 @@ export function ResendVerification({ email }: ResendVerificationProps): ReactEle
         disabled={email.trim().length === 0}
         onClick={() => void send()}
       >
+        <Icon name="mail" className="h-3.5 w-3.5" />
         Resend the verification email
       </Button>
-      {error ? <p className="text-xs text-danger">{error}</p> : null}
+      {error ? (
+        <p className="flex items-start gap-1 text-xs text-danger" role="alert">
+          <Icon name="alert" className="mt-px h-3.5 w-3.5 shrink-0" />
+          {error}
+        </p>
+      ) : null}
     </div>
   );
 }

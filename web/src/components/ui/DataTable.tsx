@@ -3,7 +3,6 @@ import type { ReactElement, ReactNode } from 'react';
 import { cn } from '../../lib/cn';
 import { Button } from './Button';
 import { Icon } from './Icon';
-import { LoadingPanel } from './Spinner';
 
 /**
  * Column list type used by every page, so table columns are declared with the
@@ -24,6 +23,30 @@ export interface DataTableProps<TData> {
   /** Row click handler; makes rows keyboard-activatable when provided. */
   onRowClick?: (row: TData) => void;
   className?: string;
+  /** Optional toolbar rendered above the header row (filters, counts). */
+  toolbar?: ReactNode;
+}
+
+/** Placeholder rows shown while the first page is loading. */
+function SkeletonRows({ columns, rows = 5 }: { columns: number; rows?: number }): ReactElement {
+  return (
+    <>
+      {Array.from({ length: rows }, (_, rowIndex) => (
+        <tr key={rowIndex} className="border-b border-border last:border-b-0">
+          {Array.from({ length: columns }, (_, colIndex) => (
+            <td key={colIndex} className="px-4 py-3">
+              <span
+                className="fx-skeleton block h-3.5"
+                style={{
+                  width: `${colIndex === 0 ? 60 : 35 + ((rowIndex * 7 + colIndex * 13) % 40)}%`,
+                }}
+              />
+            </td>
+          ))}
+        </tr>
+      ))}
+    </>
+  );
 }
 
 /**
@@ -41,6 +64,7 @@ export function DataTable<TData>({
   empty,
   onRowClick,
   className,
+  toolbar,
 }: DataTableProps<TData>): ReactElement {
   const table = useReactTable<TData>({
     data,
@@ -55,16 +79,21 @@ export function DataTable<TData>({
 
   return (
     <div className={cn('fx-card overflow-hidden', className)}>
+      {toolbar ? (
+        <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
+          {toolbar}
+        </div>
+      ) : null}
       <div className="overflow-x-auto">
-        <table className="w-full border-collapse text-sm">
+        <table className="w-full border-collapse text-sm" aria-busy={loading || undefined}>
           <thead>
             {table.getHeaderGroups().map((headerGroup) => (
-              <tr key={headerGroup.id} className="border-b border-border bg-inset/60">
+              <tr key={headerGroup.id} className="border-b border-border bg-inset/70">
                 {headerGroup.headers.map((header) => (
                   <th
                     key={header.id}
                     scope="col"
-                    className="px-4 py-2.5 text-left text-xs font-semibold tracking-wide text-fg-subtle uppercase"
+                    className="px-4 py-2.5 text-left text-[0.7rem] font-semibold tracking-[0.08em] whitespace-nowrap text-fg-subtle uppercase"
                   >
                     {header.isPlaceholder
                       ? null
@@ -76,11 +105,7 @@ export function DataTable<TData>({
           </thead>
           <tbody>
             {loading ? (
-              <tr>
-                <td colSpan={columns.length}>
-                  <LoadingPanel />
-                </td>
-              </tr>
+              <SkeletonRows columns={columns.length} />
             ) : rows.length === 0 ? (
               <tr>
                 <td colSpan={columns.length}>{empty}</td>
@@ -102,12 +127,13 @@ export function DataTable<TData>({
                       : undefined
                   }
                   className={cn(
-                    'border-b border-border last:border-b-0',
-                    onRowClick && 'cursor-pointer hover:bg-inset',
+                    'border-b border-border transition-colors last:border-b-0 hover:bg-surface-hover',
+                    onRowClick &&
+                      'cursor-pointer focus-visible:bg-accent-soft/40 focus-visible:outline-none',
                   )}
                 >
                   {row.getVisibleCells().map((cell) => (
-                    <td key={cell.id} className="px-4 py-2.5 align-middle text-fg">
+                    <td key={cell.id} className="px-4 py-3 align-middle text-fg">
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </td>
                   ))}
@@ -145,10 +171,19 @@ export function PaginationBar({
 }: PaginationBarProps): ReactElement {
   const first = total === 0 ? 0 : offset + 1;
   const last = Math.min(offset + limit, total);
+  const page = Math.floor(offset / limit) + 1;
+  const pages = Math.max(1, Math.ceil(total / limit));
   return (
-    <div className="flex items-center justify-between gap-3 border-t border-border px-4 py-2.5">
-      <p className="text-xs text-fg-muted">
-        {first}–{last} of {total}
+    <div className="flex items-center justify-between gap-3 border-t border-border bg-inset/40 px-4 py-2.5">
+      <p className="text-xs text-fg-muted tabular-nums">
+        <span className="text-fg">
+          {first}–{last}
+        </span>{' '}
+        of {total}
+        <span className="text-fg-subtle">
+          {' '}
+          · page {page} of {pages}
+        </span>
       </p>
       <div className="flex items-center gap-1.5">
         <Button
@@ -158,7 +193,7 @@ export function PaginationBar({
           onClick={() => onOffsetChange(Math.max(0, offset - limit))}
           aria-label="Previous page"
         >
-          <Icon name="chevron-right" className="rotate-180" />
+          <Icon name="chevron-left" />
           Prev
         </Button>
         <Button

@@ -30,7 +30,10 @@ export default defineConfig(({ mode }) => {
       // whatever already owns 8787 (usually another Nexus stack).
       strictPort: true,
       proxy: {
-        '/api': {
+        // A regex, not the bare `/api` prefix: Vite matches string keys as
+        // path prefixes, so `/api` also captured the SPA's `/apis/...` routes
+        // and a deep link or reload on "My APIs" returned the backend's 404.
+        '^/api(?:/|$)': {
           target: apiProxyTarget,
           changeOrigin: false,
         },

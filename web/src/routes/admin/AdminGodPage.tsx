@@ -1,4 +1,4 @@
-import { useState, type ReactElement } from 'react';
+import { useState, type ReactElement, type ReactNode } from 'react';
 import { MAX_PAGE_SIZE, ROLE_LABELS } from '@ferrum-nexus/shared';
 import { useApis } from '../../hooks/useApis';
 import { useGrants } from '../../hooks/useGrants';
@@ -19,14 +19,57 @@ import {
   type AudienceDraft,
 } from '../../components/admin/AudienceFields';
 import { RoleGuard } from '../../components/layout/RoleGuard';
+import { FormNotice } from '../../components/auth/AuthShell';
+import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
-import { Card, CardBody, CardHeader, PageHeader } from '../../components/ui/Card';
+import { Card, CardBody, PageHeader } from '../../components/ui/Card';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { Checkbox, LabeledInput, LabeledTextarea } from '../../components/ui/Input';
 import { LabeledSelect } from '../../components/ui/Select';
-import { Icon } from '../../components/ui/Icon';
+import { Icon, type IconName } from '../../components/ui/Icon';
 
 const LIST_LIMIT = Math.min(MAX_PAGE_SIZE, 200);
+
+/**
+ * The header every emergency panel wears.
+ *
+ * `CardHeader`'s icon tile is accent-toned, which reads as "a feature"; these
+ * four are not features, so the tile is tinted with the danger token instead
+ * and the phrase that follows says what the action costs in one line.
+ */
+function DangerCardHeader({
+  icon,
+  title,
+  description,
+}: {
+  icon: IconName;
+  title: string;
+  description: string;
+}): ReactElement {
+  return (
+    <div className="flex items-start gap-3 border-b border-border px-5 py-4">
+      <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-danger-soft text-danger">
+        <Icon name={icon} className="h-4 w-4" />
+      </span>
+      <div className="min-w-0">
+        <h2 className="text-sm font-semibold text-fg">{title}</h2>
+        <p className="mt-1 text-sm text-fg-muted">{description}</p>
+      </div>
+    </div>
+  );
+}
+
+/** The action row every emergency panel ends with. */
+function DangerCardFooter({ hint, children }: { hint: string; children: ReactNode }): ReactElement {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border bg-inset/40 px-5 py-3">
+      <p className="text-xs text-fg-subtle">{hint}</p>
+      {children}
+    </div>
+  );
+}
+
+const CONFIRMATION_HINT = 'Asks for a typed confirmation phrase.';
 
 function RevokeGrantPanel(): ReactElement {
   const grants = useGrants({ status: 'active', limit: LIST_LIMIT });
@@ -45,7 +88,8 @@ function RevokeGrantPanel(): ReactElement {
   return (
     <>
       <Card>
-        <CardHeader
+        <DangerCardHeader
+          icon="grant"
           title="Emergency grant revocation"
           description="Removes the ACL group from the consumer immediately, bypassing API ownership."
         />
@@ -71,16 +115,16 @@ function RevokeGrantPanel(): ReactElement {
             onChange={(event) => setReason(event.target.value)}
             hint="Recorded in the audit log."
           />
-          <div>
-            <Button
-              variant="danger"
-              disabled={!grantId || reason.trim().length === 0}
-              onClick={() => setOpen(true)}
-            >
-              Revoke grant
-            </Button>
-          </div>
         </CardBody>
+        <DangerCardFooter hint={CONFIRMATION_HINT}>
+          <Button
+            variant="danger"
+            disabled={!grantId || reason.trim().length === 0}
+            onClick={() => setOpen(true)}
+          >
+            Revoke grant
+          </Button>
+        </DangerCardFooter>
       </Card>
 
       <ConfirmDialog
@@ -124,7 +168,8 @@ function DeleteApiPanel(): ReactElement {
   return (
     <>
       <Card>
-        <CardHeader
+        <DangerCardHeader
+          icon="trash"
           title="Delete an API"
           description="Removes the catalog entry, its Edge proxy and every plugin attached to it."
         />
@@ -152,22 +197,23 @@ function DeleteApiPanel(): ReactElement {
             rows={3}
             value={reason}
             onChange={(event) => setReason(event.target.value)}
+            hint="Recorded in the audit log."
           />
           <Checkbox
             label="Also revoke every active grant for this API"
             checked={revokeGrants}
             onChange={(event) => setRevokeGrants(event.target.checked)}
           />
-          <div>
-            <Button
-              variant="danger"
-              disabled={!apiId || reason.trim().length === 0}
-              onClick={() => setOpen(true)}
-            >
-              Delete API
-            </Button>
-          </div>
         </CardBody>
+        <DangerCardFooter hint={CONFIRMATION_HINT}>
+          <Button
+            variant="danger"
+            disabled={!apiId || reason.trim().length === 0}
+            onClick={() => setOpen(true)}
+          >
+            Delete API
+          </Button>
+        </DangerCardFooter>
       </Card>
 
       <ConfirmDialog
@@ -214,7 +260,8 @@ function DisableUserPanel(): ReactElement {
   return (
     <>
       <Card>
-        <CardHeader
+        <DangerCardHeader
+          icon="user"
           title="Disable an account"
           description="Terminates every session for the account. Refused for the last active super admin."
         />
@@ -242,22 +289,23 @@ function DisableUserPanel(): ReactElement {
             rows={3}
             value={reason}
             onChange={(event) => setReason(event.target.value)}
+            hint="Recorded in the audit log."
           />
           <Checkbox
             label="Also revoke every grant held by this account"
             checked={revokeGrants}
             onChange={(event) => setRevokeGrants(event.target.checked)}
           />
-          <div>
-            <Button
-              variant="danger"
-              disabled={!userId || reason.trim().length === 0}
-              onClick={() => setOpen(true)}
-            >
-              Disable account
-            </Button>
-          </div>
         </CardBody>
+        <DangerCardFooter hint={CONFIRMATION_HINT}>
+          <Button
+            variant="danger"
+            disabled={!userId || reason.trim().length === 0}
+            onClick={() => setOpen(true)}
+          >
+            Disable account
+          </Button>
+        </DangerCardFooter>
       </Card>
 
       <ConfirmDialog
@@ -309,7 +357,8 @@ function BroadcastPanel(): ReactElement {
   return (
     <>
       <Card>
-        <CardHeader
+        <DangerCardHeader
+          icon="megaphone"
           title="Platform broadcast"
           description="Creates an in-app notification (and optionally an email) for every account in the audience."
         />
@@ -331,21 +380,22 @@ function BroadcastPanel(): ReactElement {
           />
           <Checkbox
             label="Also send this as an email"
+            description="Queued in the outbox alongside the in-app notification."
             checked={sendEmail}
             onChange={(event) => setSendEmail(event.target.checked)}
           />
-          <div>
-            <Button
-              variant="danger"
-              disabled={
-                subject.trim().length === 0 || body.trim().length === 0 || !audienceReady(audience)
-              }
-              onClick={() => setOpen(true)}
-            >
-              Broadcast
-            </Button>
-          </div>
         </CardBody>
+        <DangerCardFooter hint={`Reaches ${describeAudience(audience)}, except you.`}>
+          <Button
+            variant="danger"
+            disabled={
+              subject.trim().length === 0 || body.trim().length === 0 || !audienceReady(audience)
+            }
+            onClick={() => setOpen(true)}
+          >
+            Broadcast
+          </Button>
+        </DangerCardFooter>
       </Card>
 
       <ConfirmDialog
@@ -398,16 +448,20 @@ export function AdminGodPage(): ReactElement {
       <PageHeader
         title="God mode"
         description="Emergency controls that bypass ownership checks. Every action is audited with the reason you supply."
+        meta={
+          <Badge tone="danger" dot>
+            Super admin only
+          </Badge>
+        }
       />
-      <div className="mb-6 flex items-start gap-2.5 rounded-lg border border-danger/40 bg-danger-soft p-4">
-        <Icon name="shield" className="mt-0.5 h-4 w-4 text-danger" />
-        <p className="text-sm text-fg">
+      <div className="mb-6">
+        <FormNotice tone="danger">
           These operations take effect on the gateway immediately and cannot be undone from the
           portal. Each one requires you to type a confirmation phrase.
-        </p>
+        </FormNotice>
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-2">
+      <div className="grid items-start gap-6 xl:grid-cols-2">
         <RevokeGrantPanel />
         <DeleteApiPanel />
         <DisableUserPanel />

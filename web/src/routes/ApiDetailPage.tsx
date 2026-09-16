@@ -1,5 +1,13 @@
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactElement,
+  type ReactNode,
+} from 'react';
 import {
   AUTH_PLUGIN_LABELS,
   AUTH_PLUGIN_TYPES,
@@ -51,11 +59,13 @@ import {
 import { StartThreadDialog } from '../components/messaging/StartThreadDialog';
 import { PluginsTab } from '../components/plugins/PluginsTab';
 import { SpecEditor, isSpecValid } from '../components/publishing/SpecEditor';
+import { FormNotice } from '../components/auth/AuthShell';
 import { Badge, type BadgeTone } from '../components/ui/Badge';
-import { Button } from '../components/ui/Button';
+import { Button, buttonClassName } from '../components/ui/Button';
 import { Card, CardBody, CardHeader, DetailRow, PageHeader } from '../components/ui/Card';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { EmptyState } from '../components/ui/EmptyState';
+import { Icon, type IconName } from '../components/ui/Icon';
 import { Checkbox, LabeledInput, LabeledTextarea } from '../components/ui/Input';
 import { LabeledSelect } from '../components/ui/Select';
 import { SpecEnforcementSelect } from '../components/publishing/SpecEnforcementSelect';
@@ -90,6 +100,114 @@ const CORS_ORIGINS_HINT =
   `One origin per line, up to ${MAX_CORS_ORIGINS}, e.g. https://app.example.com. ` +
   'Leave it empty and the gateway adds no CORS headers at all, so a browser can ' +
   'only call this API from its own origin.';
+
+/* ── Small presentational helpers ───────────────────────────────────────── */
+
+/**
+ * One tile of the "at a glance" strip above the tabs.
+ *
+ * `copyable` adds a clipboard button, for the values a provider pastes into a
+ * terminal. The clipboard is unavailable in an insecure context, so a failed
+ * write simply leaves the value selectable.
+ */
+function GlanceTile({
+  icon,
+  label,
+  value,
+  mono = false,
+  copyable = false,
+}: {
+  icon: IconName;
+  label: string;
+  value: string;
+  mono?: boolean;
+  copyable?: boolean;
+}): ReactElement {
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
+  return (
+    <div className="fx-card flex items-start gap-3 px-4 py-3">
+      <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-accent-soft text-accent">
+        <Icon name={icon} className="h-4 w-4" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="text-[0.7rem] font-semibold tracking-[0.08em] text-fg-subtle uppercase">
+          {label}
+        </p>
+        <p
+          className={`mt-0.5 truncate text-sm text-fg ${mono ? 'font-mono text-xs' : 'tabular-nums'}`}
+          title={value}
+        >
+          {value}
+        </p>
+      </div>
+      {copyable ? (
+        <Button
+          size="icon-sm"
+          variant="ghost"
+          aria-label={copied ? `${label} copied` : `Copy ${label}`}
+          onClick={() => {
+            void navigator.clipboard
+              ?.writeText(value)
+              .then(() => setCopied(true))
+              .catch(() => setCopied(false));
+          }}
+        >
+          <Icon name={copied ? 'check' : 'copy'} className={copied ? 'text-success' : undefined} />
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+/** Initials for the avatar disc on an access-request or grant row. */
+function initialsOf(label: string): string {
+  const words = label
+    .trim()
+    .split(/[\s@._-]+/)
+    .filter(Boolean);
+  const letters = words.slice(0, 2).map((word) => word[0] ?? '');
+  return (letters.join('') || '?').toUpperCase();
+}
+
+/** Circular avatar standing in for the requester or grantee. */
+function Avatar({ label }: { label: string }): ReactElement {
+  return (
+    <span
+      aria-hidden="true"
+      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent-soft text-xs font-semibold text-accent"
+    >
+      {initialsOf(label)}
+    </span>
+  );
+}
+
+/** Section heading inside a long settings form. */
+function FormSection({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description?: string;
+  children: ReactNode;
+}): ReactElement {
+  return (
+    <section className="flex flex-col gap-4 border-t border-border pt-5 first:border-t-0 first:pt-0">
+      <div>
+        <h3 className="text-sm font-semibold text-fg">{title}</h3>
+        {description ? <p className="mt-0.5 text-xs text-fg-subtle">{description}</p> : null}
+      </div>
+      {children}
+    </section>
+  );
+}
 
 function SettingsTab({ api }: { api: Api }): ReactElement {
   const update = useUpdateApi();
@@ -233,164 +351,183 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
 
   return (
     <div className="flex flex-col gap-6">
-      <Card>
-        <CardHeader
-          title="Settings"
-          description="Safe runtime settings; the spec has its own tab."
-        />
-        <CardBody>
-          <form className="grid gap-4 md:grid-cols-2" onSubmit={submit}>
-            <LabeledInput
-              label="Name"
-              required
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-            />
-            <LabeledInput
-              label="Version"
-              required
-              value={version}
-              onChange={(event) => setVersion(event.target.value)}
-            />
-            <LabeledTextarea
-              className="md:col-span-2"
-              label="Description"
-              rows={3}
-              value={description}
-              onChange={(event) => setDescription(event.target.value)}
-            />
-            <LabeledInput
-              className="md:col-span-2"
-              label="Upstream URL"
-              type="url"
-              value={upstreamUrl}
-              onChange={(event) => setUpstreamUrl(event.target.value)}
-              hint={
-                api.upstream_url ? (
-                  <>
-                    Currently <code className="font-mono">{api.upstream_url}</code>. Leave blank to
-                    keep it.
-                  </>
-                ) : (
-                  'Not recorded for this API. Leave blank to keep the current upstream.'
-                )
-              }
-            />
-            <LabeledSelect<AuthPluginType>
-              label="Authentication"
-              value={authPlugin}
-              onValueChange={setAuthPlugin}
-              options={AUTH_PLUGIN_TYPES.map((value) => ({
-                value,
-                label: AUTH_PLUGIN_LABELS[value],
-              }))}
-              hint={
-                authSwapped ? (
-                  <strong className="block font-medium text-amber-700 dark:text-amber-500">
-                    {AUTH_SWAP_WARNING}
-                  </strong>
-                ) : undefined
-              }
-            />
-            {authSwapped ? (
-              <div className="md:col-span-2">
-                <Checkbox
-                  label="Cut off everyone using the old method until they re-issue, and notify them"
-                  checked={confirmDisruption}
-                  onChange={(event) => setConfirmDisruption(event.target.checked)}
+      <form onSubmit={submit}>
+        <Card>
+          <CardHeader
+            icon="settings"
+            title="Settings"
+            description="Safe runtime settings; the spec has its own tab."
+          />
+          <CardBody className="flex flex-col gap-6">
+            <FormSection
+              title="Identity"
+              description="How the API appears in the catalog and on the gateway."
+            >
+              <div className="grid gap-4 md:grid-cols-2">
+                <LabeledInput
+                  label="Name"
+                  required
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                />
+                <LabeledInput
+                  label="Version"
+                  required
+                  value={version}
+                  onChange={(event) => setVersion(event.target.value)}
+                />
+                <LabeledTextarea
+                  className="md:col-span-2"
+                  label="Description"
+                  rows={3}
+                  value={description}
+                  onChange={(event) => setDescription(event.target.value)}
+                />
+                <LabeledInput
+                  className="md:col-span-2"
+                  label="Upstream URL"
+                  type="url"
+                  value={upstreamUrl}
+                  onChange={(event) => setUpstreamUrl(event.target.value)}
+                  hint={
+                    api.upstream_url ? (
+                      <>
+                        Currently <code className="font-mono">{api.upstream_url}</code>. Leave blank
+                        to keep it.
+                      </>
+                    ) : (
+                      'Not recorded for this API. Leave blank to keep the current upstream.'
+                    )
+                  }
                 />
               </div>
-            ) : null}
-            <LabeledSelect<ApiVisibility>
-              label="Visibility"
-              value={visibility}
-              onValueChange={setVisibility}
-              options={[
-                { value: 'public', label: 'Public' },
-                { value: 'internal', label: 'Internal' },
-              ]}
-            />
-            <LabeledSelect<ApiStatus>
-              label="Status"
-              value={status}
-              onValueChange={setStatus}
-              options={[
-                { value: 'published', label: 'Published' },
-                { value: 'retired', label: 'Retired' },
-              ]}
-            />
-            <div className="flex items-end">
-              <Checkbox
-                label="Require an approved access request"
-                checked={requestable}
-                onChange={(event) => setRequestable(event.target.checked)}
-              />
-            </div>
-            <div className="md:col-span-2">
-              <Checkbox
-                label="Enforce a rate limit"
-                checked={rateLimitEnabled}
-                onChange={(event) => setRateLimitEnabled(event.target.checked)}
-              />
-            </div>
-            {rateLimitEnabled ? (
-              <>
-                <LabeledInput
-                  label="Requests"
-                  type="number"
-                  min={1}
-                  max={MAX_RATE_LIMIT_REQUESTS}
-                  value={rateLimitValue}
-                  onChange={(event) => setRateLimitValue(event.target.value)}
-                  hint={`1 – ${MAX_RATE_LIMIT_REQUESTS.toLocaleString()} per window.`}
+            </FormSection>
+
+            <FormSection title="Access" description="Who may call this API, and how they prove it.">
+              <div className="grid gap-4 md:grid-cols-2">
+                <LabeledSelect<AuthPluginType>
+                  label="Authentication"
+                  value={authPlugin}
+                  onValueChange={setAuthPlugin}
+                  options={AUTH_PLUGIN_TYPES.map((value) => ({
+                    value,
+                    label: AUTH_PLUGIN_LABELS[value],
+                  }))}
                 />
-                <LabeledSelect
-                  label="Window"
-                  value={rateLimitWindow}
-                  onValueChange={setRateLimitWindow}
-                  options={WINDOW_OPTIONS}
+                <LabeledSelect<ApiVisibility>
+                  label="Visibility"
+                  value={visibility}
+                  onValueChange={setVisibility}
+                  options={[
+                    { value: 'public', label: 'Public' },
+                    { value: 'internal', label: 'Internal' },
+                  ]}
                 />
-              </>
-            ) : null}
-            <SpecEnforcementSelect
-              className="md:col-span-2"
-              value={specEnforcement}
-              onValueChange={setSpecEnforcement}
-              publishedLevel={api.spec_enforcement}
-            />
-            <LabeledTextarea
-              className="md:col-span-2"
-              label="CORS allowed origins"
-              rows={3}
-              placeholder={'https://app.example.com\nhttps://admin.example.com'}
-              value={corsOrigins}
-              onChange={(event) => setCorsOrigins(event.target.value)}
-              hint={CORS_ORIGINS_HINT}
-            />
-            <div className="md:col-span-2">
-              <Checkbox
-                label="Allow credentials"
-                description="Lets browsers send cookies and Authorization headers cross-origin. Ignored when no origins are listed."
-                checked={corsCredentials}
-                onChange={(event) => setCorsCredentials(event.target.checked)}
-              />
-              <Checkbox
-                label="Enforce WebSocket origins"
-                description="Requires a listed Origin on every upgrade. Rejects clients without Origin. Disable only for non-browser clients that omit it."
-                checked={corsWebsocketOrigins}
-                onChange={(event) => setCorsWebsocketOrigins(event.target.checked)}
-              />
-              <LabeledTextarea
-                label="Additional CORS request headers"
-                rows={2}
-                value={corsHeaders}
-                onChange={(event) => setCorsHeaders(event.target.value)}
-                hint="One header name per line. Authentication headers are included automatically."
-              />
-            </div>
-            <div className="border-t border-border pt-4 md:col-span-2">
-              <p className="mb-3 text-sm font-medium text-fg">Advanced</p>
+                <LabeledSelect<ApiStatus>
+                  label="Status"
+                  value={status}
+                  onValueChange={setStatus}
+                  options={[
+                    { value: 'published', label: 'Published' },
+                    { value: 'retired', label: 'Retired' },
+                  ]}
+                />
+                <div className="flex items-end pb-2">
+                  <Checkbox
+                    label="Require an approved access request"
+                    checked={requestable}
+                    onChange={(event) => setRequestable(event.target.checked)}
+                  />
+                </div>
+                {authSwapped ? (
+                  <div className="flex flex-col gap-3 md:col-span-2">
+                    <FormNotice tone="warning">{AUTH_SWAP_WARNING}</FormNotice>
+                    <Checkbox
+                      label="Cut off everyone using the old method until they re-issue, and notify them"
+                      checked={confirmDisruption}
+                      onChange={(event) => setConfirmDisruption(event.target.checked)}
+                    />
+                  </div>
+                ) : null}
+              </div>
+            </FormSection>
+
+            <FormSection
+              title="Runtime policy"
+              description="Applied as Ferrum Edge plugins on the proxy created for this API."
+            >
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="md:col-span-2">
+                  <Checkbox
+                    label="Enforce a rate limit"
+                    checked={rateLimitEnabled}
+                    onChange={(event) => setRateLimitEnabled(event.target.checked)}
+                  />
+                </div>
+                {rateLimitEnabled ? (
+                  <>
+                    <LabeledInput
+                      label="Requests"
+                      type="number"
+                      min={1}
+                      max={MAX_RATE_LIMIT_REQUESTS}
+                      value={rateLimitValue}
+                      onChange={(event) => setRateLimitValue(event.target.value)}
+                      hint={`1 – ${MAX_RATE_LIMIT_REQUESTS.toLocaleString()} per window.`}
+                    />
+                    <LabeledSelect
+                      label="Window"
+                      value={rateLimitWindow}
+                      onValueChange={setRateLimitWindow}
+                      options={WINDOW_OPTIONS}
+                    />
+                  </>
+                ) : null}
+                <SpecEnforcementSelect
+                  className="md:col-span-2"
+                  value={specEnforcement}
+                  onValueChange={setSpecEnforcement}
+                  publishedLevel={api.spec_enforcement}
+                />
+                <LabeledTextarea
+                  className="md:col-span-2"
+                  label="CORS allowed origins"
+                  rows={3}
+                  placeholder={'https://app.example.com\nhttps://admin.example.com'}
+                  value={corsOrigins}
+                  onChange={(event) => setCorsOrigins(event.target.value)}
+                  hint={CORS_ORIGINS_HINT}
+                />
+                <div className="flex flex-col gap-3 md:col-span-2">
+                  <Checkbox
+                    label="Allow credentials"
+                    description="Lets browsers send cookies and Authorization headers cross-origin. Ignored when no origins are listed."
+                    checked={corsCredentials}
+                    onChange={(event) => setCorsCredentials(event.target.checked)}
+                  />
+                  <Checkbox
+                    label="Enforce WebSocket origins"
+                    description="Requires a listed Origin on every upgrade. Rejects clients without Origin. Disable only for non-browser clients that omit it."
+                    checked={corsWebsocketOrigins}
+                    onChange={(event) => setCorsWebsocketOrigins(event.target.checked)}
+                  />
+                  <LabeledTextarea
+                    label="Additional CORS request headers"
+                    rows={2}
+                    value={corsHeaders}
+                    onChange={(event) => setCorsHeaders(event.target.value)}
+                    hint="One header name per line. Authentication headers are included automatically."
+                  />
+                </div>
+              </div>
+            </FormSection>
+
+            <FormSection
+              title="Proxy"
+              description="Settings written onto the gateway proxy itself rather than as a plugin."
+            >
               <AdvancedProxySettings
+                collapsible
                 methods={methods}
                 onMethodsChange={(next) => {
                   methodsGeneration.current += 1;
@@ -411,26 +548,38 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
                 }}
                 specMethods={specMethods}
               />
-            </div>
-            <div className="md:col-span-2">
-              <Button type="submit" variant="primary" loading={update.isPending}>
-                Save settings
-              </Button>
-            </div>
-          </form>
-        </CardBody>
-      </Card>
+            </FormSection>
+          </CardBody>
+          <div className="flex flex-wrap items-center gap-3 border-t border-border bg-inset/40 px-5 py-3.5">
+            <Button type="submit" variant="primary" loading={update.isPending}>
+              Save settings
+            </Button>
+            <p className="text-xs text-fg-subtle">
+              Saved settings are reconciled onto the gateway proxy immediately.
+            </p>
+          </div>
+        </Card>
+      </form>
 
       <Card className="border-danger/40">
-        <CardHeader
-          title="Danger zone"
-          description="Deleting removes the API from the catalog and destroys its gateway proxy and plugins."
-          actions={
-            <Button variant="danger" onClick={() => setDeleteOpen(true)}>
-              Delete API
-            </Button>
-          }
-        />
+        <CardBody className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex min-w-0 items-start gap-3">
+            <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-danger-soft text-danger">
+              <Icon name="trash" className="h-4 w-4" />
+            </span>
+            <div className="min-w-0">
+              <h3 className="text-sm font-semibold text-fg">Danger zone</h3>
+              <p className="mt-1 max-w-xl text-sm leading-relaxed text-fg-muted">
+                Deleting removes the API from the catalog and destroys its gateway proxy and
+                plugins. Retire it from the Status field above if you only want it out of the
+                catalog.
+              </p>
+            </div>
+          </div>
+          <Button variant="danger" onClick={() => setDeleteOpen(true)}>
+            Delete API
+          </Button>
+        </CardBody>
       </Card>
 
       <ConfirmDialog
@@ -475,47 +624,51 @@ function SpecTab({ api }: { api: Api }): ReactElement {
   return (
     <Card>
       <CardHeader
+        icon="spec"
         title="Specification"
         description="Publishing a revision re-parses the document and updates the catalog entry."
+        actions={
+          draft !== null ? (
+            <Badge tone="warning" dot>
+              Unsaved changes
+            </Badge>
+          ) : undefined
+        }
       />
       <CardBody className="flex flex-col gap-4">
         <SpecEditor value={value} onChange={setDraft} id="api-spec" />
-        {error ? (
-          <p className="text-sm text-danger" role="alert">
-            {error}
-          </p>
-        ) : null}
-        <div className="flex items-center gap-2">
-          <Button
-            variant="primary"
-            loading={updateSpec.isPending}
-            disabled={draft === null || draft.trim().length === 0}
-            onClick={() => {
-              setError(null);
-              if (!isSpecValid(value)) {
-                setError('The OpenAPI document could not be parsed.');
-                return;
-              }
-              updateSpec.mutate(
-                { id: api.id, body: { spec: value } },
-                {
-                  onSuccess: () => {
-                    setDraft(null);
-                    toast.success('Specification updated');
-                  },
-                },
-              );
-            }}
-          >
-            Publish revision
-          </Button>
-          {draft !== null ? (
-            <Button variant="ghost" onClick={() => setDraft(null)}>
-              Discard changes
-            </Button>
-          ) : null}
-        </div>
+        {error ? <FormNotice tone="danger">{error}</FormNotice> : null}
       </CardBody>
+      <div className="flex flex-wrap items-center gap-2 border-t border-border bg-inset/40 px-5 py-3.5">
+        <Button
+          variant="primary"
+          loading={updateSpec.isPending}
+          disabled={draft === null || draft.trim().length === 0}
+          onClick={() => {
+            setError(null);
+            if (!isSpecValid(value)) {
+              setError('The OpenAPI document could not be parsed.');
+              return;
+            }
+            updateSpec.mutate(
+              { id: api.id, body: { spec: value } },
+              {
+                onSuccess: () => {
+                  setDraft(null);
+                  toast.success('Specification updated');
+                },
+              },
+            );
+          }}
+        >
+          Publish revision
+        </Button>
+        {draft !== null ? (
+          <Button variant="ghost" onClick={() => setDraft(null)}>
+            Discard changes
+          </Button>
+        ) : null}
+      </div>
     </Card>
   );
 }
@@ -534,21 +687,30 @@ function AccessPagination({
   onPageChange: (page: number) => void;
 }): ReactElement {
   return (
-    <div className="flex items-center justify-between gap-3 border-t border-border px-5 py-4">
-      <p role="status" className="text-sm text-fg-muted">
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border bg-inset/40 px-5 py-2.5">
+      <p role="status" className="text-xs text-fg-muted tabular-nums">
         {total === undefined
           ? 'Loading count…'
           : `${total} total · Page ${page + 1} of ${Math.max(1, Math.ceil(total / ACCESS_PAGE_SIZE))}`}
       </p>
-      <div className="flex gap-2">
-        <Button disabled={fetching || page === 0} onClick={() => onPageChange(page - 1)}>
+      <div className="flex gap-1.5">
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={fetching || page === 0}
+          onClick={() => onPageChange(page - 1)}
+        >
+          <Icon name="chevron-left" />
           Previous
         </Button>
         <Button
+          size="sm"
+          variant="ghost"
           disabled={fetching || total === undefined || (page + 1) * ACCESS_PAGE_SIZE >= total}
           onClick={() => onPageChange(page + 1)}
         >
           Next
+          <Icon name="chevron-right" />
         </Button>
       </div>
     </div>
@@ -587,64 +749,82 @@ export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
     <>
       <Card className="overflow-hidden">
         <CardHeader
+          icon="grant"
           title="Access requests"
           description="Approve to add the API's ACL group to the requester's consumer."
+          actions={
+            <LabeledSelect
+              className="w-40"
+              label="Request status"
+              value={status}
+              onValueChange={(value) => {
+                setStatus(value);
+                setPage(0);
+              }}
+              options={[
+                { value: 'pending', label: 'Pending' },
+                { value: 'approved', label: 'Approved' },
+                { value: 'denied', label: 'Denied' },
+                { value: 'all', label: 'All' },
+              ]}
+            />
+          }
         />
-        <div className="px-5 pb-4">
-          <LabeledSelect
-            label="Request status"
-            value={status}
-            onValueChange={(value) => {
-              setStatus(value);
-              setPage(0);
-            }}
-            options={[
-              { value: 'pending', label: 'Pending' },
-              { value: 'approved', label: 'Approved' },
-              { value: 'denied', label: 'Denied' },
-              { value: 'all', label: 'All' },
-            ]}
-          />
-        </div>
         {query.isLoading ? (
           <LoadingPanel />
         ) : requests.length === 0 ? (
-          <EmptyState icon="grant" title="No matching access requests" />
+          <EmptyState
+            icon="grant"
+            title="No matching access requests"
+            description="Requests appear here as soon as a portal user asks for access to this API."
+          />
         ) : (
           <ul>
             {requests.map((request) => (
-              <li key={request.id} className="border-b border-border px-5 py-4 last:border-b-0">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-fg">
-                      {request.requester?.display_name ?? request.user_id}
-                      {request.requester ? (
-                        <span className="ml-2 text-xs text-fg-subtle">
-                          {request.requester.email}
-                        </span>
+              <li
+                key={request.id}
+                className="border-b border-border px-5 py-4 transition-colors last:border-b-0 hover:bg-surface-hover"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
+                  <div className="flex min-w-0 flex-1 items-start gap-3">
+                    <Avatar label={request.requester?.display_name ?? request.user_id} />
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium text-fg">
+                        {request.requester?.display_name ?? request.user_id}
+                        {request.requester ? (
+                          <span className="ml-2 text-xs font-normal text-fg-subtle">
+                            {request.requester.email}
+                          </span>
+                        ) : null}
+                      </p>
+                      <p className="mt-1 text-xs text-fg-subtle">
+                        Submitted {formatDateTime(request.created_at)}
+                        {request.decided_at
+                          ? ` · decided ${formatDateTime(request.decided_at)}`
+                          : ''}
+                      </p>
+                      <blockquote className="mt-2 border-l-2 border-border pl-3 text-sm leading-relaxed whitespace-pre-line text-fg-muted">
+                        {request.justification}
+                      </blockquote>
+                      {request.decision_note ? (
+                        <p className="mt-2 text-xs text-fg-subtle">
+                          <span className="font-medium text-fg-muted">Note:</span>{' '}
+                          {request.decision_note}
+                        </p>
                       ) : null}
-                    </p>
-                    <p className="mt-1 text-sm whitespace-pre-line text-fg-muted">
-                      {request.justification}
-                    </p>
-                    <p className="mt-1 text-xs text-fg-subtle">
-                      Submitted {formatDateTime(request.created_at)}
-                      {request.decided_at ? ` · decided ${formatDateTime(request.decided_at)}` : ''}
-                    </p>
-                    {request.decision_note ? (
-                      <p className="mt-1 text-xs text-fg-subtle">Note: {request.decision_note}</p>
-                    ) : null}
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex shrink-0 items-center gap-1.5">
                     <StatusPill status={request.status} />
                     {request.requester ? (
                       <Button
-                        size="sm"
+                        size="icon-sm"
                         variant="ghost"
+                        title="Send a message"
                         aria-label={`Message ${request.requester.display_name}`}
                         onClick={() => setMessageTarget(request)}
                       >
-                        Message
+                        <Icon name="message" />
                       </Button>
                     ) : null}
                     {request.status === 'pending' ? (
@@ -657,11 +837,12 @@ export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
                             setDecision({ request, kind: 'approve' });
                           }}
                         >
+                          <Icon name="check" />
                           Approve
                         </Button>
                         <Button
                           size="sm"
-                          variant="secondary"
+                          variant="outline"
                           onClick={() => {
                             setNote('');
                             setDecision({ request, kind: 'deny' });
@@ -765,58 +946,71 @@ export function GrantsTab({ apiId }: { apiId: string }): ReactElement {
   return (
     <>
       <Card className="overflow-hidden">
-        <CardHeader title="Grants" description="Active and revoked access to this API." />
-        <div className="px-5 pb-4">
-          <LabeledSelect
-            label="Grant status"
-            value={status}
-            onValueChange={(value) => {
-              setStatus(value);
-              setPage(0);
-            }}
-            options={[
-              { value: 'active', label: 'Active' },
-              { value: 'revoked', label: 'Revoked' },
-              { value: 'all', label: 'All' },
-            ]}
-          />
-        </div>
+        <CardHeader
+          icon="key"
+          title="Grants"
+          description="Active and revoked access to this API."
+          actions={
+            <LabeledSelect
+              className="w-40"
+              label="Grant status"
+              value={status}
+              onValueChange={(value) => {
+                setStatus(value);
+                setPage(0);
+              }}
+              options={[
+                { value: 'active', label: 'Active' },
+                { value: 'revoked', label: 'Revoked' },
+                { value: 'all', label: 'All' },
+              ]}
+            />
+          }
+        />
         {query.isLoading ? (
           <LoadingPanel />
         ) : grants.length === 0 ? (
-          <EmptyState icon="grant" title="No matching grants" />
+          <EmptyState
+            icon="grant"
+            title="No matching grants"
+            description="Approving an access request issues a grant and adds this API's ACL group to the requester's consumer."
+          />
         ) : (
           <ul>
             {grants.map((grant) => (
               <li
                 key={grant.id}
-                className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3.5 last:border-b-0"
+                className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-border px-5 py-3 transition-colors last:border-b-0 hover:bg-surface-hover"
               >
-                <div className="min-w-0">
-                  <p className="truncate text-sm text-fg">
-                    {grant.user?.display_name ?? grant.user_id}
-                  </p>
-                  <p className="truncate text-xs text-fg-subtle">
-                    Granted {formatDateTime(grant.created_at)}
-                    {grant.revoked_at ? ` · revoked ${formatDateTime(grant.revoked_at)}` : ''}
-                  </p>
+                <div className="flex min-w-0 flex-1 items-center gap-3">
+                  <Avatar label={grant.user?.display_name ?? grant.user_id} />
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-fg">
+                      {grant.user?.display_name ?? grant.user_id}
+                    </p>
+                    <p className="truncate text-xs text-fg-subtle">
+                      Granted {formatDateTime(grant.created_at)}
+                      {grant.revoked_at ? ` · revoked ${formatDateTime(grant.revoked_at)}` : ''}
+                    </p>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex shrink-0 items-center gap-1.5">
                   <StatusPill status={grant.status} />
                   {grant.user ? (
                     <Button
-                      size="sm"
+                      size="icon-sm"
                       variant="ghost"
+                      title="Send a message"
                       aria-label={`Message ${grant.user.display_name}`}
                       onClick={() => setMessageTarget(grant)}
                     >
-                      Message
+                      <Icon name="message" />
                     </Button>
                   ) : null}
                   {grant.status === 'active' ? (
                     <Button
                       size="sm"
-                      variant="secondary"
+                      variant="ghost"
                       onClick={() => {
                         setReason('');
                         setRevoking(grant);
@@ -893,43 +1087,49 @@ function TestConsumerTab({ api }: { api: Api }): ReactElement {
 
   return (
     <>
-      <Card>
+      <Card className="max-w-2xl">
         <CardHeader
+          icon="key"
           title="Test consumer"
           description="Creates a sandbox consumer that already carries this API's ACL group, with a credential of the API's auth type."
         />
         <CardBody className="flex flex-col gap-4">
-          <p className="text-sm text-fg-muted">
-            Consumer username:{' '}
-            <code className="font-mono text-xs text-fg">{testConsumerUsername(api.id)}</code>
-          </p>
+          <div className="rounded-md border border-border bg-inset px-4 py-3">
+            <p className="text-[0.7rem] font-semibold tracking-[0.08em] text-fg-subtle uppercase">
+              Consumer username
+            </p>
+            <code className="mt-1 block font-mono text-xs break-all text-fg">
+              {testConsumerUsername(api.id)}
+            </code>
+          </div>
           <LabeledInput
             label="Label"
             value={label}
             onChange={(event) => setLabel(event.target.value)}
             hint="Optional, stored with the credential metadata."
           />
-          <div>
-            <Button
-              variant="primary"
-              loading={create.isPending}
-              onClick={() =>
-                create.mutate(
-                  { id: api.id, body: { label: label.trim() || null } },
-                  {
-                    onSuccess: (response) =>
-                      setSecret({
-                        secret: response.secret,
-                        username: response.consumer_username,
-                      }),
-                  },
-                )
-              }
-            >
-              Create test credential
-            </Button>
-          </div>
         </CardBody>
+        <div className="flex flex-wrap items-center gap-3 border-t border-border bg-inset/40 px-5 py-3.5">
+          <Button
+            variant="primary"
+            loading={create.isPending}
+            onClick={() =>
+              create.mutate(
+                { id: api.id, body: { label: label.trim() || null } },
+                {
+                  onSuccess: (response) =>
+                    setSecret({
+                      secret: response.secret,
+                      username: response.consumer_username,
+                    }),
+                },
+              )
+            }
+          >
+            Create test credential
+          </Button>
+          <p className="text-xs text-fg-subtle">The secret is shown once and never stored.</p>
+        </div>
       </Card>
 
       {secret ? (
@@ -1080,6 +1280,7 @@ function UsageCard({ apiId }: { apiId: string }): ReactElement {
   return (
     <Card>
       <CardHeader
+        icon="activity"
         title="Usage"
         description="Read straight from the gateway each time. Nexus stores no metrics of its own."
       />
@@ -1106,10 +1307,12 @@ function ApiDetail({ apiId }: { apiId: string }): ReactElement {
       <Card>
         <EmptyState
           icon="alert"
+          tone="danger"
           title="API not found"
           description="It may have been deleted, or you may not own it."
           action={
-            <Link to="/apis" className="text-sm text-accent hover:underline">
+            <Link to="/apis" className={buttonClassName({ variant: 'secondary' })}>
+              <Icon name="arrow-left" />
               Back to my APIs
             </Link>
           }
@@ -1123,24 +1326,46 @@ function ApiDetail({ apiId }: { apiId: string }): ReactElement {
   return (
     <>
       <PageHeader
+        breadcrumbs={[{ label: 'My APIs', to: '/apis' }, { label: api.name }]}
         title={api.name}
         description={api.description ?? undefined}
+        meta={
+          <>
+            <Badge mono>v{api.version}</Badge>
+            <Badge tone="info">{AUTH_PLUGIN_LABELS[api.auth_plugin]}</Badge>
+            <StatusPill status={api.status} />
+            <Badge tone={api.visibility === 'public' ? 'neutral' : 'warning'}>
+              {api.visibility === 'public' ? 'Public' : 'Internal'}
+            </Badge>
+            {api.requestable ? <Badge tone="accent">Requestable</Badge> : <Badge>Open</Badge>}
+          </>
+        }
         actions={
           <Link
             to="/catalog/$slug"
             params={{ slug: api.slug }}
-            className="text-sm text-accent hover:underline"
+            className={buttonClassName({ variant: 'secondary' })}
           >
             View in catalog
+            <Icon name="external" />
           </Link>
         }
       />
 
-      <div className="mb-4 flex flex-wrap items-center gap-1.5">
-        <Badge tone="accent">v{api.version}</Badge>
-        <Badge tone="info">{AUTH_PLUGIN_LABELS[api.auth_plugin]}</Badge>
-        <StatusPill status={api.status} />
-        {api.requestable ? <Badge tone="accent">Requestable</Badge> : <Badge>Open</Badge>}
+      {/* At a glance: the four values a provider checks without opening a tab. */}
+      <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <GlanceTile icon="link" label="Listen path" value={api.listen_path} mono copyable />
+        <GlanceTile icon="globe" label="Upstream" value={api.upstream_url ?? 'Not recorded'} mono />
+        <GlanceTile
+          icon="zap"
+          label="Rate limit"
+          value={
+            api.rate_limit
+              ? `${api.rate_limit.limit} / ${api.rate_limit.window_seconds}s`
+              : 'Not enforced'
+          }
+        />
+        <GlanceTile icon="inbox" label="Pending requests" value={String(stats.pending_requests)} />
       </div>
 
       <Tabs
@@ -1151,41 +1376,40 @@ function ApiDetail({ apiId }: { apiId: string }): ReactElement {
             value: 'overview',
             label: 'Overview',
             content: (
-              <div className="flex flex-col gap-4">
+              <div className="grid gap-4 xl:grid-cols-2">
                 <Card>
-                  <CardHeader title="Overview" />
+                  <CardHeader
+                    icon="info"
+                    title="Overview"
+                    description="What the gateway and the catalog hold for this API."
+                  />
                   <CardBody>
                     <dl>
                       <DetailRow label="Invoke URL">
                         {api.invoke_url ? (
-                          <code className="font-mono text-xs">{api.invoke_url}</code>
+                          <code className="font-mono text-xs break-all">{api.invoke_url}</code>
                         ) : (
                           <span className="text-fg-muted">
                             No gateway address configured — an admin sets it in Settings → Gateway.
                           </span>
                         )}
                       </DetailRow>
-                      <DetailRow label="Gateway path">
-                        <code className="font-mono text-xs">{api.listen_path}</code>
-                      </DetailRow>
                       <DetailRow label="Edge proxy id">
-                        <code className="font-mono text-xs">{api.ferrum_proxy_id ?? '—'}</code>
+                        <code className="font-mono text-xs break-all">
+                          {api.ferrum_proxy_id ?? '—'}
+                        </code>
                       </DetailRow>
                       <DetailRow label="ACL group">
-                        <code className="font-mono text-xs">{aclGroupForApi(api.id)}</code>
+                        <code className="font-mono text-xs break-all">
+                          {aclGroupForApi(api.id)}
+                        </code>
                       </DetailRow>
-                      <DetailRow label="Rate limit">
-                        {api.rate_limit
-                          ? `${api.rate_limit.limit} requests / ${api.rate_limit.window_seconds}s`
-                          : 'Not enforced'}
+                      <DetailRow label="Active grants">
+                        <span className="tabular-nums">{stats.active_grants}</span>
                       </DetailRow>
-                      <DetailRow label="Pending access requests">
-                        {stats.pending_requests}
-                      </DetailRow>
-                      <DetailRow label="Active grants">{stats.active_grants}</DetailRow>
                       {/* Access requests, not calls — the Usage card below counts the traffic. */}
                       <DetailRow label="Access requests (all time)">
-                        {stats.total_requests}
+                        <span className="tabular-nums">{stats.total_requests}</span>
                       </DetailRow>
                       <DetailRow label="Current spec">
                         {spec

@@ -90,27 +90,32 @@ Backend tests boot the full Fastify app against in-memory SQLite plus a mock Fer
 
 ## Agent-dispatch skills
 
-`.claude/skills/` holds orchestration skills that dispatch **external** CLI coding agents as
-implementation workers on isolated git worktrees. `.agents/skills` is a symlink to the same tree, so
-both paths work; the shared binary resolver lives at `.claude/lib/resolve-agent-bin.sh`.
+`.agents/skills/` holds the canonical orchestration skills that dispatch **external** CLI coding
+agents as implementation workers on isolated git worktrees, and `.claude/skills/` holds thin Claude
+Code wrappers that point at them. The tree mirrors
+[ferrum-edge](https://github.com/ferrum-edge/ferrum-edge)'s `.agents/skills` and is kept in sync
+with it, with the guidance files, invariants, and validation commands adapted to this repository.
+The shared binary resolver lives at `.agents/skills/_lib/resolve-agent-bin.sh`.
 
-| Skill                                           | Worker                  | CLI            | Effort/model selection                                             |
-| ----------------------------------------------- | ----------------------- | -------------- | ------------------------------------------------------------------ |
-| `sol-agents`                                    | GPT-5.6 Sol             | `codex`        | `--effort medium\|high\|xhigh` (`--fast` only on explicit request) |
-| `opus-agents`                                   | Claude Opus 5 1M        | `claude`       | `--effort`                                                         |
-| `fable-agents`                                  | Claude Fable 5          | `claude`       | `--effort`                                                         |
-| `grok-agents`                                   | Cursor Grok 4.6         | `cursor-agent` | effort maps to a `cursor-grok-4.6-*` sku                           |
-| `composer-agents`                               | Cursor Composer 2.5     | `cursor-agent` | pinned model                                                       |
-| `opencode-laguna-agents`                        | opencode laguna-s-2.1   | `opencode`     | `--model`                                                          |
-| `deepseek-pro-agents` / `deepseek-flash-agents` | DeepSeek V4 Pro / Flash | `opencode`     | pinned model                                                       |
-| `qwen-agents`                                   | Qwen3.8 Max             | `opencode`     | pinned model                                                       |
+| Skill                                           | Worker                  | CLI            | Effort/model selection                                                              |
+| ----------------------------------------------- | ----------------------- | -------------- | ----------------------------------------------------------------------------------- |
+| `astra-agents`                                  | GPT-6 Astra             | `codex`        | `--effort low\|medium\|high\|xhigh\|max\|ultra` (`--fast` only on explicit request) |
+| `opus-agents`                                   | Claude Opus 5 1M        | `claude`       | `--effort low\|medium\|high\|xhigh\|max` (`--fast` only on explicit request)        |
+| `fable-5-1-agents`                              | Claude Fable 5.1        | `claude`       | `--effort low\|medium\|high\|xhigh\|max`                                            |
+| `fable-agents`                                  | Claude Fable 5          | `claude`       | `--effort medium\|high`                                                             |
+| `grok-agents`                                   | Cursor Grok 4.6         | `cursor-agent` | `--effort low\|medium\|high\|xhigh\|max` maps to a `cursor-grok-4.6-*` sku          |
+| `composer-agents`                               | Cursor Composer 2.5     | `cursor-agent` | pinned model; `--effort low\|medium\|high\|xhigh\|max`                              |
+| `opencode-laguna-agents`                        | opencode laguna-s-2.1   | `opencode`     | pinned model; `--effort medium\|high\|xhigh\|max`                                   |
+| `deepseek-pro-agents` / `deepseek-flash-agents` | DeepSeek V4 Pro / Flash | `opencode`     | pinned model; `--effort medium\|high\|xhigh\|max`                                   |
+| `qwen-agents`                                   | Qwen3.8 Max             | `opencode`     | pinned model; `--effort medium\|high\|xhigh\|max`                                   |
 
-**Trigger shorthand.** "sol xhigh sub agent" (and the same shape for the other skills — "opus high",
-"grok medium") means: use that skill as the orchestrator, dispatch a worker at that reasoning
-effort, and follow the skill's worktree isolation, verification, and reporting rules. Never
-substitute a different model, effort, or service tier than the one named.
+**Trigger shorthand.** "astra xhigh sub agent" (and the same shape for the other skills — "opus
+high", "grok medium") means: use that skill as the orchestrator, dispatch a worker at that
+reasoning effort, and follow the skill's worktree isolation, verification, and reporting rules.
+Never substitute a different model, effort, or service tier than the one named.
 
-Each skill is self-contained: `SKILL.md` is the orchestrator contract,
+Each canonical skill is self-contained: `SKILL.md` is the orchestrator contract,
 `references/agent-brief.md` and `references/continuation-brief.md` are the worker briefs, and
-`scripts/dispatch-agent.sh` is the launcher that pins the model and sandbox. Workers are forbidden
-from dispatching nested workers.
+`scripts/dispatch-agent.sh` is the launcher that pins the model and sandbox. Workers validate
+through remote CI rather than local builds or tests, and are forbidden from dispatching nested
+workers.

@@ -613,16 +613,32 @@ retain their advertised `max-age`.
 {
   "portal_name": "Acme Developer Portal",
   "logo_data_url": "data:image/png;base64,…",
-  "primary_color": "#4f46e5",
-  "accent_color": "#22d3ee",
+  "primary_color": "#f97316",
+  "accent_color": "#38bdf8",
   "default_theme": "dark",
   "tagline": "APIs for partners",
   "support_email": "api-support@acme.example",
+  "radius": "md",
+  "font_preset": "system",
+  "sidebar_style": "surface",
+  "login_layout": "split",
+  "footer_text": "© Acme Corp",
+  "footer_links": [{ "label": "Terms", "url": "https://acme.example/terms" }],
   "captcha": { "enabled": false, "provider": "none", "site_key": null },
   "registration": { "open_registration": true, "allowed_roles": ["client", "provider"] },
   "bootstrap_required": false
 }
 ```
+
+The SPA derives its whole accent scale — hover and active shades, a readable
+foreground, tints and the focus ring — from `primary_color`, and its secondary
+(`info`) tokens from `accent_color`, per theme. `radius` (`none`|`sm`|`md`|`lg`)
+scales every corner, `font_preset` (`system`|`inter`|`manrope`) picks a bundled
+typeface, `sidebar_style` (`surface`|`contrast`) chooses between a rail that
+matches the page surfaces and an always-dark rail, and `login_layout`
+(`split`|`centered`) decides whether the sign-in page shows the branded hero
+panel. `footer_text` and `footer_links` (at most 5, `http(s)` only) render in
+the shell footer and on the sign-in page.
 
 `registration` is the public slice of the registration policy, so the sign-up
 form does not offer a role the server will refuse. `allowed_roles` is the stored
@@ -1055,11 +1071,17 @@ report whether one is stored.
   "branding": {
     "portal_name": "…",
     "logo_data_url": null,
-    "primary_color": "#4f46e5",
-    "accent_color": "#22d3ee",
+    "primary_color": "#f97316",
+    "accent_color": "#38bdf8",
     "default_theme": "dark",
     "tagline": null,
-    "support_email": null
+    "support_email": null,
+    "radius": "md",
+    "font_preset": "system",
+    "sidebar_style": "surface",
+    "login_layout": "split",
+    "footer_text": null,
+    "footer_links": []
   },
   "captcha": {
     "enabled": false,
@@ -1111,13 +1133,13 @@ verification and password-reset link to the operator, CAPTCHA is the
 registration brake, and the gateway origin is where every client is told to
 send its gateway credentials.
 
-| Section        | Fields                                                                                                                                                                                                                                                                                                                                                                                                       |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `branding`     | `portal_name` (1–120), `logo_data_url` (base64 image data URL, ≤ 512 KiB, nullable), `primary_color` / `accent_color` (CSS hex `#rgb`–`#rrggbbaa`), `default_theme` (`dark`\|`light`\|`system`), `tagline` (≤ 280, nullable), `support_email` (nullable)                                                                                                                                                     |
-| `captcha`      | _super_admin_ — `enabled`, `provider` (`none`\|`recaptcha`\|`hcaptcha`\|`turnstile`), `site_key` (nullable), `secret_key` — **write-only**, stored AES-256-GCM encrypted; pass `null` or `""` to clear — and `captcha_token`, the activation self-test's proof (below). Changing `provider` while CAPTCHA is (or becomes) enabled requires a `secret_key` in the same request                                |
-| `smtp`         | _super_admin_ — `host`, `port` (1–65535), `secure`, `username`, `password` — **write-only**, encrypted; `null`/`""` clears — `from_address`. Changing `host`, `port`, `secure` or `username` while a password is stored (or set by env) requires sending a fresh `password` in the same request (`400 VALIDATION_FAILED` otherwise), so a stored credential can never be replayed against a different server |
-| `registration` | `open_registration`, `require_email_verification`, `allowed_roles` (array of roles)                                                                                                                                                                                                                                                                                                                          |
-| `gateway`      | _super_admin_ — `public_url` — absolute `http(s)` **origin** of the gateway's proxy listener, no path, query or credentials; a trailing slash is stripped. `null` or `""` clears the override and falls back to `FERRUM_GATEWAY_PUBLIC_URL`. Whoever controls it directs clients to send their gateway credentials to that origin, so it needs `super_admin` like `smtp` and `captcha`.                      |
+| Section        | Fields                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `branding`     | `portal_name` (1–120), `logo_data_url` (base64 image data URL, ≤ 512 KiB, nullable), `primary_color` / `accent_color` (CSS hex `#rgb`–`#rrggbbaa`), `default_theme` (`dark`\|`light`\|`system`), `tagline` (≤ 280, nullable), `support_email` (nullable), `radius` (`none`\|`sm`\|`md`\|`lg`), `font_preset` (`system`\|`inter`\|`manrope`), `sidebar_style` (`surface`\|`contrast`), `login_layout` (`split`\|`centered`), `footer_text` (≤ 200, nullable), `footer_links` (≤ 5 × `{ label (1–60), url }`, `http(s)` URLs only — anything else is `400`) |
+| `captcha`      | _super_admin_ — `enabled`, `provider` (`none`\|`recaptcha`\|`hcaptcha`\|`turnstile`), `site_key` (nullable), `secret_key` — **write-only**, stored AES-256-GCM encrypted; pass `null` or `""` to clear — and `captcha_token`, the activation self-test's proof (below). Changing `provider` while CAPTCHA is (or becomes) enabled requires a `secret_key` in the same request                                                                                                                                                                             |
+| `smtp`         | _super_admin_ — `host`, `port` (1–65535), `secure`, `username`, `password` — **write-only**, encrypted; `null`/`""` clears — `from_address`. Changing `host`, `port`, `secure` or `username` while a password is stored (or set by env) requires sending a fresh `password` in the same request (`400 VALIDATION_FAILED` otherwise), so a stored credential can never be replayed against a different server                                                                                                                                              |
+| `registration` | `open_registration`, `require_email_verification`, `allowed_roles` (array of roles)                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `gateway`      | _super_admin_ — `public_url` — absolute `http(s)` **origin** of the gateway's proxy listener, no path, query or credentials; a trailing slash is stripped. `null` or `""` clears the override and falls back to `FERRUM_GATEWAY_PUBLIC_URL`. Whoever controls it directs clients to send their gateway credentials to that origin, so it needs `super_admin` like `smtp` and `captcha`.                                                                                                                                                                   |
 
 SMTP connection changes are compared after merging stored overrides over the
 environment defaults. Clearing the SMTP password with `null` or `""` restores

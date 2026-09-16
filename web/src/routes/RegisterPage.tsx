@@ -8,17 +8,24 @@ import {
 } from '@ferrum-nexus/shared';
 import { AuthShell, FormNotice } from '../components/auth/AuthShell';
 import { CaptchaWidget } from '../components/auth/CaptchaWidget';
+import { PasswordField } from '../components/auth/PasswordField';
 import { ResendVerification } from '../components/auth/ResendVerification';
-import { Button } from '../components/ui/Button';
-import { LabeledInput } from '../components/ui/Input';
-import { LabeledSelect } from '../components/ui/Select';
+import { Button, buttonClassName } from '../components/ui/Button';
+import { Icon, type IconName } from '../components/ui/Icon';
+import { FieldGroup, LabeledInput } from '../components/ui/Input';
 import { useBranding, useCaptchaConfig } from '../hooks/useBranding';
+import { cn } from '../lib/cn';
 import { ApiError } from '../lib/api';
 import { useAuth } from '../stores/auth';
 
 const ROLE_DESCRIPTIONS: Readonly<Record<RegistrableRole, string>> = {
   client: 'Consume APIs: browse the catalog, request access, manage credentials.',
   provider: 'Publish APIs: upload specs, review access requests, manage runtime settings.',
+};
+
+const ROLE_ICONS: Readonly<Record<RegistrableRole, IconName>> = {
+  client: 'catalog',
+  provider: 'upload',
 };
 
 /** Self-service registration. */
@@ -106,9 +113,10 @@ export function RegisterPage(): ReactElement {
           {done.verificationRequired ? <ResendVerification email={email} /> : null}
           <Link
             to="/login"
-            className="inline-flex h-11 items-center justify-center rounded-md bg-accent px-4 text-sm font-medium text-accent-fg hover:bg-accent-hover"
+            className={buttonClassName({ variant: 'primary', size: 'lg', className: 'w-full' })}
           >
             Go to sign in
+            <Icon name="arrow-right" className="h-4 w-4" />
           </Link>
         </div>
       </AuthShell>
@@ -136,9 +144,8 @@ export function RegisterPage(): ReactElement {
             <FormNotice tone="warning">
               This portal has no super-admin yet, so this registration becomes its super-admin.
             </FormNotice>
-            <LabeledInput
+            <PasswordField
               label="Bootstrap token"
-              type="password"
               autoComplete="off"
               required
               hint="Printed in the server log at startup, or the value of NEXUS_BOOTSTRAP_TOKEN."
@@ -159,13 +166,13 @@ export function RegisterPage(): ReactElement {
           label="Email"
           type="email"
           autoComplete="email"
+          placeholder="you@company.com"
           required
           value={email}
           onChange={(event) => setEmail(event.target.value)}
         />
-        <LabeledInput
+        <PasswordField
           label="Password"
-          type="password"
           autoComplete="new-password"
           required
           minLength={MIN_PASSWORD_LENGTH}
@@ -185,31 +192,75 @@ export function RegisterPage(): ReactElement {
             {ROLE_DESCRIPTIONS[soleRole]}
           </p>
         ) : (
-          <LabeledSelect<RegistrableRole>
+          <FieldGroup
             label="Account type"
-            value={role}
-            onValueChange={setRole}
-            options={allowedRoles.map((value) => ({
-              value,
-              label: ROLE_LABELS[value],
-              description: ROLE_DESCRIPTIONS[value],
-            }))}
             hint="Administrator roles are granted by an existing admin."
-          />
+          >
+            <div
+              role="radiogroup"
+              aria-label="Account type"
+              className="mt-0.5 grid gap-2 sm:grid-cols-2"
+            >
+              {allowedRoles.map((value) => {
+                const selected = role === value;
+                return (
+                  <label key={value} className="cursor-pointer">
+                    <input
+                      type="radio"
+                      name="account-type"
+                      value={value}
+                      checked={selected}
+                      onChange={() => setRole(value)}
+                      className="peer sr-only"
+                    />
+                    <span
+                      className={cn(
+                        'flex h-full flex-col gap-1.5 rounded-lg border p-3 transition-colors',
+                        'peer-focus-visible:ring-2 peer-focus-visible:ring-accent-ring',
+                        selected
+                          ? 'border-accent bg-accent-soft'
+                          : 'border-border bg-inset hover:border-border-strong',
+                      )}
+                    >
+                      <span className="flex items-center gap-2">
+                        <Icon
+                          name={ROLE_ICONS[value]}
+                          className={cn('h-4 w-4', selected ? 'text-accent' : 'text-fg-subtle')}
+                        />
+                        <span
+                          className={cn(
+                            'text-sm font-medium',
+                            selected ? 'text-accent' : 'text-fg',
+                          )}
+                        >
+                          {ROLE_LABELS[value]}
+                        </span>
+                      </span>
+                      <span className="text-xs leading-relaxed text-fg-muted">
+                        {ROLE_DESCRIPTIONS[value]}
+                      </span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </FieldGroup>
         )}
-        <LabeledInput
-          label="Company"
-          autoComplete="organization"
-          value={company}
-          onChange={(event) => setCompany(event.target.value)}
-        />
-        <LabeledInput
-          label="Phone"
-          type="tel"
-          autoComplete="tel"
-          value={phone}
-          onChange={(event) => setPhone(event.target.value)}
-        />
+        <div className="grid gap-4 sm:grid-cols-2">
+          <LabeledInput
+            label="Company"
+            autoComplete="organization"
+            value={company}
+            onChange={(event) => setCompany(event.target.value)}
+          />
+          <LabeledInput
+            label="Phone"
+            type="tel"
+            autoComplete="tel"
+            value={phone}
+            onChange={(event) => setPhone(event.target.value)}
+          />
+        </div>
 
         <CaptchaWidget config={captcha} onToken={onToken} />
 
@@ -217,10 +268,12 @@ export function RegisterPage(): ReactElement {
           type="submit"
           variant="primary"
           size="lg"
+          className="w-full"
           loading={submitting}
           disabled={allowedRoles.length === 0}
         >
           Create account
+          <Icon name="arrow-right" className="h-4 w-4" />
         </Button>
       </form>
     </AuthShell>

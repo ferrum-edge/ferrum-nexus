@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactElement } from 'react';
 import { cn } from '../../lib/cn';
 import { Badge, type BadgeTone } from '../ui/Badge';
+import { Button } from '../ui/Button';
 import { Icon } from '../ui/Icon';
 import {
   chargeNode,
@@ -25,12 +26,19 @@ const METHOD_TONES: Readonly<Record<HttpMethod, BadgeTone>> = {
   get: 'info',
   post: 'success',
   put: 'warning',
-  patch: 'accent',
+  patch: 'warning',
   delete: 'danger',
   head: 'neutral',
   options: 'neutral',
   trace: 'neutral',
 };
+
+/** Fixed-width monospace pill so a column of methods lines up. */
+const METHOD_PILL = 'w-[4.25rem] shrink-0 justify-center tracking-[0.08em] uppercase';
+
+/** Tiny uppercase column label, matching the `DataTable` header treatment. */
+const COLUMN_LABEL =
+  'py-1.5 text-left text-[0.7rem] font-semibold tracking-[0.08em] whitespace-nowrap text-fg-subtle uppercase';
 
 function statusTone(status: string): BadgeTone {
   if (status.startsWith('2')) return 'success';
@@ -78,12 +86,12 @@ function renderParameterTable(
             <p className="mt-0.5 text-xs text-fg-muted">{asString(parameter.description)}</p>
           ) : null}
         </td>
-        <td className="py-2 pr-3 align-top text-xs text-fg-muted">
+        <td className="py-2 pr-3 align-top font-mono text-xs text-fg-muted">
           {asString(parameter.in) ?? '—'}
         </td>
         <td className="py-2 pr-3 align-top text-xs">
           {parameter.required === true ? (
-            <span className="text-danger">required</span>
+            <span className="font-medium text-danger">required</span>
           ) : (
             <span className="text-fg-subtle">optional</span>
           )}
@@ -105,16 +113,16 @@ function renderParameterTable(
       <table className="w-full border-collapse text-sm">
         <thead>
           <tr className="border-b border-border">
-            <th scope="col" className="py-1.5 pr-3 text-left text-xs text-fg-subtle uppercase">
+            <th scope="col" className={cn(COLUMN_LABEL, 'pr-3')}>
               Name
             </th>
-            <th scope="col" className="py-1.5 pr-3 text-left text-xs text-fg-subtle uppercase">
+            <th scope="col" className={cn(COLUMN_LABEL, 'pr-3')}>
               In
             </th>
-            <th scope="col" className="py-1.5 pr-3 text-left text-xs text-fg-subtle uppercase">
+            <th scope="col" className={cn(COLUMN_LABEL, 'pr-3')}>
               Required
             </th>
-            <th scope="col" className="py-1.5 text-left text-xs text-fg-subtle uppercase">
+            <th scope="col" className={COLUMN_LABEL}>
               Schema
             </th>
           </tr>
@@ -188,13 +196,19 @@ function OperationCard({
         onClick={onToggle}
         aria-expanded={open}
         aria-controls={panelId}
-        className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-inset"
+        className={cn(
+          'flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-surface-hover',
+          open && 'bg-inset',
+        )}
       >
-        <Icon name="chevron-right" className={cn('text-fg-subtle', open && 'rotate-90')} />
-        <Badge tone={METHOD_TONES[operation.method]} className="w-16 justify-center uppercase">
+        <Icon
+          name="chevron-right"
+          className={cn('shrink-0 text-fg-subtle transition-transform', open && 'rotate-90')}
+        />
+        <Badge tone={METHOD_TONES[operation.method]} mono className={METHOD_PILL}>
           {operation.method}
         </Badge>
-        <code className="font-mono text-sm text-fg">{operation.path}</code>
+        <code className="truncate font-mono text-sm font-medium text-fg">{operation.path}</code>
         {operation.summary ? (
           <span className="hidden min-w-0 flex-1 truncate text-sm text-fg-muted md:block">
             {operation.summary}
@@ -223,7 +237,7 @@ function OperationCard({
 
               {operation.parameters.length > 0 ? (
                 <section>
-                  <h4 className="mb-1.5 text-xs font-semibold tracking-wide text-fg-subtle uppercase">
+                  <h4 className="mb-1.5 text-[0.7rem] font-semibold tracking-[0.08em] text-fg-subtle uppercase">
                     Parameters
                   </h4>
                   {renderParameterTable(operation.parameters, doc, budget)}
@@ -232,7 +246,7 @@ function OperationCard({
 
               {operation.requestBody ? (
                 <section>
-                  <h4 className="mb-1.5 text-xs font-semibold tracking-wide text-fg-subtle uppercase">
+                  <h4 className="mb-1.5 text-[0.7rem] font-semibold tracking-[0.08em] text-fg-subtle uppercase">
                     Request body
                   </h4>
                   {asString(operation.requestBody.description) ? (
@@ -246,7 +260,7 @@ function OperationCard({
 
               {operation.responses.length > 0 ? (
                 <section>
-                  <h4 className="mb-1.5 text-xs font-semibold tracking-wide text-fg-subtle uppercase">
+                  <h4 className="mb-1.5 text-[0.7rem] font-semibold tracking-[0.08em] text-fg-subtle uppercase">
                     Responses
                   </h4>
                   <div className="flex flex-col gap-3">
@@ -391,46 +405,54 @@ function ParsedSpecView({ spec }: { spec: ParsedSpec }): ReactElement {
     <div className="flex flex-col gap-6">
       <header className="fx-card p-5">
         <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-lg font-semibold text-fg">{spec.title}</h2>
-          {spec.version ? <Badge tone="accent">v{spec.version}</Badge> : null}
+          <h2 className="text-lg font-semibold tracking-tight text-fg">{spec.title}</h2>
+          {spec.version ? (
+            <Badge tone="accent" mono>
+              v{spec.version}
+            </Badge>
+          ) : null}
           {spec.specVersion ? <Badge>OpenAPI {spec.specVersion}</Badge> : null}
           <Badge>
             {spec.operationCount} operation{spec.operationCount === 1 ? '' : 's'}
           </Badge>
         </div>
         {spec.description ? (
-          <p className="mt-2 text-sm whitespace-pre-line text-fg-muted">{spec.description}</p>
-        ) : null}
-        {spec.servers.length > 0 ? (
-          <div className="mt-4">
-            <h3 className="text-xs font-semibold tracking-wide text-fg-subtle uppercase">
-              Servers
-            </h3>
-            <ul className="mt-1.5 flex flex-col gap-1">
-              {spec.servers.map((server) => (
-                <li key={server.url} className="flex flex-wrap items-center gap-2">
-                  <code className="rounded-sm bg-inset px-2 py-0.5 font-mono text-xs text-fg">
-                    {server.url}
-                  </code>
-                  {server.description ? (
-                    <span className="text-xs text-fg-muted">{server.description}</span>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          </div>
+          <p className="mt-2 text-sm leading-relaxed whitespace-pre-line text-fg-muted">
+            {spec.description}
+          </p>
         ) : null}
       </header>
+
+      {spec.servers.length > 0 ? (
+        // Sticky: the base URL is what a reader copies while scrolling an
+        // operation far down the document, so it stays in view. `top-16`
+        // clears the app shell's own sticky header.
+        <div className="fx-glass sticky top-16 z-10 -mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg border border-border px-4 py-2.5">
+          <h3 className="text-[0.7rem] font-semibold tracking-[0.08em] text-fg-subtle uppercase">
+            Servers
+          </h3>
+          {spec.servers.map((server) => (
+            <span key={server.url} className="flex min-w-0 flex-wrap items-center gap-2">
+              <code className="rounded-sm bg-inset px-2 py-0.5 font-mono text-xs break-all text-fg ring-1 ring-border ring-inset">
+                {server.url}
+              </code>
+              {server.description ? (
+                <span className="text-xs text-fg-muted">{server.description}</span>
+              ) : null}
+            </span>
+          ))}
+        </div>
+      ) : null}
 
       {spec.groups.length === 0 ? (
         <p className="text-sm text-fg-muted">This specification declares no operations.</p>
       ) : (
         visibleGroups.map(({ group, operations }) => (
           <section key={group.name} className="fx-card overflow-hidden">
-            <div className="border-b border-border px-4 py-3">
+            <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-b border-border bg-inset/40 px-4 py-3">
               <h3 className="text-sm font-semibold text-fg">{group.name}</h3>
               {group.description ? (
-                <p className="mt-0.5 text-sm text-fg-muted">{group.description}</p>
+                <p className="w-full text-sm text-fg-muted">{group.description}</p>
               ) : null}
             </div>
             {operations.map((operation) => {
@@ -455,13 +477,12 @@ function ParsedSpecView({ spec }: { spec: ParsedSpec }): ReactElement {
           <p className="text-sm text-fg-muted">
             Showing {shownCount} of {totalEntries} {entryLabel}.
           </p>
-          <button
-            type="button"
-            className="fx-btn fx-btn-secondary"
+          <Button
+            variant="secondary"
             onClick={() => setVisibleCount((count) => count + OPERATIONS_PAGE)}
           >
             Show {Math.min(OPERATIONS_PAGE, hiddenCount)} more
-          </button>
+          </Button>
         </div>
       ) : null}
     </div>

@@ -1,4 +1,4 @@
-import type { ReactElement } from 'react';
+import { useCallback, useEffect, useState, type ReactElement, type ReactNode } from 'react';
 import {
   AUTH_PLUGIN_LABELS,
   consumerUsernameForUser,
@@ -6,8 +6,10 @@ import {
 } from '@ferrum-nexus/shared';
 import { useAuth } from '../../stores/auth';
 import { Badge } from '../ui/Badge';
+import { Button } from '../ui/Button';
 import { Card, CardBody, CardHeader } from '../ui/Card';
 import { CopyField } from '../ui/CopyField';
+import { Icon } from '../ui/Icon';
 
 export interface CallApiPanelProps {
   /** Absolute gateway URL, or `null` when no public origin is configured. */
@@ -25,50 +27,98 @@ export interface CallApiPanelProps {
  * a basic-auth credential on Edge has no username field of its own, and the
  * `jwt_auth` plugin identifies the caller by the `sub` claim.
  */
-function AuthRecipe({ authPlugin }: { authPlugin: AuthPluginType }): ReactElement {
-  const { user } = useAuth();
-  const consumer = user ? consumerUsernameForUser(user.id) : 'nexus-user-<your id>';
+interface AuthRecipe {
+  /** The full header line pasted into the example request. */
+  header: string;
+  /** Header name on its own, for the guidance list. */
+  name: string;
+  /** Credential type to issue on the credentials page. */
+  credential: string;
+  /** What the caller has to know beyond the header name. */
+  note: ReactNode;
+}
 
+function authRecipe(authPlugin: AuthPluginType, consumer: string): AuthRecipe {
   switch (authPlugin) {
     case 'key_auth':
-      return (
-        <div className="flex flex-col gap-1.5">
-          <code className="block overflow-x-auto rounded-md border border-border bg-inset px-3 py-2 font-mono text-xs text-fg">
-            X-API-Key: &lt;your key&gt;
-          </code>
-          <p className="text-sm text-fg-muted">
-            Send the key from a <strong className="font-medium text-fg">keyauth</strong> credential.
-          </p>
-        </div>
-      );
+      return {
+        header: 'X-API-Key: <your key>',
+        name: 'X-API-Key',
+        credential: 'keyauth',
+        note: 'Send the key exactly as it was shown when you issued the credential.',
+      };
     case 'basic_auth':
-      return (
-        <div className="flex flex-col gap-1.5">
-          <code className="block overflow-x-auto rounded-md border border-border bg-inset px-3 py-2 font-mono text-xs text-fg">
-            Authorization: Basic base64({consumer}:&lt;your password&gt;)
-          </code>
-          <p className="text-sm text-fg-muted">
-            The username is your consumer username{' '}
-            <code className="font-mono text-xs">{consumer}</code>, not your email — issue a{' '}
-            <strong className="font-medium text-fg">basicauth</strong> credential for the password.
-          </p>
-        </div>
-      );
+      return {
+        header: `Authorization: Basic base64(${consumer}:<your password>)`,
+        name: 'Authorization',
+        credential: 'basicauth',
+        note: (
+          <>
+            The username is your consumer username <code className="font-mono">{consumer}</code>,
+            not your email.
+          </>
+        ),
+      };
     case 'jwt_auth':
-      return (
-        <div className="flex flex-col gap-1.5">
-          <code className="block overflow-x-auto rounded-md border border-border bg-inset px-3 py-2 font-mono text-xs text-fg">
-            Authorization: Bearer &lt;token you sign&gt;
-          </code>
-          <p className="text-sm text-fg-muted">
-            Sign a short-lived HS256 token with a{' '}
-            <strong className="font-medium text-fg">jwt</strong> credential&rsquo;s secret. Its{' '}
-            <code className="font-mono text-xs">sub</code> claim must be{' '}
-            <code className="font-mono text-xs">{consumer}</code>.
-          </p>
-        </div>
-      );
+      return {
+        header: 'Authorization: Bearer <token you sign>',
+        name: 'Authorization',
+        credential: 'jwt',
+        note: (
+          <>
+            Sign a short-lived HS256 token with the credential&rsquo;s secret; its{' '}
+            <code className="font-mono">sub</code> claim must be{' '}
+            <code className="font-mono">{consumer}</code>.
+          </>
+        ),
+      };
   }
+}
+
+/** Copy-to-clipboard affordance for the whole example request. */
+function CopySnippetButton({ value }: { value: string }): ReactElement {
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
+  const copy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+    } catch {
+      // Clipboard access can be denied (insecure context, permissions); the
+      // snippet stays selectable so it can be copied by hand.
+      setCopied(false);
+    }
+  }, [value]);
+
+  return (
+    <Button
+      size="sm"
+      variant="ghost"
+      onClick={() => void copy()}
+      aria-label={copied ? 'Example request copied' : 'Copy example request'}
+    >
+      <Icon name={copied ? 'check' : 'copy'} className={copied ? 'text-success' : undefined} />
+      {copied ? 'Copied' : 'Copy'}
+    </Button>
+  );
+}
+
+/** Label/value pair in the compact guidance list under the snippet. */
+function Guidance({ term, children }: { term: string; children: ReactNode }): ReactElement {
+  return (
+    <>
+      <dt className="text-xs font-medium tracking-wide text-fg-subtle uppercase sm:pt-0.5">
+        {term}
+      </dt>
+      <dd className="min-w-0 text-sm break-words text-fg-muted">{children}</dd>
+    </>
+  );
 }
 
 /**
@@ -84,14 +134,38 @@ export function CallApiPanel({
   listenPath,
   authPlugin,
 }: CallApiPanelProps): ReactElement {
+  const { user } = useAuth();
+  const consumer = user ? consumerUsernameForUser(user.id) : 'nexus-user-<your id>';
+  const recipe = authRecipe(authPlugin, consumer);
+  const target = invokeUrl ?? `<gateway address>${listenPath}`;
+  const snippet = `curl ${target} \\\n  -H "${recipe.header}"`;
+
   return (
     <Card>
       <CardHeader
         title="Call this API"
+        icon="code"
         description="Requests go to the gateway, not to this portal."
         actions={<Badge tone="info">{AUTH_PLUGIN_LABELS[authPlugin]}</Badge>}
       />
       <CardBody className="flex flex-col gap-4">
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-medium tracking-wide text-fg-subtle uppercase">
+              Example request
+            </span>
+            <CopySnippetButton value={snippet} />
+          </div>
+          <pre className="overflow-x-auto rounded-md border border-border bg-inset p-3 font-mono text-xs leading-relaxed text-fg">
+            <code>
+              <span className="text-fg-subtle">curl</span> {target} \{'\n'}
+              {'  '}
+              <span className="text-fg-subtle">-H</span> &quot;
+              <span className="text-accent">{recipe.header}</span>&quot;
+            </code>
+          </pre>
+        </div>
+
         {invokeUrl ? (
           <>
             <CopyField label="Invoke URL" value={invokeUrl} />
@@ -115,12 +189,19 @@ export function CallApiPanel({
           </div>
         )}
 
-        <div className="flex flex-col gap-1.5">
-          <span className="text-xs font-medium tracking-wide text-fg-subtle uppercase">
-            Authentication
-          </span>
-          <AuthRecipe authPlugin={authPlugin} />
-        </div>
+        <dl className="grid gap-x-4 gap-y-2 border-t border-border pt-4 sm:grid-cols-[8rem_1fr]">
+          <Guidance term="Header">
+            <code className="font-mono text-xs text-fg">{recipe.name}</code>
+          </Guidance>
+          <Guidance term="Credential">
+            Issue a <strong className="font-medium text-fg">{recipe.credential}</strong> credential
+            from the credentials page.
+          </Guidance>
+          <Guidance term="Consumer">
+            <code className="font-mono text-xs text-fg">{consumer}</code>
+          </Guidance>
+          <Guidance term="Notes">{recipe.note}</Guidance>
+        </dl>
       </CardBody>
     </Card>
   );

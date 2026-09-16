@@ -5,6 +5,13 @@
  * Edge objects, cookie/header names, and UI/pagination defaults.
  */
 
+import type {
+  BrandingFontPreset,
+  BrandingLoginLayout,
+  BrandingRadius,
+  BrandingSidebarStyle,
+} from './entities.js';
+
 /* ── Ferrum Edge naming ─────────────────────────────────────────────────── */
 
 /** Prefix of every ACL group Nexus manages on the gateway. */
@@ -215,6 +222,12 @@ export const CSRF_HEADER_LOWER = 'x-nexus-csrf';
 /** localStorage key persisting the user's light/dark theme choice. */
 export const THEME_STORAGE_KEY = 'nexus:theme';
 
+/**
+ * `localStorage` key caching the portal's configured `default_theme`, so the
+ * pre-paint bootstrap script can honour it before the branding payload loads.
+ */
+export const THEME_DEFAULT_STORAGE_KEY = 'nexus:theme-default';
+
 /* ── Email templates ────────────────────────────────────────────────────── */
 
 /** Key identifying a stored, admin-editable email template. */
@@ -394,3 +407,26 @@ export function clampPageSize(limit: number | undefined): number {
   if (floored < 1) return 1;
   return Math.min(floored, MAX_PAGE_SIZE);
 }
+
+/* ── Branding presets ────────────────────────────────────────────────────── */
+
+/** Corner rounding presets, in ascending order. */
+export const BRANDING_RADII: readonly BrandingRadius[] = ['none', 'sm', 'md', 'lg'];
+
+/** Typeface presets the SPA bundles. */
+export const BRANDING_FONT_PRESETS: readonly BrandingFontPreset[] = ['system', 'inter', 'manrope'];
+
+/** Navigation rail treatments. */
+export const BRANDING_SIDEBAR_STYLES: readonly BrandingSidebarStyle[] = ['surface', 'contrast'];
+
+/** Sign-in page compositions. */
+export const BRANDING_LOGIN_LAYOUTS: readonly BrandingLoginLayout[] = ['split', 'centered'];
+
+/** Most footer links an operator may configure. */
+export const MAX_BRANDING_FOOTER_LINKS = 5;
+
+/** Longest footer link label. */
+export const MAX_BRANDING_LINK_LABEL_LENGTH = 60;
+
+/** Longest footer text line. */
+export const MAX_BRANDING_FOOTER_TEXT_LENGTH = 200;

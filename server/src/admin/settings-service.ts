@@ -38,9 +38,15 @@
 import { createHash } from 'node:crypto';
 
 import {
+  BRANDING_FONT_PRESETS,
+  BRANDING_LOGIN_LAYOUTS,
+  BRANDING_RADII,
+  BRANDING_SIDEBAR_STYLES,
   EMAIL_TEMPLATE_KEYS,
+  MAX_BRANDING_FOOTER_LINKS,
   roleAtLeast,
   type AdminSettingsResponse,
+  type BrandingLink,
   type BrandingSettings,
   type CaptchaAdminSettings,
   type CaptchaProvider,
@@ -117,11 +123,18 @@ export const SMTP_PASSWORD_SETTINGS_KEY = 'smtp.password';
 export const DEFAULT_BRANDING: BrandingSettings = {
   portal_name: 'Ferrum Nexus',
   logo_data_url: null,
-  primary_color: '#4f46e5',
-  accent_color: '#22d3ee',
+  // Ferrum = iron: the ember accent the SPA's stylesheet is designed around.
+  primary_color: '#f97316',
+  accent_color: '#38bdf8',
   default_theme: 'dark',
   tagline: null,
   support_email: null,
+  radius: 'md',
+  font_preset: 'system',
+  sidebar_style: 'surface',
+  login_layout: 'split',
+  footer_text: null,
+  footer_links: [],
 };
 
 /** Shape of the stored `smtp` setting; `null` means "fall back to the env config". */
@@ -191,7 +204,44 @@ export async function readBranding(store: NexusStore): Promise<BrandingSettings>
       : DEFAULT_BRANDING.default_theme,
     tagline: str(value.tagline),
     support_email: str(value.support_email),
+    radius: oneOf(value.radius, BRANDING_RADII, DEFAULT_BRANDING.radius),
+    font_preset: oneOf(value.font_preset, BRANDING_FONT_PRESETS, DEFAULT_BRANDING.font_preset),
+    sidebar_style: oneOf(
+      value.sidebar_style,
+      BRANDING_SIDEBAR_STYLES,
+      DEFAULT_BRANDING.sidebar_style,
+    ),
+    login_layout: oneOf(value.login_layout, BRANDING_LOGIN_LAYOUTS, DEFAULT_BRANDING.login_layout),
+    footer_text: str(value.footer_text),
+    footer_links: readFooterLinks(value.footer_links),
   };
+}
+
+/** `value` when it is one of `allowed`, else `fallback`. */
+function oneOf<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  return typeof value === 'string' && (allowed as readonly string[]).includes(value)
+    ? (value as T)
+    : fallback;
+}
+
+/**
+ * Footer links as stored, re-validated on the way out: only well-formed
+ * `{ label, url }` pairs with an `http(s)` URL survive, capped at the same
+ * count the route accepts, so a hand-edited row can never put a `javascript:`
+ * link on the sign-in page.
+ */
+function readFooterLinks(value: unknown): BrandingLink[] {
+  if (!Array.isArray(value)) return [];
+  const links: BrandingLink[] = [];
+  for (const entry of value) {
+    const record = asRecord(entry);
+    const label = str(record.label);
+    const url = str(record.url);
+    if (label === null || url === null || !/^https?:\/\//i.test(url)) continue;
+    links.push({ label, url });
+    if (links.length >= MAX_BRANDING_FOOTER_LINKS) break;
+  }
+  return links;
 }
 
 /**

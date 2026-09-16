@@ -4,6 +4,7 @@ import { useCreateThread } from '../../hooks/useThreads';
 import { useToast } from '../../stores/toast';
 import { Button } from '../ui/Button';
 import { Dialog } from '../ui/Dialog';
+import { Icon } from '../ui/Icon';
 import { LabeledInput, LabeledTextarea } from '../ui/Input';
 
 export interface StartThreadDialogProps {
@@ -68,6 +69,7 @@ export function StartThreadDialog({
             disabled={body.trim().length === 0}
             onClick={submit}
           >
+            <Icon name="send" className="h-4 w-4" />
             Send
           </Button>
         </>
@@ -77,6 +79,8 @@ export function StartThreadDialog({
         <LabeledInput
           label="Subject"
           required
+          hint="A short line describing what you need; it heads the conversation."
+          placeholder={defaultSubject || 'New conversation'}
           value={subject}
           onChange={(event) => setSubject(event.target.value)}
         />
@@ -84,6 +88,8 @@ export function StartThreadDialog({
           label="Message"
           required
           rows={6}
+          hint="Include the API and environment you are asking about where it helps."
+          placeholder="Write your message…"
           value={body}
           onChange={(event) => setBody(event.target.value)}
         />

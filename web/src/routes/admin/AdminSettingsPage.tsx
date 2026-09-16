@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ChangeEvent, type ReactElement } from 'react';
+import { useCallback, useEffect, useState, type ReactElement, type ReactNode } from 'react';
 import {
   EMAIL_TEMPLATE_KEYS,
   EMAIL_TEMPLATE_LABELS,
@@ -6,10 +6,10 @@ import {
   ROLE_LABELS,
   type AdminSettingsResponse,
   type CaptchaProvider,
+  type EdgeHealthStatus,
   type EdgeNamespaceRouting,
   type EmailTemplateKey,
   type RegistrableRole,
-  type ThemePreference,
 } from '@ferrum-nexus/shared';
 import {
   useAdminSettings,
@@ -27,9 +27,10 @@ import { useAuth } from '../../stores/auth';
 import { useToast } from '../../stores/toast';
 import { CaptchaWidget } from '../../components/auth/CaptchaWidget';
 import { RoleGuard } from '../../components/layout/RoleGuard';
+import { Badge, type BadgeTone } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
 import { Card, CardBody, CardHeader, PageHeader } from '../../components/ui/Card';
-import { Icon } from '../../components/ui/Icon';
+import { Icon, type IconName } from '../../components/ui/Icon';
 import {
   Checkbox,
   Field,
@@ -42,12 +43,7 @@ import { LabeledSelect } from '../../components/ui/Select';
 import { LoadingPanel } from '../../components/ui/Spinner';
 import { Tabs } from '../../components/ui/Tabs';
 import { FormNotice } from '../../components/auth/AuthShell';
-
-const THEME_OPTIONS: ReadonlyArray<{ value: ThemePreference; label: string }> = [
-  { value: 'dark', label: 'Dark' },
-  { value: 'light', label: 'Light' },
-  { value: 'system', label: 'Follow the visitor’s system setting' },
-];
+import { BrandingTab } from './settings/BrandingTab';
 
 /** The provider and site key an in-progress activation self-test belongs to. */
 interface PendingChallenge {
@@ -85,8 +81,14 @@ const CAPTCHA_PROVIDERS: ReadonlyArray<{ value: CaptchaProvider; label: string }
  */
 function SuperAdminOnlyNotice({ what }: { what: string }): ReactElement {
   return (
-    <p className="flex items-start gap-2 rounded-md border border-border bg-inset px-3 py-2.5 text-sm text-fg-muted">
-      <Icon name="shield" className="mt-0.5 h-4 w-4 shrink-0 text-fg-subtle" />
+    // Shaped like `FormNotice`'s info tone, but with the shield the rest of the
+    // portal uses for privilege — the primitive fixes one icon per tone, and
+    // `role="status"` keeps it out of the way of the cards' single `alert`.
+    <p
+      role="status"
+      className="flex items-start gap-2.5 rounded-md border border-info/30 bg-info-soft p-3 text-sm text-fg"
+    >
+      <Icon name="shield" className="mt-0.5 h-4 w-4 shrink-0 text-info" />
       <span>
         Only a <strong className="font-medium text-fg">super admin</strong> can change {what}. Ask
         one to make the change — these settings can be used to take over accounts, so they sit above
@@ -96,145 +98,12 @@ function SuperAdminOnlyNotice({ what }: { what: string }): ReactElement {
   );
 }
 
-function BrandingTab({ settings }: { settings: AdminSettingsResponse }): ReactElement {
-  const update = useUpdateAdminSettings();
-  const toast = useToast();
-  const [portalName, setPortalName] = useState(settings.branding.portal_name);
-  const [tagline, setTagline] = useState(settings.branding.tagline ?? '');
-  const [supportEmail, setSupportEmail] = useState(settings.branding.support_email ?? '');
-  const [primaryColor, setPrimaryColor] = useState(settings.branding.primary_color);
-  const [accentColor, setAccentColor] = useState(settings.branding.accent_color);
-  const [defaultTheme, setDefaultTheme] = useState<ThemePreference>(
-    settings.branding.default_theme,
-  );
-  const [logo, setLogo] = useState<string | null>(settings.branding.logo_data_url);
-  const [logoError, setLogoError] = useState<string | null>(null);
-
-  const onLogo = (event: ChangeEvent<HTMLInputElement>): void => {
-    const file = event.target.files?.[0];
-    event.target.value = '';
-    if (!file) return;
-    if (file.size > 256 * 1024) {
-      setLogoError('Logos must be smaller than 256 KB.');
-      return;
-    }
-    setLogoError(null);
-    const reader = new FileReader();
-    reader.addEventListener('load', () => {
-      if (typeof reader.result === 'string') setLogo(reader.result);
-    });
-    reader.readAsDataURL(file);
-  };
-
+/** The row a settings card ends with: its save control, or why there isn't one. */
+function CardFooter({ children }: { children: ReactNode }): ReactElement {
   return (
-    <Card>
-      <CardHeader title="Branding" description="Shown on the sign-in page, the shell and emails." />
-      <CardBody className="grid gap-5 md:grid-cols-2">
-        <LabeledInput
-          label="Portal name"
-          value={portalName}
-          onChange={(event) => setPortalName(event.target.value)}
-        />
-        <LabeledInput
-          label="Support email"
-          type="email"
-          value={supportEmail}
-          onChange={(event) => setSupportEmail(event.target.value)}
-        />
-        <LabeledTextarea
-          className="md:col-span-2"
-          label="Tagline"
-          rows={2}
-          value={tagline}
-          onChange={(event) => setTagline(event.target.value)}
-        />
-        <Field label="Primary colour" htmlFor="primary-color" hint="Used for the accent tokens.">
-          <div className="flex items-center gap-2">
-            <Input
-              id="primary-color"
-              type="color"
-              className="h-9 w-16 p-1"
-              value={primaryColor}
-              onChange={(event) => setPrimaryColor(event.target.value)}
-            />
-            <Input
-              aria-label="Primary colour hex value"
-              value={primaryColor}
-              onChange={(event) => setPrimaryColor(event.target.value)}
-            />
-          </div>
-        </Field>
-        <Field label="Accent colour" htmlFor="accent-color">
-          <div className="flex items-center gap-2">
-            <Input
-              id="accent-color"
-              type="color"
-              className="h-9 w-16 p-1"
-              value={accentColor}
-              onChange={(event) => setAccentColor(event.target.value)}
-            />
-            <Input
-              aria-label="Accent colour hex value"
-              value={accentColor}
-              onChange={(event) => setAccentColor(event.target.value)}
-            />
-          </div>
-        </Field>
-        <LabeledSelect<ThemePreference>
-          label="Default theme"
-          value={defaultTheme}
-          onValueChange={setDefaultTheme}
-          options={THEME_OPTIONS.map((option) => ({ ...option }))}
-        />
-        <Field
-          label="Logo"
-          htmlFor="logo-upload"
-          error={logoError}
-          hint="PNG or SVG, under 256 KB."
-        >
-          <div className="flex items-center gap-3">
-            {logo ? (
-              <img src={logo} alt="Current logo" className="h-10 w-10 rounded-md object-contain" />
-            ) : (
-              <span className="flex h-10 w-10 items-center justify-center rounded-md bg-accent text-sm font-bold text-accent-fg">
-                N
-              </span>
-            )}
-            <Input id="logo-upload" type="file" accept="image/*" onChange={onLogo} />
-            {logo ? (
-              <Button variant="ghost" size="sm" onClick={() => setLogo(null)}>
-                Remove
-              </Button>
-            ) : null}
-          </div>
-        </Field>
-
-        <div className="md:col-span-2">
-          <Button
-            variant="primary"
-            loading={update.isPending}
-            onClick={() =>
-              update.mutate(
-                {
-                  branding: {
-                    portal_name: portalName.trim(),
-                    tagline: tagline.trim() || null,
-                    support_email: supportEmail.trim() || null,
-                    primary_color: primaryColor,
-                    accent_color: accentColor,
-                    default_theme: defaultTheme,
-                    logo_data_url: logo,
-                  },
-                },
-                { onSuccess: () => toast.success('Branding saved') },
-              )
-            }
-          >
-            Save branding
-          </Button>
-        </div>
-      </CardBody>
-    </Card>
+    <div className="flex flex-wrap items-center gap-3 border-t border-border bg-inset/40 px-5 py-3">
+      {children}
+    </div>
   );
 }
 
@@ -288,16 +157,38 @@ function GatewayReconciliationCard(): ReactElement | null {
   return (
     <Card>
       <CardHeader
+        icon="alert"
         title="Gateway references need repair"
         description="The gateway no longer holds objects this portal created — what a retargeted or rebuilt gateway looks like."
+        actions={
+          <Badge tone="danger" dot>
+            Orphaned
+          </Badge>
+        }
       />
       <CardBody className="flex flex-col gap-4">
-        <p className="flex items-start gap-2 rounded-md border border-border bg-inset px-3 py-2.5 text-sm text-fg-muted">
-          <Icon name="alert" className="mt-0.5 h-4 w-4 shrink-0 text-fg-subtle" />
-          <span>{summary}</span>
-        </p>
+        <FormNotice tone="warning">{summary}</FormNotice>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <ReferenceCount icon="users" label="Accounts with no consumer" value={consumers} />
+          <ReferenceCount icon="spec" label="APIs pointing at a dead proxy" value={apis} />
+        </div>
+        <p className="text-sm leading-relaxed text-fg-muted">{REPAIR_EXPLANATION}</p>
+      </CardBody>
+      <CardFooter>
         {canSuperAdmin ? (
-          <div className="flex flex-wrap gap-2">
+          <>
+            <Button
+              variant="primary"
+              loading={repair.isPending}
+              onClick={() =>
+                repair.mutate(
+                  { all: true },
+                  { onSuccess: () => toast.success('Gateway references repaired') },
+                )
+              }
+            >
+              Repair all
+            </Button>
             <Button
               variant="secondary"
               loading={reconcile.isPending}
@@ -312,27 +203,66 @@ function GatewayReconciliationCard(): ReactElement | null {
                 })
               }
             >
+              <Icon name="refresh" />
               Re-check now
             </Button>
-            <Button
-              variant="primary"
-              loading={repair.isPending}
-              onClick={() =>
-                repair.mutate(
-                  { all: true },
-                  { onSuccess: () => toast.success('Gateway references repaired') },
-                )
-              }
-            >
-              Repair all
-            </Button>
-          </div>
+          </>
         ) : (
           <SuperAdminOnlyNotice what="the portal’s gateway references" />
         )}
-        <p className="text-sm text-fg-muted">{REPAIR_EXPLANATION}</p>
-      </CardBody>
+      </CardFooter>
     </Card>
+  );
+}
+
+/**
+ * The gateway's reachability, as a pill.
+ *
+ * `StatusPill` covers the portal's own `HealthStatus`; Edge adds `not_ready`,
+ * which it has no descriptor for, so the four states are mapped here.
+ */
+const EDGE_STATUS: Readonly<Record<EdgeHealthStatus, { label: string; tone: BadgeTone }>> = {
+  ok: { label: 'Reachable', tone: 'success' },
+  degraded: { label: 'Degraded', tone: 'warning' },
+  not_ready: { label: 'Not ready', tone: 'warning' },
+  down: { label: 'Unreachable', tone: 'danger' },
+};
+
+function EdgeStatusBadge({ status }: { status: EdgeHealthStatus }): ReactElement {
+  // A status this build does not know (a newer server, or a stubbed payload)
+  // still renders rather than taking the whole tab down.
+  const descriptor = EDGE_STATUS[status] ?? { label: String(status), tone: 'neutral' as const };
+  return (
+    <Badge tone={descriptor.tone} dot>
+      {descriptor.label}
+    </Badge>
+  );
+}
+
+/** One orphan tally from the last reconciliation pass. */
+function ReferenceCount({
+  icon,
+  label,
+  value,
+}: {
+  icon: IconName;
+  label: string;
+  value: number;
+}): ReactElement {
+  return (
+    <div className="flex items-center gap-3 rounded-md border border-border bg-surface px-4 py-3">
+      <span
+        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md ${
+          value > 0 ? 'bg-danger-soft text-danger' : 'bg-neutral-soft text-fg-muted'
+        }`}
+      >
+        <Icon name={icon} className="h-4 w-4" />
+      </span>
+      <span className="min-w-0">
+        <span className="block text-xl font-semibold text-fg tabular-nums">{value}</span>
+        <span className="block truncate text-xs text-fg-subtle">{label}</span>
+      </span>
+    </div>
   );
 }
 
@@ -348,51 +278,65 @@ function GatewayTab({ settings }: { settings: AdminSettingsResponse }): ReactEle
   const toast = useToast();
   const { canSuperAdmin } = useAuth();
   const [publicUrl, setPublicUrl] = useState(settings.gateway.public_url ?? '');
-  const routing = useEdgeHealth().data?.namespace_routing;
+  const health = useEdgeHealth().data;
+  const routing = health?.namespace_routing;
 
   return (
     <div className="flex flex-col gap-5">
       <GatewayReconciliationCard />
       <Card>
         <CardHeader
+          icon="globe"
           title="Gateway"
           description="The public address of the gateway's proxy listener, shown to clients in the catalog."
+          actions={
+            health ? (
+              <span className="flex flex-wrap items-center gap-1.5">
+                <Badge mono>{health.namespace}</Badge>
+                <EdgeStatusBadge status={health.status} />
+              </span>
+            ) : null
+          }
         />
         <CardBody className="flex flex-col gap-5">
           {update.error ? <FormNotice>{update.error.message}</FormNotice> : null}
           {routing?.unserved ? <NamespaceUnservedNotice routing={routing} /> : null}
-          <LabeledInput
-            label="Public gateway URL"
-            placeholder="https://api.example.com"
-            value={publicUrl}
-            onChange={(event) => setPublicUrl(event.target.value)}
-            disabled={!canSuperAdmin}
-            hint="Scheme, host and port only — no path. This is where clients send API traffic, which is not this portal’s own address. Leave it blank to fall back to FERRUM_GATEWAY_PUBLIC_URL."
-          />
-          <p className="text-sm text-fg-muted">
-            Each published API is called at this origin followed by its{' '}
-            <code className="font-mono text-xs">/&lt;namespace&gt;/&lt;slug&gt;</code> listen path.
-            While it is unset the catalog can only show the listen path.
-          </p>
+          <div className="grid gap-5 md:grid-cols-2">
+            <LabeledInput
+              label="Public gateway URL"
+              placeholder="https://api.example.com"
+              value={publicUrl}
+              onChange={(event) => setPublicUrl(event.target.value)}
+              disabled={!canSuperAdmin}
+              hint="Scheme, host and port only — no path. This is where clients send API traffic, which is not this portal’s own address. Leave it blank to fall back to FERRUM_GATEWAY_PUBLIC_URL."
+            />
+            <p className="text-sm leading-relaxed text-fg-muted">
+              Each published API is called at this origin followed by its{' '}
+              <code className="rounded-xs bg-neutral-soft px-1.5 py-0.5 font-mono text-xs">
+                /&lt;namespace&gt;/&lt;slug&gt;
+              </code>{' '}
+              listen path. While it is unset the catalog can only show the listen path.
+            </p>
+          </div>
+        </CardBody>
+        <CardFooter>
           {canSuperAdmin ? (
-            <div>
-              <Button
-                variant="primary"
-                loading={update.isPending}
-                onClick={() =>
-                  update.mutate(
-                    { gateway: { public_url: publicUrl.trim() || null } },
-                    { onSuccess: () => toast.success('Gateway address saved') },
-                  )
-                }
-              >
-                Save gateway
-              </Button>
-            </div>
+            <Button
+              variant="primary"
+              loading={update.isPending}
+              onClick={() =>
+                update.mutate(
+                  { gateway: { public_url: publicUrl.trim() || null } },
+                  { onSuccess: () => toast.success('Gateway address saved') },
+                )
+              }
+            >
+              Save gateway
+            </Button>
           ) : (
             <SuperAdminOnlyNotice what="the public gateway URL" />
           )}
-        </CardBody>
+        </CardFooter>
       </Card>
     </div>
   );
@@ -449,23 +393,34 @@ export function RegistrationCard({ settings }: { settings: AdminSettingsResponse
 
   return (
     <Card>
-      <CardHeader title="Registration" description="Who may create an account, and how." />
-      <CardBody className="flex flex-col gap-4">
-        <Checkbox
-          label="Allow self-service registration"
-          checked={openRegistration}
-          onChange={(event) => setOpenRegistration(event.target.checked)}
-        />
-        <Checkbox
-          label="Require email verification before sign-in"
-          checked={requireVerification}
-          onChange={(event) => setRequireVerification(event.target.checked)}
-        />
+      <CardHeader
+        icon="users"
+        title="Registration"
+        description="Who may create an account, and how."
+      />
+      <CardBody className="grid gap-5 md:grid-cols-2">
+        <FieldGroup
+          label="Sign-up"
+          hint="Applied by the server on every registration, and published to the sign-up form."
+        >
+          <div className="flex flex-col gap-2 pt-1">
+            <Checkbox
+              label="Allow self-service registration"
+              checked={openRegistration}
+              onChange={(event) => setOpenRegistration(event.target.checked)}
+            />
+            <Checkbox
+              label="Require email verification before sign-in"
+              checked={requireVerification}
+              onChange={(event) => setRequireVerification(event.target.checked)}
+            />
+          </div>
+        </FieldGroup>
         <FieldGroup
           label="Self-selectable roles"
           hint="Which roles the sign-up form offers. Registration with any other role is refused with a 403."
         >
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-2 pt-1">
             {REGISTRABLE_ROLES.map((role) => (
               <Checkbox
                 key={role}
@@ -477,32 +432,34 @@ export function RegistrationCard({ settings }: { settings: AdminSettingsResponse
           </div>
         </FieldGroup>
         {allowedRoles.length === 0 ? (
-          <p className="text-sm text-danger" role="alert">
-            With no self-selectable role, self-service registration cannot complete at all. Turn off
-            open registration instead if that is what you mean.
-          </p>
+          <div className="md:col-span-2">
+            <FormNotice tone="danger">
+              With no self-selectable role, self-service registration cannot complete at all. Turn
+              off open registration instead if that is what you mean.
+            </FormNotice>
+          </div>
         ) : null}
-        <div>
-          <Button
-            variant="primary"
-            loading={update.isPending}
-            onClick={() =>
-              update.mutate(
-                {
-                  registration: {
-                    open_registration: openRegistration,
-                    require_email_verification: requireVerification,
-                    allowed_roles: allowedRoles,
-                  },
-                },
-                { onSuccess: () => toast.success('Registration settings saved') },
-              )
-            }
-          >
-            Save registration settings
-          </Button>
-        </div>
       </CardBody>
+      <CardFooter>
+        <Button
+          variant="primary"
+          loading={update.isPending}
+          onClick={() =>
+            update.mutate(
+              {
+                registration: {
+                  open_registration: openRegistration,
+                  require_email_verification: requireVerification,
+                  allowed_roles: allowedRoles,
+                },
+              },
+              { onSuccess: () => toast.success('Registration settings saved') },
+            )
+          }
+        >
+          Save registration settings
+        </Button>
+      </CardFooter>
     </Card>
   );
 }
@@ -603,8 +560,18 @@ export function CaptchaCard({ settings }: { settings: AdminSettingsResponse }): 
   return (
     <Card>
       <CardHeader
+        icon="shield"
         title="CAPTCHA"
         description="Applied to sign-in and registration. The secret key is stored AES-256-GCM encrypted and never returned."
+        actions={
+          settings.captcha.enabled ? (
+            <Badge tone="success" dot>
+              Enabled
+            </Badge>
+          ) : (
+            <Badge dot>Off</Badge>
+          )
+        }
       />
       <CardBody className="grid gap-5 md:grid-cols-2">
         {settings.captcha.enforcement === 'disabled' ? (
@@ -647,19 +614,23 @@ export function CaptchaCard({ settings }: { settings: AdminSettingsResponse }): 
           hint="Leave blank to keep the stored value."
         />
         {captchaIncomplete ? (
-          <p className="text-sm text-danger md:col-span-2" role="alert">
-            Choose a provider and enter a site key and secret key before enabling CAPTCHA.
-          </p>
+          <div className="md:col-span-2">
+            <FormNotice tone="danger">
+              Choose a provider and enter a site key and secret key before enabling CAPTCHA.
+            </FormNotice>
+          </div>
         ) : null}
         {!captchaIncomplete && providerChangeNeedsSecret ? (
-          <p className="text-sm text-danger md:col-span-2" role="alert">
-            Enter the secret key for the new provider. The stored one was issued by the previous
-            provider and is never sent to another vendor.
-          </p>
+          <div className="md:col-span-2">
+            <FormNotice tone="danger">
+              Enter the secret key for the new provider. The stored one was issued by the previous
+              provider and is never sent to another vendor.
+            </FormNotice>
+          </div>
         ) : null}
         {canSelfTest ? (
-          <div className="flex flex-col gap-3 md:col-span-2">
-            <p className="text-sm text-fg-muted">
+          <div className="flex flex-col gap-3 rounded-md border border-border bg-inset p-4 md:col-span-2">
+            <p className="text-sm leading-relaxed text-fg-muted">
               This change makes every sign-in require a challenge, including yours. Solve one with
               the configuration above and the portal will save it only if the vendor accepts the
               answer.
@@ -676,57 +647,58 @@ export function CaptchaCard({ settings }: { settings: AdminSettingsResponse }): 
                 <Button onClick={startSelfTest}>Test this CAPTCHA configuration</Button>
               </div>
             ) : (
-              <p className="text-sm text-success" role="status">
+              <p className="flex items-center gap-1.5 text-sm text-success" role="status">
+                <Icon name="check" className="h-4 w-4" />
                 Challenge solved. Save to apply this configuration.
               </p>
             )}
           </div>
         ) : null}
-        <div className="md:col-span-2">
-          {canSuperAdmin ? (
-            <Button
-              variant="primary"
-              loading={update.isPending}
-              disabled={
-                captchaIncomplete ||
-                providerChangeNeedsSecret ||
-                (selfTestRequired && provenToken === null)
-              }
-              onClick={() =>
-                update.mutate(
-                  {
-                    captcha: {
-                      enabled,
-                      provider,
-                      site_key: trimmedSiteKey || null,
-                      // Trimmed, so a field holding only whitespace keeps the
-                      // stored secret instead of being sent as an empty one,
-                      // which the server reads as "enabled with no usable
-                      // secret" and refuses.
-                      ...(trimmedSecretKey ? { secret_key: trimmedSecretKey } : {}),
-                      ...(provenToken ? { captcha_token: provenToken } : {}),
-                    },
-                  },
-                  {
-                    onSuccess: () => {
-                      setSecretKey('');
-                      forgetChallenge();
-                      toast.success('CAPTCHA settings saved');
-                    },
-                    // The self-test runs before anything is written, so a save
-                    // that failed afterwards has spent this token either way.
-                    onError: forgetChallenge,
-                  },
-                )
-              }
-            >
-              Save CAPTCHA settings
-            </Button>
-          ) : (
-            <SuperAdminOnlyNotice what="the CAPTCHA settings" />
-          )}
-        </div>
       </CardBody>
+      <CardFooter>
+        {canSuperAdmin ? (
+          <Button
+            variant="primary"
+            loading={update.isPending}
+            disabled={
+              captchaIncomplete ||
+              providerChangeNeedsSecret ||
+              (selfTestRequired && provenToken === null)
+            }
+            onClick={() =>
+              update.mutate(
+                {
+                  captcha: {
+                    enabled,
+                    provider,
+                    site_key: trimmedSiteKey || null,
+                    // Trimmed, so a field holding only whitespace keeps the
+                    // stored secret instead of being sent as an empty one,
+                    // which the server reads as "enabled with no usable
+                    // secret" and refuses.
+                    ...(trimmedSecretKey ? { secret_key: trimmedSecretKey } : {}),
+                    ...(provenToken ? { captcha_token: provenToken } : {}),
+                  },
+                },
+                {
+                  onSuccess: () => {
+                    setSecretKey('');
+                    forgetChallenge();
+                    toast.success('CAPTCHA settings saved');
+                  },
+                  // The self-test runs before anything is written, so a save
+                  // that failed afterwards has spent this token either way.
+                  onError: forgetChallenge,
+                },
+              )
+            }
+          >
+            Save CAPTCHA settings
+          </Button>
+        ) : (
+          <SuperAdminOnlyNotice what="the CAPTCHA settings" />
+        )}
+      </CardFooter>
     </Card>
   );
 }
@@ -756,61 +728,77 @@ function EmailTab({ settings }: { settings: AdminSettingsResponse }): ReactEleme
   const [testTo, setTestTo] = useState('');
 
   return (
-    <Card>
-      <CardHeader
-        title="Email delivery"
-        description="Transactional mail is queued in the outbox and sent by the worker; the password is stored encrypted."
-      />
-      <CardBody className="grid gap-5 md:grid-cols-2">
-        <LabeledInput
-          label="SMTP host"
-          value={host}
-          disabled={!canSuperAdmin}
-          onChange={(e) => setHost(e.target.value)}
+    <div className="flex flex-col gap-5">
+      <Card>
+        <CardHeader
+          icon="mail"
+          title="Email delivery"
+          description="Transactional mail is queued in the outbox and sent by the worker; the password is stored encrypted."
+          actions={
+            settings.smtp.host ? (
+              <Badge tone="success" dot>
+                Relay configured
+              </Badge>
+            ) : (
+              <Badge tone="warning" dot>
+                No relay
+              </Badge>
+            )
+          }
         />
-        <LabeledInput
-          label="Port"
-          type="number"
-          min={1}
-          max={65535}
-          value={port}
-          disabled={!canSuperAdmin}
-          onChange={(event) => setPort(event.target.value)}
-        />
-        <LabeledInput
-          label="Username"
-          autoComplete="off"
-          value={username}
-          disabled={!canSuperAdmin}
-          onChange={(event) => setUsername(event.target.value)}
-        />
-        <LabeledInput
-          label="Password"
-          type="password"
-          autoComplete="off"
-          placeholder={settings.smtp.password_set ? '•••••••• (stored)' : 'Not set'}
-          value={password}
-          disabled={!canSuperAdmin}
-          onChange={(event) => setPassword(event.target.value)}
-          hint="Leave blank to keep the stored value."
-        />
-        <LabeledInput
-          label="From address"
-          type="email"
-          value={fromAddress}
-          disabled={!canSuperAdmin}
-          onChange={(event) => setFromAddress(event.target.value)}
-        />
-        <div className="flex items-end">
-          <Checkbox
-            label="Use TLS (implicit)"
-            checked={secure}
+        <CardBody className="grid gap-5 md:grid-cols-2">
+          <LabeledInput
+            label="SMTP host"
+            placeholder="smtp.example.com"
+            value={host}
             disabled={!canSuperAdmin}
-            onChange={(event) => setSecure(event.target.checked)}
+            onChange={(e) => setHost(e.target.value)}
           />
-        </div>
-
-        <div className="md:col-span-2">
+          <LabeledInput
+            label="Port"
+            type="number"
+            min={1}
+            max={65535}
+            value={port}
+            disabled={!canSuperAdmin}
+            onChange={(event) => setPort(event.target.value)}
+          />
+          <LabeledInput
+            label="Username"
+            autoComplete="off"
+            value={username}
+            disabled={!canSuperAdmin}
+            onChange={(event) => setUsername(event.target.value)}
+          />
+          <LabeledInput
+            label="Password"
+            type="password"
+            autoComplete="off"
+            placeholder={settings.smtp.password_set ? '•••••••• (stored)' : 'Not set'}
+            value={password}
+            disabled={!canSuperAdmin}
+            onChange={(event) => setPassword(event.target.value)}
+            hint="Leave blank to keep the stored value."
+          />
+          <LabeledInput
+            label="From address"
+            type="email"
+            placeholder="Portal <no-reply@example.com>"
+            value={fromAddress}
+            disabled={!canSuperAdmin}
+            onChange={(event) => setFromAddress(event.target.value)}
+          />
+          <div className="flex items-center pt-1 md:pt-7">
+            <Checkbox
+              label="Use TLS (implicit)"
+              description="Port 465 style. Leave off for STARTTLS on 587."
+              checked={secure}
+              disabled={!canSuperAdmin}
+              onChange={(event) => setSecure(event.target.checked)}
+            />
+          </div>
+        </CardBody>
+        <CardFooter>
           {canSuperAdmin ? (
             <Button
               variant="primary"
@@ -841,35 +829,43 @@ function EmailTab({ settings }: { settings: AdminSettingsResponse }): ReactEleme
           ) : (
             <SuperAdminOnlyNotice what="the SMTP settings" />
           )}
-        </div>
+        </CardFooter>
+      </Card>
 
-        <div className="flex flex-col gap-2 border-t border-border pt-4 md:col-span-2">
+      <Card>
+        <CardHeader
+          icon="send"
+          title="Delivery test"
+          description="Enqueues one message through the settings above. Changes nothing, so any administrator may run it."
+        />
+        <CardBody>
           <LabeledInput
+            className="max-w-md"
             label="Send a test email to"
             type="email"
             placeholder="Defaults to your own address"
             value={testTo}
             onChange={(event) => setTestTo(event.target.value)}
           />
-          <div>
-            <Button
-              variant="secondary"
-              loading={smtpTest.isPending}
-              onClick={() =>
-                smtpTest.mutate(testTo.trim() ? { to_email: testTo.trim() } : {}, {
-                  onSuccess: (response) => {
-                    if (response.ok) toast.success('Test email sent');
-                    else toast.error('Test email failed', response.error ?? undefined);
-                  },
-                })
-              }
-            >
-              Send test email
-            </Button>
-          </div>
-        </div>
-      </CardBody>
-    </Card>
+        </CardBody>
+        <CardFooter>
+          <Button
+            variant="secondary"
+            loading={smtpTest.isPending}
+            onClick={() =>
+              smtpTest.mutate(testTo.trim() ? { to_email: testTo.trim() } : {}, {
+                onSuccess: (response) => {
+                  if (response.ok) toast.success('Test email sent');
+                  else toast.error('Test email failed', response.error ?? undefined);
+                },
+              })
+            }
+          >
+            Send test email
+          </Button>
+        </CardFooter>
+      </Card>
+    </div>
   );
 }
 
@@ -894,11 +890,13 @@ function TemplatesTab(): ReactElement {
   return (
     <Card>
       <CardHeader
+        icon="spec"
         title="Email templates"
         description="Placeholders are interpolated by the email service when the message is enqueued."
       />
       <CardBody className="flex flex-col gap-5">
         <LabeledSelect<EmailTemplateKey>
+          className="max-w-md"
           label="Template"
           value={key}
           onValueChange={setKey}
@@ -913,17 +911,14 @@ function TemplatesTab(): ReactElement {
         ) : (
           <>
             {query.data && query.data.available_variables.length > 0 ? (
-              <p className="flex flex-wrap items-center gap-1.5 text-sm text-fg-muted">
-                Available variables:
+              <div className="flex flex-wrap items-center gap-1.5 rounded-md border border-border bg-inset px-3 py-2.5">
+                <span className="text-xs font-medium text-fg-subtle">Available variables</span>
                 {query.data.available_variables.map((variable) => (
-                  <code
-                    key={variable}
-                    className="rounded-xs bg-neutral-soft px-1.5 py-0.5 font-mono text-xs"
-                  >
+                  <Badge key={variable} mono>
                     {`{{${variable}}}`}
-                  </code>
+                  </Badge>
                 ))}
-              </p>
+              </div>
             ) : null}
 
             <LabeledInput
@@ -945,23 +940,24 @@ function TemplatesTab(): ReactElement {
               value={bodyText}
               onChange={(event) => setBodyText(event.target.value)}
             />
-            <div>
-              <Button
-                variant="primary"
-                loading={update.isPending}
-                onClick={() =>
-                  update.mutate(
-                    { key, body: { subject, body_html: bodyHtml, body_text: bodyText } },
-                    { onSuccess: () => toast.success('Template saved') },
-                  )
-                }
-              >
-                Save template
-              </Button>
-            </div>
           </>
         )}
       </CardBody>
+      <CardFooter>
+        <Button
+          variant="primary"
+          loading={update.isPending}
+          disabled={query.isLoading}
+          onClick={() =>
+            update.mutate(
+              { key, body: { subject, body_html: bodyHtml, body_text: bodyText } },
+              { onSuccess: () => toast.success('Template saved') },
+            )
+          }
+        >
+          Save template
+        </Button>
+      </CardFooter>
     </Card>
   );
 }

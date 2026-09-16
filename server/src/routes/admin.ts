@@ -24,6 +24,9 @@ import { z } from 'zod';
 
 import {
   EMAIL_TEMPLATE_KEYS,
+  MAX_BRANDING_FOOTER_LINKS,
+  MAX_BRANDING_FOOTER_TEXT_LENGTH,
+  MAX_BRANDING_LINK_LABEL_LENGTH,
   ROLE_ORDER,
   type AdminSettingsResponse,
   type GetEmailTemplateResponse,
@@ -88,6 +91,27 @@ const updateSettingsBody = z.object({
       default_theme: z.enum(['dark', 'light', 'system']).optional(),
       tagline: z.string().trim().max(280).nullish(),
       support_email: z.string().trim().email().max(320).nullish(),
+      radius: z.enum(['none', 'sm', 'md', 'lg']).optional(),
+      font_preset: z.enum(['system', 'inter', 'manrope']).optional(),
+      sidebar_style: z.enum(['surface', 'contrast']).optional(),
+      login_layout: z.enum(['split', 'centered']).optional(),
+      footer_text: z.string().trim().max(MAX_BRANDING_FOOTER_TEXT_LENGTH).nullish(),
+      // Rendered as anchors on the unauthenticated sign-in page, so the scheme
+      // is pinned to http(s): a stored `javascript:` URL would be an XSS.
+      footer_links: z
+        .array(
+          z.object({
+            label: z.string().trim().min(1).max(MAX_BRANDING_LINK_LABEL_LENGTH),
+            url: z
+              .string()
+              .trim()
+              .max(2048)
+              .url()
+              .refine((url) => /^https?:\/\//i.test(url), 'must be an http(s) URL'),
+          }),
+        )
+        .max(MAX_BRANDING_FOOTER_LINKS)
+        .optional(),
     })
     .optional(),
   captcha: z
