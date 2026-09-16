@@ -1,4 +1,15 @@
-# Ferrum Nexus
+<p align="center">
+  <img src="docs/ferrum_nexus.png" alt="Ferrum Nexus" width="300" />
+</p>
+
+<h1 align="center">Ferrum Nexus</h1>
+
+<p align="center">
+  <a href="https://github.com/ferrum-edge/ferrum-nexus/actions/workflows/ci.yml"><img src="https://github.com/ferrum-edge/ferrum-nexus/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
+  <a href="https://github.com/ferrum-edge/ferrum-nexus/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue" alt="License" /></a>
+  <img src="https://img.shields.io/badge/node-22.14%2B-brightgreen" alt="Node.js 22.14+" />
+  <img src="https://img.shields.io/badge/TypeScript-strict-blue" alt="TypeScript" />
+</p>
 
 Ferrum Nexus is the multi-user developer portal and workflow layer that sits in
 front of [Ferrum Edge](https://github.com/ferrum-edge/ferrum-edge). Ferrum Edge
@@ -33,6 +44,48 @@ and per-user authorization before forwarding to Edge.
   per namespace. Approvals add an `acl_group` (`nexus:api:<api_id>:approved`)
   to the consumer; revocations remove it. Each requestable API gets an
   `access_control` plugin that allows only that group.
+
+## Screenshots
+
+Captured from a portal seeded with demo data, running against a mock Ferrum
+Edge Admin API. Dark theme; a light theme ships too.
+
+<p align="center">
+  <img src="docs/screenshots/catalog.png" alt="API catalog showing every published API with its access status" width="100%" />
+</p>
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/api-docs.png" alt="Rendered OpenAPI documentation for a published API" />
+      <sub><b>Rendered OpenAPI docs</b> — every operation, parameter and schema, straight from the published spec, with the invoke URL beside it.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/access-requests.png" alt="A provider reviewing a pending access request" />
+      <sub><b>Access requests</b> — providers approve or deny with a note; an approval becomes an ACL grant on the gateway consumer.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/provider-overview.png" alt="Provider view of an API with usage read from the gateway" />
+      <sub><b>Provider overview</b> — listen path, upstream, rate limit and usage read straight from the gateway; Nexus stores no metrics of its own.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/credentials.png" alt="A client's gateway credentials" />
+      <sub><b>Credentials</b> — show-once API keys, basic auth and JWT secrets, rotated append-then-retire so callers get a switch-over window.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/messages.png" alt="A message thread between a client and a provider about an API" />
+      <sub><b>Messaging</b> — client ↔ provider threads tied to an API, platform threads with the admins, bell notifications and broadcasts.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/admin-settings.png" alt="Admin branding settings with a live preview" />
+      <sub><b>White-label branding</b> — portal name, logo, colours, typeface, radius and sign-in layout, previewed in both themes as you edit.</sub>
+    </td>
+  </tr>
+</table>
 
 ## Architecture
 
