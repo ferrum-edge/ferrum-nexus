@@ -632,8 +632,11 @@ retain their advertised `max-age`.
 
 The SPA derives its whole accent scale — hover and active shades, a readable
 foreground, tints and the focus ring — from `primary_color`, and its secondary
-(`info`) tokens from `accent_color`, per theme. `radius` (`none`|`sm`|`md`|`lg`)
-scales every corner, `font_preset` (`system`|`inter`|`manrope`) picks a bundled
+(`info`) tokens from `accent_color`, per theme. Informational badge text is
+adjusted independently from its tint to reach at least 4.5:1 contrast on the
+portal's surfaces, including light-theme API Key and GET method badges.
+`radius` (`none`|`sm`|`md`|`lg`) scales every corner, `font_preset`
+(`system`|`inter`|`manrope`) picks a bundled
 typeface, `sidebar_style` (`surface`|`contrast`) chooses between a rail that
 matches the page surfaces and an always-dark rail, and `login_layout`
 (`split`|`centered`) decides whether the sign-in page shows the branded hero

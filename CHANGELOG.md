@@ -210,6 +210,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Informational badges, including API Key and GET method labels, derive readable
+  text independently from their brand tint in both themes. Default and custom
+  colours reach at least 4.5:1 contrast on the portal's badge surfaces (#269).
 - Saved portal branding and the document title apply after an authenticated
   reload without a theme toggle. Session changes preserve and refresh the public
   branding query while still removing account-specific cached data (#271).

@@ -6,6 +6,7 @@ import {
   parseHex,
   readableForeground,
   toHex,
+  type Rgb,
 } from './color';
 
 describe('parseHex', () => {
@@ -59,5 +60,73 @@ describe('deriveInfoScale', () => {
     const cyan = parseHex('#22d3ee')!;
     expect(deriveInfoScale(cyan, 'dark')['--info']).toBe('#22d3ee');
     expect(deriveInfoScale(cyan, 'light')['--info']).not.toBe('#22d3ee');
+  });
+
+  it('keeps the brand tint independent of the adjusted text', () => {
+    const base = parseHex('#38bdf8')!;
+    const light = deriveInfoScale(base, 'light');
+    const dark = deriveInfoScale(base, 'dark');
+    expect(light['--info']).not.toBe('#38bdf8');
+    expect(light['--info-soft']).toBe('rgb(56 189 248 / 0.12)');
+    expect(dark['--info']).toBe('#38bdf8');
+    expect(dark['--info-soft']).toBe('rgb(56 189 248 / 0.16)');
+  });
+});
+
+/** Composite the emitted CSS tint in sRGB, as rendered over a solid surface. */
+function compositeTint(tint: string, surface: string): Rgb {
+  const match = /^rgb\((\d+) (\d+) (\d+) \/ ([\d.]+)\)$/.exec(tint);
+  if (!match) throw new Error(`Unexpected tint: ${tint}`);
+  const alpha = Number(match[4]);
+  const background = parseHex(surface)!;
+  return {
+    r: Number(match[1]) * alpha + background.r * (1 - alpha),
+    g: Number(match[2]) * alpha + background.g * (1 - alpha),
+    b: Number(match[3]) * alpha + background.b * (1 - alpha),
+  };
+}
+
+describe('informational badge contrast', () => {
+  // Surface, base, hover, elevated and inset tokens from globals.css.
+  const surfaces = {
+    light: ['#ffffff', '#f4f6f9', '#f8fafc', '#f1f4f8'],
+    dark: ['#12151b', '#0a0c10', '#161a21', '#181c24', '#0d1015'],
+  };
+
+  it('reproduces the default light badge failure before foreground derivation', () => {
+    const background = compositeTint('rgb(56 189 248 / 0.12)', '#ffffff');
+    expect(contrastRatio(parseHex('#38bdf8')!, background)).toBeLessThan(2);
+    expect(contrastRatio(parseHex('#000')!, parseHex('#fff')!)).toBe(21);
+  });
+
+  describe.each(['light', 'dark'] as const)('%s theme', (theme) => {
+    it.each([
+      '#38bdf8',
+      '#22d3ee',
+      '#2563eb',
+      '#f97316',
+      '#ffff00',
+      '#00ff00',
+      '#ff00ff',
+      '#dc2626',
+      '#777777',
+      '#ffffff',
+      '#000000',
+      '#101419',
+    ])('reaches 4.5:1 for %s on every badge surface', (hex) => {
+      const scale = deriveInfoScale(parseHex(hex)!, theme);
+      const foreground = parseHex(scale['--info'])!;
+      for (const surface of surfaces[theme]) {
+        const background = compositeTint(scale['--info-soft'], surface);
+        expect(contrastRatio(foreground, background)).toBeGreaterThanOrEqual(4.5);
+      }
+    });
+  });
+
+  it('also provides readable default CSS fallbacks before branding loads', () => {
+    for (const surface of surfaces.light) {
+      const background = compositeTint('rgb(56 189 248 / 0.12)', surface);
+      expect(contrastRatio(parseHex('#0369a1')!, background)).toBeGreaterThanOrEqual(4.5);
+    }
   });
 });
