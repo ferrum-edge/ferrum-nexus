@@ -566,11 +566,16 @@ export interface BrandingSettings {
   /** Logo encoded as a `data:` URL, or `null` when unset. */
   logo_data_url: string | null;
   /**
-   * Primary brand colour as a CSS hex string. The SPA derives the whole accent
-   * scale (hover, active, readable foreground, tints, focus ring) from it.
+   * Primary brand colour as opaque CSS hex (`#rgb` or `#rrggbb`). Writes are
+   * stored as lowercase `#rrggbb` so the native colour swatch, preview, and
+   * derived palette all see the same value. 4- and 8-digit (alpha) forms are
+   * rejected: the swatch and palette cannot render them.
    */
   primary_color: string;
-  /** Secondary emphasis colour (informational badges, hero glow). */
+  /**
+   * Secondary emphasis colour (informational badges, hero glow). Same hex
+   * contract as {@link BrandingSettings.primary_color}.
+   */
   accent_color: string;
   /** Theme applied before the user makes a choice. */
   default_theme: ThemePreference;

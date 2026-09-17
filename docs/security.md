@@ -217,11 +217,14 @@ they are built to answer nothing:
 
 ### Browser session cache
 
-The SPA clears its TanStack Query cache on explicit logout, a request's global
+The SPA clears its session-scoped TanStack Query cache on explicit logout, a request's global
 401 handler, and a session refresh that returns 401. A sign-in after sign-out or
 an identity change clears the cache again before accepting the principal, so
 cached credential metadata and other query results cannot cross accounts in
-the same tab. A transient refresh failure preserves an authenticated session.
+the same tab. Mutation results are also cleared. Only the exact public branding
+and CAPTCHA query keys survive; they are invalidated in place so their mounted
+observers keep receiving updates across authentication changes. A transient
+refresh failure preserves an authenticated session.
 
 ### Password storage
 

@@ -8,8 +8,10 @@
  * indigo icons before).
  */
 
+import { BRANDING_HEX_COLOR, normalizeBrandingHexColor } from '@ferrum-nexus/shared';
+
 /** Matches `#rgb` / `#rrggbb`, the only forms accepted from branding settings. */
-export const HEX_COLOR = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+export const HEX_COLOR = BRANDING_HEX_COLOR;
 
 export interface Rgb {
   r: number;
@@ -28,15 +30,9 @@ export interface Hsl {
 
 /** Parse a hex colour; `null` when it is not a 3- or 6-digit hex string. */
 export function parseHex(input: string): Rgb | null {
-  if (!HEX_COLOR.test(input)) return null;
-  let hex = input.slice(1);
-  if (hex.length === 3) {
-    hex = hex
-      .split('')
-      .map((c) => c + c)
-      .join('');
-  }
-  const value = Number.parseInt(hex, 16);
+  const hex = normalizeBrandingHexColor(input);
+  if (!hex) return null;
+  const value = Number.parseInt(hex.slice(1), 16);
   return { r: (value >> 16) & 0xff, g: (value >> 8) & 0xff, b: value & 0xff };
 }
 
@@ -95,13 +91,14 @@ export function shiftLightness(rgb: Rgb, delta: number): Rgb {
   return hslToRgb({ ...hsl, l: clamp01(hsl.l + delta) });
 }
 
+function linearChannel(value: number): number {
+  const c = value / 255;
+  return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+}
+
 /** WCAG relative luminance (0 = black, 1 = white). */
 export function relativeLuminance({ r, g, b }: Rgb): number {
-  const lin = (v: number): number => {
-    const c = v / 255;
-    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
-  };
-  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+  return 0.2126 * linearChannel(r) + 0.7152 * linearChannel(g) + 0.0722 * linearChannel(b);
 }
 
 /** WCAG contrast ratio between two colours (1–21). */
@@ -164,13 +161,62 @@ export interface InfoScale {
   '--info-soft': string;
 }
 
-export function deriveInfoScale(base: Rgb, theme: 'dark' | 'light'): InfoScale {
-  // A very light secondary colour (e.g. cyan) is unreadable as text on a white
-  // surface, so pull it down a little in the light theme.
-  const readable =
-    theme === 'light' && relativeLuminance(base) > 0.45 ? shiftLightness(base, -0.22) : base;
+/**
+ * Mix towards black (target 0) or white (target 1) in Oklab, retaining the
+ * brand hue while reducing chroma. Conversion matrices: Björn Ottosson's
+ * public-domain reference, https://bottosson.github.io/posts/oklab/.
+ */
+function mixTowardNeutral(base: Rgb, target: number, amount: number): Rgb {
+  const r = linearChannel(base.r);
+  const g = linearChannel(base.g);
+  const b = linearChannel(base.b);
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  const remaining = 1 - amount;
+  const lightness =
+    (0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s) * remaining + target * amount;
+  const greenRed = (1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s) * remaining;
+  const blueYellow = (0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s) * remaining;
+  const ll = (lightness + 0.3963377774 * greenRed + 0.2158037573 * blueYellow) ** 3;
+  const mm = (lightness - 0.1055613458 * greenRed - 0.0638541728 * blueYellow) ** 3;
+  const ss = (lightness - 0.0894841775 * greenRed - 1.291485548 * blueYellow) ** 3;
+  const encode = (value: number): number =>
+    255 * (value <= 0.0031308 ? 12.92 * value : 1.055 * value ** (1 / 2.4) - 0.055);
   return {
-    '--info': toHex(readable),
-    '--info-soft': withAlpha(base, theme === 'dark' ? 0.16 : 0.12),
+    r: encode(4.0767416621 * ll - 3.3077115913 * mm + 0.2309699292 * ss),
+    g: encode(-1.2684380046 * ll + 2.6097574011 * mm - 0.3413193965 * ss),
+    b: encode(-0.0041960863 * ll - 0.7034186147 * mm + 1.707614701 * ss),
+  };
+}
+
+/**
+ * Badge text must contrast with the composited tint, not just the page white.
+ * Use the darkest light surface / lightest dark surface from globals.css so
+ * this also covers cards, hover states and inset panels. Check the serialized
+ * sRGB result after gamut clipping and rounding, with a small margin over 4.5.
+ */
+function infoForeground(base: Rgb, theme: 'dark' | 'light', alpha: number): string {
+  const surface = theme === 'light' ? { r: 241, g: 244, b: 248 } : { r: 24, g: 28, b: 36 };
+  const background = {
+    r: base.r * alpha + surface.r * (1 - alpha),
+    g: base.g * alpha + surface.g * (1 - alpha),
+    b: base.b * alpha + surface.b * (1 - alpha),
+  };
+  for (let step = 0; step < 20; step += 1) {
+    const candidate =
+      step === 0 ? base : mixTowardNeutral(base, theme === 'light' ? 0 : 1, step / 20);
+    const hex = toHex(candidate);
+    if (contrastRatio(parseHex(hex)!, background) >= 4.6) return hex;
+  }
+  // Neutral ink is safe against every supported surface and brand tint.
+  return toHex(theme === 'light' ? NEAR_BLACK : WHITE);
+}
+
+export function deriveInfoScale(base: Rgb, theme: 'dark' | 'light'): InfoScale {
+  const alpha = theme === 'dark' ? 0.16 : 0.12;
+  return {
+    '--info': infoForeground(base, theme, alpha),
+    '--info-soft': withAlpha(base, alpha),
   };
 }

@@ -29,6 +29,7 @@ import {
   type User,
 } from '@ferrum-nexus/shared';
 import { ApiError, authApi, setUnauthorizedHandler } from '../lib/api';
+import { queryKeys } from '../hooks/keys';
 
 /** Lifecycle of the session bootstrap. */
 export type AuthStatus = 'loading' | 'authenticated' | 'unauthenticated';
@@ -73,18 +74,34 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
   const previousUserId = useRef<string | null>(null);
 
+  const clearSessionCache = useCallback(() => {
+    // Public observers mount before auth resolves and stay mounted across sessions.
+    // Removing their queries detaches them until an unrelated render re-subscribes.
+    // Keep only these exact public keys; every other query is session-scoped.
+    queryClient.removeQueries({
+      predicate: ({ queryKey }) =>
+        queryKey.length !== 1 ||
+        (queryKey[0] !== queryKeys.branding[0] && queryKey[0] !== queryKeys.captcha[0]),
+    });
+    queryClient.getMutationCache().clear();
+    // Refresh public policy (including the founder-seat flag) without replacing
+    // its queries or interrupting the initial branding request.
+    void queryClient.invalidateQueries({ queryKey: queryKeys.branding, exact: true });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.captcha, exact: true });
+  }, [queryClient]);
+
   const acceptUser = useCallback(
     (next: User, nextCapabilities: Capabilities | null) => {
       // Also clear on sign-in after teardown, including anonymous cached data.
       if (previousUserId.current !== next.id) {
-        queryClient.clear();
+        clearSessionCache();
       }
       previousUserId.current = next.id;
       setUser(next);
       setCapabilities(nextCapabilities ?? capabilitiesForRole(next.role));
       setStatus('authenticated');
     },
-    [queryClient],
+    [clearSessionCache],
   );
 
   const clearLocalSession = useCallback(() => {
@@ -92,8 +109,8 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
     setUser(null);
     setCapabilities(null);
     setStatus('unauthenticated');
-    queryClient.clear();
-  }, [queryClient]);
+    clearSessionCache();
+  }, [clearSessionCache]);
 
   useEffect(() => {
     setUnauthorizedHandler(clearLocalSession);

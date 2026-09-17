@@ -50,7 +50,7 @@ export function Select<T extends string = string>({
         id={id}
         aria-label={ariaLabel}
         className={cn(
-          'flex h-9 items-center justify-between gap-2 rounded-md border border-border bg-inset px-3 text-left text-sm text-fg shadow-[0_1px_2px_rgb(0_0_0/0.06)_inset]',
+          'flex h-9 min-w-0 items-center justify-between gap-2 rounded-md border border-border bg-inset px-3 text-left text-sm text-fg shadow-[0_1px_2px_rgb(0_0_0/0.06)_inset]',
           'transition-[border-color,box-shadow] hover:border-border-strong',
           'focus:border-accent focus:ring-2 focus:ring-accent-ring focus:outline-none',
           'data-[placeholder]:text-fg-subtle',

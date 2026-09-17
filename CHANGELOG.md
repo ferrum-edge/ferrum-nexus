@@ -218,6 +218,12 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   docs state that rotate revokes the previous value as part of the operation
   (#268).
 
+- Informational badges, including API Key and GET method labels, derive readable
+  text independently from their brand tint in both themes. Default and custom
+  colours reach at least 4.5:1 contrast on the portal's badge surfaces (#269).
+- Saved portal branding and the document title apply after an authenticated
+  reload without a theme toggle. Session changes preserve and refresh the public
+  branding query while still removing account-specific cached data (#271).
 - `npm run dev` proxied every path starting with `/api` to the backend —
   including the SPA's own `/apis`, `/apis/new` and `/apis/:id` routes — so a
   reload or deep link on the publishing pages returned the backend's JSON 404
