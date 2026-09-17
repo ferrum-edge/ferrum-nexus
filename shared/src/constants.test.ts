@@ -21,6 +21,7 @@ import {
   isAuthPluginType,
   isEmailTemplateKey,
   listenPathFor,
+  normalizeBrandingHexColor,
   testConsumerUsername,
 } from './constants.js';
 import { ALL_ERROR_CODES, ERROR_CODES, ERROR_CODE_STATUS, isErrorCode } from './error-codes.js';
@@ -121,6 +122,23 @@ describe('clampPageSize', () => {
 
   it('floors fractional page sizes', () => {
     assert.equal(clampPageSize(10.9), 10);
+  });
+});
+
+describe('normalizeBrandingHexColor', () => {
+  it('expands #rgb and lowercases #rrggbb', () => {
+    assert.equal(normalizeBrandingHexColor('#abc'), '#aabbcc');
+    assert.equal(normalizeBrandingHexColor('#FFF'), '#ffffff');
+    assert.equal(normalizeBrandingHexColor('  #2563EB  '), '#2563eb');
+  });
+
+  it('rejects lengths that are not opaque CSS hex', () => {
+    assert.equal(normalizeBrandingHexColor('#12345'), null);
+    assert.equal(normalizeBrandingHexColor('#1234567'), null);
+    assert.equal(normalizeBrandingHexColor('#1234'), null);
+    assert.equal(normalizeBrandingHexColor('#12345678'), null);
+    assert.equal(normalizeBrandingHexColor('red'), null);
+    assert.equal(normalizeBrandingHexColor('#gggggg'), null);
   });
 });
 

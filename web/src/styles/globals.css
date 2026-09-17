@@ -65,7 +65,7 @@
   --danger-hover: #fb8f8f;
   --danger-soft: rgb(248 113 113 / 0.14);
   --info: #38bdf8;
-  --info-soft: rgb(56 189 248 / 0.14);
+  --info-soft: rgb(56 189 248 / 0.16);
   --neutral-soft: rgb(164 174 188 / 0.12);
 
   /* Navigation rail (`data-sidebar='surface'`, the default). */
@@ -125,8 +125,9 @@
   --danger: #dc2626;
   --danger-hover: #b91c1c;
   --danger-soft: rgb(220 38 38 / 0.1);
-  --info: #0284c7;
-  --info-soft: rgb(2 132 199 / 0.1);
+  /* Readable badge ink before the runtime branding palette arrives. */
+  --info: #0369a1;
+  --info-soft: rgb(56 189 248 / 0.12);
   --neutral-soft: rgb(75 85 99 / 0.09);
 
   --sidebar-bg: var(--surface);
