@@ -33,6 +33,19 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Park a holder until the test explicitly releases it — not a timer. */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve = (): void => {};
+  const promise = new Promise<void>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
+function yieldTurn(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 describe('createKeyedSerializer — cross-instance leases', () => {
   let store: NexusStore;
   let keySeed = 0;
@@ -77,33 +90,39 @@ describe('createKeyedSerializer — cross-instance leases', () => {
     const order: string[] = [];
     let aFinishedAt = 0;
     let bStartedAt = 0;
+    let bEntered = false;
+    const aHolds = deferred();
+    const releaseA = deferred();
 
     const first = a(key, async () => {
       order.push('a:start');
-      await sleep(120);
+      aHolds.resolve();
+      await releaseA.promise;
       order.push('a:end');
       aFinishedAt = Date.now();
     });
-    // Let A take the lease before B asks for it, so this is a genuine wait
-    // rather than a coin toss over who got there first.
-    await sleep(20);
-    const startedWaiting = Date.now();
+    // Wait until A is inside the section (lease taken), not for a timer that
+    // can resume after A has already finished.
+    await aHolds.promise;
     const second = b(key, async () => {
+      bEntered = true;
       order.push('b:start');
       bStartedAt = Date.now();
       order.push('b:end');
     });
 
+    for (let i = 0; i < 5; i += 1) {
+      await yieldTurn();
+      assert.equal(bEntered, false, 'B must not enter while A still holds the lease');
+    }
+
+    releaseA.resolve();
     await Promise.all([first, second]);
 
     assert.deepEqual(order, ['a:start', 'a:end', 'b:start', 'b:end']);
     assert.ok(
       bStartedAt >= aFinishedAt,
       `B started at ${bStartedAt} but A only finished at ${aFinishedAt}`,
-    );
-    assert.ok(
-      bStartedAt - startedWaiting >= 80,
-      'B should have spent real time waiting on the lease',
     );
   });
 
@@ -113,19 +132,23 @@ describe('createKeyedSerializer — cross-instance leases', () => {
     const a = instance('instance-a');
     const b = instance('instance-b');
     const order: string[] = [];
+    const aHolds = deferred();
+    const releaseA = deferred();
 
     const first = a(held, async () => {
       order.push('a:start');
-      await sleep(120);
+      aHolds.resolve();
+      await releaseA.promise;
       order.push('a:end');
     });
-    await sleep(20);
+    await aHolds.promise;
     await b(other, async () => {
       order.push('b:ran');
     });
-    // B is already finished while A is still inside its section.
+    // B finished while A is still parked inside its section.
     assert.deepEqual(order, ['a:start', 'b:ran']);
 
+    releaseA.resolve();
     await first;
     assert.deepEqual(order, ['a:start', 'b:ran', 'a:end']);
   });
@@ -147,9 +170,14 @@ describe('createKeyedSerializer — cross-instance leases', () => {
     const key = freshKey();
     const a = instance('instance-a');
     const b = instance('instance-b', { waitMs: 60 });
+    const aHolds = deferred();
+    const releaseA = deferred();
 
-    const first = a(key, () => sleep(400));
-    await sleep(20);
+    const first = a(key, async () => {
+      aHolds.resolve();
+      await releaseA.promise;
+    });
+    await aHolds.promise;
 
     await assert.rejects(
       () => b(key, async () => 'never'),
@@ -162,6 +190,7 @@ describe('createKeyedSerializer — cross-instance leases', () => {
       },
     );
 
+    releaseA.resolve();
     await first;
   });
 
@@ -185,18 +214,26 @@ describe('createKeyedSerializer — cross-instance leases', () => {
     // several TTLs, so without renewal the lease would lapse mid-flight.
     const a = instance('instance-a', { ttlMs: 60 });
     const b = instance('instance-b', { waitMs: 0 });
+    const aHolds = deferred();
+    const releaseA = deferred();
 
     let stolen: unknown = null;
     const long = a(key, async () => {
+      aHolds.resolve();
       await sleep(300);
       // Still ours: nothing has expired, and nobody could take it.
       stolen = await store.leases.acquire(key, 'instance-b', '2099-01-01T00:00:00.000Z', nowIso());
+      await releaseA.promise;
       return 'finished';
     });
 
+    await aHolds.promise;
+    // Elapsed TTLs are the behaviour under test here, not overlap. The
+    // deferred above is what keeps A from finishing if this timer overruns.
     await sleep(200);
     await assert.rejects(() => b(key, async () => 'never'), /another portal instance/i);
 
+    releaseA.resolve();
     assert.equal(await long, 'finished');
     assert.equal(stolen, false, 'the renewed lease was still live 300ms into a 60ms TTL');
   });
