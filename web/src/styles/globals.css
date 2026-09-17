@@ -1,5 +1,10 @@
 @import 'tailwindcss';
 
+/* Keep `lg` available at runtime for the sidebar's matching media query. */
+@theme static {
+  --breakpoint-lg: 64rem;
+}
+
 /*
  * Ferrum Nexus design tokens.
  *

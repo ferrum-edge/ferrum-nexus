@@ -210,6 +210,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Closed mobile navigation is inert and hidden from assistive technology. Opening
+  the drawer moves focus into it; Escape, navigation and backdrop dismissal return
+  focus to the toggle. Desktop navigation remains available across viewport changes (#265).
 - `npm run dev` proxied every path starting with `/api` to the backend —
   including the SPA's own `/apis`, `/apis/new` and `/apis/:id` routes — so a
   reload or deep link on the publishing pages returned the backend's JSON 404

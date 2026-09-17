@@ -1,6 +1,6 @@
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { Link, useLocation, useNavigate } from '@tanstack/react-router';
-import type { ReactElement } from 'react';
+import type { ReactElement, Ref } from 'react';
 import { ROLE_LABELS, type User } from '@ferrum-nexus/shared';
 import { useAuth } from '../../stores/auth';
 import { useTheme } from '../../stores/theme';
@@ -105,20 +105,33 @@ function useLocationCrumbs(): { section: string; page: string } | null {
 
 export interface HeaderProps {
   portalName: string;
+  sidebarId: string;
+  sidebarOpen: boolean;
+  sidebarToggleRef: Ref<HTMLButtonElement>;
   onToggleSidebar: () => void;
   user: User;
 }
 
 /** Top bar: current location, notifications, theme toggle and the account menu. */
-export function Header({ portalName, onToggleSidebar, user }: HeaderProps): ReactElement {
+export function Header({
+  portalName,
+  sidebarId,
+  sidebarOpen,
+  sidebarToggleRef,
+  onToggleSidebar,
+  user,
+}: HeaderProps): ReactElement {
   const crumbs = useLocationCrumbs();
   return (
     <header className="fx-glass sticky top-0 z-30 flex h-16 items-center justify-between gap-3 border-b border-border px-4 sm:px-6">
       <div className="flex min-w-0 items-center gap-2">
         <button
           type="button"
+          ref={sidebarToggleRef}
           onClick={onToggleSidebar}
           aria-label="Toggle navigation"
+          aria-expanded={sidebarOpen}
+          aria-controls={sidebarId}
           className={`${ICON_BUTTON} -ml-2 lg:hidden`}
         >
           <Icon name="menu" className="h-5 w-5" />
