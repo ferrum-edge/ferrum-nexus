@@ -239,13 +239,7 @@ export interface CatalogApi extends Omit<Api, 'upstream_url'> {
  * `none` is reserved for requestable APIs the caller has not asked for.
  */
 export type CatalogAccessState =
-  | 'none'
-  | 'open'
-  | 'pending'
-  | 'granted'
-  | 'denied'
-  | 'revoked'
-  | 'owner';
+  'none' | 'open' | 'pending' | 'granted' | 'denied' | 'revoked' | 'owner';
 
 /** Metadata about a stored spec revision (never carries the raw document). */
 export interface ApiSpecSummary {

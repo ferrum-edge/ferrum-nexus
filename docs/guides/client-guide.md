@@ -88,15 +88,15 @@ role or account status from here — ask an admin.
 **API catalog** lists every API you are allowed to see. Each card shows the
 name, version, owner and a badge for your relationship to it:
 
-| Badge           | Meaning                                                        |
-| --------------- | -------------------------------------------------------------- |
-| **No access**   | The API is requestable, and you have never asked for access.   |
-| **Open access** | Approval is not required; any portal account may call it.      |
-| **Pending**     | Your request is waiting on the provider.                       |
-| **Granted**     | You have active access.                                        |
-| **Denied**      | The provider declined your last request.                       |
-| **Revoked**     | Access you had was withdrawn.                                  |
-| **You own this** | You published this one.                                        |
+| Badge            | Meaning                                                      |
+| ---------------- | ------------------------------------------------------------ |
+| **No access**    | The API is requestable, and you have never asked for access. |
+| **Open access**  | Approval is not required; any portal account may call it.    |
+| **Pending**      | Your request is waiting on the provider.                     |
+| **Granted**      | You have active access.                                      |
+| **Denied**       | The provider declined your last request.                     |
+| **Revoked**      | Access you had was withdrawn.                                |
+| **You own this** | You published this one.                                      |
 
 Search by name, slug, or description and use pagination to browse the results.
 The catalog page displays requestability and internal-visibility badges; it
