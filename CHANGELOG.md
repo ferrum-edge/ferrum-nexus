@@ -210,6 +210,17 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Specification revisions are ordered by publication sequence rather than by
+  their timestamp (#270). `api_specs` gains a per-API `revision_seq` that every
+  adapter assigns in the transaction that inserts the row; listings return the
+  current revision first and then history newest-first by that sequence, and
+  `NEXUS_SPEC_HISTORY_LIMIT` retention deletes from the same order. Previously
+  the order was `created_at DESC, id DESC`, so revisions published in the same
+  millisecond were ranked by their random UUID — which could list historical
+  revisions ahead of the current one and permanently delete newer history in
+  place of older. The column is part of the `001_initial` baseline, so
+  development databases must be recreated under the buildout schema policy in
+  `docs/operations.md`.
 - Closed mobile navigation is inert and hidden from assistive technology. Opening
   the drawer moves focus into it; Escape, navigation and backdrop dismissal return
   focus to the toggle. Desktop navigation remains available across viewport changes (#265).

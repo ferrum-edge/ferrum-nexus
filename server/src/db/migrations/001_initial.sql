@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS api_specs (
   parsed_title   TEXT,
   parsed_version TEXT,
   is_current     INTEGER NOT NULL DEFAULT 0 CHECK (is_current IN (0, 1)),
+  revision_seq   INTEGER NOT NULL,
   created_at     TEXT NOT NULL,
   updated_at     TEXT NOT NULL
 );
@@ -111,7 +112,12 @@ CREATE TABLE IF NOT EXISTS api_specs (
 -- At most one current revision per API.
 CREATE UNIQUE INDEX IF NOT EXISTS ux_api_specs_current ON api_specs (api_id)
   WHERE is_current = 1;
-CREATE INDEX IF NOT EXISTS ix_api_specs_api ON api_specs (api_id, created_at);
+-- Publication order, and the index every `api_id` lookup uses. `created_at`
+-- has millisecond resolution and ids are random UUIDs, so two revisions
+-- published in the same millisecond had no stable order and bounded retention
+-- discarded the newer one (issue #270). The per-API sequence is that order;
+-- the uniqueness is what stops two writers claiming one position.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_api_specs_seq ON api_specs (api_id, revision_seq);
 
 -- ── Access requests ────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS access_requests (

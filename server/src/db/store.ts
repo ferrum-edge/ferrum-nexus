@@ -196,7 +196,32 @@ export interface SessionRecord {
 export type ApiRecord = Omit<Api, 'listen_path' | 'invoke_url'>;
 
 /** An `api_specs` row, including the raw uploaded document. */
-export type ApiSpecRecord = ApiSpec;
+export interface ApiSpecRecord extends ApiSpec {
+  /**
+   * Publication position of this revision within its API: `1` for the first
+   * revision, one more than the largest already recorded for every one after.
+   *
+   * It exists because `created_at` cannot order revisions. The column holds a
+   * millisecond-resolution ISO string and ids are random UUIDs, so two
+   * revisions published in the same millisecond were ordered by their id —
+   * which put historical revisions ahead of the current one and made bounded
+   * retention delete the newer of the tie (issue #270). Every adapter assigns
+   * it on insert and orders listing and retention by it.
+   *
+   * Store-internal: it is deliberately absent from the wire {@link ApiSpec},
+   * and the presenters drop it alongside `raw_spec`.
+   */
+  revision_seq: number;
+}
+
+/**
+ * Payload for {@link ApiSpecRepo.create}.
+ *
+ * `revision_seq` is not among the fields a caller may supply: the sequence is
+ * the store's own, read and taken in the same transaction that inserts the
+ * row.
+ */
+export type CreateApiSpecInput = CreateInput<Omit<ApiSpecRecord, 'revision_seq'>>;
 
 /**
  * An `api_plugins` row — one palette plugin as the provider configured it.
@@ -652,12 +677,29 @@ export interface ApiRepo {
 
 /** Uploaded OpenAPI documents, one row per revision. */
 export interface ApiSpecRepo {
-  create(input: CreateInput<ApiSpecRecord>): Promise<ApiSpecRecord>;
+  /**
+   * Insert a revision, assigning its {@link ApiSpecRecord.revision_seq}: one
+   * more than the largest currently recorded for the API. The read and the
+   * insert share a transaction, and a unique index on
+   * `(api_id, revision_seq)` turns two writers that raced for one position
+   * into a `CONFLICT` rather than a tie — the same guard the concurrent
+   * `is_current` swap already relies on.
+   */
+  create(input: CreateApiSpecInput): Promise<ApiSpecRecord>;
   findById(id: Uuid): Promise<ApiSpecRecord | null>;
   /** The revision with `is_current = true` for an API, if any. */
   findCurrentByApi(apiId: Uuid): Promise<ApiSpecRecord | null>;
   /** Make one revision current and clear the flag on every other revision of the API. */
   setCurrent(apiId: Uuid, specId: Uuid): Promise<void>;
+  /**
+   * One page of revisions: the current one first, then the rest newest-first
+   * by {@link ApiSpecRecord.revision_seq}.
+   *
+   * The current revision leads whatever its position, because a
+   * {@link ApiSpecRepo.setCurrent} rollback can make an older revision current
+   * again and a listing that buried it under its own successors would be
+   * describing the API wrongly.
+   */
   list(filter: ApiSpecFilter, options?: ListOptions): Promise<Paginated<ApiSpecRecord>>;
   delete(id: Uuid): Promise<boolean>;
   /** Cascade helper for API deletion. Returns the number of revisions removed. */
@@ -672,8 +714,9 @@ export interface ApiSpecRepo {
    *
    * The current revision is never a candidate whatever `keep` says, and `keep`
    * is at least `1` in practice, so the predecessor a failed revision rolls
-   * back to always survives. Newest is by `created_at`, ties broken by id, the
-   * same order {@link ApiSpecRepo.list} pages in.
+   * back to always survives. Newest is by {@link ApiSpecRecord.revision_seq} —
+   * publication order, the same order {@link ApiSpecRepo.list} pages in — and
+   * never by `created_at`, which cannot separate one millisecond's revisions.
    *
    * @returns the number of revisions removed
    */

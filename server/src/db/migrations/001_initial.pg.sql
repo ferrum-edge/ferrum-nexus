@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS api_specs (
   parsed_title   TEXT,
   parsed_version TEXT,
   is_current     SMALLINT NOT NULL DEFAULT 0 CHECK (is_current IN (0, 1)),
+  revision_seq   INTEGER NOT NULL,
   created_at     TEXT NOT NULL,
   updated_at     TEXT NOT NULL
 );
@@ -114,7 +115,8 @@ CREATE TABLE IF NOT EXISTS api_specs (
 -- At most one current revision per API.
 CREATE UNIQUE INDEX IF NOT EXISTS ux_api_specs_current ON api_specs (api_id)
   WHERE is_current = 1;
-CREATE INDEX IF NOT EXISTS ix_api_specs_api ON api_specs (api_id, created_at);
+-- Publication order; see the SQLite schema for why the timestamp is not it.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_api_specs_seq ON api_specs (api_id, revision_seq);
 
 -- ── Access requests ────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS access_requests (

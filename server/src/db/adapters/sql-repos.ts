@@ -267,6 +267,7 @@ function mapApiSpec(row: Row): ApiSpecRecord {
     parsed_title: textOrNull(row.parsed_title),
     parsed_version: textOrNull(row.parsed_version),
     is_current: bool(row.is_current),
+    revision_seq: int(row.revision_seq),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -1086,11 +1087,21 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
               [meta.updated_at, input.api_id],
             );
           }
+          // The revision's publication position, read and taken inside the same
+          // transaction as the insert; see the sqlite adapter for why the
+          // unique index on `(api_id, revision_seq)` is the other half of it.
+          const top = await queryOne(
+            tx,
+            'SELECT COALESCE(MAX(revision_seq), 0) + 1 AS seq FROM api_specs WHERE api_id = ?',
+            [input.api_id],
+          );
+          const seq = int(top?.seq ?? 1);
           await execute(
             tx,
             `INSERT INTO api_specs
-               (id, api_id, version, raw_spec, parsed_title, parsed_version, is_current, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               (id, api_id, version, raw_spec, parsed_title, parsed_version, is_current,
+                revision_seq, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               meta.id,
               input.api_id,
@@ -1099,6 +1110,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
               input.parsed_title ?? null,
               input.parsed_version ?? null,
               encodeBool(input.is_current),
+              seq,
               meta.created_at,
               meta.updated_at,
             ],
@@ -1155,9 +1167,13 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         `SELECT COUNT(*) AS cnt FROM api_specs${where.sql}`,
         where.params,
       );
+      // The current revision leads, then history newest-first by publication
+      // order; see the sqlite adapter for why the flag sorts first.
       const rows = await queryAll(
         exec,
-        `SELECT * FROM api_specs${where.sql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        `SELECT * FROM api_specs${where.sql}
+          ORDER BY is_current DESC, revision_seq DESC
+          LIMIT ? OFFSET ?`,
         [...where.params, limit, offset],
       );
       return { items: rows.map(mapApiSpec), total };
@@ -1175,7 +1191,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         exec,
         `SELECT id FROM api_specs
           WHERE api_id = ? AND is_current = ?
-          ORDER BY created_at DESC, id DESC
+          ORDER BY revision_seq DESC
           LIMIT ? OFFSET ?`,
         [apiId, encodeBool(false), SPEC_HISTORY_PRUNE_BATCH, Math.max(0, keep)],
       );
