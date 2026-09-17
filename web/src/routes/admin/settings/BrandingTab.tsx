@@ -204,10 +204,7 @@ function ColorField({
   const swatch = normalizeBrandingHexColor(value);
   return (
     <Field label={label} htmlFor={id} hint={hint} error={error} className="min-w-0">
-      <div
-        data-testid={`${id}-row`}
-        className="flex w-full min-w-0 max-w-full items-center gap-2"
-      >
+      <div data-testid={`${id}-row`} className="flex w-full min-w-0 max-w-full items-center gap-2">
         <span
           className="relative h-9 w-12 shrink-0 overflow-hidden rounded-md border border-border"
           style={{ backgroundColor: swatch ?? 'transparent' }}
