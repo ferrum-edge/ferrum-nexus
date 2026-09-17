@@ -27,6 +27,7 @@ import {
   MAX_BRANDING_FOOTER_LINKS,
   MAX_BRANDING_FOOTER_TEXT_LENGTH,
   MAX_BRANDING_LINK_LABEL_LENGTH,
+  normalizeBrandingHexColor,
   ROLE_ORDER,
   type AdminSettingsResponse,
   type GetEmailTemplateResponse,
@@ -71,10 +72,26 @@ export interface AdminRoutesOptions {
 /** Largest accepted logo, as a data URL. Roughly 384 KiB of binary. */
 export const MAX_LOGO_DATA_URL_LENGTH = 512 * 1024;
 
+/**
+ * Opaque `#rgb` / `#rrggbb` only. The native colour swatch and derived palette
+ * cannot render alpha, so 4- and 8-digit CSS hex values are refused rather than
+ * stripped. Five- and seven-digit strings are not CSS colours. Accepted values
+ * are stored as lowercase `#rrggbb`.
+ */
 const hexColor = z
   .string()
   .trim()
-  .regex(/^#[0-9a-fA-F]{3,8}$/, 'must be a CSS hex colour');
+  .transform((value, ctx) => {
+    const normalized = normalizeBrandingHexColor(value);
+    if (normalized === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'must be a CSS hex colour (#rgb or #rrggbb)',
+      });
+      return z.NEVER;
+    }
+    return normalized;
+  });
 
 const updateSettingsBody = z.object({
   branding: z

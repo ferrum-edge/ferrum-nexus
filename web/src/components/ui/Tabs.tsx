@@ -21,8 +21,14 @@ export interface TabsProps {
 /** Controlled tab set built on Radix. */
 export function Tabs({ tabs, value, onValueChange, className }: TabsProps): ReactElement {
   return (
-    <TabsPrimitive.Root value={value} onValueChange={onValueChange} className={cn(className)}>
-      <TabsPrimitive.List className="flex flex-wrap items-center gap-1 border-b border-border">
+    <TabsPrimitive.Root
+      value={value}
+      onValueChange={onValueChange}
+      className={cn('min-w-0', className)}
+    >
+      <TabsPrimitive.List
+        className="flex min-w-0 flex-wrap items-center gap-1 border-b border-border"
+      >
         {tabs.map((tab) => (
           <TabsPrimitive.Trigger
             key={tab.value}
@@ -43,7 +49,7 @@ export function Tabs({ tabs, value, onValueChange, className }: TabsProps): Reac
         <TabsPrimitive.Content
           key={tab.value}
           value={tab.value}
-          className="animate-fade-in pt-5 outline-none"
+          className="animate-fade-in min-w-0 pt-5 outline-none"
         >
           {tab.content}
         </TabsPrimitive.Content>

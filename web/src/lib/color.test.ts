@@ -13,6 +13,8 @@ describe('parseHex', () => {
     expect(parseHex('#fff')).toEqual({ r: 255, g: 255, b: 255 });
     expect(parseHex('#4f46e5')).toEqual({ r: 79, g: 70, b: 229 });
     expect(parseHex('4f46e5')).toBeNull();
+    expect(parseHex('#12345')).toBeNull();
+    expect(parseHex('#1234567')).toBeNull();
     expect(parseHex('#4f46e5aa')).toBeNull();
     expect(parseHex('red')).toBeNull();
     expect(parseHex('#gggggg')).toBeNull();

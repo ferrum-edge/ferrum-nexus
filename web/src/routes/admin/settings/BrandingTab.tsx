@@ -10,6 +10,7 @@ import {
   MAX_BRANDING_FOOTER_LINKS,
   MAX_BRANDING_FOOTER_TEXT_LENGTH,
   MAX_BRANDING_LINK_LABEL_LENGTH,
+  normalizeBrandingHexColor,
   type AdminSettingsResponse,
   type BrandingFontPreset,
   type BrandingLink,
@@ -75,6 +76,12 @@ const LOGIN_OPTIONS: ReadonlyArray<{
   { value: 'centered', label: 'Centered', description: 'The form alone.' },
 ];
 
+const COLOR_ERROR = 'Use a 3- or 6-digit CSS hex colour, for example #fff or #2563eb.';
+
+function colorFieldError(value: string): string | null {
+  return normalizeBrandingHexColor(value) ? null : COLOR_ERROR;
+}
+
 const RADIUS_FACTOR: Readonly<Record<BrandingRadius, number>> = {
   none: 0,
   sm: 0.6,
@@ -124,40 +131,40 @@ function ThemePreview({
       data-theme={theme}
       data-sidebar={state.sidebar}
       style={style}
-      className="flex h-44 overflow-hidden rounded-lg border border-border bg-base text-fg shadow-card"
+      className="flex h-44 min-w-0 w-full max-w-full overflow-hidden rounded-lg border border-border bg-base text-fg shadow-card"
       aria-label={`${theme} theme preview`}
     >
-      <div className="flex w-[38%] flex-col border-r border-sidebar-border bg-sidebar px-2.5 py-2.5 text-sidebar-fg">
-        <div className="flex items-center gap-1.5">
+      <div className="flex min-w-0 w-[38%] max-w-[38%] flex-col border-r border-sidebar-border bg-sidebar px-2.5 py-2.5 text-sidebar-fg">
+        <div className="flex min-w-0 items-center gap-1.5">
           {state.logo ? (
-            <img src={state.logo} alt="" className="h-4 w-4 rounded-sm object-contain" />
+            <img src={state.logo} alt="" className="h-4 w-4 shrink-0 rounded-sm object-contain" />
           ) : (
-            <span className="flex h-4 w-4 items-center justify-center rounded-sm bg-accent text-[0.5rem] font-bold text-accent-fg">
+            <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm bg-accent text-[0.5rem] font-bold text-accent-fg">
               {state.portalName.trim().charAt(0).toUpperCase() || 'N'}
             </span>
           )}
-          <span className="truncate text-[0.6rem] font-semibold text-sidebar-fg-strong">
+          <span className="min-w-0 truncate text-[0.6rem] font-semibold text-sidebar-fg-strong">
             {state.portalName || 'Portal'}
           </span>
         </div>
-        <div className="mt-3 flex flex-col gap-1">
-          <span className="rounded-sm bg-sidebar-active px-1.5 py-1 text-[0.55rem] font-medium text-sidebar-active-fg">
+        <div className="mt-3 flex min-w-0 flex-col gap-1">
+          <span className="truncate rounded-sm bg-sidebar-active px-1.5 py-1 text-[0.55rem] font-medium text-sidebar-active-fg">
             Dashboard
           </span>
-          <span className="px-1.5 py-1 text-[0.55rem]">API catalog</span>
-          <span className="px-1.5 py-1 text-[0.55rem]">Credentials</span>
+          <span className="truncate px-1.5 py-1 text-[0.55rem]">API catalog</span>
+          <span className="truncate px-1.5 py-1 text-[0.55rem]">Credentials</span>
         </div>
       </div>
-      <div className="flex min-w-0 flex-1 flex-col gap-2 p-2.5">
+      <div className="flex min-w-0 flex-1 flex-col gap-2 overflow-hidden p-2.5">
         <div className="h-1.5 w-1/3 rounded-full bg-fg-subtle/40" />
-        <div className="rounded-md border border-border bg-surface p-2 shadow-card">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[0.6rem] font-semibold">Billing API</span>
-            <span className="rounded-full bg-success-soft px-1.5 text-[0.5rem] font-medium text-success ring-1 ring-success/25 ring-inset">
+        <div className="min-w-0 rounded-md border border-border bg-surface p-2 shadow-card">
+          <div className="flex min-w-0 items-center justify-between gap-2">
+            <span className="min-w-0 truncate text-[0.6rem] font-semibold">Billing API</span>
+            <span className="shrink-0 rounded-full bg-success-soft px-1.5 text-[0.5rem] font-medium text-success ring-1 ring-success/25 ring-inset">
               Granted
             </span>
           </div>
-          <div className="mt-1.5 flex gap-1">
+          <div className="mt-1.5 flex min-w-0 flex-wrap gap-1">
             <span className="rounded-full bg-accent-soft px-1.5 text-[0.5rem] font-medium text-accent">
               v2.4.0
             </span>
@@ -166,7 +173,7 @@ function ThemePreview({
             </span>
           </div>
         </div>
-        <div className="mt-auto flex gap-1.5">
+        <div className="mt-auto flex min-w-0 flex-wrap gap-1.5">
           <span className="rounded-md bg-accent px-2 py-1 text-[0.55rem] font-medium text-accent-fg">
             Request access
           </span>
@@ -185,32 +192,39 @@ function ColorField({
   value,
   onChange,
   hint,
+  error,
 }: {
   id: string;
   label: string;
   value: string;
   onChange: (value: string) => void;
   hint?: string;
+  error?: string | null;
 }): ReactElement {
+  const swatch = normalizeBrandingHexColor(value);
   return (
-    <Field label={label} htmlFor={id} hint={hint}>
-      <div className="flex items-center gap-2">
+    <Field label={label} htmlFor={id} hint={hint} error={error} className="min-w-0">
+      <div
+        data-testid={`${id}-row`}
+        className="flex w-full min-w-0 max-w-full items-center gap-2"
+      >
         <span
           className="relative h-9 w-12 shrink-0 overflow-hidden rounded-md border border-border"
-          style={{ backgroundColor: value }}
+          style={{ backgroundColor: swatch ?? 'transparent' }}
         >
           <Input
             id={id}
             type="color"
-            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-            value={value}
+            className="absolute inset-0 h-full w-full max-w-full cursor-pointer opacity-0"
+            value={swatch ?? '#000000'}
             onChange={(event) => onChange(event.target.value)}
           />
         </span>
         <Input
           aria-label={`${label} hex value`}
-          className="font-mono"
+          className="w-full min-w-0 max-w-full font-mono"
           value={value}
+          invalid={Boolean(error)}
           onChange={(event) => onChange(event.target.value)}
         />
       </div>
@@ -228,6 +242,8 @@ export function BrandingTab({ settings }: { settings: AdminSettingsResponse }): 
   const [supportEmail, setSupportEmail] = useState(branding.support_email ?? '');
   const [primaryColor, setPrimaryColor] = useState(branding.primary_color);
   const [accentColor, setAccentColor] = useState(branding.accent_color);
+  const [primaryColorError, setPrimaryColorError] = useState<string | null>(null);
+  const [accentColorError, setAccentColorError] = useState<string | null>(null);
   const [defaultTheme, setDefaultTheme] = useState<ThemePreference>(branding.default_theme);
   const [radius, setRadius] = useState<BrandingRadius>(branding.radius ?? 'md');
   const [fontPreset, setFontPreset] = useState<BrandingFontPreset>(
@@ -279,15 +295,33 @@ export function BrandingTab({ settings }: { settings: AdminSettingsResponse }): 
     sidebar: sidebarStyle,
   };
 
+  const onPrimaryColor = (value: string): void => {
+    setPrimaryColor(value);
+    if (primaryColorError) setPrimaryColorError(colorFieldError(value));
+  };
+
+  const onAccentColor = (value: string): void => {
+    setAccentColor(value);
+    if (accentColorError) setAccentColorError(colorFieldError(value));
+  };
+
   const save = (): void => {
+    const nextPrimaryError = colorFieldError(primaryColor);
+    const nextAccentError = colorFieldError(accentColor);
+    setPrimaryColorError(nextPrimaryError);
+    setAccentColorError(nextAccentError);
+    if (nextPrimaryError || nextAccentError) return;
+    const primary = normalizeBrandingHexColor(primaryColor);
+    const accent = normalizeBrandingHexColor(accentColor);
+    if (!primary || !accent) return;
     update.mutate(
       {
         branding: {
           portal_name: portalName.trim(),
           tagline: tagline.trim() || null,
           support_email: supportEmail.trim() || null,
-          primary_color: primaryColor,
-          accent_color: accentColor,
+          primary_color: primary,
+          accent_color: accent,
           default_theme: defaultTheme,
           logo_data_url: logo,
           radius,
@@ -305,15 +339,18 @@ export function BrandingTab({ settings }: { settings: AdminSettingsResponse }): 
   };
 
   return (
-    <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_22rem]">
-      <div className="flex flex-col gap-6">
-        <Card>
+    <div
+      data-testid="branding-layout"
+      className="grid min-w-0 w-full max-w-full gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,22rem)]"
+    >
+      <div className="flex min-w-0 w-full max-w-full flex-col gap-6">
+        <Card className="min-w-0 w-full max-w-full">
           <CardHeader
             icon="palette"
             title="Identity"
             description="Shown on the sign-in page, the shell and in every email."
           />
-          <CardBody className="grid gap-5 md:grid-cols-2">
+          <CardBody className="grid min-w-0 gap-5 md:grid-cols-2 [&>*]:min-w-0">
             <LabeledInput
               label="Portal name"
               value={portalName}
@@ -382,25 +419,27 @@ export function BrandingTab({ settings }: { settings: AdminSettingsResponse }): 
           </CardBody>
         </Card>
 
-        <Card>
+        <Card className="min-w-0 w-full max-w-full">
           <CardHeader
             icon="layout"
             title="Appearance"
             description="Colours and presets every page is built from. The preview updates as you edit."
           />
-          <CardBody className="grid gap-5 md:grid-cols-2">
+          <CardBody className="grid min-w-0 gap-5 md:grid-cols-2 [&>*]:min-w-0">
             <ColorField
               id="primary-color"
               label="Primary colour"
               value={primaryColor}
-              onChange={setPrimaryColor}
+              onChange={onPrimaryColor}
+              error={primaryColorError}
               hint="Buttons, active navigation and focus rings; shades and tints are derived from it."
             />
             <ColorField
               id="accent-color"
               label="Accent colour"
               value={accentColor}
-              onChange={setAccentColor}
+              onChange={onAccentColor}
+              error={accentColorError}
               hint="Secondary emphasis: informational badges and the sign-in glow."
             />
             <LabeledSelect<ThemePreference>
@@ -437,13 +476,13 @@ export function BrandingTab({ settings }: { settings: AdminSettingsResponse }): 
           </CardBody>
         </Card>
 
-        <Card>
+        <Card className="min-w-0 w-full max-w-full">
           <CardHeader
             icon="link"
             title="Footer"
             description="An optional legal line and links shown in the shell footer and on the sign-in page."
           />
-          <CardBody className="flex flex-col gap-5">
+          <CardBody className="flex min-w-0 flex-col gap-5">
             <LabeledInput
               label="Footer text"
               placeholder="© 2026 Acme Corp. All rights reserved."
@@ -472,6 +511,7 @@ export function BrandingTab({ settings }: { settings: AdminSettingsResponse }): 
                     aria-label={`Link ${index + 1} label`}
                     placeholder="Label"
                     maxLength={MAX_BRANDING_LINK_LABEL_LENGTH}
+                    className="min-w-0 w-full max-w-full"
                     value={link.label}
                     onChange={(event) => updateLink(index, { label: event.target.value })}
                   />
@@ -479,7 +519,7 @@ export function BrandingTab({ settings }: { settings: AdminSettingsResponse }): 
                     aria-label={`Link ${index + 1} URL`}
                     placeholder="https://"
                     type="url"
-                    className="col-span-2 sm:col-span-1"
+                    className="col-span-2 min-w-0 w-full max-w-full sm:col-span-1"
                     value={link.url}
                     onChange={(event) => updateLink(index, { url: event.target.value })}
                   />
@@ -516,14 +556,17 @@ export function BrandingTab({ settings }: { settings: AdminSettingsResponse }): 
         </div>
       </div>
 
-      <aside className="xl:sticky xl:top-24 xl:self-start">
-        <Card>
+      <aside
+        data-testid="branding-preview"
+        className="min-w-0 w-full max-w-full xl:sticky xl:top-24 xl:self-start"
+      >
+        <Card className="min-w-0 w-full max-w-full overflow-hidden">
           <CardHeader
             icon="eye"
             title="Preview"
             description="Both themes, from the values in the form."
           />
-          <CardBody className="flex flex-col gap-4">
+          <CardBody className="flex min-w-0 flex-col gap-4 overflow-x-auto">
             <div>
               <p className="mb-1.5 text-xs font-medium tracking-wide text-fg-subtle uppercase">
                 Dark
