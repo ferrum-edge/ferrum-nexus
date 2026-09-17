@@ -1,5 +1,5 @@
 import { Outlet, useLocation, useNavigate } from '@tanstack/react-router';
-import { useEffect, useState, type ReactElement } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactElement } from 'react';
 import { useBranding } from '../../hooks/useBranding';
 import { useAuth } from '../../stores/auth';
 import { Spinner } from '../ui/Spinner';
@@ -7,6 +7,7 @@ import { BrandingFooter } from '../auth/AuthShell';
 import { Icon } from '../ui/Icon';
 import { Header } from './Header';
 import { Sidebar } from './Sidebar';
+import { useDesktopSidebar } from './useDesktopSidebar';
 
 /** Banner shown while a signed-in account still has an unverified email. */
 function VerifyEmailBanner(): ReactElement {
@@ -34,12 +35,42 @@ export function AppShell(): ReactElement {
   const { status, user, needsEmailVerification } = useAuth();
   const { data: branding } = useBranding();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const isDesktop = useDesktopSidebar();
+  const mobileOpen = sidebarOpen && !isDesktop;
+  const sidebarId = useId();
+  const sidebarRef = useRef<HTMLElement>(null);
+  const sidebarToggleRef = useRef<HTMLButtonElement>(null);
+  const wasMobileOpen = useRef(false);
   const location = useLocation();
   const navigate = useNavigate();
 
   useEffect(() => {
     setSidebarOpen(false);
   }, [location.pathname]);
+
+  useLayoutEffect(() => {
+    const sidebar = sidebarRef.current;
+    const focusWasInSidebar = sidebar?.contains(document.activeElement);
+    if (mobileOpen && sidebar) {
+      (sidebar.querySelector<HTMLElement>('a[href]') ?? sidebar).focus({ preventScroll: true });
+    } else if (!isDesktop && (wasMobileOpen.current || focusWasInSidebar)) {
+      // Also rescue focus when a desktop link becomes part of the closed drawer.
+      sidebarToggleRef.current?.focus({ preventScroll: true });
+    }
+    wasMobileOpen.current = mobileOpen;
+  }, [mobileOpen, isDesktop]);
+
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape' && !event.defaultPrevented) {
+        event.preventDefault();
+        setSidebarOpen(false);
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [mobileOpen]);
 
   // Redirect imperatively rather than rendering <Navigate>: this component
   // stays mounted while the lazy /login chunk loads, and <Navigate> re-fires on
@@ -64,14 +95,17 @@ export function AppShell(): ReactElement {
   return (
     <div className="min-h-full">
       <Sidebar
+        id={sidebarId}
+        sidebarRef={sidebarRef}
         role={user.role}
         open={sidebarOpen}
+        isDesktop={isDesktop}
         onNavigate={() => setSidebarOpen(false)}
         portalName={portalName}
         logoDataUrl={branding?.logo_data_url ?? null}
         user={user}
       />
-      {sidebarOpen ? (
+      {mobileOpen ? (
         <button
           type="button"
           aria-label="Close navigation"
@@ -82,6 +116,9 @@ export function AppShell(): ReactElement {
       <div className="flex min-h-full flex-col lg:pl-64">
         <Header
           portalName={portalName}
+          sidebarId={sidebarId}
+          sidebarOpen={mobileOpen}
+          sidebarToggleRef={sidebarToggleRef}
           user={user}
           onToggleSidebar={() => setSidebarOpen((open) => !open)}
         />
