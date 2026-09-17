@@ -434,6 +434,49 @@ describe('admin settings', () => {
     assert.equal(errorCode(response.body), 'VALIDATION_FAILED');
   });
 
+  it('rejects five- and seven-digit branding colours and stores opaque #rrggbb', async () => {
+    for (const color of ['#12345', '#1234567', '#1234', '#12345678', 'red', '#gggggg']) {
+      const primary = await harness.authed(founder, {
+        method: 'PUT',
+        url: '/api/admin/settings',
+        payload: { branding: { primary_color: color } },
+      });
+      assert.equal(primary.statusCode, 400, `primary ${color}`);
+      assert.equal(errorCode(primary.body), 'VALIDATION_FAILED');
+
+      const accent = await harness.authed(founder, {
+        method: 'PUT',
+        url: '/api/admin/settings',
+        payload: { branding: { accent_color: color } },
+      });
+      assert.equal(accent.statusCode, 400, `accent ${color}`);
+      assert.equal(errorCode(accent.body), 'VALIDATION_FAILED');
+    }
+
+    const short = await harness.authed(founder, {
+      method: 'PUT',
+      url: '/api/admin/settings',
+      payload: { branding: { primary_color: '#abc', accent_color: '#FF8800' } },
+    });
+    assert.equal(short.statusCode, 200);
+    const expanded = (
+      await harness.app.inject({ method: 'GET', url: '/api/branding' })
+    ).json<BrandingResponse>();
+    assert.equal(expanded.primary_color, '#aabbcc');
+    assert.equal(expanded.accent_color, '#ff8800');
+
+    const six = await harness.authed(founder, {
+      method: 'PUT',
+      url: '/api/admin/settings',
+      payload: { branding: { primary_color: '#2563eb' } },
+    });
+    assert.equal(six.statusCode, 200);
+    const stored = (
+      await harness.app.inject({ method: 'GET', url: '/api/branding' })
+    ).json<BrandingResponse>();
+    assert.equal(stored.primary_color, '#2563eb');
+  });
+
   it('audits changed keys and never their values', async () => {
     const page = await harness.store.auditLogs.list({ action: 'admin.settings_update' });
     assert.ok(page.total >= 3);

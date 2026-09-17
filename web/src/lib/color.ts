@@ -8,8 +8,10 @@
  * indigo icons before).
  */
 
+import { BRANDING_HEX_COLOR, normalizeBrandingHexColor } from '@ferrum-nexus/shared';
+
 /** Matches `#rgb` / `#rrggbb`, the only forms accepted from branding settings. */
-export const HEX_COLOR = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+export const HEX_COLOR = BRANDING_HEX_COLOR;
 
 export interface Rgb {
   r: number;
@@ -28,15 +30,9 @@ export interface Hsl {
 
 /** Parse a hex colour; `null` when it is not a 3- or 6-digit hex string. */
 export function parseHex(input: string): Rgb | null {
-  if (!HEX_COLOR.test(input)) return null;
-  let hex = input.slice(1);
-  if (hex.length === 3) {
-    hex = hex
-      .split('')
-      .map((c) => c + c)
-      .join('');
-  }
-  const value = Number.parseInt(hex, 16);
+  const hex = normalizeBrandingHexColor(input);
+  if (!hex) return null;
+  const value = Number.parseInt(hex.slice(1), 16);
   return { r: (value >> 16) & 0xff, g: (value >> 8) & 0xff, b: value & 0xff };
 }
 
