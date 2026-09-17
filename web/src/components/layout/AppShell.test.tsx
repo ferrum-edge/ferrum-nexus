@@ -42,7 +42,10 @@ function stubDesktopMode(initialMatches: boolean): (matches: boolean) => void {
     addEventListener: vi.fn((_type: string, listener: () => void) => listeners.add(listener)),
     removeEventListener: vi.fn((_type: string, listener: () => void) => listeners.delete(listener)),
   };
-  vi.stubGlobal('matchMedia', vi.fn(() => query));
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn(() => query),
+  );
   return (nextMatches) => {
     act(() => {
       matches = nextMatches;
