@@ -989,8 +989,9 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       const api = await makeApi(owner.id);
       const other = await makeApi(owner.id);
 
-      // Explicit stamps: retention is `created_at DESC, id DESC`, and five rows
-      // written in a loop would otherwise share a millisecond.
+      // Explicit stamps only so the rows are distinguishable when a failure is
+      // printed: retention is by `revision_seq`, which is publication order
+      // whatever the clock did (see the tie test below).
       for (let n = 1; n <= 5; n += 1) {
         await store.apiSpecs.create({
           api_id: api.id,
@@ -1028,6 +1029,76 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
 
       assert.deepEqual(await versions(other.id), ['other'], "another API's history is untouched");
       assert.equal(await store.apiSpecs.pruneHistory(api.id, 10), 0, 'an empty history is a no-op');
+    });
+
+    it('apiSpecs: orders and prunes by publication order when timestamps tie', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const api = await makeApi(owner.id);
+
+      // Issue #270: every revision in the same millisecond, with ids that sort
+      // *against* publication order. Ordering by `created_at DESC, id DESC`
+      // then listed history ahead of the current revision and let retention
+      // delete the newer rows of the tie; `revision_seq` is the order instead.
+      const at = '2026-09-17T00:00:00.000Z';
+      const ids = [
+        '99999999-0000-4000-8000-000000000000',
+        '88888888-0000-4000-8000-000000000000',
+        '77777777-0000-4000-8000-000000000000',
+        '66666666-0000-4000-8000-000000000000',
+        '55555555-0000-4000-8000-000000000000',
+      ];
+      for (let n = 1; n <= 5; n += 1) {
+        const created = await store.apiSpecs.create({
+          id: ids[n - 1]!,
+          api_id: api.id,
+          version: `${n}`,
+          raw_spec: `openapi: 3.1.0 # ${n}`,
+          created_at: at,
+          is_current: true,
+        });
+        assert.equal(created.revision_seq, n, 'the store numbers revisions as they are published');
+        // Exactly what `updateSpec` does: prune in the same breath as the
+        // revision that displaced the old current one.
+        await store.apiSpecs.pruneHistory(api.id, 2);
+      }
+
+      const page = await store.apiSpecs.list({ api_id: api.id });
+      assert.equal(page.total, 3);
+      assert.deepEqual(
+        page.items.map((spec) => ({
+          version: spec.version,
+          current: spec.is_current,
+          seq: spec.revision_seq,
+        })),
+        [
+          { version: '5', current: true, seq: 5 },
+          { version: '4', current: false, seq: 4 },
+          { version: '3', current: false, seq: 3 },
+        ],
+        'the current revision leads, then the two most recently published',
+      );
+
+      // A rollback hands the flag back to an older revision: it still leads.
+      await store.apiSpecs.setCurrent(api.id, ids[3]!);
+      assert.deepEqual(
+        (await store.apiSpecs.list({ api_id: api.id })).items.map((spec) => spec.version),
+        ['4', '5', '3'],
+      );
+
+      // The sequence keeps climbing across a rollback, so the next revision
+      // still sorts above every revision published before it.
+      const next = await store.apiSpecs.create({
+        api_id: api.id,
+        version: '6',
+        raw_spec: 'openapi: 3.1.0 # 6',
+        created_at: at,
+        is_current: true,
+      });
+      assert.equal(next.revision_seq, 6);
+      assert.deepEqual(
+        (await store.apiSpecs.list({ api_id: api.id })).items.map((spec) => spec.version),
+        ['6', '5', '4', '3'],
+      );
     });
 
     /* ── api plugins ──────────────────────────────────────────────────── */

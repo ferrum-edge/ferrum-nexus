@@ -885,7 +885,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   }
 
   function specSummary(record: ApiSpecRecord): ApiSpecSummary {
-    const { raw_spec: _raw, ...summary } = record;
+    // `revision_seq` goes with the document: it is the store's retention and
+    // ordering key, not part of the wire contract.
+    const { raw_spec: _raw, revision_seq: _seq, ...summary } = record;
     return summary;
   }
 
