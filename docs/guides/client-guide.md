@@ -88,14 +88,15 @@ role or account status from here — ask an admin.
 **API catalog** lists every API you are allowed to see. Each card shows the
 name, version, owner and a badge for your relationship to it:
 
-| Badge       | Meaning                                  |
-| ----------- | ---------------------------------------- |
-| **None**    | You have never asked for access.         |
-| **Pending** | Your request is waiting on the provider. |
-| **Granted** | You have active access.                  |
-| **Denied**  | The provider declined your last request. |
-| **Revoked** | Access you had was withdrawn.            |
-| **Owner**   | You published this one.                  |
+| Badge            | Meaning                                                      |
+| ---------------- | ------------------------------------------------------------ |
+| **No access**    | The API is requestable, and you have never asked for access. |
+| **Open access**  | Approval is not required; any portal account may call it.    |
+| **Pending**      | Your request is waiting on the provider.                     |
+| **Granted**      | You have active access.                                      |
+| **Denied**       | The provider declined your last request.                     |
+| **Revoked**      | Access you had was withdrawn.                                |
+| **You own this** | You published this one.                                      |
 
 Search by name, slug, or description and use pagination to browse the results.
 The catalog page displays requestability and internal-visibility badges; it
@@ -216,17 +217,20 @@ and status — never the secret.
 
 ### Rotating
 
-**Rotate** replaces a credential without downtime. The new secret is created on
-the gateway first, so both work during the hand-off — deploy the new one, then
-the old one is retired.
+**Rotate** replaces a credential in one step. A new secret is created on the
+gateway and the previous value is revoked as part of the same operation — there
+is no window where both work for you to switch clients over. Callers using the
+old secret start receiving `401` as soon as gateway configuration propagates,
+which can interrupt them until you deploy the new value.
 
-The rotation dialog shows the new secret **once**, same rule as issuing.
+The rotation dialog shows the new secret **once**, same rule as issuing. Deploy
+it before those callers retry.
 
-One caveat: portals cap how many live credentials of one type you may hold
-(commonly **2**). If you are already at the cap when you rotate, there is no
-room to add before removing, so the old credential is deleted first and there
-is a brief window where neither works. Avoid it by revoking anything unused
-before you rotate, so you rotate from below the cap.
+If you need both secrets live during a cutover, **issue a new credential**,
+deploy it, then **revoke** the old one. Portals cap how many live credentials
+of one type you may hold (commonly **2**). Issue is refused with `409 CONFLICT`
+when you are already at the cap — revoke something unused first so you have
+room to create the extra credential.
 
 ### Revoking
 

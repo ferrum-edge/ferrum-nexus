@@ -720,10 +720,16 @@ omits `basicauth` entirely. Even a Nexus bug that tried to read a secret back
 would get a redaction. There is no read path to the plaintext on either side —
 if a user loses it, the answer is rotation, not recovery.
 
-Rotation is append-then-delete, so both secrets are live across the hand-off.
-The one exception is an account already at `FERRUM_MAX_CREDENTIALS_PER_TYPE`
-live credentials of that type: there is no room to append, so the old entry is
-deleted first and there is a brief gap. Keeping the cap at 2 or more avoids it.
+Rotation is append-then-delete: below the cap the replacement is created first
+and both secrets are briefly live **during the server operation**, then the old
+entry is deleted before the response returns. Callers therefore have no
+user-controlled overlap window; a successful rotate returns the previous
+credential as `revoked`. The one exception is an account already at
+`FERRUM_MAX_CREDENTIALS_PER_TYPE` live credentials of that type: there is no
+room to append, so the old entry is deleted first and there is a brief gap with
+no working credential of that type. Keeping the cap at 2 or more avoids that
+gap. For a caller-visible cutover, issue a new credential, deploy it, then
+revoke the old one.
 
 Because Edge gives credential entries no id, Nexus locates one by _position_.
 Every `credential_metadata` row carries `edge_ordinal`, a per-consumer,

@@ -54,6 +54,7 @@ const STATUSES: Readonly<Record<StatusValue, StatusDescriptor>> = {
   down: { label: 'Down', tone: 'danger' },
   /* Catalog access state */
   none: { label: 'No access', tone: 'neutral' },
+  open: { label: 'Open access', tone: 'success' },
   granted: { label: 'Granted', tone: 'success' },
   owner: { label: 'You own this', tone: 'accent' },
 };

@@ -149,6 +149,9 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
           break;
       }
     }
+    // Approval is not required: any portal account may call it. Returning
+    // `none` here made both catalog views render "No access".
+    if (!api.requestable) return 'open';
     return 'none';
   }
 

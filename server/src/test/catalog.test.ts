@@ -176,6 +176,25 @@ describe('catalog visibility', () => {
       assert.equal(clientRow?.access_state, 'none');
     });
 
+    it('labels a non-requestable API as open for a client without a grant', async () => {
+      const openApi = await publish(provider, 'cat-open', { requestable: false });
+
+      const list = await harness.authed(client, {
+        method: 'GET',
+        url: '/api/catalog?limit=200',
+      });
+      const row = list.json<CatalogListResponse>().items.find((api) => api.id === openApi);
+      assert.equal(row?.requestable, false);
+      assert.equal(row?.access_state, 'open');
+
+      const detail = await harness.authed(client, {
+        method: 'GET',
+        url: '/api/catalog/cat-open',
+      });
+      assert.equal(detail.statusCode, 200, detail.body);
+      assert.equal(detail.json<CatalogDetailResponse>().api.access_state, 'open');
+    });
+
     it('does not expose provider-only upstream URLs', async () => {
       const list = await harness.authed(client, {
         method: 'GET',

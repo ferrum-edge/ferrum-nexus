@@ -89,6 +89,7 @@ describe('catalog browsing', () => {
           requestable: false,
           visibility: 'internal',
           owner: null,
+          access_state: 'open',
         }),
       ],
       total: DEFAULT_PAGE_SIZE + 1,
@@ -101,6 +102,7 @@ describe('catalog browsing', () => {
     });
     expect(screen.getByText('No description provided.')).toBeInTheDocument();
     expect(screen.getByText('Open')).toBeInTheDocument();
+    expect(screen.getByText('Open access')).toBeInTheDocument();
     expect(screen.getByText('Internal')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Next page' })).toBeDisabled();
 
@@ -114,6 +116,18 @@ describe('catalog browsing', () => {
     });
     changeField('Search the catalog', '');
     await screen.findByText('Nothing has been published to this portal yet.');
+  });
+
+  it('labels a non-requestable API as open access on the catalog card', async () => {
+    vi.mocked(catalogApi.list).mockResolvedValue({
+      items: [catalogEntry({ requestable: false, access_state: 'open' })],
+      total: 1,
+    });
+    renderPage(<CatalogPage />);
+    const card = await screen.findByRole('link', { name: /Billing API/ });
+    expect(within(card).getByText('Open access')).toBeInTheDocument();
+    expect(within(card).getByText('Open')).toBeInTheDocument();
+    expect(within(card).queryByText('No access')).not.toBeInTheDocument();
   });
 
   it('provides a catalog return link when an entry cannot be loaded', async () => {
@@ -236,12 +250,27 @@ describe('catalog access', () => {
     expect(screen.queryByRole('button', { name: 'Request access' })).not.toBeInTheDocument();
   });
 
+  it('labels a non-requestable API as open access beside the title', async () => {
+    detail = {
+      ...detail,
+      api: catalogEntry({ requestable: false, access_state: 'open' }),
+    };
+    await openDetail();
+    expect(screen.getAllByText('Open access').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText('Any portal account may call it')).toBeInTheDocument();
+    expect(screen.queryByText('No access')).not.toBeInTheDocument();
+  });
+
   it('shows the gateway path for an open API without a configured gateway origin', async () => {
-    detail = { ...detail, api: catalogEntry({ requestable: false, invoke_url: null }) };
+    detail = {
+      ...detail,
+      api: catalogEntry({ requestable: false, access_state: 'open', invoke_url: null }),
+    };
     await openDetail('Access');
     expect(screen.getByText(/No approval needed/)).toBeInTheDocument();
     expect(screen.getByText(/This portal has no gateway address configured/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Copy Invoke URL' })).not.toBeInTheDocument();
+    expect(screen.queryByText('No access')).not.toBeInTheDocument();
   });
 
   it('shows the last denial and permits a new request', async () => {

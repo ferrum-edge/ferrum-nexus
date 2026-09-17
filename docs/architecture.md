@@ -1021,11 +1021,15 @@ POST /api/credentials/:id/rotate
                                               edge_ordinal = next for (consumer, type)
 ```
 
-Append-then-delete keeps both secrets live across the hand-off, which is the
-whole point of a rotation. At the cap there is no room to append, so the old
-entry has to go first — briefly leaving the account with no working credential
-of that type. Raising `FERRUM_MAX_CREDENTIALS_PER_TYPE` (and the matching
-gateway setting) above 1 avoids that window.
+Append-then-delete keeps both secrets briefly live during the server
+operation, then deletes the old entry before the rotate response returns.
+Callers therefore have no user-controlled overlap window; a successful rotate
+always marks the previous credential `revoked`. At the cap there is no room to
+append, so the old entry has to go first — briefly leaving the account with no
+working credential of that type. Raising `FERRUM_MAX_CREDENTIALS_PER_TYPE`
+(and the matching gateway setting) above 1 avoids that gap. For a
+caller-visible cutover, issue a new credential, deploy it, then revoke the
+old one.
 
 ### 6.3 Reconciling a consumer
 

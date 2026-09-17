@@ -174,6 +174,21 @@ describe('credential management', () => {
     await screen.findByRole('dialog', { name: 'Save your new credential' });
   });
 
+  it('explains that rotation revokes the old secret as part of the operation', async () => {
+    credentials = [CREDENTIAL];
+    renderPage(<CredentialsPage />);
+    expect(
+      await screen.findByText(/revokes the previous value as part of the same operation/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/window to switch over/)).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: 'Rotate' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Rotate credential' });
+    expect(within(dialog).getByText(/revoked as part of this operation/)).toBeInTheDocument();
+    expect(
+      within(dialog).queryByText(/keeps working until the rotation is finalized/),
+    ).not.toBeInTheDocument();
+  });
+
   it('requires a fresh acknowledgement for rotation', async () => {
     renderPage(<CredentialsPage />);
     await screen.findByText('No credentials yet');

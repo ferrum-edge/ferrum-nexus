@@ -210,6 +210,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Open catalog APIs (`requestable: false`) now report `access_state: 'open'`
+  instead of `'none'`, so the catalog card and detail page show **Open access**
+  rather than **No access** (#267).
+- Credential rotation copy no longer promises a switch-over window. The
+  credentials banner, rotation confirmation, rotation email, and user-facing
+  docs state that rotate revokes the previous value as part of the operation
+  (#268).
+
 - Specification revisions are ordered by publication sequence rather than by
   their timestamp (#270). `api_specs` gains a per-API `revision_seq` that every
   adapter assigns in the transaction that inserts the row; listings return the

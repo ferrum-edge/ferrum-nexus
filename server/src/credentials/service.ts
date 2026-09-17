@@ -1820,10 +1820,11 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           throw edgeError(RECONCILE_MESSAGE, { expected: rows.length, actual: length });
         }
 
-        // Append-then-delete keeps both secrets live across the hand-off. When
-        // the array is already at the gateway cap there is no room to append,
-        // so the old entry has to go first — briefly leaving the account with
-        // no working credential of this type, which is unavoidable at the cap.
+        // Append-then-delete keeps both secrets briefly live during this
+        // operation, then deletes the old entry before the response returns.
+        // When the array is already at the gateway cap there is no room to
+        // append, so the old entry has to go first — briefly leaving the
+        // account with no working credential of this type.
         const appendFirst = length < cap;
 
         let previous = current;
