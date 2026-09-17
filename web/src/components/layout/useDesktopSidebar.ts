@@ -6,7 +6,10 @@ function desktopQuery(): MediaQueryList | null {
   const breakpoint = getComputedStyle(document.documentElement)
     .getPropertyValue('--breakpoint-lg')
     .trim();
-  return breakpoint ? window.matchMedia(`(min-width: ${breakpoint})`) : null;
+  // Fall back to Tailwind's default `lg` when the stylesheet has not exposed the
+  // token (for example before it loads): a missing token must never leave the
+  // desktop sidebar inert.
+  return window.matchMedia(`(min-width: ${breakpoint || '64rem'})`);
 }
 
 export function useDesktopSidebar(): boolean {
