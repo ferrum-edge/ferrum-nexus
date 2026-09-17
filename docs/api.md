@@ -1520,8 +1520,10 @@ _session_ — `Paginated<CatalogApi>`. Each row is an `Api` plus `owner`
 | `owner_user_id`   | uuid                                         |
 | `limit`, `offset` | pagination                                   |
 
-`access_state` ∈ `none` \| `pending` \| `granted` \| `denied` \| `revoked` \|
-`owner`.
+`access_state` ∈ `none` \| `open` \| `pending` \| `granted` \| `denied` \|
+`revoked` \| `owner`. `open` means the API does not require an access request
+(`requestable: false`) and any portal account may call it. `none` is reserved
+for requestable APIs the caller has not asked for and does not hold a grant on.
 
 ### `GET /api/catalog/:slug`
 
@@ -2383,12 +2385,19 @@ credential's label.
 ```
 
 Append-then-delete: the replacement is created on Edge first so both secrets
-are live across the hand-off, then the old entry is deleted. **When the account
-is already at the per-type cap there is no room to append**, so the old entry is
-deleted first — and marked `revoked` the moment Edge confirms it — leaving a
-brief window with no working credential of that type. If the append then fails,
-the response says so plainly (`502 EDGE_ERROR`, _the previous credential was
-removed … issue a new credential_); everything still live stays revocable.
+are briefly live **during the server operation**, then the old entry is deleted
+before the response returns. Callers therefore have no user-controlled overlap
+window; a successful rotate always returns `previous.status="revoked"`, and
+callers using the old secret start receiving 401 as soon as gateway
+configuration propagates. **When the account is already at the per-type cap
+there is no room to append**, so the old entry is deleted first — and marked
+`revoked` the moment Edge confirms it — leaving a brief window with no working
+credential of that type. If the append then fails, the response says so plainly
+(`502 EDGE_ERROR`, _the previous credential was removed … issue a new
+credential_); everything still live stays revocable.
+
+For a caller-visible cutover, issue a new credential, deploy it, then revoke
+the old one — provided the account is below `FERRUM_MAX_CREDENTIALS_PER_TYPE`.
 
 Either way the credential being replaced passes through the `retiring` status
 before it settles at `revoked`: the retirement is written down _before_ the

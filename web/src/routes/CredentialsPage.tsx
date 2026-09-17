@@ -247,8 +247,12 @@ export function CredentialsPage(): ReactElement {
 
       <div className="mb-4">
         <FormNotice tone="info">
-          Rotation appends a new credential on the gateway before retiring the old one, so callers
-          have a window to switch over. Revoking removes the credential immediately.
+          Rotation revokes the previous value as part of the same operation. Callers using the old
+          secret start receiving 401 as soon as gateway configuration propagates, which can
+          interrupt clients until they deploy the new value. To keep both secrets live during a
+          cutover, issue a new credential, deploy it, then revoke the old one — that path is
+          available when you are below the per-type limit (issuing another credential of the same
+          type is refused once you are at the cap). Revoking a credential removes it immediately.
         </FormNotice>
       </div>
 
@@ -338,7 +342,12 @@ export function CredentialsPage(): ReactElement {
           if (!open) setRotating(null);
         }}
         title="Rotate credential"
-        description="A replacement is created on the gateway and shown once. The current secret keeps working until the rotation is finalized."
+        description={
+          'A replacement is created on the gateway and shown once. The current secret is ' +
+          'revoked as part of this operation and will stop working as soon as the gateway ' +
+          'applies the change. Deploy the new value before callers retry, or issue a new ' +
+          'credential first if you are below the per-type limit.'
+        }
         confirmLabel="Rotate"
         loading={rotate.isPending}
         onConfirm={() => {

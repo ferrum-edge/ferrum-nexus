@@ -231,8 +231,21 @@ export interface CatalogApi extends Omit<Api, 'upstream_url'> {
   access_state: CatalogAccessState;
 }
 
-/** The calling user's relationship to a catalog API. */
-export type CatalogAccessState = 'none' | 'pending' | 'granted' | 'denied' | 'revoked' | 'owner';
+/**
+ * The calling user's relationship to a catalog API.
+ *
+ * `open` is returned when the API does not require an access request
+ * (`requestable: false`) and no owner / grant / request state applies.
+ * `none` is reserved for requestable APIs the caller has not asked for.
+ */
+export type CatalogAccessState =
+  | 'none'
+  | 'open'
+  | 'pending'
+  | 'granted'
+  | 'denied'
+  | 'revoked'
+  | 'owner';
 
 /** Metadata about a stored spec revision (never carries the raw document). */
 export interface ApiSpecSummary {

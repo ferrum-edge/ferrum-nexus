@@ -438,6 +438,10 @@ curl -sS -b client.txt 'http://127.0.0.1:8787/api/catalog?q=billing' \
 { "name": "Billing API", "slug": "billing", "requestable": true, "access_state": "none" }
 ```
 
+A published API with `requestable: false` reports `access_state: "open"`
+instead — any portal account may call it, and the catalog must not label that
+as "No access".
+
 ```bash
 curl -sS -b client.txt -X POST http://127.0.0.1:8787/api/access-requests \
   -H 'content-type: application/json' -H "X-Nexus-CSRF: $CLIENT_CSRF" \
