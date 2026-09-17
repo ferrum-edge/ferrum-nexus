@@ -218,7 +218,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   the order was `created_at DESC, id DESC`, so revisions published in the same
   millisecond were ranked by their random UUID — which could list historical
   revisions ahead of the current one and permanently delete newer history in
-  place of older.
+  place of older. The column is part of the `001_initial` baseline, so
+  development databases must be recreated under the buildout schema policy in
+  `docs/operations.md`.
 - `npm run dev` proxied every path starting with `/api` to the backend —
   including the SPA's own `/apis`, `/apis/new` and `/apis/:id` routes — so a
   reload or deep link on the publishing pages returned the backend's JSON 404
