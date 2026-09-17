@@ -157,6 +157,7 @@ CREATE TABLE IF NOT EXISTS api_specs (
   parsed_title   VARCHAR(255) DEFAULT NULL,
   parsed_version VARCHAR(64)  DEFAULT NULL,
   is_current     TINYINT      NOT NULL DEFAULT 0,
+  revision_seq   INT          NOT NULL,
   created_at     VARCHAR(32)  NOT NULL,
   updated_at     VARCHAR(32)  NOT NULL,
   -- Emulates `CREATE UNIQUE INDEX ux_api_specs_current ON api_specs (api_id)
@@ -167,7 +168,8 @@ CREATE TABLE IF NOT EXISTS api_specs (
                    VIRTUAL,
   PRIMARY KEY (id),
   UNIQUE KEY ux_api_specs_current (current_key),
-  KEY ix_api_specs_api (api_id, created_at),
+  -- Publication order; see the SQLite schema for why the timestamp is not it.
+  UNIQUE KEY ux_api_specs_seq (api_id, revision_seq),
   CONSTRAINT ck_api_specs_is_current CHECK (is_current IN (0, 1)),
   CONSTRAINT fk_api_specs_api FOREIGN KEY (api_id) REFERENCES apis (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;

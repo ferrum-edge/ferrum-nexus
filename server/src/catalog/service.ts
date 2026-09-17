@@ -275,7 +275,7 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       ]);
 
       const spec: ApiSpecSummary | null = specRecord
-        ? (({ raw_spec: _raw, ...rest }) => rest)(specRecord)
+        ? (({ raw_spec: _raw, revision_seq: _seq, ...rest }) => rest)(specRecord)
         : null;
 
       return {

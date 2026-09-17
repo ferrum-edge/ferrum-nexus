@@ -218,6 +218,20 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   docs state that rotate revokes the previous value as part of the operation
   (#268).
 
+- Specification revisions are ordered by publication sequence rather than by
+  their timestamp (#270). `api_specs` gains a per-API `revision_seq` that every
+  adapter assigns in the transaction that inserts the row; listings return the
+  current revision first and then history newest-first by that sequence, and
+  `NEXUS_SPEC_HISTORY_LIMIT` retention deletes from the same order. Previously
+  the order was `created_at DESC, id DESC`, so revisions published in the same
+  millisecond were ranked by their random UUID — which could list historical
+  revisions ahead of the current one and permanently delete newer history in
+  place of older. The column is part of the `001_initial` baseline, so
+  development databases must be recreated under the buildout schema policy in
+  `docs/operations.md`.
+- Closed mobile navigation is inert and hidden from assistive technology. Opening
+  the drawer moves focus into it; Escape, navigation and backdrop dismissal return
+  focus to the toggle. Desktop navigation remains available across viewport changes (#265).
 - Informational badges, including API Key and GET method labels, derive readable
   text independently from their brand tint in both themes. Default and custom
   colours reach at least 4.5:1 contrast on the portal's badge surfaces (#269).

@@ -390,6 +390,11 @@ of that API beyond the newest N is deleted.
   current, so a revision that is rolled back prunes nothing, and the previous
   current revision — the one a failed gateway write restores to — is always the
   newest historical row and is therefore always kept.
+- "Newest" is **publication order**, not the timestamp: every revision carries
+  a per-API `revision_seq` the store assigns in the transaction that inserts
+  the row. `created_at` has millisecond resolution and ids are random UUIDs, so
+  revisions published in the same millisecond had no stable order and
+  retention could delete the newer of the two.
 - The current revision is never a candidate, whatever the limit says.
 - A deployment upgrading with a long accumulated history trims up to 1000 rows
   per API per revision, so a very old API converges over its next few uploads

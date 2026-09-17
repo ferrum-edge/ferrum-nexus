@@ -300,6 +300,17 @@ function stamps(input: {
 const NEWEST_FIRST: Sort = { created_at: -1, _id: -1 };
 
 /**
+ * Spec revisions as the SQL adapters list them: the current revision first,
+ * then history newest-first by publication order. BSON sorts `false` before
+ * `true`, so a descending `is_current` puts the current revision at the head
+ * exactly as `ORDER BY is_current DESC` does.
+ */
+const SPEC_REVISIONS_ORDER: Sort = { is_current: -1, revision_seq: -1 };
+
+/** Spec history newest-first; the order retention deletes from the tail of. */
+const SPEC_HISTORY_ORDER: Sort = { revision_seq: -1 };
+
+/**
  * Outbox claim order: earliest scheduled attempt first.
  *
  * BSON sorts `null` before every string, so rows with no `next_attempt_at` come
@@ -450,6 +461,7 @@ function mapApiSpec(row: Row): ApiSpecRecord {
     parsed_title: strOrNull(row.parsed_title),
     parsed_version: strOrNull(row.parsed_version),
     is_current: flag(row.is_current),
+    revision_seq: num(row.revision_seq),
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
   };
@@ -827,7 +839,14 @@ const INDEXES: IndexDefinition[] = [
     unique: true,
     partialFilterExpression: { is_current: true },
   },
-  { collection: 'api_specs', name: 'ix_api_specs_api', key: { api_id: 1, created_at: 1 } },
+  // Publication order, and the index every `api_id` lookup uses; see the SQLite
+  // schema for why the timestamp is not it.
+  {
+    collection: 'api_specs',
+    name: 'ux_api_specs_seq',
+    key: { api_id: 1, revision_seq: 1 },
+    unique: true,
+  },
 
   {
     collection: 'api_plugins',
@@ -1095,6 +1114,24 @@ class MongoStore implements NexusStore {
       .project<Row>({ edge_ordinal: 1 })
       .toArray();
     return num(top[0]?.edge_ordinal ?? 0) + 1;
+  }
+
+  /**
+   * One more than the largest `revision_seq` recorded for an API.
+   *
+   * Called only from inside the create transaction, exactly as the SQL
+   * adapters read the next position inside theirs; the unique index on
+   * `(api_id, revision_seq)` is what catches two revisions that read one
+   * position anyway.
+   */
+  private async nextSpecRevisionSeq(apiId: string): Promise<number> {
+    const top = await this.col(COLLECTIONS.apiSpecs)
+      .find({ api_id: apiId } as Filter<NexusDoc>, this.opts)
+      .sort(SPEC_HISTORY_ORDER)
+      .limit(1)
+      .project<Row>({ revision_seq: 1 })
+      .toArray();
+    return num(top[0]?.revision_seq ?? 0) + 1;
   }
 
   /** Session option threaded through every operation of a scoped store. */
@@ -1682,6 +1719,7 @@ class MongoStore implements NexusStore {
               parsed_title: input.parsed_title ?? null,
               parsed_version: input.parsed_version ?? null,
               is_current: input.is_current,
+              revision_seq: await tx.nextSpecRevisionSeq(input.api_id),
               created_at: meta.created_at,
               updated_at: meta.updated_at,
             } as NexusDoc,
@@ -1737,7 +1775,7 @@ class MongoStore implements NexusStore {
       return this.paginate(
         COLLECTIONS.apiSpecs,
         query as Filter<NexusDoc>,
-        NEWEST_FIRST,
+        SPEC_REVISIONS_ORDER,
         options,
         mapApiSpec,
       );
@@ -1752,7 +1790,7 @@ class MongoStore implements NexusStore {
     pruneHistory: async (apiId, keep) => {
       const doomed = await this.col(COLLECTIONS.apiSpecs)
         .find({ api_id: apiId, is_current: false } as Filter<NexusDoc>, this.opts)
-        .sort(NEWEST_FIRST)
+        .sort(SPEC_HISTORY_ORDER)
         .skip(Math.max(0, keep))
         .limit(SPEC_HISTORY_PRUNE_BATCH)
         .project({ _id: 1 })

@@ -1,14 +1,17 @@
 import { Link } from '@tanstack/react-router';
-import type { ReactElement, ReactNode } from 'react';
+import type { ReactElement, ReactNode, Ref } from 'react';
 import { ROLE_LABELS, type Role, type User } from '@ferrum-nexus/shared';
 import { cn } from '../../lib/cn';
 import { Icon } from '../ui/Icon';
 import { NAV_SECTIONS, navItemsForSection } from './nav';
 
 export interface SidebarProps {
+  id: string;
+  sidebarRef: Ref<HTMLElement>;
   role: Role | null;
   /** Mobile drawer state; the sidebar is always visible from `lg` up. */
   open: boolean;
+  isDesktop: boolean;
   onNavigate: () => void;
   portalName: string;
   logoDataUrl: string | null;
@@ -61,8 +64,11 @@ export function BrandMark({
 
 /** Role-filtered primary navigation. */
 export function Sidebar({
+  id,
+  sidebarRef,
   role,
   open,
+  isDesktop,
   onNavigate,
   portalName,
   logoDataUrl,
@@ -71,6 +77,11 @@ export function Sidebar({
 }: SidebarProps): ReactElement {
   return (
     <aside
+      id={id}
+      ref={sidebarRef}
+      tabIndex={-1}
+      inert={!isDesktop && !open}
+      aria-hidden={!isDesktop && !open ? true : undefined}
       className={cn(
         'fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-fg',
         'transition-transform duration-200 ease-out lg:translate-x-0',
