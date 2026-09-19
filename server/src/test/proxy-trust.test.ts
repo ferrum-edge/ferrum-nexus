@@ -94,8 +94,9 @@ describe('proxy trust', () => {
       const statuses: number[] = [];
       for (let attempt = 0; attempt < 25; attempt += 1) {
         const response = await harness.app.inject({
-          method: 'GET',
-          url: '/api/auth/captcha',
+          method: 'POST',
+          url: '/api/auth/forgot-password',
+          payload: { email: 'unknown@example.test' },
           headers: { 'x-forwarded-for': `203.0.113.${attempt}` },
         });
         statuses.push(response.statusCode);
@@ -155,8 +156,9 @@ describe('proxy trust', () => {
       const statuses: number[] = [];
       for (let attempt = 0; attempt < 25; attempt += 1) {
         const response = await harness.app.inject({
-          method: 'GET',
-          url: '/api/auth/captcha',
+          method: 'POST',
+          url: '/api/auth/forgot-password',
+          payload: { email: 'unknown@example.test' },
           // A different real client each time, as the proxy saw it — with the
           // same forged left-most entry throughout.
           headers: { 'x-forwarded-for': `203.0.113.9, 198.51.100.${attempt}` },
@@ -213,8 +215,9 @@ describe('proxy trust', () => {
       const statuses: number[] = [];
       for (let attempt = 0; attempt < 25; attempt += 1) {
         const response = await harness.app.inject({
-          method: 'GET',
-          url: '/api/auth/captcha',
+          method: 'POST',
+          url: '/api/auth/forgot-password',
+          payload: { email: 'unknown@example.test' },
           // One real client (right-most, written by the proxy) rotating the
           // part of the header it controls.
           headers: { 'x-forwarded-for': `203.0.113.${attempt}, 198.51.100.4` },

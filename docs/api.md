@@ -382,9 +382,18 @@ way.
 
 ## Auth
 
-Registered under `/api/auth`. **Rate-limited** to 20 requests per minute per IP
-across the whole prefix when `NEXUS_RATE_LIMIT_ENABLED=true` (the default;
-always off under `NEXUS_ENV=test`). Exceeding it is `429 RATE_LIMITED`.
+Registered under `/api/auth`. The sensitive POST routes (register, login,
+logout, forgot-password, reset-password, verify-email and resend-verification)
+share **20 requests per minute per client IP**. The read-only bootstrap routes,
+`GET /api/auth/me` and `GET /api/auth/captcha`, share a separate **120 requests
+per minute per client IP**; reading either never spends the sensitive-route
+budget, and exhausting either budget does not block the other group.
+
+Both limits apply when `NEXUS_RATE_LIMIT_ENABLED=true` (the default; always off
+under `NEXUS_ENV=test`). Exceeding either is `429 RATE_LIMITED`. Client IPs come
+from Fastify's configured proxy trust, not an untrusted forwarded header. These
+budgets are per process; enforce aggregate limits at the proxy for multiple
+Nexus instances.
 
 ### `POST /api/auth/register`
 
@@ -514,7 +523,7 @@ What actually happened is recorded in the audit log
 written when a link was really issued.
 
 The only errors these routes return are `400 VALIDATION_FAILED` for a malformed
-body and `429 RATE_LIMITED` from the shared `/api/auth/*` limiter.
+body and `429 RATE_LIMITED` from the shared sensitive-auth limiter.
 
 ### `POST /api/auth/resend-verification`
 
@@ -1130,9 +1139,18 @@ settings — see
 
 ### `PUT /api/admin/settings`
 
-_admin_, except `smtp` and `captcha` which are **_super_admin_** — partial
+_admin_, except `smtp`, `captcha` and `gateway` which are **_super_admin_** — partial
 update; **omitted sections are untouched**, and omitted fields inside a supplied
 section keep their current value.
+
+Unknown top-level sections and unknown keys inside any supplied section are
+rejected with `400 VALIDATION_FAILED`, including extra keys in
+`branding.footer_links` objects. Each `error.details` entry names the full
+field path (for example `branding.portal_nam` or
+`branding.footer_links.0.target`). Response-only fields such as
+`captcha.secret_set`, `captcha.enforcement` and `smtp.password_set` are not
+accepted in an update. A schema rejection applies none of the patch, performs no
+CAPTCHA activation self-test and writes no `admin.settings_update` audit row.
 
 A body carrying an `smtp`, `captcha` or `gateway` section from an ordinary
 `admin` is refused with `403 FORBIDDEN` and nothing is written — not even the

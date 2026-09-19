@@ -608,7 +608,7 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
           const next: BrandingSettings = { ...current };
           for (const [field, value] of Object.entries(patch.branding)) {
             if (value === undefined) continue;
-            // Narrow through the known keys; unknown fields are dropped by zod.
+            // The route rejects unknown keys; internal callers use the shared DTO.
             (next as unknown as Record<string, unknown>)[field] = value;
             changed.push(`branding.${field}`);
           }

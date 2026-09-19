@@ -110,14 +110,27 @@ describe('CAPTCHA enforcement disabled (break-glass)', () => {
   });
 
   it('cannot be switched from the API', async () => {
+    const settingsBefore = await harness.store.settings.all();
+    const auditBefore = await harness.auditRows('admin.settings_update');
     const response = await harness.authed(founder, {
       method: 'PUT',
       url: '/api/admin/settings',
-      // Zod strips unknown keys, so this is stored as nothing at all.
+      // Enforcement is an operator-only setting, rejected by the strict schema.
       payload: { captcha: { enforcement: 'enforced' } },
     });
-    assert.equal(response.statusCode, 200, response.body);
-    assert.equal(response.json<AdminSettingsResponse>().captcha.enforcement, 'disabled');
+    assert.equal(response.statusCode, 400, response.body);
+    const error = response.json<ApiErrorBody>().error;
+    assert.equal(error.code, 'VALIDATION_FAILED');
+    assert.deepEqual(
+      (error.details as { path: string; code: string }[]).map(({ path, code }) => ({ path, code })),
+      [{ path: 'captcha.enforcement', code: 'unrecognized_keys' }],
+    );
+    assert.deepEqual(await harness.store.settings.all(), settingsBefore);
+    assert.deepEqual(await harness.auditRows('admin.settings_update'), auditBefore);
+    assert.equal(vendorCalls, 0);
+    const current = await harness.authed(founder, { method: 'GET', url: '/api/admin/settings' });
+    assert.equal(current.statusCode, 200, current.body);
+    assert.equal(current.json<AdminSettingsResponse>().captcha.enforcement, 'disabled');
   });
 
   it('still makes a repaired configuration prove itself before it is stored', async () => {

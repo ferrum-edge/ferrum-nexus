@@ -211,7 +211,7 @@ they are built to answer nothing:
 - **The audit log is where the truth is.** `auth.password_reset_request` and
   `auth.verification_resend` are written only when a link was really issued, so
   operators can see what the response would not say.
-- **Rate limiting still applies.** Both routes sit under the `/api/auth/*`
+- **Rate limiting still applies.** Both routes share the sensitive `/api/auth`
   limiter (20 requests per minute per IP), which is what bounds the cost of the
   scrypt floor.
 
@@ -328,9 +328,16 @@ every verification and password-reset link the portal sends, which is an account
 takeover of every user; whoever controls the CAPTCHA settings can switch off
 the registration brake; whoever controls the gateway origin directs every client
 to send its gateway credentials to a host of their choosing. `PUT /api/admin/settings` answers `403 FORBIDDEN` for
-an `admin` sending either section, and the check lives in the service, so it
+an `admin` sending any of these sections, and the check lives in the service, so it
 holds however `updateSettings` is reached. Branding and registration policy
 stay at `admin`.
+
+The settings update body rejects unknown sections and keys at every object
+level, including branding footer links. `400 VALIDATION_FAILED` names each
+rejected field path. Schema validation precedes service effects: no setting, secret,
+CAPTCHA activation check or settings audit row changes on rejection. Omitted
+known fields retain their values; accepted writes and their audit row still
+share one transaction.
 
 Email templates also stay at `admin`. Render contexts expose the server-built
 `reset_url` and `verification_url`, but never separate raw-token variables.
@@ -915,12 +922,20 @@ recognisable:
 
 ### Rate limiting
 
-`@fastify/rate-limit` is registered on two child instances.
+`@fastify/rate-limit` is registered on separate child instances so unrelated
+surfaces do not share counters.
 
-`/api/auth/*` takes **20 requests per minute per IP**, covering register, login,
-logout, me, verify-email and captcha config. Exceeding it is
-`429 RATE_LIMITED`. It is scoped to that prefix so the credential-guessing
-surface is protected without throttling normal portal use.
+The sensitive POST routes under `/api/auth` share **20 requests per minute
+per IP**: register, login, logout, forgot-password, reset-password,
+verify-email and resend-verification. Failed attempts count toward this shared
+budget, so switching sensitive endpoints does not create a fresh allowance.
+
+`GET /api/auth/me` and `GET /api/auth/captcha` share their own **120 requests
+per minute per IP**, matching the public branding and health ceilings. Anonymous
+and authenticated reads use the same IP budget. Repeated page loads never spend
+the credential-guessing allowance, and a spent sensitive-route budget does not
+prevent session bootstrap. Both groups answer `429 RATE_LIMITED` when their
+own budget is exhausted.
 
 `/api/threads` takes a limiter registered `global: false`, so only the two write
 routes carry one: **10 thread creations and 30 replies per minute**, keyed on

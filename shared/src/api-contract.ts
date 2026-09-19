@@ -953,7 +953,11 @@ export interface AdminSettingsResponse {
   gateway: GatewaySettings;
 }
 
-/** `PUT /api/admin/settings` — every section is optional; omitted ones are untouched. */
+/**
+ * `PUT /api/admin/settings` — omitted sections and fields are untouched.
+ * Unknown sections or keys (including footer-link keys) are rejected with
+ * `400 VALIDATION_FAILED` and field paths; the entire patch remains unapplied.
+ */
 export interface UpdateSettingsRequest {
   branding?: Partial<BrandingSettings>;
   captcha?: {
