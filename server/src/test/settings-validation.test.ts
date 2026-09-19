@@ -149,6 +149,42 @@ describe('strict settings route validation', () => {
     });
   }
 
+  it('bounds unknown-key responses without applying valid sibling changes', async () => {
+    const settingsBefore = await harness.store.settings.all();
+    const auditBefore = await harness.auditRows();
+    const gatewayCallsBefore = harness.edge.requests.length;
+    for (const count of [250, 1_000]) {
+      const keys = Array.from({ length: count }, (_, i) => `k${String(i).padStart(5, '0')}`);
+      const response = await harness.authed(founder, {
+        method: 'PUT',
+        url: '/api/admin/settings',
+        payload: {
+          branding: { portal_name: 'Must not save', ...Object.fromEntries(keys.map((k) => [k, 0])) },
+          captcha: {
+            enabled: true,
+            secret_key: 'replacement-captcha-secret',
+            captcha_token: TEST_CAPTCHA_TOKEN,
+          },
+          smtp: { password: 'replacement-smtp-password' },
+        },
+      });
+      assert.equal(response.statusCode, 400);
+      const error = response.json<ApiErrorBody>().error;
+      assert.equal(error.code, 'VALIDATION_FAILED');
+      const details = error.details as { path: string; code: string; message: string }[];
+      assert.deepEqual(details.map((issue) => issue.path).sort(), keys.map((k) => `branding.${k}`));
+      assert.ok(details.every((issue) => issue.code === 'unrecognized_keys'));
+      assert.ok(details.every((issue) => issue.message === 'Unrecognized key'));
+      assert.ok(Buffer.byteLength(response.body) < 128 * count + 512, 'linear response size');
+      assert.deepEqual(await harness.store.settings.all(), settingsBefore);
+      assert.deepEqual(await harness.auditRows(), auditBefore);
+      assert.equal(captchaCalls, 0);
+      assert.equal(harness.edge.requests.length, gatewayCallsBefore);
+      assert.ok(!response.body.includes('replacement-captcha-secret'));
+      assert.ok(!response.body.includes('replacement-smtp-password'));
+    }
+  });
+
   it('still validates known fields in every section before saving any sibling', async () => {
     const settingsBefore = await harness.store.settings.all();
     const auditBefore = await harness.auditRows();

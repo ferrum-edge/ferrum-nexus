@@ -27,7 +27,8 @@ export function fromZodError(error: ZodError, message = 'Request validation fail
     return paths.map((path) => ({
       path: path.join('.'),
       code: issue.code,
-      message: issue.message,
+      // Zod's unknown-key message lists every key; repeating it per path is quadratic.
+      message: issue.code === 'unrecognized_keys' ? 'Unrecognized key' : issue.message,
     }));
   });
   return new NexusError('VALIDATION_FAILED', message, details);

@@ -695,6 +695,31 @@ describe('provider plugin palette', () => {
       assert.deepEqual(effectiveNames(harness, proxyId), ['key_auth']);
     });
 
+    it('bounds provider unknown-trigger responses before gateway or audit effects', async () => {
+      const auditBefore = await harness.auditRows();
+      const gatewayCallsBefore = harness.edge.requests.length;
+      for (const count of [250, 1_000]) {
+        const keys = Array.from({ length: count }, (_, i) => `k${String(i).padStart(5, '0')}`);
+        const response = await setPlugin('correlation_id', {
+          config: { header_name: 'x-request-id' },
+          trigger: { methods: ['GET'], ...Object.fromEntries(keys.map((k) => [k, 0])) },
+        });
+        assert.equal(response.statusCode, 400);
+        const error = response.json<ApiErrorBody>().error;
+        assert.equal(error.code, 'VALIDATION_FAILED');
+        const details = error.details as { path: string; code: string; message: string }[];
+        assert.deepEqual(details.map((issue) => issue.path).sort(), keys.map((k) => `trigger.${k}`));
+        assert.ok(details.every((issue) => issue.code === 'unrecognized_keys'));
+        assert.ok(details.every((issue) => issue.message === 'Unrecognized key'));
+        assert.ok(Buffer.byteLength(response.body) < 128 * count + 512, 'linear response size');
+        assert.equal(harness.edge.requests.length, gatewayCallsBefore);
+        assert.deepEqual(await harness.auditRows(), auditBefore);
+        assert.equal(await harness.store.apiPlugins.find(apiId, 'correlation_id'), null);
+        assert.equal(harness.edge.pluginForProxy(proxyId, 'correlation_id'), undefined);
+        assert.deepEqual(effectiveNames(harness, proxyId), ['key_auth']);
+      }
+    });
+
     it('rejects an out-of-range integer', async () => {
       assert.equal(
         (await setPlugin('request_size_limiting', { config: { max_bytes: 0 } })).statusCode,
