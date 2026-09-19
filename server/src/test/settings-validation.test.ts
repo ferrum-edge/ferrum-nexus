@@ -139,10 +139,7 @@ describe('strict settings route validation', () => {
       assert.equal(error.code, 'VALIDATION_FAILED');
       const details = error.details as { path: string; code: string; message: string }[];
       assert.ok(Array.isArray(details), response.body);
-      assert.deepEqual(
-        details.map((issue) => issue.path).sort(),
-        [...paths].sort(),
-      );
+      assert.deepEqual(details.map((issue) => issue.path).sort(), [...paths].sort());
       assert.ok(details.every((issue) => issue.code === 'unrecognized_keys' && issue.message));
       assert.deepEqual(await harness.store.settings.all(), settingsBefore);
       assert.deepEqual(await harness.auditRows(), auditBefore);
