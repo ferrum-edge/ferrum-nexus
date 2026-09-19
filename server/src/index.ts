@@ -89,7 +89,7 @@ import { createUpstreamResolver, type UpstreamResolver } from './publishing/oas.
 import { createPublishingService, type PublishingService } from './publishing/service.js';
 import { accessRequestRoutes, grantRoutes } from './routes/access.js';
 import { adminRoutes } from './routes/admin.js';
-import { authRoutes } from './routes/auth.js';
+import { authBootstrapRoutes, authRoutes } from './routes/auth.js';
 import { brandingRoutes } from './routes/branding.js';
 import { catalogRoutes } from './routes/catalog.js';
 import { credentialsRoutes } from './routes/credentials.js';
@@ -201,8 +201,15 @@ export interface BuildServerDeps {
   sendLockWaitMs?: number;
 }
 
-/** Rate limit applied to `/api/auth/*` when `config.rateLimitEnabled` is true. */
+/** Shared per-IP budget for sensitive `/api/auth` routes, including credential guessing. */
 export const AUTH_RATE_LIMIT = { max: 20, timeWindow: '1 minute' } as const;
+
+/**
+ * Separate per-IP budget for session and CAPTCHA bootstrap reads. Page loads
+ * must not spend the credential-guessing allowance, but still need an abuse
+ * ceiling, like the public branding and health routes.
+ */
+export const AUTH_BOOTSTRAP_RATE_LIMIT = { max: 120, timeWindow: '1 minute' } as const;
 
 /**
  * Rate limit applied to `/api/health*` when `config.rateLimitEnabled` is true.
@@ -614,7 +621,19 @@ export async function buildServer(
       if (config.rateLimitEnabled) {
         await scope.register(rateLimit, { ...AUTH_RATE_LIMIT });
       }
-      await scope.register(authRoutes, { config, auth, captcha });
+      await scope.register(authRoutes, { config, auth });
+    },
+    { prefix: '/api/auth' },
+  );
+
+  await app.register(
+    async (scope) => {
+      // A sibling scope gives both reads one shared store, independent of the
+      // sensitive routes above. Both limiters use Fastify's trusted request.ip.
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { ...AUTH_BOOTSTRAP_RATE_LIMIT });
+      }
+      await scope.register(authBootstrapRoutes, { auth, captcha });
     },
     { prefix: '/api/auth' },
   );

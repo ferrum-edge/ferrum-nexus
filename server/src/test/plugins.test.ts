@@ -681,6 +681,20 @@ describe('provider plugin palette', () => {
       assert.deepEqual(effectiveNames(harness, proxyId), ['key_auth']);
     });
 
+    it('names unknown trigger fields through the shared route error handler', async () => {
+      const response = await setPlugin('correlation_id', {
+        config: { header_name: 'x-request-id' },
+        trigger: { methods: ['GET'], unexpected: true },
+      });
+      assert.equal(response.statusCode, 400, response.body);
+      const error = response.json<ApiErrorBody>().error;
+      assert.equal(error.code, 'VALIDATION_FAILED');
+      const details = error.details as { path: string; code: string }[];
+      assert.ok(details.some((issue) => issue.path === 'trigger.unexpected'));
+      assert.equal(harness.edge.pluginForProxy(proxyId, 'correlation_id'), undefined);
+      assert.deepEqual(effectiveNames(harness, proxyId), ['key_auth']);
+    });
+
     it('rejects an out-of-range integer', async () => {
       assert.equal(
         (await setPlugin('request_size_limiting', { config: { max_bytes: 0 } })).statusCode,

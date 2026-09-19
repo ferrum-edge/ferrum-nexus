@@ -17,11 +17,19 @@ import { isApiRequest } from './api-route.js';
 
 /** Turn a `ZodError` into `VALIDATION_FAILED` with per-field issue details. */
 export function fromZodError(error: ZodError, message = 'Request validation failed'): NexusError {
-  const details = error.issues.map((issue) => ({
-    path: issue.path.join('.'),
-    code: issue.code,
-    message: issue.message,
-  }));
+  const details = error.issues.flatMap((issue) => {
+    // Zod attaches unknown keys to the containing object. Expand them so the
+    // client can identify each rejected field, including nested array items.
+    const paths =
+      issue.code === 'unrecognized_keys'
+        ? issue.keys.map((key) => [...issue.path, key])
+        : [issue.path];
+    return paths.map((path) => ({
+      path: path.join('.'),
+      code: issue.code,
+      message: issue.message,
+    }));
+  });
   return new NexusError('VALIDATION_FAILED', message, details);
 }
 
