@@ -708,7 +708,10 @@ describe('provider plugin palette', () => {
         const error = response.json<ApiErrorBody>().error;
         assert.equal(error.code, 'VALIDATION_FAILED');
         const details = error.details as { path: string; code: string; message: string }[];
-        assert.deepEqual(details.map((issue) => issue.path).sort(), keys.map((k) => `trigger.${k}`));
+        assert.deepEqual(
+          details.map((issue) => issue.path).sort(),
+          keys.map((k) => `trigger.${k}`),
+        );
         assert.ok(details.every((issue) => issue.code === 'unrecognized_keys'));
         assert.ok(details.every((issue) => issue.message === 'Unrecognized key'));
         assert.ok(Buffer.byteLength(response.body) < 128 * count + 512, 'linear response size');

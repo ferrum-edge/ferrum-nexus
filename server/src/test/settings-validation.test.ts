@@ -159,7 +159,10 @@ describe('strict settings route validation', () => {
         method: 'PUT',
         url: '/api/admin/settings',
         payload: {
-          branding: { portal_name: 'Must not save', ...Object.fromEntries(keys.map((k) => [k, 0])) },
+          branding: {
+            portal_name: 'Must not save',
+            ...Object.fromEntries(keys.map((k) => [k, 0])),
+          },
           captcha: {
             enabled: true,
             secret_key: 'replacement-captcha-secret',
@@ -172,7 +175,10 @@ describe('strict settings route validation', () => {
       const error = response.json<ApiErrorBody>().error;
       assert.equal(error.code, 'VALIDATION_FAILED');
       const details = error.details as { path: string; code: string; message: string }[];
-      assert.deepEqual(details.map((issue) => issue.path).sort(), keys.map((k) => `branding.${k}`));
+      assert.deepEqual(
+        details.map((issue) => issue.path).sort(),
+        keys.map((k) => `branding.${k}`),
+      );
       assert.ok(details.every((issue) => issue.code === 'unrecognized_keys'));
       assert.ok(details.every((issue) => issue.message === 'Unrecognized key'));
       assert.ok(Buffer.byteLength(response.body) < 128 * count + 512, 'linear response size');
