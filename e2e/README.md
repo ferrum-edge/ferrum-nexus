@@ -31,9 +31,12 @@ runs reuse both.
 already. Nothing in this directory ships a working secret: a compose file with
 one in it is a secret that ends up in somebody's real deployment.
 
-Every run starts from empty volumes. The suite registers the portal's **first**
-account, so pointing it at a stack somebody has already used fails immediately,
-with that as the reason.
+Every run starts from empty volumes. `run.sh` bootstraps the portal once —
+registering the first account with the bootstrap token and turning email
+verification on — and both suites then sign in as it. That is deliberate: only
+the _first_ registration becomes `super_admin`, so two suites sharing one stack
+cannot each claim it. The bootstrap is idempotent, so re-running against a
+stack left up with `E2E_KEEP=1` works.
 
 ## What is pinned, and why
 

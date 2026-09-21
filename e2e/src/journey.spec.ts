@@ -14,11 +14,18 @@
 
 import { expect, test, type Page } from '@playwright/test';
 
-import { clearMail, latestMailTo, portal, waitForStack } from './harness.js';
+import {
+  ADMIN_EMAIL,
+  ADMIN_PASSWORD,
+  adminSession,
+  clearMail,
+  latestMailTo,
+  portal,
+  waitForStack,
+} from './harness.js';
 
 const RUN = Date.now().toString(36);
-const PASSWORD = 'correct-horse-battery-staple';
-const PROVIDER = `journey-provider-${RUN}@example.test`;
+const PASSWORD = ADMIN_PASSWORD;
 const CLIENT = `journey-client-${RUN}@example.test`;
 const API_SLUG = `journey-${RUN}`;
 
@@ -43,13 +50,11 @@ test('a client registers, verifies by email, finds an API and is approved', asyn
    * Set up through the API rather than the browser: the provider's publishing
    * flow has its own coverage, and what this test is about is the client's
    * journey. Doing it here keeps the browser steps to the ones under test.
+   *
+   * The operator account is the one `prepare.ts` bootstrapped — it also turned
+   * email verification on, which is what makes the mail step below real.
    */
-  const providerSession = await registerProvider();
-  await portal('PUT', '/api/admin/settings', {
-    session: providerSession,
-    body: { registration: { require_email_verification: true } },
-    expect: 200,
-  });
+  const providerSession = await adminSession();
   const published = await portal<{ api: { id: string } }>('POST', '/api/apis', {
     session: providerSession,
     body: {
@@ -129,7 +134,7 @@ test('a client registers, verifies by email, finds an API and is approved', asyn
   });
   const providerPage = await providerContext.newPage();
   await providerPage.goto('/login');
-  await providerPage.getByLabel(/email/i).first().fill(PROVIDER);
+  await providerPage.getByLabel(/email/i).first().fill(ADMIN_EMAIL);
   await providerPage
     .getByLabel(/password/i)
     .first()
@@ -169,9 +174,3 @@ test('a client registers, verifies by email, finds an API and is approved', asyn
     timeout: 30_000,
   });
 });
-
-/** The bootstrap provider, through the API — not the journey under test. */
-async function registerProvider(): Promise<import('./harness.js').Session> {
-  const { registerVerifiedUser } = await import('./harness.js');
-  return registerVerifiedUser(PROVIDER, 'provider', { bootstrap: true });
-}

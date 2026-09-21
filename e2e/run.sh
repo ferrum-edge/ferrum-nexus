@@ -115,6 +115,13 @@ if [[ ! -d node_modules ]]; then
   npm install --no-audit --no-fund
 fi
 
+# Bootstrap the portal once, before either suite. Only the *first*
+# registration becomes `super_admin`, so the two suites cannot each claim it —
+# whichever ran second used to find itself an ordinary provider and fail on its
+# first admin call.
+echo "==> preparing the portal"
+npx tsx src/prepare.ts
+
 if [[ "$SUITE" == "all" || "$SUITE" == "dataplane" ]]; then
   echo "==> data-plane acceptance suite"
   npx tsx --test src/dataplane.test.ts

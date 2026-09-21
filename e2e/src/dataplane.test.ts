@@ -28,6 +28,7 @@ import {
   type PublishedApi,
 } from './fixtures.js';
 import {
+  adminSession,
   callGateway,
   clearMail,
   portal,
@@ -79,29 +80,15 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     await waitForStack();
     await clearMail();
 
-    // The bootstrap account is the provider. Every other account goes through
-    // the real registration and verification flow, mail included.
-    const bootstrapEmail = `provider-${RUN}@example.test`;
-    provider = await registerVerifiedUser(bootstrapEmail, 'provider', { bootstrap: true });
-    // The suite needs the portal's *first* account, because it turns the
-    // verification policy on and publishes APIs. Running it against a stack
-    // somebody has already registered into fails here, with the reason, rather
-    // than as an unexplained `403` four calls later.
-    assert.equal(
-      provider.role,
-      'super_admin',
-      'the acceptance suite needs a freshly created stack — run `./e2e/run.sh`, ' +
-        'or bring the current one down with `docker compose down -v` first',
-    );
+    // The operator account `prepare.ts` bootstrapped, which also turned email
+    // verification on. Signing in rather than bootstrapping is what lets this
+    // suite and the browser journey share one stack: only the *first*
+    // registration becomes `super_admin`, so they cannot each claim it.
+    provider = await adminSession();
+    assert.equal(provider.role, 'super_admin', 'the stack was not prepared — run ./e2e/run.sh');
 
-    // Verification is a portal policy an operator turns on, so the suite turns
-    // it on before the accounts that have to go through it are created.
-    await portal('PUT', '/api/admin/settings', {
-      session: provider,
-      body: { registration: { require_email_verification: true } },
-      expect: 200,
-    });
-
+    // Every other account goes through the real registration and verification
+    // flow, mail included.
     outsider = await registerVerifiedUser(`outsider-${RUN}@example.test`, 'client');
   });
 

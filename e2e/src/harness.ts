@@ -21,6 +21,19 @@ export const GATEWAY_URL = process.env.E2E_GATEWAY_URL ?? 'http://127.0.0.1:8000
 export const MAIL_URL = process.env.E2E_MAIL_URL ?? 'http://127.0.0.1:8025';
 export const BOOTSTRAP_TOKEN = process.env.NEXUS_BOOTSTRAP_TOKEN ?? '';
 
+/**
+ * The single operator account `prepare.ts` bootstraps, which both suites sign
+ * in as.
+ *
+ * One account rather than one per suite, because only the first registration
+ * becomes `super_admin` — two suites against one stack cannot each bootstrap
+ * it, and the one that ran second used to fail on its first admin call.
+ */
+export const ADMIN_EMAIL = process.env.E2E_ADMIN_EMAIL ?? 'e2e-operator@example.test';
+
+/** The password every account in the suite uses. Throwaway stacks only. */
+export const ADMIN_PASSWORD = 'correct-horse-battery-staple';
+
 /** How long a readiness wait may take before the run is declared failed. */
 const READY_TIMEOUT_MS = Number(process.env.E2E_READY_TIMEOUT_MS ?? 120_000);
 const POLL_INTERVAL_MS = 500;
@@ -202,7 +215,7 @@ export async function registerVerifiedUser(
   role: 'client' | 'provider',
   options: { bootstrap?: boolean } = {},
 ): Promise<Session> {
-  const password = 'correct-horse-battery-staple';
+  const password = ADMIN_PASSWORD;
   const registered = await portal<RegisterResult>('POST', '/api/auth/register', {
     body: {
       email,
@@ -266,4 +279,9 @@ export async function waitForStack(): Promise<void> {
     const response = await fetch(`${MAIL_URL}/api/v1/messages?limit=1`);
     return response.ok;
   });
+}
+
+/** Sign in as the operator account `prepare.ts` bootstrapped. */
+export async function adminSession(): Promise<Session> {
+  return signIn(ADMIN_EMAIL, ADMIN_PASSWORD);
 }
