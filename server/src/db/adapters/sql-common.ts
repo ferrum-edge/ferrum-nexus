@@ -298,6 +298,26 @@ export class SqlWhereBuilder {
     return this;
   }
 
+  /**
+   * Add a nullable-scope condition, where `null` is a **value** rather than
+   * "unfiltered".
+   *
+   * `application_id` is the case this exists for: `null` selects the
+   * account-scoped rows and has to compile to `IS NULL`, because `= ?` with a
+   * null parameter matches nothing in SQL. `undefined` still means "every
+   * scope".
+   */
+  addScope(column: string, value: string | null | undefined): this {
+    if (value === undefined) return this;
+    if (value === null) {
+      this.conditions.push(`${column} IS NULL`);
+      return this;
+    }
+    this.conditions.push(`${column} = ?`);
+    this.values.push(value);
+    return this;
+  }
+
   /** Add a condition unconditionally. */
   always(condition: string, ...params: SqlParam[]): this {
     this.conditions.push(condition);

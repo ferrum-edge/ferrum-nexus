@@ -336,6 +336,13 @@ export interface AccessRequest {
   id: Uuid;
   api_id: Uuid;
   user_id: Uuid;
+  /**
+   * The application this access is for, or `null` for the account itself.
+   *
+   * `null` is the default and what every request written before applications
+   * existed carries; see {@link Application}.
+   */
+  application_id: Uuid | null;
   justification: string;
   status: AccessRequestStatus;
   decided_by: Uuid | null;
@@ -346,6 +353,8 @@ export interface AccessRequest {
   /** Denormalised joins included by list/detail endpoints. */
   api?: ApiSummary;
   requester?: UserSummary;
+  /** The requesting application, when the request is application-scoped. */
+  application?: ApplicationSummary;
 }
 
 /** Compact API reference embedded in requests, grants and threads. */
@@ -369,6 +378,15 @@ export interface Grant {
   id: Uuid;
   api_id: Uuid;
   user_id: Uuid;
+  /**
+   * The identity this grant belongs to: an application, or `null` for the
+   * account itself.
+   *
+   * It decides **which Ferrum consumer carries the ACL group**, which is what
+   * makes two applications of one owner genuinely separate rather than
+   * separate-looking.
+   */
+  application_id: Uuid | null;
   access_request_id: Uuid | null;
   /** Always `nexus:api:<api_id>:approved`. */
   acl_group: string;
@@ -380,6 +398,8 @@ export interface Grant {
   updated_at: IsoTimestamp;
   api?: ApiSummary;
   user?: UserSummary;
+  /** The holding application, when the grant is application-scoped. */
+  application?: ApplicationSummary;
 }
 
 /* ── Credentials & consumers ────────────────────────────────────────────── */
@@ -402,6 +422,15 @@ export type CredentialType = 'keyauth' | 'basicauth' | 'jwt';
 export interface CredentialMetadata {
   id: Uuid;
   user_id: Uuid;
+  /**
+   * The application this credential authenticates as, or `null` for the
+   * account itself.
+   *
+   * Unlike {@link CredentialMetadata.label}, this is not descriptive: it names
+   * the identity the material was appended to, so it decides what the
+   * credential can reach, and rotation and revocation follow it.
+   */
+  application_id: Uuid | null;
   ferrum_consumer_id: string;
   credential_type: CredentialType;
   ferrum_credential_id: string;
@@ -434,6 +463,14 @@ export interface CredentialMetadata {
 export interface Consumer {
   id: Uuid;
   user_id: Uuid;
+  /**
+   * The application this consumer *is*, or `null` for the account's canonical
+   * `nexus-user-<user_id>` identity.
+   *
+   * `user_id` is the owner either way, so every teardown, repair and audit
+   * that walks an account's consumers finds its applications' consumers too.
+   */
+  application_id: Uuid | null;
   namespace: string;
   ferrum_consumer_id: string;
   ferrum_username: string;
@@ -964,6 +1001,65 @@ export interface SpecDiff {
   changed: boolean;
 }
 
+/* ── Applications ───────────────────────────────────────────────────────── */
+
+/** Lifecycle of an application identity. */
+export type ApplicationStatus = 'active' | 'disabled';
+
+/**
+ * One integration owned by a portal account, with its own approved APIs and
+ * its own credentials.
+ *
+ * ## Why this is not a credential label
+ *
+ * A developer running several integrations needs each one approved for its own
+ * set of APIs — least privilege between their *own* systems, not only between
+ * accounts. Labels could never express that: every credential of an account
+ * hangs off one Ferrum consumer, so every credential inherits every ACL group
+ * the account holds, whatever it is called.
+ *
+ * An application is a separate identity all the way down. It gets its own
+ * consumer (`nexus-app-<application_id>`), its own access requests and grants,
+ * and its own credentials, so the boundary is enforced by Edge's ACL matching
+ * rather than by the portal's UI. Two applications of one owner approved for
+ * different APIs genuinely cannot call each other's.
+ *
+ * ## Compatibility
+ *
+ * Account-scoped access is unchanged and remains the default. Every scoped row
+ * carries a nullable `application_id`, and `null` means "the account itself" —
+ * which is what every row written before applications existed is. Nothing
+ * migrates on its own, and a deployed integration using an account credential
+ * goes on working exactly as it did.
+ */
+export interface Application {
+  id: Uuid;
+  owner_user_id: Uuid;
+  name: string;
+  description: string | null;
+  /**
+   * `disabled` refuses new access requests, approvals and credentials while
+   * keeping the rows and the gateway identity. It is the reversible option;
+   * deleting the application is the destructive one and takes its consumer,
+   * its grants and its credentials with it.
+   */
+  status: ApplicationStatus;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
+  /** Active grants this application holds. Filled by the list/detail reads. */
+  active_grants?: number;
+  /** Live credentials issued to it. Filled by the list/detail reads. */
+  active_credentials?: number;
+}
+
+/** Compact application reference embedded in requests, grants and credentials. */
+export interface ApplicationSummary {
+  id: Uuid;
+  name: string;
+  owner_user_id: Uuid;
+  status: ApplicationStatus;
+}
+
 /* ── Gateway reference reconciliation ───────────────────────────────────── */
 
 /**
@@ -996,6 +1092,14 @@ export interface GatewayReferenceScan {
 /** An account whose stored Edge consumer id the gateway no longer holds. */
 export interface OrphanedConsumerRef {
   user_id: Uuid;
+  /**
+   * The application this consumer is the identity of, or `null` for the
+   * account's own canonical consumer.
+   *
+   * The repair replays the grants of *that* identity, so getting it wrong
+   * would hand an application every API its owner can reach.
+   */
+  application_id: Uuid | null;
   ferrum_consumer_id: string;
   ferrum_username: string;
 }

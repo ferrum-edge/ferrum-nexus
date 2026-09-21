@@ -86,9 +86,11 @@ import {
 import { createNotificationsService, type NotificationsService } from './notifications/service.js';
 import { createApiPluginsService, type ApiPluginsService } from './plugins/service.js';
 import { createApiViewersService, type ApiViewersService } from './publishing/viewers.js';
+import { createApplicationsService, type ApplicationsService } from './applications/service.js';
 import { createUpstreamResolver, type UpstreamResolver } from './publishing/oas.js';
 import { createPublishingService, type PublishingService } from './publishing/service.js';
 import { accessRequestRoutes, grantRoutes } from './routes/access.js';
+import { applicationRoutes } from './routes/applications.js';
 import { adminRoutes } from './routes/admin.js';
 import { authBootstrapRoutes, authRoutes } from './routes/auth.js';
 import { brandingRoutes } from './routes/branding.js';
@@ -126,6 +128,7 @@ export interface NexusServices {
   usage: UsageService;
   apiPlugins: ApiPluginsService;
   apiViewers: ApiViewersService;
+  applications: ApplicationsService;
   access: AccessService;
   god: GodService;
   /**
@@ -450,6 +453,17 @@ export async function buildServer(
     notifications,
     assertCanAdminister: publishing.assertCanAdminister,
   });
+  // Composed after the credentials service, whose provisioner it shares: an
+  // application's gateway identity is created and torn down through exactly
+  // the same code an account's is.
+  const applications = createApplicationsService({
+    config,
+    store: deps.store,
+    edge: deps.edge,
+    audit,
+    provisioner: credentials.provisioner,
+    log: (obj, message) => app.log.error(obj, message),
+  });
   const access = createAccessService({
     config,
     edge: deps.edge,
@@ -531,6 +545,7 @@ export async function buildServer(
     usage,
     apiPlugins,
     apiViewers,
+    applications,
     access,
     god,
     reconciliation,
@@ -719,17 +734,22 @@ export async function buildServer(
       if (config.rateLimitEnabled) {
         await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
       }
-      await scope.register(accessRequestRoutes, { access });
+      await scope.register(accessRequestRoutes, { access, applications });
     },
     { prefix: '/api/access-requests' },
   );
 
-  await app.register(async (scope) => scope.register(grantRoutes, { access }), {
+  await app.register(async (scope) => scope.register(grantRoutes, { access, applications }), {
     prefix: '/api/grants',
   });
 
-  await app.register(async (scope) => scope.register(credentialsRoutes, { credentials }), {
-    prefix: '/api/credentials',
+  await app.register(
+    async (scope) => scope.register(credentialsRoutes, { credentials, applications }),
+    { prefix: '/api/credentials' },
+  );
+
+  await app.register(async (scope) => scope.register(applicationRoutes, { applications }), {
+    prefix: '/api/applications',
   });
 
   registerApiNotFoundRoutes(app);

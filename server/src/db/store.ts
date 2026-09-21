@@ -83,6 +83,8 @@ import type {
   ApiStatus,
   ApiGatewayState,
   ApiVisibility,
+  Application,
+  ApplicationStatus,
   AuditLog,
   Consumer,
   CredentialMetadata,
@@ -250,10 +252,10 @@ export interface ApiPluginRecord extends ApiPlugin {
 }
 
 /** An `access_requests` row (without the denormalised joins the API adds). */
-export type AccessRequestRecord = Omit<AccessRequest, 'api' | 'requester'>;
+export type AccessRequestRecord = Omit<AccessRequest, 'api' | 'requester' | 'application'>;
 
 /** A `grants` row (without the denormalised joins the API adds). */
-export type GrantRecord = Omit<Grant, 'api' | 'user'>;
+export type GrantRecord = Omit<Grant, 'api' | 'user' | 'application'>;
 
 /** A `credential_metadata` row. Plaintext material is never stored. */
 export type CredentialRecord = CredentialMetadata;
@@ -457,6 +459,17 @@ export interface ApiSpecFilter {
 export interface AccessRequestFilter {
   user_id?: Uuid;
   api_id?: Uuid;
+  /**
+   * Identity scope. **`null` is a value here, not "absent":** it selects the
+   * account-scoped rows, the ones no application owns. Leave the field
+   * `undefined` to match every scope.
+   *
+   * The departure from the usual "undefined means unfiltered" is deliberate
+   * and load-bearing — "the account's own grants" is a question the ACL replay
+   * has to be able to ask, and it is not the same question as "all of this
+   * account's grants".
+   */
+  application_id?: Uuid | null;
   /** Restrict to APIs owned by this provider (the reviewer inbox). */
   api_ids?: Uuid[];
   status?: AccessRequestStatus;
@@ -468,11 +481,33 @@ export interface GrantFilter {
   api_id?: Uuid;
   api_ids?: Uuid[];
   status?: GrantStatus;
+  /**
+   * Identity scope. **`null` is a value here, not "absent":** it selects the
+   * account-scoped rows, the ones no application owns. Leave the field
+   * `undefined` to match every scope.
+   *
+   * The departure from the usual "undefined means unfiltered" is deliberate
+   * and load-bearing — "the account's own grants" is a question the ACL replay
+   * has to be able to ask, and it is not the same question as "all of this
+   * account's grants".
+   */
+  application_id?: Uuid | null;
 }
 
 /** Filters for `credentials.list`. */
 export interface CredentialFilter {
   user_id?: Uuid;
+  /**
+   * Identity scope. **`null` is a value here, not "absent":** it selects the
+   * account-scoped rows, the ones no application owns. Leave the field
+   * `undefined` to match every scope.
+   *
+   * The departure from the usual "undefined means unfiltered" is deliberate
+   * and load-bearing — "the account's own grants" is a question the ACL replay
+   * has to be able to ask, and it is not the same question as "all of this
+   * account's grants".
+   */
+  application_id?: Uuid | null;
   status?: CredentialStatus;
   credential_type?: CredentialType;
   ferrum_consumer_id?: string;
@@ -482,6 +517,17 @@ export interface CredentialFilter {
 export interface ConsumerFilter {
   user_id?: Uuid;
   namespace?: string;
+  /**
+   * Identity scope. **`null` is a value here, not "absent":** it selects the
+   * account-scoped rows, the ones no application owns. Leave the field
+   * `undefined` to match every scope.
+   *
+   * The departure from the usual "undefined means unfiltered" is deliberate
+   * and load-bearing — "the account's own grants" is a question the ACL replay
+   * has to be able to ask, and it is not the same question as "all of this
+   * account's grants".
+   */
+  application_id?: Uuid | null;
 }
 
 /** Filters for `threads.list`. */
@@ -724,6 +770,39 @@ export interface ApiViewerRepo {
   deleteByApi(apiId: Uuid): Promise<number>;
 }
 
+/** An `applications` row — one integration identity owned by an account. */
+export type ApplicationRecord = Omit<Application, 'active_grants' | 'active_credentials'>;
+
+/** Filters accepted by {@link ApplicationRepo.list}. */
+export interface ApplicationFilter {
+  owner_user_id?: Uuid;
+  status?: ApplicationStatus;
+  /** Case-insensitive substring match on name or description. */
+  q?: string;
+}
+
+/** Application identities owned by portal accounts. */
+export interface ApplicationRepo {
+  create(input: CreateInput<ApplicationRecord>): Promise<ApplicationRecord>;
+  findById(id: Uuid): Promise<ApplicationRecord | null>;
+  /** Names are unique per owner, case-insensitively. */
+  findByOwnerAndName(ownerUserId: Uuid, name: string): Promise<ApplicationRecord | null>;
+  findManyByIds(ids: Uuid[]): Promise<ApplicationRecord[]>;
+  update(id: Uuid, patch: UpdateInput<ApplicationRecord>): Promise<ApplicationRecord | null>;
+  list(filter: ApplicationFilter, options?: ListOptions): Promise<Paginated<ApplicationRecord>>;
+  count(filter?: ApplicationFilter): Promise<number>;
+  /**
+   * Removes the application row only.
+   *
+   * Its grants, access requests, credentials and consumer mapping are cascaded
+   * by the schema, but the *gateway* identity is not — deleting an application
+   * has to take its Ferrum consumer down first, in the caller's transaction
+   * order, or the portal forgets about a consumer that is still carrying ACL
+   * groups.
+   */
+  delete(id: Uuid): Promise<boolean>;
+}
+
 /** Published APIs and their Edge proxies. */
 export interface ApiRepo {
   create(input: CreateApiInput): Promise<ApiRecord>;
@@ -871,7 +950,11 @@ export interface AccessRequestRepo {
   ): Promise<AccessRequestRecord | null>;
   list(filter: AccessRequestFilter, options?: ListOptions): Promise<Paginated<AccessRequestRecord>>;
   /** Duplicate guard: an open request by this user for this API. */
-  findPendingByApiAndUser(apiId: Uuid, userId: Uuid): Promise<AccessRequestRecord | null>;
+  findPendingByApiAndUser(
+    apiId: Uuid,
+    userId: Uuid,
+    applicationId?: Uuid | null,
+  ): Promise<AccessRequestRecord | null>;
   /** Newest request regardless of status — drives the catalog `access_state`. */
   findLatestByApiAndUser(apiId: Uuid, userId: Uuid): Promise<AccessRequestRecord | null>;
   /** Newest request per API for one user, for a page of catalog rows. */
@@ -917,12 +1000,29 @@ export interface GrantRepo {
   ): Promise<GrantRecord | null>;
   list(filter: GrantFilter, options?: ListOptions): Promise<Paginated<GrantRecord>>;
   /**
-   * The single `status = 'active'` grant for an API/user pair, if any. The
-   * schema enforces at most one via a partial unique index.
+   * The single `status = 'active'` grant for an API and one identity, if any.
+   * The schema enforces at most one via a partial unique index over
+   * `(api_id, user_id, COALESCE(application_id, ''))`.
+   *
+   * `applicationId` follows the {@link GrantFilter} convention: `null` (the
+   * default) means the account's own grant, an id means that application's.
    */
-  findActiveByApiAndUser(apiId: Uuid, userId: Uuid): Promise<GrantRecord | null>;
-  /** Every active grant held by a user — used to rebuild their ACL group list. */
-  listActiveByUser(userId: Uuid): Promise<GrantRecord[]>;
+  findActiveByApiAndUser(
+    apiId: Uuid,
+    userId: Uuid,
+    applicationId?: Uuid | null,
+  ): Promise<GrantRecord | null>;
+  /**
+   * Every active grant held by one identity — what rebuilds its ACL group
+   * list after a teardown or a gateway repair.
+   *
+   * `applicationId` is the identity, on the same convention: `null` for the
+   * account's canonical consumer, an id for that application's. Passing
+   * `undefined` returns every grant the *account* holds across all of its
+   * identities, which is what a "what does this account have access to?" read
+   * wants and what an ACL replay must never use.
+   */
+  listActiveByUser(userId: Uuid, applicationId?: Uuid | null): Promise<GrantRecord[]>;
   /** Every active grant on an API — used by god-mode delete and bulk revoke. */
   listActiveByApi(apiId: Uuid): Promise<GrantRecord[]>;
   count(filter: GrantFilter): Promise<number>;
@@ -972,8 +1072,18 @@ export interface CredentialRepo {
 export interface ConsumerRepo {
   create(input: CreateInput<ConsumerRecord>): Promise<ConsumerRecord>;
   findById(id: Uuid): Promise<ConsumerRecord | null>;
-  /** The mapping used on every credential and approval operation. */
-  findByUserAndNamespace(userId: Uuid, namespace: string): Promise<ConsumerRecord | null>;
+  /**
+   * The mapping used on every credential and approval operation.
+   *
+   * `applicationId` selects the identity: `null` (the default) is the
+   * account's canonical `nexus-user-<user_id>` consumer, an id is that
+   * application's `nexus-app-<application_id>` one.
+   */
+  findByUserAndNamespace(
+    userId: Uuid,
+    namespace: string,
+    applicationId?: Uuid | null,
+  ): Promise<ConsumerRecord | null>;
   findByFerrumId(ferrumConsumerId: string): Promise<ConsumerRecord | null>;
   findByUsername(namespace: string, ferrumUsername: string): Promise<ConsumerRecord | null>;
   update(id: Uuid, patch: UpdateInput<ConsumerRecord>): Promise<ConsumerRecord | null>;
@@ -1421,6 +1531,7 @@ export interface NexusStore {
   readonly users: UserRepo;
   readonly organizations: OrganizationRepo;
   readonly sessions: SessionRepo;
+  readonly applications: ApplicationRepo;
   readonly apis: ApiRepo;
   readonly apiSpecs: ApiSpecRepo;
   readonly apiPlugins: ApiPluginRepo;

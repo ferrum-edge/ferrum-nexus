@@ -14,10 +14,12 @@ import {
   useIssueCredential,
   useRotateCredential,
 } from '../hooks/useCredentials';
+import { useApplications } from '../hooks/useApplications';
 import { useGrants } from '../hooks/useGrants';
 import { useToast } from '../stores/toast';
 import { ShowOnceSecretDialog } from '../components/credentials/ShowOnceSecretDialog';
 import { FormNotice } from '../components/auth/AuthShell';
+import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import { Card, CardHeader, PageHeader } from '../components/ui/Card';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
@@ -28,6 +30,9 @@ import { Icon, type IconName } from '../components/ui/Icon';
 import { LabeledInput } from '../components/ui/Input';
 import { LabeledSelect } from '../components/ui/Select';
 import { StatusPill } from '../components/ui/StatusPill';
+
+/** The "my account" option value; a select has no `null`. */
+const ACCOUNT_IDENTITY = 'account';
 
 interface ShowOnceState {
   secret: ShowOnceSecret;
@@ -151,9 +156,19 @@ export function CredentialsPage(): ReactElement {
   const [issueOpen, setIssueOpen] = useState(false);
   const [credentialType, setCredentialType] = useState<CredentialType>('keyauth');
   const [label, setLabel] = useState('');
+  // The identity the credential authenticates as. `ACCOUNT_IDENTITY` is the
+  // account itself, which is the default and what every credential issued
+  // before applications existed uses.
+  const [identity, setIdentity] = useState<string>(ACCOUNT_IDENTITY);
   const [showOnce, setShowOnce] = useState<ShowOnceState | null>(null);
   const [rotating, setRotating] = useState<CredentialMetadata | null>(null);
   const [revoking, setRevoking] = useState<CredentialMetadata | null>(null);
+
+  const applications = useApplications({ status: 'active', limit: MAX_PAGE_SIZE });
+  const applicationNames = useMemo(
+    () => new Map((applications.data?.items ?? []).map((item) => [item.id, item.name])),
+    [applications.data],
+  );
 
   const issue = useIssueCredential();
   const rotate = useRotateCredential();
@@ -178,6 +193,20 @@ export function CredentialsPage(): ReactElement {
             </span>
           </span>
         ),
+      },
+      {
+        id: 'identity',
+        header: 'Identity',
+        // Which identity the material authenticates as, and therefore what it
+        // can reach — the thing `Label` cannot tell you.
+        cell: ({ row }) =>
+          row.original.application_id ? (
+            <Badge tone="accent">
+              {applicationNames.get(row.original.application_id) ?? 'Application'}
+            </Badge>
+          ) : (
+            <span className="text-fg-muted">My account</span>
+          ),
       },
       {
         id: 'type',
@@ -229,7 +258,7 @@ export function CredentialsPage(): ReactElement {
         ),
       },
     ],
-    [],
+    [applicationNames],
   );
 
   return (
@@ -295,11 +324,16 @@ export function CredentialsPage(): ReactElement {
               loading={issue.isPending}
               onClick={() =>
                 issue.mutate(
-                  { credential_type: credentialType, label: label.trim() || null },
+                  {
+                    credential_type: credentialType,
+                    label: label.trim() || null,
+                    application_id: identity === ACCOUNT_IDENTITY ? null : identity,
+                  },
                   {
                     onSuccess: (response) => {
                       setIssueOpen(false);
                       setLabel('');
+                      setIdentity(ACCOUNT_IDENTITY);
                       setShowOnce({
                         secret: response.secret,
                         consumerUsername: response.consumer_username,
@@ -316,6 +350,26 @@ export function CredentialsPage(): ReactElement {
         }
       >
         <div className="flex flex-col gap-4">
+          {/* The identity comes first because it is the only field here that
+              changes what the credential can *reach*. `Label` is a note to
+              yourself; this is a permission boundary (issue #289). */}
+          <LabeledSelect<string>
+            label="Identity"
+            value={identity}
+            onValueChange={setIdentity}
+            hint={
+              identity === ACCOUNT_IDENTITY
+                ? 'This credential can call every API your account is approved for.'
+                : `This credential can call only the APIs ${applicationNames.get(identity) ?? 'this application'} is approved for.`
+            }
+            options={[
+              { value: ACCOUNT_IDENTITY, label: 'My account' },
+              ...(applications.data?.items ?? []).map((application) => ({
+                value: application.id,
+                label: application.name,
+              })),
+            ]}
+          />
           <LabeledSelect<CredentialType>
             label="Credential type"
             value={credentialType}
@@ -331,7 +385,7 @@ export function CredentialsPage(): ReactElement {
             placeholder="e.g. production worker"
             value={label}
             onChange={(event) => setLabel(event.target.value)}
-            hint="Optional, helps you recognise this credential later."
+            hint="Optional, and a note to yourself only — it does not affect what this credential can call."
           />
         </div>
       </Dialog>

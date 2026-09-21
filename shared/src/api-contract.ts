@@ -25,6 +25,8 @@ import type {
   ApiViewer,
   ApiVisibility,
   AppHealth,
+  Application,
+  ApplicationStatus,
   AuditLog,
   BrandingSettings,
   CaptchaEnforcement,
@@ -524,6 +526,65 @@ export interface UpdateApiSpecResponse {
   spec: ApiSpecSummary;
 }
 
+/* ── Applications ───────────────────────────────────────────────────────── */
+
+/** `GET /api/applications` */
+export type ListApplicationsResponse = Paginated<Application>;
+
+/** `GET /api/applications?owner_user_id|status|q` */
+export interface ListApplicationsQuery extends ListQuery {
+  /** Admin-only: somebody else's. A client always sees their own. */
+  owner_user_id?: Uuid;
+  status?: ApplicationStatus;
+  q?: string;
+}
+
+/** `GET /api/applications/:id` */
+export interface GetApplicationResponse {
+  application: Application;
+}
+
+/** `POST /api/applications` */
+export interface CreateApplicationRequest {
+  name: string;
+  description?: string | null;
+}
+
+/** `POST /api/applications` */
+export interface CreateApplicationResponse {
+  application: Application;
+}
+
+/**
+ * `PATCH /api/applications/:id`
+ *
+ * Setting `status` to `disabled` refuses **new** access requests, approvals
+ * and credentials. It revokes nothing that already exists — an integration
+ * that must stop working is deleted, or has its grants revoked.
+ */
+export interface UpdateApplicationRequest {
+  name?: string;
+  description?: string | null;
+  status?: ApplicationStatus;
+}
+
+/** `PATCH /api/applications/:id` */
+export interface UpdateApplicationResponse {
+  application: Application;
+}
+
+/**
+ * `DELETE /api/applications/:id` — destructive.
+ *
+ * Deletes the application's Ferrum consumer first, then the row, whose cascade
+ * removes its grants, access requests and credential rows. The counts report
+ * what went with it.
+ */
+export interface DeleteApplicationResponse {
+  revoked_grants: number;
+  revoked_credentials: number;
+}
+
 /**
  * `GET /api/apis/:id/viewers` — who may read this API's documentation.
  *
@@ -790,6 +851,15 @@ export type ApiUsageBackendStatus = 'healthy' | 'failing' | 'recovering' | 'unkn
 export interface CreateAccessRequestRequest {
   api_id: Uuid;
   justification: string;
+  /**
+   * The identity the access is for: one of the caller's applications, or
+   * absent/`null` for the account itself.
+   *
+   * `null` is the default and what every request made before applications
+   * existed carries. The application must be the caller's and `active`; an
+   * administrator cannot request access as somebody else's application.
+   */
+  application_id?: Uuid | null;
 }
 
 /** `POST /api/access-requests` */
@@ -886,12 +956,25 @@ export type ListCredentialsResponse = Paginated<CredentialMetadata>;
 export interface IssueCredentialRequest {
   credential_type: CredentialType;
   label?: string | null;
+  /**
+   * The identity the credential authenticates as: one of the caller's
+   * applications, or absent/`null` for the account itself.
+   *
+   * Unlike `label`, this decides what the secret can reach — it is appended to
+   * that identity's Ferrum consumer, so it carries exactly the ACL groups that
+   * identity has been approved for.
+   */
+  application_id?: Uuid | null;
 }
 
 /** `POST /api/credentials` — show-once: `secret` is never retrievable again. */
 export interface IssueCredentialResponse {
   credential: CredentialMetadata;
-  /** Edge consumer username, always `nexus-user-<user_id>`. */
+  /**
+   * Edge consumer username — `nexus-user-<user_id>` for an account credential,
+   * `nexus-app-<application_id>` for an application one. It is what a
+   * `basicauth` or `jwt` client sends, so it is not cosmetic.
+   */
   consumer_username: string;
   secret: ShowOnceSecret;
 }
@@ -1258,6 +1341,12 @@ export interface RepairGatewayReferencesRequest {
 /** One account's consumer repair. */
 export interface RepairedGatewayConsumer {
   user_id: Uuid;
+  /**
+   * The application whose identity was repaired, or `null` for the account's
+   * own consumer. An account can have several rows here — one per identity —
+   * so this is what tells them apart.
+   */
+  application_id: Uuid | null;
   /** The stale id the portal held; empty when this account was not orphaned. */
   previous_ferrum_consumer_id: string;
   /** The id now recorded, or `null` when the repair failed. */

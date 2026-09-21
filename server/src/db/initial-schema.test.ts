@@ -26,6 +26,7 @@ describe('buildout schema baseline', () => {
         'api_viewers',
         'apis',
         'app_settings',
+        'applications',
         'audit_logs',
         'consumers',
         'credential_metadata',

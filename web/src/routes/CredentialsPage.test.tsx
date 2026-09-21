@@ -108,6 +108,9 @@ describe('credential management', () => {
     expect(credentialsApi.issue).toHaveBeenCalledWith({
       credential_type: type,
       label: 'Production worker',
+      // The identity defaults to the account itself, which is what every
+      // credential issued before applications existed uses (issue #289).
+      application_id: null,
     });
     expect(within(dialog).getByText(label, { exact: true })).toBeInTheDocument();
     expect(within(dialog).getByText(secret)).toBeInTheDocument();
@@ -148,7 +151,11 @@ describe('credential management', () => {
     expect(issue).toBeDisabled();
     fireEvent.click(issue);
     expect(credentialsApi.issue).toHaveBeenCalledTimes(1);
-    expect(credentialsApi.issue).toHaveBeenCalledWith({ credential_type: 'keyauth', label: null });
+    expect(credentialsApi.issue).toHaveBeenCalledWith({
+      credential_type: 'keyauth',
+      label: null,
+      application_id: null,
+    });
     await act(async () => {
       pending.resolve({
         credential: CREDENTIAL,

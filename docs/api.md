@@ -2075,6 +2075,87 @@ re-submission, so the API is never unauthenticated across it.
 declares nothing to allow — switch the enforcement level back to `docs_only`
 first if that is really the intent.
 
+## Applications
+
+An **application** is a separate gateway identity owned by a portal account,
+with its own approved APIs and its own credentials. Because ACL groups live on
+the Ferrum consumer and each application has its own
+(`nexus-app-<application_id>`), two applications of one owner approved for
+different APIs genuinely cannot call each other's.
+
+**This is not a credential label.** `label` is a note to the credential's
+holder and changes nothing about what a secret can reach; `application_id`
+decides which identity the material is appended to, and therefore what it can
+call.
+
+**Account-scoped access is unchanged and is the default.** Every scoped row —
+access requests, grants, credentials, consumer mappings — carries a nullable
+`application_id`, and `null` means "the account itself", which is what every
+row written before applications existed is. Nothing migrates on its own; an
+operator who wants an existing integration moved creates an application,
+requests access for it and issues it a credential, which is a deliberate act
+with a new secret rather than a silent re-pointing of the one already deployed.
+
+Acting _as_ an application is a field on two existing routes —
+`application_id` on `POST /api/access-requests` and on `POST /api/credentials` —
+and the application must be the caller's own and `active`. **Not even an
+administrator** can act as somebody else's: doing so would acquire access, or a
+secret that authenticates as them, which is a different thing from
+administering their account.
+
+### `GET /api/applications`
+
+_session_ — `Paginated<Application>`, newest first. A client always sees their
+own; an admin may pass `owner_user_id`. `status` and `q` narrow further.
+
+Each item carries `active_grants` and `active_credentials`, so a list view
+needs no second call.
+
+### `GET /api/applications/:id`
+
+_session_, owner-or-admin. Somebody else's reads `404`, not `403`.
+
+### `POST /api/applications`
+
+_session_ → `201`. Body: `name` (required, ≤ 120, unique per owner
+case-insensitively), `description` (optional, ≤ 500).
+
+No gateway identity is created here: an application with no approved APIs and
+no credentials has nothing for a consumer to carry, so it is provisioned by the
+first approval or the first credential, exactly as an account's is.
+
+`429 QUOTA_EXCEEDED` when the account already owns
+`NEXUS_MAX_APPLICATIONS_PER_OWNER` (default 20; `0` disables the ceiling) —
+each application is a gateway consumer, so this bounds the Edge resources one
+semi-trusted account can create.
+
+### `PATCH /api/applications/:id`
+
+_session_, owner-or-admin. Body: any of `name`, `description`, `status`.
+
+**`status: "disabled"` revokes nothing.** It refuses _new_ access requests,
+approvals and credentials; everything already issued goes on working. An
+integration that must stop working is deleted, or has its grants revoked. The
+audit row says so explicitly (`details.revoked_existing_access: false`) rather
+than leaving an operator to infer it.
+
+### `DELETE /api/applications/:id`
+
+_session_, owner-or-admin — **destructive**.
+
+```json
+{ "revoked_grants": 2, "revoked_credentials": 1 }
+```
+
+The Ferrum consumer is deleted **first**, then the row, whose cascade removes
+its grants, access requests, credential rows and consumer mapping. Gateway
+first because a row deleted before its consumer leaves a live identity — with
+its ACL groups and its credential material — that nothing in the portal can
+find any more.
+
+Its credentials stop working immediately. The reversible option is `PATCH` with
+`status: "disabled"`.
+
 ### `GET /api/apis/:id/viewers`
 
 _provider_, owner-or-admin — `Paginated<ApiViewer>`, newest first. Each item

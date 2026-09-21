@@ -26,6 +26,14 @@ import {
   type CancelAccessRequestResponse,
   type CaptchaConfigResponse,
   type CatalogDetailResponse,
+  type CreateApplicationRequest,
+  type CreateApplicationResponse,
+  type DeleteApplicationResponse,
+  type GetApplicationResponse,
+  type ListApplicationsQuery,
+  type ListApplicationsResponse,
+  type UpdateApplicationRequest,
+  type UpdateApplicationResponse,
   type CatalogListQuery,
   type CatalogListResponse,
   type CatalogSpecResponse,
@@ -384,6 +392,26 @@ export const catalogApi = {
     get<CatalogDetailResponse>(`/catalog/${encodeURIComponent(slug)}`),
   spec: (slug: string): Promise<CatalogSpecResponse> =>
     get<CatalogSpecResponse>(`/catalog/${encodeURIComponent(slug)}/spec`),
+};
+
+/* ── Applications ───────────────────────────────────────────────────────── */
+//
+// An application is a separate gateway identity owned by the account, with its
+// own approved APIs and its own credentials. These routes administer the
+// identity; acting *as* one is the `application_id` field on the access-request
+// and credential calls.
+
+export const applicationsApi = {
+  list: (query: ListApplicationsQuery = {}): Promise<ListApplicationsResponse> =>
+    get<ListApplicationsResponse>('/applications', { ...query }),
+  get: (id: string): Promise<GetApplicationResponse> =>
+    get<GetApplicationResponse>(`/applications/${encodeURIComponent(id)}`),
+  create: (body: CreateApplicationRequest): Promise<CreateApplicationResponse> =>
+    post<CreateApplicationResponse>('/applications', body),
+  update: (id: string, body: UpdateApplicationRequest): Promise<UpdateApplicationResponse> =>
+    patch<UpdateApplicationResponse>(`/applications/${encodeURIComponent(id)}`, body),
+  remove: (id: string): Promise<DeleteApplicationResponse> =>
+    del<DeleteApplicationResponse>(`/applications/${encodeURIComponent(id)}`),
 };
 
 /* ── Publishing (provider) ──────────────────────────────────────────────── */

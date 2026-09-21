@@ -972,6 +972,225 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       );
     });
 
+    it('applications: creates, renames, scopes by owner and enforces unique names', async () => {
+      const owner = await makeUser({ role: 'client' });
+      const stranger = await makeUser({ role: 'client' });
+      const marker = newId().slice(0, 8);
+
+      const app = await store.applications.create({
+        owner_user_id: owner.id,
+        name: `Billing ${marker}`,
+        description: 'Invoicing integration',
+        status: 'active',
+      });
+      assert.equal(app.status, 'active');
+      assert.deepEqual(await store.applications.findById(app.id), app);
+      assert.deepEqual(
+        await store.applications.findByOwnerAndName(owner.id, `  billing ${marker}  `),
+        app,
+        'names are matched case-insensitively and trimmed',
+      );
+
+      // Unique per owner, and only per owner.
+      await assert.rejects(
+        () =>
+          store.applications.create({
+            owner_user_id: owner.id,
+            name: `BILLING ${marker}`,
+            status: 'active',
+          }),
+        (error: unknown) => (error as { code?: string }).code === 'CONFLICT',
+      );
+      const elsewhere = await store.applications.create({
+        owner_user_id: stranger.id,
+        name: `Billing ${marker}`,
+        status: 'active',
+      });
+      assert.equal(elsewhere.owner_user_id, stranger.id);
+
+      const disabled = await store.applications.update(app.id, { status: 'disabled' });
+      assert.equal(disabled?.status, 'disabled');
+      assert.equal(
+        (await store.applications.list({ owner_user_id: owner.id, status: 'active' })).total,
+        0,
+      );
+      assert.equal(await store.applications.count({ owner_user_id: owner.id }), 1);
+      assert.equal((await store.applications.list({ q: marker })).total, 2);
+      assert.deepEqual(
+        (await store.applications.findManyByIds([app.id, elsewhere.id]))
+          .map((row) => row.id)
+          .sort(),
+        [app.id, elsewhere.id].sort(),
+      );
+
+      assert.equal(await store.applications.delete(app.id), true);
+      assert.equal(await store.applications.findById(app.id), null);
+    });
+
+    it('applications: scopes grants, requests, credentials and consumers by identity', async () => {
+      const provider = await makeUser({ role: 'provider' });
+      const client = await makeUser({ role: 'client' });
+      const api = await makeApi(provider.id);
+      const app = await store.applications.create({
+        owner_user_id: client.id,
+        name: `Scoped ${newId().slice(0, 8)}`,
+        status: 'active',
+      });
+
+      // The same API, approved for two identities of one account. The partial
+      // unique index is over `(api_id, user_id, COALESCE(application_id, ''))`,
+      // so both are allowed — and a second grant for either identity is not.
+      const accountGrant = await store.grants.create({
+        api_id: api.id,
+        user_id: client.id,
+        acl_group: `nexus:api:${api.id}:approved`,
+        status: 'active',
+        granted_by: provider.id,
+      });
+      assert.equal(accountGrant.application_id, null, 'the default is the account itself');
+      const appGrant = await store.grants.create({
+        api_id: api.id,
+        user_id: client.id,
+        application_id: app.id,
+        acl_group: `nexus:api:${api.id}:approved`,
+        status: 'active',
+        granted_by: provider.id,
+      });
+      assert.equal(appGrant.application_id, app.id);
+      for (const scope of [undefined, app.id]) {
+        await assert.rejects(
+          () =>
+            store.grants.create({
+              api_id: api.id,
+              user_id: client.id,
+              ...(scope === undefined ? {} : { application_id: scope }),
+              acl_group: `nexus:api:${api.id}:approved`,
+              status: 'active',
+              granted_by: provider.id,
+            }),
+          (error: unknown) => (error as { code?: string }).code === 'CONFLICT',
+          `a second active grant for ${scope ?? 'the account'} is refused`,
+        );
+      }
+
+      // `null` is a value in these filters, not "unfiltered".
+      assert.equal(
+        (await store.grants.findActiveByApiAndUser(api.id, client.id))?.id,
+        accountGrant.id,
+      );
+      assert.equal(
+        (await store.grants.findActiveByApiAndUser(api.id, client.id, app.id))?.id,
+        appGrant.id,
+      );
+      assert.deepEqual(
+        (await store.grants.listActiveByUser(client.id, null)).map((row) => row.id),
+        [accountGrant.id],
+      );
+      assert.deepEqual(
+        (await store.grants.listActiveByUser(client.id, app.id)).map((row) => row.id),
+        [appGrant.id],
+      );
+      assert.equal(
+        (await store.grants.listActiveByUser(client.id)).length,
+        2,
+        'omitting the scope returns every identity’s',
+      );
+      assert.equal(await store.grants.count({ application_id: app.id, status: 'active' }), 1);
+
+      // One open request per API and identity, with the same COALESCE rule.
+      const accountRequest = await store.accessRequests.create({
+        api_id: api.id,
+        user_id: client.id,
+        justification: 'account',
+        status: 'pending',
+      });
+      const appRequest = await store.accessRequests.create({
+        api_id: api.id,
+        user_id: client.id,
+        application_id: app.id,
+        justification: 'application',
+        status: 'pending',
+      });
+      assert.equal(
+        (await store.accessRequests.findPendingByApiAndUser(api.id, client.id))?.id,
+        accountRequest.id,
+      );
+      assert.equal(
+        (await store.accessRequests.findPendingByApiAndUser(api.id, client.id, app.id))?.id,
+        appRequest.id,
+      );
+      await assert.rejects(
+        () =>
+          store.accessRequests.create({
+            api_id: api.id,
+            user_id: client.id,
+            application_id: app.id,
+            justification: 'again',
+            status: 'pending',
+          }),
+        (error: unknown) => (error as { code?: string }).code === 'CONFLICT',
+      );
+
+      // One consumer per identity per namespace, again with the same rule.
+      const accountConsumer = await store.consumers.create({
+        user_id: client.id,
+        namespace: 'nexus',
+        ferrum_consumer_id: `consumer-${newId().slice(0, 8)}`,
+        ferrum_username: `nexus-user-${client.id}`,
+      });
+      const appConsumer = await store.consumers.create({
+        user_id: client.id,
+        application_id: app.id,
+        namespace: 'nexus',
+        ferrum_consumer_id: `consumer-${newId().slice(0, 8)}`,
+        ferrum_username: `nexus-app-${app.id}`,
+      });
+      assert.equal(
+        (await store.consumers.findByUserAndNamespace(client.id, 'nexus'))?.id,
+        accountConsumer.id,
+      );
+      assert.equal(
+        (await store.consumers.findByUserAndNamespace(client.id, 'nexus', app.id))?.id,
+        appConsumer.id,
+      );
+      assert.equal((await store.consumers.list({ user_id: client.id })).total, 2);
+      assert.equal(
+        (await store.consumers.list({ user_id: client.id, application_id: null })).total,
+        1,
+      );
+
+      const credential = await store.credentials.create({
+        user_id: client.id,
+        application_id: app.id,
+        ferrum_consumer_id: appConsumer.ferrum_consumer_id,
+        credential_type: 'keyauth',
+        ferrum_credential_id: `${appConsumer.ferrum_consumer_id}/credentials/keyauth`,
+        fingerprint: `fp-${newId()}`,
+        last4: 'abcd',
+        status: 'active',
+      });
+      assert.equal(credential.application_id, app.id);
+      assert.equal(
+        (await store.credentials.list({ user_id: client.id, application_id: app.id })).total,
+        1,
+      );
+      assert.equal(
+        (await store.credentials.list({ user_id: client.id, application_id: null })).total,
+        0,
+      );
+
+      // Deleting the application cascades every scoped row and its mapping.
+      assert.equal(await store.applications.delete(app.id), true);
+      assert.deepEqual(await store.grants.listActiveByUser(client.id, app.id), []);
+      assert.equal((await store.consumers.list({ user_id: client.id })).total, 1);
+      assert.equal((await store.credentials.list({ user_id: client.id })).total, 0);
+      assert.equal(
+        (await store.grants.findActiveByApiAndUser(api.id, client.id))?.id,
+        accountGrant.id,
+        'the account’s own access is untouched',
+      );
+    });
+
     it('apiViewers: authorizes, lists, resolves and revokes documentation access', async () => {
       const owner = await makeUser({ role: 'provider' });
       const partner = await makeUser({ role: 'client' });

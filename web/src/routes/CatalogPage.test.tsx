@@ -211,6 +211,9 @@ describe('catalog access', () => {
     expect(accessRequestsApi.create).toHaveBeenCalledWith({
       api_id: API.id,
       justification: 'Reconcile invoices',
+      // The identity defaults to the account itself, which is what every
+      // request made before applications existed is (issue #289).
+      application_id: null,
     });
     expect(screen.queryByText('Call this API')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Withdraw request' }));

@@ -123,6 +123,27 @@ export const AuditAction = {
    * touches no Ferrum consumer and reaches no gateway. Somebody reading the
    * log a year from now should not have to go and check.
    */
+  /**
+   * An application identity was created. `details` names it; the target is the
+   * application.
+   */
+  APPLICATION_CREATE: 'application.create',
+  /**
+   * An application was renamed, re-described, disabled or re-enabled.
+   *
+   * On a disable, `details.revoked_existing_access` is always `false`:
+   * disabling refuses *new* requests, approvals and credentials and revokes
+   * nothing that already exists. An integration that must stop working is
+   * deleted, or has its grants revoked — and an operator reading this row
+   * should not have to guess which happened.
+   */
+  APPLICATION_UPDATE: 'application.update',
+  /**
+   * An application and its gateway identity were deleted. `details` carries
+   * the consumer that came down and the counts of grants and credentials the
+   * cascade removed with it.
+   */
+  APPLICATION_DELETE: 'application.delete',
   API_VIEWER_AUTHORIZE: 'api.viewer_authorize',
   /**
    * A read authorization was withdrawn. `details.revoked_grant` is always

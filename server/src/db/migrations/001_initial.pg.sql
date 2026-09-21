@@ -103,6 +103,26 @@ CREATE INDEX IF NOT EXISTS ix_apis_gateway_state ON apis (namespace, gateway_sta
 CREATE INDEX IF NOT EXISTS ix_apis_created_at ON apis (created_at);
 
 -- ── API specs ──────────────────────────────────────────────────────────────
+-- ── Applications (per-integration identities) ──────────────────────────────
+--
+-- Owned by a portal account, with their own access requests, grants,
+-- credentials and Ferrum consumer (`nexus-app-<application_id>`). Every row
+-- that can be scoped carries a nullable `application_id`; `NULL` means "the
+-- account itself", which is what every existing row is (issue #289).
+CREATE TABLE IF NOT EXISTS applications (
+  id            TEXT PRIMARY KEY,
+  owner_user_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  name          TEXT NOT NULL,
+  description   TEXT,
+  status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_applications_owner_name
+  ON applications (owner_user_id, lower(name));
+CREATE INDEX IF NOT EXISTS ix_applications_owner ON applications (owner_user_id, created_at);
+
 CREATE TABLE IF NOT EXISTS api_viewers (
   id         TEXT PRIMARY KEY,
   api_id     TEXT NOT NULL REFERENCES apis (id) ON DELETE CASCADE,
@@ -143,6 +163,7 @@ CREATE TABLE IF NOT EXISTS access_requests (
   id            TEXT PRIMARY KEY,
   api_id        TEXT NOT NULL REFERENCES apis (id) ON DELETE CASCADE,
   user_id       TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  application_id TEXT REFERENCES applications (id) ON DELETE CASCADE,
   justification TEXT NOT NULL,
   status        TEXT NOT NULL DEFAULT 'pending'
                   CHECK (status IN ('pending', 'approved', 'denied', 'revoked', 'cancelled')),
@@ -154,8 +175,11 @@ CREATE TABLE IF NOT EXISTS access_requests (
 );
 
 -- One open request per API/user pair.
-CREATE UNIQUE INDEX IF NOT EXISTS ux_access_requests_pending ON access_requests (api_id, user_id)
+CREATE UNIQUE INDEX IF NOT EXISTS ux_access_requests_pending
+  ON access_requests (api_id, user_id, COALESCE(application_id, ''))
   WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS ix_access_requests_application
+  ON access_requests (application_id, status);
 CREATE INDEX IF NOT EXISTS ix_access_requests_api_status ON access_requests (api_id, status);
 CREATE INDEX IF NOT EXISTS ix_access_requests_user ON access_requests (user_id, created_at);
 
@@ -164,6 +188,7 @@ CREATE TABLE IF NOT EXISTS grants (
   id                TEXT PRIMARY KEY,
   api_id            TEXT NOT NULL REFERENCES apis (id) ON DELETE CASCADE,
   user_id           TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  application_id    TEXT REFERENCES applications (id) ON DELETE CASCADE,
   access_request_id TEXT REFERENCES access_requests (id) ON DELETE SET NULL,
   acl_group         TEXT NOT NULL,
   status            TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
@@ -175,8 +200,10 @@ CREATE TABLE IF NOT EXISTS grants (
 );
 
 -- At most one active grant per API/user pair.
-CREATE UNIQUE INDEX IF NOT EXISTS ux_grants_active ON grants (api_id, user_id)
+CREATE UNIQUE INDEX IF NOT EXISTS ux_grants_active
+  ON grants (api_id, user_id, COALESCE(application_id, ''))
   WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS ix_grants_application ON grants (application_id, status);
 CREATE INDEX IF NOT EXISTS ix_grants_user_status ON grants (user_id, status);
 CREATE INDEX IF NOT EXISTS ix_grants_api_status ON grants (api_id, status);
 
@@ -184,6 +211,7 @@ CREATE INDEX IF NOT EXISTS ix_grants_api_status ON grants (api_id, status);
 CREATE TABLE IF NOT EXISTS consumers (
   id                 TEXT PRIMARY KEY,
   user_id            TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  application_id     TEXT REFERENCES applications (id) ON DELETE CASCADE,
   namespace          TEXT NOT NULL,
   ferrum_consumer_id TEXT NOT NULL,
   ferrum_username    TEXT NOT NULL,
@@ -191,7 +219,9 @@ CREATE TABLE IF NOT EXISTS consumers (
   updated_at         TEXT NOT NULL
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS ux_consumers_user_namespace ON consumers (user_id, namespace);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_consumers_user_namespace
+  ON consumers (user_id, namespace, COALESCE(application_id, ''));
+CREATE INDEX IF NOT EXISTS ix_consumers_application ON consumers (application_id);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_consumers_ferrum_id ON consumers (namespace, ferrum_consumer_id);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_consumers_username ON consumers (namespace, ferrum_username);
 
@@ -200,6 +230,7 @@ CREATE TABLE IF NOT EXISTS credential_metadata (
   id                   TEXT PRIMARY KEY,
   edge_ordinal         INTEGER,
   user_id              TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  application_id       TEXT REFERENCES applications (id) ON DELETE CASCADE,
   ferrum_consumer_id   TEXT NOT NULL,
   credential_type      TEXT NOT NULL CHECK (credential_type IN ('keyauth', 'basicauth', 'jwt')),
   ferrum_credential_id TEXT NOT NULL,
@@ -218,6 +249,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_credentials_ordinal
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_credentials_fingerprint ON credential_metadata (fingerprint);
 CREATE INDEX IF NOT EXISTS ix_credentials_user_status ON credential_metadata (user_id, status);
+CREATE INDEX IF NOT EXISTS ix_credentials_application
+  ON credential_metadata (application_id, status);
 CREATE INDEX IF NOT EXISTS ix_credentials_consumer
   ON credential_metadata (ferrum_consumer_id, credential_type, created_at);
 

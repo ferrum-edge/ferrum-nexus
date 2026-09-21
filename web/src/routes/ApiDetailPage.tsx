@@ -840,12 +840,20 @@ export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
                   <div className="flex min-w-0 flex-1 items-start gap-3">
                     <Avatar label={request.requester?.display_name ?? request.user_id} />
                     <div className="min-w-0">
-                      <p className="truncate text-sm font-medium text-fg">
-                        {request.requester?.display_name ?? request.user_id}
+                      <p className="flex flex-wrap items-center gap-2 truncate text-sm font-medium text-fg">
+                        <span className="truncate">
+                          {request.requester?.display_name ?? request.user_id}
+                        </span>
                         {request.requester ? (
-                          <span className="ml-2 text-xs font-normal text-fg-subtle">
+                          <span className="text-xs font-normal text-fg-subtle">
                             {request.requester.email}
                           </span>
+                        ) : null}
+                        {/* Which *integration* is asking, not just which
+                            account — approving adds the API to that identity
+                            alone (issue #289). */}
+                        {request.application ? (
+                          <Badge tone="accent">{request.application.name}</Badge>
                         ) : null}
                       </p>
                       <p className="mt-1 text-xs text-fg-subtle">
@@ -1036,8 +1044,11 @@ export function GrantsTab({ apiId }: { apiId: string }): ReactElement {
                 <div className="flex min-w-0 flex-1 items-center gap-3">
                   <Avatar label={grant.user?.display_name ?? grant.user_id} />
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-medium text-fg">
-                      {grant.user?.display_name ?? grant.user_id}
+                    <p className="flex flex-wrap items-center gap-2 truncate text-sm font-medium text-fg">
+                      <span className="truncate">{grant.user?.display_name ?? grant.user_id}</span>
+                      {grant.application ? (
+                        <Badge tone="accent">{grant.application.name}</Badge>
+                      ) : null}
                     </p>
                     <p className="truncate text-xs text-fg-subtle">
                       Granted {formatDateTime(grant.created_at)}

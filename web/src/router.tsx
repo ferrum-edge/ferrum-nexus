@@ -94,6 +94,12 @@ const catalogDetailRoute = createRoute({
   component: lazyRouteComponent(() => import('./routes/CatalogDetailPage'), 'CatalogDetailPage'),
 });
 
+const applicationsRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: '/applications',
+  component: lazyRouteComponent(() => import('./routes/ApplicationsPage'), 'ApplicationsPage'),
+});
+
 const credentialsRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/credentials',
@@ -194,6 +200,7 @@ const routeTree = rootRoute.addChildren([
     dashboardRoute,
     catalogRoute,
     catalogDetailRoute,
+    applicationsRoute,
     credentialsRoute,
     messagesRoute,
     messageThreadRoute,

@@ -70,6 +70,7 @@ import {
   aclGroupForApi,
   roleAtLeast,
   type AccessRequest,
+  type ApplicationSummary,
   type AccessRequestStatus,
   type Grant,
   type GrantStatus,
@@ -123,11 +124,20 @@ export interface GrantListFilter {
 
 /** Access-workflow operations. */
 export interface AccessService {
-  /** Client asks for access to a requestable API. */
+  /**
+   * Client asks for access to a requestable API.
+   *
+   * `applicationId` is the identity the access is for: `null` (the default) is
+   * the account itself, an id is one of the account's applications. The caller
+   * must already have resolved it — the route does, through
+   * `ApplicationsService.resolveForActor`, which is what checks ownership and
+   * that the application is active.
+   */
   request(
     user: UserRecord,
     apiId: Uuid,
     justification: string,
+    applicationId?: Uuid | null,
     ip?: string | null,
   ): Promise<AccessRequest>;
   /** Requester withdraws their own pending request. */
@@ -231,6 +241,34 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
   }
 
   /** Attach the API and user joins list/detail payloads carry. */
+  /**
+   * The applications named by a page of rows, keyed by id.
+   *
+   * Attached to every request and grant that has one so a provider reviewing
+   * an inbox can see **which integration** is asking, not just which account —
+   * which is most of the point of application identities (issue #289). Rows
+   * with no `application_id` are account-scoped and get no summary, which is
+   * how the UI tells the two apart.
+   */
+  async function applicationsFor(
+    rows: readonly { application_id: Uuid | null }[],
+  ): Promise<Map<Uuid, ApplicationSummary>> {
+    const ids = [...new Set(rows.map((row) => row.application_id).filter((id) => id !== null))];
+    if (ids.length === 0) return new Map();
+    const found = await store.applications.findManyByIds(ids);
+    return new Map(
+      found.map((application) => [
+        application.id,
+        {
+          id: application.id,
+          name: application.name,
+          owner_user_id: application.owner_user_id,
+          status: application.status,
+        },
+      ]),
+    );
+  }
+
   async function decorateRequests(rows: AccessRequestRecord[]): Promise<AccessRequest[]> {
     if (rows.length === 0) return [];
     const apis = new Map(
@@ -244,14 +282,19 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         (user) => [user.id, user],
       ),
     );
-    const gatewayUrl = await settings.getGatewayPublicUrl();
+    const [gatewayUrl, applications] = await Promise.all([
+      settings.getGatewayPublicUrl(),
+      applicationsFor(rows),
+    ]);
     return rows.map((row) => {
       const api = apis.get(row.api_id);
       const requester = users.get(row.user_id);
+      const application = row.application_id ? applications.get(row.application_id) : undefined;
       return {
         ...row,
         ...(api ? { api: presentApiSummary(api, gatewayUrl) } : {}),
         ...(requester ? { requester: userSummary(requester) } : {}),
+        ...(application ? { application } : {}),
       };
     });
   }
@@ -269,20 +312,25 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         (user) => [user.id, user],
       ),
     );
-    const gatewayUrl = await settings.getGatewayPublicUrl();
+    const [gatewayUrl, applications] = await Promise.all([
+      settings.getGatewayPublicUrl(),
+      applicationsFor(rows),
+    ]);
     return rows.map((row) => {
       const api = apis.get(row.api_id);
       const user = users.get(row.user_id);
+      const application = row.application_id ? applications.get(row.application_id) : undefined;
       return {
         ...row,
         ...(api ? { api: presentApiSummary(api, gatewayUrl) } : {}),
         ...(user ? { user: userSummary(user) } : {}),
+        ...(application ? { application } : {}),
       };
     });
   }
 
   /**
-   * Put the ACL group on (or take it off) the user's consumer.
+   * Put the ACL group on (or take it off) one identity's consumer.
    *
    * Serialised per consumer by the provisioner, so concurrent decisions for the
    * same user compose instead of overwriting each other.
@@ -291,11 +339,16 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     user: UserRecord,
     apiId: Uuid,
     present: boolean,
+    applicationId: Uuid | null,
   ): Promise<string> {
     const group = aclGroupForApi(apiId);
+    // The identity, not the account. An application's grant belongs on its own
+    // `nexus-app-<id>` consumer — putting it on the account's would hand every
+    // one of that account's credentials the access, which is the whole thing
+    // applications exist to prevent (issue #289).
     const consumer = present
-      ? await provisioner.ensureConsumer(user)
-      : await store.consumers.findByUserAndNamespace(user.id, namespace);
+      ? await provisioner.ensureConsumer(user, applicationId)
+      : await store.consumers.findByUserAndNamespace(user.id, namespace, applicationId);
     if (!consumer) {
       // Nothing to remove: the user never had a consumer, so they never had the
       // group either. Revocation is idempotent by design.
@@ -441,6 +494,8 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     /** The group that may have landed, or `null` for a proven pre-write rejection. */
     groupAdded: string | null;
     groupPossiblyApplied: boolean;
+    /** The identity the approval was for; scopes both the re-check and the undo. */
+    applicationId: Uuid | null;
     cause: unknown;
     ip: string | null;
   }): Promise<void> {
@@ -449,11 +504,14 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       api_id: api.id,
       api_slug: api.slug,
       user_id: requester.id,
+      application_id: input.applicationId,
       acl_group_possibly_applied: input.groupPossiblyApplied,
       cause: cause instanceof Error ? cause.message : String(cause),
     };
 
-    const live = await store.grants.findActiveByApiAndUser(api.id, requester.id).catch(() => null);
+    const live = await store.grants
+      .findActiveByApiAndUser(api.id, requester.id, input.applicationId)
+      .catch(() => null);
     if (live) {
       // Somebody's approval owns this group after all. Undoing anything here
       // would revoke *their* access, so leave both the group and the decision
@@ -463,7 +521,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     } else {
       if (groupAdded !== null) {
         try {
-          await setGroupMembership(requester, api.id, false);
+          await setGroupMembership(requester, api.id, false, input.applicationId);
           details.acl_group_removed = groupAdded;
         } catch (error) {
           details.acl_group_orphaned = groupAdded;
@@ -585,7 +643,13 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
   }
 
   return {
-    async request(user, apiId, justification, ip = null): Promise<AccessRequest> {
+    async request(
+      user,
+      apiId,
+      justification,
+      applicationId = null,
+      ip = null,
+    ): Promise<AccessRequest> {
       const trimmed = justification.trim();
       if (trimmed === '') throw validationFailed('A justification is required');
       if (trimmed.length > MAX_JUSTIFICATION_LENGTH) {
@@ -622,19 +686,24 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         throw notFound('API', apiId);
       }
 
-      if (await store.grants.findActiveByApiAndUser(api.id, user.id)) {
-        throw conflict('You already have access to this API');
+      if (await store.grants.findActiveByApiAndUser(api.id, user.id, applicationId)) {
+        throw conflict(
+          applicationId === null
+            ? 'You already have access to this API'
+            : 'This application already has access to this API',
+        );
       }
 
       const created = await spendBudget(user.id, () =>
         store.transaction(async (tx) => {
           await assertWithinBudget(tx, user.id);
-          if (await tx.accessRequests.findPendingByApiAndUser(api.id, user.id)) {
+          if (await tx.accessRequests.findPendingByApiAndUser(api.id, user.id, applicationId)) {
             throw conflict('You already have a pending request for this API');
           }
           return tx.accessRequests.create({
             api_id: api.id,
             user_id: user.id,
+            application_id: applicationId,
             justification: trimmed,
             status: 'pending',
           });
@@ -717,8 +786,13 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         if (request.status !== 'pending') {
           throw conflict(`This request is already ${request.status}`);
         }
-        if (await store.grants.findActiveByApiAndUser(api.id, requester.id)) {
-          throw conflict('This user already has an active grant for this API');
+        // Scoped to the requesting identity: an account holding an
+        // account-scoped grant may still request one for an application of
+        // theirs, and two applications of one owner are independent.
+        if (
+          await store.grants.findActiveByApiAndUser(api.id, requester.id, request.application_id)
+        ) {
+          throw conflict('This identity already has an active grant for this API');
         }
 
         // Step 1 — claim the decision before anything reaches the gateway. A
@@ -745,7 +819,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           try {
             // A rejected write may still have landed. Register compensation
             // before attempting it, even if the gateway never acknowledges it.
-            await setGroupMembership(requester, api.id, true);
+            await setGroupMembership(requester, api.id, true, request.application_id);
             groupPossiblyApplied = false;
           } catch (error) {
             // The provisioner's active-user guard runs before the ACL write.
@@ -758,6 +832,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           grant = await store.transaction(async (tx) =>
             tx.grants.create({
               api_id: api.id,
+              application_id: request.application_id,
               user_id: requester.id,
               access_request_id: request.id,
               acl_group: group,
@@ -773,6 +848,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
             requestId: request.id,
             groupAdded: addedGroup,
             groupPossiblyApplied,
+            applicationId: request.application_id,
             cause: error,
             ip,
           });
@@ -926,7 +1002,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       // it. `unwindRevocation` puts the rows back if the group will not come
       // off: a revocation the gateway did not accept must not stand as one.
       try {
-        if (grantee) await setGroupMembership(grantee, api.id, false);
+        if (grantee) await setGroupMembership(grantee, api.id, false, grant.application_id);
       } catch (error) {
         await unwindRevocation({ actor, grant, request: movedRequest, cause: error, ip });
         throw error;
@@ -940,6 +1016,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           api_id: api.id,
           api_slug: api.slug,
           user_id: grant.user_id,
+          application_id: grant.application_id,
           acl_group: grant.acl_group,
           reason: reason ?? null,
         },
@@ -998,7 +1075,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           const grantee = await store.users.findById(userId);
           if (api && grantee) {
             try {
-              await setGroupMembership(grantee, api.id, false);
+              await setGroupMembership(grantee, api.id, false, grant.application_id);
             } catch (error) {
               await unwindRevocation({ actor, grant, request: null, cause: error, ip });
               throw error;

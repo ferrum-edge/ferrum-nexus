@@ -72,6 +72,7 @@ import type {
   ApiStatus,
   ApiTimeouts,
   ApiGatewayState,
+  ApplicationStatus,
   ApiVisibility,
   AuthPluginType,
   CorsConfig,
@@ -114,6 +115,9 @@ import type {
   ApiPluginRecord,
   ApiViewerRecord,
   ApiViewerRepo,
+  ApplicationFilter,
+  ApplicationRecord,
+  ApplicationRepo,
   ApiPluginRepo,
   ApiRecord,
   ApiRepo,
@@ -180,6 +184,7 @@ const COLLECTIONS = {
   organizations: 'organizations',
   users: 'users',
   sessions: 'sessions',
+  applications: 'applications',
   apis: 'apis',
   apiSpecs: 'api_specs',
   apiPlugins: 'api_plugins',
@@ -429,6 +434,18 @@ function specEnforcement(value: unknown): SpecEnforcementLevel {
   return isSpecEnforcementLevel(value) ? value : DEFAULT_SPEC_ENFORCEMENT;
 }
 
+function mapApplication(row: Row): ApplicationRecord {
+  return {
+    id: str(row._id),
+    owner_user_id: str(row.owner_user_id),
+    name: str(row.name),
+    description: strOrNull(row.description),
+    status: str(row.status) as ApplicationStatus,
+    created_at: str(row.created_at),
+    updated_at: str(row.updated_at),
+  };
+}
+
 function mapApi(row: Row): ApiRecord {
   return {
     id: str(row._id),
@@ -510,6 +527,7 @@ function mapAccessRequest(row: Row): AccessRequestRecord {
     id: str(row._id),
     api_id: str(row.api_id),
     user_id: str(row.user_id),
+    application_id: strOrNull(row.application_id),
     justification: str(row.justification),
     status: str(row.status) as AccessRequestStatus,
     decided_by: strOrNull(row.decided_by),
@@ -525,6 +543,7 @@ function mapGrant(row: Row): GrantRecord {
     id: str(row._id),
     api_id: str(row.api_id),
     user_id: str(row.user_id),
+    application_id: strOrNull(row.application_id),
     access_request_id: strOrNull(row.access_request_id),
     acl_group: str(row.acl_group),
     status: str(row.status) as GrantStatus,
@@ -540,6 +559,7 @@ function mapCredential(row: Row): CredentialRecord {
   return {
     id: str(row._id),
     user_id: str(row.user_id),
+    application_id: strOrNull(row.application_id),
     ferrum_consumer_id: str(row.ferrum_consumer_id),
     credential_type: str(row.credential_type) as CredentialType,
     ferrum_credential_id: str(row.ferrum_credential_id),
@@ -559,6 +579,7 @@ function mapConsumer(row: Row): ConsumerRecord {
   return {
     id: str(row._id),
     user_id: str(row.user_id),
+    application_id: strOrNull(row.application_id),
     namespace: str(row.namespace),
     ferrum_consumer_id: str(row.ferrum_consumer_id),
     ferrum_username: str(row.ferrum_username),
@@ -740,6 +761,17 @@ function apiViewerCondition(viewer: ApiViewerFilter): Record<string, unknown> {
   return { $or: parts };
 }
 
+function applicationFilter(filter: ApplicationFilter): Filter<NexusDoc> {
+  const query: Record<string, unknown> = {};
+  if (filter.owner_user_id !== undefined) query.owner_user_id = filter.owner_user_id;
+  if (filter.status !== undefined) query.status = filter.status;
+  if (filter.q !== undefined && filter.q.trim() !== '') {
+    const match = containsInsensitive(filter.q.trim());
+    query.$or = [{ name: match }, { description: match }];
+  }
+  return query as Filter<NexusDoc>;
+}
+
 function apiFilter(filter: ApiFilter): Filter<NexusDoc> {
   const conditions: Record<string, unknown>[] = [];
   const query: Record<string, unknown> = {};
@@ -759,12 +791,29 @@ function apiFilter(filter: ApiFilter): Filter<NexusDoc> {
   return query as Filter<NexusDoc>;
 }
 
+/**
+ * `application_id` as a Mongo predicate, where `null` is a **value**.
+ *
+ * The SQL adapters compile it to `IS NULL`; here it has to be an explicit
+ * `null` match, because a document written before applications existed has no
+ * `application_id` field at all and `{ application_id: null }` matches both
+ * that and an explicit null — which is exactly the behaviour the SQL side has.
+ */
+function scopeQuery(
+  query: Record<string, unknown>,
+  applicationId: string | null | undefined,
+): void {
+  if (applicationId === undefined) return;
+  query.application_id = applicationId;
+}
+
 function accessRequestFilter(filter: AccessRequestFilter): Filter<NexusDoc> {
   const query: Record<string, unknown> = {};
   if (filter.user_id !== undefined) query.user_id = filter.user_id;
   if (filter.api_id !== undefined) query.api_id = filter.api_id;
   if (filter.api_ids !== undefined) query.api_id = { $in: filter.api_ids };
   if (filter.status !== undefined) query.status = filter.status;
+  scopeQuery(query, filter.application_id);
   return query as Filter<NexusDoc>;
 }
 
@@ -774,6 +823,7 @@ function grantFilter(filter: GrantFilter): Filter<NexusDoc> {
   if (filter.api_id !== undefined) query.api_id = filter.api_id;
   if (filter.api_ids !== undefined) query.api_id = { $in: filter.api_ids };
   if (filter.status !== undefined) query.status = filter.status;
+  scopeQuery(query, filter.application_id);
   return query as Filter<NexusDoc>;
 }
 
@@ -785,6 +835,7 @@ function credentialFilter(filter: CredentialFilter): Filter<NexusDoc> {
   if (filter.ferrum_consumer_id !== undefined) {
     query.ferrum_consumer_id = filter.ferrum_consumer_id;
   }
+  scopeQuery(query, filter.application_id);
   return query as Filter<NexusDoc>;
 }
 
@@ -851,6 +902,18 @@ const INDEXES: IndexDefinition[] = [
     unique: true,
     partialFilterExpression: { ferrum_proxy_id: { $type: 'string' } },
   },
+  {
+    collection: 'applications',
+    name: 'ux_applications_owner_name',
+    key: { owner_user_id: 1, name_lower: 1 },
+    unique: true,
+  },
+  {
+    collection: 'applications',
+    name: 'ix_applications_owner',
+    key: { owner_user_id: 1, created_at: 1 },
+  },
+
   { collection: 'apis', name: 'ix_apis_owner', key: { owner_user_id: 1 } },
   { collection: 'apis', name: 'ix_apis_status_visibility', key: { status: 1, visibility: 1 } },
   { collection: 'apis', name: 'ix_apis_created_at', key: { created_at: 1 } },
@@ -896,7 +959,10 @@ const INDEXES: IndexDefinition[] = [
   {
     collection: 'access_requests',
     name: 'ux_access_requests_pending',
-    key: { api_id: 1, user_id: 1 },
+    // A missing field indexes as `null` in MongoDB, so this behaves exactly
+    // like the SQL `COALESCE(application_id, '')` key: one open request per API
+    // and identity, with the account-scoped rows sharing one slot.
+    key: { api_id: 1, user_id: 1, application_id: 1 },
     unique: true,
     partialFilterExpression: { status: 'pending' },
   },
@@ -914,19 +980,25 @@ const INDEXES: IndexDefinition[] = [
   {
     collection: 'grants',
     name: 'ux_grants_active',
-    key: { api_id: 1, user_id: 1 },
+    key: { api_id: 1, user_id: 1, application_id: 1 },
     unique: true,
     partialFilterExpression: { status: 'active' },
   },
   { collection: 'grants', name: 'ix_grants_user_status', key: { user_id: 1, status: 1 } },
   { collection: 'grants', name: 'ix_grants_api_status', key: { api_id: 1, status: 1 } },
+  {
+    collection: 'grants',
+    name: 'ix_grants_application',
+    key: { application_id: 1, status: 1 },
+  },
 
   {
     collection: 'consumers',
     name: 'ux_consumers_user_namespace',
-    key: { user_id: 1, namespace: 1 },
+    key: { user_id: 1, namespace: 1, application_id: 1 },
     unique: true,
   },
+  { collection: 'consumers', name: 'ix_consumers_application', key: { application_id: 1 } },
   {
     collection: 'consumers',
     name: 'ux_consumers_ferrum_id',
@@ -1604,6 +1676,91 @@ class MongoStore implements NexusStore {
       ).deletedCount,
   };
 
+  /* ── applications ─────────────────────────────────────────────────────── */
+
+  readonly applications: ApplicationRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      // `name_lower` is the derived companion of SQL's `lower(name)` index:
+      // MongoDB has no expression indexes, so the value is stored.
+      await mapConflict('You already have an application with that name', () =>
+        this.col(COLLECTIONS.applications).insertOne(
+          {
+            _id: meta.id,
+            owner_user_id: input.owner_user_id,
+            name: input.name,
+            name_lower: input.name.trim().toLowerCase(),
+            description: input.description ?? null,
+            status: input.status,
+            created_at: meta.created_at,
+            updated_at: meta.updated_at,
+          } as NexusDoc,
+          this.opts,
+        ),
+      );
+      const created = await this.applications.findById(meta.id);
+      if (!created) throw new Error('applications.create: row vanished immediately after insert');
+      return created;
+    },
+
+    findById: async (id) => {
+      const row = asRow(await this.col(COLLECTIONS.applications).findOne({ _id: id }, this.opts));
+      return row ? mapApplication(row) : null;
+    },
+
+    findByOwnerAndName: async (ownerUserId, name) => {
+      const row = asRow(
+        await this.col(COLLECTIONS.applications).findOne(
+          { owner_user_id: ownerUserId, name_lower: name.trim().toLowerCase() },
+          this.opts,
+        ),
+      );
+      return row ? mapApplication(row) : null;
+    },
+
+    findManyByIds: async (ids) => {
+      if (ids.length === 0) return [];
+      const docs = await this.col(COLLECTIONS.applications)
+        .find({ _id: { $in: ids } } as Filter<NexusDoc>, this.opts)
+        .toArray();
+      return docs.map((doc) => mapApplication(doc as Row));
+    },
+
+    update: async (id, patch) => {
+      const set = setDoc({
+        name: patch.name,
+        name_lower: patch.name === undefined ? undefined : patch.name.trim().toLowerCase(),
+        description: patch.description,
+        status: patch.status,
+      });
+      if (set) {
+        await mapConflict('You already have an application with that name', () =>
+          this.col(COLLECTIONS.applications).updateOne(
+            { _id: id },
+            { $set: { ...set, updated_at: nowIso() } },
+            this.opts,
+          ),
+        );
+      }
+      return this.applications.findById(id);
+    },
+
+    list: async (filter, options) =>
+      this.paginate(
+        COLLECTIONS.applications,
+        applicationFilter(filter),
+        NEWEST_FIRST,
+        options,
+        mapApplication,
+      ),
+
+    count: async (filter = {}) =>
+      this.col(COLLECTIONS.applications).countDocuments(applicationFilter(filter), this.opts),
+
+    delete: async (id) =>
+      (await this.col(COLLECTIONS.applications).deleteOne({ _id: id }, this.opts)).deletedCount > 0,
+  };
+
   /* ── apis ─────────────────────────────────────────────────────────────── */
 
   readonly apis: ApiRepo = {
@@ -2036,6 +2193,7 @@ class MongoStore implements NexusStore {
             _id: meta.id,
             api_id: input.api_id,
             user_id: input.user_id,
+            application_id: input.application_id ?? null,
             justification: input.justification,
             status: input.status,
             decided_by: input.decided_by ?? null,
@@ -2100,12 +2258,11 @@ class MongoStore implements NexusStore {
         mapAccessRequest,
       ),
 
-    findPendingByApiAndUser: async (apiId, userId) => {
+    findPendingByApiAndUser: async (apiId, userId, applicationId = null) => {
+      const query: Record<string, unknown> = { api_id: apiId, user_id: userId, status: 'pending' };
+      scopeQuery(query, applicationId);
       const row = asRow(
-        await this.col(COLLECTIONS.accessRequests).findOne(
-          { api_id: apiId, user_id: userId, status: 'pending' },
-          this.opts,
-        ),
+        await this.col(COLLECTIONS.accessRequests).findOne(query as Filter<NexusDoc>, this.opts),
       );
       return row ? mapAccessRequest(row) : null;
     },
@@ -2161,6 +2318,7 @@ class MongoStore implements NexusStore {
             _id: meta.id,
             api_id: input.api_id,
             user_id: input.user_id,
+            application_id: input.application_id ?? null,
             access_request_id: input.access_request_id ?? null,
             acl_group: input.acl_group,
             status: input.status,
@@ -2220,19 +2378,20 @@ class MongoStore implements NexusStore {
     list: async (filter, options) =>
       this.paginate(COLLECTIONS.grants, grantFilter(filter), NEWEST_FIRST, options, mapGrant),
 
-    findActiveByApiAndUser: async (apiId, userId) => {
+    findActiveByApiAndUser: async (apiId, userId, applicationId = null) => {
+      const query: Record<string, unknown> = { api_id: apiId, user_id: userId, status: 'active' };
+      scopeQuery(query, applicationId);
       const row = asRow(
-        await this.col(COLLECTIONS.grants).findOne(
-          { api_id: apiId, user_id: userId, status: 'active' },
-          this.opts,
-        ),
+        await this.col(COLLECTIONS.grants).findOne(query as Filter<NexusDoc>, this.opts),
       );
       return row ? mapGrant(row) : null;
     },
 
-    listActiveByUser: async (userId) => {
+    listActiveByUser: async (userId, applicationId) => {
+      const query: Record<string, unknown> = { user_id: userId, status: 'active' };
+      scopeQuery(query, applicationId);
       const docs = await this.col(COLLECTIONS.grants)
-        .find({ user_id: userId, status: 'active' }, this.opts)
+        .find(query as Filter<NexusDoc>, this.opts)
         .toArray();
       return docs.map((doc) => mapGrant(doc as Row));
     },
@@ -2265,6 +2424,7 @@ class MongoStore implements NexusStore {
           {
             _id: meta.id,
             user_id: input.user_id,
+            application_id: input.application_id ?? null,
             ferrum_consumer_id: input.ferrum_consumer_id,
             credential_type: input.credential_type,
             ferrum_credential_id: input.ferrum_credential_id,
@@ -2352,6 +2512,7 @@ class MongoStore implements NexusStore {
           {
             _id: meta.id,
             user_id: input.user_id,
+            application_id: input.application_id ?? null,
             namespace: input.namespace,
             ferrum_consumer_id: input.ferrum_consumer_id,
             ferrum_username: input.ferrum_username,
@@ -2371,9 +2532,11 @@ class MongoStore implements NexusStore {
       return row ? mapConsumer(row) : null;
     },
 
-    findByUserAndNamespace: async (userId, namespace) => {
+    findByUserAndNamespace: async (userId, namespace, applicationId = null) => {
+      const query: Record<string, unknown> = { user_id: userId, namespace };
+      scopeQuery(query, applicationId);
       const row = asRow(
-        await this.col(COLLECTIONS.consumers).findOne({ user_id: userId, namespace }, this.opts),
+        await this.col(COLLECTIONS.consumers).findOne(query as Filter<NexusDoc>, this.opts),
       );
       return row ? mapConsumer(row) : null;
     },
@@ -2420,6 +2583,7 @@ class MongoStore implements NexusStore {
       const query: Record<string, unknown> = {};
       if (filter.user_id !== undefined) query.user_id = filter.user_id;
       if (filter.namespace !== undefined) query.namespace = filter.namespace;
+      scopeQuery(query, filter.application_id);
       return this.paginate(
         COLLECTIONS.consumers,
         query as Filter<NexusDoc>,

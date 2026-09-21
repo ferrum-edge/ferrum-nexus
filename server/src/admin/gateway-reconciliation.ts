@@ -225,6 +225,7 @@ export function createGatewayReconciliationService(
         result.orphaned += 1;
         orphans.push({
           user_id: row.user_id,
+          application_id: row.application_id,
           ferrum_consumer_id: row.ferrum_consumer_id,
           ferrum_username: row.ferrum_username,
         });
@@ -389,17 +390,23 @@ export function createGatewayReconciliationService(
   /* ── Repair ───────────────────────────────────────────────────────────── */
 
   /**
-   * The ACL groups this account should carry, from the portal's own grants.
+   * The ACL groups **one identity** should carry, from the portal's own grants.
    *
    * Rebuilt from `grants` rather than remembered, because the portal's grant
    * rows are the record of who was approved for what — the gateway's copy is
    * the thing that was lost.
+   *
+   * Scoped by `applicationId`, and that scope is load-bearing: replaying an
+   * account's whole grant list onto an application's consumer would hand that
+   * application every API its owner can reach, which is precisely what
+   * application identities exist to prevent (issue #289). `null` is the
+   * account's own consumer.
    */
-  async function approvedGroups(userId: Uuid): Promise<string[]> {
+  async function approvedGroups(userId: Uuid, applicationId: Uuid | null): Promise<string[]> {
     const groups: string[] = [];
     for (let offset = 0; ; offset += MAX_PAGE_SIZE) {
       const page = await store.grants.list(
-        { user_id: userId, status: 'active' },
+        { user_id: userId, status: 'active', application_id: applicationId },
         { limit: MAX_PAGE_SIZE, offset },
       );
       for (const grant of page.items) groups.push(aclGroupForApi(grant.api_id));
@@ -423,6 +430,7 @@ export function createGatewayReconciliationService(
   ): Promise<RepairedGatewayConsumer> {
     const base: RepairedGatewayConsumer = {
       user_id: orphan.user_id,
+      application_id: orphan.application_id,
       previous_ferrum_consumer_id: orphan.ferrum_consumer_id,
       ferrum_consumer_id: null,
       credentials_requiring_reissue: 0,
@@ -430,13 +438,17 @@ export function createGatewayReconciliationService(
       error: null,
     };
     try {
-      const groups = await approvedGroups(orphan.user_id);
+      const groups = await approvedGroups(orphan.user_id, orphan.application_id);
       const outcome = await edge.serializePerKey(
         canonicalConsumerLockKey(namespace, orphan.ferrum_username),
         async () => {
           // Re-read inside the critical section: another repair, or an ordinary
           // provisioning call, may have rebuilt this consumer already.
-          const row = await store.consumers.findByUserAndNamespace(orphan.user_id, namespace);
+          const row = await store.consumers.findByUserAndNamespace(
+            orphan.user_id,
+            namespace,
+            orphan.application_id,
+          );
           if (!row) return { kind: 'gone' } as const;
           const staleId = row.ferrum_consumer_id;
           return edge.serializePerKey(staleId, async () => {
@@ -447,7 +459,9 @@ export function createGatewayReconciliationService(
             const { consumer } = await edge.consumers.ensure(
               {
                 username: row.ferrum_username,
-                custom_id: orphan.user_id,
+                // The id the username names: the application for an
+                // application identity, the account for its own consumer.
+                custom_id: orphan.application_id ?? orphan.user_id,
                 acl_groups: groups,
               },
               actor.id,
@@ -647,19 +661,27 @@ export function createGatewayReconciliationService(
         );
       }
 
-      const consumerOrphans = new Map<Uuid, OrphanedConsumerRef>(
-        report.orphaned_consumers.map((orphan) => [orphan.user_id, orphan]),
-      );
+      // Grouped by account rather than keyed by it: one account can have
+      // several orphaned consumers — its own and one per application it owns —
+      // and a map keyed on `user_id` silently kept only the last of them, so a
+      // repair fixed one identity and left the rest orphaned (issue #289).
+      const consumerOrphans = new Map<Uuid, OrphanedConsumerRef[]>();
+      for (const orphan of report.orphaned_consumers) {
+        const existing = consumerOrphans.get(orphan.user_id);
+        if (existing) existing.push(orphan);
+        else consumerOrphans.set(orphan.user_id, [orphan]);
+      }
       const proxyOrphans = new Map<Uuid, OrphanedProxyRef>(
         report.orphaned_proxies.map((orphan) => [orphan.api_id, orphan]),
       );
 
       const consumers: RepairedGatewayConsumer[] = [];
       for (const userId of all ? [...consumerOrphans.keys()] : userIds) {
-        const orphan = consumerOrphans.get(userId);
-        if (!orphan) {
+        const orphans = consumerOrphans.get(userId);
+        if (!orphans || orphans.length === 0) {
           consumers.push({
             user_id: userId,
+            application_id: null,
             previous_ferrum_consumer_id: '',
             ferrum_consumer_id: null,
             credentials_requiring_reissue: 0,
@@ -668,7 +690,10 @@ export function createGatewayReconciliationService(
           });
           continue;
         }
-        consumers.push(await repairConsumer(actor, orphan, reason, ip));
+        // Every identity of the account, each with its own approvals.
+        for (const orphan of orphans) {
+          consumers.push(await repairConsumer(actor, orphan, reason, ip));
+        }
       }
 
       const apis: FlaggedGatewayApi[] = [];
