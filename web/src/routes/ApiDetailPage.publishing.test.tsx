@@ -359,3 +359,52 @@ describe('provider specification and sandbox credentials', () => {
     expect(screen.queryByText('test-only-sandbox-key')).not.toBeInTheDocument();
   });
 });
+
+/**
+ * The gateway deployment is gone — the state issue #284 added, and the one a
+ * provider has to be able to see and act on without reading the audit log.
+ */
+describe('restoring a missing gateway deployment', () => {
+  beforeEach(() => {
+    api = { ...API, gateway_state: 'repair_required', ferrum_proxy_id: null };
+    vi.spyOn(apisApi, 'restoreGateway').mockImplementation(async () => {
+      api = { ...api, gateway_state: 'deployed', ferrum_proxy_id: 'proxy-restored' };
+      return { api, spec: SPEC, proxy_id: 'proxy-restored' };
+    });
+  });
+
+  it('shows the condition and restores on demand', async () => {
+    await renderPage(<ApiDetailPage />);
+    await screen.findByRole('heading', { name: 'Gateway deployment missing' });
+    // The distinction the banner exists to make: published, and not serving.
+    expect(screen.getByText('Not deployed')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Restore gateway deployment/ }));
+    await screen.findByText('Gateway deployment restored');
+    expect(apisApi.restoreGateway).toHaveBeenCalledWith(API.id);
+    await waitFor(() => {
+      expect(
+        screen.queryByRole('heading', { name: 'Gateway deployment missing' }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  it('keeps the banner and reports why when the restore fails', async () => {
+    vi.mocked(apisApi.restoreGateway).mockRejectedValue(new Error('Gateway unavailable'));
+    await renderPage(<ApiDetailPage />);
+    await screen.findByRole('heading', { name: 'Gateway deployment missing' });
+    fireEvent.click(screen.getByRole('button', { name: /Restore gateway deployment/ }));
+    await screen.findByText('Gateway unavailable');
+    expect(screen.getByRole('heading', { name: 'Gateway deployment missing' })).toBeInTheDocument();
+  });
+
+  it('offers nothing to restore while the API is deployed', async () => {
+    api = { ...API };
+    await renderPage(<ApiDetailPage />);
+    await screen.findByRole('heading', { name: API.name });
+    expect(
+      screen.queryByRole('heading', { name: 'Gateway deployment missing' }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText('Not deployed')).not.toBeInTheDocument();
+  });
+});

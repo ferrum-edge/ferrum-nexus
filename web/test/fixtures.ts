@@ -32,6 +32,7 @@ export const API: Api = {
   spec_enforcement: 'docs_only',
   status: 'published',
   visibility: 'public',
+  gateway_state: 'deployed',
   listen_path: '/nexus/billing',
   invoke_url: 'https://gateway.example.test/nexus/billing',
   created_at: CREATED_AT,

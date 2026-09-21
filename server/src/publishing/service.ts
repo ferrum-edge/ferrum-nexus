@@ -239,6 +239,11 @@ import {
   type TeardownGatewayIdentityResult,
 } from '../credentials/service.js';
 import { assertNamespaceServed, type FerrumAdminClient } from '../ferrum-admin/index.js';
+import {
+  edgeTriggerFor,
+  paletteGatewaySettings,
+  palettePriority,
+} from '../ferrum-admin/palette.js';
 import type {
   EdgeCircuitBreakerConfig,
   EdgeConsumer,
@@ -280,6 +285,15 @@ import {
   routesSpecDocument,
   submittableProxyBody,
 } from './spec-document.js';
+
+/** Result of {@link PublishingService.restoreGateway}. */
+export interface RestoreResult {
+  api: Api;
+  /** The revision that was redeployed — the current one, never a new row. */
+  spec: ApiSpecSummary;
+  /** The proxy the restore created on the gateway. */
+  proxyId: string;
+}
 
 /** Result of {@link PublishingService.publish} and `updateSpec`. */
 export interface PublishResult {
@@ -343,6 +357,14 @@ export interface PublishingService {
     version?: string,
     ip?: string | null,
   ): Promise<PublishResult>;
+  /**
+   * Rebuild the gateway deployment of an API the gateway no longer serves.
+   *
+   * Non-destructive: the catalog entry keeps its id, slug, owner, provider,
+   * specification history, configured gateway URL and every access grant. Only
+   * the Edge objects are recreated, from what the portal already stores.
+   */
+  restoreGateway(actor: UserRecord, apiId: Uuid, ip?: string | null): Promise<RestoreResult>;
   /** Tear the API down: grants revoked, Edge objects deleted, rows removed. */
   remove(actor: UserRecord, apiId: Uuid, ip?: string | null): Promise<{ revoked_grants: number }>;
   /** Create (or replace) the provider's throwaway consumer for their own API. */
@@ -2138,6 +2160,323 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       return {
         api: presentApi(updated, await settings.getGatewayPublicUrl()),
         spec: specSummary(spec),
+      };
+    },
+
+    async restoreGateway(actor, apiId, ip = null): Promise<RestoreResult> {
+      const initial = await loadApi(apiId);
+      assertCanAdminister(actor, initial);
+      // A restore creates a proxy and moves it onto the public listen path, so
+      // it is gated exactly as a publish is: a gateway that will not route the
+      // namespace would take every write below and serve none of them.
+      assertNamespaceRoutable();
+
+      // Serialised per API, not per proxy: there is no proxy to hold a lease on
+      // — that is the whole condition — so this is the only thing standing
+      // between two restores of the same API and two live proxies claiming one
+      // listen path. Everything from the missing-deployment check to the store
+      // write runs inside it.
+      const restored = await edge.serializePerKey(`api-restore:${apiId}`, async () => {
+        const api = await loadApi(apiId);
+        assertCanAdminister(actor, api);
+
+        // What the restore redeploys. A provider may upload a corrected
+        // document first — `updateSpec` keeps working on an undeployed API —
+        // and the restore then deploys that, because the current revision is by
+        // definition what the catalog is showing.
+        const current = await store.apiSpecs.findCurrentByApi(api.id);
+        if (!current) {
+          throw conflict('This API has no stored specification revision to redeploy', {
+            api_id: api.id,
+          });
+        }
+
+        // Is the deployment actually missing? `edge.proxies.get` answers `null`
+        // for a 404 and *throws* for everything else, and that distinction is
+        // load-bearing: a refused connection, a 500 or an expired admin token
+        // must surface as a gateway error, never as "the proxy is gone" —
+        // otherwise one flaky minute would talk a provider into building a
+        // second proxy beside a live one.
+        const recorded = api.ferrum_proxy_id;
+        if (recorded !== null) {
+          const live = await edge.proxies.get(recorded);
+          if (live) {
+            // Nothing to restore. If the row was flagged by a pass that has
+            // since been overtaken — an operator rebuilt the proxy by hand —
+            // say so by clearing the condition rather than by rebuilding on
+            // top of a proxy that is already serving.
+            if (api.gateway_state === 'repair_required') {
+              const cleared =
+                (await store.apis.update(api.id, { gateway_state: 'deployed' })) ?? api;
+              return { api: cleared, spec: current, proxyId: recorded, rebuilt: false };
+            }
+            throw conflict('This API already has a gateway proxy; there is nothing to restore', {
+              api_id: api.id,
+              proxy_id: recorded,
+            });
+          }
+          // A confirmed 404 on a reference the row still holds. Record the
+          // condition before building anything, so a restore that fails
+          // halfway leaves the API flagged rather than leaving a dead
+          // reference that the next pass would report all over again.
+          await store.apis.update(api.id, {
+            ferrum_proxy_id: null,
+            gateway_state: 'repair_required',
+          });
+          await audit.record(
+            { id: actor.id, role: actor.role },
+            AuditAction.API_GATEWAY_REPAIR_REQUIRED,
+            { type: 'api', id: api.id },
+            {
+              phase: 'orphaned_proxy',
+              namespace,
+              proxy_id: recorded,
+              slug: api.slug,
+              spec_enforcement: api.spec_enforcement,
+              reason: 'confirmed_missing_during_restore',
+            },
+            ip,
+          );
+        }
+
+        const parsed = parseOpenApiSpec(current.raw_spec);
+        // The upstream the row already records wins over whatever the document
+        // says: it is what the proxy was serving, and a restore must not
+        // quietly re-point an API at a `servers[]` entry the provider moved
+        // away from. `resolveUpstream` falls back to the document only when the
+        // row never recorded one.
+        const upstream = resolveUpstream(parsed, api.upstream_url ?? '');
+        await assertUpstreamAllowed(upstream, upstreamPolicy);
+        // Checked before the first gateway write, exactly as a publish does:
+        // a document that cannot be enforced in this API's mode must fail the
+        // request rather than halfway through building a proxy.
+        assertRoutesEnforceable(api.spec_enforcement, parsed.paths);
+        assertRoutesSubmittable(api.spec_enforcement, parsed.document);
+
+        const listenPath = listenPathFor(namespace, api.slug);
+        const stagingPath = stagingListenPath(namespace);
+        const allowedMethods = proxyAllowedMethods(api.allowed_methods, api.cors);
+        const proxyBody = {
+          name: proxyNameForSlug(api.slug),
+          listen_path: stagingPath,
+          backend_scheme: upstream.scheme,
+          backend_host: upstream.host,
+          backend_port: upstream.port,
+          ...(upstream.basePath ? { backend_path: upstream.basePath } : {}),
+          strip_listen_path: true,
+          ...(allowedMethods !== null ? { allowed_methods: allowedMethods } : {}),
+          ...(api.timeouts !== null ? timeoutFields(api.timeouts) : {}),
+          ...(api.circuit_breaker ? { circuit_breaker: DEFAULT_CIRCUIT_BREAKER } : {}),
+          allowed_ws_origins: wsOriginsFor(api.cors),
+        };
+
+        // The provider's palette, replayed onto the new proxy. Losing it would
+        // make a "non-destructive" restore quietly drop the compression, the
+        // dedupe window or the header rules the API was published with — and
+        // the `api_plugins` rows would go on naming config ids the gateway does
+        // not hold, so the next palette save would find no config it owns.
+        const palette = await store.apiPlugins.listByApi(api.id);
+
+        const created: { proxyId?: string; specId?: string; pluginIds: string[] } = {
+          pluginIds: [],
+        };
+        /** `api_plugins.plugin_name` → the config id the rebuild gave it. */
+        const paletteConfigIds = new Map<string, string>();
+        try {
+          // Pre-minted and recorded before the call is awaited, for the reason
+          // `publish()` documents at length: a create Edge applied but could
+          // not acknowledge must still leave the compensation a target.
+          const proxyId = newId();
+          created.proxyId = proxyId;
+          let gatewayProxyId = proxyId;
+          if (api.spec_enforcement === 'routes') {
+            const ref = await createSpecOwnedProxy(
+              parsed.document,
+              { id: proxyId, ...proxyBody },
+              actor.id,
+            );
+            gatewayProxyId = ref.id;
+            created.proxyId = ref.id;
+            created.specId = ref.specId;
+          } else {
+            const ref = await edge.proxies.create({ id: proxyId, ...proxyBody }, actor.id);
+            gatewayProxyId = ref.id;
+            created.proxyId = ref.id;
+          }
+
+          const auth = await attach(
+            gatewayProxyId,
+            api.auth_plugin,
+            authPluginConfig(api.auth_plugin),
+            actor.id,
+          );
+          created.pluginIds.push(auth.id);
+
+          // The access control the API's grants depend on. The ACL group is
+          // derived from the API id, which the restore preserves, so every
+          // `nexus:api:<id>:approved` group already on an approved client's
+          // consumer starts matching again the moment this is associated —
+          // which is what makes the restore non-destructive for grants.
+          if (api.requestable) {
+            const acl = await attach(
+              gatewayProxyId,
+              ACCESS_CONTROL_PLUGIN,
+              accessControlConfig(api.id),
+              actor.id,
+            );
+            created.pluginIds.push(acl.id);
+          }
+          if (api.rate_limit) {
+            const limiter = await attach(
+              gatewayProxyId,
+              RATE_LIMIT_PLUGIN,
+              rateLimitConfig(api.rate_limit, config.edge.rateLimit),
+              actor.id,
+            );
+            created.pluginIds.push(limiter.id);
+          }
+          if (api.cors) {
+            const corsPlugin = await attach(
+              gatewayProxyId,
+              CORS_PLUGIN,
+              corsPluginConfig(api.cors, api.auth_plugin, api.allowed_methods),
+              actor.id,
+            );
+            created.pluginIds.push(corsPlugin.id);
+          }
+          for (const row of palette) {
+            const written = await attach(
+              gatewayProxyId,
+              row.plugin_name,
+              paletteGatewaySettings(row.plugin_name, row.config, config.edge.rateLimit),
+              actor.id,
+              {
+                enabled: row.enabled,
+                trigger: edgeTriggerFor(row.trigger),
+                priorityOverride: palettePriority(row.plugin_name),
+              },
+            );
+            created.pluginIds.push(written.id);
+            paletteConfigIds.set(row.plugin_name, written.id);
+          }
+
+          // Nothing above runs until the proxy's own `plugins[]` names it, and
+          // nothing is reachable until the cutover below. The order is the
+          // publish's order for the publish's reason: there is no window in
+          // which the public path serves an ungated proxy.
+          await associate(gatewayProxyId, created.pluginIds, actor.id);
+          await cutOverToListenPath(
+            gatewayProxyId,
+            api.spec_enforcement,
+            listenPath,
+            parsed.document,
+            created.specId ?? null,
+            actor.id,
+          );
+
+          // Written inside the compensated block, like every other
+          // gateway-then-store sequence here: a store failure must not leave a
+          // live proxy the portal cannot address.
+          const row = await store.transaction(async (tx) => {
+            const updated = await tx.apis.update(api.id, {
+              ferrum_proxy_id: gatewayProxyId,
+              gateway_state: 'deployed',
+            });
+            if (!updated) throw notFound('API', api.id);
+            for (const entry of palette) {
+              const configId = paletteConfigIds.get(entry.plugin_name);
+              if (configId === undefined) continue;
+              await tx.apiPlugins.upsert({
+                api_id: api.id,
+                plugin_name: entry.plugin_name,
+                enabled: entry.enabled,
+                config: entry.config,
+                trigger: entry.trigger,
+                ferrum_plugin_config_id: configId,
+              });
+            }
+            return updated;
+          });
+          return { api: row, spec: current, proxyId: gatewayProxyId, rebuilt: true };
+        } catch (error) {
+          // Undo the gateway side so a failed restore is retryable rather than
+          // leaving a half-built proxy squatting the slug's staging path — and
+          // say so out loud when it could not be undone, because a swallowed
+          // compensation reads exactly like a clean one.
+          for (const pluginId of created.pluginIds) {
+            await edge.pluginConfigs.delete(pluginId, actor.id).catch(() => undefined);
+          }
+          let strandedProxyId: string | null = null;
+          if (created.proxyId) {
+            const target = created.proxyId;
+            strandedProxyId = await edge.proxies
+              .delete(target, actor.id)
+              .then(() => null)
+              .catch(() => target);
+          }
+          // The row keeps `gateway_state: 'repair_required'` and a null proxy
+          // reference, which is the truthful state: the API is still not
+          // deployed, the condition is still visible to the provider, to the
+          // reconciliation report and to `/api/health`, and a retry starts from
+          // the same place this attempt did.
+          await store.apis
+            .update(api.id, { ferrum_proxy_id: null, gateway_state: 'repair_required' })
+            .catch(() => undefined);
+          await audit
+            .record(
+              { id: actor.id, role: actor.role },
+              AuditAction.API_GATEWAY_RESTORE_FAILED,
+              { type: 'api', id: api.id },
+              {
+                slug: api.slug,
+                spec_enforcement: api.spec_enforcement,
+                auth_plugin: api.auth_plugin,
+                proxy_id: created.proxyId ?? null,
+                withdrawn: strandedProxyId === null,
+                ...(strandedProxyId === null ? {} : { stranded_proxy_id: strandedProxyId }),
+                error: errorMessage(error),
+              },
+              ip,
+            )
+            .catch(() => undefined);
+          if (strandedProxyId !== null) {
+            deps.log?.(
+              { api_id: api.id, proxy_id: strandedProxyId, error: errorMessage(error) },
+              'a failed gateway restore could not delete the proxy it created; it is still on ' +
+                'the gateway',
+            );
+          }
+          throw error;
+        }
+      });
+
+      // Outside the compensated block by the same rule the publish uses: both
+      // sides now agree, and tearing a live API back down because an audit
+      // write failed would trade a missing row for an outage.
+      await audit.record(
+        { id: actor.id, role: actor.role },
+        AuditAction.API_GATEWAY_RESTORE,
+        { type: 'api', id: restored.api.id },
+        {
+          slug: restored.api.slug,
+          listen_path: listenPathFor(namespace, restored.api.slug),
+          proxy_id: restored.proxyId,
+          spec_id: restored.spec.id,
+          spec_enforcement: restored.api.spec_enforcement,
+          auth_plugin: restored.api.auth_plugin,
+          requestable: restored.api.requestable,
+          // `false` is the other way this clears: the stored proxy was live
+          // after all, so only the stale flag was dropped. One row either way —
+          // the two paths differ in what they did, not in whether they happened.
+          rebuilt: restored.rebuilt,
+        },
+        ip,
+      );
+
+      return {
+        api: presentApi(restored.api, await settings.getGatewayPublicUrl()),
+        spec: specSummary(restored.spec),
+        proxyId: restored.proxyId,
       };
     },
 

@@ -826,6 +826,58 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(bare?.spec_enforcement, 'docs_only');
     });
 
+    it('apis: round-trips the gateway deployment state and filters on it', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const deployed = await store.apis.create({
+        name: 'Deployed',
+        slug: `deployed-${newId().slice(0, 8)}`,
+        owner_user_id: owner.id,
+        namespace: 'nexus',
+        version: '1.0.0',
+        spec_format: 'openapi',
+        requestable: true,
+        auth_plugin: 'key_auth',
+        status: 'published',
+        visibility: 'public',
+      });
+      // The default is what every row created by a publish that landed reads
+      // back as; nothing has to pass it.
+      assert.equal(deployed.gateway_state, 'deployed');
+
+      const flagged = await store.apis.update(deployed.id, {
+        ferrum_proxy_id: null,
+        gateway_state: 'repair_required',
+      });
+      assert.equal(flagged?.gateway_state, 'repair_required');
+      assert.deepEqual(await store.apis.findById(deployed.id), flagged);
+
+      const untouched = await store.apis.update(deployed.id, { version: '3.0.0' });
+      assert.equal(
+        untouched?.gateway_state,
+        'repair_required',
+        'an untouched column is left alone',
+      );
+
+      // What the reconciliation pass counts on every run, in every dialect.
+      const others = await makeApi(owner.id);
+      assert.equal(
+        await store.apis.count({ namespace: 'nexus', gateway_state: 'repair_required' }),
+        1,
+      );
+      const listed = await store.apis.list({ gateway_state: 'repair_required' }, { limit: 50 });
+      assert.ok(listed.items.every((row) => row.gateway_state === 'repair_required'));
+      assert.ok(listed.items.some((row) => row.id === deployed.id));
+      assert.ok(!listed.items.some((row) => row.id === others.id));
+      assert.equal(await store.apis.count({ namespace: 'nowhere' }), 0, 'namespace narrows too');
+
+      const restored = await store.apis.update(deployed.id, { gateway_state: 'deployed' });
+      assert.equal(restored?.gateway_state, 'deployed');
+      assert.equal(
+        await store.apis.count({ namespace: 'nexus', gateway_state: 'repair_required' }),
+        0,
+      );
+    });
+
     it('apis: visible_to paginates and counts the rows one viewer may browse', async () => {
       const owner = await makeUser({ role: 'provider' });
       const stranger = await makeUser();

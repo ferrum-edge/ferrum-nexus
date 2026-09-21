@@ -522,6 +522,22 @@ export interface UpdateApiSpecResponse {
   spec: ApiSpecSummary;
 }
 
+/**
+ * `POST /api/apis/:id/restore-gateway` — rebuild the gateway deployment of an
+ * API the gateway no longer serves.
+ *
+ * Non-destructive by contract: the catalog entry, its id, slug, owner,
+ * specification history, configured gateway URL and every access grant are
+ * kept. The body is empty; everything the rebuild needs is already stored.
+ */
+export interface RestoreApiGatewayResponse {
+  api: Api;
+  /** The revision that was redeployed — the current one, never a new row. */
+  spec: ApiSpecSummary;
+  /** Ferrum proxy id the restore created. */
+  proxy_id: string;
+}
+
 /** `POST /api/apis/:id/test-consumer` — provider-only sandbox consumer. */
 export interface CreateTestConsumerRequest {
   label?: string | null;

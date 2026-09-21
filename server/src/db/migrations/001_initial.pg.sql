@@ -87,6 +87,8 @@ CREATE TABLE IF NOT EXISTS apis (
   rate_limit_json      TEXT,
   status               TEXT NOT NULL DEFAULT 'published' CHECK (status IN ('published', 'retired')),
   visibility           TEXT NOT NULL DEFAULT 'public' CHECK (visibility IN ('public', 'internal')),
+  gateway_state        TEXT NOT NULL DEFAULT 'deployed'
+                         CHECK (gateway_state IN ('deployed', 'repair_required')),
   created_at           TEXT NOT NULL,
   updated_at           TEXT NOT NULL
 );
@@ -96,6 +98,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_apis_proxy_id ON apis (ferrum_proxy_id)
   WHERE ferrum_proxy_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_apis_owner ON apis (owner_user_id);
 CREATE INDEX IF NOT EXISTS ix_apis_status_visibility ON apis (status, visibility);
+CREATE INDEX IF NOT EXISTS ix_apis_gateway_state ON apis (namespace, gateway_state);
 CREATE INDEX IF NOT EXISTS ix_apis_created_at ON apis (created_at);
 
 -- ── API specs ──────────────────────────────────────────────────────────────

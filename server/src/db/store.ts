@@ -81,6 +81,7 @@ import type {
   ApiPluginTrigger,
   ApiSpec,
   ApiStatus,
+  ApiGatewayState,
   ApiVisibility,
   AuditLog,
   Consumer,
@@ -428,6 +429,10 @@ export interface ApiFilter {
   /** Case-insensitive substring match on name, slug or description. */
   q?: string;
   ids?: Uuid[];
+  /** Ferrum namespace the row belongs to. */
+  namespace?: string;
+  /** Deployment condition — `repair_required` selects the unrestored APIs. */
+  gateway_state?: ApiGatewayState;
   /** Restrict to rows one viewer may browse. Omit for an unrestricted read. */
   visible_to?: ApiViewerFilter;
 }
@@ -642,19 +647,21 @@ export interface SessionRepo {
 /**
  * Creation payload for an API row.
  *
- * `circuit_breaker` and `spec_enforcement` are non-nullable, so
+ * `circuit_breaker`, `spec_enforcement` and `gateway_state` are non-nullable, so
  * {@link CreateInput} would make them mandatory; they are optional here instead
  * because both columns carry a `DEFAULT` and their default *is* the common
  * case — no breaker, and an OpenAPI document that is catalog metadata only.
  */
 export type CreateApiInput = Omit<
   CreateInput<ApiRecord>,
-  'circuit_breaker' | 'spec_enforcement'
+  'circuit_breaker' | 'spec_enforcement' | 'gateway_state'
 > & {
   /** Defaults to `false`, matching the column default. */
   circuit_breaker?: boolean;
   /** Defaults to `'docs_only'`, matching the column default. */
   spec_enforcement?: SpecEnforcementLevel;
+  /** Defaults to `'deployed'`: a row is only created by a publish that landed. */
+  gateway_state?: ApiGatewayState;
 };
 
 /** Published APIs and their Edge proxies. */

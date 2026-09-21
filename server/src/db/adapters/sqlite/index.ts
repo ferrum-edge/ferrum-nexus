@@ -63,6 +63,7 @@ import type {
   ApiPluginTrigger,
   ApiStatus,
   ApiTimeouts,
+  ApiGatewayState,
   ApiVisibility,
   AuthPluginType,
   CorsConfig,
@@ -294,6 +295,7 @@ function mapApi(row: Row): ApiRecord {
     spec_enforcement: specEnforcement(row.spec_enforcement),
     status: text(row.status) as ApiStatus,
     visibility: text(row.visibility) as ApiVisibility,
+    gateway_state: text(row.gateway_state) as ApiGatewayState,
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -1074,8 +1076,8 @@ class SqliteStore implements NexusStore {
              (id, name, slug, description, owner_user_id, ferrum_proxy_id, upstream_url,
               namespace, version, spec_format, requestable, auth_plugin, rate_limit_json,
               cors_json, allowed_methods_json, timeouts_json, circuit_breaker,
-              spec_enforcement, status, visibility, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              spec_enforcement, status, visibility, gateway_state, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             meta.id,
             input.name,
@@ -1097,6 +1099,7 @@ class SqliteStore implements NexusStore {
             input.spec_enforcement ?? DEFAULT_SPEC_ENFORCEMENT,
             input.status,
             input.visibility,
+            input.gateway_state ?? 'deployed',
             meta.created_at,
             meta.updated_at,
           ],
@@ -1158,6 +1161,7 @@ class SqliteStore implements NexusStore {
         spec_enforcement: patch.spec_enforcement,
         status: patch.status,
         visibility: patch.visibility,
+        gateway_state: patch.gateway_state,
       });
       if (set) {
         mapConflict('An API with that slug already exists', () =>
@@ -2856,6 +2860,8 @@ function apiWhere(filter: ApiFilter): WhereBuilder {
     .add(filter.owner_user_id, 'owner_user_id = ?', filter.owner_user_id ?? null)
     .add(filter.status, 'status = ?', filter.status ?? null)
     .add(filter.visibility, 'visibility = ?', filter.visibility ?? null)
+    .add(filter.namespace, 'namespace = ?', filter.namespace ?? null)
+    .add(filter.gateway_state, 'gateway_state = ?', filter.gateway_state ?? null)
     .addSearch(filter.q, ['name', 'slug', 'description']);
   if (filter.requestable !== undefined) {
     builder.always('requestable = ?', encodeBool(filter.requestable));

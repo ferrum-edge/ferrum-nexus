@@ -90,9 +90,28 @@ export const AuditAction = {
    * direction: the gateway was retargeted or rebuilt, the stored
    * `ferrum_proxy_id` answers `404`, and the reconciliation repair cleared it
    * so the API reads as having no proxy — which is the state the rest of the
-   * portal already models — and can be republished through the ordinary flow.
+   * portal already models. The API is also left `gateway_state:
+   * 'repair_required'` until {@link AuditAction.API_GATEWAY_RESTORE} rebuilds
+   * its deployment.
    */
   API_GATEWAY_REPAIR_REQUIRED: 'api.gateway_repair_required',
+  /**
+   * An existing API's gateway deployment was rebuilt in place: same id, slug,
+   * owner, specification history, gateway URL and grants, new Edge proxy.
+   *
+   * `rebuilt: false` records the other way this clears — the proxy turned out
+   * to be live after all (an operator rebuilt it by hand), so the flag was
+   * dropped without touching the gateway.
+   */
+  API_GATEWAY_RESTORE: 'api.gateway_restore',
+  /**
+   * A restore that reached the gateway and then failed. Reads like
+   * {@link AuditAction.API_PUBLISH_ROLLBACK}: `withdrawn: false` means the
+   * compensating `DELETE` could not confirm and `stranded_proxy_id` names a
+   * proxy that may still be live on its staging path. The API stays
+   * `repair_required`, so the condition is still visible and a retry is safe.
+   */
+  API_GATEWAY_RESTORE_FAILED: 'api.gateway_restore_failed',
   /**
    * A publish that reached the gateway and then failed; records whether the
    * proxy it created came back off again.

@@ -129,6 +129,7 @@ CREATE TABLE IF NOT EXISTS apis (
   rate_limit_json      TEXT,
   status               VARCHAR(32)  NOT NULL DEFAULT 'published',
   visibility           VARCHAR(32)  NOT NULL DEFAULT 'public',
+  gateway_state        VARCHAR(32)  NOT NULL DEFAULT 'deployed',
   created_at           VARCHAR(32)  NOT NULL,
   updated_at           VARCHAR(32)  NOT NULL,
   CONSTRAINT ck_apis_spec_enforcement CHECK (spec_enforcement IN ('docs_only', 'routes')),
@@ -140,11 +141,13 @@ CREATE TABLE IF NOT EXISTS apis (
   KEY ix_apis_owner (owner_user_id),
   KEY ix_apis_status_visibility (status, visibility),
   KEY ix_apis_created_at (created_at),
+  KEY ix_apis_gateway_state (namespace, gateway_state),
   CONSTRAINT ck_apis_spec_format CHECK (spec_format IN ('openapi')),
   CONSTRAINT ck_apis_requestable CHECK (requestable IN (0, 1)),
   CONSTRAINT ck_apis_auth_plugin CHECK (auth_plugin IN ('key_auth', 'basic_auth', 'jwt_auth')),
   CONSTRAINT ck_apis_status CHECK (status IN ('published', 'retired')),
   CONSTRAINT ck_apis_visibility CHECK (visibility IN ('public', 'internal')),
+  CONSTRAINT ck_apis_gateway_state CHECK (gateway_state IN ('deployed', 'repair_required')),
   CONSTRAINT fk_apis_owner FOREIGN KEY (owner_user_id) REFERENCES users (id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 

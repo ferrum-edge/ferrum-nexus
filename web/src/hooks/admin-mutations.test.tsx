@@ -22,6 +22,7 @@ const report: GatewayReconciliationReport = {
   proxies: { checked: 1, orphaned: 0, complete: true },
   orphaned_consumers: [],
   orphaned_proxies: [],
+  awaiting_restore: 0,
   error: null,
 };
 

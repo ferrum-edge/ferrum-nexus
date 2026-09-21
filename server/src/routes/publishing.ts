@@ -35,6 +35,7 @@ import {
   type ListApiPluginsResponse,
   type ListApisResponse,
   type PublishApiResponse,
+  type RestoreApiGatewayResponse,
   type SetApiPluginResponse,
   type UpdateApiResponse,
   type UpdateApiSpecResponse,
@@ -479,6 +480,26 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
       const { id, name } = parseOrThrow(pluginParamsSchema, request.params);
       await apiPlugins.remove(user, id, name, clientIp(request));
       return { ok: true };
+    },
+  );
+
+  /**
+   * Rebuild the gateway deployment of an API the gateway no longer serves.
+   *
+   * Owner or admin, like every other write on the row — the restore replays
+   * what the portal already stores and grants nobody anything they did not
+   * already have. It is deliberately a `POST` with an empty body: there is
+   * nothing for a caller to choose, and anything it accepted would be a second
+   * way to configure an API.
+   */
+  app.post(
+    '/:id/restore-gateway',
+    { config: MUTATION_RATE_LIMIT },
+    async (request): Promise<RestoreApiGatewayResponse> => {
+      const { user } = requireAuth(request);
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      const result = await publishing.restoreGateway(user, id, clientIp(request));
+      return { api: result.api, spec: result.spec, proxy_id: result.proxyId };
     },
   );
 
