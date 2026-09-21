@@ -18,7 +18,14 @@ import type {
   ListApisResponse,
   PublishApiRequest,
   PublishApiResponse,
+  DiffApiSpecRequest,
+  DiffApiSpecResponse,
+  GetApiRevisionDiffResponse,
+  GetApiRevisionResponse,
+  ListApiRevisionsResponse,
+  ListQuery,
   RestoreApiGatewayResponse,
+  RollbackApiSpecResponse,
   SetApiPluginRequest,
   SetApiPluginResponse,
   UpdateApiRequest,
@@ -123,6 +130,79 @@ export function useUpdateApiSpec(): UseMutationResult<
   return useMutation({
     mutationFn: ({ id, body }: { id: string; body: UpdateApiSpecRequest }) =>
       apisApi.updateSpec(id, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.apis.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.catalog.all });
+    },
+  });
+}
+
+/* ── Specification history, change review and rollback ──────────────────── */
+
+/** One page of retained revisions: the current one first, then newest-first. */
+export function useApiRevisions(
+  id: string,
+  query: ListQuery = {},
+): UseQueryResult<ListApiRevisionsResponse> {
+  return useQuery({
+    queryKey: queryKeys.apis.revisions(id, query),
+    queryFn: () => apisApi.revisions(id, query),
+    enabled: id.length > 0,
+  });
+}
+
+/** One retained revision's document. */
+export function useApiRevision(
+  id: string,
+  revisionId: string | null,
+): UseQueryResult<GetApiRevisionResponse> {
+  return useQuery({
+    queryKey: queryKeys.apis.revision(id, revisionId ?? ''),
+    queryFn: () => apisApi.revision(id, revisionId ?? ''),
+    enabled: id.length > 0 && revisionId !== null,
+  });
+}
+
+/** What rolling back to a revision would change, against the current one. */
+export function useApiRevisionDiff(
+  id: string,
+  revisionId: string | null,
+): UseQueryResult<GetApiRevisionDiffResponse> {
+  return useQuery({
+    queryKey: queryKeys.apis.revisionDiff(id, revisionId ?? ''),
+    queryFn: () => apisApi.revisionDiff(id, revisionId ?? ''),
+    enabled: id.length > 0 && revisionId !== null,
+  });
+}
+
+/**
+ * Review an upload before publishing it.
+ *
+ * A mutation rather than a query because the document is the input and the
+ * provider asks for the comparison explicitly; nothing is stored, so there is
+ * nothing to invalidate.
+ */
+export function useDiffApiSpec(): UseMutationResult<
+  DiffApiSpecResponse,
+  Error,
+  { id: string; body: DiffApiSpecRequest }
+> {
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body: DiffApiSpecRequest }) =>
+      apisApi.diffSpec(id, body),
+  });
+}
+
+/** Redeploy a retained revision as a new revision of the same API. */
+export function useRollbackApiSpec(): UseMutationResult<
+  RollbackApiSpecResponse,
+  Error,
+  { id: string; revisionId: string }
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, revisionId }: { id: string; revisionId: string }) =>
+      apisApi.rollbackSpec(id, revisionId),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.apis.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.catalog.all });

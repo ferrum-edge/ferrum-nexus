@@ -72,6 +72,17 @@ export const AuditAction = {
   API_PUBLISH: 'api.publish',
   API_UPDATE: 'api.update',
   API_SPEC_UPDATE: 'api.spec_update',
+  /**
+   * A retained revision was redeployed as a **new** revision of the same API.
+   *
+   * The same action the gateway sees as an ordinary spec revision — it goes
+   * through the same publishing path — named separately so the log can say
+   * which of the two happened. `details` adds `restored_from_spec_id`,
+   * `restored_from_version` and `restored_from_created_at` naming the revision
+   * that was put back; the new revision's own id is `spec_id`, because history
+   * is never rewritten.
+   */
+  API_SPEC_ROLLBACK: 'api.spec_rollback',
   API_RETIRE: 'api.retire',
   API_DELETE: 'api.delete',
   /** A palette plugin was created or replaced on an API's proxy. */

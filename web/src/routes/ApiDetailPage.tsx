@@ -28,6 +28,7 @@ import {
   type HttpMethod,
   type RateLimitConfig,
   type ShowOnceSecret,
+  type SpecDiff,
   type SpecEnforcementLevel,
 } from '@ferrum-nexus/shared';
 import { formatDateTime, parseCorsOrigins } from '../lib/format';
@@ -37,6 +38,7 @@ import {
   useApiUsage,
   useCreateTestConsumer,
   useDeleteApi,
+  useDiffApiSpec,
   useRestoreApiGateway,
   useUpdateApi,
   useUpdateApiSpec,
@@ -59,7 +61,9 @@ import {
 } from '../components/publishing/AdvancedProxySettings';
 import { StartThreadDialog } from '../components/messaging/StartThreadDialog';
 import { PluginsTab } from '../components/plugins/PluginsTab';
+import { SpecDiffView } from '../components/publishing/SpecDiffView';
 import { SpecEditor, isSpecValid } from '../components/publishing/SpecEditor';
+import { SpecHistory } from '../components/publishing/SpecHistory';
 import { FormNotice } from '../components/auth/AuthShell';
 import { Badge, type BadgeTone } from '../components/ui/Badge';
 import { Button, buttonClassName } from '../components/ui/Button';
@@ -608,11 +612,34 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
 function SpecTab({ api }: { api: Api }): ReactElement {
   const specQuery = useApiSpec(api.id);
   const updateSpec = useUpdateApiSpec();
+  const reviewDiff = useDiffApiSpec();
   const toast = useToast();
   const [draft, setDraft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [review, setReview] = useState<SpecDiff | null>(null);
 
   const value = draft ?? specQuery.data?.raw_spec ?? '';
+
+  /** Publish `value`, clearing the editor's draft state on success. */
+  const publish = (): void => {
+    updateSpec.mutate(
+      { id: api.id, body: { spec: value } },
+      {
+        onSuccess: () => {
+          setDraft(null);
+          setReview(null);
+          toast.success('Specification updated');
+        },
+        // A refused revision closes the review and leaves the draft in the
+        // editor: the provider's document is the thing worth keeping, and a
+        // modal sitting over a failure they cannot act on is not.
+        onError: (mutationError: Error) => {
+          setReview(null);
+          toast.error('Specification not published', mutationError.message);
+        },
+      },
+    );
+  };
 
   if (specQuery.isLoading) {
     return (
@@ -623,54 +650,75 @@ function SpecTab({ api }: { api: Api }): ReactElement {
   }
 
   return (
-    <Card>
-      <CardHeader
-        icon="spec"
-        title="Specification"
-        description="Publishing a revision re-parses the document and updates the catalog entry."
-        actions={
-          draft !== null ? (
-            <Badge tone="warning" dot>
-              Unsaved changes
-            </Badge>
-          ) : undefined
-        }
-      />
-      <CardBody className="flex flex-col gap-4">
-        <SpecEditor value={value} onChange={setDraft} id="api-spec" />
-        {error ? <FormNotice tone="danger">{error}</FormNotice> : null}
-      </CardBody>
-      <div className="flex flex-wrap items-center gap-2 border-t border-border bg-inset/40 px-5 py-3.5">
-        <Button
-          variant="primary"
-          loading={updateSpec.isPending}
-          disabled={draft === null || draft.trim().length === 0}
-          onClick={() => {
-            setError(null);
-            if (!isSpecValid(value)) {
-              setError('The OpenAPI document could not be parsed.');
-              return;
-            }
-            updateSpec.mutate(
-              { id: api.id, body: { spec: value } },
-              {
-                onSuccess: () => {
-                  setDraft(null);
-                  toast.success('Specification updated');
+    <div className="flex flex-col gap-4">
+      <Card>
+        <CardHeader
+          icon="spec"
+          title="Specification"
+          description="Publishing a revision re-parses the document and updates the catalog entry."
+          actions={
+            draft !== null ? (
+              <Badge tone="warning" dot>
+                Unsaved changes
+              </Badge>
+            ) : undefined
+          }
+        />
+        <CardBody className="flex flex-col gap-4">
+          <SpecEditor value={value} onChange={setDraft} id="api-spec" />
+          {error ? <FormNotice tone="danger">{error}</FormNotice> : null}
+        </CardBody>
+        <div className="flex flex-wrap items-center gap-2 border-t border-border bg-inset/40 px-5 py-3.5">
+          {/* Review first. A revision can take operations away from live
+            callers, and under `routes` enforcement the gateway starts
+            rejecting them the moment it lands — so the diff is a step in the
+            flow rather than something to go looking for (issue #290). */}
+          <Button
+            variant="primary"
+            loading={reviewDiff.isPending}
+            disabled={draft === null || draft.trim().length === 0}
+            onClick={() => {
+              setError(null);
+              if (!isSpecValid(value)) {
+                setError('The OpenAPI document could not be parsed.');
+                return;
+              }
+              reviewDiff.mutate(
+                { id: api.id, body: { spec: value } },
+                {
+                  onSuccess: (response) => setReview(response.diff),
+                  onError: (mutationError: Error) => setError(mutationError.message),
                 },
-              },
-            );
-          }}
-        >
-          Publish revision
-        </Button>
-        {draft !== null ? (
-          <Button variant="ghost" onClick={() => setDraft(null)}>
-            Discard changes
+              );
+            }}
+          >
+            Review changes
           </Button>
-        ) : null}
-      </div>
-    </Card>
+          {draft !== null ? (
+            <Button variant="ghost" onClick={() => setDraft(null)}>
+              Discard changes
+            </Button>
+          ) : null}
+        </div>
+      </Card>
+
+      <SpecHistory api={api} />
+
+      <ConfirmDialog
+        open={review !== null}
+        onOpenChange={(next) => {
+          if (!next) setReview(null);
+        }}
+        title="Publish this revision"
+        description="The new document replaces the current one and is recorded as a new revision. The previous revisions stay in history."
+        confirmLabel="Publish revision"
+        danger={(review?.potentially_breaking.length ?? 0) > 0}
+        loading={updateSpec.isPending}
+        onConfirm={publish}
+      >
+        {review ? <SpecDiffView diff={review} /> : <></>}
+      </ConfirmDialog>
+    </div>
   );
 }
 

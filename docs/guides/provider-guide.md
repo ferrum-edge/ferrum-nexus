@@ -630,6 +630,45 @@ portal — and anything past that is removed as each new revision lands. The
 version label defaults to the document's `info.version` — set it explicitly if
 your catalog version differs.
 
+### Review before you publish
+
+**Review changes** compares the document in the editor against the one your API
+is serving and shows what would change before anything is published: operations
+added, operations removed, operations whose definition differs, and any change
+to `info` or `servers`. Operations that would **stop being served** are called
+out first, because those are the ones that break callers.
+
+Read that list as a prompt, not a verdict. The comparison reads paths, methods
+and the shape of each operation — it does not read schemas or follow `$ref`s,
+so a response that quietly drops a required field shows up as "responses
+changed" at most, and never as a breaking change. An empty breaking-change list
+means the comparison found nothing, not that your change is safe.
+
+### Revision history and rollback
+
+**My APIs → the API → Spec → Revision history** lists every retained revision,
+newest first, with when it was published and by whom. **View document** shows
+the original upload, byte for byte.
+
+**Review & roll back** on an earlier revision shows the same comparison — this
+time from what your API serves today to what it would serve — and then
+republishes that document.
+
+A rollback is a **new revision carrying the old document**. Nothing in your
+history is rewritten or deleted, and the API keeps its id, its slug, its
+`invoke_url`, its plugins and every approved client: none of your clients has
+to request access again. If the gateway refuses the change, the rollback fails
+and your catalog is left exactly as it was — it never half-lands.
+
+Two things to expect:
+
+- Retention applies to rollback targets too. A revision you can see today can be
+  pruned by later uploads; rolling back to one that is gone answers "no longer
+  retained" and writes nothing.
+- At the `routes` [enforcement level](#enforcement-level), rolling back changes
+  **what the gateway accepts**, immediately, in exactly the way an upload does.
+  The operations the review listed as removed start being rejected.
+
 ### The upstream-following rule
 
 Uploading a spec **can** move the gateway's backend. The rule is exact:

@@ -114,6 +114,17 @@ CREATE TABLE IF NOT EXISTS api_specs (
   parsed_version TEXT,
   is_current     INTEGER NOT NULL DEFAULT 0 CHECK (is_current IN (0, 1)),
   revision_seq   INTEGER NOT NULL,
+  -- Who published this revision. `ON DELETE SET NULL` rather than RESTRICT: a
+  -- revision outlives the account that uploaded it, and history that could
+  -- block a user deletion would be history nobody keeps. Rows written before
+  -- the column existed, and rows whose author has since been removed, read
+  -- back `null` — which the history view renders as an unknown author rather
+  -- than attributing them to somebody.
+  created_by     TEXT REFERENCES users (id) ON DELETE SET NULL,
+  -- What this revision was restoring, when it was published by a rollback.
+  -- `ON DELETE SET NULL` because retention deletes the target long before the
+  -- rollback that restored it: the link is provenance, not a dependency.
+  rolled_back_from_id TEXT REFERENCES api_specs (id) ON DELETE SET NULL,
   created_at     TEXT NOT NULL,
   updated_at     TEXT NOT NULL
 );

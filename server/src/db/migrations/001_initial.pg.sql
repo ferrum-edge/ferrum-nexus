@@ -111,6 +111,8 @@ CREATE TABLE IF NOT EXISTS api_specs (
   parsed_version TEXT,
   is_current     SMALLINT NOT NULL DEFAULT 0 CHECK (is_current IN (0, 1)),
   revision_seq   INTEGER NOT NULL,
+  created_by     TEXT REFERENCES users (id) ON DELETE SET NULL,
+  rolled_back_from_id TEXT REFERENCES api_specs (id) ON DELETE SET NULL,
   created_at     TEXT NOT NULL,
   updated_at     TEXT NOT NULL
 );

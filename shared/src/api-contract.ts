@@ -52,6 +52,7 @@ import type {
   RateLimitConfig,
   RegistrationSettings,
   SmtpSettings,
+  SpecDiff,
   ThemePreference,
   User,
   UserStatus,
@@ -518,6 +519,51 @@ export interface UpdateApiSpecRequest {
 
 /** `PUT /api/apis/:id/spec` */
 export interface UpdateApiSpecResponse {
+  api: Api;
+  spec: ApiSpecSummary;
+}
+
+/** `GET /api/apis/:id/revisions` — retained specification history. */
+export type ListApiRevisionsResponse = Paginated<ApiSpecSummary>;
+
+/**
+ * `GET /api/apis/:id/revisions/:revisionId` — one retained revision's
+ * document, in the same shape as `GET /api/apis/:id/spec`.
+ */
+export type GetApiRevisionResponse = GetApiSpecResponse;
+
+/**
+ * `GET /api/apis/:id/revisions/:revisionId/diff` — what rolling back to this
+ * revision would change, compared against the current one.
+ */
+export interface GetApiRevisionDiffResponse {
+  diff: SpecDiff;
+}
+
+/**
+ * `POST /api/apis/:id/spec/diff` — what uploading this document would change,
+ * compared against the current revision. Read-only: nothing is stored and
+ * nothing reaches the gateway.
+ */
+export interface DiffApiSpecRequest {
+  /** The proposed OpenAPI document as text (JSON or YAML). */
+  spec: string;
+}
+
+/** `POST /api/apis/:id/spec/diff` */
+export interface DiffApiSpecResponse {
+  diff: SpecDiff;
+}
+
+/**
+ * `POST /api/apis/:id/revisions/:revisionId/rollback` — redeploy a retained
+ * revision as a **new** revision of the same API.
+ *
+ * `spec` is the newly created revision, not the one that was restored: history
+ * is appended to, never rewritten. The new row's `rolled_back_from_id` names
+ * the target.
+ */
+export interface RollbackApiSpecResponse {
   api: Api;
   spec: ApiSpecSummary;
 }

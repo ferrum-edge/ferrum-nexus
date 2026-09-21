@@ -97,7 +97,14 @@ import {
   type MeResponse,
   type PublishApiRequest,
   type PublishApiResponse,
+  type DiffApiSpecRequest,
+  type ListQuery,
+  type DiffApiSpecResponse,
+  type GetApiRevisionDiffResponse,
+  type GetApiRevisionResponse,
+  type ListApiRevisionsResponse,
   type RestoreApiGatewayResponse,
+  type RollbackApiSpecResponse,
   type RegisterRequest,
   type RegisterResponse,
   type ResendVerificationRequest,
@@ -400,6 +407,27 @@ export const apisApi = {
     body: CreateTestConsumerRequest = {},
   ): Promise<CreateTestConsumerResponse> =>
     post<CreateTestConsumerResponse>(`/apis/${encodeURIComponent(id)}/test-consumer`, body),
+  /* ── Specification history, change review and rollback ────────────── */
+
+  revisions: (id: string, query: ListQuery = {}): Promise<ListApiRevisionsResponse> =>
+    get<ListApiRevisionsResponse>(`/apis/${encodeURIComponent(id)}/revisions`, { ...query }),
+  revision: (id: string, revisionId: string): Promise<GetApiRevisionResponse> =>
+    get<GetApiRevisionResponse>(
+      `/apis/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}`,
+    ),
+  /** What rolling back to this revision would change, against the current one. */
+  revisionDiff: (id: string, revisionId: string): Promise<GetApiRevisionDiffResponse> =>
+    get<GetApiRevisionDiffResponse>(
+      `/apis/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}/diff`,
+    ),
+  /** What uploading this document would change. Read-only despite the verb. */
+  diffSpec: (id: string, body: DiffApiSpecRequest): Promise<DiffApiSpecResponse> =>
+    post<DiffApiSpecResponse>(`/apis/${encodeURIComponent(id)}/spec/diff`, body),
+  rollbackSpec: (id: string, revisionId: string): Promise<RollbackApiSpecResponse> =>
+    post<RollbackApiSpecResponse>(
+      `/apis/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}/rollback`,
+    ),
+
   /**
    * Rebuild the gateway deployment of an API the gateway no longer serves.
    *

@@ -277,6 +277,23 @@ export interface ApiSpecSummary {
   parsed_title: string | null;
   parsed_version: string | null;
   is_current: boolean;
+  /**
+   * The account that published this revision, or `null` when it is not
+   * recorded — a revision written before the column existed, or one whose
+   * author's account has since been deleted. The history view renders `null`
+   * as an unknown author rather than attributing the revision to somebody.
+   */
+  created_by: Uuid | null;
+  /**
+   * The revision this one restored, when it was published by a rollback.
+   *
+   * A rollback is a **new revision carrying an old document**, never a rewrite
+   * of history, so this is the only thing that distinguishes the two. `null`
+   * for an ordinary upload — and also for a rollback whose target has since
+   * been dropped by retention, because the link is provenance rather than a
+   * dependency.
+   */
+  rolled_back_from_id: Uuid | null;
   created_at: IsoTimestamp;
   updated_at: IsoTimestamp;
 }
@@ -825,6 +842,80 @@ export interface EdgeHealth extends Omit<DependencyHealth, 'status'> {
    * inside the health request — see {@link EdgeReconciliationHealth}.
    */
   reconciliation: EdgeReconciliationHealth;
+}
+
+/* ── Specification change review ────────────────────────────────────────── */
+
+/** One operation of an OpenAPI document: a path template and a method. */
+export interface SpecOperationRef {
+  /** The path template as written, e.g. `/invoices/{id}`. */
+  path: string;
+  /** Uppercase HTTP method, e.g. `GET`. */
+  method: string;
+}
+
+/** An operation both documents declare, with what differs about it. */
+export interface SpecOperationChange extends SpecOperationRef {
+  /**
+   * Short labels for the parts of the operation that differ — `parameters`,
+   * `requestBody`, `responses`, `security`, `summary`, `description`,
+   * `deprecated`, `tags`, `servers`, `operationId`, `callbacks`.
+   *
+   * Structural, and deliberately shallow: it says *that* the request body
+   * changed, not how. Anything the labels do not cover shows up as `other`.
+   */
+  changes: string[];
+}
+
+/** A top-level `info` field that differs between two revisions. */
+export interface SpecInfoChange {
+  field: 'title' | 'version' | 'description';
+  from: string | null;
+  to: string | null;
+}
+
+/**
+ * A structural comparison of two OpenAPI revisions.
+ *
+ * **What this is not.** It compares declared paths, methods and the shape of
+ * each operation. It does not evaluate schemas, resolve `$ref`s, or reason
+ * about semantics, so an empty {@link SpecDiff.potentially_breaking} is
+ * emphatically *not* proof that a change is backward compatible — a response
+ * schema can drop a required field, or a parameter can narrow its type, with
+ * every path and method identical. It is a review aid, and the UI says so.
+ */
+export interface SpecDiff {
+  /** The revision being compared *from* — the current one, for a rollback. */
+  from: ApiSpecSummary | null;
+  /** The revision being compared *to*: a retained revision, or an upload. */
+  to: ApiSpecSummary | null;
+  /** Operations the target declares and the source does not. */
+  added_operations: SpecOperationRef[];
+  /** Operations the source declares and the target does not. */
+  removed_operations: SpecOperationRef[];
+  /** Operations both declare, whose definitions differ. */
+  changed_operations: SpecOperationChange[];
+  /** Path templates the target adds outright. */
+  added_paths: string[];
+  /** Path templates the target drops outright. */
+  removed_paths: string[];
+  /** `info` fields that differ. */
+  info_changes: SpecInfoChange[];
+  /** Whether the document's `servers` block differs. */
+  servers_changed: boolean;
+  /**
+   * Operations a caller is using today that the target would stop serving:
+   * every removed operation, in document order.
+   *
+   * Under `routes` enforcement these become a `400` from the gateway's
+   * generated validator; under `docs_only` they stop being documented while
+   * the proxy goes on forwarding them. Either way they are the changes worth
+   * reading twice, which is why they are lifted out of
+   * {@link SpecDiff.removed_operations} rather than left to be counted.
+   */
+  potentially_breaking: SpecOperationRef[];
+  /** Whether the two documents differ at all, by any of the above. */
+  changed: boolean;
 }
 
 /* ── Gateway reference reconciliation ───────────────────────────────────── */

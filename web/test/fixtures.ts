@@ -46,6 +46,8 @@ export const SPEC: ApiSpecSummary = {
   parsed_title: 'Billing specification',
   parsed_version: '1.0.0',
   is_current: true,
+  created_by: API.owner_user_id,
+  rolled_back_from_id: null,
   created_at: CREATED_AT,
   updated_at: CREATED_AT,
 };

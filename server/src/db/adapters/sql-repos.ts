@@ -270,6 +270,8 @@ function mapApiSpec(row: Row): ApiSpecRecord {
     parsed_version: textOrNull(row.parsed_version),
     is_current: bool(row.is_current),
     revision_seq: int(row.revision_seq),
+    created_by: textOrNull(row.created_by),
+    rolled_back_from_id: textOrNull(row.rolled_back_from_id),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -1106,8 +1108,8 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
             tx,
             `INSERT INTO api_specs
                (id, api_id, version, raw_spec, parsed_title, parsed_version, is_current,
-                revision_seq, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                revision_seq, created_by, rolled_back_from_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               meta.id,
               input.api_id,
@@ -1117,6 +1119,8 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
               input.parsed_version ?? null,
               encodeBool(input.is_current),
               seq,
+              input.created_by ?? null,
+              input.rolled_back_from_id ?? null,
               meta.created_at,
               meta.updated_at,
             ],
