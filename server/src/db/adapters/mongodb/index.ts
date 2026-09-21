@@ -1796,9 +1796,15 @@ class MongoStore implements NexusStore {
       );
     },
 
-    delete: async (id) =>
-      (await this.col(COLLECTIONS.apiSpecs).deleteOne({ _id: id }, this.opts)).deletedCount > 0,
+    delete: async (id) => {
+      await this.clearRollbackLinks([id]);
+      return (
+        (await this.col(COLLECTIONS.apiSpecs).deleteOne({ _id: id }, this.opts)).deletedCount > 0
+      );
+    },
 
+    // No link-clearing here: every `rolled_back_from_id` points at a revision
+    // of the *same* API, and this removes all of them.
     deleteByApi: async (apiId) =>
       (await this.col(COLLECTIONS.apiSpecs).deleteMany({ api_id: apiId }, this.opts)).deletedCount,
 
@@ -1812,6 +1818,7 @@ class MongoStore implements NexusStore {
         .toArray();
       if (doomed.length === 0) return 0;
       const ids = doomed.map((row) => String(row._id));
+      await this.clearRollbackLinks(ids);
       return (
         await this.col(COLLECTIONS.apiSpecs).deleteMany(
           { _id: { $in: ids } } as Filter<NexusDoc>,
@@ -1820,6 +1827,27 @@ class MongoStore implements NexusStore {
       ).deletedCount;
     },
   };
+
+  /**
+   * Stand in for `api_specs.rolled_back_from_id … ON DELETE SET NULL`.
+   *
+   * The SQL schemas declare that constraint so a rollback's provenance goes to
+   * `null` once retention drops the revision it restored — the link is
+   * provenance, not a dependency, and it must never keep a revision alive or
+   * outlive it as a dangling id. MongoDB has no foreign keys, so the adapter
+   * has to do it: without this, a rollback on Mongo kept pointing at a
+   * revision that no longer existed while the same row on PostgreSQL read
+   * `null`, which is exactly the kind of divergence the cross-adapter suite
+   * exists to catch.
+   */
+  private async clearRollbackLinks(specIds: readonly string[]): Promise<void> {
+    if (specIds.length === 0) return;
+    await this.col(COLLECTIONS.apiSpecs).updateMany(
+      { rolled_back_from_id: { $in: [...specIds] } } as Filter<NexusDoc>,
+      { $set: { rolled_back_from_id: null } } as UpdateFilter<NexusDoc>,
+      this.opts,
+    );
+  }
 
   /* ── apiPlugins ───────────────────────────────────────────────────────── */
 
