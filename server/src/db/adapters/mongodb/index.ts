@@ -1757,8 +1757,32 @@ class MongoStore implements NexusStore {
     count: async (filter = {}) =>
       this.col(COLLECTIONS.applications).countDocuments(applicationFilter(filter), this.opts),
 
-    delete: async (id) =>
-      (await this.col(COLLECTIONS.applications).deleteOne({ _id: id }, this.opts)).deletedCount > 0,
+    delete: async (id) => {
+      // Stand in for `… REFERENCES applications (id) ON DELETE CASCADE`, which
+      // the three SQL schemas declare on every scoped table. MongoDB has no
+      // foreign keys, so without this an application's grants, requests,
+      // credentials and consumer mapping outlived the application on Mongo and
+      // not on PostgreSQL — the kind of divergence the cross-adapter suite
+      // exists to catch, and it caught this one.
+      //
+      // Before the row, not after: a cascade that ran second would leave the
+      // scoped rows orphaned if it failed, with nothing left to find them by.
+      for (const collection of [
+        COLLECTIONS.grants,
+        COLLECTIONS.accessRequests,
+        COLLECTIONS.credentials,
+        COLLECTIONS.consumers,
+      ]) {
+        await this.col(collection).deleteMany(
+          { application_id: id } as Filter<NexusDoc>,
+          this.opts,
+        );
+      }
+      return (
+        (await this.col(COLLECTIONS.applications).deleteOne({ _id: id }, this.opts)).deletedCount >
+        0
+      );
+    },
   };
 
   /* ── apis ─────────────────────────────────────────────────────────────── */

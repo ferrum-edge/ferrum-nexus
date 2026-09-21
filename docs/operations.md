@@ -953,6 +953,12 @@ from the [Edge releases](https://github.com/ferrum-edge/ferrum-edge/releases).
 A source tag or chart version alone does not prove image publication, and
 historical `latest` images are no longer refreshed by Edge main CI.
 
+> **Which Edge release is this portal actually known to work against?** The
+> acceptance suite ([`e2e/`](../e2e/README.md)) runs the packaged image against
+> one pinned release on every CI run and asserts through the gateway's
+> data-plane listener. The digest in `e2e/.env.example` is the release the
+> guarantee covers; running against a different one is supported and untested.
+
 Portal on `http://127.0.0.1:8787`, gateway proxy listener on
 `http://127.0.0.1:8000`. Points worth understanding before adapting it:
 

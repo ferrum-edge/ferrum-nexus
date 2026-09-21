@@ -1,0 +1,17 @@
+{
+  "name": "@ferrum-nexus/e2e",
+  "private": true,
+  "type": "module",
+  "description": "Acceptance suite: the packaged portal against a real Ferrum Edge release.",
+  "scripts": {
+    "test": "tsx --test src/dataplane.test.ts",
+    "test:browser": "playwright test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
