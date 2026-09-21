@@ -97,6 +97,7 @@ import {
   type MeResponse,
   type PublishApiRequest,
   type PublishApiResponse,
+  type RestoreApiGatewayResponse,
   type RegisterRequest,
   type RegisterResponse,
   type ResendVerificationRequest,
@@ -399,6 +400,14 @@ export const apisApi = {
     body: CreateTestConsumerRequest = {},
   ): Promise<CreateTestConsumerResponse> =>
     post<CreateTestConsumerResponse>(`/apis/${encodeURIComponent(id)}/test-consumer`, body),
+  /**
+   * Rebuild the gateway deployment of an API the gateway no longer serves.
+   *
+   * Empty body: the rebuild replays what the portal already stores, so there
+   * is nothing for the caller to choose.
+   */
+  restoreGateway: (id: string): Promise<RestoreApiGatewayResponse> =>
+    post<RestoreApiGatewayResponse>(`/apis/${encodeURIComponent(id)}/restore-gateway`),
 
   /* ── Plugin palette ─────────────────────────────────────────────────── */
   //

@@ -71,6 +71,7 @@ import type {
   ApiPluginTrigger,
   ApiStatus,
   ApiTimeouts,
+  ApiGatewayState,
   ApiVisibility,
   AuthPluginType,
   CorsConfig,
@@ -447,6 +448,7 @@ function mapApi(row: Row): ApiRecord {
     spec_enforcement: specEnforcement(row.spec_enforcement),
     status: str(row.status) as ApiStatus,
     visibility: str(row.visibility) as ApiVisibility,
+    gateway_state: (str(row.gateway_state) || 'deployed') as ApiGatewayState,
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
   };
@@ -725,6 +727,8 @@ function apiFilter(filter: ApiFilter): Filter<NexusDoc> {
   if (filter.owner_user_id !== undefined) query.owner_user_id = filter.owner_user_id;
   if (filter.status !== undefined) query.status = filter.status;
   if (filter.visibility !== undefined) query.visibility = filter.visibility;
+  if (filter.namespace !== undefined) query.namespace = filter.namespace;
+  if (filter.gateway_state !== undefined) query.gateway_state = filter.gateway_state;
   if (filter.requestable !== undefined) query.requestable = filter.requestable;
   if (filter.ids !== undefined) query._id = { $in: filter.ids };
   if (filter.q !== undefined && filter.q.trim() !== '') {
@@ -831,6 +835,11 @@ const INDEXES: IndexDefinition[] = [
   { collection: 'apis', name: 'ix_apis_owner', key: { owner_user_id: 1 } },
   { collection: 'apis', name: 'ix_apis_status_visibility', key: { status: 1, visibility: 1 } },
   { collection: 'apis', name: 'ix_apis_created_at', key: { created_at: 1 } },
+  {
+    collection: 'apis',
+    name: 'ix_apis_gateway_state',
+    key: { namespace: 1, gateway_state: 1 },
+  },
 
   {
     collection: 'api_specs',
@@ -1596,6 +1605,7 @@ class MongoStore implements NexusStore {
             spec_enforcement: input.spec_enforcement ?? DEFAULT_SPEC_ENFORCEMENT,
             status: input.status,
             visibility: input.visibility,
+            gateway_state: input.gateway_state ?? 'deployed',
             created_at: meta.created_at,
             updated_at: meta.updated_at,
           } as NexusDoc,
@@ -1659,6 +1669,7 @@ class MongoStore implements NexusStore {
         spec_enforcement: patch.spec_enforcement,
         status: patch.status,
         visibility: patch.visibility,
+        gateway_state: patch.gateway_state,
       });
       if (set) {
         await mapConflict('An API with that slug already exists', () =>

@@ -74,7 +74,12 @@ import {
 import { AuditAction, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type { ApiPluginRecord, NexusStore, UserRecord } from '../db/store.js';
-import { incompatiblePaletteSibling, palettePriority } from '../ferrum-admin/palette.js';
+import {
+  edgeTriggerFor,
+  incompatiblePaletteSibling,
+  paletteGatewaySettings,
+  palettePriority,
+} from '../ferrum-admin/palette.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import type {
   EdgePluginConfig,
@@ -156,29 +161,6 @@ function present(row: ApiPluginRecord): ApiPlugin {
   };
 }
 
-/**
- * Compile the portal's trigger into the predicate tree Edge expects.
- *
- * A node sets **exactly one** of `all`/`any`/`not`/`match`, and a `match` leaf
- * sets exactly one predicate, so two conditions become an `all` of two leaves
- * and one condition stays a bare leaf — an `all` with a single child would be
- * accepted but is noise in the stored document.
- */
-export function edgeTriggerFor(trigger: ApiPluginTrigger | null): EdgePluginTrigger | null {
-  if (trigger === null) return null;
-  const leaves: Record<string, unknown>[] = [];
-  if (trigger.methods !== undefined && trigger.methods.length > 0) {
-    leaves.push({ match: { method: [...trigger.methods] } });
-  }
-  if (trigger.path_prefix !== undefined && trigger.path_prefix !== '') {
-    leaves.push({ match: { path: { prefix: [trigger.path_prefix] } } });
-  }
-  if (leaves.length === 0) return null;
-  const first = leaves[0];
-  if (leaves.length === 1 && first !== undefined) return { when: first };
-  return { when: { all: leaves } };
-}
-
 /** Build the palette service. */
 export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPluginsService {
   const { config, store, edge, audit, publishing } = deps;
@@ -233,20 +215,6 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
    * keys are *rejected* outside `sync_mode: 'redis'`, so nothing is sent at all
    * in the local case.
    */
-  function gatewaySettings(
-    descriptor: ProviderPluginDescriptor,
-    settings: Record<string, unknown>,
-  ): EdgePluginSettings {
-    if (descriptor.name !== 'request_deduplication') return settings;
-    const sync = config.edge.rateLimit;
-    if (sync.syncMode !== 'redis' || sync.redisUrl === undefined) return settings;
-    return {
-      ...settings,
-      sync_mode: 'redis',
-      redis_url: sync.redisUrl,
-      redis_tls: sync.redisTls,
-    };
-  }
 
   /**
    * The gateway config this API's palette row owns, or `undefined` when there
@@ -337,7 +305,7 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
               target.proxyId,
               existing,
               pluginName,
-              gatewaySettings(descriptor, input.config),
+              paletteGatewaySettings(descriptor.name, input.config, config.edge.rateLimit),
               actor.id,
               undo,
               { enabled: input.enabled, trigger, priorityOverride },

@@ -233,6 +233,7 @@ function presentReconciliation(
       checked_at: report?.checked_at ?? null,
       orphaned_consumers: null,
       orphaned_proxies: null,
+      awaiting_restore: null,
       complete: null,
     };
   }
@@ -241,6 +242,7 @@ function presentReconciliation(
     checked_at: report.checked_at,
     orphaned_consumers: detailAllowed ? report.consumers.orphaned : null,
     orphaned_proxies: detailAllowed ? report.proxies.orphaned : null,
+    awaiting_restore: detailAllowed ? report.awaiting_restore : null,
     complete: detailAllowed ? report.consumers.complete && report.proxies.complete : null,
   };
 }

@@ -71,6 +71,26 @@ export type ApiStatus = 'published' | 'retired';
 /** Who may see an API in the catalog. */
 export type ApiVisibility = 'public' | 'internal';
 
+/**
+ * Whether the portal believes this API is deployed on the gateway.
+ *
+ * `deployed` is the ordinary state and what every API reads back as until
+ * something says otherwise. `repair_required` is written when the portal has
+ * *established* that the gateway no longer serves the API — today only by a
+ * reconciliation pass answering `404` for the stored `ferrum_proxy_id`, or by
+ * a restore attempt that failed partway — and it stays until a restore
+ * succeeds.
+ *
+ * It is deliberately a separate field from {@link Api.ferrum_proxy_id} rather
+ * than being derived from it. Clearing a dead proxy reference is what makes the
+ * rest of the portal stop writing to a proxy that is not there; on its own it
+ * also made the API look like one that simply has no deployment yet, so the
+ * next reconciliation pass reported a clean portal while the API served
+ * nothing (issue #284). The reference and the unresolved condition are two
+ * different facts, and this is the second one.
+ */
+export type ApiGatewayState = 'deployed' | 'repair_required';
+
 /** Format of an uploaded API description document. */
 export type SpecFormat = 'openapi';
 
@@ -215,6 +235,14 @@ export interface Api {
   spec_enforcement: SpecEnforcementLevel;
   status: ApiStatus;
   visibility: ApiVisibility;
+  /**
+   * Whether the gateway is believed to be serving this API.
+   *
+   * `repair_required` is an actionable condition, not a cosmetic badge: the
+   * public path answers `404`, approved clients' credentials reach nothing,
+   * and only `POST /api/apis/:id/restore-gateway` clears it.
+   */
+  gateway_state: ApiGatewayState;
   created_at: IsoTimestamp;
   updated_at: IsoTimestamp;
 }
@@ -808,6 +836,13 @@ export interface EdgeHealth extends Omit<DependencyHealth, 'status'> {
  * reach the gateway": neither is evidence that the stored ids are wrong, so
  * neither degrades the portal on its own — an unreachable gateway is already
  * reported by {@link EdgeHealthStatus}.
+ *
+ * `orphaned` also covers a pass that found no live orphan but knows of at
+ * least one API still flagged `repair_required`
+ * ({@link GatewayReconciliationReport.awaiting_restore}). That condition was
+ * established by an earlier pass and survives the repair that cleared the dead
+ * reference, so it outranks `unknown` too: an unreachable gateway does not
+ * make an unrestored deployment go away.
  */
 export type GatewayReconciliationStatus = 'ok' | 'orphaned' | 'unknown';
 
@@ -850,6 +885,18 @@ export interface GatewayReconciliationReport {
   proxies: GatewayReferenceScan;
   orphaned_consumers: OrphanedConsumerRef[];
   orphaned_proxies: OrphanedProxyRef[];
+  /**
+   * APIs in this namespace whose {@link Api.gateway_state} is
+   * `repair_required` — the deployment condition a previous pass already
+   * established and nothing has restored yet.
+   *
+   * Counted from the portal's own rows rather than from the gateway, so it is
+   * filled on every pass including one that could not reach Edge: "we know
+   * these APIs are not deployed" does not stop being true because the gateway
+   * stopped answering. It is what keeps the condition visible after a repair
+   * has cleared the dead proxy reference the scan would otherwise have found.
+   */
+  awaiting_restore: number;
   /** Why the pass could not finish; `null` when it did. */
   error: string | null;
 }
@@ -871,6 +918,8 @@ export interface EdgeReconciliationHealth {
   orphaned_consumers: number | null;
   /** Admin-only: APIs whose gateway proxy is gone. */
   orphaned_proxies: number | null;
+  /** Admin-only: APIs flagged `repair_required` and not restored yet. */
+  awaiting_restore: number | null;
   /** Admin-only: whether the pass covered every stored reference. */
   complete: boolean | null;
 }

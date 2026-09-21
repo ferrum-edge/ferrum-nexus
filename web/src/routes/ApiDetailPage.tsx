@@ -37,6 +37,7 @@ import {
   useApiUsage,
   useCreateTestConsumer,
   useDeleteApi,
+  useRestoreApiGateway,
   useUpdateApi,
   useUpdateApiSpec,
 } from '../hooks/useApis';
@@ -1297,6 +1298,57 @@ function UsageCard({ apiId }: { apiId: string }): ReactElement {
   );
 }
 
+/**
+ * The API's gateway deployment is gone, and only a restore brings it back.
+ *
+ * Deliberately a page-level banner rather than a tab: every other thing a
+ * provider could do here — edit settings, publish a revision, look at grants —
+ * is being done to an API that is currently serving nothing, and that is the
+ * first thing they need to know. The wording separates the two halves that
+ * confused this case before (issue #284): the catalog entry, its history and
+ * its approved clients are all intact, and it is only the gateway objects that
+ * have to be rebuilt.
+ */
+function GatewayRepairBanner({ api }: { api: Api }): ReactElement {
+  const restore = useRestoreApiGateway();
+  const toast = useToast();
+
+  return (
+    <Card className="mb-6 border-danger/40">
+      <CardBody className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex min-w-0 items-start gap-3">
+          <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-danger-soft text-danger">
+            <Icon name="alert" className="h-4 w-4" />
+          </span>
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold text-fg">Gateway deployment missing</h3>
+            <p className="mt-1 max-w-2xl text-sm leading-relaxed text-fg-muted">
+              The gateway no longer serves{' '}
+              <code className="font-mono text-xs">{api.listen_path}</code>, so requests to this API
+              fail. Its catalog entry, specification history and approved clients are untouched —
+              restoring rebuilds the proxy, its authentication and its access control from what the
+              portal already holds. Clients keep the credentials they were issued.
+            </p>
+          </div>
+        </div>
+        <Button
+          variant="primary"
+          loading={restore.isPending}
+          onClick={() =>
+            restore.mutate(api.id, {
+              onSuccess: () => toast.success('Gateway deployment restored'),
+              onError: (error: Error) => toast.error('Restore failed', error.message),
+            })
+          }
+        >
+          <Icon name="refresh" />
+          Restore gateway deployment
+        </Button>
+      </CardBody>
+    </Card>
+  );
+}
+
 function ApiDetail({ apiId }: { apiId: string }): ReactElement {
   const query = useApi(apiId);
   const [tab, setTab] = useState('overview');
@@ -1338,6 +1390,11 @@ function ApiDetail({ apiId }: { apiId: string }): ReactElement {
               {api.visibility === 'public' ? 'Public' : 'Internal'}
             </Badge>
             {api.requestable ? <Badge tone="accent">Requestable</Badge> : <Badge>Open</Badge>}
+            {api.gateway_state === 'repair_required' ? (
+              <Badge tone="danger" dot>
+                Not deployed
+              </Badge>
+            ) : null}
           </>
         }
         actions={
@@ -1351,6 +1408,8 @@ function ApiDetail({ apiId }: { apiId: string }): ReactElement {
           </Link>
         }
       />
+
+      {api.gateway_state === 'repair_required' ? <GatewayRepairBanner api={api} /> : null}
 
       {/* At a glance: the four values a provider checks without opening a tab. */}
       <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">

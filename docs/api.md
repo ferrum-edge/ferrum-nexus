@@ -1653,6 +1653,7 @@ message threads.
 | `timeouts`         | `{ connect_ms, read_ms, write_ms }` \| null      | backend timeouts in milliseconds; `null` keeps the gateway defaults (5000 / 30000 / 30000). All three move together                                                                                                                                                                                                                                                                                                                                           |
 | `circuit_breaker`  | boolean                                          | when true the proxy carries Edge's default `CircuitBreakerConfig` (5 failures to open, 3 successes to close, 30 s open, tripping on 500/502/503/504 and on connection errors); when false it carries none                                                                                                                                                                                                                                                     |
 | `spec_enforcement` | `docs_only` \| `routes`                          | how much of the current OpenAPI revision the gateway enforces. `docs_only` (the default, and what every API published before this field existed reads back as) means the document is catalog metadata only; `routes` makes the proxy **spec-owned** — Edge imports the document and generates an `openapi_validator` that answers `400` for a path or method the document does not declare. **Request and response bodies are not validated at either level** |
+| `gateway_state`    | `deployed` \| `repair_required`                  | whether the gateway is believed to be serving this API. `repair_required` means the portal has _established_ that it is not — a reconciliation pass answered `404` for the stored proxy, or a restore failed partway — and it stays until `POST /api/apis/:id/restore-gateway` succeeds. It is deliberately separate from `ferrum_proxy_id`, which a repair clears and a restore refills                                                                      |
 
 `HttpMethod` is `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`,
 `TRACE` or `CONNECT` — Edge's own enum.
@@ -2042,6 +2043,52 @@ re-submission, so the API is never unauthenticated across it.
 `400 SPEC_INVALID` with `details.reason = "no_operations"` when the new document
 declares nothing to allow — switch the enforcement level back to `docs_only`
 first if that is really the intent.
+
+### `POST /api/apis/:id/restore-gateway`
+
+_provider_, owner-or-admin — rebuild the gateway deployment of an API the
+gateway no longer serves. Empty body.
+
+```json
+{ "api": { … }, "spec": { … }, "proxy_id": "…" }
+```
+
+**Non-destructive by contract.** The API keeps its id, slug, owner, provider,
+specification history, configured gateway URL and every access grant; the
+restore recreates only the Edge objects, from what the portal already stores.
+Approved clients keep the credentials they were issued — the ACL group is
+derived from the API id, so the moment the rebuilt proxy's `access_control`
+plugin is associated, the groups already on their consumers match again.
+
+What is rebuilt, in the order a publish builds it: the proxy (through the
+API-spec importer in `routes` mode, so the `openapi_validator` is regenerated),
+the authentication plugin, `access_control` when the API is `requestable`, the
+rate limit, the CORS policy, and the provider's plugin palette — then a single
+association, and the move onto `/<namespace>/<slug>` as the **last** gateway
+write. There is no window in which the public path serves an ungated proxy.
+`api_plugins.ferrum_plugin_config_id` is repointed at the rebuilt configs in the
+same store transaction that records the new proxy id.
+
+The current specification revision is what gets deployed; no new revision is
+written. A provider who wants to correct the document first can `PUT
+/api/apis/:id/spec` — that keeps working on an undeployed API — and then
+restore.
+
+| Status           | Meaning                                                                                                                                                                                 |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `200`            | rebuilt, or (`rebuilt: false` in the audit row) the stored proxy turned out to be live after all and the flag was simply cleared                                                        |
+| `403 FORBIDDEN`  | not the owner and not an admin                                                                                                                                                          |
+| `404 NOT_FOUND`  | no such API                                                                                                                                                                             |
+| `409 CONFLICT`   | the API already has a live gateway proxy, or has no stored specification revision to redeploy, or another restore of the same API is in flight                                          |
+| `502 EDGE_ERROR` | the gateway could not be reached or refused a write. **Nothing is inferred from this** — an unreachable gateway is never read as a deleted proxy, and the row is left exactly as it was |
+
+A restore that reaches the gateway and then fails deletes what it created,
+records `api.gateway_restore_failed` (with `stranded_proxy_id` when the
+compensating delete could not be confirmed), and leaves the API
+`repair_required` with no proxy reference. Retrying starts from the same place.
+
+Concurrent restores of one API are serialized; the loser gets `409 CONFLICT`
+rather than building a second proxy for the same listen path.
 
 ### `POST /api/apis/:id/test-consumer`
 

@@ -53,7 +53,19 @@ function MyApisTable(): ReactElement {
       {
         id: 'status',
         header: 'Status',
-        cell: ({ row }) => <StatusPill status={row.original.status} />,
+        // `published` and "actually serving traffic" are two different things,
+        // and an API whose gateway deployment is gone looked exactly like a
+        // healthy one in this list (issue #284).
+        cell: ({ row }) => (
+          <span className="flex flex-wrap items-center gap-1.5">
+            <StatusPill status={row.original.status} />
+            {row.original.gateway_state === 'repair_required' ? (
+              <Badge tone="danger" dot>
+                Not deployed
+              </Badge>
+            ) : null}
+          </span>
+        ),
       },
       {
         id: 'updated',

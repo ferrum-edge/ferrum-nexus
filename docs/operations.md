@@ -1648,6 +1648,7 @@ reports the last reconciliation pass:
   "checked_at": "2026-09-11T18:22:05.412Z",
   "orphaned_consumers": 14,
   "orphaned_proxies": 3,
+  "awaiting_restore": 2,
   "complete": true
 }
 ```
@@ -1656,7 +1657,11 @@ reports the last reconciliation pass:
 finished yet, or the last one could not read the gateway, neither of which is
 evidence that the references are wrong. **Alert on `orphaned`**: nothing
 repairs it by itself, and the repair is [§13](#13-retargeting-or-rebuilding-ferrum-edge).
-The three count fields are `null` for anyone below `admin`, the same rule the
+`awaiting_restore` counts APIs whose gateway deployment is known to be missing
+and has not been restored; it keeps `status` at `orphaned` even after the dead
+references have been cleared, and even when the last pass could not reach the
+gateway.
+The four count fields are `null` for anyone below `admin`, the same rule the
 Edge diagnostic text follows; `status` and `checked_at` stay public so an
 anonymous monitor can act on them.
 
@@ -2338,15 +2343,46 @@ worse than useless — the mirror's `edge_ordinal` positions would describe an
 array that no longer exists, and the next rotate or revoke would refuse as drift
 ([§12](#12-the-credential-mirror)).
 
-For each orphaned API the repair **clears the dead `ferrum_proxy_id`** and
-records an `api.gateway_repair_required` audit row with `phase:
-"orphaned_proxy"`. No proxy is rebuilt: doing that needs the provider's current
-spec revision, upstream, plugin palette and enforcement mode replayed in order,
-which is what publishing already does. The cleared row reads as "has no gateway
-proxy", which is a state the rest of the portal already models — the plugin
-palette refuses to attach to it, and every proxy write is skipped — and the
-provider republishes through the ordinary flow. The API's catalog entry, its
+For each orphaned API the repair **clears the dead `ferrum_proxy_id`**, sets the
+row's `gateway_state` to `repair_required`, and records an
+`api.gateway_repair_required` audit row with `phase: "orphaned_proxy"`. No proxy
+is rebuilt here: doing that needs the provider's current spec revision,
+upstream, plugin palette and enforcement mode replayed in order, which is what
+publishing already does — so it lives there, as
+[`POST /api/apis/:id/restore-gateway`](api.md#post-apiapisidrestore-gateway).
+The cleared row reads as "has no gateway proxy", which is a state the rest of
+the portal already models: the plugin palette refuses to attach to it, and every
+proxy write is skipped. The API's catalog entry, its specification history, its
 grants and its access requests are untouched. The owner is notified.
+
+Clearing the reference is **not** the end of the incident. On its own it left
+the API looking like one that simply has no deployment yet — the next pass
+skipped it, reported a clean portal, and the API went on serving nothing
+(issue #284). The `gateway_state` column is the unresolved condition, separate
+from the reference: every pass counts the flagged rows into the report's
+`awaiting_restore`, the verdict stays `orphaned` and the portal `degraded` until
+a restore succeeds, and the count is read from the portal's own rows so a pass
+that could not reach the gateway still reports it.
+
+**Restoring a deployment.** The API's owner (or an admin) rebuilds it from the
+API's page in the portal, or with:
+
+```bash
+curl -sS -X POST -b cookies.txt -H "X-Nexus-CSRF: $CSRF" \
+  http://127.0.0.1:8787/api/apis/$API_ID/restore-gateway | jq .
+```
+
+The restore recreates the proxy, its authentication plugin, its access control,
+its rate limit, its CORS policy and the provider's plugin palette from what the
+portal already stores, then moves it onto the public listen path as the last
+write — the same staged order a publish uses, so the path is never served by a
+half-built proxy. The API keeps its id, slug, owner, specification history,
+configured gateway URL and every access grant, and approved clients keep the
+credentials they were issued: the ACL group is derived from the API id, which
+the restore preserves. A restore that fails leaves the API flagged, records
+`api.gateway_restore_failed`, and can simply be retried. A gateway that is
+merely unreachable answers `502 EDGE_ERROR` and changes nothing — it is never
+read as a deleted proxy.
 
 The response reports every target it touched, with a per-target `error` for
 anything it could not do:

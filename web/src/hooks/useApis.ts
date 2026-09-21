@@ -18,6 +18,7 @@ import type {
   ListApisResponse,
   PublishApiRequest,
   PublishApiResponse,
+  RestoreApiGatewayResponse,
   SetApiPluginRequest,
   SetApiPluginResponse,
   UpdateApiRequest,
@@ -122,6 +123,27 @@ export function useUpdateApiSpec(): UseMutationResult<
   return useMutation({
     mutationFn: ({ id, body }: { id: string; body: UpdateApiSpecRequest }) =>
       apisApi.updateSpec(id, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.apis.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.catalog.all });
+    },
+  });
+}
+
+/**
+ * Rebuild the gateway deployment of an API the gateway no longer serves.
+ *
+ * Invalidates the catalog too: until the restore lands, the API's public path
+ * answers nothing, so a catalog entry showing it as reachable was wrong.
+ */
+export function useRestoreApiGateway(): UseMutationResult<
+  RestoreApiGatewayResponse,
+  Error,
+  string
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apisApi.restoreGateway(id),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.apis.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.catalog.all });
