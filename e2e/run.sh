@@ -88,7 +88,20 @@ cleanup() {
 trap cleanup EXIT
 
 echo "==> starting the stack"
-"${COMPOSE[@]}" up -d --build --wait --wait-timeout 180
+# No `--wait`: the stack includes a one-shot init container that chowns the
+# gateway's data volume and then exits, and compose's readiness wait treats an
+# exited service as a failure. The suite's own `waitForStack()` is the
+# readiness gate anyway — it is bounded, and it names the surface it gave up
+# on, which "compose timed out" does not.
+"${COMPOSE[@]}" up -d --build
+
+# Fail early and loudly if something never came up at all, rather than letting
+# it surface two minutes later as a readiness timeout.
+if "${COMPOSE[@]}" ps --status=exited --services | grep -vx 'ferrum-edge-init' | grep -q .; then
+  echo "error: a service exited during startup:" >&2
+  "${COMPOSE[@]}" ps >&2
+  exit 1
+fi
 
 export E2E_PORTAL_URL="http://127.0.0.1:${NEXUS_PORT:-8787}"
 export E2E_GATEWAY_URL="http://127.0.0.1:${FERRUM_PROXY_PORT:-8000}"
