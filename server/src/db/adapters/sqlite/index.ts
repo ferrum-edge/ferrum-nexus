@@ -100,6 +100,8 @@ import type {
   AccessRequestRepo,
   ApiFilter,
   ApiPluginRecord,
+  ApiViewerRecord,
+  ApiViewerRepo,
   ApiPluginRepo,
   ApiRecord,
   ApiRepo,
@@ -313,6 +315,18 @@ function mapApiSpec(row: Row): ApiSpecRecord {
     revision_seq: int(row.revision_seq),
     created_by: textOrNull(row.created_by),
     rolled_back_from_id: textOrNull(row.rolled_back_from_id),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapApiViewer(row: Row): ApiViewerRecord {
+  return {
+    id: text(row.id),
+    api_id: text(row.api_id),
+    user_id: text(row.user_id),
+    granted_by: textOrNull(row.granted_by),
+    note: textOrNull(row.note),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -1405,6 +1419,78 @@ class SqliteStore implements NexusStore {
 
     deleteByApi: async (apiId) =>
       execute(this.db, 'DELETE FROM api_plugins WHERE api_id = ?', [apiId]),
+  };
+
+  /* ── apiViewers ───────────────────────────────────────────────────────── */
+
+  readonly apiViewers: ApiViewerRepo = {
+    upsert: async (input) => {
+      const meta = stamps(input);
+      // Idempotent by intent: re-inviting somebody who is already authorized
+      // refreshes the note rather than raising a conflict at them.
+      execute(
+        this.db,
+        `INSERT INTO api_viewers (id, api_id, user_id, granted_by, note, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (api_id, user_id) DO UPDATE SET
+           granted_by = excluded.granted_by,
+           note = excluded.note,
+           updated_at = excluded.updated_at`,
+        [
+          meta.id,
+          input.api_id,
+          input.user_id,
+          input.granted_by ?? null,
+          input.note ?? null,
+          meta.created_at,
+          meta.updated_at,
+        ],
+      );
+      const saved = await this.apiViewers.find(input.api_id, input.user_id);
+      if (!saved) throw new Error('apiViewers.upsert: row vanished immediately after write');
+      return saved;
+    },
+
+    find: async (apiId, userId) => {
+      const row = queryOne(this.db, 'SELECT * FROM api_viewers WHERE api_id = ? AND user_id = ?', [
+        apiId,
+        userId,
+      ]);
+      return row ? mapApiViewer(row) : null;
+    },
+
+    list: async (filter, options) => {
+      const where = new WhereBuilder()
+        .add(filter.api_id, 'api_id = ?', filter.api_id ?? null)
+        .add(filter.user_id, 'user_id = ?', filter.user_id ?? null)
+        .build();
+      const { limit, offset } = page(options);
+      const total = queryCount(
+        this.db,
+        `SELECT COUNT(*) AS count FROM api_viewers${where.sql}`,
+        where.params,
+      );
+      const rows = queryAll(
+        this.db,
+        `SELECT * FROM api_viewers${where.sql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
+      );
+      return { items: rows.map(mapApiViewer), total };
+    },
+
+    listApiIdsByUser: async (userId) =>
+      queryAll(this.db, 'SELECT api_id FROM api_viewers WHERE user_id = ?', [userId]).map((row) =>
+        text(row.api_id),
+      ),
+
+    delete: async (apiId, userId) =>
+      execute(this.db, 'DELETE FROM api_viewers WHERE api_id = ? AND user_id = ?', [
+        apiId,
+        userId,
+      ]) > 0,
+
+    deleteByApi: async (apiId) =>
+      execute(this.db, 'DELETE FROM api_viewers WHERE api_id = ?', [apiId]),
   };
 
   /* ── accessRequests ───────────────────────────────────────────────────── */
@@ -2850,6 +2936,11 @@ function apiViewerCondition(viewer: ApiViewerFilter): { sql: string; params: Par
   if (granted.length > 0) {
     parts.push(`id IN (${granted.map(() => '?').join(', ')})`);
     params.push(...granted);
+  }
+  const authorized = [...new Set(viewer.authorized_api_ids)];
+  if (authorized.length > 0) {
+    parts.push(`id IN (${authorized.map(() => '?').join(', ')})`);
+    params.push(...authorized);
   }
   const visibilities = [...new Set(viewer.open_visibilities)];
   if (visibilities.length > 0) {

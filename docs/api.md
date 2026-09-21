@@ -1521,18 +1521,48 @@ Visibility is decided by the catalog service, which answers `404` rather than
 `403` for an API you may not see, so the catalog never confirms that an
 internal API exists.
 
-| API state                           | client  | grantee | owner | admin |
-| ----------------------------------- | ------- | ------- | ----- | ----- |
-| `published` + `public` — **list**   | yes     | yes     | yes   | yes   |
-| `published` + `internal` — **list** | no      | yes     | yes   | yes   |
-| `retired` — **list**                | no      | yes     | yes   | yes   |
-| `published` + `public` — **open**   | yes     | yes     | yes   | yes   |
-| `published` + `internal` — **open** | **yes** | yes     | yes   | yes   |
-| `retired` — **open**                | no      | yes     | yes   | yes   |
+| API state                           | unrelated client | viewer | grantee | owner | admin |
+| ----------------------------------- | ---------------- | ------ | ------- | ----- | ----- |
+| `published` + `public` — **list**   | yes              | yes    | yes     | yes   | yes   |
+| `published` + `internal` — **list** | no               | yes    | yes     | yes   | yes   |
+| `published` + `private` — **list**  | **no**           | yes    | yes     | yes   | yes   |
+| `retired` — **list**                | no               | yes    | yes     | yes   | yes   |
+| `published` + `public` — **open**   | yes              | yes    | yes     | yes   | yes   |
+| `published` + `internal` — **open** | **yes**          | yes    | yes     | yes   | yes   |
+| `published` + `private` — **open**  | **no**           | yes    | yes     | yes   | yes   |
+| `retired` — **open**                | no               | yes    | yes     | yes   | yes   |
 
-`internal` means _unlisted_, not secret: a provider hands out the link and the
-recipient can read the docs and raise an access request. What protects the data
-is the ACL group on the gateway.
+Every catalog route requires a session, so a signed-out caller sees nothing at
+all; that column is omitted rather than repeated as "no" fourteen times.
+
+"Viewer" means an `api_viewers` row — somebody the provider explicitly
+authorized to read this API's documentation. **It is not a grant**: it confers
+no ACL group, touches no Ferrum consumer and reaches no gateway. An authorized
+viewer reads the docs and, if the API is `requestable`, asks for access like
+anybody else. See
+[`POST /api/apis/:id/viewers`](#post-apiapisidviewers).
+
+The three visibilities answer two different questions:
+
+- **`internal` means _unlisted_, not secret**, and still does. A provider hands
+  out the link and the recipient can read the docs and raise an access request.
+  Adding `private` changed nothing about it — the two are separate values
+  precisely so that APIs already published as `internal` keep the semantics
+  they were published under.
+- **`private` is the permission-enforced one.** Neither listed nor openable
+  unless the caller is on one of the lists above. Knowing or guessing the slug
+  is not access, and an unauthorized caller gets `404` rather than `403`, so
+  the endpoint does not confirm that the slug names anything. Search results
+  and their `total` apply the same clause in the database, so a private API
+  cannot be found by paging or counting either. An account that cannot see a
+  private API cannot request access to it, for the same reason: the request
+  would confirm the API exists.
+
+**None of this is data-plane authorization.** What stops an unapproved caller
+reaching the API is the `access_control` plugin and its ACL group on the
+gateway. Visibility governs the _documentation_, and a `private` API published
+with `requestable: false` and no access control in front of it is still
+callable by anyone who knows the URL.
 
 ### `GET /api/catalog`
 
@@ -1543,7 +1573,7 @@ _session_ — `Paginated<CatalogApi>`. Each row is an `Api` plus `owner`
 | ----------------- | -------------------------------------------- |
 | `q`               | substring match on name, slug or description |
 | `requestable`     | boolean                                      |
-| `visibility`      | `public` \| `internal`                       |
+| `visibility`      | `public` \| `internal` \| `private`          |
 | `owner_user_id`   | uuid                                         |
 | `limit`, `offset` | pagination                                   |
 
@@ -1598,8 +1628,9 @@ Documentation tab renders this same normalized document.
 `404 NOT_FOUND` when the API is not viewable or has no spec. A stored document
 that cannot be normalized returns `400 SPEC_INVALID` without its contents or
 parser diagnostics. `internal` APIs remain unlisted but readable by signed-in
-users holding the link. The provider's original is available only through
-`GET /api/apis/:id/spec`.
+users holding the link; a `private` API's specification is served only to the
+accounts its detail page is served to, and answers `404` to everyone else. The
+provider's original is available only through `GET /api/apis/:id/spec`.
 
 ---
 
@@ -1737,7 +1768,7 @@ then persists.
 | `spec`             | string                                           | the OpenAPI 3.x document as JSON or YAML text, ≤ 2 MiB — required                                                                                                                                                                                                                                                                                                                                              |
 | `auth_plugin`      | `key_auth` \| `basic_auth` \| `jwt_auth`         | required                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `requestable`      | boolean                                          | required — attaches `access_control` when true                                                                                                                                                                                                                                                                                                                                                                 |
-| `visibility`       | `public` \| `internal`                           | required                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `visibility`       | `public` \| `internal` \| `private`              | required                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `rate_limit`       | `{ limit, window_seconds }` \| null              | optional; `limit` 1–1 000 000, `window_seconds` 1–86 400 — both are Edge's own ceilings                                                                                                                                                                                                                                                                                                                        |
 | `cors`             | `{ allowed_origins, allow_credentials }` \| null | optional; `allowed_origins` (alias `origins`) is 1–64 whitespace-free strings of ≤ 255 characters, `allow_credentials` defaults to `false`. Sending both `allowed_origins` and `origins` with different values is `400`. Omit it (or send `null`) and the API gets no `cors` plugin, so the gateway adds no CORS headers                                                                                       |
 | `allowed_methods`  | `HttpMethod[]` \| null                           | optional; 1–9 entries from Edge's enum, duplicates collapsed. Omit it (or send `null`) to accept every method — an **empty array is rejected**, because a proxy whose `allowed_methods` is `[]` accepts nothing at all                                                                                                                                                                                         |
@@ -1894,7 +1925,7 @@ route. Every field optional; nothing supplied returns the row unchanged.
 | Field                            | Effect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `name`, `description`, `version` | metadata only                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `visibility`                     | `public` ⇄ `internal`; catalog listing only                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `visibility`                     | `public` ⇄ `internal` ⇄ `private`; documentation visibility only — never the gateway's access control. Switching **to** `private` starts enforcing the API's existing viewer list; switching away from it stops enforcing but keeps the list                                                                                                                                                                                                                                                                                                                                     |
 | `status`                         | `published` ⇄ `retired` — **catalog state only**, the proxy and every live grant keep working                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `upstream_url`                   | re-points the Edge proxy's backend and records the normalized form on the row; everything else on the proxy is left as it was found                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `auth_plugin`                    | attaches and associates the new auth plugin config before detaching and deleting the old one. **Refused with `409 ACCESS_DISRUPTION_CONFIRMATION_REQUIRED` while anyone holding access has a live credential of the outgoing flavour**; send `confirm_access_disruption: true` to make the change anyway. Grantee credentials are never revoked — the API's own `nexus-test-<api_id>` credentials are. Every grantee is notified either way                                                                                                                                      |
@@ -2043,6 +2074,53 @@ re-submission, so the API is never unauthenticated across it.
 `400 SPEC_INVALID` with `details.reason = "no_operations"` when the new document
 declares nothing to allow — switch the enforcement level back to `docs_only`
 first if that is really the intent.
+
+### `GET /api/apis/:id/viewers`
+
+_provider_, owner-or-admin — `Paginated<ApiViewer>`, newest first. Each item
+carries `user_id`, an embedded `user` (`UserSummary` \| null), `granted_by`,
+`note` and timestamps.
+
+The list is kept whatever the API's visibility and only _enforces_ while the
+API is `private`, so switching visibility back and forth does not discard it.
+
+### `POST /api/apis/:id/viewers`
+
+_provider_, owner-or-admin → `201` — authorize one account to **read** this
+API's documentation.
+
+Body: exactly one of `email` or `user_id`, plus an optional `note` (≤ 500).
+Sending both, or neither, is a `400`.
+
+```json
+{ "viewer": { "user_id": "…", "user": { … }, "note": "Design partner", "…": "…" } }
+```
+
+**This is not a grant.** It confers no ACL group, touches no Ferrum consumer
+and makes no call to Ferrum Edge. An authorized viewer can find the API in the
+catalog and read its specification; to _call_ it they still request access and
+the provider still approves it. Every audit row spells this out
+(`details.grants_invocation: false`) rather than leaving it to be inferred.
+
+The account is notified in the portal, in those terms.
+
+| Status                  | Meaning                                                                                                                                                                                                                                                                                |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `201`                   | authorized. Re-authorizing an account that already is refreshes the note rather than conflicting — the route describes a state                                                                                                                                                         |
+| `400 VALIDATION_FAILED` | no portal account uses that address, or both/neither identifier was sent. An address with no account is **refused rather than stored as a pending invitation**: an authorization is attached to an account, not to an address, and re-pointing an address later would silently move it |
+| `403 FORBIDDEN`         | not the owner and not an admin                                                                                                                                                                                                                                                         |
+| `409 CONFLICT`          | the account is the API's owner, or an administrator — both can already read it                                                                                                                                                                                                         |
+
+### `DELETE /api/apis/:id/viewers/:userId`
+
+_provider_, owner-or-admin — withdraw a read authorization. `404 NOT_FOUND`
+when that account was not authorized.
+
+Read access and invocation access are separate, so this leaves any grant the
+account holds untouched (`details.revoked_grant: false`); revoke that through
+`DELETE /api/grants/:id`. An account that still holds a grant goes on being
+able to read the API, because somebody who may call it may certainly read its
+documentation.
 
 ### `GET /api/apis/:id/revisions`
 

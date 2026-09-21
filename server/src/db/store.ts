@@ -414,6 +414,16 @@ export interface ApiViewerFilter {
    * that MongoDB has no cross-collection `find` filter.
    */
   granted_api_ids: readonly Uuid[];
+  /**
+   * Rows the viewer was explicitly authorized to *read* — `api_viewers`.
+   *
+   * Separate from {@link ApiViewerFilter.granted_api_ids} because the two are
+   * different permissions that happen to widen the same query: a grant lets an
+   * account call the API, an authorization only lets it read the
+   * documentation. Folding them into one list here would make the next reader
+   * of this filter believe a viewer holds a grant.
+   */
+  authorized_api_ids: readonly Uuid[];
   /** Any other row must carry this status… */
   open_status: ApiStatus;
   /** …and one of these visibilities. An empty list admits none of them. */
@@ -663,6 +673,56 @@ export type CreateApiInput = Omit<
   /** Defaults to `'deployed'`: a row is only created by a publish that landed. */
   gateway_state?: ApiGatewayState;
 };
+
+/**
+ * An `api_viewers` row — one account a provider authorized to read a private
+ * API's documentation.
+ *
+ * Read permission only. Nothing here reaches Ferrum Edge, and nothing here
+ * implies a grant: see {@link ApiViewer}.
+ */
+export interface ApiViewerRecord {
+  id: Uuid;
+  api_id: Uuid;
+  user_id: Uuid;
+  granted_by: Uuid | null;
+  note: string | null;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
+}
+
+/** Filters accepted by {@link ApiViewerRepo.list}. */
+export interface ApiViewerFilterInput {
+  api_id?: Uuid;
+  user_id?: Uuid;
+}
+
+/** Who may read each private API's documentation. */
+export interface ApiViewerRepo {
+  /**
+   * Authorize `user_id` on `api_id`, or refresh an existing authorization.
+   *
+   * Upsert rather than create, because the route is idempotent by intent: a
+   * provider re-inviting somebody who is already authorized has asked for a
+   * state, not for a second row, and a `CONFLICT` there would be noise.
+   * `created_at` is preserved on a replace.
+   */
+  upsert(input: CreateInput<ApiViewerRecord>): Promise<ApiViewerRecord>;
+  find(apiId: Uuid, userId: Uuid): Promise<ApiViewerRecord | null>;
+  list(filter: ApiViewerFilterInput, options?: ListOptions): Promise<Paginated<ApiViewerRecord>>;
+  /**
+   * Every API this account may read the documentation of.
+   *
+   * Bounded rather than paginated, and read on every catalog request, for the
+   * same reason the viewer's grants are: it becomes a list of ids in the
+   * `apis` query, and MongoDB has no cross-collection filter to do it with.
+   */
+  listApiIdsByUser(userId: Uuid): Promise<Uuid[]>;
+  /** Returns `false` when that account was not authorized in the first place. */
+  delete(apiId: Uuid, userId: Uuid): Promise<boolean>;
+  /** Cascade helper for API deletion. Returns the number of rows removed. */
+  deleteByApi(apiId: Uuid): Promise<number>;
+}
 
 /** Published APIs and their Edge proxies. */
 export interface ApiRepo {
@@ -1364,6 +1424,7 @@ export interface NexusStore {
   readonly apis: ApiRepo;
   readonly apiSpecs: ApiSpecRepo;
   readonly apiPlugins: ApiPluginRepo;
+  readonly apiViewers: ApiViewerRepo;
   readonly accessRequests: AccessRequestRepo;
   readonly grants: GrantRepo;
   readonly credentials: CredentialRepo;

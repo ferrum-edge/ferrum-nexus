@@ -36,7 +36,10 @@ import {
   type GetApiRevisionResponse,
   type GetApiSpecResponse,
   type ListApiPluginsResponse,
+  type AuthorizeApiViewerResponse,
   type ListApiRevisionsResponse,
+  type ListApiViewersResponse,
+  type RevokeApiViewerResponse,
   type ListApisResponse,
   type PublishApiResponse,
   type RollbackApiSpecResponse,
@@ -51,6 +54,7 @@ import { userOrIpKey } from '../middleware/rate-limit-keys.js';
 import { parseOrThrow } from '../middleware/error-handler.js';
 import { parsePluginConfig, pluginTriggerSchema } from '../plugins/schema.js';
 import type { ApiPluginsService } from '../plugins/service.js';
+import type { ApiViewersService } from '../publishing/viewers.js';
 import type { PublishingService } from '../publishing/service.js';
 import type { UsageService } from '../usage/service.js';
 import {
@@ -66,6 +70,7 @@ export interface PublishingRoutesOptions {
   publishing: PublishingService;
   usage: UsageService;
   apiPlugins: ApiPluginsService;
+  apiViewers: ApiViewersService;
 }
 
 /** Character ceiling on an uploaded document; the byte check lives in `oas.ts`. */
@@ -252,7 +257,7 @@ const publishBody = z.object({
   spec: specField,
   auth_plugin: z.enum(AUTH_PLUGIN_TYPES),
   requestable: z.boolean(),
-  visibility: z.enum(['public', 'internal']),
+  visibility: z.enum(['public', 'internal', 'private']),
   rate_limit: rateLimitSchema.optional(),
   cors: corsSchema.nullish(),
   allowed_methods: allowedMethodsSchema.nullish(),
@@ -268,7 +273,7 @@ const updateBody = z.object({
   upstream_url: z.string().trim().max(MAX_UPSTREAM_URL_LENGTH).optional(),
   auth_plugin: z.enum(AUTH_PLUGIN_TYPES).optional(),
   requestable: z.boolean().optional(),
-  visibility: z.enum(['public', 'internal']).optional(),
+  visibility: z.enum(['public', 'internal', 'private']).optional(),
   rate_limit: rateLimitSchema.optional(),
   cors: corsSchema.nullish(),
   allowed_methods: allowedMethodsSchema.nullish(),
@@ -301,6 +306,29 @@ const revisionParamsSchema = z.object({
 /** The change-review body: the same field `PUT /spec` takes, and nothing else. */
 const diffBody = z.object({ spec: specField });
 
+/** An authorized viewer addressed within their API. */
+const viewerParamsSchema = z.object({
+  id: z.string().trim().min(1).max(64),
+  userId: z.string().trim().min(1).max(64),
+});
+
+/**
+ * Authorizing a viewer: the account, named either way, plus an optional note.
+ *
+ * Exactly one identifier — accepting both and silently preferring one would
+ * make a UI bug look like a permission decision.
+ */
+const viewerBody = z
+  .object({
+    email: z.string().trim().max(320).email().optional(),
+    user_id: z.string().trim().min(1).max(64).optional(),
+    note: z.string().trim().max(500).nullish(),
+  })
+  .refine(
+    (body) => (body.email === undefined) !== (body.user_id === undefined),
+    'Provide exactly one of `email` or `user_id`',
+  );
+
 /**
  * The palette route's params.
  *
@@ -330,7 +358,7 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
   app,
   options,
 ) => {
-  const { publishing, usage, apiPlugins } = options;
+  const { publishing, usage, apiPlugins, apiViewers } = options;
   app.addHook('onRequest', requireRole('provider'));
 
   app.get('/', async (request): Promise<ListApisResponse> => {
@@ -493,6 +521,54 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
       const { user } = requireAuth(request);
       const { id, name } = parseOrThrow(pluginParamsSchema, request.params);
       await apiPlugins.remove(user, id, name, clientIp(request));
+      return { ok: true };
+    },
+  );
+
+  /* ── Private documentation access ─────────────────────────────────────
+   *
+   * Who may *read* this API's catalog entry and specification. Administered by
+   * whoever administers the API, and deliberately nothing to do with grants:
+   * an entry here confers no ACL group, touches no consumer and reaches no
+   * gateway (issue #288).
+   */
+
+  app.get('/:id/viewers', async (request): Promise<ListApiViewersResponse> => {
+    const { user } = requireAuth(request);
+    const { id } = parseOrThrow(idParamSchema, request.params);
+    const query = parseOrThrow(listQuerySchema, request.query);
+    return apiViewers.list(user, id, listOptions(query));
+  });
+
+  app.post(
+    '/:id/viewers',
+    { config: MUTATION_RATE_LIMIT },
+    async (request, reply): Promise<AuthorizeApiViewerResponse> => {
+      const { user } = requireAuth(request);
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      const body = parseOrThrow(viewerBody, request.body);
+      const viewer = await apiViewers.authorize(
+        user,
+        id,
+        {
+          email: body.email ?? null,
+          user_id: body.user_id ?? null,
+          note: body.note ?? null,
+        },
+        clientIp(request),
+      );
+      reply.status(201);
+      return { viewer };
+    },
+  );
+
+  app.delete(
+    '/:id/viewers/:userId',
+    { config: MUTATION_RATE_LIMIT },
+    async (request): Promise<RevokeApiViewerResponse> => {
+      const { user } = requireAuth(request);
+      const { id, userId } = parseOrThrow(viewerParamsSchema, request.params);
+      await apiViewers.revoke(user, id, userId, clientIp(request));
       return { ok: true };
     },
   );

@@ -86,7 +86,8 @@ CREATE TABLE IF NOT EXISTS apis (
   auth_plugin          TEXT NOT NULL CHECK (auth_plugin IN ('key_auth', 'basic_auth', 'jwt_auth')),
   rate_limit_json      TEXT,
   status               TEXT NOT NULL DEFAULT 'published' CHECK (status IN ('published', 'retired')),
-  visibility           TEXT NOT NULL DEFAULT 'public' CHECK (visibility IN ('public', 'internal')),
+  visibility           TEXT NOT NULL DEFAULT 'public'
+                         CHECK (visibility IN ('public', 'internal', 'private')),
   gateway_state        TEXT NOT NULL DEFAULT 'deployed'
                          CHECK (gateway_state IN ('deployed', 'repair_required')),
   created_at           TEXT NOT NULL,
@@ -102,6 +103,20 @@ CREATE INDEX IF NOT EXISTS ix_apis_gateway_state ON apis (namespace, gateway_sta
 CREATE INDEX IF NOT EXISTS ix_apis_created_at ON apis (created_at);
 
 -- ── API specs ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS api_viewers (
+  id         TEXT PRIMARY KEY,
+  api_id     TEXT NOT NULL REFERENCES apis (id) ON DELETE CASCADE,
+  user_id    TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  granted_by TEXT REFERENCES users (id) ON DELETE SET NULL,
+  note       TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_api_viewers_api_user ON api_viewers (api_id, user_id);
+CREATE INDEX IF NOT EXISTS ix_api_viewers_user ON api_viewers (user_id);
+CREATE INDEX IF NOT EXISTS ix_api_viewers_api ON api_viewers (api_id, created_at);
+
 CREATE TABLE IF NOT EXISTS api_specs (
   id             TEXT PRIMARY KEY,
   api_id         TEXT NOT NULL REFERENCES apis (id) ON DELETE CASCADE,

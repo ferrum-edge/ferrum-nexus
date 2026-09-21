@@ -61,6 +61,7 @@ import {
 } from '../components/publishing/AdvancedProxySettings';
 import { StartThreadDialog } from '../components/messaging/StartThreadDialog';
 import { PluginsTab } from '../components/plugins/PluginsTab';
+import { ApiViewersTab } from '../components/publishing/ApiViewersTab';
 import { SpecDiffView } from '../components/publishing/SpecDiffView';
 import { SpecEditor, isSpecValid } from '../components/publishing/SpecEditor';
 import { SpecHistory } from '../components/publishing/SpecHistory';
@@ -425,7 +426,8 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
                   onValueChange={setVisibility}
                   options={[
                     { value: 'public', label: 'Public' },
-                    { value: 'internal', label: 'Internal' },
+                    { value: 'internal', label: 'Internal (unlisted)' },
+                    { value: 'private', label: 'Private (authorized viewers)' },
                   ]}
                 />
                 <LabeledSelect<ApiStatus>
@@ -1434,8 +1436,20 @@ function ApiDetail({ apiId }: { apiId: string }): ReactElement {
             <Badge mono>v{api.version}</Badge>
             <Badge tone="info">{AUTH_PLUGIN_LABELS[api.auth_plugin]}</Badge>
             <StatusPill status={api.status} />
-            <Badge tone={api.visibility === 'public' ? 'neutral' : 'warning'}>
-              {api.visibility === 'public' ? 'Public' : 'Internal'}
+            <Badge
+              tone={
+                api.visibility === 'public'
+                  ? 'neutral'
+                  : api.visibility === 'internal'
+                    ? 'warning'
+                    : 'danger'
+              }
+            >
+              {api.visibility === 'public'
+                ? 'Public'
+                : api.visibility === 'internal'
+                  ? 'Unlisted'
+                  : 'Private'}
             </Badge>
             {api.requestable ? <Badge tone="accent">Requestable</Badge> : <Badge>Open</Badge>}
             {api.gateway_state === 'repair_required' ? (
@@ -1544,6 +1558,15 @@ function ApiDetail({ apiId }: { apiId: string }): ReactElement {
             content: <RequestsTab key={api.id} apiId={api.id} />,
           },
           { value: 'grants', label: 'Grants', content: <GrantsTab key={api.id} apiId={api.id} /> },
+          {
+            value: 'viewers',
+            // Named for what it controls rather than for the visibility mode:
+            // the list is kept whatever the API's visibility, and a provider
+            // switching to Private should find their earlier invitations here.
+            label: 'Viewers',
+            badge: api.visibility === 'private' ? <Badge tone="danger">Private</Badge> : undefined,
+            content: <ApiViewersTab key={api.id} api={api} />,
+          },
           { value: 'test', label: 'Test consumer', content: <TestConsumerTab api={api} /> },
         ]}
       />

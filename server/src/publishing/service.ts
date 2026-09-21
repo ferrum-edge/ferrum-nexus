@@ -2747,6 +2747,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           await tx.grants.deleteByApi(api.id);
           await tx.accessRequests.deleteByApi(api.id);
           await tx.apiPlugins.deleteByApi(api.id);
+          await tx.apiViewers.deleteByApi(api.id);
           await tx.apiSpecs.deleteByApi(api.id);
           await tx.apis.delete(api.id);
         });

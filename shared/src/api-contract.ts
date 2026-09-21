@@ -22,6 +22,7 @@ import type {
   ApiSpecSummary,
   ApiStatus,
   ApiTimeouts,
+  ApiViewer,
   ApiVisibility,
   AppHealth,
   AuditLog,
@@ -522,6 +523,40 @@ export interface UpdateApiSpecResponse {
   api: Api;
   spec: ApiSpecSummary;
 }
+
+/**
+ * `GET /api/apis/:id/viewers` — who may read this API's documentation.
+ *
+ * Only meaningful for a `private` API; the list is kept (and readable) for the
+ * others so switching visibility does not silently discard it.
+ */
+export type ListApiViewersResponse = Paginated<ApiViewer>;
+
+/**
+ * `POST /api/apis/:id/viewers` — authorize one account to read this API's
+ * documentation.
+ *
+ * Exactly one of `email` or `user_id`. **This is not a grant**: it confers no
+ * ACL group, touches no Ferrum consumer and reaches no gateway. An authorized
+ * viewer who wants to call the API requests access like anybody else.
+ *
+ * An address with no portal account is refused rather than stored as a pending
+ * invitation — an authorization is attached to an account, not to an address.
+ */
+export interface AuthorizeApiViewerRequest {
+  email?: string | null;
+  user_id?: Uuid | null;
+  /** Free-text note, e.g. which partner this is. Up to 500 characters. */
+  note?: string | null;
+}
+
+/** `POST /api/apis/:id/viewers` */
+export interface AuthorizeApiViewerResponse {
+  viewer: ApiViewer;
+}
+
+/** `DELETE /api/apis/:id/viewers/:userId` — withdraw a read authorization. */
+export type RevokeApiViewerResponse = OkResponse;
 
 /** `GET /api/apis/:id/revisions` — retained specification history. */
 export type ListApiRevisionsResponse = Paginated<ApiSpecSummary>;

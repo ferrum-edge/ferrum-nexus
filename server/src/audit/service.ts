@@ -114,6 +114,22 @@ export const AuditAction = {
    * to be live after all (an operator rebuilt it by hand), so the flag was
    * dropped without touching the gateway.
    */
+  /**
+   * A provider authorized one account to **read** a private API's
+   * documentation.
+   *
+   * `details.grants_invocation` is always `false`, spelled out on every row
+   * rather than left to be inferred: this authorization confers no ACL group,
+   * touches no Ferrum consumer and reaches no gateway. Somebody reading the
+   * log a year from now should not have to go and check.
+   */
+  API_VIEWER_AUTHORIZE: 'api.viewer_authorize',
+  /**
+   * A read authorization was withdrawn. `details.revoked_grant` is always
+   * `false` for the same reason: read access and invocation access are
+   * separate, and removing one has never touched the other.
+   */
+  API_VIEWER_REVOKE: 'api.viewer_revoke',
   API_GATEWAY_RESTORE: 'api.gateway_restore',
   /**
    * A restore that reached the gateway and then failed. Reads like

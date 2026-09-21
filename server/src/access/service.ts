@@ -605,12 +605,22 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       if (!api.requestable) {
         throw conflict('This API does not accept access requests');
       }
-      // Visibility is deliberately *not* checked here. `internal` means
-      // unlisted, not private (see `catalog/service.ts`): a provider hands out
-      // the link and the recipient requests access through the normal flow.
-      // Gating requests on visibility would make `internal` + `requestable` a
-      // combination nobody could ever act on, since there is no
-      // provider-initiated grant path.
+      // `internal` is deliberately *not* gated here. It means unlisted, not
+      // private (see `catalog/service.ts`): a provider hands out the link and
+      // the recipient requests access through the normal flow. Gating that
+      // would make `internal` + `requestable` a combination nobody could ever
+      // act on.
+      //
+      // `private` is gated, because there the provider-initiated path exists:
+      // an account that cannot see the API cannot ask for it either, and a
+      // request that got through would confirm the API's existence to somebody
+      // who was never shown it. The check mirrors the catalog's read rule —
+      // an authorized viewer may request access exactly like any other client
+      // — and answers `NOT_FOUND` rather than `FORBIDDEN` for the same reason
+      // the catalog does (issue #288).
+      if (api.visibility === 'private' && !(await store.apiViewers.find(api.id, user.id))) {
+        throw notFound('API', apiId);
+      }
 
       if (await store.grants.findActiveByApiAndUser(api.id, user.id)) {
         throw conflict('You already have access to this API');

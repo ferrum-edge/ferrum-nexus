@@ -68,8 +68,30 @@ export interface Organization {
 /** Publication state of an API. */
 export type ApiStatus = 'published' | 'retired';
 
-/** Who may see an API in the catalog. */
-export type ApiVisibility = 'public' | 'internal';
+/**
+ * Who may see an API in the catalog — and, for `private`, who may open it.
+ *
+ * The three are deliberately distinct, because two of them answer different
+ * questions:
+ *
+ * - `public` — listed in the browse view and readable by any signed-in
+ *   account.
+ * - `internal` — **unlisted, not secret.** Kept out of the browse view so the
+ *   catalog stays a curated shop window, while anybody holding the link can
+ *   still read the documentation and request access. This is what it has
+ *   always meant, and it did not change when `private` was added.
+ * - `private` — **permission enforced.** Neither listed nor openable unless
+ *   the viewer is the owner, an administrator, an approved client, or someone
+ *   the provider explicitly authorized. Guessing or being handed a slug is not
+ *   enough.
+ *
+ * None of the three is a data-plane control. What stops an unapproved caller
+ * reaching the API is the `access_control` plugin and its ACL group on the
+ * gateway; visibility governs the *documentation* only, and a private API with
+ * no access control in front of it is still callable by anyone who knows the
+ * URL.
+ */
+export type ApiVisibility = 'public' | 'internal' | 'private';
 
 /**
  * Whether the portal believes this API is deployed on the gateway.
@@ -842,6 +864,30 @@ export interface EdgeHealth extends Omit<DependencyHealth, 'status'> {
    * inside the health request — see {@link EdgeReconciliationHealth}.
    */
   reconciliation: EdgeReconciliationHealth;
+}
+
+/**
+ * Somebody a provider has authorized to read a private API's documentation.
+ *
+ * **Not a grant.** It confers no ACL group, touches no Ferrum consumer and
+ * reaches no gateway: an authorized viewer can read the catalog entry and the
+ * specification, and — if the API is `requestable` — ask for access through
+ * the ordinary flow. Being able to read the documentation and being able to
+ * call the API are two different permissions, and a portal that conflated them
+ * would turn "share the docs" into an authorization bug.
+ */
+export interface ApiViewer {
+  id: Uuid;
+  api_id: Uuid;
+  user_id: Uuid;
+  /** The account authorized, for rendering the list. */
+  user: UserSummary | null;
+  /** Who authorized them; `null` once that account is gone. */
+  granted_by: Uuid | null;
+  /** Free-text note the provider attached, e.g. why this person was invited. */
+  note: string | null;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
 }
 
 /* ── Specification change review ────────────────────────────────────────── */
