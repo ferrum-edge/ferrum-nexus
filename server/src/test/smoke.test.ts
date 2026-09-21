@@ -1004,6 +1004,53 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(await store.apiSpecs.deleteByApi(api.id), 1);
     });
 
+    it('apiSpecs: records the author and the revision a rollback restored', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const api = await makeApi(owner.id);
+
+      const original = await store.apiSpecs.create({
+        api_id: api.id,
+        version: '1',
+        raw_spec: 'openapi: 3.1.0',
+        is_current: true,
+        created_by: owner.id,
+      });
+      assert.equal(original.created_by, owner.id);
+      assert.equal(original.rolled_back_from_id, null);
+
+      const replacement = await store.apiSpecs.create({
+        api_id: api.id,
+        version: '2',
+        raw_spec: 'openapi: 3.1.0 # v2',
+        is_current: true,
+      });
+      // Both columns are optional: a revision written without them reads back
+      // as an unattributed upload rather than failing.
+      assert.equal(replacement.created_by, null);
+      assert.equal(replacement.rolled_back_from_id, null);
+
+      const rolledBack = await store.apiSpecs.create({
+        api_id: api.id,
+        version: '1',
+        raw_spec: original.raw_spec,
+        is_current: true,
+        created_by: owner.id,
+        rolled_back_from_id: original.id,
+      });
+      assert.equal(rolledBack.rolled_back_from_id, original.id);
+      assert.deepEqual(await store.apiSpecs.findById(rolledBack.id), rolledBack);
+      assert.equal(
+        (await store.apiSpecs.findById(original.id))?.rolled_back_from_id,
+        null,
+        'the restored revision’s own row is never rewritten',
+      );
+
+      // Provenance, not a dependency: retention drops the target and the link
+      // goes to `null` rather than blocking the delete.
+      assert.equal(await store.apiSpecs.delete(original.id), true);
+      assert.equal((await store.apiSpecs.findById(rolledBack.id))?.rolled_back_from_id, null);
+    });
+
     it('apiSpecs: a revision that fails to insert leaves the previous one current', async () => {
       const owner = await makeUser({ role: 'provider' });
       const api = await makeApi(owner.id);

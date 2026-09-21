@@ -30,11 +30,16 @@ import {
   type CreateTestConsumerResponse,
   type DeleteApiPluginResponse,
   type DeleteApiResponse,
+  type DiffApiSpecResponse,
   type GetApiResponse,
+  type GetApiRevisionDiffResponse,
+  type GetApiRevisionResponse,
   type GetApiSpecResponse,
   type ListApiPluginsResponse,
+  type ListApiRevisionsResponse,
   type ListApisResponse,
   type PublishApiResponse,
+  type RollbackApiSpecResponse,
   type RestoreApiGatewayResponse,
   type SetApiPluginResponse,
   type UpdateApiResponse,
@@ -287,6 +292,15 @@ const specBody = z.object({
 
 const testConsumerBody = z.object({ label: z.string().trim().max(120).nullish() });
 
+/** A revision addressed within its API — both halves are checked together. */
+const revisionParamsSchema = z.object({
+  id: z.string().trim().min(1).max(64),
+  revisionId: z.string().trim().min(1).max(64),
+});
+
+/** The change-review body: the same field `PUT /spec` takes, and nothing else. */
+const diffBody = z.object({ spec: specField });
+
 /**
  * The palette route's params.
  *
@@ -480,6 +494,66 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
       const { id, name } = parseOrThrow(pluginParamsSchema, request.params);
       await apiPlugins.remove(user, id, name, clientIp(request));
       return { ok: true };
+    },
+  );
+
+  /* ── Specification history, change review and rollback ───────────────
+   *
+   * All four are owner-or-admin like every other provider-side read of the
+   * row, and all four scope the revision by API in the lookup itself — a
+   * revision id belonging to somebody else's API reads as absent rather than
+   * as forbidden, so the endpoints cannot be used to confirm that an id
+   * exists.
+   */
+
+  app.get('/:id/revisions', async (request): Promise<ListApiRevisionsResponse> => {
+    const { user } = requireAuth(request);
+    const { id } = parseOrThrow(idParamSchema, request.params);
+    const query = parseOrThrow(listQuerySchema, request.query);
+    return publishing.revisions(user, id, listOptions(query));
+  });
+
+  app.get('/:id/revisions/:revisionId', async (request): Promise<GetApiRevisionResponse> => {
+    const { user } = requireAuth(request);
+    const { id, revisionId } = parseOrThrow(revisionParamsSchema, request.params);
+    return publishing.revision(user, id, revisionId);
+  });
+
+  app.get(
+    '/:id/revisions/:revisionId/diff',
+    async (request): Promise<GetApiRevisionDiffResponse> => {
+      const { user } = requireAuth(request);
+      const { id, revisionId } = parseOrThrow(revisionParamsSchema, request.params);
+      return { diff: await publishing.diffRevision(user, id, revisionId) };
+    },
+  );
+
+  /**
+   * What an upload *would* change, without uploading it.
+   *
+   * A `POST` because the document is a body rather than a parameter, but
+   * read-only: nothing is stored and nothing reaches the gateway. It carries
+   * the mutation rate limit anyway — it parses a document up to
+   * `MAX_SPEC_BYTES`, which is the cost the limit exists to bound.
+   */
+  app.post(
+    '/:id/spec/diff',
+    { config: MUTATION_RATE_LIMIT },
+    async (request): Promise<DiffApiSpecResponse> => {
+      const { user } = requireAuth(request);
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      const body = parseOrThrow(diffBody, request.body);
+      return { diff: await publishing.diffUpload(user, id, body.spec) };
+    },
+  );
+
+  app.post(
+    '/:id/revisions/:revisionId/rollback',
+    { config: MUTATION_RATE_LIMIT },
+    async (request): Promise<RollbackApiSpecResponse> => {
+      const { user } = requireAuth(request);
+      const { id, revisionId } = parseOrThrow(revisionParamsSchema, request.params);
+      return publishing.rollbackSpec(user, id, revisionId, clientIp(request));
     },
   );
 

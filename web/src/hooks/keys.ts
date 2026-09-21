@@ -25,6 +25,10 @@ export const queryKeys = {
     detail: (id: string) => ['apis', 'detail', id] as const,
     usage: (id: string) => ['apis', 'usage', id] as const,
     plugins: (id: string) => ['apis', 'plugins', id] as const,
+    revisions: (id: string, params: unknown) => ['apis', 'revisions', id, params] as const,
+    revision: (id: string, revisionId: string) => ['apis', 'revision', id, revisionId] as const,
+    revisionDiff: (id: string, revisionId: string) =>
+      ['apis', 'revision-diff', id, revisionId] as const,
   },
 
   accessRequests: {

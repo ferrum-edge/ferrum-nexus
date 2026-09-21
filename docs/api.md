@@ -2044,6 +2044,108 @@ re-submission, so the API is never unauthenticated across it.
 declares nothing to allow — switch the enforcement level back to `docs_only`
 first if that is really the intent.
 
+### `GET /api/apis/:id/revisions`
+
+_provider_, owner-or-admin — one page of the API's retained specification
+history. Standard `limit`/`offset`; the current revision leads, then the rest
+newest-first by publication order.
+
+Each item is an `ApiSpecSummary`: `id`, `api_id`, `version`, `parsed_title`,
+`parsed_version`, `is_current`, `created_by`, `rolled_back_from_id`,
+`created_at`, `updated_at`. `created_by` is `null` when the author is not
+recorded — a revision published before the column existed, or one whose
+author's account has since been deleted — and the UI renders that as an unknown
+author rather than attributing it to somebody. `rolled_back_from_id` names the
+revision a rollback restored, and is `null` for an ordinary upload.
+
+Retention still applies: `NEXUS_SPEC_HISTORY_LIMIT` (default 10, on top of the
+current revision) bounds what is listed here.
+
+### `GET /api/apis/:id/revisions/:revisionId`
+
+_provider_, owner-or-admin — one retained revision's document, in the same
+shape as `GET /api/apis/:id/spec` (`raw_spec` plus a matching `content_type`).
+
+`404 NOT_FOUND` when the revision is not retained **or belongs to another
+API** — the API scope is part of the lookup rather than a check after it, so
+the endpoint cannot be used to confirm that an id exists elsewhere.
+
+### `GET /api/apis/:id/revisions/:revisionId/diff`
+
+_provider_, owner-or-admin — what rolling back to this revision would change.
+
+```json
+{ "diff": { "from": { … }, "to": { … }, "…": "…" } }
+```
+
+`from` is the current revision (what the API serves today) and `to` is the
+target (what it would serve), so the comparison reads in the direction the
+change would go.
+
+### `POST /api/apis/:id/spec/diff`
+
+_provider_, owner-or-admin — what uploading a document _would_ change, without
+uploading it. Body: `{ "spec": "…" }`, the same field `PUT /api/apis/:id/spec`
+takes. Read-only despite the verb: nothing is stored and nothing reaches the
+gateway. `to` is `null`, because the proposed document is not a stored
+revision. `400 SPEC_INVALID` for a document the portal would refuse to publish
+— a review must not describe a change that cannot be made.
+
+#### The `SpecDiff` shape, and what it does not claim
+
+| Field                                     | Meaning                                                                                                                                                                                                                                                                                             |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `added_operations` / `removed_operations` | operations (`{ path, method }`) the target declares and the source does not, and the other way round                                                                                                                                                                                                |
+| `changed_operations`                      | operations both declare whose definitions differ, with `changes`: the Operation Object members that differ (`parameters`, `requestBody`, `responses`, `security`, `summary`, `description`, `deprecated`, `tags`, `servers`, `operationId`, `callbacks`), or `other` for anything outside that list |
+| `added_paths` / `removed_paths`           | path templates added or dropped outright                                                                                                                                                                                                                                                            |
+| `info_changes`                            | `title`, `version` or `description` differences, as `{ field, from, to }`                                                                                                                                                                                                                           |
+| `servers_changed`                         | whether the `servers` block differs                                                                                                                                                                                                                                                                 |
+| `potentially_breaking`                    | every removed operation — the changes worth reading twice                                                                                                                                                                                                                                           |
+| `changed`                                 | whether the documents differ at all                                                                                                                                                                                                                                                                 |
+
+The comparison is **structural**. It reads paths, methods and the shape of each
+operation; it does not resolve `$ref`s, walk schemas, or reason about
+semantics. A response schema can drop a required field, or a parameter narrow
+its type, with every path and method identical — that shows up as
+`changed_operations` at best, and never in `potentially_breaking`. An empty
+`potentially_breaking` therefore means _this comparison found nothing_, not
+that the change is backward compatible, and the UI says so alongside the
+counts. Path-item-level `parameters` are folded into each operation before
+comparison, so moving a shared parameter onto an operation is correctly no
+change at all.
+
+### `POST /api/apis/:id/revisions/:revisionId/rollback`
+
+_provider_, owner-or-admin — redeploy a retained revision. Empty body.
+
+```json
+{ "api": { … }, "spec": { … } }
+```
+
+**A rollback is a new revision carrying an old document.** History is appended
+to, never rewritten: the restored revision's own row is untouched, the returned
+`spec` is the newly created revision, and its `rolled_back_from_id` names the
+target. There is no delete-and-republish — the API keeps its id, slug,
+ownership, access grants, gateway proxy and configured gateway URL.
+
+It runs through the same path `PUT /api/apis/:id/spec` runs through, and
+therefore inherits all of it: the same validation, the same gateway-first
+ordering, the same compensation when the gateway moves and the revision cannot
+be persisted, and the same bounded retention. A `routes` API has its restored
+document re-submitted to Edge, which regenerates the operation table from it.
+
+| Status           | Meaning                                                                                                                                                                    |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `200`            | the restored document is the current revision and the gateway agrees                                                                                                       |
+| `403 FORBIDDEN`  | not the owner and not an admin                                                                                                                                             |
+| `404 NOT_FOUND`  | the revision is not retained, or belongs to another API. Retention can drop a revision between listing it and rolling it back; this is that answer, and nothing is written |
+| `409 CONFLICT`   | the target is already the current revision                                                                                                                                 |
+| `502 EDGE_ERROR` | the gateway refused or could not be reached. The catalog is left exactly as it was — a failed rollback never claims it happened                                            |
+
+Audited as `api.spec_rollback` rather than `api.spec_update`, with
+`restored_from_spec_id`, `restored_from_version` and `restored_from_created_at`
+naming the revision that was put back.
+
 ### `POST /api/apis/:id/restore-gateway`
 
 _provider_, owner-or-admin — rebuild the gateway deployment of an API the
