@@ -83,7 +83,14 @@ CREATE TABLE IF NOT EXISTS apis (
   auth_plugin          TEXT NOT NULL CHECK (auth_plugin IN ('key_auth', 'basic_auth', 'jwt_auth')),
   rate_limit_json      TEXT,
   status               TEXT NOT NULL DEFAULT 'published' CHECK (status IN ('published', 'retired')),
-  visibility           TEXT NOT NULL DEFAULT 'public' CHECK (visibility IN ('public', 'internal')),
+  -- `internal` is *unlisted*: kept out of the browse view, readable by anyone
+  -- holding the link. `private` is *permission enforced*: invisible and
+  -- unopenable unless the viewer is the owner, an admin, an approved client,
+  -- or someone the provider explicitly authorized in `api_viewers`. The two
+  -- are deliberately separate values so adding the second does not silently
+  -- change what the first already means for existing APIs (issue #288).
+  visibility           TEXT NOT NULL DEFAULT 'public'
+                         CHECK (visibility IN ('public', 'internal', 'private')),
   -- Whether the gateway is believed to be serving this API. Written
   -- `repair_required` only when the portal has established that it is not, and
   -- cleared only by a successful restore — never derived from
@@ -103,6 +110,29 @@ CREATE INDEX IF NOT EXISTS ix_apis_status_visibility ON apis (status, visibility
 CREATE INDEX IF NOT EXISTS ix_apis_created_at ON apis (created_at);
 -- Reconciliation counts the unrestored deployments on every pass.
 CREATE INDEX IF NOT EXISTS ix_apis_gateway_state ON apis (namespace, gateway_state);
+
+-- ── API viewers (private documentation access) ─────────────────────────────
+--
+-- Who a provider has authorized to *read* a private API's catalog entry and
+-- specification. Deliberately not a grant: it confers no ACL group, touches no
+-- consumer and reaches no gateway. Being able to read the documentation and
+-- being able to call the API are two different permissions, and conflating
+-- them is how a "share the docs" click becomes an authorization bug.
+CREATE TABLE IF NOT EXISTS api_viewers (
+  id         TEXT PRIMARY KEY,
+  api_id     TEXT NOT NULL REFERENCES apis (id) ON DELETE CASCADE,
+  user_id    TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  -- The provider or admin who authorized them; NULL once that account is gone.
+  granted_by TEXT REFERENCES users (id) ON DELETE SET NULL,
+  note       TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_api_viewers_api_user ON api_viewers (api_id, user_id);
+-- Every catalog read resolves "which private APIs may this account see?".
+CREATE INDEX IF NOT EXISTS ix_api_viewers_user ON api_viewers (user_id);
+CREATE INDEX IF NOT EXISTS ix_api_viewers_api ON api_viewers (api_id, created_at);
 
 -- ── API specs ──────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS api_specs (

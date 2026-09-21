@@ -112,6 +112,8 @@ import type {
   AccessRequestRepo,
   ApiFilter,
   ApiPluginRecord,
+  ApiViewerRecord,
+  ApiViewerRepo,
   ApiPluginRepo,
   ApiRecord,
   ApiRepo,
@@ -181,6 +183,7 @@ const COLLECTIONS = {
   apis: 'apis',
   apiSpecs: 'api_specs',
   apiPlugins: 'api_plugins',
+  apiViewers: 'api_viewers',
   accessRequests: 'access_requests',
   grants: 'grants',
   consumers: 'consumers',
@@ -471,6 +474,18 @@ function mapApiSpec(row: Row): ApiSpecRecord {
   };
 }
 
+function mapApiViewer(row: Row): ApiViewerRecord {
+  return {
+    id: str(row._id),
+    api_id: str(row.api_id),
+    user_id: str(row.user_id),
+    granted_by: strOrNull(row.granted_by),
+    note: strOrNull(row.note),
+    created_at: str(row.created_at),
+    updated_at: str(row.updated_at),
+  };
+}
+
 function mapApiPlugin(row: Row): ApiPluginRecord {
   return {
     id: str(row._id),
@@ -716,6 +731,8 @@ function apiViewerCondition(viewer: ApiViewerFilter): Record<string, unknown> {
   const parts: Record<string, unknown>[] = [{ owner_user_id: viewer.owner_user_id }];
   const granted = [...new Set(viewer.granted_api_ids)];
   if (granted.length > 0) parts.push({ _id: { $in: granted } });
+  const authorized = [...new Set(viewer.authorized_api_ids)];
+  if (authorized.length > 0) parts.push({ _id: { $in: authorized } });
   const visibilities = [...new Set(viewer.open_visibilities)];
   if (visibilities.length > 0) {
     parts.push({ status: viewer.open_status, visibility: { $in: visibilities } });
@@ -866,6 +883,15 @@ const INDEXES: IndexDefinition[] = [
     unique: true,
   },
   { collection: 'api_plugins', name: 'ix_api_plugins_api', key: { api_id: 1, created_at: 1 } },
+
+  {
+    collection: 'api_viewers',
+    name: 'ux_api_viewers_api_user',
+    key: { api_id: 1, user_id: 1 },
+    unique: true,
+  },
+  { collection: 'api_viewers', name: 'ix_api_viewers_user', key: { user_id: 1 } },
+  { collection: 'api_viewers', name: 'ix_api_viewers_api', key: { api_id: 1, created_at: 1 } },
 
   {
     collection: 'access_requests',
@@ -1913,6 +1939,86 @@ class MongoStore implements NexusStore {
     deleteByApi: async (apiId) =>
       (
         await this.col(COLLECTIONS.apiPlugins).deleteMany(
+          { api_id: apiId } as Filter<NexusDoc>,
+          this.opts,
+        )
+      ).deletedCount,
+  };
+
+  /* ── apiViewers ───────────────────────────────────────────────────────── */
+
+  readonly apiViewers: ApiViewerRepo = {
+    upsert: async (input) => {
+      const meta = stamps(input);
+      // One upsert against the unique `(api_id, user_id)` index, so two
+      // concurrent invitations converge on one document. `$setOnInsert` keeps
+      // the moment this account was first authorized across a replace.
+      await mapConflict('That account is already authorized for this API', () =>
+        this.col(COLLECTIONS.apiViewers).updateOne(
+          { api_id: input.api_id, user_id: input.user_id } as Filter<NexusDoc>,
+          {
+            $set: {
+              granted_by: input.granted_by ?? null,
+              note: input.note ?? null,
+              updated_at: meta.updated_at,
+            },
+            $setOnInsert: {
+              _id: meta.id,
+              api_id: input.api_id,
+              user_id: input.user_id,
+              created_at: meta.created_at,
+            },
+          } as UpdateFilter<NexusDoc>,
+          { ...this.opts, upsert: true },
+        ),
+      );
+      const saved = await this.apiViewers.find(input.api_id, input.user_id);
+      if (!saved) throw new Error('apiViewers.upsert: row vanished immediately after write');
+      return saved;
+    },
+
+    find: async (apiId, userId) => {
+      const row = asRow(
+        await this.col(COLLECTIONS.apiViewers).findOne(
+          { api_id: apiId, user_id: userId },
+          this.opts,
+        ),
+      );
+      return row ? mapApiViewer(row) : null;
+    },
+
+    list: async (filter, options) => {
+      const query: Record<string, unknown> = {};
+      if (filter.api_id !== undefined) query.api_id = filter.api_id;
+      if (filter.user_id !== undefined) query.user_id = filter.user_id;
+      return this.paginate(
+        COLLECTIONS.apiViewers,
+        query as Filter<NexusDoc>,
+        NEWEST_FIRST,
+        options,
+        mapApiViewer,
+      );
+    },
+
+    listApiIdsByUser: async (userId) =>
+      (
+        await this.col(COLLECTIONS.apiViewers)
+          .find({ user_id: userId } as Filter<NexusDoc>, this.opts)
+          .project({ api_id: 1 })
+          .toArray()
+      ).map((doc) => str((doc as Row).api_id)),
+
+    delete: async (apiId, userId) =>
+      (
+        await this.col(COLLECTIONS.apiViewers).deleteOne(
+          { api_id: apiId, user_id: userId } as Filter<NexusDoc>,
+          this.opts,
+        )
+      ).deletedCount > 0,
+
+    deleteByApi: async (apiId) =>
+      (
+        await this.col(COLLECTIONS.apiViewers).deleteMany(
           { api_id: apiId } as Filter<NexusDoc>,
           this.opts,
         )

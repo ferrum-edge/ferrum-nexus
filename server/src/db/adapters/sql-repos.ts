@@ -55,6 +55,8 @@ import type {
   AccessRequestRepo,
   ApiFilter,
   ApiPluginRecord,
+  ApiViewerRecord,
+  ApiViewerRepo,
   ApiPluginRepo,
   ApiRecord,
   ApiRepo,
@@ -272,6 +274,18 @@ function mapApiSpec(row: Row): ApiSpecRecord {
     revision_seq: int(row.revision_seq),
     created_by: textOrNull(row.created_by),
     rolled_back_from_id: textOrNull(row.rolled_back_from_id),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapApiViewer(row: Row): ApiViewerRecord {
+  return {
+    id: text(row.id),
+    api_id: text(row.api_id),
+    user_id: text(row.user_id),
+    granted_by: textOrNull(row.granted_by),
+    note: textOrNull(row.note),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -525,6 +539,11 @@ function apiViewerCondition(viewer: ApiViewerFilter): { sql: string; params: Sql
     parts.push(`id IN (${placeholders(granted.length)})`);
     params.push(...granted);
   }
+  const authorized = [...new Set(viewer.authorized_api_ids)];
+  if (authorized.length > 0) {
+    parts.push(`id IN (${placeholders(authorized.length)})`);
+    params.push(...authorized);
+  }
   const visibilities = [...new Set(viewer.open_visibilities)];
   if (visibilities.length > 0) {
     parts.push(`(status = ? AND visibility IN (${placeholders(visibilities.length)}))`);
@@ -649,6 +668,7 @@ export interface SqlRepos {
   apis: ApiRepo;
   apiSpecs: ApiSpecRepo;
   apiPlugins: ApiPluginRepo;
+  apiViewers: ApiViewerRepo;
   accessRequests: AccessRequestRepo;
   grants: GrantRepo;
   credentials: CredentialRepo;
@@ -1287,6 +1307,80 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
     deleteByApi: async (apiId) =>
       execute(exec, 'DELETE FROM api_plugins WHERE api_id = ?', [apiId]),
+  };
+
+  /* ── apiViewers ─────────────────────────────────────────────────────── */
+
+  const API_VIEWER_UPSERT = upsertSql(
+    dialect,
+    'api_viewers',
+    ['id', 'api_id', 'user_id', 'granted_by', 'note', 'created_at', 'updated_at'],
+    'api_id, user_id',
+    ['granted_by', 'note', 'updated_at'],
+  );
+
+  const apiViewers: ApiViewerRepo = {
+    upsert: async (input) => {
+      const meta = stamps(input);
+      // `created_at` is not in the update list: the row records when this
+      // account was first authorized, not when the note was last edited.
+      await mapSqlConflict('That account is already authorized for this API', () =>
+        execute(exec, API_VIEWER_UPSERT, [
+          meta.id,
+          input.api_id,
+          input.user_id,
+          input.granted_by ?? null,
+          input.note ?? null,
+          meta.created_at,
+          meta.updated_at,
+        ]),
+      );
+      const saved = await apiViewers.find(input.api_id, input.user_id);
+      if (!saved) throw new Error('apiViewers.upsert: row vanished immediately after write');
+      return saved;
+    },
+
+    find: async (apiId, userId) => {
+      const row = await queryOne(
+        exec,
+        'SELECT * FROM api_viewers WHERE api_id = ? AND user_id = ?',
+        [apiId, userId],
+      );
+      return row ? mapApiViewer(row) : null;
+    },
+
+    list: async (filter, options) => {
+      const where = new SqlWhereBuilder()
+        .add(filter.api_id, 'api_id = ?', filter.api_id ?? null)
+        .add(filter.user_id, 'user_id = ?', filter.user_id ?? null)
+        .build();
+      const { limit, offset } = page(options);
+      const total = await queryCount(
+        exec,
+        `SELECT COUNT(*) AS cnt FROM api_viewers${where.sql}`,
+        where.params,
+      );
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM api_viewers${where.sql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
+      );
+      return { items: rows.map(mapApiViewer), total };
+    },
+
+    listApiIdsByUser: async (userId) =>
+      (await queryAll(exec, 'SELECT api_id FROM api_viewers WHERE user_id = ?', [userId])).map(
+        (row) => text(row.api_id),
+      ),
+
+    delete: async (apiId, userId) =>
+      (await execute(exec, 'DELETE FROM api_viewers WHERE api_id = ? AND user_id = ?', [
+        apiId,
+        userId,
+      ])) > 0,
+
+    deleteByApi: async (apiId) =>
+      execute(exec, 'DELETE FROM api_viewers WHERE api_id = ?', [apiId]),
   };
 
   /* ── accessRequests ─────────────────────────────────────────────────── */
@@ -2815,6 +2909,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     apis,
     apiSpecs,
     apiPlugins,
+    apiViewers,
     accessRequests,
     grants,
     credentials,
@@ -2903,6 +2998,7 @@ class SqlStore implements NexusStore {
   readonly apis: ApiRepo;
   readonly apiSpecs: ApiSpecRepo;
   readonly apiPlugins: ApiPluginRepo;
+  readonly apiViewers: ApiViewerRepo;
   readonly accessRequests: AccessRequestRepo;
   readonly grants: GrantRepo;
   readonly credentials: CredentialRepo;
@@ -2944,6 +3040,7 @@ class SqlStore implements NexusStore {
     this.apis = repos.apis;
     this.apiSpecs = repos.apiSpecs;
     this.apiPlugins = repos.apiPlugins;
+    this.apiViewers = repos.apiViewers;
     this.accessRequests = repos.accessRequests;
     this.grants = repos.grants;
     this.credentials = repos.credentials;

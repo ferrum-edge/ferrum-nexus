@@ -97,13 +97,17 @@ import {
   type MeResponse,
   type PublishApiRequest,
   type PublishApiResponse,
+  type AuthorizeApiViewerRequest,
+  type AuthorizeApiViewerResponse,
   type DiffApiSpecRequest,
+  type ListApiViewersResponse,
   type ListQuery,
   type DiffApiSpecResponse,
   type GetApiRevisionDiffResponse,
   type GetApiRevisionResponse,
   type ListApiRevisionsResponse,
   type RestoreApiGatewayResponse,
+  type RevokeApiViewerResponse,
   type RollbackApiSpecResponse,
   type RegisterRequest,
   type RegisterResponse,
@@ -407,6 +411,24 @@ export const apisApi = {
     body: CreateTestConsumerRequest = {},
   ): Promise<CreateTestConsumerResponse> =>
     post<CreateTestConsumerResponse>(`/apis/${encodeURIComponent(id)}/test-consumer`, body),
+  /* ── Private documentation access ─────────────────────────────────── */
+  //
+  // Who may *read* a private API's catalog entry and specification. Nothing
+  // here is a grant: authorizing a viewer confers no ACL group and reaches no
+  // gateway.
+
+  viewers: (id: string, query: ListQuery = {}): Promise<ListApiViewersResponse> =>
+    get<ListApiViewersResponse>(`/apis/${encodeURIComponent(id)}/viewers`, { ...query }),
+  authorizeViewer: (
+    id: string,
+    body: AuthorizeApiViewerRequest,
+  ): Promise<AuthorizeApiViewerResponse> =>
+    post<AuthorizeApiViewerResponse>(`/apis/${encodeURIComponent(id)}/viewers`, body),
+  revokeViewer: (id: string, userId: string): Promise<RevokeApiViewerResponse> =>
+    del<RevokeApiViewerResponse>(
+      `/apis/${encodeURIComponent(id)}/viewers/${encodeURIComponent(userId)}`,
+    ),
+
   /* ── Specification history, change review and rollback ────────────── */
 
   revisions: (id: string, query: ListQuery = {}): Promise<ListApiRevisionsResponse> =>

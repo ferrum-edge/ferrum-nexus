@@ -161,16 +161,48 @@ consumers and simply become inert.
 
 ### Visibility
 
-| Visibility   | In the catalog      | Openable by link | Requestable |
-| ------------ | ------------------- | ---------------- | ----------- |
-| **Public**   | listed for everyone | yes              | yes         |
-| **Internal** | **unlisted**        | **yes**          | yes         |
+| Visibility              | In the catalog        | Openable by link      | Requestable |
+| ----------------------- | --------------------- | --------------------- | ----------- |
+| **Public**              | listed for everyone   | yes                   | yes         |
+| **Internal (unlisted)** | **unlisted**          | **yes**               | yes         |
+| **Private**             | **only your viewers** | **only your viewers** | yes         |
 
 **Internal means unlisted, not secret.** Anyone with the link can open the page,
-read the documentation and raise an access request. That is deliberate — there
-is no provider-initiated grant flow, so a link that could not be acted on would
-be useless. What protects your data is the access-control gate, not whether the
-documentation is readable.
+read the documentation and raise an access request. That is deliberate: it is
+how you hand a prospective client a link without putting the API in the shop
+window. It has always meant this and still does — adding Private did not change
+it.
+
+**Private is the one that enforces.** A private API is invisible in the catalog
+and answers "not found" to anyone who is not you, an administrator, an approved
+client, or an account you have authorized. Guessing the slug does not help, and
+neither does searching — the listing, its totals and the specification endpoint
+all apply the same rule. An account that cannot see it cannot request access to
+it either.
+
+#### Authorizing viewers
+
+**My APIs → the API → Viewers.** Enter the email address of an existing portal
+account and they can find and read the API.
+
+**Authorizing somebody is not approving them.** It lets them read the
+documentation. It does not let them call the API — for that they request access
+from the catalog page and you approve it, exactly as for any other client.
+Revoking a viewer likewise leaves any grant they hold alone; revoke that from
+the Grants tab.
+
+Two practical notes:
+
+- The account has to exist. An address nobody has registered is refused rather
+  than remembered, because an authorization belongs to an account and an
+  address can change hands.
+- The viewer list is kept whatever the visibility, and only enforces while the
+  API is Private. Switching to Public and back does not lose it.
+
+**Visibility is documentation, not enforcement.** What stops an unapproved
+caller reaching your upstream is the access-control gate (**Requestable on**),
+not whether the OpenAPI document is readable. A private API published with
+Requestable **off** is still callable by anyone who knows its URL.
 
 If a document itself is too sensitive to show a signed-in portal user, do not
 publish it here.
@@ -575,17 +607,17 @@ backend-state read fails, counters remain valid and the backend is Unknown.
 **My APIs → the API → Settings.** Everything here is safe to change on a live
 API, but two of them have consequences worth reading first.
 
-| Change                     | Effect                                                                                                                                                                 |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Name, description, version | Catalog metadata only.                                                                                                                                                 |
-| Visibility                 | Listing only. Existing grants and calls are unaffected.                                                                                                                |
-| Upstream URL               | Re-points the gateway's backend. Takes effect immediately, and the upstream shown on the API page updates with it.                                                     |
-| Rate limit                 | Attaches, updates, or (cleared) removes the quota.                                                                                                                     |
-| CORS                       | Attaches, replaces, or (cleared) removes the browser CORS policy and its default-on WebSocket origin check.                                                            |
-| Allowed methods            | Takes effect immediately. Untick everything to accept every method again.                                                                                              |
-| Timeouts, circuit breaker  | Take effect immediately. Clearing the timeout boxes restores the gateway defaults.                                                                                     |
-| **Requestable → off**      | ⚠️ Removes the access gate. **Every authenticated consumer can now call this API.** Existing grants stay but become inert.                                             |
-| **Authentication plugin**  | ⚠️ Refused while anyone holding access has a live credential of the old method, unless you confirm; they keep their credentials but lose this API until they re-issue. |
+| Change                     | Effect                                                                                                                                                                                       |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Name, description, version | Catalog metadata only.                                                                                                                                                                       |
+| Visibility                 | Documentation visibility only. Existing grants and calls are unaffected. Switching **to** Private starts enforcing the API's viewer list; switching away stops enforcing but keeps the list. |
+| Upstream URL               | Re-points the gateway's backend. Takes effect immediately, and the upstream shown on the API page updates with it.                                                                           |
+| Rate limit                 | Attaches, updates, or (cleared) removes the quota.                                                                                                                                           |
+| CORS                       | Attaches, replaces, or (cleared) removes the browser CORS policy and its default-on WebSocket origin check.                                                                                  |
+| Allowed methods            | Takes effect immediately. Untick everything to accept every method again.                                                                                                                    |
+| Timeouts, circuit breaker  | Take effect immediately. Clearing the timeout boxes restores the gateway defaults.                                                                                                           |
+| **Requestable → off**      | ⚠️ Removes the access gate. **Every authenticated consumer can now call this API.** Existing grants stay but become inert.                                                                   |
+| **Authentication plugin**  | ⚠️ Refused while anyone holding access has a live credential of the old method, unless you confirm; they keep their credentials but lose this API until they re-issue.                       |
 
 ### Changing the authentication plugin
 

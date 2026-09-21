@@ -18,13 +18,17 @@ import type {
   ListApisResponse,
   PublishApiRequest,
   PublishApiResponse,
+  AuthorizeApiViewerRequest,
+  AuthorizeApiViewerResponse,
   DiffApiSpecRequest,
   DiffApiSpecResponse,
   GetApiRevisionDiffResponse,
   GetApiRevisionResponse,
   ListApiRevisionsResponse,
+  ListApiViewersResponse,
   ListQuery,
   RestoreApiGatewayResponse,
+  RevokeApiViewerResponse,
   RollbackApiSpecResponse,
   SetApiPluginRequest,
   SetApiPluginResponse,
@@ -133,6 +137,52 @@ export function useUpdateApiSpec(): UseMutationResult<
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.apis.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.catalog.all });
+    },
+  });
+}
+
+/* ── Private documentation access ───────────────────────────────────────── */
+
+/** Who may read this API's documentation. Not its grants — see `useGrants`. */
+export function useApiViewers(
+  id: string,
+  query: ListQuery = {},
+): UseQueryResult<ListApiViewersResponse> {
+  return useQuery({
+    queryKey: queryKeys.apis.viewers(id, query),
+    queryFn: () => apisApi.viewers(id, query),
+    enabled: id.length > 0,
+  });
+}
+
+/** Authorize one account to read this API's documentation. */
+export function useAuthorizeApiViewer(): UseMutationResult<
+  AuthorizeApiViewerResponse,
+  Error,
+  { id: string; body: AuthorizeApiViewerRequest }
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body: AuthorizeApiViewerRequest }) =>
+      apisApi.authorizeViewer(id, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.apis.all });
+    },
+  });
+}
+
+/** Withdraw a read authorization. Leaves any grant the account holds alone. */
+export function useRevokeApiViewer(): UseMutationResult<
+  RevokeApiViewerResponse,
+  Error,
+  { id: string; userId: string }
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, userId }: { id: string; userId: string }) =>
+      apisApi.revokeViewer(id, userId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.apis.all });
     },
   });
 }

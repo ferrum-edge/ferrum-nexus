@@ -85,6 +85,7 @@ import {
 } from './middleware/error-handler.js';
 import { createNotificationsService, type NotificationsService } from './notifications/service.js';
 import { createApiPluginsService, type ApiPluginsService } from './plugins/service.js';
+import { createApiViewersService, type ApiViewersService } from './publishing/viewers.js';
 import { createUpstreamResolver, type UpstreamResolver } from './publishing/oas.js';
 import { createPublishingService, type PublishingService } from './publishing/service.js';
 import { accessRequestRoutes, grantRoutes } from './routes/access.js';
@@ -124,6 +125,7 @@ export interface NexusServices {
   publishing: PublishingService;
   usage: UsageService;
   apiPlugins: ApiPluginsService;
+  apiViewers: ApiViewersService;
   access: AccessService;
   god: GodService;
   /**
@@ -440,6 +442,14 @@ export async function buildServer(
     publishing,
     log: (obj, message) => app.log.error(obj, message),
   });
+  // Also composed after publishing, and for the same reason: the read-access
+  // list of a private API is administered by whoever administers the API.
+  const apiViewers = createApiViewersService({
+    store: deps.store,
+    audit,
+    notifications,
+    assertCanAdminister: publishing.assertCanAdminister,
+  });
   const access = createAccessService({
     config,
     edge: deps.edge,
@@ -520,6 +530,7 @@ export async function buildServer(
     publishing,
     usage,
     apiPlugins,
+    apiViewers,
     access,
     god,
     reconciliation,
@@ -698,7 +709,7 @@ export async function buildServer(
       if (config.rateLimitEnabled) {
         await scope.register(rateLimit, { global: false });
       }
-      await scope.register(publishingRoutes, { publishing, usage, apiPlugins });
+      await scope.register(publishingRoutes, { publishing, usage, apiPlugins, apiViewers });
     },
     { prefix: '/api/apis' },
   );

@@ -62,8 +62,10 @@ function AllApisTable(): ReactElement {
         id: 'visibility',
         header: 'Visibility',
         cell: ({ row }) =>
-          row.original.visibility === 'internal' ? (
-            <Badge tone="warning">Internal</Badge>
+          row.original.visibility === 'private' ? (
+            <Badge tone="danger">Private</Badge>
+          ) : row.original.visibility === 'internal' ? (
+            <Badge tone="warning">Unlisted</Badge>
           ) : (
             <Badge>Public</Badge>
           ),

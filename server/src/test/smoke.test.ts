@@ -918,6 +918,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       const clause = {
         owner_user_id: stranger.id,
         granted_api_ids: [granted],
+        authorized_api_ids: [],
         open_status: 'published' as const,
         open_visibilities: ['public' as const],
       };
@@ -969,6 +970,100 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         2,
         'an empty visibility list leaves only owned and granted rows',
       );
+    });
+
+    it('apiViewers: authorizes, lists, resolves and revokes documentation access', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const partner = await makeUser({ role: 'client' });
+      const other = await makeUser({ role: 'client' });
+      const api = await makeApi(owner.id);
+      const second = await makeApi(owner.id);
+
+      const authorized = await store.apiViewers.upsert({
+        api_id: api.id,
+        user_id: partner.id,
+        granted_by: owner.id,
+        note: 'Design partner',
+      });
+      assert.equal(authorized.note, 'Design partner');
+      assert.deepEqual(await store.apiViewers.find(api.id, partner.id), authorized);
+      assert.equal(await store.apiViewers.find(api.id, other.id), null);
+
+      // Upsert, not create: re-inviting somebody refreshes the row rather than
+      // raising a conflict, and keeps the moment they were first authorized.
+      const refreshed = await store.apiViewers.upsert({
+        api_id: api.id,
+        user_id: partner.id,
+        granted_by: owner.id,
+        note: 'Renewed',
+      });
+      assert.equal(refreshed.id, authorized.id);
+      assert.equal(refreshed.created_at, authorized.created_at);
+      assert.equal(refreshed.note, 'Renewed');
+      assert.equal((await store.apiViewers.list({ api_id: api.id })).total, 1);
+
+      await store.apiViewers.upsert({ api_id: second.id, user_id: partner.id, granted_by: null });
+      assert.deepEqual(
+        (await store.apiViewers.listApiIdsByUser(partner.id)).sort(),
+        [api.id, second.id].sort(),
+      );
+      assert.deepEqual(await store.apiViewers.listApiIdsByUser(other.id), []);
+
+      const byUser = await store.apiViewers.list({ user_id: partner.id }, { limit: 50 });
+      assert.equal(byUser.total, 2);
+
+      assert.equal(await store.apiViewers.delete(api.id, other.id), false);
+      assert.equal(await store.apiViewers.delete(api.id, partner.id), true);
+      assert.deepEqual(await store.apiViewers.listApiIdsByUser(partner.id), [second.id]);
+      assert.equal(await store.apiViewers.deleteByApi(second.id), 1);
+      assert.deepEqual(await store.apiViewers.listApiIdsByUser(partner.id), []);
+    });
+
+    it('apis: filters the rows one viewer may browse by authorization as well as grant', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const viewer = await makeUser({ role: 'client' });
+      const slug = newId().slice(0, 8);
+      const secret = await store.apis.create({
+        name: 'Confidential',
+        slug: `private-${slug}`,
+        owner_user_id: owner.id,
+        namespace: 'nexus',
+        version: '1.0.0',
+        spec_format: 'openapi',
+        requestable: true,
+        auth_plugin: 'key_auth',
+        status: 'published',
+        visibility: 'private',
+      });
+      assert.equal(secret.visibility, 'private');
+
+      const unauthorized = {
+        owner_user_id: viewer.id,
+        granted_api_ids: [],
+        authorized_api_ids: [],
+        open_status: 'published' as const,
+        open_visibilities: ['public' as const],
+      };
+      const hidden = await store.apis.list({ visible_to: unauthorized }, { limit: 50 });
+      assert.ok(!hidden.items.some((row) => row.id === secret.id), 'private stays out');
+      assert.equal(await store.apis.count({ visible_to: unauthorized, ids: [secret.id] }), 0);
+
+      await store.apiViewers.upsert({
+        api_id: secret.id,
+        user_id: viewer.id,
+        granted_by: owner.id,
+      });
+      const authorized = {
+        ...unauthorized,
+        authorized_api_ids: await store.apiViewers.listApiIdsByUser(viewer.id),
+      };
+      const shown = await store.apis.list({ visible_to: authorized }, { limit: 50 });
+      assert.ok(
+        shown.items.some((row) => row.id === secret.id),
+        'authorization admits it',
+      );
+      // The count applies the same clause, so pagination totals agree.
+      assert.equal(await store.apis.count({ visible_to: authorized, ids: [secret.id] }), 1);
     });
 
     it('apiSpecs: keeps exactly one current revision per API', async () => {

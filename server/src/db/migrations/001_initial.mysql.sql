@@ -146,12 +146,30 @@ CREATE TABLE IF NOT EXISTS apis (
   CONSTRAINT ck_apis_requestable CHECK (requestable IN (0, 1)),
   CONSTRAINT ck_apis_auth_plugin CHECK (auth_plugin IN ('key_auth', 'basic_auth', 'jwt_auth')),
   CONSTRAINT ck_apis_status CHECK (status IN ('published', 'retired')),
-  CONSTRAINT ck_apis_visibility CHECK (visibility IN ('public', 'internal')),
+  CONSTRAINT ck_apis_visibility CHECK (visibility IN ('public', 'internal', 'private')),
   CONSTRAINT ck_apis_gateway_state CHECK (gateway_state IN ('deployed', 'repair_required')),
   CONSTRAINT fk_apis_owner FOREIGN KEY (owner_user_id) REFERENCES users (id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 -- ── API specs ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS api_viewers (
+  id         VARCHAR(64) NOT NULL,
+  api_id     VARCHAR(64) NOT NULL,
+  user_id    VARCHAR(64) NOT NULL,
+  granted_by VARCHAR(64) DEFAULT NULL,
+  note       TEXT,
+  created_at VARCHAR(32) NOT NULL,
+  updated_at VARCHAR(32) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY ux_api_viewers_api_user (api_id, user_id),
+  KEY ix_api_viewers_user (user_id),
+  KEY ix_api_viewers_api (api_id, created_at),
+  CONSTRAINT fk_api_viewers_api FOREIGN KEY (api_id) REFERENCES apis (id) ON DELETE CASCADE,
+  CONSTRAINT fk_api_viewers_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+  CONSTRAINT fk_api_viewers_granted_by FOREIGN KEY (granted_by) REFERENCES users (id)
+    ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE IF NOT EXISTS api_specs (
   id             VARCHAR(64)  NOT NULL,
   api_id         VARCHAR(64)  NOT NULL,

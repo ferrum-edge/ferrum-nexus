@@ -103,7 +103,10 @@ describe('catalog browsing', () => {
     expect(screen.getByText('No description provided.')).toBeInTheDocument();
     expect(screen.getByText('Open')).toBeInTheDocument();
     expect(screen.getByText('Open access')).toBeInTheDocument();
-    expect(screen.getByText('Internal')).toBeInTheDocument();
+    // `internal` is unlisted, not secret, and the badge says the true thing:
+    // calling it "Internal" was what made providers reach for it when they
+    // wanted "Private" (issue #288).
+    expect(screen.getByText('Unlisted')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Next page' })).toBeDisabled();
 
     vi.mocked(catalogApi.list).mockResolvedValue({ items: [], total: 0 });

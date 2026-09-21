@@ -23,6 +23,7 @@ describe('buildout schema baseline', () => {
         'access_requests',
         'api_plugins',
         'api_specs',
+        'api_viewers',
         'apis',
         'app_settings',
         'audit_logs',
