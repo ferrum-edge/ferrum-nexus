@@ -45,7 +45,6 @@ npm run lint                             # NOTE: this is just `tsc --noEmit` —
 npm test                                 # all workspaces (shared first)
 npm test --workspace server              # backend only (node --test via tsx)
 npm test --workspace web                 # frontend only (vitest)
-./e2e/run.sh                             # acceptance: packaged image vs a real pinned Edge
 npm run format / format:check            # Prettier
 ```
 
@@ -58,8 +57,6 @@ cd server && npx tsx --test src/path/to/file.test.ts
 Backend tests boot the full Fastify app against in-memory SQLite plus a mock Ferrum Edge Admin API ([server/src/test/mock-ferrum-edge.ts](server/src/test/mock-ferrum-edge.ts)); use `buildTestApp()` from [server/src/test/helpers.ts](server/src/test/helpers.ts).
 
 **Cross-adapter smoke tests** ([server/src/test/smoke.test.ts](server/src/test/smoke.test.ts)) run SQLite by default and opt into Postgres/MySQL/Mongo via `NEXUS_TEST_POSTGRES_URL`, `NEXUS_TEST_MYSQL_URL`, `NEXUS_TEST_MONGO_URL` (throwaway databases/schemas are created and dropped per run). Set those — e.g. against disposable Docker containers — whenever you change anything under `server/src/db/`.
-
-**Acceptance suite** ([e2e/](e2e/)) runs the **packaged container image** against a real, digest-pinned Ferrum Edge release, PostgreSQL, a deterministic upstream and a real SMTP sink — with a browser journey and data-plane assertions made through the gateway's listener rather than its Admin API. `./e2e/run.sh` brings the stack up, runs it and tears it down; it is a required CI job. Run it for anything that changes what Nexus writes to Edge, the auth/credential contract, or the container image.
 
 ## Architecture rules that affect every change
 

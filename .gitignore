@@ -14,6 +14,3 @@ data/
 web/dist/
 server/dist/
 shared/dist/
-
-# Acceptance-suite artifacts: container logs, Playwright traces and screenshots.
-e2e/artifacts/
