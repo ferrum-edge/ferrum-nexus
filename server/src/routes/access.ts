@@ -22,6 +22,7 @@ import {
   type RevokeGrantResponse,
 } from '@ferrum-nexus/shared';
 
+import type { ApplicationsService } from '../applications/service.js';
 import type { AccessService } from '../access/service.js';
 import { clientIp, requireAuth, requireAuthHook } from '../middleware/auth-plugin.js';
 import { parseOrThrow } from '../middleware/error-handler.js';
@@ -36,11 +37,18 @@ import {
 /** Services these route plugins need. */
 export interface AccessRoutesOptions {
   access: AccessService;
+  /** Resolves and authorizes the application an access request is for. */
+  applications: ApplicationsService;
 }
 
 const createBody = z.object({
   api_id: z.string().trim().min(1).max(64),
   justification: z.string().trim().min(1).max(MAX_JUSTIFICATION_LENGTH),
+  /**
+   * The identity the access is for. Absent or `null` is the account itself,
+   * which is what every request made before applications existed is.
+   */
+  application_id: z.string().trim().min(1).max(64).nullish(),
 });
 
 const decideBody = z.object({ decision_note: z.string().trim().max(2_000).nullish() });
@@ -75,7 +83,7 @@ export const accessRequestRoutes: FastifyPluginAsync<AccessRoutesOptions> = asyn
   app,
   options,
 ) => {
-  const { access } = options;
+  const { access, applications } = options;
   app.addHook('onRequest', requireAuthHook);
 
   app.get('/', async (request): Promise<ListAccessRequestsResponse> => {
@@ -99,10 +107,15 @@ export const accessRequestRoutes: FastifyPluginAsync<AccessRoutesOptions> = asyn
     async (request, reply): Promise<CreateAccessRequestResponse> => {
       const { user } = requireAuth(request);
       const input = parseOrThrow(createBody, request.body);
+      // Resolved before anything else: this is what checks the caller owns the
+      // application and that it is active. `null` passes straight through as
+      // the account's own identity.
+      const application = await applications.resolveForActor(user, input.application_id ?? null);
       const created = await access.request(
         user,
         input.api_id,
         input.justification,
+        application?.id ?? null,
         clientIp(request),
       );
       reply.status(201);

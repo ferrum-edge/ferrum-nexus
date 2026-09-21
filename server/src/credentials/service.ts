@@ -323,6 +323,12 @@ export interface GatewayTeardown {
 export interface IssueForConsumerInput {
   /** The account the credential row is attributed to. */
   user: UserRecord;
+  /**
+   * The application this credential authenticates as, or `null`/omitted for
+   * the account itself. Must match the identity `consumerId` names — the
+   * caller has already resolved both together.
+   */
+  applicationId?: Uuid | null;
   /** Edge consumer the entry is appended to. */
   consumerId: string;
   /** That consumer's username — what a `basicauth` or `jwt` client must send. */
@@ -348,13 +354,35 @@ export interface CredentialsService {
   list(
     actor: UserRecord,
     targetUserId?: Uuid,
-    filter?: { status?: CredentialMetadata['status'] },
+    filter?: {
+      status?: CredentialMetadata['status'];
+      /**
+       * Identity scope. `null` selects the account's own credentials,
+       * an id selects that application's, and omitting it lists every
+       * identity the account holds.
+       */
+      application_id?: Uuid | null;
+    },
     options?: ListOptions,
   ): Promise<Paginated<CredentialRecord>>;
   /** Mint a credential on the caller's own consumer. Show-once. */
+  /**
+   * Mint a credential on one of the caller's identities. Show-once.
+   *
+   * `application_id` selects it: absent or `null` is the account's own
+   * consumer — the behaviour every credential issued before applications
+   * existed has — and an id is that application's. The caller must already
+   * have resolved the application through
+   * `ApplicationsService.resolveForActor`, which is what checks ownership and
+   * that it is active.
+   */
   issue(
     user: UserRecord,
-    input: { credential_type: CredentialType; label?: string | null },
+    input: {
+      credential_type: CredentialType;
+      label?: string | null;
+      application_id?: Uuid | null;
+    },
     ip?: string | null,
   ): Promise<IssueCredentialResponse>;
   /** Append-then-delete rotation of one credential. Show-once. */
@@ -1302,6 +1330,13 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
   async function appendCredential(input: {
     /** The account the row is attributed to and that the secret belongs to. */
     ownerId: Uuid;
+    /**
+     * The application the credential authenticates as, or `null` for the
+     * account itself. It follows the consumer the entry is appended to, and is
+     * what a later rotate, revoke or teardown reads to know which identity the
+     * material belongs to.
+     */
+    applicationId?: Uuid | null;
     /** Who Edge records as the subject of the write — an admin, when acting. */
     actorId: Uuid;
     /** The actor's role, for the audit row a failed compensation writes. */
@@ -1346,6 +1381,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     try {
       const credential = await store.credentials.create({
         user_id: input.ownerId,
+        application_id: input.applicationId ?? null,
         ferrum_consumer_id: input.consumerId,
         credential_type: input.type,
         // Edge assigns credential entries no id of their own; the addressable
@@ -1419,8 +1455,11 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         actor: { id: input.user.id, role: input.user.role },
         ip: input.ip ?? null,
       });
-      // The cap is a portal policy over the account's own credentials, so it
-      // is counted on the mirror; the gateway enforces its own on the append.
+      // The cap is a portal policy over the *identity's* credentials, so it is
+      // counted on the mirror for this consumer; the gateway enforces its own
+      // on the append. Per identity rather than per account, because each
+      // application's consumer has its own Edge credential array and the cap
+      // is a statement about that array.
       if (input.skipCap !== true && rows.length >= cap) {
         throw conflict(
           `You already hold ${rows.length} live ${input.credentialType} credentials (the gateway allows ${cap}); revoke or rotate one first`,
@@ -1429,6 +1468,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       }
       return appendCredential({
         ownerId: input.user.id,
+        applicationId: input.applicationId ?? null,
         actorId: input.user.id,
         actorRole: input.user.role,
         consumerId: input.consumerId,
@@ -1571,50 +1611,66 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     },
 
     async restoreGatewayAccess(userId, subject): Promise<void> {
-      const consumer = await provisioner.findConsumer(userId);
-      if (!consumer) {
+      // Every identity the account still has a mapping for, not only its
+      // canonical one: an application's grants live on its own consumer, and
+      // re-enabling an account that restored only the canonical consumer would
+      // leave every application it owns silently without access (issue #289).
+      const consumers = await provisioner.listConsumers(userId);
+      if (consumers.length === 0) {
         if ((await store.grants.listActiveByUser(userId)).length > 0) {
-          throw edgeError('Active grants have no canonical gateway consumer mapping');
+          throw edgeError('Active grants have no gateway consumer mapping');
         }
         // A provider with only disposable test identities needs no canonical
         // consumer, and re-enabling must not recreate those identities.
         return;
       }
-      await edge.serializePerKey(consumer.ferrum_consumer_id, async () => {
-        const owner = await store.users.findById(userId);
-        if (!owner || owner.status !== 'active') {
-          throw userDisabled('This account is no longer active; gateway access was not restored');
-        }
-        // Read grants inside the same consumer section as approvals,
-        // revocations, and teardown. A revocation that claims a grant after
-        // this read removes its group after this write; one that won before
-        // the read is never replayed here.
-        const grants = await store.grants.listActiveByUser(userId);
-        if (grants.length === 0) return;
-        const live = await edge.consumers.get(consumer.ferrum_consumer_id);
-        if (!live) throw edgeError('The gateway consumer for this account no longer exists');
-        const groups = [
-          ...new Set([...(live.acl_groups ?? []), ...grants.map((grant) => grant.acl_group)]),
-        ];
-        await edge.consumers.replace(
-          live.id,
-          {
-            id: live.id,
-            username: live.username,
-            custom_id: live.custom_id ?? null,
-            credentials: live.credentials,
-            acl_groups: groups,
-          },
-          subject,
-        );
-      });
+      for (const consumer of consumers) {
+        await edge.serializePerKey(consumer.ferrum_consumer_id, async () => {
+          const owner = await store.users.findById(userId);
+          if (!owner || owner.status !== 'active') {
+            throw userDisabled('This account is no longer active; gateway access was not restored');
+          }
+          // Read grants inside the same consumer section as approvals,
+          // revocations, and teardown. A revocation that claims a grant after
+          // this read removes its group after this write; one that won before
+          // the read is never replayed here. Scoped to *this* identity: a
+          // replay that used the account's whole grant list would hand every
+          // application every API the account can reach.
+          const grants = await store.grants.listActiveByUser(userId, consumer.application_id);
+          if (grants.length === 0) return;
+          const live = await edge.consumers.get(consumer.ferrum_consumer_id);
+          if (!live) throw edgeError('The gateway consumer for this identity no longer exists');
+          const groups = [
+            ...new Set([...(live.acl_groups ?? []), ...grants.map((grant) => grant.acl_group)]),
+          ];
+          await edge.consumers.replace(
+            live.id,
+            {
+              id: live.id,
+              username: live.username,
+              custom_id: live.custom_id ?? null,
+              credentials: live.credentials,
+              acl_groups: groups,
+            },
+            subject,
+          );
+        });
+      }
     },
 
     async disableGatewayAccess(userId, subject): Promise<GatewayTeardown> {
-      const consumer = await provisioner.findConsumer(userId);
-      const consumerId = consumer?.ferrum_consumer_id ?? null;
+      // Every identity the account *durably* holds: its canonical consumer and
+      // one per application it owns. These are stripped and kept, not deleted —
+      // an application is a lasting identity of the account, not a disposable
+      // test consumer, and re-enabling has to be able to give each one its own
+      // approvals back (issue #289).
+      const durableConsumers = await provisioner.listConsumers(userId);
+      const durableIds = new Set(durableConsumers.map((row) => row.ferrum_consumer_id));
+      const canonical = durableConsumers.find((row) => row.application_id === null) ?? null;
+      const consumerId = canonical?.ferrum_consumer_id ?? null;
       let revoked = 0;
       const deleted: string[] = [];
+      const removedGroups: string[] = [];
 
       // Everything else the account can still authenticate as. A provider's
       // `nexus-test-<apiId>` consumer is a *separate* Edge identity carrying a
@@ -1640,9 +1696,9 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // credential rows on and nothing else records. Reading live rows is also
       // what makes a retry skip the identities an earlier attempt finished —
       // their rows are `revoked`, so they never come back into this list.
-      const foreign = await foreignConsumerIds(userId, consumerId);
+      const foreign = await foreignConsumerIds(userId, durableIds);
 
-      if (consumerId === null && foreign.length === 0) {
+      if (durableConsumers.length === 0 && foreign.length === 0) {
         return {
           consumer_id: null,
           revoked_credentials: revoked,
@@ -1673,57 +1729,55 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         deleted.push(foreignId);
       }
 
-      if (consumerId === null) {
-        return {
-          consumer_id: null,
-          revoked_credentials: revoked,
-          removed_groups: [],
-          deleted_consumers: deleted,
-        };
+      // One serialised block per durable identity — and *only* one each,
+      // because `serializePerKey` is a queue rather than a re-entrant lock:
+      // calling `provisioner.mutateAclGroups` from in here would wait on the
+      // block it is already inside. Sequential, so a failure leaves the
+      // identities behind it for the retry.
+      for (const identity of durableConsumers) {
+        const id = identity.ferrum_consumer_id;
+        await edge.serializePerKey(id, async () => {
+          await assertStillDisabled(userId);
+          const live = await edge.consumers.get(id);
+          removedGroups.push(...(live?.acl_groups ?? []));
+
+          if (live) {
+            // Groups first, rebuilt from the GET so redacted credential
+            // placeholders round-trip (§4.4) and nothing is dropped early…
+            await edge.consumers.replace(
+              id,
+              {
+                id: live.id,
+                username: live.username,
+                custom_id: live.custom_id ?? null,
+                credentials: live.credentials,
+                acl_groups: [],
+              },
+              subject,
+            );
+            // …then every credential type, whether or not the read projection
+            // could show it — `basicauth` never appears in a GET. The
+            // whole-type delete is idempotent, so an absent type costs one 204.
+            for (const type of CREDENTIAL_TYPES) {
+              await edge.consumers.deleteCredentialType(id, type, subject);
+            }
+          }
+
+          // The mirror follows the gateway, including when the consumer was
+          // already gone: those rows describe credentials that cannot work.
+          revoked += await revokeRowsFor(id);
+        });
       }
 
-      // One serialised block, like every other consumer mutation — and *only*
-      // one, because `serializePerKey` is a queue rather than a re-entrant
-      // lock: calling `provisioner.mutateAclGroups` from in here would wait on
-      // the block it is already inside.
-      return edge.serializePerKey(consumerId, async () => {
-        await assertStillDisabled(userId);
-        const live = await edge.consumers.get(consumerId);
-        const removedGroups = [...(live?.acl_groups ?? [])];
-
-        if (live) {
-          // Groups first, rebuilt from the GET so redacted credential
-          // placeholders round-trip (§4.4) and nothing is dropped early…
-          await edge.consumers.replace(
-            consumerId,
-            {
-              id: live.id,
-              username: live.username,
-              custom_id: live.custom_id ?? null,
-              credentials: live.credentials,
-              acl_groups: [],
-            },
-            subject,
-          );
-          // …then every credential type, whether or not the read projection
-          // could show it — `basicauth` never appears in a GET. The whole-type
-          // delete is idempotent, so an absent type costs one 204.
-          for (const type of CREDENTIAL_TYPES) {
-            await edge.consumers.deleteCredentialType(consumerId, type, subject);
-          }
-        }
-
-        // The mirror follows the gateway, including when the consumer was
-        // already gone: those rows describe credentials that cannot work.
-        revoked += await revokeRowsFor(consumerId);
-
-        return {
-          consumer_id: consumerId,
-          revoked_credentials: revoked,
-          removed_groups: removedGroups,
-          deleted_consumers: deleted,
-        };
-      });
+      return {
+        // The canonical consumer, for the callers that report one. The
+        // application identities are counted into the numbers above and named
+        // by the audit row the caller writes.
+        consumer_id: consumerId,
+        revoked_credentials: revoked,
+        removed_groups: [...new Set(removedGroups)],
+        deleted_consumers: deleted,
+      };
     },
 
     async list(actor, targetUserId, filter = {}, options): Promise<Paginated<CredentialRecord>> {
@@ -1734,6 +1788,9 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       const storeFilter: CredentialFilter = {
         user_id: userId,
         ...(filter.status !== undefined ? { status: filter.status } : {}),
+        // `null` is a value here, not "absent": it selects the account's own
+        // credentials. `undefined` lists every identity's.
+        ...(filter.application_id !== undefined ? { application_id: filter.application_id } : {}),
       };
       return store.credentials.list(storeFilter, options);
     },
@@ -1742,10 +1799,17 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       if (!(CREDENTIAL_TYPES as readonly string[]).includes(input.credential_type)) {
         throw validationFailed(`Unsupported credential type '${input.credential_type}'`);
       }
-      const consumer = await provisioner.ensureConsumer(user);
+      // The identity the caller asked for. `null` is the account's own
+      // consumer — unchanged, and what every credential issued before
+      // applications existed hangs off. An application id gets that
+      // application's `nexus-app-<id>` consumer, so the secret can only reach
+      // the APIs *that* identity has been approved for.
+      const applicationId = input.application_id ?? null;
+      const consumer = await provisioner.ensureConsumer(user, applicationId);
 
       const { credential, secret } = await issueForConsumer({
         user,
+        applicationId,
         consumerId: consumer.ferrum_consumer_id,
         consumerUsername: consumer.ferrum_username,
         credentialType: input.credential_type,
@@ -1760,6 +1824,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         {
           credential_type: credential.credential_type,
           consumer_id: consumer.ferrum_consumer_id,
+          application_id: applicationId,
           last4: credential.last4,
         },
         ip,
@@ -1868,6 +1933,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           // the replacement on a consumer the owner cannot list it against, and
           // the owner's own `DELETE` of it would come back 403.
           ownerId: current.user_id,
+          // …and to whichever identity it belonged to. A rotation replaces one
+          // credential on one consumer; moving it between identities would
+          // silently change what the new secret can reach.
+          applicationId: current.application_id,
           // The admin is still the actor: theirs is the id Edge records as the
           // write's subject, and the one the Nexus audit row names.
           actorId: user.id,
@@ -2223,7 +2292,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * for it. Registered identities are torn down — and their rows revoked —
    * before this is read, so they do not reappear here.
    */
-  async function foreignConsumerIds(userId: Uuid, canonicalId: string | null): Promise<string[]> {
+  async function foreignConsumerIds(userId: Uuid, durable: Set<string>): Promise<string[]> {
     const seen = new Set<string>();
     for (const status of LIVE_STATUSES) {
       let offset = 0;
@@ -2233,7 +2302,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           { limit: MAX_PAGE_SIZE, offset },
         );
         for (const row of page.items) {
-          if (row.ferrum_consumer_id !== canonicalId) seen.add(row.ferrum_consumer_id);
+          if (!durable.has(row.ferrum_consumer_id)) seen.add(row.ferrum_consumer_id);
         }
         offset += page.items.length;
         if (page.items.length === 0 || offset >= page.total) break;

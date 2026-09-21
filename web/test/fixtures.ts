@@ -82,6 +82,7 @@ export const REQUEST: AccessRequest = {
   id: 'request-1',
   api_id: API.id,
   user_id: 'user-1',
+  application_id: null,
   justification: 'Reconcile invoices',
   status: 'pending',
   decided_by: null,
@@ -95,6 +96,7 @@ export const GRANT: Grant = {
   id: 'grant-1',
   api_id: API.id,
   user_id: 'user-1',
+  application_id: null,
   access_request_id: REQUEST.id,
   acl_group: 'nexus:api:api-1:approved',
   status: 'active',
@@ -109,6 +111,7 @@ export const GRANT: Grant = {
 export const CREDENTIAL: CredentialMetadata = {
   id: 'credential-1',
   user_id: 'user-1',
+  application_id: null,
   ferrum_consumer_id: 'consumer-1',
   credential_type: 'keyauth',
   ferrum_credential_id: '0',

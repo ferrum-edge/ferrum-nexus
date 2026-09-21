@@ -501,22 +501,52 @@ they are looked up with `GET /plugins/config` filtered by `proxy_id` whenever
 they need changing, which keeps the schema free of ids whose lifecycle Nexus
 does not own and reconciles automatically if an operator recreates one by hand.
 
-### 5.4 One consumer per user per namespace
+### 5.4 One consumer per identity per namespace
 
-Each Nexus account maps to exactly one Edge consumer in the configured
-namespace:
+An **identity** is either a Nexus account itself or one of its applications,
+and each maps to exactly one Edge consumer in the configured namespace:
 
-- `username` = `nexus-user-<user_id>` (`consumerUsernameForUser`). Never derived
+- `username` = `nexus-user-<user_id>` (`consumerUsernameForUser`) for an
+  account, or `nexus-app-<application_id>`
+  (`consumerUsernameForApplication`) for one of its applications. Never derived
   from anything user-editable — `access_control` matches usernames
-  byte-for-byte.
-- `custom_id` = the raw Nexus user id, giving operators a reverse lookup from
-  the gateway back into the portal.
+  byte-for-byte, so an identity must not move when somebody renames something.
+- `custom_id` = the raw Nexus id the username names — the user for an account
+  identity, the application for an application one — giving operators a reverse
+  lookup from the gateway back into the portal.
 - New `id` values are UUIDv8s derived from SHA-256 of the JSON array
   `["ferrum-nexus-consumer-v1", namespace, username]` (first 128 bits, with UUID
   version/variant bits set). The `consumers` table caches the id, including
   original Edge-assigned ids adopted from older deployments.
 
-The provisioner is lazy: the consumer is created the first time a user is
+#### Why applications are separate consumers
+
+ACL groups live on the consumer, so an account with one consumer has **one
+permission set** however many credentials it holds: every key inherits every
+group. A developer running several integrations could therefore not give each
+one its own approved APIs — credential labels are descriptive and change
+nothing about what a secret can reach.
+
+An application is a separate identity all the way down: its own consumer, its
+own access requests and grants, its own credentials. Two applications of one
+owner approved for different APIs genuinely cannot call each other's, because
+Edge's ACL matching is what enforces it (issue #289).
+
+The `consumers` row carries the owning `user_id` either way, with a nullable
+`application_id`, so every teardown, repair and audit that walks an account's
+consumers finds its applications' too. `account disable` strips **every** one
+of them — an application identity left up is an offboarding only half done —
+and keeps the rows, so re-enabling can replay each identity's own grants. A
+`nexus-test-<api_id>` consumer is different: it is disposable, so teardown
+deletes it outright.
+
+Account-scoped access is unchanged and is the default. Every scoped row carries
+a nullable `application_id` where `NULL` means "the account itself", which is
+what every row written before applications existed is. Nothing migrates on its
+own, and a deployed integration using an account credential goes on working
+exactly as it did.
+
+The provisioner is lazy: the consumer is created the first time an identity is
 approved for an API _or_ issues a credential, whichever comes first. If a
 consumer exists on the gateway without a Nexus row — a database restore, say —
 `ensureConsumer` reads the derived id directly and re-caches it. If that id is

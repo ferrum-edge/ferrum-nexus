@@ -1,5 +1,6 @@
 /**
- * The Nexus-user → Ferrum-consumer mapping, and the only place it is created.
+ * The Nexus-identity → Ferrum-consumer mapping, and the only place it is
+ * created.
  *
  * Two services need a user's Edge consumer: **credentials** (to hang API keys
  * off it) and **access** (to add and remove the `nexus:api:<id>:approved` ACL
@@ -9,11 +10,23 @@
  *
  * ## Naming and identity
  *
- * - `username` is `nexus-user-<user_id>` ({@link consumerUsernameForUser}).
- *   `access_control` matches usernames byte-for-byte, so it is never derived
- *   from anything user-editable.
- * - `custom_id` is the raw Nexus user id, giving operators a reverse lookup
- *   from the gateway back into the portal.
+ * - `username` is `nexus-user-<user_id>` ({@link consumerUsernameForUser}) for
+ *   an account's own identity, and `nexus-app-<application_id>`
+ *   ({@link consumerUsernameForApplication}) for one of its applications.
+ *   `access_control` matches usernames byte-for-byte, so neither is ever
+ *   derived from anything user-editable.
+ * - `custom_id` is the raw Nexus id the username names, giving operators a
+ *   reverse lookup from the gateway back into the portal.
+ *
+ * ## Why an application is a *separate consumer*
+ *
+ * It is what makes two applications of one owner genuinely separate rather
+ * than separate-looking. ACL groups live on the consumer, so an account with
+ * one consumer has one permission set however many credentials it holds —
+ * every key inherits every group. Giving each application its own identity
+ * puts the boundary where Edge enforces it (issue #289). `user_id` on the row
+ * is still the owner, so every teardown, repair and audit that walks an
+ * account's consumers finds its applications' too.
  * - Nexus derives the consumer `id` and caches it in the `consumers` table so
  *   the hot paths never scan `GET /consumers`.
  *
@@ -32,7 +45,12 @@
  * Nexus instance is ordered against this one only if it locks the same string.
  */
 
-import { consumerUsernameForUser, type Uuid } from '@ferrum-nexus/shared';
+import {
+  MAX_PAGE_SIZE,
+  consumerUsernameForApplication,
+  consumerUsernameForUser,
+  type Uuid,
+} from '@ferrum-nexus/shared';
 
 import type { NexusConfig } from '../config/index.js';
 import type { ConsumerRecord, NexusStore, UserRecord } from '../db/store.js';
@@ -43,12 +61,25 @@ import { edgeError, userDisabled } from '../lib/errors.js';
 /** Provisioning and ACL-group maintenance for Edge consumers. */
 export interface ConsumerProvisioner {
   /**
-   * The user's Edge consumer, creating it (and its cached row) when this is the
-   * first time Nexus has needed it.
+   * The identity's Edge consumer, creating it (and its cached row) when this
+   * is the first time Nexus has needed it.
+   *
+   * `applicationId` selects the identity: `null` or omitted is the account's
+   * own canonical consumer, an id is that application's. The application must
+   * already exist and be owned by `user` — this does not check, because every
+   * caller has already loaded it to decide it may act.
    */
-  ensureConsumer(user: Pick<UserRecord, 'id'>): Promise<ConsumerRecord>;
-  /** The cached mapping for a user, or `null` when they have no consumer yet. */
-  findConsumer(userId: Uuid): Promise<ConsumerRecord | null>;
+  ensureConsumer(
+    user: Pick<UserRecord, 'id'>,
+    applicationId?: Uuid | null,
+  ): Promise<ConsumerRecord>;
+  /**
+   * The cached mapping for one identity, or `null` when it has no consumer
+   * yet. Same `applicationId` convention as {@link ensureConsumer}.
+   */
+  findConsumer(userId: Uuid, applicationId?: Uuid | null): Promise<ConsumerRecord | null>;
+  /** Every consumer this account owns, its own and its applications'. */
+  listConsumers(userId: Uuid): Promise<ConsumerRecord[]>;
   /**
    * Read-modify-write the consumer's `acl_groups`, serialised per consumer.
    *
@@ -96,26 +127,54 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
   const namespace = config.edge.namespace;
 
   return {
-    async findConsumer(userId): Promise<ConsumerRecord | null> {
-      return store.consumers.findByUserAndNamespace(userId, namespace);
+    async findConsumer(userId, applicationId = null): Promise<ConsumerRecord | null> {
+      return store.consumers.findByUserAndNamespace(userId, namespace, applicationId);
     },
 
-    async ensureConsumer(user): Promise<ConsumerRecord> {
+    async listConsumers(userId): Promise<ConsumerRecord[]> {
+      const rows: ConsumerRecord[] = [];
+      let offset = 0;
+      for (;;) {
+        const page = await store.consumers.list(
+          { user_id: userId, namespace },
+          { limit: MAX_PAGE_SIZE, offset },
+        );
+        rows.push(...page.items);
+        offset += page.items.length;
+        if (page.items.length === 0 || offset >= page.total) return rows;
+      }
+    },
+
+    async ensureConsumer(user, applicationId = null): Promise<ConsumerRecord> {
       // The id does not exist yet. Use a namespace/name key until the remote
       // identity and local mapping are both durable, then release it before
       // callers take the canonical consumer-id mutation key.
-      const username = consumerUsernameForUser(user.id);
+      //
+      // The username is derived from the *identity*, not from the account: an
+      // application's consumer is `nexus-app-<application_id>`, and
+      // `custom_id` names the same id, so an operator reading the gateway can
+      // tell an application identity from an account one without the portal.
+      const username =
+        applicationId === null
+          ? consumerUsernameForUser(user.id)
+          : consumerUsernameForApplication(applicationId);
+      const customId = applicationId ?? user.id;
       return edge.serializePerKey(canonicalConsumerLockKey(namespace, username), async () => {
-        const cached = await store.consumers.findByUserAndNamespace(user.id, namespace);
+        const cached = await store.consumers.findByUserAndNamespace(
+          user.id,
+          namespace,
+          applicationId,
+        );
         if (cached) return cached;
 
         const { consumer } = await edge.consumers.ensure(
-          { username, custom_id: user.id, acl_groups: [] },
+          { username, custom_id: customId, acl_groups: [] },
           user.id,
         );
 
         return store.consumers.create({
           user_id: user.id,
+          application_id: applicationId,
           namespace,
           ferrum_consumer_id: consumer.id,
           ferrum_username: consumer.username,

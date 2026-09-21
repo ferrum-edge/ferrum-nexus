@@ -56,6 +56,23 @@ export function consumerUsernameForUser(userId: string): string {
   return `${CONSUMER_USERNAME_PREFIX}${userId}`;
 }
 
+/** Prefix of the Edge consumer username used for an application identity. */
+export const APPLICATION_CONSUMER_USERNAME_PREFIX = 'nexus-app-';
+
+/**
+ * Username of the Ferrum consumer that *is* an application identity.
+ *
+ * Derived from the application id rather than its name for the same reason the
+ * account's is derived from the user id: `access_control` matches usernames
+ * byte-for-byte, so the identity must never move when somebody renames
+ * something.
+ *
+ * @example consumerUsernameForApplication('a-1') // 'nexus-app-a-1'
+ */
+export function consumerUsernameForApplication(applicationId: string): string {
+  return `${APPLICATION_CONSUMER_USERNAME_PREFIX}${applicationId}`;
+}
+
 /**
  * Username of the throwaway test consumer a provider may create for their API.
  *

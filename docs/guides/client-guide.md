@@ -170,29 +170,63 @@ does not block a new one. If the note is unclear, **message the provider**
 
 ---
 
+## Applications
+
+By default everything you do belongs to **your account**: you request access as
+yourself, and a credential you issue works for every API your account is
+approved for. That is simple, and it is the right answer while you have one
+integration.
+
+An **application** is a second identity you own, for when you have more than
+one. Each has its own approved APIs and its own credentials, so a credential
+issued to your billing worker can call only what the billing worker was
+approved for — not what your mobile app was. That boundary is real: it is
+enforced by the gateway, not by the portal hiding things.
+
+**Applications → New application**, then choose it when you request access and
+when you issue a credential.
+
+Two things worth knowing:
+
+- **A label is not an identity.** Naming a credential "production" changes
+  nothing about what it can call. The **Identity** field on the issue form is
+  the one that does.
+- **Disabling is not revoking.** Disabling an application stops it acquiring
+  _new_ access and new credentials; the credentials it already has go on
+  working. To stop them, delete the application — which takes its gateway
+  identity with it — or revoke its access.
+
+Your account's own access is unaffected by any of this, and nothing you already
+have changes when you create your first application.
+
+---
+
 ## Credentials
 
-**Credentials** is where you mint the secrets your code actually sends. They
-belong to your account, not to an individual API: one credential works for
-**every** API you are approved for that uses the matching authentication type.
+**Credentials** is where you mint the secrets your code actually sends. Each
+one belongs to **one identity** — your account, or one of your applications —
+and works for every API _that identity_ is approved for that uses the matching
+authentication type.
 
 ### Choosing a type
 
 Match the API's authentication method — the catalog page for each API says
 which one it uses:
 
-| API uses   | Issue this credential | What you send                                                   |
-| ---------- | --------------------- | --------------------------------------------------------------- |
-| API Key    | **keyauth**           | `X-API-Key: <key>`                                              |
-| HTTP Basic | **basicauth**         | Basic auth, username `nexus-user-<your id>`, password as issued |
-| JWT        | **jwt**               | `Authorization: Bearer <token you sign>`                        |
+| API uses   | Issue this credential | What you send                                                                                                                              |
+| ---------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| API Key    | **keyauth**           | `X-API-Key: <key>`                                                                                                                         |
+| HTTP Basic | **basicauth**         | Basic auth, username as shown when the credential was issued (`nexus-user-<your id>`, or `nexus-app-<application id>`), password as issued |
+| JWT        | **jwt**               | `Authorization: Bearer <token you sign>`                                                                                                   |
 
 If you are approved for two APIs that use different methods, issue one
 credential of each type.
 
 ### Issuing one
 
-**Credentials → Issue credential**, pick the type, give it a label you will
+**Credentials → Issue credential**, choose the **identity** (your account, or
+one of your applications — this is what decides which APIs the secret can
+call), pick the type, give it a label you will
 recognise later (`nightly-job`, `staging`, `laptop`), and confirm.
 
 > ### The secret is shown exactly once

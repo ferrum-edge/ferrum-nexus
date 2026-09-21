@@ -47,10 +47,16 @@ See [database setup and reset](docs/operations.md#buildout-schema-policy).
   templates, send mass emails, manage users / providers / APIs / grants,
   view a historical audit log, and use **god mode** for emergency revoke,
   spec deletion, user disablement, and direct platform messaging.
-- **Ferrum integration** uses one Ferrum consumer per Nexus client account
-  per namespace. Approvals add an `acl_group` (`nexus:api:<api_id>:approved`)
-  to the consumer; revocations remove it. Each requestable API gets an
-  `access_control` plugin that allows only that group.
+- **Ferrum integration** uses one Ferrum consumer per _identity_ per namespace:
+  a client account (`nexus-user-<id>`), or one of its **applications**
+  (`nexus-app-<id>`). Approvals add an `acl_group`
+  (`nexus:api:<api_id>:approved`) to that consumer; revocations remove it. Each
+  requestable API gets an `access_control` plugin that allows only that group.
+- **Applications** let one account keep its integrations apart: each has its own
+  approved APIs and its own credentials, and because the boundary is the Edge
+  consumer, two applications of one owner approved for different APIs cannot
+  call each other's. Account-scoped access is unchanged and remains the
+  default.
 
 ## Screenshots
 

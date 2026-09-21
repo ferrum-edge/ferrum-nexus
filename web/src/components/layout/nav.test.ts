@@ -13,7 +13,14 @@ describe('nav config', () => {
 
   it('gives clients the portal section only', () => {
     const paths = pathsFor('client');
-    expect(paths).toEqual(['/', '/catalog', '/credentials', '/messages', '/profile']);
+    expect(paths).toEqual([
+      '/',
+      '/catalog',
+      '/applications',
+      '/credentials',
+      '/messages',
+      '/profile',
+    ]);
     expect(paths).not.toContain('/apis');
     expect(paths.some((path) => path.startsWith('/admin'))).toBe(false);
   });
@@ -53,7 +60,7 @@ describe('nav config', () => {
   it('groups items by section', () => {
     expect(navItemsForSection('super_admin', 'provider').map((item) => item.to)).toEqual(['/apis']);
     expect(navItemsForSection('client', 'admin')).toEqual([]);
-    expect(navItemsForSection('client', 'main')).toHaveLength(5);
+    expect(navItemsForSection('client', 'main')).toHaveLength(6);
   });
 
   it('reports the role a nav path requires', () => {

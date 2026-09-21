@@ -111,6 +111,37 @@ CREATE INDEX IF NOT EXISTS ix_apis_created_at ON apis (created_at);
 -- Reconciliation counts the unrestored deployments on every pass.
 CREATE INDEX IF NOT EXISTS ix_apis_gateway_state ON apis (namespace, gateway_state);
 
+-- ── Applications (per-integration identities) ──────────────────────────────
+--
+-- A developer running several integrations needs each one approved for its own
+-- set of APIs — least privilege between their own systems, not just between
+-- accounts. An application is that boundary: it is owned by a portal account,
+-- it carries its own access requests, grants and credentials, and it gets its
+-- own Ferrum consumer (`nexus-app-<application_id>`) so the separation is
+-- enforced in Edge's identity/ACL mapping rather than in a credential label
+-- (issue #289).
+--
+-- Account-scoped access is unchanged and is still the default: every row that
+-- can be scoped carries a nullable `application_id`, and `NULL` means "the
+-- account itself", exactly as before this table existed. Nothing migrates on
+-- its own.
+CREATE TABLE IF NOT EXISTS applications (
+  id            TEXT PRIMARY KEY,
+  owner_user_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  name          TEXT NOT NULL,
+  description   TEXT,
+  -- `disabled` keeps the rows and the gateway identity but refuses new
+  -- requests, approvals and credentials; deleting the application is the
+  -- destructive option and takes its consumer with it.
+  status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_applications_owner_name
+  ON applications (owner_user_id, lower(name));
+CREATE INDEX IF NOT EXISTS ix_applications_owner ON applications (owner_user_id, created_at);
+
 -- ── API viewers (private documentation access) ─────────────────────────────
 --
 -- Who a provider has authorized to *read* a private API's catalog entry and
@@ -174,6 +205,8 @@ CREATE TABLE IF NOT EXISTS access_requests (
   id            TEXT PRIMARY KEY,
   api_id        TEXT NOT NULL REFERENCES apis (id) ON DELETE CASCADE,
   user_id       TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  -- The application this access is for, or NULL for the account itself.
+  application_id TEXT REFERENCES applications (id) ON DELETE CASCADE,
   justification TEXT NOT NULL,
   status        TEXT NOT NULL DEFAULT 'pending'
                   CHECK (status IN ('pending', 'approved', 'denied', 'revoked', 'cancelled')),
@@ -184,9 +217,15 @@ CREATE TABLE IF NOT EXISTS access_requests (
   updated_at    TEXT NOT NULL
 );
 
--- One open request per API/user pair.
-CREATE UNIQUE INDEX IF NOT EXISTS ux_access_requests_pending ON access_requests (api_id, user_id)
+-- One open request per API and identity. `COALESCE` is what keeps the
+-- account-scoped case unique: SQL treats NULLs as distinct, so a bare
+-- three-column index would let one account open any number of identical
+-- account-scoped requests.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_access_requests_pending
+  ON access_requests (api_id, user_id, COALESCE(application_id, ''))
   WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS ix_access_requests_application
+  ON access_requests (application_id, status);
 CREATE INDEX IF NOT EXISTS ix_access_requests_api_status ON access_requests (api_id, status);
 CREATE INDEX IF NOT EXISTS ix_access_requests_user ON access_requests (user_id, created_at);
 
@@ -195,6 +234,10 @@ CREATE TABLE IF NOT EXISTS grants (
   id                TEXT PRIMARY KEY,
   api_id            TEXT NOT NULL REFERENCES apis (id) ON DELETE CASCADE,
   user_id           TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  -- The identity this grant belongs to: an application, or NULL for the
+  -- account. It decides which Ferrum consumer carries the ACL group, which is
+  -- what makes two applications of one owner genuinely separate.
+  application_id    TEXT REFERENCES applications (id) ON DELETE CASCADE,
   access_request_id TEXT REFERENCES access_requests (id) ON DELETE SET NULL,
   acl_group         TEXT NOT NULL,
   status            TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
@@ -205,9 +248,12 @@ CREATE TABLE IF NOT EXISTS grants (
   updated_at        TEXT NOT NULL
 );
 
--- At most one active grant per API/user pair.
-CREATE UNIQUE INDEX IF NOT EXISTS ux_grants_active ON grants (api_id, user_id)
+-- At most one active grant per API and identity; see the note on
+-- `ux_access_requests_pending` for why `COALESCE` is there.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_grants_active
+  ON grants (api_id, user_id, COALESCE(application_id, ''))
   WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS ix_grants_application ON grants (application_id, status);
 CREATE INDEX IF NOT EXISTS ix_grants_user_status ON grants (user_id, status);
 CREATE INDEX IF NOT EXISTS ix_grants_api_status ON grants (api_id, status);
 
@@ -215,6 +261,11 @@ CREATE INDEX IF NOT EXISTS ix_grants_api_status ON grants (api_id, status);
 CREATE TABLE IF NOT EXISTS consumers (
   id                 TEXT PRIMARY KEY,
   user_id            TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  -- The application whose identity this consumer is, or NULL for the
+  -- account's canonical `nexus-user-<user_id>` consumer. `user_id` is the
+  -- owner either way, so every teardown and repair that walks an account's
+  -- consumers finds its applications' too.
+  application_id     TEXT REFERENCES applications (id) ON DELETE CASCADE,
   namespace          TEXT NOT NULL,
   ferrum_consumer_id TEXT NOT NULL,
   ferrum_username    TEXT NOT NULL,
@@ -222,7 +273,9 @@ CREATE TABLE IF NOT EXISTS consumers (
   updated_at         TEXT NOT NULL
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS ux_consumers_user_namespace ON consumers (user_id, namespace);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_consumers_user_namespace
+  ON consumers (user_id, namespace, COALESCE(application_id, ''));
+CREATE INDEX IF NOT EXISTS ix_consumers_application ON consumers (application_id);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_consumers_ferrum_id ON consumers (namespace, ferrum_consumer_id);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_consumers_username ON consumers (namespace, ferrum_username);
 
@@ -231,6 +284,10 @@ CREATE TABLE IF NOT EXISTS credential_metadata (
   id                   TEXT PRIMARY KEY,
   edge_ordinal         INTEGER,
   user_id              TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  -- The application this credential authenticates as, or NULL for the
+  -- account. Descriptive, unlike `label`: it names the identity the material
+  -- was appended to, and rotation and revocation follow it.
+  application_id       TEXT REFERENCES applications (id) ON DELETE CASCADE,
   ferrum_consumer_id   TEXT NOT NULL,
   credential_type      TEXT NOT NULL CHECK (credential_type IN ('keyauth', 'basicauth', 'jwt')),
   ferrum_credential_id TEXT NOT NULL,
@@ -249,6 +306,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_credentials_ordinal
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_credentials_fingerprint ON credential_metadata (fingerprint);
 CREATE INDEX IF NOT EXISTS ix_credentials_user_status ON credential_metadata (user_id, status);
+CREATE INDEX IF NOT EXISTS ix_credentials_application
+  ON credential_metadata (application_id, status);
 CREATE INDEX IF NOT EXISTS ix_credentials_consumer
   ON credential_metadata (ferrum_consumer_id, credential_type, created_at);
 

@@ -3,11 +3,13 @@ import { useState, type ReactElement, type ReactNode } from 'react';
 import {
   AUTH_PLUGIN_LABELS,
   MAX_JUSTIFICATION_LENGTH,
+  MAX_PAGE_SIZE,
   type CatalogDetailResponse,
 } from '@ferrum-nexus/shared';
 import { formatDateTime } from '../lib/format';
 import { useCatalogApi, useCatalogSpec } from '../hooks/useCatalog';
 import { useCancelAccessRequest, useCreateAccessRequest } from '../hooks/useAccessRequests';
+import { useApplications } from '../hooks/useApplications';
 import { useAuth } from '../stores/auth';
 import { useToast } from '../stores/toast';
 import { CallApiPanel } from '../components/catalog/CallApiPanel';
@@ -21,9 +23,13 @@ import { CopyField } from '../components/ui/CopyField';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Icon, type IconName } from '../components/ui/Icon';
 import { LabeledTextarea } from '../components/ui/Input';
+import { LabeledSelect } from '../components/ui/Select';
 import { LoadingPanel } from '../components/ui/Spinner';
 import { StatusPill } from '../components/ui/StatusPill';
 import { Tabs } from '../components/ui/Tabs';
+
+/** The "my account" option value; a select has no `null`. */
+const ACCOUNT_IDENTITY = 'account';
 
 /** One tile in the strip of runtime facts under the page header. */
 function GlanceTile({
@@ -166,6 +172,11 @@ function Documentation({ slug, hasSpec }: { slug: string; hasSpec: boolean }): R
 function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElement {
   const { api, my_request: myRequest, my_grant: myGrant } = detail;
   const [justification, setJustification] = useState('');
+  // Which identity the access is for. `ACCOUNT_IDENTITY` is the account
+  // itself, the default and what every request made before applications
+  // existed is (issue #289).
+  const [identity, setIdentity] = useState<string>(ACCOUNT_IDENTITY);
+  const applications = useApplications({ status: 'active', limit: MAX_PAGE_SIZE });
   const createRequest = useCreateAccessRequest();
   const cancelRequest = useCancelAccessRequest();
   const toast = useToast();
@@ -260,16 +271,40 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
               onSubmit={(event) => {
                 event.preventDefault();
                 createRequest.mutate(
-                  { api_id: api.id, justification: justification.trim() },
+                  {
+                    api_id: api.id,
+                    justification: justification.trim(),
+                    application_id: identity === ACCOUNT_IDENTITY ? null : identity,
+                  },
                   {
                     onSuccess: () => {
                       setJustification('');
+                      setIdentity(ACCOUNT_IDENTITY);
                       toast.success('Access request submitted');
                     },
                   },
                 );
               }}
             >
+              {(applications.data?.items.length ?? 0) > 0 ? (
+                <LabeledSelect<string>
+                  label="Requesting for"
+                  value={identity}
+                  onValueChange={setIdentity}
+                  hint={
+                    identity === ACCOUNT_IDENTITY
+                      ? 'Approval adds this API to your account, so every credential issued to your account can call it.'
+                      : 'Approval adds this API to that application only. Its credentials can call it; your account’s cannot.'
+                  }
+                  options={[
+                    { value: ACCOUNT_IDENTITY, label: 'My account' },
+                    ...(applications.data?.items ?? []).map((application) => ({
+                      value: application.id,
+                      label: application.name,
+                    })),
+                  ]}
+                />
+              ) : null}
               <LabeledTextarea
                 label="Why do you need access?"
                 required
@@ -324,6 +359,7 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
 }
 
 /** Catalog entry detail: overview, rendered documentation and access request. */
+
 export function CatalogDetailPage(): ReactElement {
   const params = useParams({ strict: false });
   const slug = params.slug ?? '';
