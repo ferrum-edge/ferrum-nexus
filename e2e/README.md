@@ -42,9 +42,15 @@ stack left up with `E2E_KEEP=1` works.
 
 `FERRUM_EDGE_IMAGE` names a release **by digest**. A suite whose whole claim is
 "the portal agrees with a real gateway" has to name the gateway build it agreed
-with, and a tag can be re-pointed where a digest cannot. Moving to a newer Edge
-is a deliberate edit to `e2e/.env.example` and the CI workflow, and the diff
-says which release the guarantee now covers.
+with, and a tag can be re-pointed where a digest cannot. `e2e/.env.example` is
+the only place it is written — the CI workflow does not repeat it, because
+`run.sh` generates `e2e/.env` from the example whenever none exists, and a CI
+checkout never has one. Moving to a newer Edge is a deliberate one-line edit
+there, and the diff says which release the guarantee now covers.
+
+A local `e2e/.env` is generated once and then kept, so it does not follow a
+later change to the pin: delete it (or update its `FERRUM_EDGE_IMAGE`) after
+pulling a new one.
 
 ## The two halves
 

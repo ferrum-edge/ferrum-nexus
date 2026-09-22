@@ -139,16 +139,22 @@ they reached the backend.
 E2E_KEEP=1 ./e2e/run.sh   # leave the stack up to poke at
 ```
 
-It is a **required CI job**, and it is the release validation path: a change
-that makes a real gateway refuse a request the portal says it approved is
-exactly what it exists to stop shipping. Run it locally for anything that
-changes what Nexus writes to Edge, the authentication or credential contract,
-or the container image.
+It runs as the `acceptance` job on every push and pull request, and it is the
+release validation path: a change that makes a real gateway refuse a request the
+portal says it approved is exactly what it exists to stop shipping. It is **not**
+one of the `main` ruleset's required checks, so a red `acceptance` does not block
+the merge button by itself — treat it as blocking anyway. Run it locally for
+anything that changes what Nexus writes to Edge, the authentication or
+credential contract, or the container image.
 
-The Edge release is pinned **by digest** in `e2e/.env.example` and the CI
-workflow. Moving to a newer one is a deliberate edit, and the diff says which
-release the guarantee now covers. See [e2e/README.md](../e2e/README.md) for
-what each half asserts and why.
+The Edge release is pinned **by digest** in one place, `e2e/.env.example`. The
+CI workflow does not repeat it: `run.sh` generates `e2e/.env` from that file
+when none exists, and CI always starts from a clean checkout. Moving to a newer
+Edge is therefore a one-line edit, and the diff says which release the
+guarantee now covers. A local `e2e/.env` is generated once and then kept, so
+after the pin moves, delete it (or edit its `FERRUM_EDGE_IMAGE`) to test the new
+release locally. See [e2e/README.md](../e2e/README.md) for what each half
+asserts and why.
 
 ## Adding things
 

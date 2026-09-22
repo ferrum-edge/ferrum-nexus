@@ -152,8 +152,11 @@ jobs:
   # mock gateway, which can only ever confirm that the portal sent the
   # configuration it meant to send (issue #285).
   #
-  # Required, not advisory: a change that makes a real gateway refuse a request
-  # the portal says it approved is exactly what this exists to stop shipping.
+  # Treat a failure as blocking: a change that makes a real gateway refuse a
+  # request the portal says it approved is exactly what this exists to stop
+  # shipping. (It is not in the `main` ruleset's required checks.) The Edge
+  # release is pinned only in e2e/.env.example, which run.sh copies into the
+  # e2e/.env a fresh checkout does not have.
   acceptance:
     runs-on: ubuntu-latest
     timeout-minutes: 30
