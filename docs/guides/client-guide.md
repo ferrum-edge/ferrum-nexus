@@ -220,7 +220,9 @@ which one it uses:
 | JWT        | **jwt**               | `Authorization: Bearer <token you sign>`                                                                                                   |
 
 If you are approved for two APIs that use different methods, issue one
-credential of each type.
+credential of each type. The method is the provider's choice, not yours — and it
+decides whether the provider's own server ever sees your credential, so read
+[Your token reaches the provider's backend](#jwt-jwt) before you use **jwt**.
 
 ### Issuing one
 
@@ -343,6 +345,22 @@ curl -sS https://gateway.example.com/nexus/billing/invoices \
 Keep the lifetime short and mint per request or per batch. Never ship the
 signing secret to a browser or a mobile app — anyone holding it can mint tokens
 as you.
+
+> ### Your token reaches the provider's backend
+>
+> The gateway strips an API key and a Basic password out of a request before it
+> forwards it upstream. It does **not** strip `Authorization: Bearer`. A JWT
+> usually carries claims the backend wants, and the gateway offers no option to
+> hide it — so the provider's server sees every token you sign.
+>
+> Your **signing secret is never forwarded**, so a provider cannot mint tokens
+> as you. It can replay a token you sent it until that token expires, and the
+> gateway does not cap `exp` — the lifetime is whatever you sign. That is one
+> more reason to keep it short. Put nothing in a custom claim you would not show
+> the provider.
+>
+> This applies only to **jwt**. If an API uses **keyauth** or **basicauth**,
+> that credential stops at the gateway and never reaches the provider.
 
 ### Reading the failure
 

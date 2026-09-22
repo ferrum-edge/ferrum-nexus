@@ -459,14 +459,31 @@ const CORS_PLUGIN = 'cors';
 /**
  * Config for an auth plugin.
  *
- * All three are sent as `{}`:
+ * All three are sent as `{}`, which takes Edge's defaults:
  * - `key_auth` defaults to `header:X-API-Key` + `hide_credentials: true`, which
  *   is exactly what the portal documents;
- * - `basic_auth` **must** be `{}` or `null` — a non-empty object is a 400
- *   (`ref-edge-admin.md` §8.7);
+ * - `basic_auth` accepts `hide_credentials` and nothing else, and it too
+ *   defaults to `true`, so `{}` (equivalently `null`) is the hiding form;
  * - `jwt_auth` defaults to `token_lookup: header:Authorization` and
  *   `consumer_claim_field: sub`, and Nexus hands the consumer username out as
  *   the `sub` value the client must send.
+ *
+ * **`jwt_auth` forwards the bearer token to the upstream, and Nexus cannot turn
+ * that off.** Of these three plugins only `key_auth` and `basic_auth` take
+ * `hide_credentials`; `jwt_auth`'s config is a closed eight-key set
+ * (`token_lookup`, `consumer_claim_field`, `require_exp`, `require_nbf`,
+ * `expected_issuer`, `expected_issuers`, `audiences`, `leeway_secs`) whose
+ * admission check refuses anything else, so sending `hide_credentials` here
+ * would 400 every `jwt_auth` publish rather than hide a token. The asymmetry is
+ * Edge's: a key and a Basic password are reusable indefinitely, whereas
+ * `require_exp` defaults to `true` so every accepted token carries an expiry —
+ * one the client chooses, since neither Edge nor Nexus caps it — and a backend
+ * offered JWT usually wants the claims. The client's signing secret is never
+ * forwarded — a provider cannot mint tokens as a client, only replay one it was
+ * handed, until that token's `exp`. What each credential type discloses to the
+ * provider is documented in `docs/api.md`, `docs/security.md` §5 and the client
+ * and provider guides, and pinned against the real gateway by
+ * `e2e/src/dataplane.test.ts`.
  */
 export function authPluginConfig(_plugin: AuthPluginType): EdgePluginSettings {
   return {};

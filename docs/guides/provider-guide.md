@@ -140,6 +140,13 @@ API Key is the usual default: simplest for callers, and the gateway hides the
 header from your upstream. Choose JWT when callers need short-lived
 credentials they mint themselves.
 
+> **With JWT, your upstream receives your callers' live tokens.** The gateway
+> strips an API key and a Basic password before forwarding, but it forwards
+> `Authorization: Bearer <token>` unchanged — Ferrum Edge has no option to hide
+> it, and a backend usually wants the claims. Each token is a working credential
+> for that caller until its `exp`, so treat the header as a secret: do not log
+> it, echo it, or pass it on to another service. Callers are told this too.
+
 > **HTTP Basic needs one piece of gateway configuration.** Publishing fails
 > unless the operator has set `FERRUM_BASIC_AUTH_HMAC_SECRET` (at least 32
 > bytes) on Ferrum Edge — it is the key the gateway hashes Basic passwords
