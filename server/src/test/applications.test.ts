@@ -314,6 +314,65 @@ describe('application-scoped identities', () => {
     assert.equal(row?.details.revoked_existing_access, false);
   });
 
+  it('refuses to approve a request whose application was disabled after it was filed', async () => {
+    // The documented contract is that a disabled application acquires no new
+    // access. A request filed while it was active is exactly the case a check
+    // at request time alone does not cover.
+    const requested = await harness.authed(owner, {
+      method: 'POST',
+      url: '/api/access-requests',
+      payload: { api_id: apiX, justification: 'Before the disable', application_id: appA },
+    });
+    assert.equal(requested.statusCode, 201, requested.body);
+    const requestId = requested.json<CreateAccessRequestResponse>().access_request.id;
+
+    const disabled = await harness.authed(owner, {
+      method: 'PATCH',
+      url: `/api/applications/${appA}`,
+      payload: { status: 'disabled' },
+    });
+    assert.equal(disabled.statusCode, 200, disabled.body);
+
+    const approved = await harness.authed(provider, {
+      method: 'POST',
+      url: `/api/access-requests/${requestId}/approve`,
+      payload: {},
+    });
+    assert.equal(approved.statusCode, 409, approved.body);
+    assert.deepEqual(groupsOf(appA), [], 'and nothing reached the gateway');
+    const still = await harness.store.accessRequests.findById(requestId);
+    assert.equal(still?.status, 'pending', 'the request is left for a decision once re-enabled');
+  });
+
+  it('refuses to rotate a disabled application’s credential into a new secret', async () => {
+    await grant(owner, apiX, appA);
+    const issued = await harness.authed(owner, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth', application_id: appA },
+    });
+    const credentialId = issued.json<IssueCredentialResponse>().credential.id;
+    await harness.authed(owner, {
+      method: 'PATCH',
+      url: `/api/applications/${appA}`,
+      payload: { status: 'disabled' },
+    });
+
+    const rotated = await harness.authed(owner, {
+      method: 'POST',
+      url: `/api/credentials/${credentialId}/rotate`,
+      payload: {},
+    });
+    assert.equal(rotated.statusCode, 409, rotated.body);
+
+    // Revoking is still allowed — it takes access away rather than adding it.
+    const revoked = await harness.authed(owner, {
+      method: 'DELETE',
+      url: `/api/credentials/${credentialId}`,
+    });
+    assert.equal(revoked.statusCode, 200, revoked.body);
+  });
+
   it('takes the gateway identity down when the application is deleted', async () => {
     await grant(owner, apiX, appA);
     await harness.authed(owner, {
@@ -388,6 +447,37 @@ describe('application-scoped identities', () => {
     assert.deepEqual(groupsOf(appA), [aclGroupForApi(apiX)]);
     assert.deepEqual(groupsOf(appB), [aclGroupForApi(apiY)]);
     assert.deepEqual(groupsOf(null), [aclGroupForApi(apiX)]);
+  });
+
+  it('refuses to report a re-enable as done when an identity with grants has no mapping', async () => {
+    await grant(owner, apiX, appA);
+    await grant(owner, apiY, null);
+    const superAdmin = await harness.loginUser('apps-super@example.test');
+    const disabled = await harness.authed(superAdmin, {
+      method: 'PATCH',
+      url: `/api/users/${owner.user.id}`,
+      payload: { status: 'disabled' },
+    });
+    assert.equal(disabled.statusCode, 200, disabled.body);
+    await harness.services.teardown.tick();
+
+    // The account's own mapping goes missing; its application keeps its own.
+    const canonical = await harness.store.consumers.findByUserAndNamespace(
+      owner.user.id,
+      NAMESPACE,
+    );
+    assert.ok(canonical);
+    await harness.store.consumers.delete(canonical.id);
+
+    // Restoring only the application and answering 200 would leave the
+    // account's own grant unrestored with nothing saying so.
+    const reenabled = await harness.authed(superAdmin, {
+      method: 'PATCH',
+      url: `/api/users/${owner.user.id}`,
+      payload: { status: 'active' },
+    });
+    assert.equal(reenabled.statusCode, 502, reenabled.body);
+    assert.match(reenabled.body, /no gateway consumer mapping/);
   });
 
   it('repairs an orphaned application consumer with that application’s grants', async () => {

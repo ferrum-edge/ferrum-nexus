@@ -843,6 +843,73 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     return (proxy.plugins ?? []).map((entry) => entry.plugin_config_id);
   }
 
+  /**
+   * The `PATCH` fields that only take effect through the gateway.
+   *
+   * Every one of them is applied by a write to the API's proxy or its plugin
+   * configs, and `update()` skips those writes when there is no proxy.
+   */
+  const GATEWAY_SETTING_FIELDS = [
+    'upstream_url',
+    'auth_plugin',
+    'requestable',
+    'rate_limit',
+    'cors',
+    'allowed_methods',
+    'timeouts',
+    'circuit_breaker',
+    'spec_enforcement',
+  ] as const;
+
+  /**
+   * Refuse a gateway setting change on an API that has no gateway deployment.
+   *
+   * `update()` applies these fields by writing to the proxy, and skips every
+   * proxy write when there is none — so the change was silently discarded and
+   * the request still answered `200`. That was a quirk of rare legacy rows
+   * until issue #284 made "deployment missing" a normal, user-visible state
+   * with a Restore button, where a provider fixing the API before restoring it
+   * is exactly who sends these. It also left a restore in flight building from
+   * settings the provider believed they had just changed.
+   *
+   * Refused rather than persisted to the row for the restore to pick up: several
+   * of these (an `auth_plugin` swap, an enforcement conversion) carry gateway
+   * side effects and confirmations that only make sense against a live proxy.
+   * Catalog-only fields — name, description, version, visibility, status —
+   * keep working, and a corrected specification can still be uploaded.
+   */
+  function assertGatewaySettingsWritable(api: ApiRecord, patch: UpdateApiInput): void {
+    if (api.ferrum_proxy_id !== null) return;
+    const fields = GATEWAY_SETTING_FIELDS.filter((field) => patch[field] !== undefined);
+    if (fields.length === 0) return;
+    throw conflict(
+      'This API has no gateway deployment. Restore it before changing its gateway settings.',
+      { api_id: api.id, fields, gateway_state: api.gateway_state },
+    );
+  }
+
+  /**
+   * Everything about an API row that shapes the proxy a restore builds.
+   *
+   * Compared before a restore commits: if any of it moved while the proxy was
+   * being built, the proxy describes an API that no longer exists.
+   */
+  function deploymentShape(api: ApiRecord): Record<string, unknown> {
+    return {
+      slug: api.slug,
+      namespace: api.namespace,
+      upstream_url: api.upstream_url,
+      auth_plugin: api.auth_plugin,
+      requestable: api.requestable,
+      rate_limit: api.rate_limit,
+      cors: api.cors,
+      allowed_methods: api.allowed_methods,
+      timeouts: api.timeouts,
+      circuit_breaker: api.circuit_breaker,
+      spec_enforcement: api.spec_enforcement,
+    };
+  }
+
   /** Unique slug, or `CONFLICT` when the provider's choice is taken. */
   async function resolveSlug(requested: string | undefined, name: string): Promise<string> {
     const slug = slugify(requested && requested.trim() !== '' ? requested : name);
@@ -1619,6 +1686,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     async update(actor, apiId, patch, ip = null): Promise<Api> {
       const initial = await loadApi(apiId);
       assertCanAdminister(actor, initial);
+      assertGatewaySettingsWritable(initial, patch);
       // The read, gateway mutations, rollback, and catalog write are one
       // canonical proxy operation. Helpers inside must not reacquire the key.
       const apply = async (): Promise<Api> => {
@@ -2542,6 +2610,27 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // gateway-then-store sequence here: a store failure must not leave a
           // live proxy the portal cannot address.
           const row = await store.transaction(async (tx) => {
+            // Re-read before committing. The restore holds a lease against
+            // other restores, but there is no proxy for anything else to lease
+            // on — that is the whole condition — so a specification uploaded
+            // while this one was building would otherwise be committed under a
+            // proxy still serving the previous document. A changed row means
+            // the proxy was built from something that is no longer true:
+            // refuse, let the compensation withdraw it, and let a retry build
+            // from what the row says now.
+            const latest = await tx.apis.findById(api.id);
+            if (!latest) throw notFound('API', api.id);
+            const latestSpec = await tx.apiSpecs.findCurrentByApi(api.id);
+            if (
+              latest.ferrum_proxy_id !== null ||
+              latestSpec?.id !== current.id ||
+              !isDeepStrictEqual(deploymentShape(latest), deploymentShape(api))
+            ) {
+              throw conflict(
+                'This API changed while its gateway deployment was being rebuilt; restore it again',
+                { api_id: api.id },
+              );
+            }
             const updated = await tx.apis.update(api.id, {
               ferrum_proxy_id: gatewayProxyId,
               gateway_state: 'deployed',

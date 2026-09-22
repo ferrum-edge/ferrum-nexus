@@ -164,9 +164,27 @@ export function CredentialsPage(): ReactElement {
   const [rotating, setRotating] = useState<CredentialMetadata | null>(null);
   const [revoking, setRevoking] = useState<CredentialMetadata | null>(null);
 
-  const applications = useApplications({ status: 'active', limit: MAX_PAGE_SIZE });
+  // Every application, not only the active ones: the table has to name the
+  // identity a credential belongs to even after its application is disabled,
+  // or a disabled application's credentials read as an anonymous "Application".
+  // Only the picker is narrowed to active ones, because a disabled application
+  // cannot be issued anything.
+  const applications = useApplications({ limit: MAX_PAGE_SIZE });
   const applicationNames = useMemo(
     () => new Map((applications.data?.items ?? []).map((item) => [item.id, item.name])),
+    [applications.data],
+  );
+  const activeApplications = useMemo(
+    () => (applications.data?.items ?? []).filter((item) => item.status === 'active'),
+    [applications.data],
+  );
+  const disabledApplications = useMemo(
+    () =>
+      new Set(
+        (applications.data?.items ?? [])
+          .filter((item) => item.status !== 'active')
+          .map((item) => item.id),
+      ),
     [applications.data],
   );
 
@@ -201,9 +219,14 @@ export function CredentialsPage(): ReactElement {
         // can reach — the thing `Label` cannot tell you.
         cell: ({ row }) =>
           row.original.application_id ? (
-            <Badge tone="accent">
-              {applicationNames.get(row.original.application_id) ?? 'Application'}
-            </Badge>
+            <span className="flex flex-wrap items-center gap-1.5">
+              <Badge tone="accent">
+                {applicationNames.get(row.original.application_id) ?? 'Application'}
+              </Badge>
+              {disabledApplications.has(row.original.application_id) ? (
+                <Badge tone="warning">Disabled</Badge>
+              ) : null}
+            </span>
           ) : (
             <span className="text-fg-muted">My account</span>
           ),
@@ -258,7 +281,7 @@ export function CredentialsPage(): ReactElement {
         ),
       },
     ],
-    [applicationNames],
+    [applicationNames, disabledApplications],
   );
 
   return (
@@ -364,7 +387,7 @@ export function CredentialsPage(): ReactElement {
             }
             options={[
               { value: ACCOUNT_IDENTITY, label: 'My account' },
-              ...(applications.data?.items ?? []).map((application) => ({
+              ...activeApplications.map((application) => ({
                 value: application.id,
                 label: application.name,
               })),

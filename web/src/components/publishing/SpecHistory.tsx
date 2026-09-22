@@ -7,6 +7,7 @@ import {
   useApiRevisions,
   useRollbackApiSpec,
 } from '../../hooks/useApis';
+import { useAuth } from '../../stores/auth';
 import { useToast } from '../../stores/toast';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
@@ -88,13 +89,27 @@ function RollbackDialog({
   );
 }
 
+/**
+ * Who published a revision, in words.
+ *
+ * The summary carries an account id, not a name, and an id is not something to
+ * show a person. "You" is the case that matters most — a provider reviewing
+ * their own history — and anybody else is described rather than identified.
+ */
+function authorLabel(createdBy: string | null, viewerId: string | undefined): string {
+  if (createdBy === null) return 'author not recorded';
+  return createdBy === viewerId ? 'by you' : 'by another account';
+}
+
 function RevisionRow({
   api,
   revision,
+  viewerId,
   onRollback,
 }: {
   api: Api;
   revision: ApiSpecSummary;
+  viewerId: string | undefined;
   onRollback: () => void;
 }): ReactElement {
   const [open, setOpen] = useState(false);
@@ -111,7 +126,7 @@ function RevisionRow({
           <span className="text-xs text-fg-muted">
             {/* Never attributed to somebody we cannot name: an unrecorded or
                 deleted author reads as unknown, not as the current user. */}
-            {revision.created_by ? `by ${revision.created_by}` : 'author not recorded'}
+            {authorLabel(revision.created_by, viewerId)}
           </span>
         </div>
         <div className="flex items-center gap-2">
@@ -148,6 +163,7 @@ export function SpecHistory({ api }: { api: Api }): ReactElement {
   const [page, setPage] = useState(0);
   const [target, setTarget] = useState<ApiSpecSummary | null>(null);
   const query = useApiRevisions(api.id, { limit: PAGE_SIZE, offset: page * PAGE_SIZE });
+  const { user } = useAuth();
 
   const total = query.data?.total ?? 0;
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -179,6 +195,7 @@ export function SpecHistory({ api }: { api: Api }): ReactElement {
                 key={revision.id}
                 api={api}
                 revision={revision}
+                viewerId={user?.id}
                 onRollback={() => setTarget(revision)}
               />
             ))}
