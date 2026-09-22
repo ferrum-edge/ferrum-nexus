@@ -413,8 +413,8 @@ const CORS_PLUGIN = 'cors';
  * - `key_auth` defaults to `header:X-API-Key` + `hide_credentials: true`, which
  *   is exactly what the portal documents;
  * - `basic_auth` accepts only `hide_credentials`, which defaults to `true`, so
- *   `{}` is the portal's policy of never forwarding the reusable Basic password
- *   (`ref-edge-admin.md` §8.7);
+ *   `{}` keeps Edge's default of stripping the reusable Basic password before
+ *   the request reaches the backend (`ref-edge-admin.md` §8.7);
  * - `jwt_auth` defaults to `token_lookup: header:Authorization` and
  *   `consumer_claim_field: sub`, and Nexus hands the consumer username out as
  *   the `sub` value the client must send.
