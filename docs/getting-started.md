@@ -3,6 +3,9 @@
 A complete walkthrough: from an empty machine to a client calling a published
 API through the gateway with a credential the portal issued.
 
+**Buildout:** the application has no users yet, and schema changes may require a
+fresh development database. See the [schema policy](operations.md#buildout-schema-policy).
+
 You will play three roles in sequence — the operator who runs the stack, a
 **provider** who publishes an API, and a **client** who requests access and
 calls it. Allow about twenty minutes.
@@ -47,9 +50,18 @@ docker volume create ferrum-data
 docker run --rm -v ferrum-data:/data alpine chown 65532:65532 /data
 ```
 
+Choose a complete image reference from a successfully published
+[Edge release](https://github.com/ferrum-edge/ferrum-edge/releases): a version
+tag or immutable digest, using the same `FERRUM_EDGE_IMAGE` variable as the
+[Compose example](operations.md#compose). A source tag or chart version alone
+does not prove image publication; historical `latest` images are no longer
+refreshed by Edge main CI.
+
 Then start the gateway:
 
 ```bash
+# Replace with the complete published image reference selected above.
+export FERRUM_EDGE_IMAGE='<published image tag or digest>'
 export FERRUM_ADMIN_JWT_SECRET="$(openssl rand -hex 32)"
 export FERRUM_BASIC_AUTH_HMAC_SECRET="$(openssl rand -hex 32)"
 
@@ -66,7 +78,7 @@ docker run -d --name ferrum-edge \
   -e FERRUM_ADMIN_BIND_ADDRESS=0.0.0.0 \
   -e FERRUM_ALLOW_INSECURE_ADMIN_HTTP=true \
   -v ferrum-data:/data \
-  ferrumedge/ferrum-edge:latest run -m database
+  "${FERRUM_EDGE_IMAGE:?set FERRUM_EDGE_IMAGE to a published version or digest}" run -m database
 ```
 
 Two additions worth explaining before you move on:
@@ -434,6 +446,10 @@ curl -sS -b client.txt 'http://127.0.0.1:8787/api/catalog?q=billing' \
 ```json
 { "name": "Billing API", "slug": "billing", "requestable": true, "access_state": "none" }
 ```
+
+A published API with `requestable: false` reports `access_state: "open"`
+instead — any portal account may call it, and the catalog must not label that
+as "No access".
 
 ```bash
 curl -sS -b client.txt -X POST http://127.0.0.1:8787/api/access-requests \

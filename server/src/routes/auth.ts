@@ -35,7 +35,6 @@ import { parseOrThrow } from '../middleware/error-handler.js';
 export interface AuthRoutesOptions {
   config: NexusConfig;
   auth: AuthService;
-  captcha: CaptchaService;
 }
 
 const registerBody = z.object({
@@ -79,7 +78,7 @@ const resetPasswordBody = z.object({
 
 /** `/api/auth` route plugin. */
 export const authRoutes: FastifyPluginAsync<AuthRoutesOptions> = async (app, options) => {
-  const { config, auth, captcha } = options;
+  const { config, auth } = options;
 
   app.post('/register', async (request, reply): Promise<RegisterResponse> => {
     const input = parseOrThrow(registerBody, request.body);
@@ -121,11 +120,6 @@ export const authRoutes: FastifyPluginAsync<AuthRoutesOptions> = async (app, opt
     return { ok: true };
   });
 
-  app.get('/me', async (request): Promise<MeResponse> => {
-    const { user, session } = requireAuth(request);
-    return auth.me(user, session);
-  });
-
   app.post('/verify-email', async (request): Promise<VerifyEmailResponse> => {
     const input = parseOrThrow(verifyEmailBody, request.body);
     return auth.verifyEmail(input.token, requestContext(request));
@@ -134,7 +128,7 @@ export const authRoutes: FastifyPluginAsync<AuthRoutesOptions> = async (app, opt
   // The three routes below are anonymous and deliberately uninformative: each
   // answers `{ ok: true }` whatever it decided to do, so neither status, body
   // nor timing tells the caller whether the address has an account. The
-  // `/api/auth/*` rate limiter is what bounds how fast they can be asked.
+  // shared sensitive-auth rate limiter bounds how fast they can be asked.
 
   app.post('/resend-verification', async (request): Promise<ResendVerificationResponse> => {
     const input = parseOrThrow(emailOnlyBody, request.body);
@@ -156,6 +150,17 @@ export const authRoutes: FastifyPluginAsync<AuthRoutesOptions> = async (app, opt
     // would only produce a confusing 401 on the next page.
     clearSessionCookies(reply, config);
     return { ok: true };
+  });
+};
+
+/** Read-only bootstrap routes registered under their own rate-limit scope. */
+export const authBootstrapRoutes: FastifyPluginAsync<{
+  auth: AuthService;
+  captcha: CaptchaService;
+}> = async (app, { auth, captcha }) => {
+  app.get('/me', async (request): Promise<MeResponse> => {
+    const { user, session } = requireAuth(request);
+    return auth.me(user, session);
   });
 
   app.get('/captcha', async (): Promise<CaptchaConfigResponse> => captcha.getPublicConfig());

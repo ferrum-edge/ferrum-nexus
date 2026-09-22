@@ -24,6 +24,13 @@ and per-user authorization before forwarding to Edge.
 
 > Required Notice: Copyright Ferrum Nexus (https://github.com/ferrum-edge)
 
+## Development status
+
+Ferrum Nexus is in active buildout, with no users or production data to preserve.
+Breaking changes are expected. Database changes are folded into one initial schema
+per SQL dialect; recreate disposable development databases when that schema changes.
+See [database setup and reset](docs/operations.md#buildout-schema-policy).
+
 ## Features
 
 - **API clients** can register, verify their email (and re-send the link),
@@ -40,10 +47,16 @@ and per-user authorization before forwarding to Edge.
   templates, send mass emails, manage users / providers / APIs / grants,
   view a historical audit log, and use **god mode** for emergency revoke,
   spec deletion, user disablement, and direct platform messaging.
-- **Ferrum integration** uses one Ferrum consumer per Nexus client account
-  per namespace. Approvals add an `acl_group` (`nexus:api:<api_id>:approved`)
-  to the consumer; revocations remove it. Each requestable API gets an
-  `access_control` plugin that allows only that group.
+- **Ferrum integration** uses one Ferrum consumer per _identity_ per namespace:
+  a client account (`nexus-user-<id>`), or one of its **applications**
+  (`nexus-app-<id>`). Approvals add an `acl_group`
+  (`nexus:api:<api_id>:approved`) to that consumer; revocations remove it. Each
+  requestable API gets an `access_control` plugin that allows only that group.
+- **Applications** let one account keep its integrations apart: each has its own
+  approved APIs and its own credentials, and because the boundary is the Edge
+  consumer, two applications of one owner approved for different APIs cannot
+  call each other's. Account-scoped access is unchanged and remains the
+  default.
 
 ## Screenshots
 
@@ -116,7 +129,7 @@ cp .env.example .env
 # edit .env — at minimum set NEXUS_SECRET_KEY and FERRUM_ADMIN_JWT_SECRET
 # (both at least 32 characters; FERRUM_ADMIN_URL defaults to http://127.0.0.1:9000)
 
-npm run migrate   # builds shared, then applies migrations
+npm run migrate   # builds shared, then initializes the schema
 npm run dev
 ```
 

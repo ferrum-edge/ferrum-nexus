@@ -88,14 +88,15 @@ role or account status from here — ask an admin.
 **API catalog** lists every API you are allowed to see. Each card shows the
 name, version, owner and a badge for your relationship to it:
 
-| Badge       | Meaning                                  |
-| ----------- | ---------------------------------------- |
-| **None**    | You have never asked for access.         |
-| **Pending** | Your request is waiting on the provider. |
-| **Granted** | You have active access.                  |
-| **Denied**  | The provider declined your last request. |
-| **Revoked** | Access you had was withdrawn.            |
-| **Owner**   | You published this one.                  |
+| Badge            | Meaning                                                      |
+| ---------------- | ------------------------------------------------------------ |
+| **No access**    | The API is requestable, and you have never asked for access. |
+| **Open access**  | Approval is not required; any portal account may call it.    |
+| **Pending**      | Your request is waiting on the provider.                     |
+| **Granted**      | You have active access.                                      |
+| **Denied**       | The provider declined your last request.                     |
+| **Revoked**      | Access you had was withdrawn.                                |
+| **You own this** | You published this one.                                      |
 
 Search by name, slug, or description and use pagination to browse the results.
 The catalog page displays requestability and internal-visibility badges; it
@@ -169,29 +170,65 @@ does not block a new one. If the note is unclear, **message the provider**
 
 ---
 
+## Applications
+
+By default everything you do belongs to **your account**: you request access as
+yourself, and a credential you issue works for every API your account is
+approved for. That is simple, and it is the right answer while you have one
+integration.
+
+An **application** is a second identity you own, for when you have more than
+one. Each has its own approved APIs and its own credentials, so a credential
+issued to your billing worker can call only what the billing worker was
+approved for — not what your mobile app was. That boundary is real: it is
+enforced by the gateway, not by the portal hiding things.
+
+**Applications → New application**, then choose it when you request access and
+when you issue a credential.
+
+Two things worth knowing:
+
+- **A label is not an identity.** Naming a credential "production" changes
+  nothing about what it can call. The **Identity** field on the issue form is
+  the one that does.
+- **Disabling is not revoking.** Disabling an application stops it acquiring
+  _new_ access and new credentials; the credentials it already has go on
+  working. To stop them, delete the application — which takes its gateway
+  identity with it — or revoke its access.
+
+Your account's own access is unaffected by any of this, and nothing you already
+have changes when you create your first application.
+
+---
+
 ## Credentials
 
-**Credentials** is where you mint the secrets your code actually sends. They
-belong to your account, not to an individual API: one credential works for
-**every** API you are approved for that uses the matching authentication type.
+**Credentials** is where you mint the secrets your code actually sends. Each
+one belongs to **one identity** — your account, or one of your applications —
+and works for every API _that identity_ is approved for that uses the matching
+authentication type.
 
 ### Choosing a type
 
 Match the API's authentication method — the catalog page for each API says
 which one it uses:
 
-| API uses   | Issue this credential | What you send                                                   |
-| ---------- | --------------------- | --------------------------------------------------------------- |
-| API Key    | **keyauth**           | `X-API-Key: <key>`                                              |
-| HTTP Basic | **basicauth**         | Basic auth, username `nexus-user-<your id>`, password as issued |
-| JWT        | **jwt**               | `Authorization: Bearer <token you sign>`                        |
+| API uses   | Issue this credential | What you send                                                                                                                              |
+| ---------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| API Key    | **keyauth**           | `X-API-Key: <key>`                                                                                                                         |
+| HTTP Basic | **basicauth**         | Basic auth, username as shown when the credential was issued (`nexus-user-<your id>`, or `nexus-app-<application id>`), password as issued |
+| JWT        | **jwt**               | `Authorization: Bearer <token you sign>`                                                                                                   |
 
 If you are approved for two APIs that use different methods, issue one
-credential of each type.
+credential of each type. The method is the provider's choice, not yours — and it
+decides whether the provider's own server ever sees your credential, so read
+[Your token reaches the provider's backend](#jwt-jwt) before you use **jwt**.
 
 ### Issuing one
 
-**Credentials → Issue credential**, pick the type, give it a label you will
+**Credentials → Issue credential**, choose the **identity** (your account, or
+one of your applications — this is what decides which APIs the secret can
+call), pick the type, give it a label you will
 recognise later (`nightly-job`, `staging`, `laptop`), and confirm.
 
 > ### The secret is shown exactly once
@@ -216,17 +253,20 @@ and status — never the secret.
 
 ### Rotating
 
-**Rotate** replaces a credential without downtime. The new secret is created on
-the gateway first, so both work during the hand-off — deploy the new one, then
-the old one is retired.
+**Rotate** replaces a credential in one step. A new secret is created on the
+gateway and the previous value is revoked as part of the same operation — there
+is no window where both work for you to switch clients over. Callers using the
+old secret start receiving `401` as soon as gateway configuration propagates,
+which can interrupt them until you deploy the new value.
 
-The rotation dialog shows the new secret **once**, same rule as issuing.
+The rotation dialog shows the new secret **once**, same rule as issuing. Deploy
+it before those callers retry.
 
-One caveat: portals cap how many live credentials of one type you may hold
-(commonly **2**). If you are already at the cap when you rotate, there is no
-room to add before removing, so the old credential is deleted first and there
-is a brief window where neither works. Avoid it by revoking anything unused
-before you rotate, so you rotate from below the cap.
+If you need both secrets live during a cutover, **issue a new credential**,
+deploy it, then **revoke** the old one. Portals cap how many live credentials
+of one type you may hold (commonly **2**). Issue is refused with `409 CONFLICT`
+when you are already at the cap — revoke something unused first so you have
+room to create the extra credential.
 
 ### Revoking
 
@@ -305,6 +345,22 @@ curl -sS https://gateway.example.com/nexus/billing/invoices \
 Keep the lifetime short and mint per request or per batch. Never ship the
 signing secret to a browser or a mobile app — anyone holding it can mint tokens
 as you.
+
+> ### Your token reaches the provider's backend
+>
+> The gateway strips an API key and a Basic password out of a request before it
+> forwards it upstream. It does **not** strip `Authorization: Bearer`. A JWT
+> usually carries claims the backend wants, and the gateway offers no option to
+> hide it — so the provider's server sees every token you sign.
+>
+> Your **signing secret is never forwarded**, so a provider cannot mint tokens
+> as you. It can replay a token you sent it until that token expires, and the
+> gateway does not cap `exp` — the lifetime is whatever you sign. That is one
+> more reason to keep it short. Put nothing in a custom claim you would not show
+> the provider.
+>
+> This applies only to **jwt**. If an API uses **keyauth** or **basicauth**,
+> that credential stops at the gateway and never reaches the provider.
 
 ### Reading the failure
 

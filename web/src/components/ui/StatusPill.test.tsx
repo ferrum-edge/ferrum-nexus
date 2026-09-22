@@ -24,6 +24,7 @@ describe('StatusPill', () => {
       ['degraded', 'Degraded'],
       ['down', 'Down'],
       ['none', 'No access'],
+      ['open', 'Open access'],
       ['granted', 'Granted'],
       ['owner', 'You own this'],
     ];

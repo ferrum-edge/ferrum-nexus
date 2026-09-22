@@ -22,8 +22,11 @@ import type {
   ApiSpecSummary,
   ApiStatus,
   ApiTimeouts,
+  ApiViewer,
   ApiVisibility,
   AppHealth,
+  Application,
+  ApplicationStatus,
   AuditLog,
   BrandingSettings,
   CaptchaEnforcement,
@@ -52,6 +55,7 @@ import type {
   RateLimitConfig,
   RegistrationSettings,
   SmtpSettings,
+  SpecDiff,
   ThemePreference,
   User,
   UserStatus,
@@ -326,7 +330,11 @@ export interface CatalogListQuery extends ListQuery {
   owner_user_id?: Uuid;
 }
 
-/** `GET /api/catalog` */
+/**
+ * `GET /api/catalog` — each row's `access_state` is the caller's relationship
+ * to that API: `owner`, `granted`, `pending`, `denied`, `revoked`, `open`
+ * (approval not required) or `none` (requestable, no grant or request).
+ */
 export type CatalogListResponse = Paginated<CatalogApi>;
 
 /** `GET /api/catalog/:slug` */
@@ -518,6 +526,160 @@ export interface UpdateApiSpecResponse {
   spec: ApiSpecSummary;
 }
 
+/* ── Applications ───────────────────────────────────────────────────────── */
+
+/** `GET /api/applications` */
+export type ListApplicationsResponse = Paginated<Application>;
+
+/** `GET /api/applications?owner_user_id|status|q` */
+export interface ListApplicationsQuery extends ListQuery {
+  /** Admin-only: somebody else's. A client always sees their own. */
+  owner_user_id?: Uuid;
+  status?: ApplicationStatus;
+  q?: string;
+}
+
+/** `GET /api/applications/:id` */
+export interface GetApplicationResponse {
+  application: Application;
+}
+
+/** `POST /api/applications` */
+export interface CreateApplicationRequest {
+  name: string;
+  description?: string | null;
+}
+
+/** `POST /api/applications` */
+export interface CreateApplicationResponse {
+  application: Application;
+}
+
+/**
+ * `PATCH /api/applications/:id`
+ *
+ * Setting `status` to `disabled` refuses **new** access requests, approvals
+ * and credentials. It revokes nothing that already exists — an integration
+ * that must stop working is deleted, or has its grants revoked.
+ */
+export interface UpdateApplicationRequest {
+  name?: string;
+  description?: string | null;
+  status?: ApplicationStatus;
+}
+
+/** `PATCH /api/applications/:id` */
+export interface UpdateApplicationResponse {
+  application: Application;
+}
+
+/**
+ * `DELETE /api/applications/:id` — destructive.
+ *
+ * Deletes the application's Ferrum consumer first, then the row, whose cascade
+ * removes its grants, access requests and credential rows. The counts report
+ * what went with it.
+ */
+export interface DeleteApplicationResponse {
+  revoked_grants: number;
+  revoked_credentials: number;
+}
+
+/**
+ * `GET /api/apis/:id/viewers` — who may read this API's documentation.
+ *
+ * Only meaningful for a `private` API; the list is kept (and readable) for the
+ * others so switching visibility does not silently discard it.
+ */
+export type ListApiViewersResponse = Paginated<ApiViewer>;
+
+/**
+ * `POST /api/apis/:id/viewers` — authorize one account to read this API's
+ * documentation.
+ *
+ * Exactly one of `email` or `user_id`. **This is not a grant**: it confers no
+ * ACL group, touches no Ferrum consumer and reaches no gateway. An authorized
+ * viewer who wants to call the API requests access like anybody else.
+ *
+ * An address with no portal account is refused rather than stored as a pending
+ * invitation — an authorization is attached to an account, not to an address.
+ */
+export interface AuthorizeApiViewerRequest {
+  email?: string | null;
+  user_id?: Uuid | null;
+  /** Free-text note, e.g. which partner this is. Up to 500 characters. */
+  note?: string | null;
+}
+
+/** `POST /api/apis/:id/viewers` */
+export interface AuthorizeApiViewerResponse {
+  viewer: ApiViewer;
+}
+
+/** `DELETE /api/apis/:id/viewers/:userId` — withdraw a read authorization. */
+export type RevokeApiViewerResponse = OkResponse;
+
+/** `GET /api/apis/:id/revisions` — retained specification history. */
+export type ListApiRevisionsResponse = Paginated<ApiSpecSummary>;
+
+/**
+ * `GET /api/apis/:id/revisions/:revisionId` — one retained revision's
+ * document, in the same shape as `GET /api/apis/:id/spec`.
+ */
+export type GetApiRevisionResponse = GetApiSpecResponse;
+
+/**
+ * `GET /api/apis/:id/revisions/:revisionId/diff` — what rolling back to this
+ * revision would change, compared against the current one.
+ */
+export interface GetApiRevisionDiffResponse {
+  diff: SpecDiff;
+}
+
+/**
+ * `POST /api/apis/:id/spec/diff` — what uploading this document would change,
+ * compared against the current revision. Read-only: nothing is stored and
+ * nothing reaches the gateway.
+ */
+export interface DiffApiSpecRequest {
+  /** The proposed OpenAPI document as text (JSON or YAML). */
+  spec: string;
+}
+
+/** `POST /api/apis/:id/spec/diff` */
+export interface DiffApiSpecResponse {
+  diff: SpecDiff;
+}
+
+/**
+ * `POST /api/apis/:id/revisions/:revisionId/rollback` — redeploy a retained
+ * revision as a **new** revision of the same API.
+ *
+ * `spec` is the newly created revision, not the one that was restored: history
+ * is appended to, never rewritten. The new row's `rolled_back_from_id` names
+ * the target.
+ */
+export interface RollbackApiSpecResponse {
+  api: Api;
+  spec: ApiSpecSummary;
+}
+
+/**
+ * `POST /api/apis/:id/restore-gateway` — rebuild the gateway deployment of an
+ * API the gateway no longer serves.
+ *
+ * Non-destructive by contract: the catalog entry, its id, slug, owner,
+ * specification history, configured gateway URL and every access grant are
+ * kept. The body is empty; everything the rebuild needs is already stored.
+ */
+export interface RestoreApiGatewayResponse {
+  api: Api;
+  /** The revision that was redeployed — the current one, never a new row. */
+  spec: ApiSpecSummary;
+  /** Ferrum proxy id the restore created. */
+  proxy_id: string;
+}
+
 /** `POST /api/apis/:id/test-consumer` — provider-only sandbox consumer. */
 export interface CreateTestConsumerRequest {
   label?: string | null;
@@ -689,6 +851,15 @@ export type ApiUsageBackendStatus = 'healthy' | 'failing' | 'recovering' | 'unkn
 export interface CreateAccessRequestRequest {
   api_id: Uuid;
   justification: string;
+  /**
+   * The identity the access is for: one of the caller's applications, or
+   * absent/`null` for the account itself.
+   *
+   * `null` is the default and what every request made before applications
+   * existed carries. The application must be the caller's and `active`; an
+   * administrator cannot request access as somebody else's application.
+   */
+  application_id?: Uuid | null;
 }
 
 /** `POST /api/access-requests` */
@@ -785,12 +956,25 @@ export type ListCredentialsResponse = Paginated<CredentialMetadata>;
 export interface IssueCredentialRequest {
   credential_type: CredentialType;
   label?: string | null;
+  /**
+   * The identity the credential authenticates as: one of the caller's
+   * applications, or absent/`null` for the account itself.
+   *
+   * Unlike `label`, this decides what the secret can reach — it is appended to
+   * that identity's Ferrum consumer, so it carries exactly the ACL groups that
+   * identity has been approved for.
+   */
+  application_id?: Uuid | null;
 }
 
 /** `POST /api/credentials` — show-once: `secret` is never retrievable again. */
 export interface IssueCredentialResponse {
   credential: CredentialMetadata;
-  /** Edge consumer username, always `nexus-user-<user_id>`. */
+  /**
+   * Edge consumer username — `nexus-user-<user_id>` for an account credential,
+   * `nexus-app-<application_id>` for an application one. It is what a
+   * `basicauth` or `jwt` client sends, so it is not cosmetic.
+   */
   consumer_username: string;
   secret: ShowOnceSecret;
 }
@@ -801,12 +985,14 @@ export interface RotateCredentialRequest {
 }
 
 /**
- * `POST /api/credentials/:id/rotate` — show-once. Below the gateway's per-type
- * cap the replacement is created on Edge first, so both secrets are briefly
- * live; at the cap the old entry has to go first. Either way the credential
- * being replaced passes through `retiring` — the durable record that its
- * gateway entry may already be gone — and settles at `revoked` once Edge has
- * confirmed the delete.
+ * `POST /api/credentials/:id/rotate` — show-once. The previous credential is
+ * revoked before this response returns; callers using the old secret start
+ * receiving 401 as soon as gateway configuration propagates. Below the
+ * gateway's per-type cap the replacement is created on Edge first, so both
+ * secrets are briefly live only during the server operation; at the cap the
+ * old entry has to go first. Either way the credential being replaced passes
+ * through `retiring` — the durable record that its gateway entry may already
+ * be gone — and settles at `revoked` once Edge has confirmed the delete.
  */
 export interface RotateCredentialResponse {
   credential: CredentialMetadata;
@@ -947,7 +1133,11 @@ export interface AdminSettingsResponse {
   gateway: GatewaySettings;
 }
 
-/** `PUT /api/admin/settings` — every section is optional; omitted ones are untouched. */
+/**
+ * `PUT /api/admin/settings` — omitted sections and fields are untouched.
+ * Unknown sections or keys (including footer-link keys) are rejected with
+ * `400 VALIDATION_FAILED` and field paths; the entire patch remains unapplied.
+ */
 export interface UpdateSettingsRequest {
   branding?: Partial<BrandingSettings>;
   captcha?: {
@@ -1151,6 +1341,12 @@ export interface RepairGatewayReferencesRequest {
 /** One account's consumer repair. */
 export interface RepairedGatewayConsumer {
   user_id: Uuid;
+  /**
+   * The application whose identity was repaired, or `null` for the account's
+   * own consumer. An account can have several rows here — one per identity —
+   * so this is what tells them apart.
+   */
+  application_id: Uuid | null;
   /** The stale id the portal held; empty when this account was not orphaned. */
   previous_ferrum_consumer_id: string;
   /** The id now recorded, or `null` when the repair failed. */

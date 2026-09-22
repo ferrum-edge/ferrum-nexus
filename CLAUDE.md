@@ -8,6 +8,15 @@ Ferrum Nexus is a **Backend-for-Frontend (BFF)** sitting in front of [Ferrum Edg
 
 The browser **never** talks to the Ferrum Edge Admin API directly. Every gateway mutation flows through the Nexus server (`server/`), which enforces RBAC + audit logging before forwarding.
 
+## Buildout status
+
+Ferrum Nexus is in active buildout and has no users or production data to preserve.
+Breaking changes are acceptable during this phase. Keep database changes in the
+single `001_initial` schema for each SQL dialect and the MongoDB initial index
+setup; do not add incremental migrations, legacy backfills, or upgrade paths.
+Recreate disposable development databases after schema changes. Introduce versioned
+upgrade migrations when the application begins serving users.
+
 ## Workspace layout
 
 npm workspaces — order of build dependency matters:
@@ -25,7 +34,7 @@ Run from repo root unless noted.
 npm install                              # install all workspaces
 
 cp .env.example .env                     # then set NEXUS_SECRET_KEY + FERRUM_ADMIN_URL + FERRUM_ADMIN_JWT_SECRET
-npm run migrate                          # build shared + apply migrations (also runs at server startup)
+npm run migrate                          # build shared + initialize the schema (also runs at server startup)
                                          # `npm run migrate --workspace server` needs shared built first
 
 npm run dev                              # concurrently: server (tsx watch) + web (vite). Backend :8787, web :5173
@@ -36,6 +45,7 @@ npm run lint                             # NOTE: this is just `tsc --noEmit` —
 npm test                                 # all workspaces (shared first)
 npm test --workspace server              # backend only (node --test via tsx)
 npm test --workspace web                 # frontend only (vitest)
+./e2e/run.sh                             # acceptance: packaged image vs a real pinned Edge
 npm run format / format:check            # Prettier
 ```
 
@@ -49,13 +59,15 @@ Backend tests boot the full Fastify app against in-memory SQLite plus a mock Fer
 
 **Cross-adapter smoke tests** ([server/src/test/smoke.test.ts](server/src/test/smoke.test.ts)) run SQLite by default and opt into Postgres/MySQL/Mongo via `NEXUS_TEST_POSTGRES_URL`, `NEXUS_TEST_MYSQL_URL`, `NEXUS_TEST_MONGO_URL` (throwaway databases/schemas are created and dropped per run). Set those — e.g. against disposable Docker containers — whenever you change anything under `server/src/db/`.
 
+**Acceptance suite** ([e2e/](e2e/)) runs the **packaged container image** against a real, digest-pinned Ferrum Edge release, PostgreSQL, a deterministic upstream and a real SMTP sink — with a browser journey and data-plane assertions made through the gateway's listener rather than its Admin API. `./e2e/run.sh` brings the stack up, runs it and tears it down; it is a required CI job. Run it for anything that changes what Nexus writes to Edge, the auth/credential contract, or the container image.
+
 ## Architecture rules that affect every change
 
 1. **Never reach into a database driver from a service module.** All persistence goes through `NexusStore` defined in [server/src/db/store.ts](server/src/db/store.ts). Four adapters implement it: `sqlite/` (synchronous better-sqlite3, self-contained reference), `postgres/` + `mysql/` (async, sharing all repo logic in `adapters/sql-repos.ts` over a small `SqlExecutor` with dialect shims in `adapters/sql-common.ts`), and `mongodb/` (one collection per logical table). If you add a query: extend the interface, implement it in sqlite, sql-repos, and mongodb, and cover it in the smoke suite. **Transaction bodies must be re-runnable**: the pooled adapters re-run a body the engine rolled back for contention (an InnoDB deadlock, a PostgreSQL `40001`, a Mongo write conflict), so everything a `store.transaction` body does must go through the transaction-scoped store or be idempotent — no gateway calls, no email enqueues, no in-memory bookkeeping. A body that genuinely cannot honour that passes `{ retry: false }`. Contention that outlives the retry budget surfaces as `NexusError('CONFLICT')`, never as a driver error; see `server/src/db/adapters/transaction-retry.ts`.
 2. **String UUIDs everywhere, ISO-8601 timestamps as strings** (stored in text columns, never native timestamp types). Adapters convert booleans/JSON at the boundary; services see real booleans and parsed objects.
 3. **Every state-changing endpoint requires a session and writes an `audit_logs` row** via the `audit` service and its `AuditAction` catalog — don't invent a parallel log. CSRF is enforced via the `X-Nexus-CSRF` header matching the `nexus_csrf` cookie (and the session's stored token).
 4. **Service modules export a factory (`createXService(deps)`)** and are composed in [server/src/index.ts](server/src/index.ts). Routes register under `server/src/routes/` and receive services via the registration options object — route files never import service modules.
-5. **One Ferrum consumer per Nexus user per namespace** (username `nexus-user-<user_id>`). Approvals add ACL group `nexus:api:<api_id>:approved` to that consumer; revocations remove it. Requestable APIs get an `access_control` plugin with `allowed_groups` restricted to that group. Edge's `PUT /consumers/{id}` is a whole-resource replace with no concurrency token, so **every consumer mutation must go through `edge.serializePerKey(consumerId, …)`**.
+5. **One Ferrum consumer per Nexus identity per namespace** — the account itself (username `nexus-user-<user_id>`) and each of its applications (`nexus-app-<application_id>`); `application_id = null` on grants, requests and credentials means the account. Approvals add ACL group `nexus:api:<api_id>:approved` to the requesting identity's consumer; revocations remove it. Requestable APIs get an `access_control` plugin with `allowed_groups` restricted to that group. Edge's `PUT /consumers/{id}` is a whole-resource replace with no concurrency token, so **every consumer mutation must go through `edge.serializePerKey(consumerId, …)`**.
 6. **Show-once credentials.** Plaintext credential material is returned exactly once from the API and never stored — only a SHA-256 fingerprint + last4 land in `credential_metadata`. Rotation is append-then-delete on the Edge credential array. Note the naming trap: Edge credential _types_ are `keyauth`/`basicauth`/`jwt`, while the auth _plugins_ are `key_auth`/`basic_auth`/`jwt_auth` (see `CREDENTIAL_TYPE_FOR_PLUGIN` in shared).
 7. **Email goes through the outbox.** All transactional mail enqueues into `email_outbox`; a worker polls every 5s with exponential backoff up to 5 attempts. Use `EmailService.enqueue` with an `idempotencyKey` for at-most-once semantics (verification, mass email).
 8. **The first registered user becomes `super_admin`.** Later registrations may choose only `client`/`provider`; admins are promoted by an existing admin. The last active `super_admin` cannot be demoted, disabled, or removed.
@@ -75,7 +87,7 @@ Backend tests boot the full Fastify app against in-memory SQLite plus a mock Fer
 ## Where to start when…
 
 - **Adding a route**: register it in the appropriate file under `server/src/routes/`, wire any new services into `server/src/index.ts` (COMPOSITION sections), add DTOs to `shared/src/api-contract.ts`, and add the call in `web/src/lib/api.ts`.
-- **Adding a DB column / table**: add a migration under `server/src/db/migrations/` (`.sql` = SQLite, `.pg.sql`, `.mysql.sql`; Mongo indexes are created in its adapter), update `NexusStore`, implement in sqlite + sql-repos + mongodb, extend the smoke suite.
+- **Adding a DB column / table**: edit `server/src/db/migrations/001_initial.sql`, `001_initial.pg.sql`, and `001_initial.mysql.sql` in place (Mongo indexes are defined in its adapter), update `NexusStore`, implement in sqlite + sql-repos + mongodb, extend the smoke suite.
 - **Touching the Ferrum Edge integration**: only through `server/src/ferrum-admin/`; extend the mock in `server/src/test/mock-ferrum-edge.ts` to match.
 - **Adding an audit event**: extend the `AuditAction` catalog in [server/src/audit/service.ts](server/src/audit/service.ts) and the table in [docs/security.md](docs/security.md).
 

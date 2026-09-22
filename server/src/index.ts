@@ -85,11 +85,14 @@ import {
 } from './middleware/error-handler.js';
 import { createNotificationsService, type NotificationsService } from './notifications/service.js';
 import { createApiPluginsService, type ApiPluginsService } from './plugins/service.js';
+import { createApiViewersService, type ApiViewersService } from './publishing/viewers.js';
+import { createApplicationsService, type ApplicationsService } from './applications/service.js';
 import { createUpstreamResolver, type UpstreamResolver } from './publishing/oas.js';
 import { createPublishingService, type PublishingService } from './publishing/service.js';
 import { accessRequestRoutes, grantRoutes } from './routes/access.js';
+import { applicationRoutes } from './routes/applications.js';
 import { adminRoutes } from './routes/admin.js';
-import { authRoutes } from './routes/auth.js';
+import { authBootstrapRoutes, authRoutes } from './routes/auth.js';
 import { brandingRoutes } from './routes/branding.js';
 import { catalogRoutes } from './routes/catalog.js';
 import { credentialsRoutes } from './routes/credentials.js';
@@ -124,6 +127,8 @@ export interface NexusServices {
   publishing: PublishingService;
   usage: UsageService;
   apiPlugins: ApiPluginsService;
+  apiViewers: ApiViewersService;
+  applications: ApplicationsService;
   access: AccessService;
   god: GodService;
   /**
@@ -201,8 +206,15 @@ export interface BuildServerDeps {
   sendLockWaitMs?: number;
 }
 
-/** Rate limit applied to `/api/auth/*` when `config.rateLimitEnabled` is true. */
+/** Shared per-IP budget for sensitive `/api/auth` routes, including credential guessing. */
 export const AUTH_RATE_LIMIT = { max: 20, timeWindow: '1 minute' } as const;
+
+/**
+ * Separate per-IP budget for session and CAPTCHA bootstrap reads. Page loads
+ * must not spend the credential-guessing allowance, but still need an abuse
+ * ceiling, like the public branding and health routes.
+ */
+export const AUTH_BOOTSTRAP_RATE_LIMIT = { max: 120, timeWindow: '1 minute' } as const;
 
 /**
  * Rate limit applied to `/api/health*` when `config.rateLimitEnabled` is true.
@@ -433,6 +445,25 @@ export async function buildServer(
     publishing,
     log: (obj, message) => app.log.error(obj, message),
   });
+  // Also composed after publishing, and for the same reason: the read-access
+  // list of a private API is administered by whoever administers the API.
+  const apiViewers = createApiViewersService({
+    store: deps.store,
+    audit,
+    notifications,
+    assertCanAdminister: publishing.assertCanAdminister,
+  });
+  // Composed after the credentials service, whose provisioner it shares: an
+  // application's gateway identity is created and torn down through exactly
+  // the same code an account's is.
+  const applications = createApplicationsService({
+    config,
+    store: deps.store,
+    edge: deps.edge,
+    audit,
+    provisioner: credentials.provisioner,
+    log: (obj, message) => app.log.error(obj, message),
+  });
   const access = createAccessService({
     config,
     edge: deps.edge,
@@ -513,6 +544,8 @@ export async function buildServer(
     publishing,
     usage,
     apiPlugins,
+    apiViewers,
+    applications,
     access,
     god,
     reconciliation,
@@ -614,7 +647,19 @@ export async function buildServer(
       if (config.rateLimitEnabled) {
         await scope.register(rateLimit, { ...AUTH_RATE_LIMIT });
       }
-      await scope.register(authRoutes, { config, auth, captcha });
+      await scope.register(authRoutes, { config, auth });
+    },
+    { prefix: '/api/auth' },
+  );
+
+  await app.register(
+    async (scope) => {
+      // A sibling scope gives both reads one shared store, independent of the
+      // sensitive routes above. Both limiters use Fastify's trusted request.ip.
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { ...AUTH_BOOTSTRAP_RATE_LIMIT });
+      }
+      await scope.register(authBootstrapRoutes, { auth, captcha });
     },
     { prefix: '/api/auth' },
   );
@@ -679,7 +724,7 @@ export async function buildServer(
       if (config.rateLimitEnabled) {
         await scope.register(rateLimit, { global: false });
       }
-      await scope.register(publishingRoutes, { publishing, usage, apiPlugins });
+      await scope.register(publishingRoutes, { publishing, usage, apiPlugins, apiViewers });
     },
     { prefix: '/api/apis' },
   );
@@ -689,17 +734,22 @@ export async function buildServer(
       if (config.rateLimitEnabled) {
         await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
       }
-      await scope.register(accessRequestRoutes, { access });
+      await scope.register(accessRequestRoutes, { access, applications });
     },
     { prefix: '/api/access-requests' },
   );
 
-  await app.register(async (scope) => scope.register(grantRoutes, { access }), {
+  await app.register(async (scope) => scope.register(grantRoutes, { access, applications }), {
     prefix: '/api/grants',
   });
 
-  await app.register(async (scope) => scope.register(credentialsRoutes, { credentials }), {
-    prefix: '/api/credentials',
+  await app.register(
+    async (scope) => scope.register(credentialsRoutes, { credentials, applications }),
+    { prefix: '/api/credentials' },
+  );
+
+  await app.register(async (scope) => scope.register(applicationRoutes, { applications }), {
+    prefix: '/api/applications',
   });
 
   registerApiNotFoundRoutes(app);

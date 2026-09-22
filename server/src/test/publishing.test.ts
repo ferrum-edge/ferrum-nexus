@@ -5004,12 +5004,15 @@ describe('bounded spec revision history', () => {
     });
   }
 
-  /** Every stored revision for an API, newest first. */
-  async function revisions(apiId: string): Promise<{ version: string; current: boolean }[]> {
+  /** Every stored revision for an API: the current one, then history newest first. */
+  async function revisions(
+    apiId: string,
+  ): Promise<{ version: string; current: boolean; seq: number }[]> {
     const page = await harness.store.apiSpecs.list({ api_id: apiId });
     return page.items.map((spec) => ({
       version: String(spec.parsed_version),
       current: spec.is_current,
+      seq: spec.revision_seq,
     }));
   }
 
@@ -5021,10 +5024,13 @@ describe('bounded spec revision history', () => {
     }
 
     // `NEXUS_SPEC_HISTORY_LIMIT` historical revisions, plus the current one.
+    // The `revision_seq` values are asserted too: five revisions published in
+    // a row share a millisecond often enough that ordering by `created_at`
+    // used to make this test flaky and delete the wrong rows (issue #270).
     assert.deepEqual(await revisions(apiId), [
-      { version: '5.0.0', current: true },
-      { version: '4.0.0', current: false },
-      { version: '3.0.0', current: false },
+      { version: '5.0.0', current: true, seq: 5 },
+      { version: '4.0.0', current: false, seq: 4 },
+      { version: '3.0.0', current: false, seq: 3 },
     ]);
   });
 

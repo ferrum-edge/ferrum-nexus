@@ -30,11 +30,20 @@ import {
   type CreateTestConsumerResponse,
   type DeleteApiPluginResponse,
   type DeleteApiResponse,
+  type DiffApiSpecResponse,
   type GetApiResponse,
+  type GetApiRevisionDiffResponse,
+  type GetApiRevisionResponse,
   type GetApiSpecResponse,
   type ListApiPluginsResponse,
+  type AuthorizeApiViewerResponse,
+  type ListApiRevisionsResponse,
+  type ListApiViewersResponse,
+  type RevokeApiViewerResponse,
   type ListApisResponse,
   type PublishApiResponse,
+  type RollbackApiSpecResponse,
+  type RestoreApiGatewayResponse,
   type SetApiPluginResponse,
   type UpdateApiResponse,
   type UpdateApiSpecResponse,
@@ -45,6 +54,7 @@ import { userOrIpKey } from '../middleware/rate-limit-keys.js';
 import { parseOrThrow } from '../middleware/error-handler.js';
 import { parsePluginConfig, pluginTriggerSchema } from '../plugins/schema.js';
 import type { ApiPluginsService } from '../plugins/service.js';
+import type { ApiViewersService } from '../publishing/viewers.js';
 import type { PublishingService } from '../publishing/service.js';
 import type { UsageService } from '../usage/service.js';
 import {
@@ -60,6 +70,7 @@ export interface PublishingRoutesOptions {
   publishing: PublishingService;
   usage: UsageService;
   apiPlugins: ApiPluginsService;
+  apiViewers: ApiViewersService;
 }
 
 /** Character ceiling on an uploaded document; the byte check lives in `oas.ts`. */
@@ -246,7 +257,7 @@ const publishBody = z.object({
   spec: specField,
   auth_plugin: z.enum(AUTH_PLUGIN_TYPES),
   requestable: z.boolean(),
-  visibility: z.enum(['public', 'internal']),
+  visibility: z.enum(['public', 'internal', 'private']),
   rate_limit: rateLimitSchema.optional(),
   cors: corsSchema.nullish(),
   allowed_methods: allowedMethodsSchema.nullish(),
@@ -262,7 +273,7 @@ const updateBody = z.object({
   upstream_url: z.string().trim().max(MAX_UPSTREAM_URL_LENGTH).optional(),
   auth_plugin: z.enum(AUTH_PLUGIN_TYPES).optional(),
   requestable: z.boolean().optional(),
-  visibility: z.enum(['public', 'internal']).optional(),
+  visibility: z.enum(['public', 'internal', 'private']).optional(),
   rate_limit: rateLimitSchema.optional(),
   cors: corsSchema.nullish(),
   allowed_methods: allowedMethodsSchema.nullish(),
@@ -285,6 +296,38 @@ const specBody = z.object({
 });
 
 const testConsumerBody = z.object({ label: z.string().trim().max(120).nullish() });
+
+/** A revision addressed within its API — both halves are checked together. */
+const revisionParamsSchema = z.object({
+  id: z.string().trim().min(1).max(64),
+  revisionId: z.string().trim().min(1).max(64),
+});
+
+/** The change-review body: the same field `PUT /spec` takes, and nothing else. */
+const diffBody = z.object({ spec: specField });
+
+/** An authorized viewer addressed within their API. */
+const viewerParamsSchema = z.object({
+  id: z.string().trim().min(1).max(64),
+  userId: z.string().trim().min(1).max(64),
+});
+
+/**
+ * Authorizing a viewer: the account, named either way, plus an optional note.
+ *
+ * Exactly one identifier — accepting both and silently preferring one would
+ * make a UI bug look like a permission decision.
+ */
+const viewerBody = z
+  .object({
+    email: z.string().trim().max(320).email().optional(),
+    user_id: z.string().trim().min(1).max(64).optional(),
+    note: z.string().trim().max(500).nullish(),
+  })
+  .refine(
+    (body) => (body.email === undefined) !== (body.user_id === undefined),
+    'Provide exactly one of `email` or `user_id`',
+  );
 
 /**
  * The palette route's params.
@@ -315,7 +358,7 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
   app,
   options,
 ) => {
-  const { publishing, usage, apiPlugins } = options;
+  const { publishing, usage, apiPlugins, apiViewers } = options;
   app.addHook('onRequest', requireRole('provider'));
 
   app.get('/', async (request): Promise<ListApisResponse> => {
@@ -479,6 +522,134 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
       const { id, name } = parseOrThrow(pluginParamsSchema, request.params);
       await apiPlugins.remove(user, id, name, clientIp(request));
       return { ok: true };
+    },
+  );
+
+  /* ── Private documentation access ─────────────────────────────────────
+   *
+   * Who may *read* this API's catalog entry and specification. Administered by
+   * whoever administers the API, and deliberately nothing to do with grants:
+   * an entry here confers no ACL group, touches no consumer and reaches no
+   * gateway (issue #288).
+   */
+
+  app.get('/:id/viewers', async (request): Promise<ListApiViewersResponse> => {
+    const { user } = requireAuth(request);
+    const { id } = parseOrThrow(idParamSchema, request.params);
+    const query = parseOrThrow(listQuerySchema, request.query);
+    return apiViewers.list(user, id, listOptions(query));
+  });
+
+  app.post(
+    '/:id/viewers',
+    { config: MUTATION_RATE_LIMIT },
+    async (request, reply): Promise<AuthorizeApiViewerResponse> => {
+      const { user } = requireAuth(request);
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      const body = parseOrThrow(viewerBody, request.body);
+      const viewer = await apiViewers.authorize(
+        user,
+        id,
+        {
+          email: body.email ?? null,
+          user_id: body.user_id ?? null,
+          note: body.note ?? null,
+        },
+        clientIp(request),
+      );
+      reply.status(201);
+      return { viewer };
+    },
+  );
+
+  app.delete(
+    '/:id/viewers/:userId',
+    { config: MUTATION_RATE_LIMIT },
+    async (request): Promise<RevokeApiViewerResponse> => {
+      const { user } = requireAuth(request);
+      const { id, userId } = parseOrThrow(viewerParamsSchema, request.params);
+      await apiViewers.revoke(user, id, userId, clientIp(request));
+      return { ok: true };
+    },
+  );
+
+  /* ── Specification history, change review and rollback ───────────────
+   *
+   * All four are owner-or-admin like every other provider-side read of the
+   * row, and all four scope the revision by API in the lookup itself — a
+   * revision id belonging to somebody else's API reads as absent rather than
+   * as forbidden, so the endpoints cannot be used to confirm that an id
+   * exists.
+   */
+
+  app.get('/:id/revisions', async (request): Promise<ListApiRevisionsResponse> => {
+    const { user } = requireAuth(request);
+    const { id } = parseOrThrow(idParamSchema, request.params);
+    const query = parseOrThrow(listQuerySchema, request.query);
+    return publishing.revisions(user, id, listOptions(query));
+  });
+
+  app.get('/:id/revisions/:revisionId', async (request): Promise<GetApiRevisionResponse> => {
+    const { user } = requireAuth(request);
+    const { id, revisionId } = parseOrThrow(revisionParamsSchema, request.params);
+    return publishing.revision(user, id, revisionId);
+  });
+
+  app.get(
+    '/:id/revisions/:revisionId/diff',
+    async (request): Promise<GetApiRevisionDiffResponse> => {
+      const { user } = requireAuth(request);
+      const { id, revisionId } = parseOrThrow(revisionParamsSchema, request.params);
+      return { diff: await publishing.diffRevision(user, id, revisionId) };
+    },
+  );
+
+  /**
+   * What an upload *would* change, without uploading it.
+   *
+   * A `POST` because the document is a body rather than a parameter, but
+   * read-only: nothing is stored and nothing reaches the gateway. It carries
+   * the mutation rate limit anyway — it parses a document up to
+   * `MAX_SPEC_BYTES`, which is the cost the limit exists to bound.
+   */
+  app.post(
+    '/:id/spec/diff',
+    { config: MUTATION_RATE_LIMIT },
+    async (request): Promise<DiffApiSpecResponse> => {
+      const { user } = requireAuth(request);
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      const body = parseOrThrow(diffBody, request.body);
+      return { diff: await publishing.diffUpload(user, id, body.spec) };
+    },
+  );
+
+  app.post(
+    '/:id/revisions/:revisionId/rollback',
+    { config: MUTATION_RATE_LIMIT },
+    async (request): Promise<RollbackApiSpecResponse> => {
+      const { user } = requireAuth(request);
+      const { id, revisionId } = parseOrThrow(revisionParamsSchema, request.params);
+      return publishing.rollbackSpec(user, id, revisionId, clientIp(request));
+    },
+  );
+
+  /**
+   * Rebuild the gateway deployment of an API the gateway no longer serves.
+   *
+   * Owner or admin, like every other write on the row — the restore replays
+   * what the portal already stores and grants nobody anything they did not
+   * already have. It is deliberately a `POST` with an empty body: there is
+   * nothing for a caller to choose, and anything it accepted would be a second
+   * way to configure an API.
+   */
+  app.post(
+    '/:id/restore-gateway',
+    { config: MUTATION_RATE_LIMIT },
+    async (request): Promise<RestoreApiGatewayResponse> => {
+      const { user } = requireAuth(request);
+      const { id } = parseOrThrow(idParamSchema, request.params);
+      const result = await publishing.restoreGateway(user, id, clientIp(request));
+      return { api: result.api, spec: result.spec, proxy_id: result.proxyId };
     },
   );
 

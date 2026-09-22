@@ -28,6 +28,7 @@ import {
   type HttpMethod,
   type RateLimitConfig,
   type ShowOnceSecret,
+  type SpecDiff,
   type SpecEnforcementLevel,
 } from '@ferrum-nexus/shared';
 import { formatDateTime, parseCorsOrigins } from '../lib/format';
@@ -37,6 +38,8 @@ import {
   useApiUsage,
   useCreateTestConsumer,
   useDeleteApi,
+  useDiffApiSpec,
+  useRestoreApiGateway,
   useUpdateApi,
   useUpdateApiSpec,
 } from '../hooks/useApis';
@@ -58,7 +61,10 @@ import {
 } from '../components/publishing/AdvancedProxySettings';
 import { StartThreadDialog } from '../components/messaging/StartThreadDialog';
 import { PluginsTab } from '../components/plugins/PluginsTab';
+import { ApiViewersTab } from '../components/publishing/ApiViewersTab';
+import { SpecDiffView } from '../components/publishing/SpecDiffView';
 import { SpecEditor, isSpecValid } from '../components/publishing/SpecEditor';
+import { SpecHistory } from '../components/publishing/SpecHistory';
 import { FormNotice } from '../components/auth/AuthShell';
 import { Badge, type BadgeTone } from '../components/ui/Badge';
 import { Button, buttonClassName } from '../components/ui/Button';
@@ -420,7 +426,8 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
                   onValueChange={setVisibility}
                   options={[
                     { value: 'public', label: 'Public' },
-                    { value: 'internal', label: 'Internal' },
+                    { value: 'internal', label: 'Internal (unlisted)' },
+                    { value: 'private', label: 'Private (authorized viewers)' },
                   ]}
                 />
                 <LabeledSelect<ApiStatus>
@@ -607,11 +614,34 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
 function SpecTab({ api }: { api: Api }): ReactElement {
   const specQuery = useApiSpec(api.id);
   const updateSpec = useUpdateApiSpec();
+  const reviewDiff = useDiffApiSpec();
   const toast = useToast();
   const [draft, setDraft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [review, setReview] = useState<SpecDiff | null>(null);
 
   const value = draft ?? specQuery.data?.raw_spec ?? '';
+
+  /** Publish `value`, clearing the editor's draft state on success. */
+  const publish = (): void => {
+    updateSpec.mutate(
+      { id: api.id, body: { spec: value } },
+      {
+        onSuccess: () => {
+          setDraft(null);
+          setReview(null);
+          toast.success('Specification updated');
+        },
+        // A refused revision closes the review and leaves the draft in the
+        // editor: the provider's document is the thing worth keeping, and a
+        // modal sitting over a failure they cannot act on is not.
+        onError: (mutationError: Error) => {
+          setReview(null);
+          toast.error('Specification not published', mutationError.message);
+        },
+      },
+    );
+  };
 
   if (specQuery.isLoading) {
     return (
@@ -622,54 +652,75 @@ function SpecTab({ api }: { api: Api }): ReactElement {
   }
 
   return (
-    <Card>
-      <CardHeader
-        icon="spec"
-        title="Specification"
-        description="Publishing a revision re-parses the document and updates the catalog entry."
-        actions={
-          draft !== null ? (
-            <Badge tone="warning" dot>
-              Unsaved changes
-            </Badge>
-          ) : undefined
-        }
-      />
-      <CardBody className="flex flex-col gap-4">
-        <SpecEditor value={value} onChange={setDraft} id="api-spec" />
-        {error ? <FormNotice tone="danger">{error}</FormNotice> : null}
-      </CardBody>
-      <div className="flex flex-wrap items-center gap-2 border-t border-border bg-inset/40 px-5 py-3.5">
-        <Button
-          variant="primary"
-          loading={updateSpec.isPending}
-          disabled={draft === null || draft.trim().length === 0}
-          onClick={() => {
-            setError(null);
-            if (!isSpecValid(value)) {
-              setError('The OpenAPI document could not be parsed.');
-              return;
-            }
-            updateSpec.mutate(
-              { id: api.id, body: { spec: value } },
-              {
-                onSuccess: () => {
-                  setDraft(null);
-                  toast.success('Specification updated');
+    <div className="flex flex-col gap-4">
+      <Card>
+        <CardHeader
+          icon="spec"
+          title="Specification"
+          description="Publishing a revision re-parses the document and updates the catalog entry."
+          actions={
+            draft !== null ? (
+              <Badge tone="warning" dot>
+                Unsaved changes
+              </Badge>
+            ) : undefined
+          }
+        />
+        <CardBody className="flex flex-col gap-4">
+          <SpecEditor value={value} onChange={setDraft} id="api-spec" />
+          {error ? <FormNotice tone="danger">{error}</FormNotice> : null}
+        </CardBody>
+        <div className="flex flex-wrap items-center gap-2 border-t border-border bg-inset/40 px-5 py-3.5">
+          {/* Review first. A revision can take operations away from live
+            callers, and under `routes` enforcement the gateway starts
+            rejecting them the moment it lands — so the diff is a step in the
+            flow rather than something to go looking for (issue #290). */}
+          <Button
+            variant="primary"
+            loading={reviewDiff.isPending}
+            disabled={draft === null || draft.trim().length === 0}
+            onClick={() => {
+              setError(null);
+              if (!isSpecValid(value)) {
+                setError('The OpenAPI document could not be parsed.');
+                return;
+              }
+              reviewDiff.mutate(
+                { id: api.id, body: { spec: value } },
+                {
+                  onSuccess: (response) => setReview(response.diff),
+                  onError: (mutationError: Error) => setError(mutationError.message),
                 },
-              },
-            );
-          }}
-        >
-          Publish revision
-        </Button>
-        {draft !== null ? (
-          <Button variant="ghost" onClick={() => setDraft(null)}>
-            Discard changes
+              );
+            }}
+          >
+            Review changes
           </Button>
-        ) : null}
-      </div>
-    </Card>
+          {draft !== null ? (
+            <Button variant="ghost" onClick={() => setDraft(null)}>
+              Discard changes
+            </Button>
+          ) : null}
+        </div>
+      </Card>
+
+      <SpecHistory api={api} />
+
+      <ConfirmDialog
+        open={review !== null}
+        onOpenChange={(next) => {
+          if (!next) setReview(null);
+        }}
+        title="Publish this revision"
+        description="The new document replaces the current one and is recorded as a new revision. The previous revisions stay in history."
+        confirmLabel="Publish revision"
+        danger={(review?.potentially_breaking.length ?? 0) > 0}
+        loading={updateSpec.isPending}
+        onConfirm={publish}
+      >
+        {review ? <SpecDiffView diff={review} /> : <></>}
+      </ConfirmDialog>
+    </div>
   );
 }
 
@@ -789,12 +840,20 @@ export function RequestsTab({ apiId }: { apiId: string }): ReactElement {
                   <div className="flex min-w-0 flex-1 items-start gap-3">
                     <Avatar label={request.requester?.display_name ?? request.user_id} />
                     <div className="min-w-0">
-                      <p className="truncate text-sm font-medium text-fg">
-                        {request.requester?.display_name ?? request.user_id}
+                      <p className="flex flex-wrap items-center gap-2 truncate text-sm font-medium text-fg">
+                        <span className="truncate">
+                          {request.requester?.display_name ?? request.user_id}
+                        </span>
                         {request.requester ? (
-                          <span className="ml-2 text-xs font-normal text-fg-subtle">
+                          <span className="text-xs font-normal text-fg-subtle">
                             {request.requester.email}
                           </span>
+                        ) : null}
+                        {/* Which *integration* is asking, not just which
+                            account — approving adds the API to that identity
+                            alone (issue #289). */}
+                        {request.application ? (
+                          <Badge tone="accent">{request.application.name}</Badge>
                         ) : null}
                       </p>
                       <p className="mt-1 text-xs text-fg-subtle">
@@ -985,8 +1044,11 @@ export function GrantsTab({ apiId }: { apiId: string }): ReactElement {
                 <div className="flex min-w-0 flex-1 items-center gap-3">
                   <Avatar label={grant.user?.display_name ?? grant.user_id} />
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-medium text-fg">
-                      {grant.user?.display_name ?? grant.user_id}
+                    <p className="flex flex-wrap items-center gap-2 truncate text-sm font-medium text-fg">
+                      <span className="truncate">{grant.user?.display_name ?? grant.user_id}</span>
+                      {grant.application ? (
+                        <Badge tone="accent">{grant.application.name}</Badge>
+                      ) : null}
                     </p>
                     <p className="truncate text-xs text-fg-subtle">
                       Granted {formatDateTime(grant.created_at)}
@@ -1297,6 +1359,57 @@ function UsageCard({ apiId }: { apiId: string }): ReactElement {
   );
 }
 
+/**
+ * The API's gateway deployment is gone, and only a restore brings it back.
+ *
+ * Deliberately a page-level banner rather than a tab: every other thing a
+ * provider could do here — edit settings, publish a revision, look at grants —
+ * is being done to an API that is currently serving nothing, and that is the
+ * first thing they need to know. The wording separates the two halves that
+ * confused this case before (issue #284): the catalog entry, its history and
+ * its approved clients are all intact, and it is only the gateway objects that
+ * have to be rebuilt.
+ */
+function GatewayRepairBanner({ api }: { api: Api }): ReactElement {
+  const restore = useRestoreApiGateway();
+  const toast = useToast();
+
+  return (
+    <Card className="mb-6 border-danger/40">
+      <CardBody className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex min-w-0 items-start gap-3">
+          <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-danger-soft text-danger">
+            <Icon name="alert" className="h-4 w-4" />
+          </span>
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold text-fg">Gateway deployment missing</h3>
+            <p className="mt-1 max-w-2xl text-sm leading-relaxed text-fg-muted">
+              The gateway no longer serves{' '}
+              <code className="font-mono text-xs">{api.listen_path}</code>, so requests to this API
+              fail. Its catalog entry, specification history and approved clients are untouched —
+              restoring rebuilds the proxy, its authentication and its access control from what the
+              portal already holds. Clients keep the credentials they were issued.
+            </p>
+          </div>
+        </div>
+        <Button
+          variant="primary"
+          loading={restore.isPending}
+          onClick={() =>
+            restore.mutate(api.id, {
+              onSuccess: () => toast.success('Gateway deployment restored'),
+              onError: (error: Error) => toast.error('Restore failed', error.message),
+            })
+          }
+        >
+          <Icon name="refresh" />
+          Restore gateway deployment
+        </Button>
+      </CardBody>
+    </Card>
+  );
+}
+
 function ApiDetail({ apiId }: { apiId: string }): ReactElement {
   const query = useApi(apiId);
   const [tab, setTab] = useState('overview');
@@ -1334,10 +1447,27 @@ function ApiDetail({ apiId }: { apiId: string }): ReactElement {
             <Badge mono>v{api.version}</Badge>
             <Badge tone="info">{AUTH_PLUGIN_LABELS[api.auth_plugin]}</Badge>
             <StatusPill status={api.status} />
-            <Badge tone={api.visibility === 'public' ? 'neutral' : 'warning'}>
-              {api.visibility === 'public' ? 'Public' : 'Internal'}
+            <Badge
+              tone={
+                api.visibility === 'public'
+                  ? 'neutral'
+                  : api.visibility === 'internal'
+                    ? 'warning'
+                    : 'danger'
+              }
+            >
+              {api.visibility === 'public'
+                ? 'Public'
+                : api.visibility === 'internal'
+                  ? 'Unlisted'
+                  : 'Private'}
             </Badge>
             {api.requestable ? <Badge tone="accent">Requestable</Badge> : <Badge>Open</Badge>}
+            {api.gateway_state === 'repair_required' ? (
+              <Badge tone="danger" dot>
+                Not deployed
+              </Badge>
+            ) : null}
           </>
         }
         actions={
@@ -1351,6 +1481,8 @@ function ApiDetail({ apiId }: { apiId: string }): ReactElement {
           </Link>
         }
       />
+
+      {api.gateway_state === 'repair_required' ? <GatewayRepairBanner api={api} /> : null}
 
       {/* At a glance: the four values a provider checks without opening a tab. */}
       <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -1437,6 +1569,15 @@ function ApiDetail({ apiId }: { apiId: string }): ReactElement {
             content: <RequestsTab key={api.id} apiId={api.id} />,
           },
           { value: 'grants', label: 'Grants', content: <GrantsTab key={api.id} apiId={api.id} /> },
+          {
+            value: 'viewers',
+            // Named for what it controls rather than for the visibility mode:
+            // the list is kept whatever the API's visibility, and a provider
+            // switching to Private should find their earlier invitations here.
+            label: 'Viewers',
+            badge: api.visibility === 'private' ? <Badge tone="danger">Private</Badge> : undefined,
+            content: <ApiViewersTab key={api.id} api={api} />,
+          },
           { value: 'test', label: 'Test consumer', content: <TestConsumerTab api={api} /> },
         ]}
       />

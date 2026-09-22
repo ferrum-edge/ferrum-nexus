@@ -29,7 +29,7 @@ export interface CatalogRoutesOptions {
 const catalogQuery = listQuerySchema.extend({
   q: z.string().trim().max(200).optional(),
   requestable: booleanQuerySchema,
-  visibility: z.enum(['public', 'internal']).optional(),
+  visibility: z.enum(['public', 'internal', 'private']).optional(),
   owner_user_id: z.string().trim().min(1).max(64).optional(),
 });
 

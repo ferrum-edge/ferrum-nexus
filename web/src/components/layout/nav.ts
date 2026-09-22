@@ -13,6 +13,7 @@ import type { IconName } from '../ui/Icon';
 export type NavPath =
   | '/'
   | '/catalog'
+  | '/applications'
   | '/credentials'
   | '/messages'
   | '/profile'
@@ -58,6 +59,13 @@ export const NAV_ITEMS: readonly NavItem[] = [
     exact: true,
   },
   { to: '/catalog', label: 'API catalog', icon: 'catalog', minRole: 'client', section: 'main' },
+  {
+    to: '/applications',
+    label: 'Applications',
+    icon: 'stack',
+    minRole: 'client',
+    section: 'main',
+  },
   { to: '/credentials', label: 'Credentials', icon: 'key', minRole: 'client', section: 'main' },
   { to: '/messages', label: 'Messages', icon: 'mail', minRole: 'client', section: 'main' },
   { to: '/profile', label: 'Profile', icon: 'user', minRole: 'client', section: 'main' },

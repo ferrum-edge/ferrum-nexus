@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_PAGE_SIZE,
   MAX_PAGE_SIZE,
+  type Application,
   type CredentialMetadata,
   type IssueCredentialResponse,
   type ShowOnceSecret,
@@ -10,7 +11,7 @@ import {
 import { API, CREDENTIAL, GRANT } from '../../test/fixtures';
 import { changeField, clearClients, deferred, renderPage } from '../../test/helpers';
 import { queryKeys } from '../hooks/keys';
-import { credentialsApi, grantsApi } from '../lib/api';
+import { applicationsApi, credentialsApi, grantsApi } from '../lib/api';
 import { CredentialsPage } from './CredentialsPage';
 
 vi.mock('../components/ui/Select', async () => {
@@ -108,6 +109,9 @@ describe('credential management', () => {
     expect(credentialsApi.issue).toHaveBeenCalledWith({
       credential_type: type,
       label: 'Production worker',
+      // The identity defaults to the account itself, which is what every
+      // credential issued before applications existed uses (issue #289).
+      application_id: null,
     });
     expect(within(dialog).getByText(label, { exact: true })).toBeInTheDocument();
     expect(within(dialog).getByText(secret)).toBeInTheDocument();
@@ -148,7 +152,11 @@ describe('credential management', () => {
     expect(issue).toBeDisabled();
     fireEvent.click(issue);
     expect(credentialsApi.issue).toHaveBeenCalledTimes(1);
-    expect(credentialsApi.issue).toHaveBeenCalledWith({ credential_type: 'keyauth', label: null });
+    expect(credentialsApi.issue).toHaveBeenCalledWith({
+      credential_type: 'keyauth',
+      label: null,
+      application_id: null,
+    });
     await act(async () => {
       pending.resolve({
         credential: CREDENTIAL,
@@ -172,6 +180,21 @@ describe('credential management', () => {
     expect(screen.queryByText('Save your new credential')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Issue' }));
     await screen.findByRole('dialog', { name: 'Save your new credential' });
+  });
+
+  it('explains that rotation revokes the old secret as part of the operation', async () => {
+    credentials = [CREDENTIAL];
+    renderPage(<CredentialsPage />);
+    expect(
+      await screen.findByText(/revokes the previous value as part of the same operation/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/window to switch over/)).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: 'Rotate' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Rotate credential' });
+    expect(within(dialog).getByText(/revoked as part of this operation/)).toBeInTheDocument();
+    expect(
+      within(dialog).queryByText(/keeps working until the rotation is finalized/),
+    ).not.toBeInTheDocument();
   });
 
   it('requires a fresh acknowledgement for rotation', async () => {
@@ -268,5 +291,43 @@ describe('credential management', () => {
     expect(screen.queryByText('Worker 0')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Previous page' }));
     expect(await screen.findByText('Worker 0')).toBeInTheDocument();
+  });
+});
+
+describe('application identities', () => {
+  const application = (id: string, name: string, status: Application['status']): Application => ({
+    id,
+    owner_user_id: CREDENTIAL.user_id,
+    name,
+    description: null,
+    status,
+    active_grants: 0,
+    active_credentials: 1,
+    created_at: CREDENTIAL.created_at,
+    updated_at: CREDENTIAL.created_at,
+  });
+
+  it('names a disabled application in the table but does not offer it for issuance', async () => {
+    // A disabled application keeps its credentials (they are still listed and
+    // still revocable), so the table must still say whose they are.
+    vi.spyOn(applicationsApi, 'list').mockResolvedValue({
+      items: [
+        application('app-live', 'Billing worker', 'active'),
+        application('app-off', 'Retired batch job', 'disabled'),
+      ],
+      total: 2,
+    });
+    credentials = [{ ...CREDENTIAL, application_id: 'app-off', label: 'Nightly export' }];
+    renderPage(<CredentialsPage />);
+    expect(await screen.findByText('Retired batch job')).toBeInTheDocument();
+    expect(screen.getByText('Disabled')).toBeInTheDocument();
+    expect(applicationsApi.list).toHaveBeenCalledWith({ limit: MAX_PAGE_SIZE });
+
+    openIssue();
+    const identity = screen.getByLabelText('Identity');
+    const offered = within(identity)
+      .getAllByRole('option')
+      .map((option) => option.textContent);
+    expect(offered).toEqual(['My account', 'Billing worker']);
   });
 });

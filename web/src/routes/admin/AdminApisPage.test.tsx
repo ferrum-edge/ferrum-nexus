@@ -48,6 +48,7 @@ const foreign: Api = {
   spec_enforcement: 'docs_only',
   status: 'published',
   visibility: 'public',
+  gateway_state: 'deployed',
   created_at: '2026-09-07T12:00:00.000Z',
   updated_at: '2026-09-07T12:00:00.000Z',
 };

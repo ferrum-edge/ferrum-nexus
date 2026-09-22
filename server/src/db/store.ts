@@ -81,7 +81,10 @@ import type {
   ApiPluginTrigger,
   ApiSpec,
   ApiStatus,
+  ApiGatewayState,
   ApiVisibility,
+  Application,
+  ApplicationStatus,
   AuditLog,
   Consumer,
   CredentialMetadata,
@@ -196,7 +199,32 @@ export interface SessionRecord {
 export type ApiRecord = Omit<Api, 'listen_path' | 'invoke_url'>;
 
 /** An `api_specs` row, including the raw uploaded document. */
-export type ApiSpecRecord = ApiSpec;
+export interface ApiSpecRecord extends ApiSpec {
+  /**
+   * Publication position of this revision within its API: `1` for the first
+   * revision, one more than the largest already recorded for every one after.
+   *
+   * It exists because `created_at` cannot order revisions. The column holds a
+   * millisecond-resolution ISO string and ids are random UUIDs, so two
+   * revisions published in the same millisecond were ordered by their id —
+   * which put historical revisions ahead of the current one and made bounded
+   * retention delete the newer of the tie (issue #270). Every adapter assigns
+   * it on insert and orders listing and retention by it.
+   *
+   * Store-internal: it is deliberately absent from the wire {@link ApiSpec},
+   * and the presenters drop it alongside `raw_spec`.
+   */
+  revision_seq: number;
+}
+
+/**
+ * Payload for {@link ApiSpecRepo.create}.
+ *
+ * `revision_seq` is not among the fields a caller may supply: the sequence is
+ * the store's own, read and taken in the same transaction that inserts the
+ * row.
+ */
+export type CreateApiSpecInput = CreateInput<Omit<ApiSpecRecord, 'revision_seq'>>;
 
 /**
  * An `api_plugins` row — one palette plugin as the provider configured it.
@@ -217,19 +245,17 @@ export interface ApiPluginRecord extends ApiPlugin {
    * matched on the name alone replaced or deleted the operator's hand-made
    * config as well (issue #153).
    *
-   * `null` on a row written before the column existed, and on one whose gateway
-   * config an operator has since removed. `plugins/service.ts` backfills the
-   * first case by matching the plugin name on the proxy — the rule that
-   * resolved it then — and creates a fresh config for the second.
+   * `null` means no gateway config is claimed. A save creates a fresh config
+   * and records its id; removal never adopts an unowned config by name.
    */
   ferrum_plugin_config_id: string | null;
 }
 
 /** An `access_requests` row (without the denormalised joins the API adds). */
-export type AccessRequestRecord = Omit<AccessRequest, 'api' | 'requester'>;
+export type AccessRequestRecord = Omit<AccessRequest, 'api' | 'requester' | 'application'>;
 
 /** A `grants` row (without the denormalised joins the API adds). */
-export type GrantRecord = Omit<Grant, 'api' | 'user'>;
+export type GrantRecord = Omit<Grant, 'api' | 'user' | 'application'>;
 
 /** A `credential_metadata` row. Plaintext material is never stored. */
 export type CredentialRecord = CredentialMetadata;
@@ -390,6 +416,16 @@ export interface ApiViewerFilter {
    * that MongoDB has no cross-collection `find` filter.
    */
   granted_api_ids: readonly Uuid[];
+  /**
+   * Rows the viewer was explicitly authorized to *read* — `api_viewers`.
+   *
+   * Separate from {@link ApiViewerFilter.granted_api_ids} because the two are
+   * different permissions that happen to widen the same query: a grant lets an
+   * account call the API, an authorization only lets it read the
+   * documentation. Folding them into one list here would make the next reader
+   * of this filter believe a viewer holds a grant.
+   */
+  authorized_api_ids: readonly Uuid[];
   /** Any other row must carry this status… */
   open_status: ApiStatus;
   /** …and one of these visibilities. An empty list admits none of them. */
@@ -405,6 +441,10 @@ export interface ApiFilter {
   /** Case-insensitive substring match on name, slug or description. */
   q?: string;
   ids?: Uuid[];
+  /** Ferrum namespace the row belongs to. */
+  namespace?: string;
+  /** Deployment condition — `repair_required` selects the unrestored APIs. */
+  gateway_state?: ApiGatewayState;
   /** Restrict to rows one viewer may browse. Omit for an unrestricted read. */
   visible_to?: ApiViewerFilter;
 }
@@ -419,6 +459,17 @@ export interface ApiSpecFilter {
 export interface AccessRequestFilter {
   user_id?: Uuid;
   api_id?: Uuid;
+  /**
+   * Identity scope. **`null` is a value here, not "absent":** it selects the
+   * account-scoped rows, the ones no application owns. Leave the field
+   * `undefined` to match every scope.
+   *
+   * The departure from the usual "undefined means unfiltered" is deliberate
+   * and load-bearing — "the account's own grants" is a question the ACL replay
+   * has to be able to ask, and it is not the same question as "all of this
+   * account's grants".
+   */
+  application_id?: Uuid | null;
   /** Restrict to APIs owned by this provider (the reviewer inbox). */
   api_ids?: Uuid[];
   status?: AccessRequestStatus;
@@ -430,11 +481,33 @@ export interface GrantFilter {
   api_id?: Uuid;
   api_ids?: Uuid[];
   status?: GrantStatus;
+  /**
+   * Identity scope. **`null` is a value here, not "absent":** it selects the
+   * account-scoped rows, the ones no application owns. Leave the field
+   * `undefined` to match every scope.
+   *
+   * The departure from the usual "undefined means unfiltered" is deliberate
+   * and load-bearing — "the account's own grants" is a question the ACL replay
+   * has to be able to ask, and it is not the same question as "all of this
+   * account's grants".
+   */
+  application_id?: Uuid | null;
 }
 
 /** Filters for `credentials.list`. */
 export interface CredentialFilter {
   user_id?: Uuid;
+  /**
+   * Identity scope. **`null` is a value here, not "absent":** it selects the
+   * account-scoped rows, the ones no application owns. Leave the field
+   * `undefined` to match every scope.
+   *
+   * The departure from the usual "undefined means unfiltered" is deliberate
+   * and load-bearing — "the account's own grants" is a question the ACL replay
+   * has to be able to ask, and it is not the same question as "all of this
+   * account's grants".
+   */
+  application_id?: Uuid | null;
   status?: CredentialStatus;
   credential_type?: CredentialType;
   ferrum_consumer_id?: string;
@@ -444,6 +517,17 @@ export interface CredentialFilter {
 export interface ConsumerFilter {
   user_id?: Uuid;
   namespace?: string;
+  /**
+   * Identity scope. **`null` is a value here, not "absent":** it selects the
+   * account-scoped rows, the ones no application owns. Leave the field
+   * `undefined` to match every scope.
+   *
+   * The departure from the usual "undefined means unfiltered" is deliberate
+   * and load-bearing — "the account's own grants" is a question the ACL replay
+   * has to be able to ask, and it is not the same question as "all of this
+   * account's grants".
+   */
+  application_id?: Uuid | null;
 }
 
 /** Filters for `threads.list`. */
@@ -619,20 +703,105 @@ export interface SessionRepo {
 /**
  * Creation payload for an API row.
  *
- * `circuit_breaker` and `spec_enforcement` are non-nullable, so
+ * `circuit_breaker`, `spec_enforcement` and `gateway_state` are non-nullable, so
  * {@link CreateInput} would make them mandatory; they are optional here instead
  * because both columns carry a `DEFAULT` and their default *is* the common
  * case — no breaker, and an OpenAPI document that is catalog metadata only.
  */
 export type CreateApiInput = Omit<
   CreateInput<ApiRecord>,
-  'circuit_breaker' | 'spec_enforcement'
+  'circuit_breaker' | 'spec_enforcement' | 'gateway_state'
 > & {
   /** Defaults to `false`, matching the column default. */
   circuit_breaker?: boolean;
   /** Defaults to `'docs_only'`, matching the column default. */
   spec_enforcement?: SpecEnforcementLevel;
+  /** Defaults to `'deployed'`: a row is only created by a publish that landed. */
+  gateway_state?: ApiGatewayState;
 };
+
+/**
+ * An `api_viewers` row — one account a provider authorized to read a private
+ * API's documentation.
+ *
+ * Read permission only. Nothing here reaches Ferrum Edge, and nothing here
+ * implies a grant: see {@link ApiViewer}.
+ */
+export interface ApiViewerRecord {
+  id: Uuid;
+  api_id: Uuid;
+  user_id: Uuid;
+  granted_by: Uuid | null;
+  note: string | null;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
+}
+
+/** Filters accepted by {@link ApiViewerRepo.list}. */
+export interface ApiViewerFilterInput {
+  api_id?: Uuid;
+  user_id?: Uuid;
+}
+
+/** Who may read each private API's documentation. */
+export interface ApiViewerRepo {
+  /**
+   * Authorize `user_id` on `api_id`, or refresh an existing authorization.
+   *
+   * Upsert rather than create, because the route is idempotent by intent: a
+   * provider re-inviting somebody who is already authorized has asked for a
+   * state, not for a second row, and a `CONFLICT` there would be noise.
+   * `created_at` is preserved on a replace.
+   */
+  upsert(input: CreateInput<ApiViewerRecord>): Promise<ApiViewerRecord>;
+  find(apiId: Uuid, userId: Uuid): Promise<ApiViewerRecord | null>;
+  list(filter: ApiViewerFilterInput, options?: ListOptions): Promise<Paginated<ApiViewerRecord>>;
+  /**
+   * Every API this account may read the documentation of.
+   *
+   * Bounded rather than paginated, and read on every catalog request, for the
+   * same reason the viewer's grants are: it becomes a list of ids in the
+   * `apis` query, and MongoDB has no cross-collection filter to do it with.
+   */
+  listApiIdsByUser(userId: Uuid): Promise<Uuid[]>;
+  /** Returns `false` when that account was not authorized in the first place. */
+  delete(apiId: Uuid, userId: Uuid): Promise<boolean>;
+  /** Cascade helper for API deletion. Returns the number of rows removed. */
+  deleteByApi(apiId: Uuid): Promise<number>;
+}
+
+/** An `applications` row — one integration identity owned by an account. */
+export type ApplicationRecord = Omit<Application, 'active_grants' | 'active_credentials'>;
+
+/** Filters accepted by {@link ApplicationRepo.list}. */
+export interface ApplicationFilter {
+  owner_user_id?: Uuid;
+  status?: ApplicationStatus;
+  /** Case-insensitive substring match on name or description. */
+  q?: string;
+}
+
+/** Application identities owned by portal accounts. */
+export interface ApplicationRepo {
+  create(input: CreateInput<ApplicationRecord>): Promise<ApplicationRecord>;
+  findById(id: Uuid): Promise<ApplicationRecord | null>;
+  /** Names are unique per owner, case-insensitively. */
+  findByOwnerAndName(ownerUserId: Uuid, name: string): Promise<ApplicationRecord | null>;
+  findManyByIds(ids: Uuid[]): Promise<ApplicationRecord[]>;
+  update(id: Uuid, patch: UpdateInput<ApplicationRecord>): Promise<ApplicationRecord | null>;
+  list(filter: ApplicationFilter, options?: ListOptions): Promise<Paginated<ApplicationRecord>>;
+  count(filter?: ApplicationFilter): Promise<number>;
+  /**
+   * Removes the application row only.
+   *
+   * Its grants, access requests, credentials and consumer mapping are cascaded
+   * by the schema, but the *gateway* identity is not — deleting an application
+   * has to take its Ferrum consumer down first, in the caller's transaction
+   * order, or the portal forgets about a consumer that is still carrying ACL
+   * groups.
+   */
+  delete(id: Uuid): Promise<boolean>;
+}
 
 /** Published APIs and their Edge proxies. */
 export interface ApiRepo {
@@ -654,12 +823,29 @@ export interface ApiRepo {
 
 /** Uploaded OpenAPI documents, one row per revision. */
 export interface ApiSpecRepo {
-  create(input: CreateInput<ApiSpecRecord>): Promise<ApiSpecRecord>;
+  /**
+   * Insert a revision, assigning its {@link ApiSpecRecord.revision_seq}: one
+   * more than the largest currently recorded for the API. The read and the
+   * insert share a transaction, and a unique index on
+   * `(api_id, revision_seq)` turns two writers that raced for one position
+   * into a `CONFLICT` rather than a tie — the same guard the concurrent
+   * `is_current` swap already relies on.
+   */
+  create(input: CreateApiSpecInput): Promise<ApiSpecRecord>;
   findById(id: Uuid): Promise<ApiSpecRecord | null>;
   /** The revision with `is_current = true` for an API, if any. */
   findCurrentByApi(apiId: Uuid): Promise<ApiSpecRecord | null>;
   /** Make one revision current and clear the flag on every other revision of the API. */
   setCurrent(apiId: Uuid, specId: Uuid): Promise<void>;
+  /**
+   * One page of revisions: the current one first, then the rest newest-first
+   * by {@link ApiSpecRecord.revision_seq}.
+   *
+   * The current revision leads whatever its position, because a
+   * {@link ApiSpecRepo.setCurrent} rollback can make an older revision current
+   * again and a listing that buried it under its own successors would be
+   * describing the API wrongly.
+   */
   list(filter: ApiSpecFilter, options?: ListOptions): Promise<Paginated<ApiSpecRecord>>;
   delete(id: Uuid): Promise<boolean>;
   /** Cascade helper for API deletion. Returns the number of revisions removed. */
@@ -674,8 +860,9 @@ export interface ApiSpecRepo {
    *
    * The current revision is never a candidate whatever `keep` says, and `keep`
    * is at least `1` in practice, so the predecessor a failed revision rolls
-   * back to always survives. Newest is by `created_at`, ties broken by id, the
-   * same order {@link ApiSpecRepo.list} pages in.
+   * back to always survives. Newest is by {@link ApiSpecRecord.revision_seq} —
+   * publication order, the same order {@link ApiSpecRepo.list} pages in — and
+   * never by `created_at`, which cannot separate one millisecond's revisions.
    *
    * @returns the number of revisions removed
    */
@@ -763,7 +950,11 @@ export interface AccessRequestRepo {
   ): Promise<AccessRequestRecord | null>;
   list(filter: AccessRequestFilter, options?: ListOptions): Promise<Paginated<AccessRequestRecord>>;
   /** Duplicate guard: an open request by this user for this API. */
-  findPendingByApiAndUser(apiId: Uuid, userId: Uuid): Promise<AccessRequestRecord | null>;
+  findPendingByApiAndUser(
+    apiId: Uuid,
+    userId: Uuid,
+    applicationId?: Uuid | null,
+  ): Promise<AccessRequestRecord | null>;
   /** Newest request regardless of status — drives the catalog `access_state`. */
   findLatestByApiAndUser(apiId: Uuid, userId: Uuid): Promise<AccessRequestRecord | null>;
   /** Newest request per API for one user, for a page of catalog rows. */
@@ -809,12 +1000,29 @@ export interface GrantRepo {
   ): Promise<GrantRecord | null>;
   list(filter: GrantFilter, options?: ListOptions): Promise<Paginated<GrantRecord>>;
   /**
-   * The single `status = 'active'` grant for an API/user pair, if any. The
-   * schema enforces at most one via a partial unique index.
+   * The single `status = 'active'` grant for an API and one identity, if any.
+   * The schema enforces at most one via a partial unique index over
+   * `(api_id, user_id, COALESCE(application_id, ''))`.
+   *
+   * `applicationId` follows the {@link GrantFilter} convention: `null` (the
+   * default) means the account's own grant, an id means that application's.
    */
-  findActiveByApiAndUser(apiId: Uuid, userId: Uuid): Promise<GrantRecord | null>;
-  /** Every active grant held by a user — used to rebuild their ACL group list. */
-  listActiveByUser(userId: Uuid): Promise<GrantRecord[]>;
+  findActiveByApiAndUser(
+    apiId: Uuid,
+    userId: Uuid,
+    applicationId?: Uuid | null,
+  ): Promise<GrantRecord | null>;
+  /**
+   * Every active grant held by one identity — what rebuilds its ACL group
+   * list after a teardown or a gateway repair.
+   *
+   * `applicationId` is the identity, on the same convention: `null` for the
+   * account's canonical consumer, an id for that application's. Passing
+   * `undefined` returns every grant the *account* holds across all of its
+   * identities, which is what a "what does this account have access to?" read
+   * wants and what an ACL replay must never use.
+   */
+  listActiveByUser(userId: Uuid, applicationId?: Uuid | null): Promise<GrantRecord[]>;
   /** Every active grant on an API — used by god-mode delete and bulk revoke. */
   listActiveByApi(apiId: Uuid): Promise<GrantRecord[]>;
   count(filter: GrantFilter): Promise<number>;
@@ -837,7 +1045,7 @@ export interface CredentialRepo {
    * `CONFLICT` rather than two rows claiming one Edge slot.
    *
    * Pass `edge_ordinal: null` only to record a row whose gateway position is
-   * unknown — the state the migration backfill leaves ambiguous legacy rows in.
+   * unknown. Multiple unresolved rows cannot be addressed individually.
    * No service does this.
    */
   create(input: CreateInput<CredentialRecord>): Promise<CredentialRecord>;
@@ -864,8 +1072,18 @@ export interface CredentialRepo {
 export interface ConsumerRepo {
   create(input: CreateInput<ConsumerRecord>): Promise<ConsumerRecord>;
   findById(id: Uuid): Promise<ConsumerRecord | null>;
-  /** The mapping used on every credential and approval operation. */
-  findByUserAndNamespace(userId: Uuid, namespace: string): Promise<ConsumerRecord | null>;
+  /**
+   * The mapping used on every credential and approval operation.
+   *
+   * `applicationId` selects the identity: `null` (the default) is the
+   * account's canonical `nexus-user-<user_id>` consumer, an id is that
+   * application's `nexus-app-<application_id>` one.
+   */
+  findByUserAndNamespace(
+    userId: Uuid,
+    namespace: string,
+    applicationId?: Uuid | null,
+  ): Promise<ConsumerRecord | null>;
   findByFerrumId(ferrumConsumerId: string): Promise<ConsumerRecord | null>;
   findByUsername(namespace: string, ferrumUsername: string): Promise<ConsumerRecord | null>;
   update(id: Uuid, patch: UpdateInput<ConsumerRecord>): Promise<ConsumerRecord | null>;
@@ -1313,9 +1531,11 @@ export interface NexusStore {
   readonly users: UserRepo;
   readonly organizations: OrganizationRepo;
   readonly sessions: SessionRepo;
+  readonly applications: ApplicationRepo;
   readonly apis: ApiRepo;
   readonly apiSpecs: ApiSpecRepo;
   readonly apiPlugins: ApiPluginRepo;
+  readonly apiViewers: ApiViewerRepo;
   readonly accessRequests: AccessRequestRepo;
   readonly grants: GrantRepo;
   readonly credentials: CredentialRepo;

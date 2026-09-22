@@ -18,6 +18,12 @@ export const queryKeys = {
     spec: (slug: string) => ['catalog', 'spec', slug] as const,
   },
 
+  applications: {
+    all: ['applications'] as const,
+    list: (params: unknown) => ['applications', 'list', params] as const,
+    detail: (id: string) => ['applications', 'detail', id] as const,
+  },
+
   apis: {
     all: ['apis'] as const,
     spec: (id: string) => ['apis', 'spec', id] as const,
@@ -25,6 +31,11 @@ export const queryKeys = {
     detail: (id: string) => ['apis', 'detail', id] as const,
     usage: (id: string) => ['apis', 'usage', id] as const,
     plugins: (id: string) => ['apis', 'plugins', id] as const,
+    viewers: (id: string, params: unknown) => ['apis', 'viewers', id, params] as const,
+    revisions: (id: string, params: unknown) => ['apis', 'revisions', id, params] as const,
+    revision: (id: string, revisionId: string) => ['apis', 'revision', id, revisionId] as const,
+    revisionDiff: (id: string, revisionId: string) =>
+      ['apis', 'revision-diff', id, revisionId] as const,
   },
 
   accessRequests: {

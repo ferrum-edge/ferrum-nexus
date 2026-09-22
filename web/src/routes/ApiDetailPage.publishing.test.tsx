@@ -4,6 +4,7 @@ import {
   MAX_CORS_ORIGINS,
   type Api,
   type GetApiSpecResponse,
+  type SpecDiff,
   type UpdateApiResponse,
 } from '@ferrum-nexus/shared';
 import { API, CREDENTIAL, RAW_SPEC, SPEC } from '../../test/fixtures';
@@ -25,6 +26,21 @@ vi.mock('../components/ui/Select', async () => {
 
 let api: Api;
 let rawSpec: string;
+
+/** A comparison that found nothing — the default for tests not about the diff. */
+const EMPTY_DIFF: SpecDiff = {
+  from: SPEC,
+  to: null,
+  added_operations: [],
+  removed_operations: [],
+  changed_operations: [],
+  added_paths: [],
+  removed_paths: [],
+  info_changes: [],
+  servers_changed: false,
+  potentially_breaking: [],
+  changed: false,
+};
 
 beforeEach(() => {
   api = { ...API };
@@ -55,6 +71,10 @@ beforeEach(() => {
     return { api, spec: SPEC };
   });
   vi.spyOn(apisApi, 'remove').mockResolvedValue({ ok: true });
+  vi.spyOn(apisApi, 'diffSpec').mockResolvedValue({ diff: EMPTY_DIFF });
+  vi.spyOn(apisApi, 'revisions').mockResolvedValue({ items: [SPEC], total: 1 });
+  vi.spyOn(apisApi, 'revisionDiff').mockResolvedValue({ diff: EMPTY_DIFF });
+  vi.spyOn(apisApi, 'rollbackSpec').mockImplementation(async () => ({ api, spec: SPEC }));
   vi.spyOn(apisApi, 'createTestConsumer').mockResolvedValue({
     credential: CREDENTIAL,
     consumer_username: 'nexus-test-api-1',
@@ -308,23 +328,53 @@ describe('provider specification and sandbox credentials', () => {
       });
     });
     expect(await screen.findByLabelText(/OpenAPI specification/)).toHaveValue(RAW_SPEC);
-    expect(screen.getByRole('button', { name: 'Publish revision' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Review changes' })).toBeDisabled();
     changeField(/OpenAPI specification/, 'invalid');
-    fireEvent.click(screen.getByRole('button', { name: 'Publish revision' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
     expect(screen.getByText('The OpenAPI document could not be parsed.')).toBeInTheDocument();
+    expect(apisApi.diffSpec).not.toHaveBeenCalled();
     expect(apisApi.updateSpec).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Discard changes' }));
     expect(screen.getByLabelText(/OpenAPI specification/)).toHaveValue(RAW_SPEC);
+
+    // A revision is reviewed before it replaces anything: the diff is fetched,
+    // shown, and only the confirmation publishes.
     const revision = RAW_SPEC.replace('1.0.0', '2.0.0');
     changeField(/OpenAPI specification/, revision);
-    fireEvent.click(screen.getByRole('button', { name: 'Publish revision' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Publish this revision' });
+    expect(apisApi.diffSpec).toHaveBeenCalledWith(API.id, { spec: revision });
+    expect(apisApi.updateSpec).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Publish revision' }));
+
     await screen.findByText('Specification updated');
     expect(apisApi.updateSpec).toHaveBeenCalledWith(API.id, { spec: revision });
-    expect(screen.getByRole('button', { name: 'Publish revision' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Review changes' })).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Discard changes' })).not.toBeInTheDocument();
     await waitFor(() => {
       expect(screen.getByLabelText(/OpenAPI specification/)).toHaveValue(revision);
     });
+  });
+
+  it('names the operations a revision would stop serving before publishing it', async () => {
+    vi.mocked(apisApi.diffSpec).mockResolvedValue({
+      diff: {
+        ...EMPTY_DIFF,
+        removed_operations: [{ method: 'POST', path: '/invoices' }],
+        potentially_breaking: [{ method: 'POST', path: '/invoices' }],
+        changed: true,
+      },
+    });
+    await openTab('Specification');
+    await screen.findByLabelText(/OpenAPI specification/);
+    changeField(/OpenAPI specification/, RAW_SPEC.replace('1.0.0', '2.0.0'));
+    fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Publish this revision' });
+    expect(within(dialog).getByText(/would stop being served/)).toBeInTheDocument();
+    expect(within(dialog).getByText('/invoices')).toBeInTheDocument();
+    // …and the comparison never claims the rest of the change is safe.
+    expect(within(dialog).getByText(/cannot tell you a change is backward/)).toBeInTheDocument();
   });
 
   it('keeps a rejected specification revision editable for retry', async () => {
@@ -333,14 +383,50 @@ describe('provider specification and sandbox credentials', () => {
     await screen.findByLabelText(/OpenAPI specification/);
     const revision = RAW_SPEC.replace('1.0.0', '2.0.0');
     changeField(/OpenAPI specification/, revision);
-    fireEvent.click(screen.getByRole('button', { name: 'Publish revision' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Publish this revision' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Publish revision' }));
     await waitFor(() => expect(apisApi.updateSpec).toHaveBeenCalledTimes(1));
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Publish revision' })).toBeEnabled(),
+      expect(screen.getByRole('button', { name: 'Review changes' })).toBeEnabled(),
     );
     expect(screen.getByLabelText(/OpenAPI specification/)).toHaveValue(revision);
     expect(screen.getByRole('button', { name: 'Discard changes' })).toBeEnabled();
     expect(screen.queryByText('Specification updated')).not.toBeInTheDocument();
+  });
+
+  it('lists revision history and rolls one back after reviewing it', async () => {
+    const earlier = {
+      ...SPEC,
+      id: 'spec-0',
+      version: '0.9.0',
+      parsed_version: '0.9.0',
+      is_current: false,
+    };
+    vi.mocked(apisApi.revisions).mockResolvedValue({ items: [SPEC, earlier], total: 2 });
+    vi.mocked(apisApi.revisionDiff).mockResolvedValue({
+      diff: {
+        ...EMPTY_DIFF,
+        removed_operations: [{ method: 'GET', path: '/receipts' }],
+        potentially_breaking: [{ method: 'GET', path: '/receipts' }],
+        changed: true,
+      },
+    });
+    await openTab('Specification');
+    await screen.findByText('Revision history');
+    expect(await screen.findByText('v0.9.0')).toBeInTheDocument();
+    // The current revision is not offered for rollback.
+    expect(screen.getAllByRole('button', { name: /Review & roll back/ })).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole('button', { name: /Review & roll back/ }));
+    const dialog = await screen.findByRole('dialog', { name: 'Roll back to version 0.9.0' });
+    await waitFor(() => expect(apisApi.revisionDiff).toHaveBeenCalledWith(API.id, 'spec-0'));
+    expect(within(dialog).getByText(/would stop being served/)).toBeInTheDocument();
+    expect(apisApi.rollbackSpec).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Roll back' }));
+    await screen.findByText('Rolled back to version 0.9.0');
+    expect(apisApi.rollbackSpec).toHaveBeenCalledWith(API.id, 'spec-0');
   });
 
   it('creates a sandbox credential and forgets its display after acknowledgement', async () => {
@@ -357,5 +443,54 @@ describe('provider specification and sandbox credentials', () => {
     fireEvent.click(within(dialog).getByRole('checkbox'));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
     expect(screen.queryByText('test-only-sandbox-key')).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * The gateway deployment is gone — the state issue #284 added, and the one a
+ * provider has to be able to see and act on without reading the audit log.
+ */
+describe('restoring a missing gateway deployment', () => {
+  beforeEach(() => {
+    api = { ...API, gateway_state: 'repair_required', ferrum_proxy_id: null };
+    vi.spyOn(apisApi, 'restoreGateway').mockImplementation(async () => {
+      api = { ...api, gateway_state: 'deployed', ferrum_proxy_id: 'proxy-restored' };
+      return { api, spec: SPEC, proxy_id: 'proxy-restored' };
+    });
+  });
+
+  it('shows the condition and restores on demand', async () => {
+    await renderPage(<ApiDetailPage />);
+    await screen.findByRole('heading', { name: 'Gateway deployment missing' });
+    // The distinction the banner exists to make: published, and not serving.
+    expect(screen.getByText('Not deployed')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Restore gateway deployment/ }));
+    await screen.findByText('Gateway deployment restored');
+    expect(apisApi.restoreGateway).toHaveBeenCalledWith(API.id);
+    await waitFor(() => {
+      expect(
+        screen.queryByRole('heading', { name: 'Gateway deployment missing' }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  it('keeps the banner and reports why when the restore fails', async () => {
+    vi.mocked(apisApi.restoreGateway).mockRejectedValue(new Error('Gateway unavailable'));
+    await renderPage(<ApiDetailPage />);
+    await screen.findByRole('heading', { name: 'Gateway deployment missing' });
+    fireEvent.click(screen.getByRole('button', { name: /Restore gateway deployment/ }));
+    await screen.findByText('Gateway unavailable');
+    expect(screen.getByRole('heading', { name: 'Gateway deployment missing' })).toBeInTheDocument();
+  });
+
+  it('offers nothing to restore while the API is deployed', async () => {
+    api = { ...API };
+    await renderPage(<ApiDetailPage />);
+    await screen.findByRole('heading', { name: API.name });
+    expect(
+      screen.queryByRole('heading', { name: 'Gateway deployment missing' }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText('Not deployed')).not.toBeInTheDocument();
   });
 });

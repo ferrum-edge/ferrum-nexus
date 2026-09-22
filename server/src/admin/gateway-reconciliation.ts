@@ -64,18 +64,28 @@
  * (`edge_ordinal`) would then describe an array that no longer exists, and the
  * next rotate or revoke on the account would refuse as drift.
  *
- * An orphaned proxy is not recreated at all. Rebuilding one needs the
+ * An orphaned proxy is not recreated *here*. Rebuilding one needs the
  * provider's current spec revision, upstream, plugin palette and enforcement
- * mode replayed in order, which is exactly what publishing already does — so
- * the repair clears the dead `ferrum_proxy_id` and leaves the API in the state
- * the rest of the portal already models as "has no gateway proxy"
- * (`plugins/service.ts` refuses to attach to one; `publishing/service.ts`
- * skips every proxy write for one). The provider republishes through the
- * ordinary flow, and the incident is recorded as an
+ * mode replayed in order — which is exactly what publishing already does, and
+ * is therefore where it lives: `publishing.restoreGateway` rebuilds the
+ * deployment of an existing API in place, keeping its id, slug, owner,
+ * specification history, gateway URL and every access grant. This repair
+ * clears the dead `ferrum_proxy_id`, which is what makes the rest of the portal
+ * stop addressing a proxy that is not there (`plugins/service.ts` refuses to
+ * attach to one; `publishing/service.ts` skips every proxy write for one), and
+ * records the incident as an
  * {@link AuditAction.API_GATEWAY_REPAIR_REQUIRED} row with
- * `phase: 'orphaned_proxy'` — the same action the publishing lifecycle already
- * writes for an API whose gateway objects need rebuilding, rather than a second
- * state machine saying the same thing.
+ * `phase: 'orphaned_proxy'`.
+ *
+ * Clearing the reference is deliberately **not** the whole story. On its own it
+ * made the API indistinguishable from one that simply has no deployment yet:
+ * the next pass skipped it (no proxy id to check), reported a clean portal, and
+ * the API went on serving nothing (issue #284). So the same write sets
+ * `apis.gateway_state = 'repair_required'`, every pass counts those rows into
+ * {@link GatewayReconciliationReport.awaiting_restore}, and the verdict stays
+ * `orphaned` — and the portal `degraded` — until a restore succeeds. That count
+ * comes from the portal's own rows, so it survives a pass that could not reach
+ * the gateway at all.
  */
 
 import {
@@ -215,6 +225,7 @@ export function createGatewayReconciliationService(
         result.orphaned += 1;
         orphans.push({
           user_id: row.user_id,
+          application_id: row.application_id,
           ferrum_consumer_id: row.ferrum_consumer_id,
           ferrum_username: row.ferrum_username,
         });
@@ -255,25 +266,52 @@ export function createGatewayReconciliationService(
     }
   }
 
+  /**
+   * APIs this namespace has already established are not deployed.
+   *
+   * A portal read, not a gateway one, and therefore the one finding a pass
+   * keeps when Edge stops answering: `repair_required` was written because a
+   * gateway *did* answer `404` for the proxy, and an unreachable gateway is no
+   * reason to stop reporting it. `0` on a store failure — the count is a
+   * signal, and losing the whole pass over it would hide the orphans too.
+   */
+  async function countAwaitingRestore(): Promise<number> {
+    try {
+      return await store.apis.count({ namespace, gateway_state: 'repair_required' });
+    } catch (error) {
+      log(
+        { namespace, error: errorMessage(error) },
+        'Could not count the APIs awaiting a gateway restore',
+      );
+      return 0;
+    }
+  }
+
   async function runScan(): Promise<GatewayReconciliationReport> {
     const checkedAt = new Date().toISOString();
     const orphanedConsumers: OrphanedConsumerRef[] = [];
     const orphanedProxies: OrphanedProxyRef[] = [];
+    const awaitingRestore = await countAwaitingRestore();
     try {
       const consumers = await scanConsumers(orphanedConsumers);
       const proxies = await scanProxies(orphanedProxies);
       const orphaned = consumers.orphaned + proxies.orphaned;
       const report: GatewayReconciliationReport = {
-        status: orphaned > 0 ? 'orphaned' : 'ok',
+        // An API waiting to be restored is an unresolved gateway condition
+        // exactly as a live orphan is — it is the *same* incident one repair
+        // step later — so it keeps the verdict, and the portal, degraded until
+        // the restore lands.
+        status: orphaned > 0 || awaitingRestore > 0 ? 'orphaned' : 'ok',
         checked_at: checkedAt,
         namespace,
         consumers,
         proxies,
         orphaned_consumers: orphanedConsumers,
         orphaned_proxies: orphanedProxies,
+        awaiting_restore: awaitingRestore,
         error: null,
       };
-      if (orphaned > 0) {
+      if (orphaned > 0 || awaitingRestore > 0) {
         // The line to alert on: the portal is pointing at a gateway that does
         // not hold what it stored, and nothing repairs that by itself.
         log(
@@ -283,8 +321,10 @@ export function createGatewayReconciliationService(
             orphaned_proxies: proxies.orphaned,
             checked_consumers: consumers.checked,
             checked_proxies: proxies.checked,
+            awaiting_restore: awaitingRestore,
           },
-          'The gateway no longer holds references the portal stored; run the gateway repair',
+          'The gateway no longer holds references the portal stored; run the gateway repair ' +
+            'and restore the affected API deployments',
         );
       }
       cached = report;
@@ -295,13 +335,17 @@ export function createGatewayReconciliationService(
       // checked before the gateway stopped answering is no longer evidence
       // about the gateway as a whole.
       const report: GatewayReconciliationReport = {
-        status: 'unknown',
+        // The gateway findings are discarded, but the flagged APIs are not
+        // gateway findings: they are what the portal already knows, and they
+        // outrank `unknown` for the same reason they outrank `ok`.
+        status: awaitingRestore > 0 ? 'orphaned' : 'unknown',
         checked_at: checkedAt,
         namespace,
         consumers: { checked: 0, orphaned: 0, complete: false },
         proxies: { checked: 0, orphaned: 0, complete: false },
         orphaned_consumers: [],
         orphaned_proxies: [],
+        awaiting_restore: awaitingRestore,
         error: error.message,
       };
       log(
@@ -346,17 +390,23 @@ export function createGatewayReconciliationService(
   /* ── Repair ───────────────────────────────────────────────────────────── */
 
   /**
-   * The ACL groups this account should carry, from the portal's own grants.
+   * The ACL groups **one identity** should carry, from the portal's own grants.
    *
    * Rebuilt from `grants` rather than remembered, because the portal's grant
    * rows are the record of who was approved for what — the gateway's copy is
    * the thing that was lost.
+   *
+   * Scoped by `applicationId`, and that scope is load-bearing: replaying an
+   * account's whole grant list onto an application's consumer would hand that
+   * application every API its owner can reach, which is precisely what
+   * application identities exist to prevent (issue #289). `null` is the
+   * account's own consumer.
    */
-  async function approvedGroups(userId: Uuid): Promise<string[]> {
+  async function approvedGroups(userId: Uuid, applicationId: Uuid | null): Promise<string[]> {
     const groups: string[] = [];
     for (let offset = 0; ; offset += MAX_PAGE_SIZE) {
       const page = await store.grants.list(
-        { user_id: userId, status: 'active' },
+        { user_id: userId, status: 'active', application_id: applicationId },
         { limit: MAX_PAGE_SIZE, offset },
       );
       for (const grant of page.items) groups.push(aclGroupForApi(grant.api_id));
@@ -380,6 +430,7 @@ export function createGatewayReconciliationService(
   ): Promise<RepairedGatewayConsumer> {
     const base: RepairedGatewayConsumer = {
       user_id: orphan.user_id,
+      application_id: orphan.application_id,
       previous_ferrum_consumer_id: orphan.ferrum_consumer_id,
       ferrum_consumer_id: null,
       credentials_requiring_reissue: 0,
@@ -387,13 +438,17 @@ export function createGatewayReconciliationService(
       error: null,
     };
     try {
-      const groups = await approvedGroups(orphan.user_id);
+      const groups = await approvedGroups(orphan.user_id, orphan.application_id);
       const outcome = await edge.serializePerKey(
         canonicalConsumerLockKey(namespace, orphan.ferrum_username),
         async () => {
           // Re-read inside the critical section: another repair, or an ordinary
           // provisioning call, may have rebuilt this consumer already.
-          const row = await store.consumers.findByUserAndNamespace(orphan.user_id, namespace);
+          const row = await store.consumers.findByUserAndNamespace(
+            orphan.user_id,
+            namespace,
+            orphan.application_id,
+          );
           if (!row) return { kind: 'gone' } as const;
           const staleId = row.ferrum_consumer_id;
           return edge.serializePerKey(staleId, async () => {
@@ -404,7 +459,9 @@ export function createGatewayReconciliationService(
             const { consumer } = await edge.consumers.ensure(
               {
                 username: row.ferrum_username,
-                custom_id: orphan.user_id,
+                // The id the username names: the application for an
+                // application identity, the account for its own consumer.
+                custom_id: orphan.application_id ?? orphan.user_id,
                 acl_groups: groups,
               },
               actor.id,
@@ -520,7 +577,14 @@ export function createGatewayReconciliationService(
       if (api.ferrum_proxy_id !== orphan.ferrum_proxy_id) {
         return { ...base, error: 'The API’s gateway proxy changed while the repair was running' };
       }
-      await store.apis.update(api.id, { ferrum_proxy_id: null });
+      // Both facts in one write. Clearing the reference is what makes the rest
+      // of the portal stop addressing a proxy that is not there; the state is
+      // what keeps "this API is not deployed" true afterwards, so that the next
+      // pass does not read a flagged API as a clean one (issue #284).
+      await store.apis.update(api.id, {
+        ferrum_proxy_id: null,
+        gateway_state: 'repair_required',
+      });
       await audit.record(
         { id: actor.id, role: actor.role },
         AuditAction.API_GATEWAY_REPAIR_REQUIRED,
@@ -537,16 +601,18 @@ export function createGatewayReconciliationService(
       );
       log(
         { api_id: api.id, slug: api.slug, proxy_id: orphan.ferrum_proxy_id },
-        'Cleared a gateway proxy id the gateway no longer holds; the API must be republished',
+        'Cleared a gateway proxy id the gateway no longer holds; the API needs its ' +
+          'deployment restored',
       );
       await notifications
         .notify(
           api.owner_user_id,
           'system',
-          'Republish required',
+          'Gateway deployment missing',
           `The API gateway no longer serves “${api.name}”: its proxy went away when the ` +
-            'gateway was rebuilt. Publish it again to restore traffic.',
-          '/apis',
+            'gateway was rebuilt. Restore the gateway deployment to bring it back — the ' +
+            'catalog entry, its specification history and every approved client keep working.',
+          `/apis/${api.id}`,
         )
         .catch(() => undefined);
       return { ...base, flagged: true };
@@ -595,19 +661,27 @@ export function createGatewayReconciliationService(
         );
       }
 
-      const consumerOrphans = new Map<Uuid, OrphanedConsumerRef>(
-        report.orphaned_consumers.map((orphan) => [orphan.user_id, orphan]),
-      );
+      // Grouped by account rather than keyed by it: one account can have
+      // several orphaned consumers — its own and one per application it owns —
+      // and a map keyed on `user_id` silently kept only the last of them, so a
+      // repair fixed one identity and left the rest orphaned (issue #289).
+      const consumerOrphans = new Map<Uuid, OrphanedConsumerRef[]>();
+      for (const orphan of report.orphaned_consumers) {
+        const existing = consumerOrphans.get(orphan.user_id);
+        if (existing) existing.push(orphan);
+        else consumerOrphans.set(orphan.user_id, [orphan]);
+      }
       const proxyOrphans = new Map<Uuid, OrphanedProxyRef>(
         report.orphaned_proxies.map((orphan) => [orphan.api_id, orphan]),
       );
 
       const consumers: RepairedGatewayConsumer[] = [];
       for (const userId of all ? [...consumerOrphans.keys()] : userIds) {
-        const orphan = consumerOrphans.get(userId);
-        if (!orphan) {
+        const orphans = consumerOrphans.get(userId);
+        if (!orphans || orphans.length === 0) {
           consumers.push({
             user_id: userId,
+            application_id: null,
             previous_ferrum_consumer_id: '',
             ferrum_consumer_id: null,
             credentials_requiring_reissue: 0,
@@ -616,7 +690,10 @@ export function createGatewayReconciliationService(
           });
           continue;
         }
-        consumers.push(await repairConsumer(actor, orphan, reason, ip));
+        // Every identity of the account, each with its own approvals.
+        for (const orphan of orphans) {
+          consumers.push(await repairConsumer(actor, orphan, reason, ip));
+        }
       }
 
       const apis: FlaggedGatewayApi[] = [];

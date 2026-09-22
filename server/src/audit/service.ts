@@ -72,6 +72,17 @@ export const AuditAction = {
   API_PUBLISH: 'api.publish',
   API_UPDATE: 'api.update',
   API_SPEC_UPDATE: 'api.spec_update',
+  /**
+   * A retained revision was redeployed as a **new** revision of the same API.
+   *
+   * The same action the gateway sees as an ordinary spec revision — it goes
+   * through the same publishing path — named separately so the log can say
+   * which of the two happened. `details` adds `restored_from_spec_id`,
+   * `restored_from_version` and `restored_from_created_at` naming the revision
+   * that was put back; the new revision's own id is `spec_id`, because history
+   * is never rewritten.
+   */
+  API_SPEC_ROLLBACK: 'api.spec_rollback',
   API_RETIRE: 'api.retire',
   API_DELETE: 'api.delete',
   /** A palette plugin was created or replaced on an API's proxy. */
@@ -90,9 +101,65 @@ export const AuditAction = {
    * direction: the gateway was retargeted or rebuilt, the stored
    * `ferrum_proxy_id` answers `404`, and the reconciliation repair cleared it
    * so the API reads as having no proxy — which is the state the rest of the
-   * portal already models — and can be republished through the ordinary flow.
+   * portal already models. The API is also left `gateway_state:
+   * 'repair_required'` until {@link AuditAction.API_GATEWAY_RESTORE} rebuilds
+   * its deployment.
    */
   API_GATEWAY_REPAIR_REQUIRED: 'api.gateway_repair_required',
+  /**
+   * An existing API's gateway deployment was rebuilt in place: same id, slug,
+   * owner, specification history, gateway URL and grants, new Edge proxy.
+   *
+   * `rebuilt: false` records the other way this clears — the proxy turned out
+   * to be live after all (an operator rebuilt it by hand), so the flag was
+   * dropped without touching the gateway.
+   */
+  /**
+   * A provider authorized one account to **read** a private API's
+   * documentation.
+   *
+   * `details.grants_invocation` is always `false`, spelled out on every row
+   * rather than left to be inferred: this authorization confers no ACL group,
+   * touches no Ferrum consumer and reaches no gateway. Somebody reading the
+   * log a year from now should not have to go and check.
+   */
+  /**
+   * An application identity was created. `details` names it; the target is the
+   * application.
+   */
+  APPLICATION_CREATE: 'application.create',
+  /**
+   * An application was renamed, re-described, disabled or re-enabled.
+   *
+   * On a disable, `details.revoked_existing_access` is always `false`:
+   * disabling refuses *new* requests, approvals and credentials and revokes
+   * nothing that already exists. An integration that must stop working is
+   * deleted, or has its grants revoked — and an operator reading this row
+   * should not have to guess which happened.
+   */
+  APPLICATION_UPDATE: 'application.update',
+  /**
+   * An application and its gateway identity were deleted. `details` carries
+   * the consumer that came down and the counts of grants and credentials the
+   * cascade removed with it.
+   */
+  APPLICATION_DELETE: 'application.delete',
+  API_VIEWER_AUTHORIZE: 'api.viewer_authorize',
+  /**
+   * A read authorization was withdrawn. `details.revoked_grant` is always
+   * `false` for the same reason: read access and invocation access are
+   * separate, and removing one has never touched the other.
+   */
+  API_VIEWER_REVOKE: 'api.viewer_revoke',
+  API_GATEWAY_RESTORE: 'api.gateway_restore',
+  /**
+   * A restore that reached the gateway and then failed. Reads like
+   * {@link AuditAction.API_PUBLISH_ROLLBACK}: `withdrawn: false` means the
+   * compensating `DELETE` could not confirm and `stranded_proxy_id` names a
+   * proxy that may still be live on its staging path. The API stays
+   * `repair_required`, so the condition is still visible and a retry is safe.
+   */
+  API_GATEWAY_RESTORE_FAILED: 'api.gateway_restore_failed',
   /**
    * A publish that reached the gateway and then failed; records whether the
    * proxy it created came back off again.

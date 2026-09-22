@@ -43,7 +43,8 @@ function CatalogCard({ api }: { api: CatalogApi }): ReactElement {
           <Badge mono>v{api.version}</Badge>
           <Badge tone="info">{AUTH_PLUGIN_LABELS[api.auth_plugin]}</Badge>
           {api.requestable ? <Badge tone="accent">Requestable</Badge> : <Badge>Open</Badge>}
-          {api.visibility === 'internal' ? <Badge tone="warning">Internal</Badge> : null}
+          {api.visibility === 'internal' ? <Badge tone="warning">Unlisted</Badge> : null}
+          {api.visibility === 'private' ? <Badge tone="danger">Private</Badge> : null}
         </div>
         {api.owner ? (
           <div className="flex min-w-0 items-center gap-1.5">

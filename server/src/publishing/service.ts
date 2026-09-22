@@ -216,6 +216,7 @@ import {
   type Paginated,
   type PublishApiRequest,
   type RateLimitConfig,
+  type SpecDiff,
   type SpecEnforcementLevel,
   type UpdateApiRequest,
   type Uuid,
@@ -239,6 +240,11 @@ import {
   type TeardownGatewayIdentityResult,
 } from '../credentials/service.js';
 import { assertNamespaceServed, type FerrumAdminClient } from '../ferrum-admin/index.js';
+import {
+  edgeTriggerFor,
+  paletteGatewaySettings,
+  palettePriority,
+} from '../ferrum-admin/palette.js';
 import type {
   EdgeCircuitBreakerConfig,
   EdgeConsumer,
@@ -274,12 +280,22 @@ import {
   type UpstreamPolicy,
   type UpstreamResolver,
 } from './oas.js';
+import { diffSpecDocuments } from './spec-diff.js';
 import {
   assertRoutesSubmittable,
   handOwnedPlugins,
   routesSpecDocument,
   submittableProxyBody,
 } from './spec-document.js';
+
+/** Result of {@link PublishingService.restoreGateway}. */
+export interface RestoreResult {
+  api: Api;
+  /** The revision that was redeployed — the current one, never a new row. */
+  spec: ApiSpecSummary;
+  /** The proxy the restore created on the gateway. */
+  proxyId: string;
+}
 
 /** Result of {@link PublishingService.publish} and `updateSpec`. */
 export interface PublishResult {
@@ -343,6 +359,40 @@ export interface PublishingService {
     version?: string,
     ip?: string | null,
   ): Promise<PublishResult>;
+  /** One page of retained revisions, current first then newest-first. */
+  revisions(
+    actor: UserRecord,
+    apiId: Uuid,
+    options?: ListOptions,
+  ): Promise<Paginated<ApiSpecSummary>>;
+  /** One retained revision's document, rendered as `GET /spec` renders one. */
+  revision(actor: UserRecord, apiId: Uuid, revisionId: Uuid): Promise<GetApiSpecResponse>;
+  /** What rolling back to `revisionId` would change, against the current revision. */
+  diffRevision(actor: UserRecord, apiId: Uuid, revisionId: Uuid): Promise<SpecDiff>;
+  /** What uploading `specText` would change, against the current revision. */
+  diffUpload(actor: UserRecord, apiId: Uuid, specText: string): Promise<SpecDiff>;
+  /**
+   * Redeploy a retained revision **as a new revision** of the same API.
+   *
+   * Never a rewrite of history and never a delete-and-republish: the API keeps
+   * its id, slug, ownership, grants and gateway URL, and the restored document
+   * goes through the same validation, gateway synchronisation and compensation
+   * an upload does.
+   */
+  rollbackSpec(
+    actor: UserRecord,
+    apiId: Uuid,
+    revisionId: Uuid,
+    ip?: string | null,
+  ): Promise<PublishResult>;
+  /**
+   * Rebuild the gateway deployment of an API the gateway no longer serves.
+   *
+   * Non-destructive: the catalog entry keeps its id, slug, owner, provider,
+   * specification history, configured gateway URL and every access grant. Only
+   * the Edge objects are recreated, from what the portal already stores.
+   */
+  restoreGateway(actor: UserRecord, apiId: Uuid, ip?: string | null): Promise<RestoreResult>;
   /** Tear the API down: grants revoked, Edge objects deleted, rows removed. */
   remove(actor: UserRecord, apiId: Uuid, ip?: string | null): Promise<{ revoked_grants: number }>;
   /** Create (or replace) the provider's throwaway consumer for their own API. */
@@ -409,15 +459,31 @@ const CORS_PLUGIN = 'cors';
 /**
  * Config for an auth plugin.
  *
- * All three are sent as `{}`:
+ * All three are sent as `{}`, which takes Edge's defaults:
  * - `key_auth` defaults to `header:X-API-Key` + `hide_credentials: true`, which
  *   is exactly what the portal documents;
- * - `basic_auth` accepts only `hide_credentials`, which defaults to `true`, so
- *   `{}` keeps Edge's default of stripping the reusable Basic password before
- *   the request reaches the backend (`ref-edge-admin.md` §8.7);
+ * - `basic_auth` accepts `hide_credentials` and nothing else, and it too
+ *   defaults to `true`, so `{}` (equivalently `null`) is the hiding form;
  * - `jwt_auth` defaults to `token_lookup: header:Authorization` and
  *   `consumer_claim_field: sub`, and Nexus hands the consumer username out as
  *   the `sub` value the client must send.
+ *
+ * **`jwt_auth` forwards the bearer token to the upstream, and Nexus cannot turn
+ * that off.** Of these three plugins only `key_auth` and `basic_auth` take
+ * `hide_credentials`; `jwt_auth`'s config is a closed eight-key set
+ * (`token_lookup`, `consumer_claim_field`, `require_exp`, `require_nbf`,
+ * `expected_issuer`, `expected_issuers`, `audiences`, `leeway_secs`) whose
+ * admission check refuses anything else, so sending `hide_credentials` here
+ * would 400 every `jwt_auth` publish rather than hide a token. The asymmetry is
+ * Edge's: a key and a Basic password are reusable indefinitely, whereas
+ * `require_exp` defaults to `true` so every accepted token carries an expiry —
+ * one the client chooses, since neither Edge nor Nexus caps it — and a backend
+ * offered JWT usually wants the claims. The client's signing secret is never
+ * forwarded — a provider cannot mint tokens as a client, only replay one it was
+ * handed, until that token's `exp`. What each credential type discloses to the
+ * provider is documented in `docs/api.md`, `docs/security.md` §5 and the client
+ * and provider guides, and pinned against the real gateway by
+ * `e2e/src/dataplane.test.ts`.
  */
 export function authPluginConfig(_plugin: AuthPluginType): EdgePluginSettings {
   return {};
@@ -794,6 +860,73 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     return (proxy.plugins ?? []).map((entry) => entry.plugin_config_id);
   }
 
+  /**
+   * The `PATCH` fields that only take effect through the gateway.
+   *
+   * Every one of them is applied by a write to the API's proxy or its plugin
+   * configs, and `update()` skips those writes when there is no proxy.
+   */
+  const GATEWAY_SETTING_FIELDS = [
+    'upstream_url',
+    'auth_plugin',
+    'requestable',
+    'rate_limit',
+    'cors',
+    'allowed_methods',
+    'timeouts',
+    'circuit_breaker',
+    'spec_enforcement',
+  ] as const;
+
+  /**
+   * Refuse a gateway setting change on an API that has no gateway deployment.
+   *
+   * `update()` applies these fields by writing to the proxy, and skips every
+   * proxy write when there is none — so the change was silently discarded and
+   * the request still answered `200`. That was a quirk of rare legacy rows
+   * until issue #284 made "deployment missing" a normal, user-visible state
+   * with a Restore button, where a provider fixing the API before restoring it
+   * is exactly who sends these. It also left a restore in flight building from
+   * settings the provider believed they had just changed.
+   *
+   * Refused rather than persisted to the row for the restore to pick up: several
+   * of these (an `auth_plugin` swap, an enforcement conversion) carry gateway
+   * side effects and confirmations that only make sense against a live proxy.
+   * Catalog-only fields — name, description, version, visibility, status —
+   * keep working, and a corrected specification can still be uploaded.
+   */
+  function assertGatewaySettingsWritable(api: ApiRecord, patch: UpdateApiInput): void {
+    if (api.ferrum_proxy_id !== null) return;
+    const fields = GATEWAY_SETTING_FIELDS.filter((field) => patch[field] !== undefined);
+    if (fields.length === 0) return;
+    throw conflict(
+      'This API has no gateway deployment. Restore it before changing its gateway settings.',
+      { api_id: api.id, fields, gateway_state: api.gateway_state },
+    );
+  }
+
+  /**
+   * Everything about an API row that shapes the proxy a restore builds.
+   *
+   * Compared before a restore commits: if any of it moved while the proxy was
+   * being built, the proxy describes an API that no longer exists.
+   */
+  function deploymentShape(api: ApiRecord): Record<string, unknown> {
+    return {
+      slug: api.slug,
+      namespace: api.namespace,
+      upstream_url: api.upstream_url,
+      auth_plugin: api.auth_plugin,
+      requestable: api.requestable,
+      rate_limit: api.rate_limit,
+      cors: api.cors,
+      allowed_methods: api.allowed_methods,
+      timeouts: api.timeouts,
+      circuit_breaker: api.circuit_breaker,
+      spec_enforcement: api.spec_enforcement,
+    };
+  }
+
   /** Unique slug, or `CONFLICT` when the provider's choice is taken. */
   async function resolveSlug(requested: string | undefined, name: string): Promise<string> {
     const slug = slugify(requested && requested.trim() !== '' ? requested : name);
@@ -886,7 +1019,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   }
 
   function specSummary(record: ApiSpecRecord): ApiSpecSummary {
-    const { raw_spec: _raw, ...summary } = record;
+    // `revision_seq` goes with the document: it is the store's retention and
+    // ordering key, not part of the wire contract.
+    const { raw_spec: _raw, revision_seq: _seq, ...summary } = record;
     return summary;
   }
 
@@ -900,6 +1035,323 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       (groups) => groups.filter((entry) => entry !== group),
       userId,
     );
+  }
+
+  /**
+   * One retained revision of `apiId`.
+   *
+   * The API scope is part of the lookup, not a check after it: a revision id
+   * from another provider's API must read as absent rather than as forbidden,
+   * or the endpoint becomes a way to confirm that an id exists. A `404` is
+   * also what retention leaves behind — the revision a provider is looking at
+   * can be pruned by a publish between the listing and the rollback, and
+   * "that revision is no longer retained" is exactly the right answer.
+   */
+  async function loadRevision(apiId: Uuid, revisionId: Uuid): Promise<ApiSpecRecord> {
+    const revision = await store.apiSpecs.findById(revisionId);
+    if (!revision || revision.api_id !== apiId) throw notFound('API spec revision', revisionId);
+    return revision;
+  }
+
+  /**
+   * A stored revision as `GET /spec` renders one.
+   *
+   * The content type is derived from the bytes rather than stored: an upload
+   * is kept exactly as it arrived, and whether that was JSON or YAML is
+   * visible in its first non-space character.
+   */
+  function presentRevision(record: ApiSpecRecord): GetApiSpecResponse {
+    const head = record.raw_spec.trimStart();
+    return {
+      api_id: record.api_id,
+      version: record.version,
+      raw_spec: record.raw_spec,
+      content_type:
+        head.startsWith('{') || head.startsWith('[') ? 'application/json' : 'application/yaml',
+      parsed_title: record.parsed_title,
+      parsed_version: record.parsed_version,
+    };
+  }
+
+  /**
+   * Compare a proposed document against what the API is serving today.
+   *
+   * An API with no current revision compares against an empty document, so a
+   * first upload reads as "everything is new" rather than failing — there is
+   * nothing wrong with reviewing a change to nothing.
+   */
+  function diffAgainstCurrent(
+    current: ApiSpecRecord | null,
+    proposed: { document: Record<string, unknown>; summary: ApiSpecSummary | null },
+  ): SpecDiff {
+    return diffSpecDocuments(
+      {
+        document: current ? safeSpecDocument(current.raw_spec) : {},
+        summary: current ? specSummary(current) : null,
+      },
+      proposed,
+    );
+  }
+
+  /**
+   * Publish `specText` as the API's new current revision.
+   *
+   * Shared by {@link PublishingService.updateSpec} and
+   * {@link PublishingService.rollbackSpec}, because a rollback *is* a spec
+   * revision: the same validation, the same gateway-first ordering, the same
+   * compensation, the same bounded retention. `restoredFrom` is the retained
+   * revision a rollback is replaying, and it changes exactly two things — the
+   * provenance recorded on the new row, and which audit action names it. It
+   * does not change what happens to the gateway, which is the point: a
+   * rollback that took a shortcut would be a second, less-tested publishing
+   * path (issue #290).
+   */
+  async function applyRevision(
+    actor: UserRecord,
+    apiId: Uuid,
+    specText: string,
+    version: string | null,
+    ip: string | null,
+    restoredFrom: ApiSpecRecord | null,
+  ): Promise<PublishResult> {
+    let api = await loadApi(apiId);
+    assertCanAdminister(actor, api);
+    // A revision rewrites the proxy and its spec on the gateway, so it is a
+    // re-publish and gated the same way a first publish is.
+    assertNamespaceRoutable();
+
+    const parsed = parseOpenApiSpec(specText);
+    let previous = await store.apiSpecs.findCurrentByApi(api.id);
+    const nextVersion = version?.trim() || parsed.version;
+    const proxyId = api.ferrum_proxy_id;
+
+    // The gateway moves **first**, and the revision only becomes current once
+    // it has. The other order publishes a document describing a backend Edge
+    // is not serving yet; this order's failure mode is compensated below, and
+    // if the compensation itself fails the gateway wins — traffic keeps
+    // flowing to the new upstream while the catalog still shows the previous
+    // revision, which is the direction that does not break integrations.
+    let backendUpdated = false;
+    /** Normalized upstream the proxy now points at, when it moved. */
+    let movedTo: string | null = null;
+    /** Historical revisions `NEXUS_SPEC_HISTORY_LIMIT` dropped for this one. */
+    let pruned = 0;
+    // Validate the proposed upstream before waiting for the proxy lease.
+    // If the catalog changes while waiting, derive it again under the lease.
+    let backend = proxyId ? await followedUpstream(api, previous, parsed) : null;
+
+    /**
+     * Move the gateway, then persist the revision, compensating the gateway
+     * if the persistence fails.
+     *
+     * Run under the caller's `proxy:<id>` lease whenever the API has a proxy,
+     * because in `routes` mode this *is* a proxy rewrite: `PUT /api-specs`
+     * re-inserts the proxy from the submitted `x-ferrum-proxy`, so a body
+     * built from a read outside the lease silently discards whatever a
+     * concurrent runtime `PATCH` wrote in between — a method restriction, the
+     * timeouts, the WebSocket origins or the backend. Holding the lease
+     * across the store transaction as well is what stops a *rollback* landing
+     * on top of a later spec revision that succeeded: no other writer can
+     * have interleaved. Everything inside therefore uses the `…Locked`
+     * helpers — the serializer is not re-entrant.
+     */
+    const apply = async (): Promise<{ spec: ApiSpecRecord; api: ApiRecord }> => {
+      const fresh = await loadApi(apiId);
+      assertCanAdminister(actor, fresh);
+      if (fresh.ferrum_proxy_id !== proxyId) {
+        throw conflict(
+          'The gateway proxy changed while this revision was waiting; reload and retry',
+        );
+      }
+      const current = await store.apiSpecs.findCurrentByApi(apiId);
+      if (!isDeepStrictEqual(fresh, api) || current?.id !== previous?.id) {
+        api = fresh;
+        previous = current;
+        backend = proxyId ? await followedUpstream(api, previous, parsed) : null;
+      }
+      assertRoutesEnforceable(api.spec_enforcement, parsed.paths);
+      assertRoutesSubmittable(api.spec_enforcement, parsed.document);
+      const undo: (() => Promise<void>)[] = [];
+      try {
+        if (proxyId) {
+          // In `routes` mode the `x-ferrum-proxy` body has to be the whole
+          // current document or the replace resets every field it omits; in
+          // `docs_only` mode this is the existence check the revision would
+          // otherwise skip when the document does not move the backend.
+          const proxy = await edge.proxies.get(proxyId);
+          if (!proxy) throw notFound('Proxy', proxyId);
+
+          if (api.spec_enforcement === 'routes') {
+            // One call moves both things a revision can move. `PUT /api-specs`
+            // regenerates the operation table *and* re-inserts the proxy from
+            // the submitted `x-ferrum-proxy`, so the backend rides along in the
+            // same write rather than in a separate `PUT /proxies/{id}` that
+            // this call would immediately overwrite. Hand-owned plugin configs
+            // and their associations are untouched by it, so there is no window
+            // in which the API is unauthenticated.
+            const build = (
+              document: Record<string, unknown>,
+              proxyBody: Record<string, unknown>,
+            ): Record<string, unknown> => routesSpecDocument(document, { proxy: proxyBody });
+
+            const specId = await specIdForProxy(proxyId);
+            // Captured before the write: the compensation has to put back the
+            // revision the catalog still shows, on the backend it was still
+            // pointed at. A first revision that somehow has no predecessor
+            // restores to the new document, which is the best available answer
+            // and never leaves the proxy without a spec.
+            const restoreDocument = previous
+              ? safeSpecDocument(previous.raw_spec)
+              : parsed.document;
+            const restoreBackend = proxyBackendFields(proxy);
+            // Register before PUT: a lost response can still mean it landed.
+            undo.push(async () => {
+              // Re-read rather than replay the captured body: only the
+              // document and the backend are being rewound, exactly as
+              // `restoreProxyBackend` is narrow, so nothing else this
+              // operation left on the proxy is reverted with them.
+              const fresh = await edge.proxies.get(proxyId);
+              if (!fresh) throw notFound('Proxy', proxyId);
+              await edge.apiSpecs.replace(
+                specId,
+                build(restoreDocument, {
+                  ...submittableProxyBody(fresh),
+                  ...(backend ? restoreBackend : {}),
+                }),
+                actor.id,
+              );
+            });
+            await edge.apiSpecs.replace(
+              specId,
+              build(parsed.document, {
+                ...submittableProxyBody(proxy),
+                ...(backend ? backendFields(backend) : {}),
+              }),
+              actor.id,
+            );
+          } else if (backend) {
+            // Registered from inside the mutator, between the `GET` and the
+            // `PUT`, for the reason the helper documents: waiting for the
+            // call to return registers nothing when Edge applied the move and
+            // lost the answer.
+            await replaceProxyBackendLocked(proxyId, backend, actor.id, (step) => undo.push(step));
+          }
+
+          if (backend) {
+            backendUpdated = true;
+            movedTo = formatUpstreamUrl(backend);
+          }
+        }
+
+        return await store.transaction(async (tx) => {
+          const revision = await tx.apiSpecs.create({
+            api_id: api.id,
+            version: nextVersion,
+            raw_spec: parsed.raw,
+            parsed_title: parsed.title,
+            parsed_version: parsed.version,
+            is_current: true,
+            created_by: actor.id,
+            // Provenance, not a dependency: retention will eventually drop
+            // the revision this one restored, and the column goes to `null`
+            // rather than holding the rollback hostage.
+            rolled_back_from_id: restoredFrom?.id ?? null,
+          });
+          await tx.apiSpecs.setCurrent(api.id, revision.id);
+          // Bounded retention, in the *same* transaction that made the new
+          // revision current: a rollback takes the prune with it, and by this
+          // point the revision a rollback would restore is the newest
+          // non-current one, which the limit's minimum of 1 always keeps.
+          pruned = await tx.apiSpecs.pruneHistory(api.id, config.specHistoryLimit);
+          // The row that records where the gateway points moves with the
+          // gateway, in the same transaction as the revision: if this rolls
+          // back, the compensation below puts the proxy back and the row never
+          // claimed the new upstream in the first place.
+          const changes: Partial<ApiRecord> = {};
+          if (nextVersion !== api.version) changes.version = nextVersion;
+          if (movedTo !== null) changes.upstream_url = movedTo;
+          const row =
+            Object.keys(changes).length === 0
+              ? api
+              : ((await tx.apis.update(api.id, changes)) ?? api);
+          return { spec: revision, api: row };
+        });
+      } catch (error) {
+        // Best-effort by the same contract `update()` documents: the request
+        // is already failing and an undo step must not replace the failure
+        // the caller needs to see with its own. Every step here replays a
+        // proxy write or a spec replace, so the gateway stays describable
+        // whichever way one goes — but a swallowed failure is still a
+        // divergence nothing else will revisit, so it is logged and audited.
+        const failures: { step: string; error: string }[] = [];
+        for (const step of undo.reverse()) {
+          await step().catch((undoError: unknown) => {
+            failures.push({
+              step:
+                api.spec_enforcement === 'routes' ? 'the spec re-import' : 'the upstream backend',
+              error: errorMessage(undoError),
+            });
+            deps.log?.(
+              { api_id: api.id, proxy_id: proxyId, error: errorMessage(undoError) },
+              'a spec revision compensation step failed; the gateway may not match the portal',
+            );
+          });
+        }
+        if (failures.length > 0) {
+          await recordCompensationFailure({
+            api,
+            proxyId,
+            attempted: ['spec'],
+            failures,
+            error,
+            actor,
+            ip,
+          });
+        }
+        // A compensated failure leaves the row where it was, so the audit
+        // details must not claim a move that has just been rewound.
+        backendUpdated = false;
+        movedTo = null;
+        pruned = 0;
+        throw error;
+      }
+    };
+
+    const persisted = proxyId ? await binder.withProxy(proxyId, apply) : await apply();
+    const spec = persisted.spec;
+    const updated = persisted.api;
+
+    await audit.record(
+      { id: actor.id, role: actor.role },
+      // One publishing path, two names for it. A rollback is a revision like
+      // any other on the gateway, and an operator reading the log still has
+      // to be able to tell "the provider uploaded a document" from "the
+      // provider put an earlier one back".
+      restoredFrom ? AuditAction.API_SPEC_ROLLBACK : AuditAction.API_SPEC_UPDATE,
+      { type: 'api', id: api.id },
+      {
+        spec_id: spec.id,
+        version: nextVersion,
+        spec_paths: parsed.pathCount,
+        spec_operations: parsed.operationCount,
+        spec_enforcement: api.spec_enforcement,
+        backend_updated: backendUpdated,
+        pruned_revisions: pruned,
+        ...(restoredFrom
+          ? {
+              restored_from_spec_id: restoredFrom.id,
+              restored_from_version: restoredFrom.version,
+              restored_from_created_at: restoredFrom.created_at,
+            }
+          : {}),
+      },
+      ip,
+    );
+
+    return {
+      api: presentApi(updated, await settings.getGatewayPublicUrl()),
+      spec: specSummary(spec),
+    };
   }
 
   return {
@@ -942,16 +1394,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       assertCanAdminister(actor, api);
       const record = await store.apiSpecs.findCurrentByApi(api.id);
       if (!record) throw notFound('Specification for API', apiId);
-      const head = record.raw_spec.trimStart();
-      return {
-        api_id: api.id,
-        version: record.version,
-        raw_spec: record.raw_spec,
-        content_type:
-          head.startsWith('{') || head.startsWith('[') ? 'application/json' : 'application/yaml',
-        parsed_title: record.parsed_title,
-        parsed_version: record.parsed_version,
-      };
+      return presentRevision(record);
     },
 
     async publish(owner, input, ip = null): Promise<PublishResult> {
@@ -1158,6 +1601,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               parsed_title: parsed.title,
               parsed_version: parsed.version,
               is_current: true,
+              created_by: owner.id,
             });
             return { api: row, spec: revision };
           });
@@ -1259,6 +1703,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     async update(actor, apiId, patch, ip = null): Promise<Api> {
       const initial = await loadApi(apiId);
       assertCanAdminister(actor, initial);
+      assertGatewaySettingsWritable(initial, patch);
       // The read, gateway mutations, rollback, and catalog write are one
       // canonical proxy operation. Helpers inside must not reacquire the key.
       const apply = async (): Promise<Api> => {
@@ -1913,230 +2358,395 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       return initial.ferrum_proxy_id ? binder.withProxy(initial.ferrum_proxy_id, apply) : apply();
     },
 
-    async updateSpec(actor, apiId, specText, version, ip = null): Promise<PublishResult> {
-      let api = await loadApi(apiId);
+    updateSpec(actor, apiId, specText, version, ip = null): Promise<PublishResult> {
+      return applyRevision(actor, apiId, specText, version ?? null, ip, null);
+    },
+
+    async revisions(actor, apiId, options): Promise<Paginated<ApiSpecSummary>> {
+      const api = await loadApi(apiId);
       assertCanAdminister(actor, api);
-      // A revision rewrites the proxy and its spec on the gateway, so it is a
-      // re-publish and gated the same way a first publish is.
+      const page = await store.apiSpecs.list({ api_id: api.id }, options);
+      return { items: page.items.map(specSummary), total: page.total };
+    },
+
+    async revision(actor, apiId, revisionId): Promise<GetApiSpecResponse> {
+      const api = await loadApi(apiId);
+      assertCanAdminister(actor, api);
+      return presentRevision(await loadRevision(api.id, revisionId));
+    },
+
+    async diffRevision(actor, apiId, revisionId): Promise<SpecDiff> {
+      const api = await loadApi(apiId);
+      assertCanAdminister(actor, api);
+      const target = await loadRevision(api.id, revisionId);
+      const current = await store.apiSpecs.findCurrentByApi(api.id);
+      // `from` is what the API serves today and `to` is what it would serve,
+      // so a rollback's diff reads in the direction the change would go.
+      return diffAgainstCurrent(current, {
+        document: safeSpecDocument(target.raw_spec),
+        summary: specSummary(target),
+      });
+    },
+
+    async diffUpload(actor, apiId, specText): Promise<SpecDiff> {
+      const api = await loadApi(apiId);
+      assertCanAdminister(actor, api);
+      // Parsed rather than merely compared: a document the portal would refuse
+      // at upload has to be refused here too, or the review would describe a
+      // change that cannot actually be made.
+      const parsed = parseOpenApiSpec(specText);
+      const current = await store.apiSpecs.findCurrentByApi(api.id);
+      return diffAgainstCurrent(current, { document: parsed.document, summary: null });
+    },
+
+    async rollbackSpec(actor, apiId, revisionId, ip = null): Promise<PublishResult> {
+      const api = await loadApi(apiId);
+      assertCanAdminister(actor, api);
+      const target = await loadRevision(api.id, revisionId);
+      if (target.is_current) {
+        throw conflict('That revision is already the current one', {
+          api_id: api.id,
+          spec_id: target.id,
+        });
+      }
+      return applyRevision(actor, api.id, target.raw_spec, target.version, ip, target);
+    },
+
+    async restoreGateway(actor, apiId, ip = null): Promise<RestoreResult> {
+      const initial = await loadApi(apiId);
+      assertCanAdminister(actor, initial);
+      // A restore creates a proxy and moves it onto the public listen path, so
+      // it is gated exactly as a publish is: a gateway that will not route the
+      // namespace would take every write below and serve none of them.
       assertNamespaceRoutable();
 
-      const parsed = parseOpenApiSpec(specText);
-      let previous = await store.apiSpecs.findCurrentByApi(api.id);
-      const nextVersion = version?.trim() || parsed.version;
-      const proxyId = api.ferrum_proxy_id;
+      // Serialised per API, not per proxy: there is no proxy to hold a lease on
+      // — that is the whole condition — so this is the only thing standing
+      // between two restores of the same API and two live proxies claiming one
+      // listen path. Everything from the missing-deployment check to the store
+      // write runs inside it.
+      const restored = await edge.serializePerKey(`api-restore:${apiId}`, async () => {
+        const api = await loadApi(apiId);
+        assertCanAdminister(actor, api);
 
-      // The gateway moves **first**, and the revision only becomes current once
-      // it has. The other order publishes a document describing a backend Edge
-      // is not serving yet; this order's failure mode is compensated below, and
-      // if the compensation itself fails the gateway wins — traffic keeps
-      // flowing to the new upstream while the catalog still shows the previous
-      // revision, which is the direction that does not break integrations.
-      let backendUpdated = false;
-      /** Normalized upstream the proxy now points at, when it moved. */
-      let movedTo: string | null = null;
-      /** Historical revisions `NEXUS_SPEC_HISTORY_LIMIT` dropped for this one. */
-      let pruned = 0;
-      // Validate the proposed upstream before waiting for the proxy lease.
-      // If the catalog changes while waiting, derive it again under the lease.
-      let backend = proxyId ? await followedUpstream(api, previous, parsed) : null;
+        // What the restore redeploys. A provider may upload a corrected
+        // document first — `updateSpec` keeps working on an undeployed API —
+        // and the restore then deploys that, because the current revision is by
+        // definition what the catalog is showing.
+        const current = await store.apiSpecs.findCurrentByApi(api.id);
+        if (!current) {
+          throw conflict('This API has no stored specification revision to redeploy', {
+            api_id: api.id,
+          });
+        }
 
-      /**
-       * Move the gateway, then persist the revision, compensating the gateway
-       * if the persistence fails.
-       *
-       * Run under the caller's `proxy:<id>` lease whenever the API has a proxy,
-       * because in `routes` mode this *is* a proxy rewrite: `PUT /api-specs`
-       * re-inserts the proxy from the submitted `x-ferrum-proxy`, so a body
-       * built from a read outside the lease silently discards whatever a
-       * concurrent runtime `PATCH` wrote in between — a method restriction, the
-       * timeouts, the WebSocket origins or the backend. Holding the lease
-       * across the store transaction as well is what stops a *rollback* landing
-       * on top of a later spec revision that succeeded: no other writer can
-       * have interleaved. Everything inside therefore uses the `…Locked`
-       * helpers — the serializer is not re-entrant.
-       */
-      const apply = async (): Promise<{ spec: ApiSpecRecord; api: ApiRecord }> => {
-        const fresh = await loadApi(apiId);
-        assertCanAdminister(actor, fresh);
-        if (fresh.ferrum_proxy_id !== proxyId) {
-          throw conflict(
-            'The gateway proxy changed while this revision was waiting; reload and retry',
+        // Is the deployment actually missing? `edge.proxies.get` answers `null`
+        // for a 404 and *throws* for everything else, and that distinction is
+        // load-bearing: a refused connection, a 500 or an expired admin token
+        // must surface as a gateway error, never as "the proxy is gone" —
+        // otherwise one flaky minute would talk a provider into building a
+        // second proxy beside a live one.
+        const recorded = api.ferrum_proxy_id;
+        if (recorded !== null) {
+          const live = await edge.proxies.get(recorded);
+          if (live) {
+            // Nothing to restore. If the row was flagged by a pass that has
+            // since been overtaken — an operator rebuilt the proxy by hand —
+            // say so by clearing the condition rather than by rebuilding on
+            // top of a proxy that is already serving.
+            if (api.gateway_state === 'repair_required') {
+              const cleared =
+                (await store.apis.update(api.id, { gateway_state: 'deployed' })) ?? api;
+              return { api: cleared, spec: current, proxyId: recorded, rebuilt: false };
+            }
+            throw conflict('This API already has a gateway proxy; there is nothing to restore', {
+              api_id: api.id,
+              proxy_id: recorded,
+            });
+          }
+          // A confirmed 404 on a reference the row still holds. Record the
+          // condition before building anything, so a restore that fails
+          // halfway leaves the API flagged rather than leaving a dead
+          // reference that the next pass would report all over again.
+          await store.apis.update(api.id, {
+            ferrum_proxy_id: null,
+            gateway_state: 'repair_required',
+          });
+          await audit.record(
+            { id: actor.id, role: actor.role },
+            AuditAction.API_GATEWAY_REPAIR_REQUIRED,
+            { type: 'api', id: api.id },
+            {
+              phase: 'orphaned_proxy',
+              namespace,
+              proxy_id: recorded,
+              slug: api.slug,
+              spec_enforcement: api.spec_enforcement,
+              reason: 'confirmed_missing_during_restore',
+            },
+            ip,
           );
         }
-        const current = await store.apiSpecs.findCurrentByApi(apiId);
-        if (!isDeepStrictEqual(fresh, api) || current?.id !== previous?.id) {
-          api = fresh;
-          previous = current;
-          backend = proxyId ? await followedUpstream(api, previous, parsed) : null;
-        }
+
+        const parsed = parseOpenApiSpec(current.raw_spec);
+        // The upstream the row already records wins over whatever the document
+        // says: it is what the proxy was serving, and a restore must not
+        // quietly re-point an API at a `servers[]` entry the provider moved
+        // away from. `resolveUpstream` falls back to the document only when the
+        // row never recorded one.
+        const upstream = resolveUpstream(parsed, api.upstream_url ?? '');
+        await assertUpstreamAllowed(upstream, upstreamPolicy);
+        // Checked before the first gateway write, exactly as a publish does:
+        // a document that cannot be enforced in this API's mode must fail the
+        // request rather than halfway through building a proxy.
         assertRoutesEnforceable(api.spec_enforcement, parsed.paths);
         assertRoutesSubmittable(api.spec_enforcement, parsed.document);
-        const undo: (() => Promise<void>)[] = [];
+
+        const listenPath = listenPathFor(namespace, api.slug);
+        const stagingPath = stagingListenPath(namespace);
+        const allowedMethods = proxyAllowedMethods(api.allowed_methods, api.cors);
+        const proxyBody = {
+          name: proxyNameForSlug(api.slug),
+          listen_path: stagingPath,
+          backend_scheme: upstream.scheme,
+          backend_host: upstream.host,
+          backend_port: upstream.port,
+          ...(upstream.basePath ? { backend_path: upstream.basePath } : {}),
+          strip_listen_path: true,
+          ...(allowedMethods !== null ? { allowed_methods: allowedMethods } : {}),
+          ...(api.timeouts !== null ? timeoutFields(api.timeouts) : {}),
+          ...(api.circuit_breaker ? { circuit_breaker: DEFAULT_CIRCUIT_BREAKER } : {}),
+          allowed_ws_origins: wsOriginsFor(api.cors),
+        };
+
+        // The provider's palette, replayed onto the new proxy. Losing it would
+        // make a "non-destructive" restore quietly drop the compression, the
+        // dedupe window or the header rules the API was published with — and
+        // the `api_plugins` rows would go on naming config ids the gateway does
+        // not hold, so the next palette save would find no config it owns.
+        const palette = await store.apiPlugins.listByApi(api.id);
+
+        const created: { proxyId?: string; specId?: string; pluginIds: string[] } = {
+          pluginIds: [],
+        };
+        /** `api_plugins.plugin_name` → the config id the rebuild gave it. */
+        const paletteConfigIds = new Map<string, string>();
         try {
-          if (proxyId) {
-            // In `routes` mode the `x-ferrum-proxy` body has to be the whole
-            // current document or the replace resets every field it omits; in
-            // `docs_only` mode this is the existence check the revision would
-            // otherwise skip when the document does not move the backend.
-            const proxy = await edge.proxies.get(proxyId);
-            if (!proxy) throw notFound('Proxy', proxyId);
-
-            if (api.spec_enforcement === 'routes') {
-              // One call moves both things a revision can move. `PUT /api-specs`
-              // regenerates the operation table *and* re-inserts the proxy from
-              // the submitted `x-ferrum-proxy`, so the backend rides along in the
-              // same write rather than in a separate `PUT /proxies/{id}` that
-              // this call would immediately overwrite. Hand-owned plugin configs
-              // and their associations are untouched by it, so there is no window
-              // in which the API is unauthenticated.
-              const build = (
-                document: Record<string, unknown>,
-                proxyBody: Record<string, unknown>,
-              ): Record<string, unknown> => routesSpecDocument(document, { proxy: proxyBody });
-
-              const specId = await specIdForProxy(proxyId);
-              // Captured before the write: the compensation has to put back the
-              // revision the catalog still shows, on the backend it was still
-              // pointed at. A first revision that somehow has no predecessor
-              // restores to the new document, which is the best available answer
-              // and never leaves the proxy without a spec.
-              const restoreDocument = previous
-                ? safeSpecDocument(previous.raw_spec)
-                : parsed.document;
-              const restoreBackend = proxyBackendFields(proxy);
-              // Register before PUT: a lost response can still mean it landed.
-              undo.push(async () => {
-                // Re-read rather than replay the captured body: only the
-                // document and the backend are being rewound, exactly as
-                // `restoreProxyBackend` is narrow, so nothing else this
-                // operation left on the proxy is reverted with them.
-                const fresh = await edge.proxies.get(proxyId);
-                if (!fresh) throw notFound('Proxy', proxyId);
-                await edge.apiSpecs.replace(
-                  specId,
-                  build(restoreDocument, {
-                    ...submittableProxyBody(fresh),
-                    ...(backend ? restoreBackend : {}),
-                  }),
-                  actor.id,
-                );
-              });
-              await edge.apiSpecs.replace(
-                specId,
-                build(parsed.document, {
-                  ...submittableProxyBody(proxy),
-                  ...(backend ? backendFields(backend) : {}),
-                }),
-                actor.id,
-              );
-            } else if (backend) {
-              // Registered from inside the mutator, between the `GET` and the
-              // `PUT`, for the reason the helper documents: waiting for the
-              // call to return registers nothing when Edge applied the move and
-              // lost the answer.
-              await replaceProxyBackendLocked(proxyId, backend, actor.id, (step) =>
-                undo.push(step),
-              );
-            }
-
-            if (backend) {
-              backendUpdated = true;
-              movedTo = formatUpstreamUrl(backend);
-            }
+          // Pre-minted and recorded before the call is awaited, for the reason
+          // `publish()` documents at length: a create Edge applied but could
+          // not acknowledge must still leave the compensation a target.
+          const proxyId = newId();
+          created.proxyId = proxyId;
+          let gatewayProxyId = proxyId;
+          if (api.spec_enforcement === 'routes') {
+            const ref = await createSpecOwnedProxy(
+              parsed.document,
+              { id: proxyId, ...proxyBody },
+              actor.id,
+            );
+            gatewayProxyId = ref.id;
+            created.proxyId = ref.id;
+            created.specId = ref.specId;
+          } else {
+            const ref = await edge.proxies.create({ id: proxyId, ...proxyBody }, actor.id);
+            gatewayProxyId = ref.id;
+            created.proxyId = ref.id;
           }
 
-          return await store.transaction(async (tx) => {
-            const revision = await tx.apiSpecs.create({
-              api_id: api.id,
-              version: nextVersion,
-              raw_spec: parsed.raw,
-              parsed_title: parsed.title,
-              parsed_version: parsed.version,
-              is_current: true,
+          const auth = await attach(
+            gatewayProxyId,
+            api.auth_plugin,
+            authPluginConfig(api.auth_plugin),
+            actor.id,
+          );
+          created.pluginIds.push(auth.id);
+
+          // The access control the API's grants depend on. The ACL group is
+          // derived from the API id, which the restore preserves, so every
+          // `nexus:api:<id>:approved` group already on an approved client's
+          // consumer starts matching again the moment this is associated —
+          // which is what makes the restore non-destructive for grants.
+          if (api.requestable) {
+            const acl = await attach(
+              gatewayProxyId,
+              ACCESS_CONTROL_PLUGIN,
+              accessControlConfig(api.id),
+              actor.id,
+            );
+            created.pluginIds.push(acl.id);
+          }
+          if (api.rate_limit) {
+            const limiter = await attach(
+              gatewayProxyId,
+              RATE_LIMIT_PLUGIN,
+              rateLimitConfig(api.rate_limit, config.edge.rateLimit),
+              actor.id,
+            );
+            created.pluginIds.push(limiter.id);
+          }
+          if (api.cors) {
+            const corsPlugin = await attach(
+              gatewayProxyId,
+              CORS_PLUGIN,
+              corsPluginConfig(api.cors, api.auth_plugin, api.allowed_methods),
+              actor.id,
+            );
+            created.pluginIds.push(corsPlugin.id);
+          }
+          for (const row of palette) {
+            const written = await attach(
+              gatewayProxyId,
+              row.plugin_name,
+              paletteGatewaySettings(row.plugin_name, row.config, config.edge.rateLimit),
+              actor.id,
+              {
+                enabled: row.enabled,
+                trigger: edgeTriggerFor(row.trigger),
+                priorityOverride: palettePriority(row.plugin_name),
+              },
+            );
+            created.pluginIds.push(written.id);
+            paletteConfigIds.set(row.plugin_name, written.id);
+          }
+
+          // Nothing above runs until the proxy's own `plugins[]` names it, and
+          // nothing is reachable until the cutover below. The order is the
+          // publish's order for the publish's reason: there is no window in
+          // which the public path serves an ungated proxy.
+          await associate(gatewayProxyId, created.pluginIds, actor.id);
+          await cutOverToListenPath(
+            gatewayProxyId,
+            api.spec_enforcement,
+            listenPath,
+            parsed.document,
+            created.specId ?? null,
+            actor.id,
+          );
+
+          // Written inside the compensated block, like every other
+          // gateway-then-store sequence here: a store failure must not leave a
+          // live proxy the portal cannot address.
+          const row = await store.transaction(async (tx) => {
+            // Re-read before committing. The restore holds a lease against
+            // other restores, but there is no proxy for anything else to lease
+            // on — that is the whole condition — so a specification uploaded
+            // while this one was building would otherwise be committed under a
+            // proxy still serving the previous document. A changed row means
+            // the proxy was built from something that is no longer true:
+            // refuse, let the compensation withdraw it, and let a retry build
+            // from what the row says now.
+            const latest = await tx.apis.findById(api.id);
+            if (!latest) throw notFound('API', api.id);
+            const latestSpec = await tx.apiSpecs.findCurrentByApi(api.id);
+            if (
+              latest.ferrum_proxy_id !== null ||
+              latestSpec?.id !== current.id ||
+              !isDeepStrictEqual(deploymentShape(latest), deploymentShape(api))
+            ) {
+              throw conflict(
+                'This API changed while its gateway deployment was being rebuilt; restore it again',
+                { api_id: api.id },
+              );
+            }
+            const updated = await tx.apis.update(api.id, {
+              ferrum_proxy_id: gatewayProxyId,
+              gateway_state: 'deployed',
             });
-            await tx.apiSpecs.setCurrent(api.id, revision.id);
-            // Bounded retention, in the *same* transaction that made the new
-            // revision current: a rollback takes the prune with it, and by this
-            // point the revision a rollback would restore is the newest
-            // non-current one, which the limit's minimum of 1 always keeps.
-            pruned = await tx.apiSpecs.pruneHistory(api.id, config.specHistoryLimit);
-            // The row that records where the gateway points moves with the
-            // gateway, in the same transaction as the revision: if this rolls
-            // back, the compensation below puts the proxy back and the row never
-            // claimed the new upstream in the first place.
-            const changes: Partial<ApiRecord> = {};
-            if (nextVersion !== api.version) changes.version = nextVersion;
-            if (movedTo !== null) changes.upstream_url = movedTo;
-            const row =
-              Object.keys(changes).length === 0
-                ? api
-                : ((await tx.apis.update(api.id, changes)) ?? api);
-            return { spec: revision, api: row };
+            if (!updated) throw notFound('API', api.id);
+            for (const entry of palette) {
+              const configId = paletteConfigIds.get(entry.plugin_name);
+              if (configId === undefined) continue;
+              await tx.apiPlugins.upsert({
+                api_id: api.id,
+                plugin_name: entry.plugin_name,
+                enabled: entry.enabled,
+                config: entry.config,
+                trigger: entry.trigger,
+                ferrum_plugin_config_id: configId,
+              });
+            }
+            return updated;
           });
+          return { api: row, spec: current, proxyId: gatewayProxyId, rebuilt: true };
         } catch (error) {
-          // Best-effort by the same contract `update()` documents: the request
-          // is already failing and an undo step must not replace the failure
-          // the caller needs to see with its own. Every step here replays a
-          // proxy write or a spec replace, so the gateway stays describable
-          // whichever way one goes — but a swallowed failure is still a
-          // divergence nothing else will revisit, so it is logged and audited.
-          const failures: { step: string; error: string }[] = [];
-          for (const step of undo.reverse()) {
-            await step().catch((undoError: unknown) => {
-              failures.push({
-                step:
-                  api.spec_enforcement === 'routes' ? 'the spec re-import' : 'the upstream backend',
-                error: errorMessage(undoError),
-              });
-              deps.log?.(
-                { api_id: api.id, proxy_id: proxyId, error: errorMessage(undoError) },
-                'a spec revision compensation step failed; the gateway may not match the portal',
-              );
-            });
+          // Undo the gateway side so a failed restore is retryable rather than
+          // leaving a half-built proxy squatting the slug's staging path — and
+          // say so out loud when it could not be undone, because a swallowed
+          // compensation reads exactly like a clean one.
+          for (const pluginId of created.pluginIds) {
+            await edge.pluginConfigs.delete(pluginId, actor.id).catch(() => undefined);
           }
-          if (failures.length > 0) {
-            await recordCompensationFailure({
-              api,
-              proxyId,
-              attempted: ['spec'],
-              failures,
-              error,
-              actor,
+          let strandedProxyId: string | null = null;
+          if (created.proxyId) {
+            const target = created.proxyId;
+            strandedProxyId = await edge.proxies
+              .delete(target, actor.id)
+              .then(() => null)
+              .catch(() => target);
+          }
+          // The row keeps `gateway_state: 'repair_required'` and a null proxy
+          // reference, which is the truthful state: the API is still not
+          // deployed, the condition is still visible to the provider, to the
+          // reconciliation report and to `/api/health`, and a retry starts from
+          // the same place this attempt did.
+          await store.apis
+            .update(api.id, { ferrum_proxy_id: null, gateway_state: 'repair_required' })
+            .catch(() => undefined);
+          await audit
+            .record(
+              { id: actor.id, role: actor.role },
+              AuditAction.API_GATEWAY_RESTORE_FAILED,
+              { type: 'api', id: api.id },
+              {
+                slug: api.slug,
+                spec_enforcement: api.spec_enforcement,
+                auth_plugin: api.auth_plugin,
+                proxy_id: created.proxyId ?? null,
+                withdrawn: strandedProxyId === null,
+                ...(strandedProxyId === null ? {} : { stranded_proxy_id: strandedProxyId }),
+                error: errorMessage(error),
+              },
               ip,
-            });
+            )
+            .catch(() => undefined);
+          if (strandedProxyId !== null) {
+            deps.log?.(
+              { api_id: api.id, proxy_id: strandedProxyId, error: errorMessage(error) },
+              'a failed gateway restore could not delete the proxy it created; it is still on ' +
+                'the gateway',
+            );
           }
-          // A compensated failure leaves the row where it was, so the audit
-          // details must not claim a move that has just been rewound.
-          backendUpdated = false;
-          movedTo = null;
-          pruned = 0;
           throw error;
         }
-      };
+      });
 
-      const persisted = proxyId ? await binder.withProxy(proxyId, apply) : await apply();
-      const spec = persisted.spec;
-      const updated = persisted.api;
-
+      // Outside the compensated block by the same rule the publish uses: both
+      // sides now agree, and tearing a live API back down because an audit
+      // write failed would trade a missing row for an outage.
       await audit.record(
         { id: actor.id, role: actor.role },
-        AuditAction.API_SPEC_UPDATE,
-        { type: 'api', id: api.id },
+        AuditAction.API_GATEWAY_RESTORE,
+        { type: 'api', id: restored.api.id },
         {
-          spec_id: spec.id,
-          version: nextVersion,
-          spec_paths: parsed.pathCount,
-          spec_operations: parsed.operationCount,
-          spec_enforcement: api.spec_enforcement,
-          backend_updated: backendUpdated,
-          pruned_revisions: pruned,
+          slug: restored.api.slug,
+          listen_path: listenPathFor(namespace, restored.api.slug),
+          proxy_id: restored.proxyId,
+          spec_id: restored.spec.id,
+          spec_enforcement: restored.api.spec_enforcement,
+          auth_plugin: restored.api.auth_plugin,
+          requestable: restored.api.requestable,
+          // `false` is the other way this clears: the stored proxy was live
+          // after all, so only the stale flag was dropped. One row either way —
+          // the two paths differ in what they did, not in whether they happened.
+          rebuilt: restored.rebuilt,
         },
         ip,
       );
 
       return {
-        api: presentApi(updated, await settings.getGatewayPublicUrl()),
-        spec: specSummary(spec),
+        api: presentApi(restored.api, await settings.getGatewayPublicUrl()),
+        spec: specSummary(restored.spec),
+        proxyId: restored.proxyId,
       };
     },
 
@@ -2243,6 +2853,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           await tx.grants.deleteByApi(api.id);
           await tx.accessRequests.deleteByApi(api.id);
           await tx.apiPlugins.deleteByApi(api.id);
+          await tx.apiViewers.deleteByApi(api.id);
           await tx.apiSpecs.deleteByApi(api.id);
           await tx.apis.delete(api.id);
         });

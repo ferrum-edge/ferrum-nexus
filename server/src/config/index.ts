@@ -55,6 +55,17 @@ export type TrustedProxies = false | number | string[];
 export const DEFAULT_MAX_APIS_PER_OWNER = 50;
 
 /**
+ * Default ceiling on application identities owned by one account
+ * (`NEXUS_MAX_APPLICATIONS_PER_OWNER`).
+ *
+ * Each application is a Ferrum consumer, so this bounds the gateway resources
+ * one account can create. Twenty is generous for the case the feature exists
+ * for — a developer separating their own integrations — and low enough that a
+ * scripted account cannot fill the gateway before an operator notices.
+ */
+export const DEFAULT_MAX_APPLICATIONS_PER_OWNER = 20;
+
+/**
  * Default number of **historical** spec revisions kept per API
  * (`NEXUS_SPEC_HISTORY_LIMIT`).
  *
@@ -294,6 +305,15 @@ export interface NexusConfig {
    */
   maxApisPerOwner: number;
   /**
+   * How many application identities one account may own
+   * (`NEXUS_MAX_APPLICATIONS_PER_OWNER`). `0` disables the ceiling.
+   *
+   * Each one is a gateway consumer, so this is the same kind of bound
+   * {@link NexusConfig.maxApisPerOwner} is: a semi-trusted account must not be
+   * able to create Edge resources without limit.
+   */
+  maxApplicationsPerOwner: number;
+  /**
    * How many **historical** spec revisions each API keeps
    * (`NEXUS_SPEC_HISTORY_LIMIT`), on top of the current one.
    *
@@ -510,6 +530,7 @@ const envSchema = z.object({
   NEXUS_GATEWAY_RECONCILE_INTERVAL_MS: intish(15 * 60_000, 0, 24 * 60 * 60_000),
   NEXUS_GATEWAY_RECONCILE_SAMPLE: intish(200, 1, 100_000),
   NEXUS_MAX_APIS_PER_OWNER: intish(DEFAULT_MAX_APIS_PER_OWNER, 0, 100_000),
+  NEXUS_MAX_APPLICATIONS_PER_OWNER: intish(DEFAULT_MAX_APPLICATIONS_PER_OWNER, 0, 100_000),
   NEXUS_SPEC_HISTORY_LIMIT: intish(DEFAULT_SPEC_HISTORY_LIMIT, 1, 10_000),
   NEXUS_MAX_MESSAGES_PER_USER_PER_DAY: intish(200, 0, 1_000_000),
   NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY: intish(20, 0, 1_000_000),
@@ -738,6 +759,7 @@ export function loadConfig(env: EnvRecord): NexusConfig {
     gatewayReconcileIntervalMs: raw.NEXUS_GATEWAY_RECONCILE_INTERVAL_MS,
     gatewayReconcileSample: raw.NEXUS_GATEWAY_RECONCILE_SAMPLE,
     maxApisPerOwner: raw.NEXUS_MAX_APIS_PER_OWNER,
+    maxApplicationsPerOwner: raw.NEXUS_MAX_APPLICATIONS_PER_OWNER,
     specHistoryLimit: raw.NEXUS_SPEC_HISTORY_LIMIT,
     maxMessagesPerUserPerDay: raw.NEXUS_MAX_MESSAGES_PER_USER_PER_DAY,
     maxAccessRequestsPerUserPerDay: raw.NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY,

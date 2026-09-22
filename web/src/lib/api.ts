@@ -26,6 +26,14 @@ import {
   type CancelAccessRequestResponse,
   type CaptchaConfigResponse,
   type CatalogDetailResponse,
+  type CreateApplicationRequest,
+  type CreateApplicationResponse,
+  type DeleteApplicationResponse,
+  type GetApplicationResponse,
+  type ListApplicationsQuery,
+  type ListApplicationsResponse,
+  type UpdateApplicationRequest,
+  type UpdateApplicationResponse,
   type CatalogListQuery,
   type CatalogListResponse,
   type CatalogSpecResponse,
@@ -97,6 +105,18 @@ import {
   type MeResponse,
   type PublishApiRequest,
   type PublishApiResponse,
+  type AuthorizeApiViewerRequest,
+  type AuthorizeApiViewerResponse,
+  type DiffApiSpecRequest,
+  type ListApiViewersResponse,
+  type ListQuery,
+  type DiffApiSpecResponse,
+  type GetApiRevisionDiffResponse,
+  type GetApiRevisionResponse,
+  type ListApiRevisionsResponse,
+  type RestoreApiGatewayResponse,
+  type RevokeApiViewerResponse,
+  type RollbackApiSpecResponse,
   type RegisterRequest,
   type RegisterResponse,
   type ResendVerificationRequest,
@@ -374,6 +394,26 @@ export const catalogApi = {
     get<CatalogSpecResponse>(`/catalog/${encodeURIComponent(slug)}/spec`),
 };
 
+/* ── Applications ───────────────────────────────────────────────────────── */
+//
+// An application is a separate gateway identity owned by the account, with its
+// own approved APIs and its own credentials. These routes administer the
+// identity; acting *as* one is the `application_id` field on the access-request
+// and credential calls.
+
+export const applicationsApi = {
+  list: (query: ListApplicationsQuery = {}): Promise<ListApplicationsResponse> =>
+    get<ListApplicationsResponse>('/applications', { ...query }),
+  get: (id: string): Promise<GetApplicationResponse> =>
+    get<GetApplicationResponse>(`/applications/${encodeURIComponent(id)}`),
+  create: (body: CreateApplicationRequest): Promise<CreateApplicationResponse> =>
+    post<CreateApplicationResponse>('/applications', body),
+  update: (id: string, body: UpdateApplicationRequest): Promise<UpdateApplicationResponse> =>
+    patch<UpdateApplicationResponse>(`/applications/${encodeURIComponent(id)}`, body),
+  remove: (id: string): Promise<DeleteApplicationResponse> =>
+    del<DeleteApplicationResponse>(`/applications/${encodeURIComponent(id)}`),
+};
+
 /* ── Publishing (provider) ──────────────────────────────────────────────── */
 
 export const apisApi = {
@@ -399,6 +439,53 @@ export const apisApi = {
     body: CreateTestConsumerRequest = {},
   ): Promise<CreateTestConsumerResponse> =>
     post<CreateTestConsumerResponse>(`/apis/${encodeURIComponent(id)}/test-consumer`, body),
+  /* ── Private documentation access ─────────────────────────────────── */
+  //
+  // Who may *read* a private API's catalog entry and specification. Nothing
+  // here is a grant: authorizing a viewer confers no ACL group and reaches no
+  // gateway.
+
+  viewers: (id: string, query: ListQuery = {}): Promise<ListApiViewersResponse> =>
+    get<ListApiViewersResponse>(`/apis/${encodeURIComponent(id)}/viewers`, { ...query }),
+  authorizeViewer: (
+    id: string,
+    body: AuthorizeApiViewerRequest,
+  ): Promise<AuthorizeApiViewerResponse> =>
+    post<AuthorizeApiViewerResponse>(`/apis/${encodeURIComponent(id)}/viewers`, body),
+  revokeViewer: (id: string, userId: string): Promise<RevokeApiViewerResponse> =>
+    del<RevokeApiViewerResponse>(
+      `/apis/${encodeURIComponent(id)}/viewers/${encodeURIComponent(userId)}`,
+    ),
+
+  /* ── Specification history, change review and rollback ────────────── */
+
+  revisions: (id: string, query: ListQuery = {}): Promise<ListApiRevisionsResponse> =>
+    get<ListApiRevisionsResponse>(`/apis/${encodeURIComponent(id)}/revisions`, { ...query }),
+  revision: (id: string, revisionId: string): Promise<GetApiRevisionResponse> =>
+    get<GetApiRevisionResponse>(
+      `/apis/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}`,
+    ),
+  /** What rolling back to this revision would change, against the current one. */
+  revisionDiff: (id: string, revisionId: string): Promise<GetApiRevisionDiffResponse> =>
+    get<GetApiRevisionDiffResponse>(
+      `/apis/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}/diff`,
+    ),
+  /** What uploading this document would change. Read-only despite the verb. */
+  diffSpec: (id: string, body: DiffApiSpecRequest): Promise<DiffApiSpecResponse> =>
+    post<DiffApiSpecResponse>(`/apis/${encodeURIComponent(id)}/spec/diff`, body),
+  rollbackSpec: (id: string, revisionId: string): Promise<RollbackApiSpecResponse> =>
+    post<RollbackApiSpecResponse>(
+      `/apis/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}/rollback`,
+    ),
+
+  /**
+   * Rebuild the gateway deployment of an API the gateway no longer serves.
+   *
+   * Empty body: the rebuild replays what the portal already stores, so there
+   * is nothing for the caller to choose.
+   */
+  restoreGateway: (id: string): Promise<RestoreApiGatewayResponse> =>
+    post<RestoreApiGatewayResponse>(`/apis/${encodeURIComponent(id)}/restore-gateway`),
 
   /* ── Plugin palette ─────────────────────────────────────────────────── */
   //

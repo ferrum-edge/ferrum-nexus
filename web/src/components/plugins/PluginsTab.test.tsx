@@ -41,6 +41,7 @@ const API: Api = {
   spec_enforcement: 'docs_only',
   status: 'published',
   visibility: 'public',
+  gateway_state: 'deployed',
   listen_path: '/nexus/billing',
   invoke_url: 'https://gw.example.com/nexus/billing',
   created_at: '2026-01-01T00:00:00.000Z',

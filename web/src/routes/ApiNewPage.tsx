@@ -297,12 +297,27 @@ function PublishForm(): ReactElement {
                   {
                     value: 'public',
                     label: 'Public',
-                    description: 'Visible to every portal user.',
+                    description: 'Listed in the catalog and readable by every signed-in user.',
                   },
                   {
                     value: 'internal',
-                    label: 'Internal',
-                    description: 'Visible to providers and admins only.',
+                    label: 'Internal (unlisted)',
+                    // The old wording here said "providers and admins only",
+                    // which is not what `internal` does and never was: it is
+                    // unlisted, and anyone with the link can read the docs.
+                    // Saying otherwise is how somebody picks it for a
+                    // confidential API (issue #288).
+                    description:
+                      'Hidden from the catalog listing, but any signed-in user with the link ' +
+                      'can still read it. Not a secret — choose Private for that.',
+                  },
+                  {
+                    value: 'private',
+                    label: 'Private',
+                    description:
+                      'Only you, administrators, approved clients and people you authorize can ' +
+                      'find or read it. Authorizing someone lets them read the documentation; ' +
+                      'it does not let them call the API.',
                   },
                 ]}
               />

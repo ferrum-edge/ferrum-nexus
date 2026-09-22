@@ -68,8 +68,50 @@ export interface Organization {
 /** Publication state of an API. */
 export type ApiStatus = 'published' | 'retired';
 
-/** Who may see an API in the catalog. */
-export type ApiVisibility = 'public' | 'internal';
+/**
+ * Who may see an API in the catalog — and, for `private`, who may open it.
+ *
+ * The three are deliberately distinct, because two of them answer different
+ * questions:
+ *
+ * - `public` — listed in the browse view and readable by any signed-in
+ *   account.
+ * - `internal` — **unlisted, not secret.** Kept out of the browse view so the
+ *   catalog stays a curated shop window, while anybody holding the link can
+ *   still read the documentation and request access. This is what it has
+ *   always meant, and it did not change when `private` was added.
+ * - `private` — **permission enforced.** Neither listed nor openable unless
+ *   the viewer is the owner, an administrator, an approved client, or someone
+ *   the provider explicitly authorized. Guessing or being handed a slug is not
+ *   enough.
+ *
+ * None of the three is a data-plane control. What stops an unapproved caller
+ * reaching the API is the `access_control` plugin and its ACL group on the
+ * gateway; visibility governs the *documentation* only, and a private API with
+ * no access control in front of it is still callable by anyone who knows the
+ * URL.
+ */
+export type ApiVisibility = 'public' | 'internal' | 'private';
+
+/**
+ * Whether the portal believes this API is deployed on the gateway.
+ *
+ * `deployed` is the ordinary state and what every API reads back as until
+ * something says otherwise. `repair_required` is written when the portal has
+ * *established* that the gateway no longer serves the API — today only by a
+ * reconciliation pass answering `404` for the stored `ferrum_proxy_id`, or by
+ * a restore attempt that failed partway — and it stays until a restore
+ * succeeds.
+ *
+ * It is deliberately a separate field from {@link Api.ferrum_proxy_id} rather
+ * than being derived from it. Clearing a dead proxy reference is what makes the
+ * rest of the portal stop writing to a proxy that is not there; on its own it
+ * also made the API look like one that simply has no deployment yet, so the
+ * next reconciliation pass reported a clean portal while the API served
+ * nothing (issue #284). The reference and the unresolved condition are two
+ * different facts, and this is the second one.
+ */
+export type ApiGatewayState = 'deployed' | 'repair_required';
 
 /** Format of an uploaded API description document. */
 export type SpecFormat = 'openapi';
@@ -215,6 +257,14 @@ export interface Api {
   spec_enforcement: SpecEnforcementLevel;
   status: ApiStatus;
   visibility: ApiVisibility;
+  /**
+   * Whether the gateway is believed to be serving this API.
+   *
+   * `repair_required` is an actionable condition, not a cosmetic badge: the
+   * public path answers `404`, approved clients' credentials reach nothing,
+   * and only `POST /api/apis/:id/restore-gateway` clears it.
+   */
+  gateway_state: ApiGatewayState;
   created_at: IsoTimestamp;
   updated_at: IsoTimestamp;
 }
@@ -231,8 +281,15 @@ export interface CatalogApi extends Omit<Api, 'upstream_url'> {
   access_state: CatalogAccessState;
 }
 
-/** The calling user's relationship to a catalog API. */
-export type CatalogAccessState = 'none' | 'pending' | 'granted' | 'denied' | 'revoked' | 'owner';
+/**
+ * The calling user's relationship to a catalog API.
+ *
+ * `open` is returned when the API does not require an access request
+ * (`requestable: false`) and no owner / grant / request state applies.
+ * `none` is reserved for requestable APIs the caller has not asked for.
+ */
+export type CatalogAccessState =
+  'none' | 'open' | 'pending' | 'granted' | 'denied' | 'revoked' | 'owner';
 
 /** Metadata about a stored spec revision (never carries the raw document). */
 export interface ApiSpecSummary {
@@ -242,6 +299,23 @@ export interface ApiSpecSummary {
   parsed_title: string | null;
   parsed_version: string | null;
   is_current: boolean;
+  /**
+   * The account that published this revision, or `null` when it is not
+   * recorded — a revision written before the column existed, or one whose
+   * author's account has since been deleted. The history view renders `null`
+   * as an unknown author rather than attributing the revision to somebody.
+   */
+  created_by: Uuid | null;
+  /**
+   * The revision this one restored, when it was published by a rollback.
+   *
+   * A rollback is a **new revision carrying an old document**, never a rewrite
+   * of history, so this is the only thing that distinguishes the two. `null`
+   * for an ordinary upload — and also for a rollback whose target has since
+   * been dropped by retention, because the link is provenance rather than a
+   * dependency.
+   */
+  rolled_back_from_id: Uuid | null;
   created_at: IsoTimestamp;
   updated_at: IsoTimestamp;
 }
@@ -262,6 +336,13 @@ export interface AccessRequest {
   id: Uuid;
   api_id: Uuid;
   user_id: Uuid;
+  /**
+   * The application this access is for, or `null` for the account itself.
+   *
+   * `null` is the default and what every request written before applications
+   * existed carries; see {@link Application}.
+   */
+  application_id: Uuid | null;
   justification: string;
   status: AccessRequestStatus;
   decided_by: Uuid | null;
@@ -272,6 +353,8 @@ export interface AccessRequest {
   /** Denormalised joins included by list/detail endpoints. */
   api?: ApiSummary;
   requester?: UserSummary;
+  /** The requesting application, when the request is application-scoped. */
+  application?: ApplicationSummary;
 }
 
 /** Compact API reference embedded in requests, grants and threads. */
@@ -295,6 +378,15 @@ export interface Grant {
   id: Uuid;
   api_id: Uuid;
   user_id: Uuid;
+  /**
+   * The identity this grant belongs to: an application, or `null` for the
+   * account itself.
+   *
+   * It decides **which Ferrum consumer carries the ACL group**, which is what
+   * makes two applications of one owner genuinely separate rather than
+   * separate-looking.
+   */
+  application_id: Uuid | null;
   access_request_id: Uuid | null;
   /** Always `nexus:api:<api_id>:approved`. */
   acl_group: string;
@@ -306,6 +398,8 @@ export interface Grant {
   updated_at: IsoTimestamp;
   api?: ApiSummary;
   user?: UserSummary;
+  /** The holding application, when the grant is application-scoped. */
+  application?: ApplicationSummary;
 }
 
 /* ── Credentials & consumers ────────────────────────────────────────────── */
@@ -328,6 +422,15 @@ export type CredentialType = 'keyauth' | 'basicauth' | 'jwt';
 export interface CredentialMetadata {
   id: Uuid;
   user_id: Uuid;
+  /**
+   * The application this credential authenticates as, or `null` for the
+   * account itself.
+   *
+   * Unlike {@link CredentialMetadata.label}, this is not descriptive: it names
+   * the identity the material was appended to, so it decides what the
+   * credential can reach, and rotation and revocation follow it.
+   */
+  application_id: Uuid | null;
   ferrum_consumer_id: string;
   credential_type: CredentialType;
   ferrum_credential_id: string;
@@ -360,6 +463,14 @@ export interface CredentialMetadata {
 export interface Consumer {
   id: Uuid;
   user_id: Uuid;
+  /**
+   * The application this consumer *is*, or `null` for the account's canonical
+   * `nexus-user-<user_id>` identity.
+   *
+   * `user_id` is the owner either way, so every teardown, repair and audit
+   * that walks an account's consumers finds its applications' consumers too.
+   */
+  application_id: Uuid | null;
   namespace: string;
   ferrum_consumer_id: string;
   ferrum_username: string;
@@ -559,11 +670,16 @@ export interface BrandingSettings {
   /** Logo encoded as a `data:` URL, or `null` when unset. */
   logo_data_url: string | null;
   /**
-   * Primary brand colour as a CSS hex string. The SPA derives the whole accent
-   * scale (hover, active, readable foreground, tints, focus ring) from it.
+   * Primary brand colour as opaque CSS hex (`#rgb` or `#rrggbb`). Writes are
+   * stored as lowercase `#rrggbb` so the native colour swatch, preview, and
+   * derived palette all see the same value. 4- and 8-digit (alpha) forms are
+   * rejected: the swatch and palette cannot render them.
    */
   primary_color: string;
-  /** Secondary emphasis colour (informational badges, hero glow). */
+  /**
+   * Secondary emphasis colour (informational badges, hero glow). Same hex
+   * contract as {@link BrandingSettings.primary_color}.
+   */
   accent_color: string;
   /** Theme applied before the user makes a choice. */
   default_theme: ThemePreference;
@@ -787,6 +903,163 @@ export interface EdgeHealth extends Omit<DependencyHealth, 'status'> {
   reconciliation: EdgeReconciliationHealth;
 }
 
+/**
+ * Somebody a provider has authorized to read a private API's documentation.
+ *
+ * **Not a grant.** It confers no ACL group, touches no Ferrum consumer and
+ * reaches no gateway: an authorized viewer can read the catalog entry and the
+ * specification, and — if the API is `requestable` — ask for access through
+ * the ordinary flow. Being able to read the documentation and being able to
+ * call the API are two different permissions, and a portal that conflated them
+ * would turn "share the docs" into an authorization bug.
+ */
+export interface ApiViewer {
+  id: Uuid;
+  api_id: Uuid;
+  user_id: Uuid;
+  /** The account authorized, for rendering the list. */
+  user: UserSummary | null;
+  /** Who authorized them; `null` once that account is gone. */
+  granted_by: Uuid | null;
+  /** Free-text note the provider attached, e.g. why this person was invited. */
+  note: string | null;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
+}
+
+/* ── Specification change review ────────────────────────────────────────── */
+
+/** One operation of an OpenAPI document: a path template and a method. */
+export interface SpecOperationRef {
+  /** The path template as written, e.g. `/invoices/{id}`. */
+  path: string;
+  /** Uppercase HTTP method, e.g. `GET`. */
+  method: string;
+}
+
+/** An operation both documents declare, with what differs about it. */
+export interface SpecOperationChange extends SpecOperationRef {
+  /**
+   * Short labels for the parts of the operation that differ — `parameters`,
+   * `requestBody`, `responses`, `security`, `summary`, `description`,
+   * `deprecated`, `tags`, `servers`, `operationId`, `callbacks`.
+   *
+   * Structural, and deliberately shallow: it says *that* the request body
+   * changed, not how. Anything the labels do not cover shows up as `other`.
+   */
+  changes: string[];
+}
+
+/** A top-level `info` field that differs between two revisions. */
+export interface SpecInfoChange {
+  field: 'title' | 'version' | 'description';
+  from: string | null;
+  to: string | null;
+}
+
+/**
+ * A structural comparison of two OpenAPI revisions.
+ *
+ * **What this is not.** It compares declared paths, methods and the shape of
+ * each operation. It does not evaluate schemas, resolve `$ref`s, or reason
+ * about semantics, so an empty {@link SpecDiff.potentially_breaking} is
+ * emphatically *not* proof that a change is backward compatible — a response
+ * schema can drop a required field, or a parameter can narrow its type, with
+ * every path and method identical. It is a review aid, and the UI says so.
+ */
+export interface SpecDiff {
+  /** The revision being compared *from* — the current one, for a rollback. */
+  from: ApiSpecSummary | null;
+  /** The revision being compared *to*: a retained revision, or an upload. */
+  to: ApiSpecSummary | null;
+  /** Operations the target declares and the source does not. */
+  added_operations: SpecOperationRef[];
+  /** Operations the source declares and the target does not. */
+  removed_operations: SpecOperationRef[];
+  /** Operations both declare, whose definitions differ. */
+  changed_operations: SpecOperationChange[];
+  /** Path templates the target adds outright. */
+  added_paths: string[];
+  /** Path templates the target drops outright. */
+  removed_paths: string[];
+  /** `info` fields that differ. */
+  info_changes: SpecInfoChange[];
+  /** Whether the document's `servers` block differs. */
+  servers_changed: boolean;
+  /**
+   * Operations a caller is using today that the target would stop serving:
+   * every removed operation, in document order.
+   *
+   * Under `routes` enforcement these become a `400` from the gateway's
+   * generated validator; under `docs_only` they stop being documented while
+   * the proxy goes on forwarding them. Either way they are the changes worth
+   * reading twice, which is why they are lifted out of
+   * {@link SpecDiff.removed_operations} rather than left to be counted.
+   */
+  potentially_breaking: SpecOperationRef[];
+  /** Whether the two documents differ at all, by any of the above. */
+  changed: boolean;
+}
+
+/* ── Applications ───────────────────────────────────────────────────────── */
+
+/** Lifecycle of an application identity. */
+export type ApplicationStatus = 'active' | 'disabled';
+
+/**
+ * One integration owned by a portal account, with its own approved APIs and
+ * its own credentials.
+ *
+ * ## Why this is not a credential label
+ *
+ * A developer running several integrations needs each one approved for its own
+ * set of APIs — least privilege between their *own* systems, not only between
+ * accounts. Labels could never express that: every credential of an account
+ * hangs off one Ferrum consumer, so every credential inherits every ACL group
+ * the account holds, whatever it is called.
+ *
+ * An application is a separate identity all the way down. It gets its own
+ * consumer (`nexus-app-<application_id>`), its own access requests and grants,
+ * and its own credentials, so the boundary is enforced by Edge's ACL matching
+ * rather than by the portal's UI. Two applications of one owner approved for
+ * different APIs genuinely cannot call each other's.
+ *
+ * ## Compatibility
+ *
+ * Account-scoped access is unchanged and remains the default. Every scoped row
+ * carries a nullable `application_id`, and `null` means "the account itself" —
+ * which is what every row written before applications existed is. Nothing
+ * migrates on its own, and a deployed integration using an account credential
+ * goes on working exactly as it did.
+ */
+export interface Application {
+  id: Uuid;
+  owner_user_id: Uuid;
+  name: string;
+  description: string | null;
+  /**
+   * `disabled` refuses new access requests, approvals and credentials while
+   * keeping the rows and the gateway identity. It is the reversible option;
+   * deleting the application is the destructive one and takes its consumer,
+   * its grants and its credentials with it.
+   */
+  status: ApplicationStatus;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
+  /** Active grants this application holds. Filled by the list/detail reads. */
+  active_grants?: number;
+  /** Live credentials issued to it. Filled by the list/detail reads. */
+  active_credentials?: number;
+}
+
+/** Compact application reference embedded in requests, grants and credentials. */
+export interface ApplicationSummary {
+  id: Uuid;
+  name: string;
+  owner_user_id: Uuid;
+  status: ApplicationStatus;
+}
+
 /* ── Gateway reference reconciliation ───────────────────────────────────── */
 
 /**
@@ -796,6 +1069,13 @@ export interface EdgeHealth extends Omit<DependencyHealth, 'status'> {
  * reach the gateway": neither is evidence that the stored ids are wrong, so
  * neither degrades the portal on its own — an unreachable gateway is already
  * reported by {@link EdgeHealthStatus}.
+ *
+ * `orphaned` also covers a pass that found no live orphan but knows of at
+ * least one API still flagged `repair_required`
+ * ({@link GatewayReconciliationReport.awaiting_restore}). That condition was
+ * established by an earlier pass and survives the repair that cleared the dead
+ * reference, so it outranks `unknown` too: an unreachable gateway does not
+ * make an unrestored deployment go away.
  */
 export type GatewayReconciliationStatus = 'ok' | 'orphaned' | 'unknown';
 
@@ -812,6 +1092,14 @@ export interface GatewayReferenceScan {
 /** An account whose stored Edge consumer id the gateway no longer holds. */
 export interface OrphanedConsumerRef {
   user_id: Uuid;
+  /**
+   * The application this consumer is the identity of, or `null` for the
+   * account's own canonical consumer.
+   *
+   * The repair replays the grants of *that* identity, so getting it wrong
+   * would hand an application every API its owner can reach.
+   */
+  application_id: Uuid | null;
   ferrum_consumer_id: string;
   ferrum_username: string;
 }
@@ -838,6 +1126,18 @@ export interface GatewayReconciliationReport {
   proxies: GatewayReferenceScan;
   orphaned_consumers: OrphanedConsumerRef[];
   orphaned_proxies: OrphanedProxyRef[];
+  /**
+   * APIs in this namespace whose {@link Api.gateway_state} is
+   * `repair_required` — the deployment condition a previous pass already
+   * established and nothing has restored yet.
+   *
+   * Counted from the portal's own rows rather than from the gateway, so it is
+   * filled on every pass including one that could not reach Edge: "we know
+   * these APIs are not deployed" does not stop being true because the gateway
+   * stopped answering. It is what keeps the condition visible after a repair
+   * has cleared the dead proxy reference the scan would otherwise have found.
+   */
+  awaiting_restore: number;
   /** Why the pass could not finish; `null` when it did. */
   error: string | null;
 }
@@ -859,6 +1159,8 @@ export interface EdgeReconciliationHealth {
   orphaned_consumers: number | null;
   /** Admin-only: APIs whose gateway proxy is gone. */
   orphaned_proxies: number | null;
+  /** Admin-only: APIs flagged `repair_required` and not restored yet. */
+  awaiting_restore: number | null;
   /** Admin-only: whether the pass covered every stored reference. */
   complete: boolean | null;
 }

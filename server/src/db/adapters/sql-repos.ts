@@ -26,6 +26,8 @@ import type {
   ApiPluginTrigger,
   ApiStatus,
   ApiTimeouts,
+  ApiGatewayState,
+  ApplicationStatus,
   ApiVisibility,
   AuthPluginType,
   CorsConfig,
@@ -54,6 +56,11 @@ import type {
   AccessRequestRepo,
   ApiFilter,
   ApiPluginRecord,
+  ApiViewerRecord,
+  ApiViewerRepo,
+  ApplicationFilter,
+  ApplicationRecord,
+  ApplicationRepo,
   ApiPluginRepo,
   ApiRecord,
   ApiRepo,
@@ -231,6 +238,18 @@ function specEnforcement(value: unknown): SpecEnforcementLevel {
   return isSpecEnforcementLevel(raw) ? raw : DEFAULT_SPEC_ENFORCEMENT;
 }
 
+function mapApplication(row: Row): ApplicationRecord {
+  return {
+    id: text(row.id),
+    owner_user_id: text(row.owner_user_id),
+    name: text(row.name),
+    description: textOrNull(row.description),
+    status: text(row.status) as ApplicationStatus,
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
 function mapApi(row: Row): ApiRecord {
   return {
     id: text(row.id),
@@ -253,6 +272,7 @@ function mapApi(row: Row): ApiRecord {
     spec_enforcement: specEnforcement(row.spec_enforcement),
     status: text(row.status) as ApiStatus,
     visibility: text(row.visibility) as ApiVisibility,
+    gateway_state: text(row.gateway_state) as ApiGatewayState,
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -267,6 +287,21 @@ function mapApiSpec(row: Row): ApiSpecRecord {
     parsed_title: textOrNull(row.parsed_title),
     parsed_version: textOrNull(row.parsed_version),
     is_current: bool(row.is_current),
+    revision_seq: int(row.revision_seq),
+    created_by: textOrNull(row.created_by),
+    rolled_back_from_id: textOrNull(row.rolled_back_from_id),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapApiViewer(row: Row): ApiViewerRecord {
+  return {
+    id: text(row.id),
+    api_id: text(row.api_id),
+    user_id: text(row.user_id),
+    granted_by: textOrNull(row.granted_by),
+    note: textOrNull(row.note),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
   };
@@ -291,6 +326,7 @@ function mapAccessRequest(row: Row): AccessRequestRecord {
     id: text(row.id),
     api_id: text(row.api_id),
     user_id: text(row.user_id),
+    application_id: textOrNull(row.application_id),
     justification: text(row.justification),
     status: text(row.status) as AccessRequestStatus,
     decided_by: textOrNull(row.decided_by),
@@ -306,6 +342,7 @@ function mapGrant(row: Row): GrantRecord {
     id: text(row.id),
     api_id: text(row.api_id),
     user_id: text(row.user_id),
+    application_id: textOrNull(row.application_id),
     access_request_id: textOrNull(row.access_request_id),
     acl_group: text(row.acl_group),
     status: text(row.status) as GrantStatus,
@@ -321,6 +358,7 @@ function mapCredential(row: Row): CredentialRecord {
   return {
     id: text(row.id),
     user_id: text(row.user_id),
+    application_id: textOrNull(row.application_id),
     ferrum_consumer_id: text(row.ferrum_consumer_id),
     credential_type: text(row.credential_type) as CredentialType,
     ferrum_credential_id: text(row.ferrum_credential_id),
@@ -339,6 +377,7 @@ function mapConsumer(row: Row): ConsumerRecord {
   return {
     id: text(row.id),
     user_id: text(row.user_id),
+    application_id: textOrNull(row.application_id),
     namespace: text(row.namespace),
     ferrum_consumer_id: text(row.ferrum_consumer_id),
     ferrum_username: text(row.ferrum_username),
@@ -520,6 +559,11 @@ function apiViewerCondition(viewer: ApiViewerFilter): { sql: string; params: Sql
     parts.push(`id IN (${placeholders(granted.length)})`);
     params.push(...granted);
   }
+  const authorized = [...new Set(viewer.authorized_api_ids)];
+  if (authorized.length > 0) {
+    parts.push(`id IN (${placeholders(authorized.length)})`);
+    params.push(...authorized);
+  }
   const visibilities = [...new Set(viewer.open_visibilities)];
   if (visibilities.length > 0) {
     parts.push(`(status = ? AND visibility IN (${placeholders(visibilities.length)}))`);
@@ -528,11 +572,20 @@ function apiViewerCondition(viewer: ApiViewerFilter): { sql: string; params: Sql
   return { sql: `(${parts.join(' OR ')})`, params };
 }
 
+function applicationWhere(filter: ApplicationFilter): SqlWhereBuilder {
+  return new SqlWhereBuilder()
+    .add(filter.owner_user_id, 'owner_user_id = ?', filter.owner_user_id ?? null)
+    .add(filter.status, 'status = ?', filter.status ?? null)
+    .addSearch(filter.q, ['name', 'description']);
+}
+
 function apiWhere(filter: ApiFilter): SqlWhereBuilder {
   const builder = new SqlWhereBuilder()
     .add(filter.owner_user_id, 'owner_user_id = ?', filter.owner_user_id ?? null)
     .add(filter.status, 'status = ?', filter.status ?? null)
     .add(filter.visibility, 'visibility = ?', filter.visibility ?? null)
+    .add(filter.namespace, 'namespace = ?', filter.namespace ?? null)
+    .add(filter.gateway_state, 'gateway_state = ?', filter.gateway_state ?? null)
     .addSearch(filter.q, ['name', 'slug', 'description']);
   if (filter.requestable !== undefined) {
     builder.always('requestable = ?', encodeBool(filter.requestable));
@@ -549,6 +602,7 @@ function accessRequestWhere(filter: AccessRequestFilter): SqlWhereBuilder {
   const builder = new SqlWhereBuilder()
     .add(filter.user_id, 'user_id = ?', filter.user_id ?? null)
     .add(filter.api_id, 'api_id = ?', filter.api_id ?? null)
+    .addScope('application_id', filter.application_id)
     .add(filter.status, 'status = ?', filter.status ?? null);
   if (filter.api_ids !== undefined) builder.addIn('api_id', filter.api_ids);
   return builder;
@@ -558,6 +612,7 @@ function grantWhere(filter: GrantFilter): SqlWhereBuilder {
   const builder = new SqlWhereBuilder()
     .add(filter.user_id, 'user_id = ?', filter.user_id ?? null)
     .add(filter.api_id, 'api_id = ?', filter.api_id ?? null)
+    .addScope('application_id', filter.application_id)
     .add(filter.status, 'status = ?', filter.status ?? null);
   if (filter.api_ids !== undefined) builder.addIn('api_id', filter.api_ids);
   return builder;
@@ -566,6 +621,7 @@ function grantWhere(filter: GrantFilter): SqlWhereBuilder {
 function credentialWhere(filter: CredentialFilter): SqlWhereBuilder {
   return new SqlWhereBuilder()
     .add(filter.user_id, 'user_id = ?', filter.user_id ?? null)
+    .addScope('application_id', filter.application_id)
     .add(filter.status, 'status = ?', filter.status ?? null)
     .add(filter.credential_type, 'credential_type = ?', filter.credential_type ?? null)
     .add(filter.ferrum_consumer_id, 'ferrum_consumer_id = ?', filter.ferrum_consumer_id ?? null);
@@ -642,6 +698,8 @@ export interface SqlRepos {
   apis: ApiRepo;
   apiSpecs: ApiSpecRepo;
   apiPlugins: ApiPluginRepo;
+  apiViewers: ApiViewerRepo;
+  applications: ApplicationRepo;
   accessRequests: AccessRequestRepo;
   grants: GrantRepo;
   credentials: CredentialRepo;
@@ -936,6 +994,100 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
   /* ── apis ───────────────────────────────────────────────────────────── */
 
+  /* ── applications ───────────────────────────────────────────────────── */
+
+  const applications: ApplicationRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      await mapSqlConflict('You already have an application with that name', () =>
+        execute(
+          exec,
+          `INSERT INTO applications
+             (id, owner_user_id, name, description, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            meta.id,
+            input.owner_user_id,
+            input.name,
+            input.description ?? null,
+            input.status,
+            meta.created_at,
+            meta.updated_at,
+          ],
+        ),
+      );
+      const created = await applications.findById(meta.id);
+      if (!created) throw new Error('applications.create: row vanished immediately after insert');
+      return created;
+    },
+
+    findById: async (id) => {
+      const row = await queryOne(exec, 'SELECT * FROM applications WHERE id = ?', [id]);
+      return row ? mapApplication(row) : null;
+    },
+
+    findByOwnerAndName: async (ownerUserId, name) => {
+      const row = await queryOne(
+        exec,
+        'SELECT * FROM applications WHERE owner_user_id = ? AND lower(name) = ?',
+        [ownerUserId, name.trim().toLowerCase()],
+      );
+      return row ? mapApplication(row) : null;
+    },
+
+    findManyByIds: async (ids) => {
+      if (ids.length === 0) return [];
+      return (
+        await queryAll(
+          exec,
+          `SELECT * FROM applications WHERE id IN (${placeholders(ids.length)})`,
+          [...ids],
+        )
+      ).map(mapApplication);
+    },
+
+    update: async (id, patch) => {
+      const set = setParts({
+        name: patch.name,
+        description: patch.description,
+        status: patch.status,
+      });
+      if (set) {
+        await mapSqlConflict('You already have an application with that name', () =>
+          execute(exec, `UPDATE applications SET ${set.sql}, updated_at = ? WHERE id = ?`, [
+            ...set.params,
+            nowIso(),
+            id,
+          ]),
+        );
+      }
+      return applications.findById(id);
+    },
+
+    list: async (filter, options) => {
+      const where = applicationWhere(filter).build();
+      const { limit, offset } = page(options);
+      const total = await queryCount(
+        exec,
+        `SELECT COUNT(*) AS cnt FROM applications${where.sql}`,
+        where.params,
+      );
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM applications${where.sql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
+      );
+      return { items: rows.map(mapApplication), total };
+    },
+
+    count: async (filter = {}) => {
+      const where = applicationWhere(filter).build();
+      return queryCount(exec, `SELECT COUNT(*) AS cnt FROM applications${where.sql}`, where.params);
+    },
+
+    delete: async (id) => (await execute(exec, 'DELETE FROM applications WHERE id = ?', [id])) > 0,
+  };
+
   const apis: ApiRepo = {
     create: async (input) => {
       const meta = stamps(input);
@@ -946,8 +1098,8 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
              (id, name, slug, description, owner_user_id, ferrum_proxy_id, upstream_url,
               namespace, version, spec_format, requestable, auth_plugin, rate_limit_json,
               cors_json, allowed_methods_json, timeouts_json, circuit_breaker,
-              spec_enforcement, status, visibility, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              spec_enforcement, status, visibility, gateway_state, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             meta.id,
             input.name,
@@ -969,6 +1121,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
             input.spec_enforcement ?? DEFAULT_SPEC_ENFORCEMENT,
             input.status,
             input.visibility,
+            input.gateway_state ?? 'deployed',
             meta.created_at,
             meta.updated_at,
           ],
@@ -1030,6 +1183,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         spec_enforcement: patch.spec_enforcement,
         status: patch.status,
         visibility: patch.visibility,
+        gateway_state: patch.gateway_state,
       });
       if (set) {
         await mapSqlConflict('An API with that slug already exists', () =>
@@ -1086,11 +1240,21 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
               [meta.updated_at, input.api_id],
             );
           }
+          // The revision's publication position, read and taken inside the same
+          // transaction as the insert; see the sqlite adapter for why the
+          // unique index on `(api_id, revision_seq)` is the other half of it.
+          const top = await queryOne(
+            tx,
+            'SELECT COALESCE(MAX(revision_seq), 0) + 1 AS seq FROM api_specs WHERE api_id = ?',
+            [input.api_id],
+          );
+          const seq = int(top?.seq ?? 1);
           await execute(
             tx,
             `INSERT INTO api_specs
-               (id, api_id, version, raw_spec, parsed_title, parsed_version, is_current, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               (id, api_id, version, raw_spec, parsed_title, parsed_version, is_current,
+                revision_seq, created_by, rolled_back_from_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               meta.id,
               input.api_id,
@@ -1099,6 +1263,9 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
               input.parsed_title ?? null,
               input.parsed_version ?? null,
               encodeBool(input.is_current),
+              seq,
+              input.created_by ?? null,
+              input.rolled_back_from_id ?? null,
               meta.created_at,
               meta.updated_at,
             ],
@@ -1155,9 +1322,13 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         `SELECT COUNT(*) AS cnt FROM api_specs${where.sql}`,
         where.params,
       );
+      // The current revision leads, then history newest-first by publication
+      // order; see the sqlite adapter for why the flag sorts first.
       const rows = await queryAll(
         exec,
-        `SELECT * FROM api_specs${where.sql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        `SELECT * FROM api_specs${where.sql}
+          ORDER BY is_current DESC, revision_seq DESC
+          LIMIT ? OFFSET ?`,
         [...where.params, limit, offset],
       );
       return { items: rows.map(mapApiSpec), total };
@@ -1175,7 +1346,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         exec,
         `SELECT id FROM api_specs
           WHERE api_id = ? AND is_current = ?
-          ORDER BY created_at DESC, id DESC
+          ORDER BY revision_seq DESC
           LIMIT ? OFFSET ?`,
         [apiId, encodeBool(false), SPEC_HISTORY_PRUNE_BATCH, Math.max(0, keep)],
       );
@@ -1263,6 +1434,80 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       execute(exec, 'DELETE FROM api_plugins WHERE api_id = ?', [apiId]),
   };
 
+  /* ── apiViewers ─────────────────────────────────────────────────────── */
+
+  const API_VIEWER_UPSERT = upsertSql(
+    dialect,
+    'api_viewers',
+    ['id', 'api_id', 'user_id', 'granted_by', 'note', 'created_at', 'updated_at'],
+    'api_id, user_id',
+    ['granted_by', 'note', 'updated_at'],
+  );
+
+  const apiViewers: ApiViewerRepo = {
+    upsert: async (input) => {
+      const meta = stamps(input);
+      // `created_at` is not in the update list: the row records when this
+      // account was first authorized, not when the note was last edited.
+      await mapSqlConflict('That account is already authorized for this API', () =>
+        execute(exec, API_VIEWER_UPSERT, [
+          meta.id,
+          input.api_id,
+          input.user_id,
+          input.granted_by ?? null,
+          input.note ?? null,
+          meta.created_at,
+          meta.updated_at,
+        ]),
+      );
+      const saved = await apiViewers.find(input.api_id, input.user_id);
+      if (!saved) throw new Error('apiViewers.upsert: row vanished immediately after write');
+      return saved;
+    },
+
+    find: async (apiId, userId) => {
+      const row = await queryOne(
+        exec,
+        'SELECT * FROM api_viewers WHERE api_id = ? AND user_id = ?',
+        [apiId, userId],
+      );
+      return row ? mapApiViewer(row) : null;
+    },
+
+    list: async (filter, options) => {
+      const where = new SqlWhereBuilder()
+        .add(filter.api_id, 'api_id = ?', filter.api_id ?? null)
+        .add(filter.user_id, 'user_id = ?', filter.user_id ?? null)
+        .build();
+      const { limit, offset } = page(options);
+      const total = await queryCount(
+        exec,
+        `SELECT COUNT(*) AS cnt FROM api_viewers${where.sql}`,
+        where.params,
+      );
+      const rows = await queryAll(
+        exec,
+        `SELECT * FROM api_viewers${where.sql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
+      );
+      return { items: rows.map(mapApiViewer), total };
+    },
+
+    listApiIdsByUser: async (userId) =>
+      (await queryAll(exec, 'SELECT api_id FROM api_viewers WHERE user_id = ?', [userId])).map(
+        (row) => text(row.api_id),
+      ),
+
+    delete: async (apiId, userId) =>
+      (await execute(exec, 'DELETE FROM api_viewers WHERE api_id = ? AND user_id = ?', [
+        apiId,
+        userId,
+      ])) > 0,
+
+    deleteByApi: async (apiId) =>
+      execute(exec, 'DELETE FROM api_viewers WHERE api_id = ?', [apiId]),
+  };
+
   /* ── accessRequests ─────────────────────────────────────────────────── */
 
   const accessRequests: AccessRequestRepo = {
@@ -1272,13 +1517,14 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         execute(
           exec,
           `INSERT INTO access_requests
-             (id, api_id, user_id, justification, status, decided_by, decided_at, decision_note,
-              created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, api_id, user_id, application_id, justification, status, decided_by, decided_at,
+              decision_note, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             meta.id,
             input.api_id,
             input.user_id,
+            input.application_id ?? null,
             input.justification,
             input.status,
             input.decided_by ?? null,
@@ -1354,12 +1600,14 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return { items: rows.map(mapAccessRequest), total };
     },
 
-    findPendingByApiAndUser: async (apiId, userId) => {
-      const row = await queryOne(
-        exec,
-        "SELECT * FROM access_requests WHERE api_id = ? AND user_id = ? AND status = 'pending'",
-        [apiId, userId],
-      );
+    findPendingByApiAndUser: async (apiId, userId, applicationId = null) => {
+      const where = new SqlWhereBuilder()
+        .always('api_id = ?', apiId)
+        .always('user_id = ?', userId)
+        .always("status = 'pending'")
+        .addScope('application_id', applicationId)
+        .build();
+      const row = await queryOne(exec, `SELECT * FROM access_requests${where.sql}`, where.params);
       return row ? mapAccessRequest(row) : null;
     },
 
@@ -1426,13 +1674,14 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         execute(
           exec,
           `INSERT INTO grants
-             (id, api_id, user_id, access_request_id, acl_group, status, granted_by, revoked_by,
-              revoked_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, api_id, user_id, application_id, access_request_id, acl_group, status,
+              granted_by, revoked_by, revoked_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             meta.id,
             input.api_id,
             input.user_id,
+            input.application_id ?? null,
             input.access_request_id ?? null,
             input.acl_group,
             input.status,
@@ -1510,21 +1759,25 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return { items: rows.map(mapGrant), total };
     },
 
-    findActiveByApiAndUser: async (apiId, userId) => {
-      const row = await queryOne(
-        exec,
-        "SELECT * FROM grants WHERE api_id = ? AND user_id = ? AND status = 'active'",
-        [apiId, userId],
-      );
+    findActiveByApiAndUser: async (apiId, userId, applicationId = null) => {
+      const where = new SqlWhereBuilder()
+        .always('api_id = ?', apiId)
+        .always('user_id = ?', userId)
+        .always("status = 'active'")
+        .addScope('application_id', applicationId)
+        .build();
+      const row = await queryOne(exec, `SELECT * FROM grants${where.sql}`, where.params);
       return row ? mapGrant(row) : null;
     },
 
-    listActiveByUser: async (userId) =>
-      (
-        await queryAll(exec, "SELECT * FROM grants WHERE user_id = ? AND status = 'active'", [
-          userId,
-        ])
-      ).map(mapGrant),
+    listActiveByUser: async (userId, applicationId) => {
+      const where = new SqlWhereBuilder()
+        .always('user_id = ?', userId)
+        .always("status = 'active'")
+        .addScope('application_id', applicationId)
+        .build();
+      return (await queryAll(exec, `SELECT * FROM grants${where.sql}`, where.params)).map(mapGrant);
+    },
 
     listActiveByApi: async (apiId) =>
       (
@@ -1544,12 +1797,13 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
   const credentials: CredentialRepo = {
     create: async (input) => {
       const meta = stamps(input);
-      const columns = `(id, user_id, ferrum_consumer_id, credential_type, ferrum_credential_id,
-              fingerprint, last4, label, status, rotated_from_id, edge_ordinal, created_at,
-              updated_at)`;
+      const columns = `(id, user_id, application_id, ferrum_consumer_id, credential_type,
+              ferrum_credential_id, fingerprint, last4, label, status, rotated_from_id,
+              edge_ordinal, created_at, updated_at)`;
       const values: SqlParam[] = [
         meta.id,
         input.user_id,
+        input.application_id ?? null,
         input.ferrum_consumer_id,
         input.credential_type,
         input.ferrum_credential_id,
@@ -1568,7 +1822,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
           ? execute(
               exec,
               `INSERT INTO credential_metadata ${columns}
-               SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(MAX(edge_ordinal), 0) + 1, ?, ?
+               SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(MAX(edge_ordinal), 0) + 1, ?, ?
                  FROM credential_metadata
                 WHERE ferrum_consumer_id = ? AND credential_type = ?`,
               [
@@ -1582,7 +1836,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
           : execute(
               exec,
               `INSERT INTO credential_metadata ${columns}
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               [...values, input.edge_ordinal, meta.created_at, meta.updated_at],
             ),
       );
@@ -1676,11 +1930,13 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         execute(
           exec,
           `INSERT INTO consumers
-             (id, user_id, namespace, ferrum_consumer_id, ferrum_username, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+             (id, user_id, application_id, namespace, ferrum_consumer_id, ferrum_username,
+              created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             meta.id,
             input.user_id,
+            input.application_id ?? null,
             input.namespace,
             input.ferrum_consumer_id,
             input.ferrum_username,
@@ -1699,12 +1955,13 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return row ? mapConsumer(row) : null;
     },
 
-    findByUserAndNamespace: async (userId, namespace) => {
-      const row = await queryOne(
-        exec,
-        'SELECT * FROM consumers WHERE user_id = ? AND namespace = ?',
-        [userId, namespace],
-      );
+    findByUserAndNamespace: async (userId, namespace, applicationId = null) => {
+      const where = new SqlWhereBuilder()
+        .always('user_id = ?', userId)
+        .always('namespace = ?', namespace)
+        .addScope('application_id', applicationId)
+        .build();
+      const row = await queryOne(exec, `SELECT * FROM consumers${where.sql}`, where.params);
       return row ? mapConsumer(row) : null;
     },
 
@@ -1746,6 +2003,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       const where = new SqlWhereBuilder()
         .add(filter.user_id, 'user_id = ?', filter.user_id ?? null)
         .add(filter.namespace, 'namespace = ?', filter.namespace ?? null)
+        .addScope('application_id', filter.application_id)
         .build();
       const { limit, offset } = page(options);
       const total = await queryCount(
@@ -2789,6 +3047,8 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     apis,
     apiSpecs,
     apiPlugins,
+    apiViewers,
+    applications,
     accessRequests,
     grants,
     credentials,
@@ -2877,6 +3137,8 @@ class SqlStore implements NexusStore {
   readonly apis: ApiRepo;
   readonly apiSpecs: ApiSpecRepo;
   readonly apiPlugins: ApiPluginRepo;
+  readonly apiViewers: ApiViewerRepo;
+  readonly applications: ApplicationRepo;
   readonly accessRequests: AccessRequestRepo;
   readonly grants: GrantRepo;
   readonly credentials: CredentialRepo;
@@ -2918,6 +3180,8 @@ class SqlStore implements NexusStore {
     this.apis = repos.apis;
     this.apiSpecs = repos.apiSpecs;
     this.apiPlugins = repos.apiPlugins;
+    this.apiViewers = repos.apiViewers;
+    this.applications = repos.applications;
     this.accessRequests = repos.accessRequests;
     this.grants = repos.grants;
     this.credentials = repos.credentials;

@@ -56,6 +56,23 @@ export function consumerUsernameForUser(userId: string): string {
   return `${CONSUMER_USERNAME_PREFIX}${userId}`;
 }
 
+/** Prefix of the Edge consumer username used for an application identity. */
+export const APPLICATION_CONSUMER_USERNAME_PREFIX = 'nexus-app-';
+
+/**
+ * Username of the Ferrum consumer that *is* an application identity.
+ *
+ * Derived from the application id rather than its name for the same reason the
+ * account's is derived from the user id: `access_control` matches usernames
+ * byte-for-byte, so the identity must never move when somebody renames
+ * something.
+ *
+ * @example consumerUsernameForApplication('a-1') // 'nexus-app-a-1'
+ */
+export function consumerUsernameForApplication(applicationId: string): string {
+  return `${APPLICATION_CONSUMER_USERNAME_PREFIX}${applicationId}`;
+}
+
 /**
  * Username of the throwaway test consumer a provider may create for their API.
  *
@@ -430,3 +447,29 @@ export const MAX_BRANDING_LINK_LABEL_LENGTH = 60;
 
 /** Longest footer text line. */
 export const MAX_BRANDING_FOOTER_TEXT_LENGTH = 200;
+
+/**
+ * Opaque CSS hex colours accepted for branding: `#rgb` or `#rrggbb`.
+ *
+ * CSS also has 4- and 8-digit forms (with alpha), but the native colour swatch
+ * (`<input type="color">`) and the derived palette only render opaque
+ * `#rrggbb`. Five- and seven-digit strings are not CSS colours at all. Writes
+ * that match this pattern are stored as lowercase `#rrggbb` via
+ * {@link normalizeBrandingHexColor}.
+ */
+export const BRANDING_HEX_COLOR = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+
+/**
+ * Expand a branding colour to lowercase `#rrggbb`. Returns `null` when the
+ * input is not a 3- or 6-digit CSS hex colour.
+ */
+export function normalizeBrandingHexColor(input: string): string | null {
+  const trimmed = input.trim();
+  if (!BRANDING_HEX_COLOR.test(trimmed)) return null;
+  const hex = trimmed.slice(1).toLowerCase();
+  if (hex.length === 6) return `#${hex}`;
+  return `#${hex
+    .split('')
+    .map((digit) => digit + digit)
+    .join('')}`;
+}

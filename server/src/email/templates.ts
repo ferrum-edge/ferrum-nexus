@@ -254,15 +254,17 @@ export const DEFAULT_EMAIL_TEMPLATES: Readonly<Record<EmailTemplateKey, EmailTem
     body_html: htmlDocument(
       '<p>Hello {{recipient_name}},</p>' +
         '<p>The credential <strong>{{credential_label}}</strong> ' +
-        '(&hellip;{{credential_last4}}) was rotated. The previous secret keeps working ' +
-        'until the rotation is finalized.</p>' +
+        '(&hellip;{{credential_last4}}) was rotated. The previous secret was revoked as ' +
+        'part of the rotation and will stop working as soon as the gateway applies the ' +
+        'change. Deploy the new value before callers retry.</p>' +
         '<p><a href="{{credentials_url}}">Review your credentials</a></p>' +
         '<p>If this was not you, contact an administrator immediately.</p>',
     ),
     body_text:
       'Hello {{recipient_name}},\n\n' +
       'The credential {{credential_label}} (...{{credential_last4}}) was rotated.\n' +
-      'The previous secret keeps working until the rotation is finalized.\n\n' +
+      'The previous secret was revoked as part of the rotation and will stop working as ' +
+      'soon as the gateway applies the change. Deploy the new value before callers retry.\n\n' +
       '{{credentials_url}}\n\n' +
       'If this was not you, contact an administrator immediately.\n',
   },

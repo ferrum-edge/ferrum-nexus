@@ -87,7 +87,7 @@ docs/      this tree
 | `db/store.ts`                                  | The `NexusStore` interface: 17 repositories plus `init`/`migrate`/`close`/`healthCheck`/`transaction`.                                          |
 | `db/adapters/{sqlite,postgres,mysql,mongodb}/` | The four implementations.                                                                                                                       |
 | `db/adapters/sql-common.ts`, `sql-repos.ts`    | Dialect shims and the repo bodies shared by PG + MySQL.                                                                                         |
-| `db/migrations/`                               | `NNN_name.sql` (SQLite), `.pg.sql`, `.mysql.sql`. Mongo builds collections and indexes in code.                                                 |
+| `db/migrations/`                               | One `001_initial` baseline per SQL dialect: `.sql` (SQLite), `.pg.sql`, `.mysql.sql`. Mongo defines its initial indexes in code.                |
 | `ferrum-admin/`                                | The **only** module that knows the Edge HTTP shape: `client.ts`, `jwt.ts`, `types.ts`.                                                          |
 | `middleware/auth-plugin.ts`                    | Session resolution, sliding expiry, CSRF double-submit, RBAC guards.                                                                            |
 | `middleware/error-handler.ts`                  | The single place an exception becomes an HTTP response.                                                                                         |
@@ -301,6 +301,13 @@ supply three primitives (`ensureMigrationsTable`, `listApplied`,
 prefix plus description (`001_initial`) is the id, shared across dialects, so
 the same logical migration can never be applied twice on one database.
 
+During buildout there is only `001_initial`: edit its three SQL variants and the
+MongoDB initial index definitions directly. There are no incremental upgrades or
+data backfills. Recreate development databases after schema changes; the application
+has no users or production data to preserve. The server build copies SQL assets to
+`server/dist/db/migrations/`; both source and compiled runners load the directory
+beside their own module, without searching another source tree.
+
 ---
 
 ## 5. Ferrum Edge integration
@@ -458,10 +465,16 @@ Plugin configs are closed key sets; a typo is a 400. What Nexus sends:
 
 - **auth plugins** — `{}` for all three. `key_auth` defaults to
   `header:X-API-Key` + `hide_credentials: true`, which is exactly what the
-  portal documents; `basic_auth` accepts only `hide_credentials`, whose `true`
-  default is what the portal wants;
-  `jwt_auth` defaults to `token_lookup: header:Authorization` and
-  `consumer_claim_field: sub`.
+  portal documents; `basic_auth` accepts only `hide_credentials`, which also
+  defaults to `true`; `jwt_auth` defaults to
+  `token_lookup: header:Authorization` and `consumer_claim_field: sub`. Edge
+  has no `hide_credentials` for `jwt_auth` — its config is a closed key set
+  that refuses one — so a bearer token is forwarded to the provider's upstream
+  where a key or a Basic password is stripped. The asymmetry is Edge's, not a
+  Nexus default: it is documented in [`api.md`](api.md),
+  [`security.md`](security.md#5-show-once-credentials) §5 and the client and
+  provider guides, and pinned against the real gateway by
+  `e2e/src/dataplane.test.ts`.
 - **`access_control`** — `{ allowed_groups: ['nexus:api:<api_id>:approved'] }`,
   and nothing else. Never `allowed_consumers`.
 - **`rate_limiting`** — `limit_by: 'consumer'`, `expose_headers: true`, and a
@@ -495,22 +508,52 @@ they are looked up with `GET /plugins/config` filtered by `proxy_id` whenever
 they need changing, which keeps the schema free of ids whose lifecycle Nexus
 does not own and reconciles automatically if an operator recreates one by hand.
 
-### 5.4 One consumer per user per namespace
+### 5.4 One consumer per identity per namespace
 
-Each Nexus account maps to exactly one Edge consumer in the configured
-namespace:
+An **identity** is either a Nexus account itself or one of its applications,
+and each maps to exactly one Edge consumer in the configured namespace:
 
-- `username` = `nexus-user-<user_id>` (`consumerUsernameForUser`). Never derived
+- `username` = `nexus-user-<user_id>` (`consumerUsernameForUser`) for an
+  account, or `nexus-app-<application_id>`
+  (`consumerUsernameForApplication`) for one of its applications. Never derived
   from anything user-editable — `access_control` matches usernames
-  byte-for-byte.
-- `custom_id` = the raw Nexus user id, giving operators a reverse lookup from
-  the gateway back into the portal.
+  byte-for-byte, so an identity must not move when somebody renames something.
+- `custom_id` = the raw Nexus id the username names — the user for an account
+  identity, the application for an application one — giving operators a reverse
+  lookup from the gateway back into the portal.
 - New `id` values are UUIDv8s derived from SHA-256 of the JSON array
   `["ferrum-nexus-consumer-v1", namespace, username]` (first 128 bits, with UUID
   version/variant bits set). The `consumers` table caches the id, including
   original Edge-assigned ids adopted from older deployments.
 
-The provisioner is lazy: the consumer is created the first time a user is
+#### Why applications are separate consumers
+
+ACL groups live on the consumer, so an account with one consumer has **one
+permission set** however many credentials it holds: every key inherits every
+group. A developer running several integrations could therefore not give each
+one its own approved APIs — credential labels are descriptive and change
+nothing about what a secret can reach.
+
+An application is a separate identity all the way down: its own consumer, its
+own access requests and grants, its own credentials. Two applications of one
+owner approved for different APIs genuinely cannot call each other's, because
+Edge's ACL matching is what enforces it (issue #289).
+
+The `consumers` row carries the owning `user_id` either way, with a nullable
+`application_id`, so every teardown, repair and audit that walks an account's
+consumers finds its applications' too. `account disable` strips **every** one
+of them — an application identity left up is an offboarding only half done —
+and keeps the rows, so re-enabling can replay each identity's own grants. A
+`nexus-test-<api_id>` consumer is different: it is disposable, so teardown
+deletes it outright.
+
+Account-scoped access is unchanged and is the default. Every scoped row carries
+a nullable `application_id` where `NULL` means "the account itself", which is
+what every row written before applications existed is. Nothing migrates on its
+own, and a deployed integration using an account credential goes on working
+exactly as it did.
+
+The provisioner is lazy: the consumer is created the first time an identity is
 approved for an API _or_ issues a credential, whichever comes first. If a
 consumer exists on the gateway without a Nexus row — a database restore, say —
 `ensureConsumer` reads the derived id directly and re-caches it. If that id is
@@ -884,15 +927,14 @@ Three further points of fidelity:
   [ferrum-edge#4844](https://github.com/ferrum-edge/ferrum-edge/pull/4844).
 
 **The portal owns configs it created, by id.** The `api_plugins` row records the
-Edge plugin config id it produced (`ferrum_plugin_config_id`, migration 015),
+Edge plugin config id it produced (`ferrum_plugin_config_id`),
 and a save or a removal acts on that config alone. Edge genuinely allows several
 configs of one plugin name on a proxy — distinct `trigger`s, distinct
 `priority_override`s — so a name is not an identity: an operator's hand-made
 per-path deny gate lives happily beside the palette's config of the same name,
-and the portal never replaces or deletes it. A row written before the column
-existed carries no id, so the next save backfills one by matching the plugin
-name, adopting a single match (or, when several exist, the first) and leaving
-every other config where it is. A recorded id that is no longer on the gateway
+and the portal never replaces or deletes it. A row with no recorded id owns no
+gateway config; a save creates a fresh config and records its id, while removal
+leaves unowned configs alone. A recorded id that is no longer on the gateway
 means an operator removed it; the next save creates a fresh config and records
 the new id rather than adopting somebody else's.
 
@@ -962,11 +1004,9 @@ a clock stepped backwards between two appends puts the later one first — eithe
 way a revoke deleted _another_ live key while marking the requested one revoked
 (#77). Nothing reads `created_at` for position any more.
 
-Rows written before the ordinal existed were backfilled from the old sort by
-`011_credential_ordinal` where that sort was unambiguous (distinct timestamps
-among the live rows of a group). Where it was not, the whole group carries
-`edge_ordinal = NULL`: those rows all precede every row that has an ordinal,
-but their order among themselves is unknowable. A lone such row is still index
+A row with an unknown gateway position carries `edge_ordinal = NULL`. Such
+rows precede every row that has an ordinal, but their order among themselves is
+unknowable. A lone such row is still index
 0; two or more make a target **ambiguous**, and the operation is refused with
 `409 CONFLICT` until an administrator runs
 `POST /api/admin/credentials/reconcile`, which empties the type on both sides
@@ -1018,11 +1058,15 @@ POST /api/credentials/:id/rotate
                                               edge_ordinal = next for (consumer, type)
 ```
 
-Append-then-delete keeps both secrets live across the hand-off, which is the
-whole point of a rotation. At the cap there is no room to append, so the old
-entry has to go first — briefly leaving the account with no working credential
-of that type. Raising `FERRUM_MAX_CREDENTIALS_PER_TYPE` (and the matching
-gateway setting) above 1 avoids that window.
+Append-then-delete keeps both secrets briefly live during the server
+operation, then deletes the old entry before the rotate response returns.
+Callers therefore have no user-controlled overlap window; a successful rotate
+always marks the previous credential `revoked`. At the cap there is no room to
+append, so the old entry has to go first — briefly leaving the account with no
+working credential of that type. Raising `FERRUM_MAX_CREDENTIALS_PER_TYPE`
+(and the matching gateway setting) above 1 avoids that gap. For a
+caller-visible cutover, issue a new credential, deploy it, then revoke the
+old one.
 
 ### 6.3 Reconciling a consumer
 

@@ -788,7 +788,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(cleared?.timeouts, null);
       assert.equal(cleared?.circuit_breaker, false);
 
-      // A row created without them — every row predating migration 004 — reads
+      // A row created without these settings reads
       // back as "no restriction, gateway defaults, no breaker".
       const bare = await store.apis.findById((await makeApi(owner.id)).id);
       assert.equal(bare?.allowed_methods, null);
@@ -820,10 +820,62 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       const untouched = await store.apis.update(api.id, { version: '2.0.0' });
       assert.equal(untouched?.spec_enforcement, 'docs_only', 'an untouched column is left alone');
 
-      // A row created without it — every row predating migration 005 — reads
+      // A row created without an enforcement setting reads
       // back as "the document is catalog metadata only".
       const bare = await store.apis.findById((await makeApi(owner.id)).id);
       assert.equal(bare?.spec_enforcement, 'docs_only');
+    });
+
+    it('apis: round-trips the gateway deployment state and filters on it', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const deployed = await store.apis.create({
+        name: 'Deployed',
+        slug: `deployed-${newId().slice(0, 8)}`,
+        owner_user_id: owner.id,
+        namespace: 'nexus',
+        version: '1.0.0',
+        spec_format: 'openapi',
+        requestable: true,
+        auth_plugin: 'key_auth',
+        status: 'published',
+        visibility: 'public',
+      });
+      // The default is what every row created by a publish that landed reads
+      // back as; nothing has to pass it.
+      assert.equal(deployed.gateway_state, 'deployed');
+
+      const flagged = await store.apis.update(deployed.id, {
+        ferrum_proxy_id: null,
+        gateway_state: 'repair_required',
+      });
+      assert.equal(flagged?.gateway_state, 'repair_required');
+      assert.deepEqual(await store.apis.findById(deployed.id), flagged);
+
+      const untouched = await store.apis.update(deployed.id, { version: '3.0.0' });
+      assert.equal(
+        untouched?.gateway_state,
+        'repair_required',
+        'an untouched column is left alone',
+      );
+
+      // What the reconciliation pass counts on every run, in every dialect.
+      const others = await makeApi(owner.id);
+      assert.equal(
+        await store.apis.count({ namespace: 'nexus', gateway_state: 'repair_required' }),
+        1,
+      );
+      const listed = await store.apis.list({ gateway_state: 'repair_required' }, { limit: 50 });
+      assert.ok(listed.items.every((row) => row.gateway_state === 'repair_required'));
+      assert.ok(listed.items.some((row) => row.id === deployed.id));
+      assert.ok(!listed.items.some((row) => row.id === others.id));
+      assert.equal(await store.apis.count({ namespace: 'nowhere' }), 0, 'namespace narrows too');
+
+      const restored = await store.apis.update(deployed.id, { gateway_state: 'deployed' });
+      assert.equal(restored?.gateway_state, 'deployed');
+      assert.equal(
+        await store.apis.count({ namespace: 'nexus', gateway_state: 'repair_required' }),
+        0,
+      );
     });
 
     it('apis: visible_to paginates and counts the rows one viewer may browse', async () => {
@@ -866,6 +918,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       const clause = {
         owner_user_id: stranger.id,
         granted_api_ids: [granted],
+        authorized_api_ids: [],
         open_status: 'published' as const,
         open_visibilities: ['public' as const],
       };
@@ -919,6 +972,319 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       );
     });
 
+    it('applications: creates, renames, scopes by owner and enforces unique names', async () => {
+      const owner = await makeUser({ role: 'client' });
+      const stranger = await makeUser({ role: 'client' });
+      const marker = newId().slice(0, 8);
+
+      const app = await store.applications.create({
+        owner_user_id: owner.id,
+        name: `Billing ${marker}`,
+        description: 'Invoicing integration',
+        status: 'active',
+      });
+      assert.equal(app.status, 'active');
+      assert.deepEqual(await store.applications.findById(app.id), app);
+      assert.deepEqual(
+        await store.applications.findByOwnerAndName(owner.id, `  billing ${marker}  `),
+        app,
+        'names are matched case-insensitively and trimmed',
+      );
+
+      // Unique per owner, and only per owner.
+      await assert.rejects(
+        () =>
+          store.applications.create({
+            owner_user_id: owner.id,
+            name: `BILLING ${marker}`,
+            status: 'active',
+          }),
+        (error: unknown) => (error as { code?: string }).code === 'CONFLICT',
+      );
+      const elsewhere = await store.applications.create({
+        owner_user_id: stranger.id,
+        name: `Billing ${marker}`,
+        status: 'active',
+      });
+      assert.equal(elsewhere.owner_user_id, stranger.id);
+
+      const disabled = await store.applications.update(app.id, { status: 'disabled' });
+      assert.equal(disabled?.status, 'disabled');
+      assert.equal(
+        (await store.applications.list({ owner_user_id: owner.id, status: 'active' })).total,
+        0,
+      );
+      assert.equal(await store.applications.count({ owner_user_id: owner.id }), 1);
+      assert.equal((await store.applications.list({ q: marker })).total, 2);
+      assert.deepEqual(
+        (await store.applications.findManyByIds([app.id, elsewhere.id]))
+          .map((row) => row.id)
+          .sort(),
+        [app.id, elsewhere.id].sort(),
+      );
+
+      assert.equal(await store.applications.delete(app.id), true);
+      assert.equal(await store.applications.findById(app.id), null);
+    });
+
+    it('applications: scopes grants, requests, credentials and consumers by identity', async () => {
+      const provider = await makeUser({ role: 'provider' });
+      const client = await makeUser({ role: 'client' });
+      const api = await makeApi(provider.id);
+      const app = await store.applications.create({
+        owner_user_id: client.id,
+        name: `Scoped ${newId().slice(0, 8)}`,
+        status: 'active',
+      });
+
+      // The same API, approved for two identities of one account. The partial
+      // unique index is over `(api_id, user_id, COALESCE(application_id, ''))`,
+      // so both are allowed — and a second grant for either identity is not.
+      const accountGrant = await store.grants.create({
+        api_id: api.id,
+        user_id: client.id,
+        acl_group: `nexus:api:${api.id}:approved`,
+        status: 'active',
+        granted_by: provider.id,
+      });
+      assert.equal(accountGrant.application_id, null, 'the default is the account itself');
+      const appGrant = await store.grants.create({
+        api_id: api.id,
+        user_id: client.id,
+        application_id: app.id,
+        acl_group: `nexus:api:${api.id}:approved`,
+        status: 'active',
+        granted_by: provider.id,
+      });
+      assert.equal(appGrant.application_id, app.id);
+      for (const scope of [undefined, app.id]) {
+        await assert.rejects(
+          () =>
+            store.grants.create({
+              api_id: api.id,
+              user_id: client.id,
+              ...(scope === undefined ? {} : { application_id: scope }),
+              acl_group: `nexus:api:${api.id}:approved`,
+              status: 'active',
+              granted_by: provider.id,
+            }),
+          (error: unknown) => (error as { code?: string }).code === 'CONFLICT',
+          `a second active grant for ${scope ?? 'the account'} is refused`,
+        );
+      }
+
+      // `null` is a value in these filters, not "unfiltered".
+      assert.equal(
+        (await store.grants.findActiveByApiAndUser(api.id, client.id))?.id,
+        accountGrant.id,
+      );
+      assert.equal(
+        (await store.grants.findActiveByApiAndUser(api.id, client.id, app.id))?.id,
+        appGrant.id,
+      );
+      assert.deepEqual(
+        (await store.grants.listActiveByUser(client.id, null)).map((row) => row.id),
+        [accountGrant.id],
+      );
+      assert.deepEqual(
+        (await store.grants.listActiveByUser(client.id, app.id)).map((row) => row.id),
+        [appGrant.id],
+      );
+      assert.equal(
+        (await store.grants.listActiveByUser(client.id)).length,
+        2,
+        'omitting the scope returns every identity’s',
+      );
+      assert.equal(await store.grants.count({ application_id: app.id, status: 'active' }), 1);
+
+      // One open request per API and identity, with the same COALESCE rule.
+      const accountRequest = await store.accessRequests.create({
+        api_id: api.id,
+        user_id: client.id,
+        justification: 'account',
+        status: 'pending',
+      });
+      const appRequest = await store.accessRequests.create({
+        api_id: api.id,
+        user_id: client.id,
+        application_id: app.id,
+        justification: 'application',
+        status: 'pending',
+      });
+      assert.equal(
+        (await store.accessRequests.findPendingByApiAndUser(api.id, client.id))?.id,
+        accountRequest.id,
+      );
+      assert.equal(
+        (await store.accessRequests.findPendingByApiAndUser(api.id, client.id, app.id))?.id,
+        appRequest.id,
+      );
+      await assert.rejects(
+        () =>
+          store.accessRequests.create({
+            api_id: api.id,
+            user_id: client.id,
+            application_id: app.id,
+            justification: 'again',
+            status: 'pending',
+          }),
+        (error: unknown) => (error as { code?: string }).code === 'CONFLICT',
+      );
+
+      // One consumer per identity per namespace, again with the same rule.
+      const accountConsumer = await store.consumers.create({
+        user_id: client.id,
+        namespace: 'nexus',
+        ferrum_consumer_id: `consumer-${newId().slice(0, 8)}`,
+        ferrum_username: `nexus-user-${client.id}`,
+      });
+      const appConsumer = await store.consumers.create({
+        user_id: client.id,
+        application_id: app.id,
+        namespace: 'nexus',
+        ferrum_consumer_id: `consumer-${newId().slice(0, 8)}`,
+        ferrum_username: `nexus-app-${app.id}`,
+      });
+      assert.equal(
+        (await store.consumers.findByUserAndNamespace(client.id, 'nexus'))?.id,
+        accountConsumer.id,
+      );
+      assert.equal(
+        (await store.consumers.findByUserAndNamespace(client.id, 'nexus', app.id))?.id,
+        appConsumer.id,
+      );
+      assert.equal((await store.consumers.list({ user_id: client.id })).total, 2);
+      assert.equal(
+        (await store.consumers.list({ user_id: client.id, application_id: null })).total,
+        1,
+      );
+
+      const credential = await store.credentials.create({
+        user_id: client.id,
+        application_id: app.id,
+        ferrum_consumer_id: appConsumer.ferrum_consumer_id,
+        credential_type: 'keyauth',
+        ferrum_credential_id: `${appConsumer.ferrum_consumer_id}/credentials/keyauth`,
+        fingerprint: `fp-${newId()}`,
+        last4: 'abcd',
+        status: 'active',
+      });
+      assert.equal(credential.application_id, app.id);
+      assert.equal(
+        (await store.credentials.list({ user_id: client.id, application_id: app.id })).total,
+        1,
+      );
+      assert.equal(
+        (await store.credentials.list({ user_id: client.id, application_id: null })).total,
+        0,
+      );
+
+      // Deleting the application cascades every scoped row and its mapping.
+      assert.equal(await store.applications.delete(app.id), true);
+      assert.deepEqual(await store.grants.listActiveByUser(client.id, app.id), []);
+      assert.equal((await store.consumers.list({ user_id: client.id })).total, 1);
+      assert.equal((await store.credentials.list({ user_id: client.id })).total, 0);
+      assert.equal(
+        (await store.grants.findActiveByApiAndUser(api.id, client.id))?.id,
+        accountGrant.id,
+        'the account’s own access is untouched',
+      );
+    });
+
+    it('apiViewers: authorizes, lists, resolves and revokes documentation access', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const partner = await makeUser({ role: 'client' });
+      const other = await makeUser({ role: 'client' });
+      const api = await makeApi(owner.id);
+      const second = await makeApi(owner.id);
+
+      const authorized = await store.apiViewers.upsert({
+        api_id: api.id,
+        user_id: partner.id,
+        granted_by: owner.id,
+        note: 'Design partner',
+      });
+      assert.equal(authorized.note, 'Design partner');
+      assert.deepEqual(await store.apiViewers.find(api.id, partner.id), authorized);
+      assert.equal(await store.apiViewers.find(api.id, other.id), null);
+
+      // Upsert, not create: re-inviting somebody refreshes the row rather than
+      // raising a conflict, and keeps the moment they were first authorized.
+      const refreshed = await store.apiViewers.upsert({
+        api_id: api.id,
+        user_id: partner.id,
+        granted_by: owner.id,
+        note: 'Renewed',
+      });
+      assert.equal(refreshed.id, authorized.id);
+      assert.equal(refreshed.created_at, authorized.created_at);
+      assert.equal(refreshed.note, 'Renewed');
+      assert.equal((await store.apiViewers.list({ api_id: api.id })).total, 1);
+
+      await store.apiViewers.upsert({ api_id: second.id, user_id: partner.id, granted_by: null });
+      assert.deepEqual(
+        (await store.apiViewers.listApiIdsByUser(partner.id)).sort(),
+        [api.id, second.id].sort(),
+      );
+      assert.deepEqual(await store.apiViewers.listApiIdsByUser(other.id), []);
+
+      const byUser = await store.apiViewers.list({ user_id: partner.id }, { limit: 50 });
+      assert.equal(byUser.total, 2);
+
+      assert.equal(await store.apiViewers.delete(api.id, other.id), false);
+      assert.equal(await store.apiViewers.delete(api.id, partner.id), true);
+      assert.deepEqual(await store.apiViewers.listApiIdsByUser(partner.id), [second.id]);
+      assert.equal(await store.apiViewers.deleteByApi(second.id), 1);
+      assert.deepEqual(await store.apiViewers.listApiIdsByUser(partner.id), []);
+    });
+
+    it('apis: filters the rows one viewer may browse by authorization as well as grant', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const viewer = await makeUser({ role: 'client' });
+      const slug = newId().slice(0, 8);
+      const secret = await store.apis.create({
+        name: 'Confidential',
+        slug: `private-${slug}`,
+        owner_user_id: owner.id,
+        namespace: 'nexus',
+        version: '1.0.0',
+        spec_format: 'openapi',
+        requestable: true,
+        auth_plugin: 'key_auth',
+        status: 'published',
+        visibility: 'private',
+      });
+      assert.equal(secret.visibility, 'private');
+
+      const unauthorized = {
+        owner_user_id: viewer.id,
+        granted_api_ids: [],
+        authorized_api_ids: [],
+        open_status: 'published' as const,
+        open_visibilities: ['public' as const],
+      };
+      const hidden = await store.apis.list({ visible_to: unauthorized }, { limit: 50 });
+      assert.ok(!hidden.items.some((row) => row.id === secret.id), 'private stays out');
+      assert.equal(await store.apis.count({ visible_to: unauthorized, ids: [secret.id] }), 0);
+
+      await store.apiViewers.upsert({
+        api_id: secret.id,
+        user_id: viewer.id,
+        granted_by: owner.id,
+      });
+      const authorized = {
+        ...unauthorized,
+        authorized_api_ids: await store.apiViewers.listApiIdsByUser(viewer.id),
+      };
+      const shown = await store.apis.list({ visible_to: authorized }, { limit: 50 });
+      assert.ok(
+        shown.items.some((row) => row.id === secret.id),
+        'authorization admits it',
+      );
+      // The count applies the same clause, so pagination totals agree.
+      assert.equal(await store.apis.count({ visible_to: authorized, ids: [secret.id] }), 1);
+    });
+
     it('apiSpecs: keeps exactly one current revision per API', async () => {
       const owner = await makeUser({ role: 'provider' });
       const api = await makeApi(owner.id);
@@ -950,6 +1316,53 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
 
       assert.equal(await store.apiSpecs.delete(v2.id), true);
       assert.equal(await store.apiSpecs.deleteByApi(api.id), 1);
+    });
+
+    it('apiSpecs: records the author and the revision a rollback restored', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const api = await makeApi(owner.id);
+
+      const original = await store.apiSpecs.create({
+        api_id: api.id,
+        version: '1',
+        raw_spec: 'openapi: 3.1.0',
+        is_current: true,
+        created_by: owner.id,
+      });
+      assert.equal(original.created_by, owner.id);
+      assert.equal(original.rolled_back_from_id, null);
+
+      const replacement = await store.apiSpecs.create({
+        api_id: api.id,
+        version: '2',
+        raw_spec: 'openapi: 3.1.0 # v2',
+        is_current: true,
+      });
+      // Both columns are optional: a revision written without them reads back
+      // as an unattributed upload rather than failing.
+      assert.equal(replacement.created_by, null);
+      assert.equal(replacement.rolled_back_from_id, null);
+
+      const rolledBack = await store.apiSpecs.create({
+        api_id: api.id,
+        version: '1',
+        raw_spec: original.raw_spec,
+        is_current: true,
+        created_by: owner.id,
+        rolled_back_from_id: original.id,
+      });
+      assert.equal(rolledBack.rolled_back_from_id, original.id);
+      assert.deepEqual(await store.apiSpecs.findById(rolledBack.id), rolledBack);
+      assert.equal(
+        (await store.apiSpecs.findById(original.id))?.rolled_back_from_id,
+        null,
+        'the restored revision’s own row is never rewritten',
+      );
+
+      // Provenance, not a dependency: retention drops the target and the link
+      // goes to `null` rather than blocking the delete.
+      assert.equal(await store.apiSpecs.delete(original.id), true);
+      assert.equal((await store.apiSpecs.findById(rolledBack.id))?.rolled_back_from_id, null);
     });
 
     it('apiSpecs: a revision that fails to insert leaves the previous one current', async () => {
@@ -989,8 +1402,9 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       const api = await makeApi(owner.id);
       const other = await makeApi(owner.id);
 
-      // Explicit stamps: retention is `created_at DESC, id DESC`, and five rows
-      // written in a loop would otherwise share a millisecond.
+      // Explicit stamps only so the rows are distinguishable when a failure is
+      // printed: retention is by `revision_seq`, which is publication order
+      // whatever the clock did (see the tie test below).
       for (let n = 1; n <= 5; n += 1) {
         await store.apiSpecs.create({
           api_id: api.id,
@@ -1028,6 +1442,76 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
 
       assert.deepEqual(await versions(other.id), ['other'], "another API's history is untouched");
       assert.equal(await store.apiSpecs.pruneHistory(api.id, 10), 0, 'an empty history is a no-op');
+    });
+
+    it('apiSpecs: orders and prunes by publication order when timestamps tie', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const api = await makeApi(owner.id);
+
+      // Issue #270: every revision in the same millisecond, with ids that sort
+      // *against* publication order. Ordering by `created_at DESC, id DESC`
+      // then listed history ahead of the current revision and let retention
+      // delete the newer rows of the tie; `revision_seq` is the order instead.
+      const at = '2026-09-17T00:00:00.000Z';
+      const ids = [
+        '99999999-0000-4000-8000-000000000000',
+        '88888888-0000-4000-8000-000000000000',
+        '77777777-0000-4000-8000-000000000000',
+        '66666666-0000-4000-8000-000000000000',
+        '55555555-0000-4000-8000-000000000000',
+      ];
+      for (let n = 1; n <= 5; n += 1) {
+        const created = await store.apiSpecs.create({
+          id: ids[n - 1]!,
+          api_id: api.id,
+          version: `${n}`,
+          raw_spec: `openapi: 3.1.0 # ${n}`,
+          created_at: at,
+          is_current: true,
+        });
+        assert.equal(created.revision_seq, n, 'the store numbers revisions as they are published');
+        // Exactly what `updateSpec` does: prune in the same breath as the
+        // revision that displaced the old current one.
+        await store.apiSpecs.pruneHistory(api.id, 2);
+      }
+
+      const page = await store.apiSpecs.list({ api_id: api.id });
+      assert.equal(page.total, 3);
+      assert.deepEqual(
+        page.items.map((spec) => ({
+          version: spec.version,
+          current: spec.is_current,
+          seq: spec.revision_seq,
+        })),
+        [
+          { version: '5', current: true, seq: 5 },
+          { version: '4', current: false, seq: 4 },
+          { version: '3', current: false, seq: 3 },
+        ],
+        'the current revision leads, then the two most recently published',
+      );
+
+      // A rollback hands the flag back to an older revision: it still leads.
+      await store.apiSpecs.setCurrent(api.id, ids[3]!);
+      assert.deepEqual(
+        (await store.apiSpecs.list({ api_id: api.id })).items.map((spec) => spec.version),
+        ['4', '5', '3'],
+      );
+
+      // The sequence keeps climbing across a rollback, so the next revision
+      // still sorts above every revision published before it.
+      const next = await store.apiSpecs.create({
+        api_id: api.id,
+        version: '6',
+        raw_spec: 'openapi: 3.1.0 # 6',
+        created_at: at,
+        is_current: true,
+      });
+      assert.equal(next.revision_seq, 6);
+      assert.deepEqual(
+        (await store.apiSpecs.list({ api_id: api.id })).items.map((spec) => spec.version),
+        ['6', '5', '4', '3'],
+      );
     });
 
     /* ── api plugins ──────────────────────────────────────────────────── */
@@ -1074,7 +1558,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       );
 
       // An operator deleted the gateway config by hand: the row survives with
-      // no claim, which is the same shape a pre-015 row has.
+      // no claim, so the palette cannot address an existing gateway config.
       const orphaned = await store.apiPlugins.upsert({
         api_id: api.id,
         plugin_name: 'ip_restriction',

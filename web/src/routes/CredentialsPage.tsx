@@ -14,10 +14,12 @@ import {
   useIssueCredential,
   useRotateCredential,
 } from '../hooks/useCredentials';
+import { useApplications } from '../hooks/useApplications';
 import { useGrants } from '../hooks/useGrants';
 import { useToast } from '../stores/toast';
 import { ShowOnceSecretDialog } from '../components/credentials/ShowOnceSecretDialog';
 import { FormNotice } from '../components/auth/AuthShell';
+import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import { Card, CardHeader, PageHeader } from '../components/ui/Card';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
@@ -28,6 +30,9 @@ import { Icon, type IconName } from '../components/ui/Icon';
 import { LabeledInput } from '../components/ui/Input';
 import { LabeledSelect } from '../components/ui/Select';
 import { StatusPill } from '../components/ui/StatusPill';
+
+/** The "my account" option value; a select has no `null`. */
+const ACCOUNT_IDENTITY = 'account';
 
 interface ShowOnceState {
   secret: ShowOnceSecret;
@@ -151,9 +156,37 @@ export function CredentialsPage(): ReactElement {
   const [issueOpen, setIssueOpen] = useState(false);
   const [credentialType, setCredentialType] = useState<CredentialType>('keyauth');
   const [label, setLabel] = useState('');
+  // The identity the credential authenticates as. `ACCOUNT_IDENTITY` is the
+  // account itself, which is the default and what every credential issued
+  // before applications existed uses.
+  const [identity, setIdentity] = useState<string>(ACCOUNT_IDENTITY);
   const [showOnce, setShowOnce] = useState<ShowOnceState | null>(null);
   const [rotating, setRotating] = useState<CredentialMetadata | null>(null);
   const [revoking, setRevoking] = useState<CredentialMetadata | null>(null);
+
+  // Every application, not only the active ones: the table has to name the
+  // identity a credential belongs to even after its application is disabled,
+  // or a disabled application's credentials read as an anonymous "Application".
+  // Only the picker is narrowed to active ones, because a disabled application
+  // cannot be issued anything.
+  const applications = useApplications({ limit: MAX_PAGE_SIZE });
+  const applicationNames = useMemo(
+    () => new Map((applications.data?.items ?? []).map((item) => [item.id, item.name])),
+    [applications.data],
+  );
+  const activeApplications = useMemo(
+    () => (applications.data?.items ?? []).filter((item) => item.status === 'active'),
+    [applications.data],
+  );
+  const disabledApplications = useMemo(
+    () =>
+      new Set(
+        (applications.data?.items ?? [])
+          .filter((item) => item.status !== 'active')
+          .map((item) => item.id),
+      ),
+    [applications.data],
+  );
 
   const issue = useIssueCredential();
   const rotate = useRotateCredential();
@@ -178,6 +211,25 @@ export function CredentialsPage(): ReactElement {
             </span>
           </span>
         ),
+      },
+      {
+        id: 'identity',
+        header: 'Identity',
+        // Which identity the material authenticates as, and therefore what it
+        // can reach — the thing `Label` cannot tell you.
+        cell: ({ row }) =>
+          row.original.application_id ? (
+            <span className="flex flex-wrap items-center gap-1.5">
+              <Badge tone="accent">
+                {applicationNames.get(row.original.application_id) ?? 'Application'}
+              </Badge>
+              {disabledApplications.has(row.original.application_id) ? (
+                <Badge tone="warning">Disabled</Badge>
+              ) : null}
+            </span>
+          ) : (
+            <span className="text-fg-muted">My account</span>
+          ),
       },
       {
         id: 'type',
@@ -229,7 +281,7 @@ export function CredentialsPage(): ReactElement {
         ),
       },
     ],
-    [],
+    [applicationNames, disabledApplications],
   );
 
   return (
@@ -247,8 +299,12 @@ export function CredentialsPage(): ReactElement {
 
       <div className="mb-4">
         <FormNotice tone="info">
-          Rotation appends a new credential on the gateway before retiring the old one, so callers
-          have a window to switch over. Revoking removes the credential immediately.
+          Rotation revokes the previous value as part of the same operation. Callers using the old
+          secret start receiving 401 as soon as gateway configuration propagates, which can
+          interrupt clients until they deploy the new value. To keep both secrets live during a
+          cutover, issue a new credential, deploy it, then revoke the old one — that path is
+          available when you are below the per-type limit (issuing another credential of the same
+          type is refused once you are at the cap). Revoking a credential removes it immediately.
         </FormNotice>
       </div>
 
@@ -291,11 +347,16 @@ export function CredentialsPage(): ReactElement {
               loading={issue.isPending}
               onClick={() =>
                 issue.mutate(
-                  { credential_type: credentialType, label: label.trim() || null },
+                  {
+                    credential_type: credentialType,
+                    label: label.trim() || null,
+                    application_id: identity === ACCOUNT_IDENTITY ? null : identity,
+                  },
                   {
                     onSuccess: (response) => {
                       setIssueOpen(false);
                       setLabel('');
+                      setIdentity(ACCOUNT_IDENTITY);
                       setShowOnce({
                         secret: response.secret,
                         consumerUsername: response.consumer_username,
@@ -312,6 +373,26 @@ export function CredentialsPage(): ReactElement {
         }
       >
         <div className="flex flex-col gap-4">
+          {/* The identity comes first because it is the only field here that
+              changes what the credential can *reach*. `Label` is a note to
+              yourself; this is a permission boundary (issue #289). */}
+          <LabeledSelect<string>
+            label="Identity"
+            value={identity}
+            onValueChange={setIdentity}
+            hint={
+              identity === ACCOUNT_IDENTITY
+                ? 'This credential can call every API your account is approved for.'
+                : `This credential can call only the APIs ${applicationNames.get(identity) ?? 'this application'} is approved for.`
+            }
+            options={[
+              { value: ACCOUNT_IDENTITY, label: 'My account' },
+              ...activeApplications.map((application) => ({
+                value: application.id,
+                label: application.name,
+              })),
+            ]}
+          />
           <LabeledSelect<CredentialType>
             label="Credential type"
             value={credentialType}
@@ -327,7 +408,7 @@ export function CredentialsPage(): ReactElement {
             placeholder="e.g. production worker"
             value={label}
             onChange={(event) => setLabel(event.target.value)}
-            hint="Optional, helps you recognise this credential later."
+            hint="Optional, and a note to yourself only — it does not affect what this credential can call."
           />
         </div>
       </Dialog>
@@ -338,7 +419,12 @@ export function CredentialsPage(): ReactElement {
           if (!open) setRotating(null);
         }}
         title="Rotate credential"
-        description="A replacement is created on the gateway and shown once. The current secret keeps working until the rotation is finalized."
+        description={
+          'A replacement is created on the gateway and shown once. The current secret is ' +
+          'revoked as part of this operation and will stop working as soon as the gateway ' +
+          'applies the change. Deploy the new value before callers retry, or issue a new ' +
+          'credential first if you are below the per-type limit.'
+        }
         confirmLabel="Rotate"
         loading={rotate.isPending}
         onConfirm={() => {

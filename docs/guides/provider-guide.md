@@ -140,6 +140,13 @@ API Key is the usual default: simplest for callers, and the gateway hides the
 header from your upstream. Choose JWT when callers need short-lived
 credentials they mint themselves.
 
+> **With JWT, your upstream receives your callers' live tokens.** The gateway
+> strips an API key and a Basic password before forwarding, but it forwards
+> `Authorization: Bearer <token>` unchanged — Ferrum Edge has no option to hide
+> it, and a backend usually wants the claims. Each token is a working credential
+> for that caller until its `exp`, so treat the header as a secret: do not log
+> it, echo it, or pass it on to another service. Callers are told this too.
+
 > **HTTP Basic needs one piece of gateway configuration.** Publishing fails
 > unless the operator has set `FERRUM_BASIC_AUTH_HMAC_SECRET` (at least 32
 > bytes) on Ferrum Edge — it is the key the gateway hashes Basic passwords
@@ -161,16 +168,48 @@ consumers and simply become inert.
 
 ### Visibility
 
-| Visibility   | In the catalog      | Openable by link | Requestable |
-| ------------ | ------------------- | ---------------- | ----------- |
-| **Public**   | listed for everyone | yes              | yes         |
-| **Internal** | **unlisted**        | **yes**          | yes         |
+| Visibility              | In the catalog        | Openable by link      | Requestable |
+| ----------------------- | --------------------- | --------------------- | ----------- |
+| **Public**              | listed for everyone   | yes                   | yes         |
+| **Internal (unlisted)** | **unlisted**          | **yes**               | yes         |
+| **Private**             | **only your viewers** | **only your viewers** | yes         |
 
 **Internal means unlisted, not secret.** Anyone with the link can open the page,
-read the documentation and raise an access request. That is deliberate — there
-is no provider-initiated grant flow, so a link that could not be acted on would
-be useless. What protects your data is the access-control gate, not whether the
-documentation is readable.
+read the documentation and raise an access request. That is deliberate: it is
+how you hand a prospective client a link without putting the API in the shop
+window. It has always meant this and still does — adding Private did not change
+it.
+
+**Private is the one that enforces.** A private API is invisible in the catalog
+and answers "not found" to anyone who is not you, an administrator, an approved
+client, or an account you have authorized. Guessing the slug does not help, and
+neither does searching — the listing, its totals and the specification endpoint
+all apply the same rule. An account that cannot see it cannot request access to
+it either.
+
+#### Authorizing viewers
+
+**My APIs → the API → Viewers.** Enter the email address of an existing portal
+account and they can find and read the API.
+
+**Authorizing somebody is not approving them.** It lets them read the
+documentation. It does not let them call the API — for that they request access
+from the catalog page and you approve it, exactly as for any other client.
+Revoking a viewer likewise leaves any grant they hold alone; revoke that from
+the Grants tab.
+
+Two practical notes:
+
+- The account has to exist. An address nobody has registered is refused rather
+  than remembered, because an authorization belongs to an account and an
+  address can change hands.
+- The viewer list is kept whatever the visibility, and only enforces while the
+  API is Private. Switching to Public and back does not lose it.
+
+**Visibility is documentation, not enforcement.** What stops an unapproved
+caller reaching your upstream is the access-control gate (**Requestable on**),
+not whether the OpenAPI document is readable. A private API published with
+Requestable **off** is still callable by anyone who knows its URL.
 
 If a document itself is too sensitive to show a signed-in portal user, do not
 publish it here.
@@ -575,17 +614,17 @@ backend-state read fails, counters remain valid and the backend is Unknown.
 **My APIs → the API → Settings.** Everything here is safe to change on a live
 API, but two of them have consequences worth reading first.
 
-| Change                     | Effect                                                                                                                                                                 |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Name, description, version | Catalog metadata only.                                                                                                                                                 |
-| Visibility                 | Listing only. Existing grants and calls are unaffected.                                                                                                                |
-| Upstream URL               | Re-points the gateway's backend. Takes effect immediately, and the upstream shown on the API page updates with it.                                                     |
-| Rate limit                 | Attaches, updates, or (cleared) removes the quota.                                                                                                                     |
-| CORS                       | Attaches, replaces, or (cleared) removes the browser CORS policy and its default-on WebSocket origin check.                                                            |
-| Allowed methods            | Takes effect immediately. Untick everything to accept every method again.                                                                                              |
-| Timeouts, circuit breaker  | Take effect immediately. Clearing the timeout boxes restores the gateway defaults.                                                                                     |
-| **Requestable → off**      | ⚠️ Removes the access gate. **Every authenticated consumer can now call this API.** Existing grants stay but become inert.                                             |
-| **Authentication plugin**  | ⚠️ Refused while anyone holding access has a live credential of the old method, unless you confirm; they keep their credentials but lose this API until they re-issue. |
+| Change                     | Effect                                                                                                                                                                                       |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Name, description, version | Catalog metadata only.                                                                                                                                                                       |
+| Visibility                 | Documentation visibility only. Existing grants and calls are unaffected. Switching **to** Private starts enforcing the API's viewer list; switching away stops enforcing but keeps the list. |
+| Upstream URL               | Re-points the gateway's backend. Takes effect immediately, and the upstream shown on the API page updates with it.                                                                           |
+| Rate limit                 | Attaches, updates, or (cleared) removes the quota.                                                                                                                                           |
+| CORS                       | Attaches, replaces, or (cleared) removes the browser CORS policy and its default-on WebSocket origin check.                                                                                  |
+| Allowed methods            | Takes effect immediately. Untick everything to accept every method again.                                                                                                                    |
+| Timeouts, circuit breaker  | Take effect immediately. Clearing the timeout boxes restores the gateway defaults.                                                                                                           |
+| **Requestable → off**      | ⚠️ Removes the access gate. **Every authenticated consumer can now call this API.** Existing grants stay but become inert.                                                                   |
+| **Authentication plugin**  | ⚠️ Refused while anyone holding access has a live credential of the old method, unless you confirm; they keep their credentials but lose this API until they re-issue.                       |
 
 ### Changing the authentication plugin
 
@@ -629,6 +668,45 @@ older revisions is retained — ten by default, `NEXUS_SPEC_HISTORY_LIMIT` on yo
 portal — and anything past that is removed as each new revision lands. The
 version label defaults to the document's `info.version` — set it explicitly if
 your catalog version differs.
+
+### Review before you publish
+
+**Review changes** compares the document in the editor against the one your API
+is serving and shows what would change before anything is published: operations
+added, operations removed, operations whose definition differs, and any change
+to `info` or `servers`. Operations that would **stop being served** are called
+out first, because those are the ones that break callers.
+
+Read that list as a prompt, not a verdict. The comparison reads paths, methods
+and the shape of each operation — it does not read schemas or follow `$ref`s,
+so a response that quietly drops a required field shows up as "responses
+changed" at most, and never as a breaking change. An empty breaking-change list
+means the comparison found nothing, not that your change is safe.
+
+### Revision history and rollback
+
+**My APIs → the API → Spec → Revision history** lists every retained revision,
+newest first, with when it was published and by whom. **View document** shows
+the original upload, byte for byte.
+
+**Review & roll back** on an earlier revision shows the same comparison — this
+time from what your API serves today to what it would serve — and then
+republishes that document.
+
+A rollback is a **new revision carrying the old document**. Nothing in your
+history is rewritten or deleted, and the API keeps its id, its slug, its
+`invoke_url`, its plugins and every approved client: none of your clients has
+to request access again. If the gateway refuses the change, the rollback fails
+and your catalog is left exactly as it was — it never half-lands.
+
+Two things to expect:
+
+- Retention applies to rollback targets too. A revision you can see today can be
+  pruned by later uploads; rolling back to one that is gone answers "no longer
+  retained" and writes nothing.
+- At the `routes` [enforcement level](#enforcement-level), rolling back changes
+  **what the gateway accepts**, immediately, in exactly the way an upload does.
+  The operations the review listed as removed start being rejected.
 
 ### The upstream-following rule
 

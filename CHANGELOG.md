@@ -170,6 +170,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   a sober danger-zone treatment for god mode, radio-card role choice and
   password reveal toggles on the public forms, and a tidier OpenAPI viewer.
   Behaviour, routes, API calls and copy that tests assert on are unchanged.
+- Consolidated the buildout database history into one `001_initial` schema per
+  SQL dialect and one MongoDB initial index setup. Removed legacy backfills and
+  upgrade runbooks. Development databases must be recreated after baseline changes.
+  Server builds now ship SQL assets beside the compiled runner.
 - `POST /api/apis` and `PATCH /api/apis/:id` accept `cors.origins` as an alias
   for `cors.allowed_origins`. Sending both with different values is `400`
   naming both keys. Responses still emit `allowed_origins` only.
@@ -206,6 +210,34 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Open catalog APIs (`requestable: false`) now report `access_state: 'open'`
+  instead of `'none'`, so the catalog card and detail page show **Open access**
+  rather than **No access** (#267).
+- Credential rotation copy no longer promises a switch-over window. The
+  credentials banner, rotation confirmation, rotation email, and user-facing
+  docs state that rotate revokes the previous value as part of the operation
+  (#268).
+
+- Specification revisions are ordered by publication sequence rather than by
+  their timestamp (#270). `api_specs` gains a per-API `revision_seq` that every
+  adapter assigns in the transaction that inserts the row; listings return the
+  current revision first and then history newest-first by that sequence, and
+  `NEXUS_SPEC_HISTORY_LIMIT` retention deletes from the same order. Previously
+  the order was `created_at DESC, id DESC`, so revisions published in the same
+  millisecond were ranked by their random UUID — which could list historical
+  revisions ahead of the current one and permanently delete newer history in
+  place of older. The column is part of the `001_initial` baseline, so
+  development databases must be recreated under the buildout schema policy in
+  `docs/operations.md`.
+- Closed mobile navigation is inert and hidden from assistive technology. Opening
+  the drawer moves focus into it; Escape, navigation and backdrop dismissal return
+  focus to the toggle. Desktop navigation remains available across viewport changes (#265).
+- Informational badges, including API Key and GET method labels, derive readable
+  text independently from their brand tint in both themes. Default and custom
+  colours reach at least 4.5:1 contrast on the portal's badge surfaces (#269).
+- Saved portal branding and the document title apply after an authenticated
+  reload without a theme toggle. Session changes preserve and refresh the public
+  branding query while still removing account-specific cached data (#271).
 - `npm run dev` proxied every path starting with `/api` to the backend —
   including the SPA's own `/apis`, `/apis/new` and `/apis/:id` routes — so a
   reload or deep link on the publishing pages returned the backend's JSON 404
@@ -370,10 +402,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   name.** Ownership was inferred from the plugin name, so every other config
   of that name on the proxy looked like a leftover duplicate and was removed —
   including a per-path deny gate Nexus never created. `api_plugins` now records
-  the Edge config id it produced (migration `015_api_plugin_config_id`) and
-  saves, removals and reconciliation act on that config alone; a row written
-  before the column adopts a single name match on its next save and never
-  deletes the rest. The `api.plugin_set` and `api.plugin_remove` audit rows name
+  the Edge config id it produced (`ferrum_plugin_config_id`) and
+  saves, removals and reconciliation act on that config alone. A row without
+  a recorded id creates a fresh config on save and leaves existing configs alone. The `api.plugin_set` and `api.plugin_remove` audit rows name
   the config id they touched.
 - **An ordinary portal save reset an operator's `priority_override`.** The body
   sent to `PUT /plugins/config/{id}` was built from scratch, and that endpoint
@@ -628,10 +659,10 @@ fails without the fix.
   template now announces activity instead of quoting a message. One
   self-registered account could previously mail-bomb every administrator
   and grow the message, audit, notification and outbox tables without limit.
-  Migration `010_message_sender_index` adds the index the budget check runs on.
+  The initial schema includes the sender index the budget check runs on.
 - **Gateway writes are exclusive across Nexus instances.** Every consumer
   and proxy read-modify-write now holds a database lease (`edge_leases`,
-  migration `009`, 60 s TTL, renewed while held, up to 30 s wait, then
+  60 s TTL, renewed while held, up to 30 s wait, then
   `409 CONFLICT`) in addition to the in-process queue, so two instances over
   one database can no longer restore a revoked ACL group or drop a proxy's
   auth association by overwriting each other's whole-resource `PUT`. The

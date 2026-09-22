@@ -9,34 +9,55 @@
  *
  * **Browse** (`GET /api/catalog`) — {@link CatalogService.canList}
  *
- * | API state              | client | grantee | owner | admin |
- * |------------------------|--------|---------|-------|-------|
- * | `published` `public`   | yes    | yes     | yes   | yes   |
- * | `published` `internal` | **no** | yes     | yes   | yes   |
- * | `retired`              | **no** | yes     | yes   | yes   |
+ * | API state              | signed out | unrelated client | viewer | grantee | owner | admin |
+ * |------------------------|------------|------------------|--------|---------|-------|-------|
+ * | `published` `public`   | **no**     | yes              | yes    | yes     | yes   | yes   |
+ * | `published` `internal` | **no**     | **no**           | yes    | yes     | yes   | yes   |
+ * | `published` `private`  | **no**     | **no**           | yes    | yes     | yes   | yes   |
+ * | `retired`              | **no**     | **no**           | yes    | yes     | yes   | yes   |
  *
  * **Open** (`GET /api/catalog/:slug` and `…/spec`) — {@link CatalogService.canView}
  *
- * | API state              | client  | grantee | owner | admin |
- * |------------------------|---------|---------|-------|-------|
- * | `published` `public`   | yes     | yes     | yes   | yes   |
- * | `published` `internal` | **yes** | yes     | yes   | yes   |
- * | `retired`              | **no**  | yes     | yes   | yes   |
+ * | API state              | signed out | unrelated client | viewer | grantee | owner | admin |
+ * |------------------------|------------|------------------|--------|---------|-------|-------|
+ * | `published` `public`   | **no**     | yes              | yes    | yes     | yes   | yes   |
+ * | `published` `internal` | **no**     | **yes**          | yes    | yes     | yes   | yes   |
+ * | `published` `private`  | **no**     | **no**           | yes    | yes     | yes   | yes   |
+ * | `retired`              | **no**     | **no**           | yes    | yes     | yes   | yes   |
+ *
+ * "Signed out" is not a column the checks below implement — every catalog
+ * route requires a session — but it belongs in the matrix, because the whole
+ * point of `private` is the question "who can read this?" and "nobody who is
+ * not signed in" is half the answer.
+ *
+ * "Viewer" is an `api_viewers` row: somebody the provider explicitly
+ * authorized to read this API's documentation. It is **not** a grant. It
+ * confers no ACL group, touches no consumer and reaches no gateway — an
+ * authorized viewer can read the docs and, if the API is `requestable`, ask
+ * for access through the ordinary flow like anyone else.
  *
  * The reasoning behind each deliberate cell:
  *
- * - **`internal` means unlisted, not secret.** It keeps an API out of the
- *   general browse view so the catalog stays a curated shop window, while still
- *   letting a provider hand somebody a link and have them read the docs and
- *   raise an access request. Making it unopenable instead would be
- *   self-defeating: `requestable` + `internal` would be a combination nobody
- *   could ever act on, because there is no provider-initiated grant flow. What
- *   actually protects the data is the ACL group on the gateway, not whether the
- *   OpenAPI document is readable.
+ * - **`internal` means unlisted, not secret**, and still does. It keeps an API
+ *   out of the general browse view so the catalog stays a curated shop window,
+ *   while still letting a provider hand somebody a link and have them read the
+ *   docs and raise an access request. Adding `private` did not change it: the
+ *   two are separate values precisely so that existing `internal` APIs keep
+ *   the semantics they were published under (issue #288).
+ * - **`private` is the permission-enforced one.** Neither listed nor openable
+ *   unless the viewer is on one of the lists above — guessing or being handed
+ *   a slug is not enough, and an unauthorized account gets `404`, not `403`,
+ *   so the endpoint does not confirm that the slug names anything.
  * - **`retired` stops circulating.** Retirement is the provider saying "stop
  *   onboarding onto this". It leaves the proxy and every existing grant alone —
  *   integrations already in production must not break — but the documentation
  *   stops being served to people who are not already using it.
+ *
+ * **None of this is data-plane authorization.** What stops an unapproved caller
+ * reaching the API is the `access_control` plugin and its ACL group on the
+ * gateway. Hiding documentation is not enforcement, and a `private` API with
+ * no access control in front of it is still callable by anyone who knows the
+ * URL. The two are deliberately separate permissions.
  *
  * The normalized spec follows the detail page's visibility exactly: there is no separate
  * "documentation" permission, because a catalog entry whose documentation you
@@ -71,6 +92,7 @@ import type {
 } from '../db/store.js';
 import { notFound, specInvalid } from '../lib/errors.js';
 import { parseOpenApiSpec, type ParsedSpec } from '../publishing/oas.js';
+import { canListApi, canViewApi, resolveReadAccess, type ApiReadAccess } from './read-access.js';
 import { presentApi, type GatewayUrlSource } from '../publishing/present.js';
 import { rewriteSpecServers } from '../publishing/spec-document.js';
 
@@ -95,9 +117,9 @@ export interface CatalogService {
   /** The normalized current spec with gateway servers, when the caller may see the API. */
   spec(viewer: UserRecord, slug: string): Promise<CatalogSpecResponse>;
   /** Whether `api` appears in `viewer`'s browse list. */
-  canList(viewer: UserRecord, api: ApiRecord, hasGrant: boolean): boolean;
+  canList(viewer: UserRecord, api: ApiRecord, access: ApiReadAccess): boolean;
   /** Whether `viewer` may open `api`'s detail page and read its spec. */
-  canView(viewer: UserRecord, api: ApiRecord, hasGrant: boolean): boolean;
+  canView(viewer: UserRecord, api: ApiRecord, access: ApiReadAccess): boolean;
 }
 
 /** Dependencies of {@link createCatalogService}. */
@@ -111,22 +133,11 @@ export interface CatalogServiceDeps {
 export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
   const { store, settings } = deps;
 
-  /** Owner, admin and grantee always see everything about an API. */
-  function isInsider(viewer: UserRecord, api: ApiRecord, hasGrant: boolean): boolean {
-    return api.owner_user_id === viewer.id || roleAtLeast(viewer.role, 'admin') || hasGrant;
-  }
-
-  function canList(viewer: UserRecord, api: ApiRecord, hasGrant: boolean): boolean {
-    if (isInsider(viewer, api, hasGrant)) return true;
-    return api.status === 'published' && api.visibility === 'public';
-  }
-
-  function canView(viewer: UserRecord, api: ApiRecord, hasGrant: boolean): boolean {
-    if (isInsider(viewer, api, hasGrant)) return true;
-    // Visibility governs listing, not opening: an `internal` API is unlisted
-    // but readable by anyone holding its link.
-    return api.status === 'published';
-  }
+  // The rule is evaluated in `read-access.ts`, shared with the access and
+  // messaging services, so that every surface that can reveal an API answers
+  // "may this account read it?" the same way.
+  const canList = canListApi;
+  const canView = canViewApi;
 
   /** The caller's relationship to an API, for the catalog badge. */
   function accessState(
@@ -149,6 +160,9 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
           break;
       }
     }
+    // Approval is not required: any portal account may call it. Returning
+    // `none` here made both catalog views render "No access".
+    if (!api.requestable) return 'open';
     return 'none';
   }
 
@@ -202,12 +216,24 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       // gets "mine, or granted to me, or published and public" — the exact
       // three branches `canList` tests, with `retired` excluded for outsiders
       // because the status half of the openly-listed disjunct fails it.
+      // APIs whose documentation this account was explicitly authorized to
+      // read. Fetched alongside the grants, and for the same reason: both
+      // become bounded id lists in the query, because the predicate has to run
+      // in the database or pagination describes a truncated scan.
+      const authorized = roleAtLeast(viewer.role, 'admin')
+        ? []
+        : await store.apiViewers.listApiIdsByUser(viewer.id);
+
       const visibleTo: ApiViewerFilter | undefined = roleAtLeast(viewer.role, 'admin')
         ? undefined
         : {
             owner_user_id: viewer.id,
             granted_api_ids: [...grants.keys()],
+            authorized_api_ids: authorized,
             open_status: 'published',
+            // `public` only. `internal` is unlisted by design and `private` is
+            // not visible to anyone who is not on one of the lists above, so
+            // neither belongs in the openly-listed disjunct.
             open_visibilities: ['public'],
           };
 
@@ -262,8 +288,11 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       // forbidden, so the catalog does not leak the existence of internal APIs.
       if (!api) throw notFound('API', slug);
 
-      const grant = await store.grants.findActiveByApiAndUser(api.id, viewer.id);
-      if (!canView(viewer, api, grant !== null)) throw notFound('API', slug);
+      const access = await resolveReadAccess(store, viewer, api);
+      if (!canView(viewer, api, access)) throw notFound('API', slug);
+      // The grant that admits them — the account's own when it has one, else
+      // an application's — is the one the detail reports.
+      const { grant } = access;
 
       const [specRecord, owner, request] = await Promise.all([
         store.apiSpecs.findCurrentByApi(api.id),
@@ -272,7 +301,7 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       ]);
 
       const spec: ApiSpecSummary | null = specRecord
-        ? (({ raw_spec: _raw, ...rest }) => rest)(specRecord)
+        ? (({ raw_spec: _raw, revision_seq: _seq, ...rest }) => rest)(specRecord)
         : null;
 
       return {
@@ -293,8 +322,9 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
     async spec(viewer, slug): Promise<CatalogSpecResponse> {
       const api = await store.apis.findBySlug(slug);
       if (!api) throw notFound('API', slug);
-      const grant = await store.grants.findActiveByApiAndUser(api.id, viewer.id);
-      if (!canView(viewer, api, grant !== null)) throw notFound('API', slug);
+      if (!canView(viewer, api, await resolveReadAccess(store, viewer, api))) {
+        throw notFound('API', slug);
+      }
 
       const record = await store.apiSpecs.findCurrentByApi(api.id);
       if (!record) throw notFound('Specification for API', slug);

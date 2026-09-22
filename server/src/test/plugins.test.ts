@@ -681,6 +681,48 @@ describe('provider plugin palette', () => {
       assert.deepEqual(effectiveNames(harness, proxyId), ['key_auth']);
     });
 
+    it('names unknown trigger fields through the shared route error handler', async () => {
+      const response = await setPlugin('correlation_id', {
+        config: { header_name: 'x-request-id' },
+        trigger: { methods: ['GET'], unexpected: true },
+      });
+      assert.equal(response.statusCode, 400, response.body);
+      const error = response.json<ApiErrorBody>().error;
+      assert.equal(error.code, 'VALIDATION_FAILED');
+      const details = error.details as { path: string; code: string }[];
+      assert.ok(details.some((issue) => issue.path === 'trigger.unexpected'));
+      assert.equal(harness.edge.pluginForProxy(proxyId, 'correlation_id'), undefined);
+      assert.deepEqual(effectiveNames(harness, proxyId), ['key_auth']);
+    });
+
+    it('bounds provider unknown-trigger responses before gateway or audit effects', async () => {
+      const auditBefore = await harness.auditRows();
+      const gatewayCallsBefore = harness.edge.requests.length;
+      for (const count of [250, 1_000]) {
+        const keys = Array.from({ length: count }, (_, i) => `k${String(i).padStart(5, '0')}`);
+        const response = await setPlugin('correlation_id', {
+          config: { header_name: 'x-request-id' },
+          trigger: { methods: ['GET'], ...Object.fromEntries(keys.map((k) => [k, 0])) },
+        });
+        assert.equal(response.statusCode, 400);
+        const error = response.json<ApiErrorBody>().error;
+        assert.equal(error.code, 'VALIDATION_FAILED');
+        const details = error.details as { path: string; code: string; message: string }[];
+        assert.deepEqual(
+          details.map((issue) => issue.path).sort(),
+          keys.map((k) => `trigger.${k}`),
+        );
+        assert.ok(details.every((issue) => issue.code === 'unrecognized_keys'));
+        assert.ok(details.every((issue) => issue.message === 'Unrecognized key'));
+        assert.ok(Buffer.byteLength(response.body) < 128 * count + 512, 'linear response size');
+        assert.equal(harness.edge.requests.length, gatewayCallsBefore);
+        assert.deepEqual(await harness.auditRows(), auditBefore);
+        assert.equal(await harness.store.apiPlugins.find(apiId, 'correlation_id'), null);
+        assert.equal(harness.edge.pluginForProxy(proxyId, 'correlation_id'), undefined);
+        assert.deepEqual(effectiveNames(harness, proxyId), ['key_auth']);
+      }
+    });
+
     it('rejects an out-of-range integer', async () => {
       assert.equal(
         (await setPlugin('request_size_limiting', { config: { max_bytes: 0 } })).statusCode,
@@ -971,11 +1013,11 @@ describe('provider plugin palette', () => {
       assert.equal(harness.edge.pluginConfigs.get(`nexus/${owned}`), undefined);
     });
 
-    it('backfills ownership by name for a row written before the id column', async () => {
+    it('creates a fresh config when the row has no ownership claim', async () => {
       await setPlugin('compression', { config: { algorithms: ['gzip'] } });
       const created = await ownedConfigId('compression');
       assert.ok(created);
-      // A pre-015 row: the gateway config exists, the claim on it does not.
+      // The gateway config exists, but this row has no ownership claim.
       await harness.store.apiPlugins.upsert({
         api_id: apiId,
         plugin_name: 'compression',
@@ -990,12 +1032,15 @@ describe('provider plugin palette', () => {
         200,
       );
 
-      assert.equal(configsNamed('compression').length, 1, 'the config was adopted, not duplicated');
-      assert.equal(await ownedConfigId('compression'), created);
-      assert.deepEqual(storedConfig(created).config, { algorithms: ['br'] });
+      assert.equal(configsNamed('compression').length, 2);
+      const recorded = await ownedConfigId('compression');
+      assert.ok(recorded);
+      assert.notEqual(recorded, created, 'a name match does not confer ownership');
+      assert.deepEqual(storedConfig(created).config, { algorithms: ['gzip'] });
+      assert.deepEqual(storedConfig(recorded).config, { algorithms: ['br'] });
     });
 
-    it('adopts the first match and leaves the rest when a legacy row is ambiguous', async () => {
+    it('removes an unclaimed palette row without deleting any matching gateway configs', async () => {
       await setPlugin('compression', { config: { algorithms: ['gzip'] } });
       const created = await ownedConfigId('compression');
       assert.ok(created);
@@ -1009,15 +1054,15 @@ describe('provider plugin palette', () => {
         ferrum_plugin_config_id: null,
       });
 
-      assert.equal(
-        (await setPlugin('compression', { config: { algorithms: ['gzip', 'br'] } })).statusCode,
-        200,
-      );
-
-      assert.equal(configsNamed('compression').length, 2, 'ambiguity never deletes');
+      const response = await harness.authed(provider, {
+        method: 'DELETE',
+        url: `/api/apis/${apiId}/plugins/compression`,
+      });
+      assert.equal(response.statusCode, 200);
+      assert.equal(configsNamed('compression').length, 2);
       assert.deepEqual(storedConfig('operator-owned-config-0003').config, { algorithms: ['br'] });
-      assert.equal(await ownedConfigId('compression'), created, 'the first match is adopted');
-      assert.deepEqual(storedConfig(created).config, { algorithms: ['gzip', 'br'] });
+      assert.deepEqual(storedConfig(created).config, { algorithms: ['gzip'] });
+      assert.equal(await ownedConfigId('compression'), null);
     });
 
     it('creates a fresh config when the recorded one was removed by hand', async () => {

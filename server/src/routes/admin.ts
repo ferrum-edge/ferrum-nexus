@@ -27,6 +27,7 @@ import {
   MAX_BRANDING_FOOTER_LINKS,
   MAX_BRANDING_FOOTER_TEXT_LENGTH,
   MAX_BRANDING_LINK_LABEL_LENGTH,
+  normalizeBrandingHexColor,
   ROLE_ORDER,
   type AdminSettingsResponse,
   type GetEmailTemplateResponse,
@@ -42,6 +43,7 @@ import {
   type RepairGatewayReferencesResponse,
   type SmtpTestResponse,
   type UpdateEmailTemplateResponse,
+  type UpdateSettingsRequest,
   type UpdateSettingsResponse,
 } from '@ferrum-nexus/shared';
 
@@ -71,82 +73,109 @@ export interface AdminRoutesOptions {
 /** Largest accepted logo, as a data URL. Roughly 384 KiB of binary. */
 export const MAX_LOGO_DATA_URL_LENGTH = 512 * 1024;
 
+/**
+ * Opaque `#rgb` / `#rrggbb` only. The native colour swatch and derived palette
+ * cannot render alpha, so 4- and 8-digit CSS hex values are refused rather than
+ * stripped. Five- and seven-digit strings are not CSS colours. Accepted values
+ * are stored as lowercase `#rrggbb`.
+ */
 const hexColor = z
   .string()
   .trim()
-  .regex(/^#[0-9a-fA-F]{3,8}$/, 'must be a CSS hex colour');
+  .transform((value, ctx) => {
+    const normalized = normalizeBrandingHexColor(value);
+    if (normalized === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'must be a CSS hex colour (#rgb or #rrggbb)',
+      });
+      return z.NEVER;
+    }
+    return normalized;
+  });
 
-const updateSettingsBody = z.object({
-  branding: z
-    .object({
-      portal_name: z.string().trim().min(1).max(120).optional(),
-      logo_data_url: z
-        .string()
-        .trim()
-        .max(MAX_LOGO_DATA_URL_LENGTH)
-        .regex(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, 'must be a base64 image data URL')
-        .nullish(),
-      primary_color: hexColor.optional(),
-      accent_color: hexColor.optional(),
-      default_theme: z.enum(['dark', 'light', 'system']).optional(),
-      tagline: z.string().trim().max(280).nullish(),
-      support_email: z.string().trim().email().max(320).nullish(),
-      radius: z.enum(['none', 'sm', 'md', 'lg']).optional(),
-      font_preset: z.enum(['system', 'inter', 'manrope']).optional(),
-      sidebar_style: z.enum(['surface', 'contrast']).optional(),
-      login_layout: z.enum(['split', 'centered']).optional(),
-      footer_text: z.string().trim().max(MAX_BRANDING_FOOTER_TEXT_LENGTH).nullish(),
-      // Rendered as anchors on the unauthenticated sign-in page, so the scheme
-      // is pinned to http(s): a stored `javascript:` URL would be an XSS.
-      footer_links: z
-        .array(
-          z.object({
-            label: z.string().trim().min(1).max(MAX_BRANDING_LINK_LABEL_LENGTH),
-            url: z
-              .string()
-              .trim()
-              .max(2048)
-              .url()
-              .refine((url) => /^https?:\/\//i.test(url), 'must be an http(s) URL'),
-          }),
-        )
-        .max(MAX_BRANDING_FOOTER_LINKS)
-        .optional(),
-    })
-    .optional(),
-  captcha: z
-    .object({
-      enabled: z.boolean().optional(),
-      provider: z.enum(['none', 'recaptcha', 'hcaptcha', 'turnstile']).optional(),
-      site_key: z.string().trim().max(512).nullish(),
-      secret_key: z.string().trim().max(512).nullish(),
-      // The activation self-test's token, bounded like the login one. The
-      // service decides when it is required and verifies it against the
-      // configuration this patch describes.
-      captcha_token: z.string().max(4096).optional(),
-    })
-    .optional(),
-  smtp: z
-    .object({
-      host: z.string().trim().max(255).nullish(),
-      port: z.number().int().min(1).max(65_535).optional(),
-      secure: z.boolean().optional(),
-      username: z.string().trim().max(255).nullish(),
-      password: z.string().max(1024).nullish(),
-      from_address: z.string().trim().max(320).nullish(),
-    })
-    .optional(),
-  registration: z
-    .object({
-      open_registration: z.boolean().optional(),
-      require_email_verification: z.boolean().optional(),
-      allowed_roles: z.array(z.enum(ROLE_ORDER)).max(4).optional(),
-    })
-    .optional(),
-  // Only length is checked here; the settings service owns the origin rule and
-  // the normalisation, so a caller cannot store a path or a credential pair.
-  gateway: z.object({ public_url: z.string().trim().max(2048).nullish() }).optional(),
-});
+const updateSettingsBody: z.ZodType<UpdateSettingsRequest> = z
+  .object({
+    branding: z
+      .object({
+        portal_name: z.string().trim().min(1).max(120).optional(),
+        logo_data_url: z
+          .string()
+          .trim()
+          .max(MAX_LOGO_DATA_URL_LENGTH)
+          .regex(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, 'must be a base64 image data URL')
+          .nullish(),
+        primary_color: hexColor.optional(),
+        accent_color: hexColor.optional(),
+        default_theme: z.enum(['dark', 'light', 'system']).optional(),
+        tagline: z.string().trim().max(280).nullish(),
+        support_email: z.string().trim().email().max(320).nullish(),
+        radius: z.enum(['none', 'sm', 'md', 'lg']).optional(),
+        font_preset: z.enum(['system', 'inter', 'manrope']).optional(),
+        sidebar_style: z.enum(['surface', 'contrast']).optional(),
+        login_layout: z.enum(['split', 'centered']).optional(),
+        footer_text: z.string().trim().max(MAX_BRANDING_FOOTER_TEXT_LENGTH).nullish(),
+        // Rendered as anchors on the unauthenticated sign-in page, so the scheme
+        // is pinned to http(s): a stored `javascript:` URL would be an XSS.
+        footer_links: z
+          .array(
+            z
+              .object({
+                label: z.string().trim().min(1).max(MAX_BRANDING_LINK_LABEL_LENGTH),
+                url: z
+                  .string()
+                  .trim()
+                  .max(2048)
+                  .url()
+                  .refine((url) => /^https?:\/\//i.test(url), 'must be an http(s) URL'),
+              })
+              .strict(),
+          )
+          .max(MAX_BRANDING_FOOTER_LINKS)
+          .optional(),
+      })
+      .strict()
+      .optional(),
+    captcha: z
+      .object({
+        enabled: z.boolean().optional(),
+        provider: z.enum(['none', 'recaptcha', 'hcaptcha', 'turnstile']).optional(),
+        site_key: z.string().trim().max(512).nullish(),
+        secret_key: z.string().trim().max(512).nullish(),
+        // The activation self-test's token, bounded like the login one. The
+        // service decides when it is required and verifies it against the
+        // configuration this patch describes.
+        captcha_token: z.string().max(4096).optional(),
+      })
+      .strict()
+      .optional(),
+    smtp: z
+      .object({
+        host: z.string().trim().max(255).nullish(),
+        port: z.number().int().min(1).max(65_535).optional(),
+        secure: z.boolean().optional(),
+        username: z.string().trim().max(255).nullish(),
+        password: z.string().max(1024).nullish(),
+        from_address: z.string().trim().max(320).nullish(),
+      })
+      .strict()
+      .optional(),
+    registration: z
+      .object({
+        open_registration: z.boolean().optional(),
+        require_email_verification: z.boolean().optional(),
+        allowed_roles: z.array(z.enum(ROLE_ORDER)).max(4).optional(),
+      })
+      .strict()
+      .optional(),
+    // Only length is checked here; the settings service owns the origin rule and
+    // the normalisation, so a caller cannot store a path or a credential pair.
+    gateway: z
+      .object({ public_url: z.string().trim().max(2048).nullish() })
+      .strict()
+      .optional(),
+  })
+  .strict();
 
 const smtpTestBody = z.object({ to_email: z.string().trim().email().max(320).optional() });
 

@@ -124,13 +124,39 @@ The Mongo URL must point at a replica set — a standalone `mongod` is rejected
 at `init()` unless `NEXUS_DB_ALLOW_STANDALONE=true`, and the transactional
 paths the smoke test exercises are exactly what standalone cannot do.
 
+## The acceptance suite
+
+`e2e/` is the one place this repository tests against a **real** Ferrum Edge.
+Everything above runs against the mock, which can only ever confirm that Nexus
+sent the configuration it meant to send; the acceptance suite runs the
+**packaged container image** against a digest-pinned Edge release and asserts
+by sending requests to the gateway's **data-plane listener** and seeing whether
+they reached the backend.
+
+```bash
+./e2e/run.sh              # the whole thing: stack up, suite, teardown
+./e2e/run.sh dataplane    # the gateway matrix only
+E2E_KEEP=1 ./e2e/run.sh   # leave the stack up to poke at
+```
+
+It is a **required CI job**, and it is the release validation path: a change
+that makes a real gateway refuse a request the portal says it approved is
+exactly what it exists to stop shipping. Run it locally for anything that
+changes what Nexus writes to Edge, the authentication or credential contract,
+or the container image.
+
+The Edge release is pinned **by digest** in `e2e/.env.example` and the CI
+workflow. Moving to a newer one is a deliberate edit, and the diff says which
+release the guarantee now covers. See [e2e/README.md](../e2e/README.md) for
+what each half asserts and why.
+
 ## Adding things
 
 | Task                 | Steps                                                                                                                                                                                                                                 |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | A route              | Register it in the right file under `server/src/routes/`, wire any new service in `server/src/index.ts`, add the client call in `web/src/lib/api.ts`, add the DTO in `shared/src/api-contract.ts`, document it in [`api.md`](api.md). |
 | A service            | `<domain>/service.ts` exporting `create<Domain>Service(deps)`, constructed in the composition root and handed to its route plugin. Never import a service from a route file.                                                          |
-| A DB column or table | New migration under `server/src/db/migrations/` (`.sql`, `.pg.sql`, `.mysql.sql`), update `NexusStore`, implement in **all four** adapters, run the cross-adapter smoke tests.                                                        |
+| A DB column or table | Edit the three `server/src/db/migrations/001_initial*.sql` baselines in place during buildout; update MongoDB initial indexes, update `NexusStore`, implement in **all four** adapters, run the cross-adapter smoke tests.            |
 | An Edge call         | Only in `server/src/ferrum-admin/`. Extend the mock too.                                                                                                                                                                              |
 | An audit event       | Append to `AuditAction` in `server/src/audit/service.ts` **and** to the catalog in [`security.md`](security.md#10-audit-event-catalog).                                                                                               |
 | An error code        | Append to `shared/src/error-codes.ts` (never rename one — they are public contract), add its status to `ERROR_CODE_STATUS`, and add a row to the table in [`api.md`](api.md#error-envelope-and-codes).                                |

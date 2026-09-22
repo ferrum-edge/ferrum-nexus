@@ -382,9 +382,18 @@ way.
 
 ## Auth
 
-Registered under `/api/auth`. **Rate-limited** to 20 requests per minute per IP
-across the whole prefix when `NEXUS_RATE_LIMIT_ENABLED=true` (the default;
-always off under `NEXUS_ENV=test`). Exceeding it is `429 RATE_LIMITED`.
+Registered under `/api/auth`. The sensitive POST routes (register, login,
+logout, forgot-password, reset-password, verify-email and resend-verification)
+share **20 requests per minute per client IP**. The read-only bootstrap routes,
+`GET /api/auth/me` and `GET /api/auth/captcha`, share a separate **120 requests
+per minute per client IP**; reading either never spends the sensitive-route
+budget, and exhausting either budget does not block the other group.
+
+Both limits apply when `NEXUS_RATE_LIMIT_ENABLED=true` (the default; always off
+under `NEXUS_ENV=test`). Exceeding either is `429 RATE_LIMITED`. Client IPs come
+from Fastify's configured proxy trust, not an untrusted forwarded header. These
+budgets are per process; enforce aggregate limits at the proxy for multiple
+Nexus instances.
 
 ### `POST /api/auth/register`
 
@@ -514,7 +523,7 @@ What actually happened is recorded in the audit log
 written when a link was really issued.
 
 The only errors these routes return are `400 VALIDATION_FAILED` for a malformed
-body and `429 RATE_LIMITED` from the shared `/api/auth/*` limiter.
+body and `429 RATE_LIMITED` from the shared sensitive-auth limiter.
 
 ### `POST /api/auth/resend-verification`
 
@@ -630,10 +639,19 @@ retain their advertised `max-age`.
 }
 ```
 
+`primary_color` and `accent_color` are opaque CSS hex (`#rgb` or `#rrggbb`);
+writes are stored as lowercase `#rrggbb`. Four-, five-, seven- and eight-digit
+values are `400 VALIDATION_FAILED` — 4/8-digit CSS hex carries alpha the native
+colour swatch and derived palette cannot render, and 5/7-digit strings are not
+CSS colours.
+
 The SPA derives its whole accent scale — hover and active shades, a readable
 foreground, tints and the focus ring — from `primary_color`, and its secondary
-(`info`) tokens from `accent_color`, per theme. `radius` (`none`|`sm`|`md`|`lg`)
-scales every corner, `font_preset` (`system`|`inter`|`manrope`) picks a bundled
+(`info`) tokens from `accent_color`, per theme. Informational badge text is
+adjusted independently from its tint to reach at least 4.5:1 contrast on the
+portal's surfaces, including light-theme API Key and GET method badges.
+`radius` (`none`|`sm`|`md`|`lg`) scales every corner, `font_preset`
+(`system`|`inter`|`manrope`) picks a bundled
 typeface, `sidebar_style` (`surface`|`contrast`) chooses between a rail that
 matches the page surfaces and an always-dark rail, and `login_layout`
 (`split`|`centered`) decides whether the sign-in page shows the branded hero
@@ -852,7 +870,9 @@ _session_ → `201`
 ```
 
 Errors: `400 VALIDATION_FAILED` (empty subject/body, or messaging yourself),
-`404 NOT_FOUND` (unknown or disabled recipient, unknown API),
+`404 NOT_FOUND` (unknown or disabled recipient, unknown API, or a `private` API
+the sender may not read — the same rule as the catalog, so a thread cannot be
+used to learn a private API's name, owner or gateway address),
 `429 RATE_LIMITED` (more than 10 a minute from this account),
 `429 QUOTA_EXCEEDED` (the account's rolling 24-hour message budget is spent —
 `details` carries `{ limit, window: "24h", setting: "NEXUS_MAX_MESSAGES_PER_USER_PER_DAY" }`),
@@ -1121,9 +1141,18 @@ settings — see
 
 ### `PUT /api/admin/settings`
 
-_admin_, except `smtp` and `captcha` which are **_super_admin_** — partial
+_admin_, except `smtp`, `captcha` and `gateway` which are **_super_admin_** — partial
 update; **omitted sections are untouched**, and omitted fields inside a supplied
 section keep their current value.
+
+Unknown top-level sections and unknown keys inside any supplied section are
+rejected with `400 VALIDATION_FAILED`, including extra keys in
+`branding.footer_links` objects. Each `error.details` entry names the full
+field path (for example `branding.portal_nam` or
+`branding.footer_links.0.target`). Response-only fields such as
+`captcha.secret_set`, `captcha.enforcement` and `smtp.password_set` are not
+accepted in an update. A schema rejection applies none of the patch, performs no
+CAPTCHA activation self-test and writes no `admin.settings_update` audit row.
 
 A body carrying an `smtp`, `captcha` or `gateway` section from an ordinary
 `admin` is refused with `403 FORBIDDEN` and nothing is written — not even the
@@ -1133,13 +1162,13 @@ verification and password-reset link to the operator, CAPTCHA is the
 registration brake, and the gateway origin is where every client is told to
 send its gateway credentials.
 
-| Section        | Fields                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `branding`     | `portal_name` (1–120), `logo_data_url` (base64 image data URL, ≤ 512 KiB, nullable), `primary_color` / `accent_color` (CSS hex `#rgb`–`#rrggbbaa`), `default_theme` (`dark`\|`light`\|`system`), `tagline` (≤ 280, nullable), `support_email` (nullable), `radius` (`none`\|`sm`\|`md`\|`lg`), `font_preset` (`system`\|`inter`\|`manrope`), `sidebar_style` (`surface`\|`contrast`), `login_layout` (`split`\|`centered`), `footer_text` (≤ 200, nullable), `footer_links` (≤ 5 × `{ label (1–60), url }`, `http(s)` URLs only — anything else is `400`) |
-| `captcha`      | _super_admin_ — `enabled`, `provider` (`none`\|`recaptcha`\|`hcaptcha`\|`turnstile`), `site_key` (nullable), `secret_key` — **write-only**, stored AES-256-GCM encrypted; pass `null` or `""` to clear — and `captcha_token`, the activation self-test's proof (below). Changing `provider` while CAPTCHA is (or becomes) enabled requires a `secret_key` in the same request                                                                                                                                                                             |
-| `smtp`         | _super_admin_ — `host`, `port` (1–65535), `secure`, `username`, `password` — **write-only**, encrypted; `null`/`""` clears — `from_address`. Changing `host`, `port`, `secure` or `username` while a password is stored (or set by env) requires sending a fresh `password` in the same request (`400 VALIDATION_FAILED` otherwise), so a stored credential can never be replayed against a different server                                                                                                                                              |
-| `registration` | `open_registration`, `require_email_verification`, `allowed_roles` (array of roles)                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `gateway`      | _super_admin_ — `public_url` — absolute `http(s)` **origin** of the gateway's proxy listener, no path, query or credentials; a trailing slash is stripped. `null` or `""` clears the override and falls back to `FERRUM_GATEWAY_PUBLIC_URL`. Whoever controls it directs clients to send their gateway credentials to that origin, so it needs `super_admin` like `smtp` and `captcha`.                                                                                                                                                                   |
+| Section        | Fields                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `branding`     | `portal_name` (1–120), `logo_data_url` (base64 image data URL, ≤ 512 KiB, nullable), `primary_color` / `accent_color` (opaque CSS hex `#rgb` or `#rrggbb`, stored as lowercase `#rrggbb`; 4/5/7/8-digit values are `400`), `default_theme` (`dark`\|`light`\|`system`), `tagline` (≤ 280, nullable), `support_email` (nullable), `radius` (`none`\|`sm`\|`md`\|`lg`), `font_preset` (`system`\|`inter`\|`manrope`), `sidebar_style` (`surface`\|`contrast`), `login_layout` (`split`\|`centered`), `footer_text` (≤ 200, nullable), `footer_links` (≤ 5 × `{ label (1–60), url }`, `http(s)` URLs only — anything else is `400`) |
+| `captcha`      | _super_admin_ — `enabled`, `provider` (`none`\|`recaptcha`\|`hcaptcha`\|`turnstile`), `site_key` (nullable), `secret_key` — **write-only**, stored AES-256-GCM encrypted; pass `null` or `""` to clear — and `captcha_token`, the activation self-test's proof (below). Changing `provider` while CAPTCHA is (or becomes) enabled requires a `secret_key` in the same request                                                                                                                                                                                                                                                    |
+| `smtp`         | _super_admin_ — `host`, `port` (1–65535), `secure`, `username`, `password` — **write-only**, encrypted; `null`/`""` clears — `from_address`. Changing `host`, `port`, `secure` or `username` while a password is stored (or set by env) requires sending a fresh `password` in the same request (`400 VALIDATION_FAILED` otherwise), so a stored credential can never be replayed against a different server                                                                                                                                                                                                                     |
+| `registration` | `open_registration`, `require_email_verification`, `allowed_roles` (array of roles)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `gateway`      | _super_admin_ — `public_url` — absolute `http(s)` **origin** of the gateway's proxy listener, no path, query or credentials; a trailing slash is stripped. `null` or `""` clears the override and falls back to `FERRUM_GATEWAY_PUBLIC_URL`. Whoever controls it directs clients to send their gateway credentials to that origin, so it needs `super_admin` like `smtp` and `captcha`.                                                                                                                                                                                                                                          |
 
 SMTP connection changes are compared after merging stored overrides over the
 environment defaults. Clearing the SMTP password with `null` or `""` restores
@@ -1494,18 +1523,48 @@ Visibility is decided by the catalog service, which answers `404` rather than
 `403` for an API you may not see, so the catalog never confirms that an
 internal API exists.
 
-| API state                           | client  | grantee | owner | admin |
-| ----------------------------------- | ------- | ------- | ----- | ----- |
-| `published` + `public` — **list**   | yes     | yes     | yes   | yes   |
-| `published` + `internal` — **list** | no      | yes     | yes   | yes   |
-| `retired` — **list**                | no      | yes     | yes   | yes   |
-| `published` + `public` — **open**   | yes     | yes     | yes   | yes   |
-| `published` + `internal` — **open** | **yes** | yes     | yes   | yes   |
-| `retired` — **open**                | no      | yes     | yes   | yes   |
+| API state                           | unrelated client | viewer | grantee | owner | admin |
+| ----------------------------------- | ---------------- | ------ | ------- | ----- | ----- |
+| `published` + `public` — **list**   | yes              | yes    | yes     | yes   | yes   |
+| `published` + `internal` — **list** | no               | yes    | yes     | yes   | yes   |
+| `published` + `private` — **list**  | **no**           | yes    | yes     | yes   | yes   |
+| `retired` — **list**                | no               | yes    | yes     | yes   | yes   |
+| `published` + `public` — **open**   | yes              | yes    | yes     | yes   | yes   |
+| `published` + `internal` — **open** | **yes**          | yes    | yes     | yes   | yes   |
+| `published` + `private` — **open**  | **no**           | yes    | yes     | yes   | yes   |
+| `retired` — **open**                | no               | yes    | yes     | yes   | yes   |
 
-`internal` means _unlisted_, not secret: a provider hands out the link and the
-recipient can read the docs and raise an access request. What protects the data
-is the ACL group on the gateway.
+Every catalog route requires a session, so a signed-out caller sees nothing at
+all; that column is omitted rather than repeated as "no" fourteen times.
+
+"Viewer" means an `api_viewers` row — somebody the provider explicitly
+authorized to read this API's documentation. **It is not a grant**: it confers
+no ACL group, touches no Ferrum consumer and reaches no gateway. An authorized
+viewer reads the docs and, if the API is `requestable`, asks for access like
+anybody else. See
+[`POST /api/apis/:id/viewers`](#post-apiapisidviewers).
+
+The three visibilities answer two different questions:
+
+- **`internal` means _unlisted_, not secret**, and still does. A provider hands
+  out the link and the recipient can read the docs and raise an access request.
+  Adding `private` changed nothing about it — the two are separate values
+  precisely so that APIs already published as `internal` keep the semantics
+  they were published under.
+- **`private` is the permission-enforced one.** Neither listed nor openable
+  unless the caller is on one of the lists above. Knowing or guessing the slug
+  is not access, and an unauthorized caller gets `404` rather than `403`, so
+  the endpoint does not confirm that the slug names anything. Search results
+  and their `total` apply the same clause in the database, so a private API
+  cannot be found by paging or counting either. An account that cannot see a
+  private API cannot request access to it, for the same reason: the request
+  would confirm the API exists.
+
+**None of this is data-plane authorization.** What stops an unapproved caller
+reaching the API is the `access_control` plugin and its ACL group on the
+gateway. Visibility governs the _documentation_, and a `private` API published
+with `requestable: false` and no access control in front of it is still
+callable by anyone who knows the URL.
 
 ### `GET /api/catalog`
 
@@ -1516,12 +1575,14 @@ _session_ — `Paginated<CatalogApi>`. Each row is an `Api` plus `owner`
 | ----------------- | -------------------------------------------- |
 | `q`               | substring match on name, slug or description |
 | `requestable`     | boolean                                      |
-| `visibility`      | `public` \| `internal`                       |
+| `visibility`      | `public` \| `internal` \| `private`          |
 | `owner_user_id`   | uuid                                         |
 | `limit`, `offset` | pagination                                   |
 
-`access_state` ∈ `none` \| `pending` \| `granted` \| `denied` \| `revoked` \|
-`owner`.
+`access_state` ∈ `none` \| `open` \| `pending` \| `granted` \| `denied` \|
+`revoked` \| `owner`. `open` means the API does not require an access request
+(`requestable: false`) and any portal account may call it. `none` is reserved
+for requestable APIs the caller has not asked for and does not hold a grant on.
 
 ### `GET /api/catalog/:slug`
 
@@ -1569,8 +1630,9 @@ Documentation tab renders this same normalized document.
 `404 NOT_FOUND` when the API is not viewable or has no spec. A stored document
 that cannot be normalized returns `400 SPEC_INVALID` without its contents or
 parser diagnostics. `internal` APIs remain unlisted but readable by signed-in
-users holding the link. The provider's original is available only through
-`GET /api/apis/:id/spec`.
+users holding the link; a `private` API's specification is served only to the
+accounts its detail page is served to, and answers `404` to everyone else. The
+provider's original is available only through `GET /api/apis/:id/spec`.
 
 ---
 
@@ -1624,6 +1686,7 @@ message threads.
 | `timeouts`         | `{ connect_ms, read_ms, write_ms }` \| null      | backend timeouts in milliseconds; `null` keeps the gateway defaults (5000 / 30000 / 30000). All three move together                                                                                                                                                                                                                                                                                                                                           |
 | `circuit_breaker`  | boolean                                          | when true the proxy carries Edge's default `CircuitBreakerConfig` (5 failures to open, 3 successes to close, 30 s open, tripping on 500/502/503/504 and on connection errors); when false it carries none                                                                                                                                                                                                                                                     |
 | `spec_enforcement` | `docs_only` \| `routes`                          | how much of the current OpenAPI revision the gateway enforces. `docs_only` (the default, and what every API published before this field existed reads back as) means the document is catalog metadata only; `routes` makes the proxy **spec-owned** — Edge imports the document and generates an `openapi_validator` that answers `400` for a path or method the document does not declare. **Request and response bodies are not validated at either level** |
+| `gateway_state`    | `deployed` \| `repair_required`                  | whether the gateway is believed to be serving this API. `repair_required` means the portal has _established_ that it is not — a reconciliation pass answered `404` for the stored proxy, or a restore failed partway — and it stays until `POST /api/apis/:id/restore-gateway` succeeds. It is deliberately separate from `ferrum_proxy_id`, which a repair clears and a restore refills                                                                      |
 
 `HttpMethod` is `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`,
 `TRACE` or `CONNECT` — Edge's own enum.
@@ -1707,7 +1770,7 @@ then persists.
 | `spec`             | string                                           | the OpenAPI 3.x document as JSON or YAML text, ≤ 2 MiB — required                                                                                                                                                                                                                                                                                                                                              |
 | `auth_plugin`      | `key_auth` \| `basic_auth` \| `jwt_auth`         | required                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `requestable`      | boolean                                          | required — attaches `access_control` when true                                                                                                                                                                                                                                                                                                                                                                 |
-| `visibility`       | `public` \| `internal`                           | required                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `visibility`       | `public` \| `internal` \| `private`              | required                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `rate_limit`       | `{ limit, window_seconds }` \| null              | optional; `limit` 1–1 000 000, `window_seconds` 1–86 400 — both are Edge's own ceilings                                                                                                                                                                                                                                                                                                                        |
 | `cors`             | `{ allowed_origins, allow_credentials }` \| null | optional; `allowed_origins` (alias `origins`) is 1–64 whitespace-free strings of ≤ 255 characters, `allow_credentials` defaults to `false`. Sending both `allowed_origins` and `origins` with different values is `400`. Omit it (or send `null`) and the API gets no `cors` plugin, so the gateway adds no CORS headers                                                                                       |
 | `allowed_methods`  | `HttpMethod[]` \| null                           | optional; 1–9 entries from Edge's enum, duplicates collapsed. Omit it (or send `null`) to accept every method — an **empty array is rejected**, because a proxy whose `allowed_methods` is `[]` accepts nothing at all                                                                                                                                                                                         |
@@ -1864,7 +1927,7 @@ route. Every field optional; nothing supplied returns the row unchanged.
 | Field                            | Effect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `name`, `description`, `version` | metadata only                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `visibility`                     | `public` ⇄ `internal`; catalog listing only                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `visibility`                     | `public` ⇄ `internal` ⇄ `private`; documentation visibility only — never the gateway's access control. Switching **to** `private` starts enforcing the API's existing viewer list; switching away from it stops enforcing but keeps the list                                                                                                                                                                                                                                                                                                                                     |
 | `status`                         | `published` ⇄ `retired` — **catalog state only**, the proxy and every live grant keep working                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `upstream_url`                   | re-points the Edge proxy's backend and records the normalized form on the row; everything else on the proxy is left as it was found                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `auth_plugin`                    | attaches and associates the new auth plugin config before detaching and deleting the old one. **Refused with `409 ACCESS_DISRUPTION_CONFIRMATION_REQUIRED` while anyone holding access has a live credential of the outgoing flavour**; send `confirm_access_disruption: true` to make the change anyway. Grantee credentials are never revoked — the API's own `nexus-test-<api_id>` credentials are. Every grantee is notified either way                                                                                                                                      |
@@ -1882,7 +1945,19 @@ route. Every field optional; nothing supplied returns the row unchanged.
 when `routes` is asked for and the current revision declares nothing to allow),
 `409 ACCESS_DISRUPTION_CONFIRMATION_REQUIRED` (an `auth_plugin` change that
 would lock grantees out of the API, without `confirm_access_disruption: true`),
-`502 EDGE_ERROR`.
+`409 CONFLICT` (a gateway setting — `upstream_url`, `auth_plugin`, `requestable`,
+`rate_limit`, `cors`, `allowed_methods`, `timeouts`, `circuit_breaker` or
+`spec_enforcement` — on an API with no gateway deployment; `details.fields`
+names them), `502 EDGE_ERROR`.
+
+**An API the gateway no longer serves takes catalog edits only.** While
+`ferrum_proxy_id` is `null` (after a reconciliation repair, or a restore that
+failed) there is no proxy to apply a gateway setting to, and several of them
+carry their own gateway side effects and confirmations. Rather than store a
+value the gateway never saw, the whole `PATCH` is refused; name, description,
+tags, visibility and the other catalog fields still save. Restore the deployment
+with [`POST /api/apis/:id/restore-gateway`](#post-apiapisidrestore-gateway),
+then change the setting.
 
 > **Changing `auth_plugin` locks every credential of the old flavour out of
 > this API.** Edge runs one authentication plugin per proxy, so the moment the
@@ -2013,6 +2088,289 @@ re-submission, so the API is never unauthenticated across it.
 `400 SPEC_INVALID` with `details.reason = "no_operations"` when the new document
 declares nothing to allow — switch the enforcement level back to `docs_only`
 first if that is really the intent.
+
+## Applications
+
+An **application** is a separate gateway identity owned by a portal account,
+with its own approved APIs and its own credentials. Because ACL groups live on
+the Ferrum consumer and each application has its own
+(`nexus-app-<application_id>`), two applications of one owner approved for
+different APIs genuinely cannot call each other's.
+
+**This is not a credential label.** `label` is a note to the credential's
+holder and changes nothing about what a secret can reach; `application_id`
+decides which identity the material is appended to, and therefore what it can
+call.
+
+**Account-scoped access is unchanged and is the default.** Every scoped row —
+access requests, grants, credentials, consumer mappings — carries a nullable
+`application_id`, and `null` means "the account itself", which is what every
+row written before applications existed is. Nothing migrates on its own; an
+operator who wants an existing integration moved creates an application,
+requests access for it and issues it a credential, which is a deliberate act
+with a new secret rather than a silent re-pointing of the one already deployed.
+
+Acting _as_ an application is a field on two existing routes —
+`application_id` on `POST /api/access-requests` and on `POST /api/credentials` —
+and the application must be the caller's own and `active`. **Not even an
+administrator** can act as somebody else's: doing so would acquire access, or a
+secret that authenticates as them, which is a different thing from
+administering their account.
+
+### `GET /api/applications`
+
+_session_ — `Paginated<Application>`, newest first. A client always sees their
+own; an admin may pass `owner_user_id`. `status` and `q` narrow further.
+
+Each item carries `active_grants` and `active_credentials`, so a list view
+needs no second call.
+
+### `GET /api/applications/:id`
+
+_session_, owner-or-admin. Somebody else's reads `404`, not `403`.
+
+### `POST /api/applications`
+
+_session_ → `201`. Body: `name` (required, ≤ 120, unique per owner
+case-insensitively), `description` (optional, ≤ 500).
+
+No gateway identity is created here: an application with no approved APIs and
+no credentials has nothing for a consumer to carry, so it is provisioned by the
+first approval or the first credential, exactly as an account's is.
+
+`429 QUOTA_EXCEEDED` when the account already owns
+`NEXUS_MAX_APPLICATIONS_PER_OWNER` (default 20; `0` disables the ceiling) —
+each application is a gateway consumer, so this bounds the Edge resources one
+semi-trusted account can create.
+
+### `PATCH /api/applications/:id`
+
+_session_, owner-or-admin. Body: any of `name`, `description`, `status`.
+
+**`status: "disabled"` revokes nothing.** It refuses _new_ access requests,
+approvals and credentials; everything already issued goes on working. An
+integration that must stop working is deleted, or has its grants revoked. The
+audit row says so explicitly (`details.revoked_existing_access: false`) rather
+than leaving an operator to infer it. Rotating one of its credentials counts as
+issuing a new one and is refused (`409`); revoking stays allowed. An access
+request already pending for it cannot be approved until it is re-enabled.
+
+Re-enabling checks the gateway identity before it reports success: if the
+application holds active grants but the portal has no consumer mapping for it,
+the call fails `502 EDGE_ERROR` (`details.identities`) rather than re-enabling
+an identity whose grants reach nothing.
+
+### `DELETE /api/applications/:id`
+
+_session_, owner-or-admin — **destructive**.
+
+```json
+{ "revoked_grants": 2, "revoked_credentials": 1 }
+```
+
+The Ferrum consumer is deleted **first**, then the row, whose cascade removes
+its grants, access requests, credential rows and consumer mapping. Gateway
+first because a row deleted before its consumer leaves a live identity — with
+its ACL groups and its credential material — that nothing in the portal can
+find any more.
+
+Its credentials stop working immediately. The reversible option is `PATCH` with
+`status: "disabled"`.
+
+### `GET /api/apis/:id/viewers`
+
+_provider_, owner-or-admin — `Paginated<ApiViewer>`, newest first. Each item
+carries `user_id`, an embedded `user` (`UserSummary` \| null), `granted_by`,
+`note` and timestamps.
+
+The list is kept whatever the API's visibility and only _enforces_ while the
+API is `private`, so switching visibility back and forth does not discard it.
+
+### `POST /api/apis/:id/viewers`
+
+_provider_, owner-or-admin → `201` — authorize one account to **read** this
+API's documentation.
+
+Body: exactly one of `email` or `user_id`, plus an optional `note` (≤ 500).
+Sending both, or neither, is a `400`.
+
+```json
+{ "viewer": { "user_id": "…", "user": { … }, "note": "Design partner", "…": "…" } }
+```
+
+**This is not a grant.** It confers no ACL group, touches no Ferrum consumer
+and makes no call to Ferrum Edge. An authorized viewer can find the API in the
+catalog and read its specification; to _call_ it they still request access and
+the provider still approves it. Every audit row spells this out
+(`details.grants_invocation: false`) rather than leaving it to be inferred.
+
+The account is notified in the portal, in those terms.
+
+| Status                  | Meaning                                                                                                                                                                                                                                                                                |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `201`                   | authorized. Re-authorizing an account that already is refreshes the note rather than conflicting — the route describes a state                                                                                                                                                         |
+| `400 VALIDATION_FAILED` | no portal account uses that address, or both/neither identifier was sent. An address with no account is **refused rather than stored as a pending invitation**: an authorization is attached to an account, not to an address, and re-pointing an address later would silently move it |
+| `403 FORBIDDEN`         | not the owner and not an admin                                                                                                                                                                                                                                                         |
+| `409 CONFLICT`          | the account is the API's owner, or an administrator — both can already read it                                                                                                                                                                                                         |
+
+### `DELETE /api/apis/:id/viewers/:userId`
+
+_provider_, owner-or-admin — withdraw a read authorization. `404 NOT_FOUND`
+when that account was not authorized.
+
+Read access and invocation access are separate, so this leaves any grant the
+account holds untouched (`details.revoked_grant: false`); revoke that through
+`DELETE /api/grants/:id`. An account that still holds a grant goes on being
+able to read the API, because somebody who may call it may certainly read its
+documentation.
+
+### `GET /api/apis/:id/revisions`
+
+_provider_, owner-or-admin — one page of the API's retained specification
+history. Standard `limit`/`offset`; the current revision leads, then the rest
+newest-first by publication order.
+
+Each item is an `ApiSpecSummary`: `id`, `api_id`, `version`, `parsed_title`,
+`parsed_version`, `is_current`, `created_by`, `rolled_back_from_id`,
+`created_at`, `updated_at`. `created_by` is `null` when the author is not
+recorded — a revision published before the column existed, or one whose
+author's account has since been deleted — and the UI renders that as an unknown
+author rather than attributing it to somebody. `rolled_back_from_id` names the
+revision a rollback restored, and is `null` for an ordinary upload.
+
+Retention still applies: `NEXUS_SPEC_HISTORY_LIMIT` (default 10, on top of the
+current revision) bounds what is listed here.
+
+### `GET /api/apis/:id/revisions/:revisionId`
+
+_provider_, owner-or-admin — one retained revision's document, in the same
+shape as `GET /api/apis/:id/spec` (`raw_spec` plus a matching `content_type`).
+
+`404 NOT_FOUND` when the revision is not retained **or belongs to another
+API** — the API scope is part of the lookup rather than a check after it, so
+the endpoint cannot be used to confirm that an id exists elsewhere.
+
+### `GET /api/apis/:id/revisions/:revisionId/diff`
+
+_provider_, owner-or-admin — what rolling back to this revision would change.
+
+```json
+{ "diff": { "from": { … }, "to": { … }, "…": "…" } }
+```
+
+`from` is the current revision (what the API serves today) and `to` is the
+target (what it would serve), so the comparison reads in the direction the
+change would go.
+
+### `POST /api/apis/:id/spec/diff`
+
+_provider_, owner-or-admin — what uploading a document _would_ change, without
+uploading it. Body: `{ "spec": "…" }`, the same field `PUT /api/apis/:id/spec`
+takes. Read-only despite the verb: nothing is stored and nothing reaches the
+gateway. `to` is `null`, because the proposed document is not a stored
+revision. `400 SPEC_INVALID` for a document the portal would refuse to publish
+— a review must not describe a change that cannot be made.
+
+#### The `SpecDiff` shape, and what it does not claim
+
+| Field                                     | Meaning                                                                                                                                                                                                                                                                                             |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `added_operations` / `removed_operations` | operations (`{ path, method }`) the target declares and the source does not, and the other way round                                                                                                                                                                                                |
+| `changed_operations`                      | operations both declare whose definitions differ, with `changes`: the Operation Object members that differ (`parameters`, `requestBody`, `responses`, `security`, `summary`, `description`, `deprecated`, `tags`, `servers`, `operationId`, `callbacks`), or `other` for anything outside that list |
+| `added_paths` / `removed_paths`           | path templates added or dropped outright                                                                                                                                                                                                                                                            |
+| `info_changes`                            | `title`, `version` or `description` differences, as `{ field, from, to }`                                                                                                                                                                                                                           |
+| `servers_changed`                         | whether the `servers` block differs                                                                                                                                                                                                                                                                 |
+| `potentially_breaking`                    | every removed operation — the changes worth reading twice                                                                                                                                                                                                                                           |
+| `changed`                                 | whether the documents differ at all                                                                                                                                                                                                                                                                 |
+
+The comparison is **structural**. It reads paths, methods and the shape of each
+operation; it does not resolve `$ref`s, walk schemas, or reason about
+semantics. A response schema can drop a required field, or a parameter narrow
+its type, with every path and method identical — that shows up as
+`changed_operations` at best, and never in `potentially_breaking`. An empty
+`potentially_breaking` therefore means _this comparison found nothing_, not
+that the change is backward compatible, and the UI says so alongside the
+counts. Path-item-level `parameters` are folded into each operation before
+comparison, so moving a shared parameter onto an operation is correctly no
+change at all.
+
+### `POST /api/apis/:id/revisions/:revisionId/rollback`
+
+_provider_, owner-or-admin — redeploy a retained revision. Empty body.
+
+```json
+{ "api": { … }, "spec": { … } }
+```
+
+**A rollback is a new revision carrying an old document.** History is appended
+to, never rewritten: the restored revision's own row is untouched, the returned
+`spec` is the newly created revision, and its `rolled_back_from_id` names the
+target. There is no delete-and-republish — the API keeps its id, slug,
+ownership, access grants, gateway proxy and configured gateway URL.
+
+It runs through the same path `PUT /api/apis/:id/spec` runs through, and
+therefore inherits all of it: the same validation, the same gateway-first
+ordering, the same compensation when the gateway moves and the revision cannot
+be persisted, and the same bounded retention. A `routes` API has its restored
+document re-submitted to Edge, which regenerates the operation table from it.
+
+| Status           | Meaning                                                                                                                                                                    |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `200`            | the restored document is the current revision and the gateway agrees                                                                                                       |
+| `403 FORBIDDEN`  | not the owner and not an admin                                                                                                                                             |
+| `404 NOT_FOUND`  | the revision is not retained, or belongs to another API. Retention can drop a revision between listing it and rolling it back; this is that answer, and nothing is written |
+| `409 CONFLICT`   | the target is already the current revision                                                                                                                                 |
+| `502 EDGE_ERROR` | the gateway refused or could not be reached. The catalog is left exactly as it was — a failed rollback never claims it happened                                            |
+
+Audited as `api.spec_rollback` rather than `api.spec_update`, with
+`restored_from_spec_id`, `restored_from_version` and `restored_from_created_at`
+naming the revision that was put back.
+
+### `POST /api/apis/:id/restore-gateway`
+
+_provider_, owner-or-admin — rebuild the gateway deployment of an API the
+gateway no longer serves. Empty body.
+
+```json
+{ "api": { … }, "spec": { … }, "proxy_id": "…" }
+```
+
+**Non-destructive by contract.** The API keeps its id, slug, owner, provider,
+specification history, configured gateway URL and every access grant; the
+restore recreates only the Edge objects, from what the portal already stores.
+Approved clients keep the credentials they were issued — the ACL group is
+derived from the API id, so the moment the rebuilt proxy's `access_control`
+plugin is associated, the groups already on their consumers match again.
+
+What is rebuilt, in the order a publish builds it: the proxy (through the
+API-spec importer in `routes` mode, so the `openapi_validator` is regenerated),
+the authentication plugin, `access_control` when the API is `requestable`, the
+rate limit, the CORS policy, and the provider's plugin palette — then a single
+association, and the move onto `/<namespace>/<slug>` as the **last** gateway
+write. There is no window in which the public path serves an ungated proxy.
+`api_plugins.ferrum_plugin_config_id` is repointed at the rebuilt configs in the
+same store transaction that records the new proxy id.
+
+The current specification revision is what gets deployed; no new revision is
+written. A provider who wants to correct the document first can `PUT
+/api/apis/:id/spec` — that keeps working on an undeployed API — and then
+restore.
+
+| Status           | Meaning                                                                                                                                                                                                                                                                                   |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `200`            | rebuilt, or (`rebuilt: false` in the audit row) the stored proxy turned out to be live after all and the flag was simply cleared                                                                                                                                                          |
+| `403 FORBIDDEN`  | not the owner and not an admin                                                                                                                                                                                                                                                            |
+| `404 NOT_FOUND`  | no such API                                                                                                                                                                                                                                                                               |
+| `409 CONFLICT`   | the API already has a live gateway proxy, or has no stored specification revision to redeploy, or another restore of the same API is in flight, or the API's deployment settings or current specification changed while the proxy was being built (the build is withdrawn; restore again) |
+| `502 EDGE_ERROR` | the gateway could not be reached or refused a write. **Nothing is inferred from this** — an unreachable gateway is never read as a deleted proxy, and the row is left exactly as it was                                                                                                   |
+
+A restore that reaches the gateway and then fails deletes what it created,
+records `api.gateway_restore_failed` (with `stranded_proxy_id` when the
+compensating delete could not be confirmed), and leaves the API
+`repair_required` with no proxy reference. Retrying starts from the same place.
+
+Concurrent restores of one API are serialized; the loser gets `409 CONFLICT`
+rather than building a second proxy for the same listen path.
 
 ### `POST /api/apis/:id/test-consumer`
 
@@ -2215,11 +2573,17 @@ bound is `429` (`RATE_LIMITED` or `QUOTA_EXCEEDED` with
 
 Errors, all `409 CONFLICT`: you own this API; the API is retired; the API does
 not accept access requests (`requestable: false`); you already have access; you
-already have a pending request. `404 NOT_FOUND` for an unknown API.
+already have a pending request. `404 NOT_FOUND` for an unknown API, and for a
+`private` API the caller may not read.
 
-Visibility is deliberately **not** checked — an `internal` API is unlisted, not
-private, and gating requests on visibility would make `internal` +
-`requestable` a combination nobody could act on.
+The `private` check comes **first**, before any of the `409`s, so a probe for
+an API the caller cannot see gets the same `404` whether the id exists, is
+retired or is not requestable — the answers would otherwise confirm it exists.
+"May read" is the catalog's rule: the owner, an admin, an authorized viewer, or
+an account holding an active grant through any of its identities.
+`internal` is deliberately **not** gated — it is unlisted, not private, and
+gating requests on it would make `internal` + `requestable` a combination
+nobody could act on.
 
 ```bash
 curl -sS -b cookies.txt -X POST http://127.0.0.1:8787/api/access-requests \
@@ -2258,8 +2622,10 @@ the grant row is committed. The requester gets a notification and an
 `access_approved` email.
 
 Errors: `403 FORBIDDEN` (neither a provider owner nor an admin), `409 CONFLICT`
-(already decided, the user already holds an active grant, or the API is retired
-or no longer requestable),
+(already decided, the user already holds an active grant, the API is retired
+or no longer requestable, or the request was made for an application that has
+since been disabled or deleted — the request stays `pending` until the
+application is re-enabled or the request is denied),
 `502 EDGE_ERROR` / `502 EDGE_UNAVAILABLE` — failed approval attempts compensate
 unowned ACL additions and return the request to `pending` where possible.
 Compensation also removes additions whose gateway write was not acknowledged.
@@ -2322,8 +2688,7 @@ is no path back to the plaintext on either side.
 
 _session_ — `Paginated<CredentialMetadata>`. Never contains a secret.
 `edge_ordinal` is the row's durable append position within its consumer and
-type (`null` for a row written before `011_credential_ordinal` whose position
-could not be recovered); the portal derives an entry's gateway array index from
+type (`null` when the gateway position is unknown); the portal derives an entry's gateway array index from
 it.
 
 | Query             | Type                                | Notes                                                                                     |
@@ -2357,6 +2722,31 @@ The `secret` shape depends on the type:
 | `basicauth`       | `username` (= the consumer username), `password`  | HTTP Basic `<consumer username>:<password>`                                            |
 | `jwt`             | `jwt_secret`, `jwt_key` (= the consumer username) | HS256 JWT signed with `jwt_secret`, `sub` = `jwt_key`, sent as `Authorization: Bearer` |
 
+#### What the provider's upstream sees
+
+The gateway removes a key or a Basic password before it proxies the request,
+but it **forwards a bearer token**:
+
+| `credential_type` | Does the credential reach the provider's backend?                                         |
+| ----------------- | ----------------------------------------------------------------------------------------- |
+| `keyauth`         | **No** — Edge's `key_auth` runs with `hide_credentials: true`, so `X-API-Key` is stripped |
+| `basicauth`       | **No** — `basic_auth` likewise strips the `Authorization: Basic` field                    |
+| `jwt`             | **Yes** — `Authorization: Bearer <token>` is forwarded unchanged                          |
+
+This is not a Nexus setting. Of the three authentication plugins, Edge offers
+`hide_credentials` on `key_auth` and `basic_auth`; `jwt_auth` has no
+credential-hiding option, and its config is a closed key set that refuses one.
+A backend offered JWT commonly wants the claims, so Edge forwards the token.
+
+The practical consequence for a caller holding a `jwt` credential: the
+provider's server sees the tokens you sign. Your **signing secret is never
+forwarded**, so a provider cannot mint tokens as you — but it can replay a token
+you sent it until that token's `exp` — which Edge requires by default but does
+not cap, so the lifetime is whatever you sign. Keep `exp` short, and put nothing
+in a custom claim you would not show the provider. Which
+method an API uses is the provider's choice, published on the catalog entry; see
+the [client guide](guides/client-guide.md).
+
 Errors: `409 CONFLICT` when you already hold
 `FERRUM_MAX_CREDENTIALS_PER_TYPE` (default 2) live credentials of that type —
 revoke or rotate one first; `502 EDGE_ERROR` / `502 EDGE_UNAVAILABLE`.
@@ -2384,12 +2774,19 @@ credential's label.
 ```
 
 Append-then-delete: the replacement is created on Edge first so both secrets
-are live across the hand-off, then the old entry is deleted. **When the account
-is already at the per-type cap there is no room to append**, so the old entry is
-deleted first — and marked `revoked` the moment Edge confirms it — leaving a
-brief window with no working credential of that type. If the append then fails,
-the response says so plainly (`502 EDGE_ERROR`, _the previous credential was
-removed … issue a new credential_); everything still live stays revocable.
+are briefly live **during the server operation**, then the old entry is deleted
+before the response returns. Callers therefore have no user-controlled overlap
+window; a successful rotate always returns `previous.status="revoked"`, and
+callers using the old secret start receiving 401 as soon as gateway
+configuration propagates. **When the account is already at the per-type cap
+there is no room to append**, so the old entry is deleted first — and marked
+`revoked` the moment Edge confirms it — leaving a brief window with no working
+credential of that type. If the append then fails, the response says so plainly
+(`502 EDGE_ERROR`, _the previous credential was removed … issue a new
+credential_); everything still live stays revocable.
+
+For a caller-visible cutover, issue a new credential, deploy it, then revoke
+the old one — provided the account is below `FERRUM_MAX_CREDENTIALS_PER_TYPE`.
 
 Either way the credential being replaced passes through the `retiring` status
 before it settles at `revoked`: the retirement is written down _before_ the
@@ -2419,7 +2816,9 @@ the audit row and as the subject of the Edge write. The notification and email
 go to the owner.
 
 Errors: `403 FORBIDDEN` (someone else's credential), `403 USER_DISABLED` (the
-owner's account was disabled), `409 CONFLICT` (already revoked), `502
+owner's account was disabled), `409 CONFLICT` (already revoked, or the
+credential belongs to a disabled application — re-enable it to rotate, or
+revoke the credential, which stays allowed), `502
 EDGE_ERROR` — including the case where the gateway's credential list no longer
 matches the portal's view, which is refused rather than guessed at.
 

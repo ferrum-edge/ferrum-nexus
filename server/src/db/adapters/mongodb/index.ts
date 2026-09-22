@@ -56,7 +56,6 @@
 
 import {
   MongoClient,
-  type AnyBulkWriteOperation,
   type ClientSession,
   type Collection,
   type Db,
@@ -72,6 +71,8 @@ import type {
   ApiPluginTrigger,
   ApiStatus,
   ApiTimeouts,
+  ApiGatewayState,
+  ApplicationStatus,
   ApiVisibility,
   AuthPluginType,
   CorsConfig,
@@ -112,6 +113,11 @@ import type {
   AccessRequestRepo,
   ApiFilter,
   ApiPluginRecord,
+  ApiViewerRecord,
+  ApiViewerRepo,
+  ApplicationFilter,
+  ApplicationRecord,
+  ApplicationRepo,
   ApiPluginRepo,
   ApiRecord,
   ApiRepo,
@@ -178,9 +184,11 @@ const COLLECTIONS = {
   organizations: 'organizations',
   users: 'users',
   sessions: 'sessions',
+  applications: 'applications',
   apis: 'apis',
   apiSpecs: 'api_specs',
   apiPlugins: 'api_plugins',
+  apiViewers: 'api_viewers',
   accessRequests: 'access_requests',
   grants: 'grants',
   consumers: 'consumers',
@@ -301,6 +309,17 @@ function stamps(input: {
 const NEWEST_FIRST: Sort = { created_at: -1, _id: -1 };
 
 /**
+ * Spec revisions as the SQL adapters list them: the current revision first,
+ * then history newest-first by publication order. BSON sorts `false` before
+ * `true`, so a descending `is_current` puts the current revision at the head
+ * exactly as `ORDER BY is_current DESC` does.
+ */
+const SPEC_REVISIONS_ORDER: Sort = { is_current: -1, revision_seq: -1 };
+
+/** Spec history newest-first; the order retention deletes from the tail of. */
+const SPEC_HISTORY_ORDER: Sort = { revision_seq: -1 };
+
+/**
  * Outbox claim order: earliest scheduled attempt first.
  *
  * BSON sorts `null` before every string, so rows with no `next_attempt_at` come
@@ -408,13 +427,23 @@ function mapSession(row: Row): SessionRecord {
 /**
  * Decode the `spec_enforcement` field, falling back to `docs_only`.
  *
- * Unlike the SQL adapters there is no migration to backfill: a document
- * written before this field existed simply does not carry it, and neither it
- * nor a level a newer build introduced may read back as enforcement this
- * binary cannot generate a plugin config for.
+ * Missing or invalid values must not enable enforcement this binary cannot
+ * generate a plugin config for.
  */
 function specEnforcement(value: unknown): SpecEnforcementLevel {
   return isSpecEnforcementLevel(value) ? value : DEFAULT_SPEC_ENFORCEMENT;
+}
+
+function mapApplication(row: Row): ApplicationRecord {
+  return {
+    id: str(row._id),
+    owner_user_id: str(row.owner_user_id),
+    name: str(row.name),
+    description: strOrNull(row.description),
+    status: str(row.status) as ApplicationStatus,
+    created_at: str(row.created_at),
+    updated_at: str(row.updated_at),
+  };
 }
 
 function mapApi(row: Row): ApiRecord {
@@ -439,6 +468,7 @@ function mapApi(row: Row): ApiRecord {
     spec_enforcement: specEnforcement(row.spec_enforcement),
     status: str(row.status) as ApiStatus,
     visibility: str(row.visibility) as ApiVisibility,
+    gateway_state: (str(row.gateway_state) || 'deployed') as ApiGatewayState,
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
   };
@@ -453,6 +483,21 @@ function mapApiSpec(row: Row): ApiSpecRecord {
     parsed_title: strOrNull(row.parsed_title),
     parsed_version: strOrNull(row.parsed_version),
     is_current: flag(row.is_current),
+    revision_seq: num(row.revision_seq),
+    created_by: strOrNull(row.created_by),
+    rolled_back_from_id: strOrNull(row.rolled_back_from_id),
+    created_at: str(row.created_at),
+    updated_at: str(row.updated_at),
+  };
+}
+
+function mapApiViewer(row: Row): ApiViewerRecord {
+  return {
+    id: str(row._id),
+    api_id: str(row.api_id),
+    user_id: str(row.user_id),
+    granted_by: strOrNull(row.granted_by),
+    note: strOrNull(row.note),
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
   };
@@ -482,6 +527,7 @@ function mapAccessRequest(row: Row): AccessRequestRecord {
     id: str(row._id),
     api_id: str(row.api_id),
     user_id: str(row.user_id),
+    application_id: strOrNull(row.application_id),
     justification: str(row.justification),
     status: str(row.status) as AccessRequestStatus,
     decided_by: strOrNull(row.decided_by),
@@ -497,6 +543,7 @@ function mapGrant(row: Row): GrantRecord {
     id: str(row._id),
     api_id: str(row.api_id),
     user_id: str(row.user_id),
+    application_id: strOrNull(row.application_id),
     access_request_id: strOrNull(row.access_request_id),
     acl_group: str(row.acl_group),
     status: str(row.status) as GrantStatus,
@@ -512,6 +559,7 @@ function mapCredential(row: Row): CredentialRecord {
   return {
     id: str(row._id),
     user_id: str(row.user_id),
+    application_id: strOrNull(row.application_id),
     ferrum_consumer_id: str(row.ferrum_consumer_id),
     credential_type: str(row.credential_type) as CredentialType,
     ferrum_credential_id: str(row.ferrum_credential_id),
@@ -520,8 +568,7 @@ function mapCredential(row: Row): CredentialRecord {
     label: strOrNull(row.label),
     status: str(row.status) as CredentialStatus,
     rotated_from_id: strOrNull(row.rotated_from_id),
-    // Absent on a document written before `011_credential_ordinal` ran, which
-    // reads back exactly like the SQL backfill's unresolved NULL.
+    // Missing positions read back exactly like an unresolved SQL NULL.
     edge_ordinal: numOrNull(row.edge_ordinal),
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
@@ -532,6 +579,7 @@ function mapConsumer(row: Row): ConsumerRecord {
   return {
     id: str(row._id),
     user_id: str(row.user_id),
+    application_id: strOrNull(row.application_id),
     namespace: str(row.namespace),
     ferrum_consumer_id: str(row.ferrum_consumer_id),
     ferrum_username: str(row.ferrum_username),
@@ -560,8 +608,7 @@ function mapMessage(row: Row): MessageRecord {
     thread_id: str(row.thread_id),
     sender_user_id: str(row.sender_user_id),
     body: str(row.body),
-    // Documents written before `017_message_broadcast` carry no field at all,
-    // and every one of them is an ordinary message.
+    // Only an explicit true marks a broadcast; the default is ordinary mail.
     broadcast: row.broadcast === true,
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
@@ -705,11 +752,24 @@ function apiViewerCondition(viewer: ApiViewerFilter): Record<string, unknown> {
   const parts: Record<string, unknown>[] = [{ owner_user_id: viewer.owner_user_id }];
   const granted = [...new Set(viewer.granted_api_ids)];
   if (granted.length > 0) parts.push({ _id: { $in: granted } });
+  const authorized = [...new Set(viewer.authorized_api_ids)];
+  if (authorized.length > 0) parts.push({ _id: { $in: authorized } });
   const visibilities = [...new Set(viewer.open_visibilities)];
   if (visibilities.length > 0) {
     parts.push({ status: viewer.open_status, visibility: { $in: visibilities } });
   }
   return { $or: parts };
+}
+
+function applicationFilter(filter: ApplicationFilter): Filter<NexusDoc> {
+  const query: Record<string, unknown> = {};
+  if (filter.owner_user_id !== undefined) query.owner_user_id = filter.owner_user_id;
+  if (filter.status !== undefined) query.status = filter.status;
+  if (filter.q !== undefined && filter.q.trim() !== '') {
+    const match = containsInsensitive(filter.q.trim());
+    query.$or = [{ name: match }, { description: match }];
+  }
+  return query as Filter<NexusDoc>;
 }
 
 function apiFilter(filter: ApiFilter): Filter<NexusDoc> {
@@ -718,6 +778,8 @@ function apiFilter(filter: ApiFilter): Filter<NexusDoc> {
   if (filter.owner_user_id !== undefined) query.owner_user_id = filter.owner_user_id;
   if (filter.status !== undefined) query.status = filter.status;
   if (filter.visibility !== undefined) query.visibility = filter.visibility;
+  if (filter.namespace !== undefined) query.namespace = filter.namespace;
+  if (filter.gateway_state !== undefined) query.gateway_state = filter.gateway_state;
   if (filter.requestable !== undefined) query.requestable = filter.requestable;
   if (filter.ids !== undefined) query._id = { $in: filter.ids };
   if (filter.q !== undefined && filter.q.trim() !== '') {
@@ -729,12 +791,29 @@ function apiFilter(filter: ApiFilter): Filter<NexusDoc> {
   return query as Filter<NexusDoc>;
 }
 
+/**
+ * `application_id` as a Mongo predicate, where `null` is a **value**.
+ *
+ * The SQL adapters compile it to `IS NULL`; here it has to be an explicit
+ * `null` match, because a document written before applications existed has no
+ * `application_id` field at all and `{ application_id: null }` matches both
+ * that and an explicit null — which is exactly the behaviour the SQL side has.
+ */
+function scopeQuery(
+  query: Record<string, unknown>,
+  applicationId: string | null | undefined,
+): void {
+  if (applicationId === undefined) return;
+  query.application_id = applicationId;
+}
+
 function accessRequestFilter(filter: AccessRequestFilter): Filter<NexusDoc> {
   const query: Record<string, unknown> = {};
   if (filter.user_id !== undefined) query.user_id = filter.user_id;
   if (filter.api_id !== undefined) query.api_id = filter.api_id;
   if (filter.api_ids !== undefined) query.api_id = { $in: filter.api_ids };
   if (filter.status !== undefined) query.status = filter.status;
+  scopeQuery(query, filter.application_id);
   return query as Filter<NexusDoc>;
 }
 
@@ -744,6 +823,7 @@ function grantFilter(filter: GrantFilter): Filter<NexusDoc> {
   if (filter.api_id !== undefined) query.api_id = filter.api_id;
   if (filter.api_ids !== undefined) query.api_id = { $in: filter.api_ids };
   if (filter.status !== undefined) query.status = filter.status;
+  scopeQuery(query, filter.application_id);
   return query as Filter<NexusDoc>;
 }
 
@@ -755,6 +835,7 @@ function credentialFilter(filter: CredentialFilter): Filter<NexusDoc> {
   if (filter.ferrum_consumer_id !== undefined) {
     query.ferrum_consumer_id = filter.ferrum_consumer_id;
   }
+  scopeQuery(query, filter.application_id);
   return query as Filter<NexusDoc>;
 }
 
@@ -783,17 +864,6 @@ interface IndexDefinition {
   unique?: boolean;
   partialFilterExpression?: Document;
 }
-
-/** Indexes added by `007_api_plugins`. */
-const API_PLUGIN_INDEXES: IndexDefinition[] = [
-  {
-    collection: 'api_plugins',
-    name: 'ux_api_plugins_api_name',
-    key: { api_id: 1, plugin_name: 1 },
-    unique: true,
-  },
-  { collection: 'api_plugins', name: 'ix_api_plugins_api', key: { api_id: 1, created_at: 1 } },
-];
 
 /**
  * Every index of `001_initial`, translated.
@@ -832,9 +902,26 @@ const INDEXES: IndexDefinition[] = [
     unique: true,
     partialFilterExpression: { ferrum_proxy_id: { $type: 'string' } },
   },
+  {
+    collection: 'applications',
+    name: 'ux_applications_owner_name',
+    key: { owner_user_id: 1, name_lower: 1 },
+    unique: true,
+  },
+  {
+    collection: 'applications',
+    name: 'ix_applications_owner',
+    key: { owner_user_id: 1, created_at: 1 },
+  },
+
   { collection: 'apis', name: 'ix_apis_owner', key: { owner_user_id: 1 } },
   { collection: 'apis', name: 'ix_apis_status_visibility', key: { status: 1, visibility: 1 } },
   { collection: 'apis', name: 'ix_apis_created_at', key: { created_at: 1 } },
+  {
+    collection: 'apis',
+    name: 'ix_apis_gateway_state',
+    key: { namespace: 1, gateway_state: 1 },
+  },
 
   {
     collection: 'api_specs',
@@ -843,14 +930,39 @@ const INDEXES: IndexDefinition[] = [
     unique: true,
     partialFilterExpression: { is_current: true },
   },
-  { collection: 'api_specs', name: 'ix_api_specs_api', key: { api_id: 1, created_at: 1 } },
+  // Publication order, and the index every `api_id` lookup uses; see the SQLite
+  // schema for why the timestamp is not it.
+  {
+    collection: 'api_specs',
+    name: 'ux_api_specs_seq',
+    key: { api_id: 1, revision_seq: 1 },
+    unique: true,
+  },
 
-  ...API_PLUGIN_INDEXES,
+  {
+    collection: 'api_plugins',
+    name: 'ux_api_plugins_api_name',
+    key: { api_id: 1, plugin_name: 1 },
+    unique: true,
+  },
+  { collection: 'api_plugins', name: 'ix_api_plugins_api', key: { api_id: 1, created_at: 1 } },
+
+  {
+    collection: 'api_viewers',
+    name: 'ux_api_viewers_api_user',
+    key: { api_id: 1, user_id: 1 },
+    unique: true,
+  },
+  { collection: 'api_viewers', name: 'ix_api_viewers_user', key: { user_id: 1 } },
+  { collection: 'api_viewers', name: 'ix_api_viewers_api', key: { api_id: 1, created_at: 1 } },
 
   {
     collection: 'access_requests',
     name: 'ux_access_requests_pending',
-    key: { api_id: 1, user_id: 1 },
+    // A missing field indexes as `null` in MongoDB, so this behaves exactly
+    // like the SQL `COALESCE(application_id, '')` key: one open request per API
+    // and identity, with the account-scoped rows sharing one slot.
+    key: { api_id: 1, user_id: 1, application_id: 1 },
     unique: true,
     partialFilterExpression: { status: 'pending' },
   },
@@ -868,19 +980,25 @@ const INDEXES: IndexDefinition[] = [
   {
     collection: 'grants',
     name: 'ux_grants_active',
-    key: { api_id: 1, user_id: 1 },
+    key: { api_id: 1, user_id: 1, application_id: 1 },
     unique: true,
     partialFilterExpression: { status: 'active' },
   },
   { collection: 'grants', name: 'ix_grants_user_status', key: { user_id: 1, status: 1 } },
   { collection: 'grants', name: 'ix_grants_api_status', key: { api_id: 1, status: 1 } },
+  {
+    collection: 'grants',
+    name: 'ix_grants_application',
+    key: { application_id: 1, status: 1 },
+  },
 
   {
     collection: 'consumers',
     name: 'ux_consumers_user_namespace',
-    key: { user_id: 1, namespace: 1 },
+    key: { user_id: 1, namespace: 1, application_id: 1 },
     unique: true,
   },
+  { collection: 'consumers', name: 'ix_consumers_application', key: { application_id: 1 } },
   {
     collection: 'consumers',
     name: 'ux_consumers_ferrum_id',
@@ -970,28 +1088,19 @@ const INDEXES: IndexDefinition[] = [
     name: 'ix_verification_tokens_expires',
     key: { expires_at: 1 },
   },
-];
 
-/** Indexes added by `010_message_sender_index`. */
-const SENDER_INDEXES: IndexDefinition[] = [
   {
     collection: 'messages',
     name: 'ix_messages_sender',
     key: { sender_user_id: 1, created_at: 1 },
   },
-];
 
-/** Indexes added by `003_verification_token_purpose`. */
-const PURPOSE_INDEXES: IndexDefinition[] = [
   {
     collection: 'email_verification_tokens',
     name: 'ix_verification_tokens_user_purpose',
     key: { user_id: 1, purpose: 1 },
   },
-];
 
-/** Indexes added by `008_gateway_teardown_jobs`. */
-const TEARDOWN_JOB_INDEXES: IndexDefinition[] = [
   {
     collection: 'gateway_teardown_jobs',
     name: 'ux_gateway_teardown_jobs_user',
@@ -1003,19 +1112,13 @@ const TEARDOWN_JOB_INDEXES: IndexDefinition[] = [
     name: 'ix_gateway_teardown_jobs_due',
     key: { status: 1, next_attempt_at: 1 },
   },
-];
 
-/** Indexes added by `009_edge_leases`. */
-const LEASE_INDEXES: IndexDefinition[] = [
   // `_id` already carries the key, so this is the redundant-but-explicit
   // counterpart of the SQL primary key; the expiry index backs the
   // housekeeping sweep.
   { collection: 'edge_leases', name: 'ux_edge_leases_key', key: { key: 1 }, unique: true },
   { collection: 'edge_leases', name: 'ix_edge_leases_expires', key: { expires_at: 1 } },
-];
 
-/** Indexes added by `012_gateway_identities`. */
-const IDENTITY_INDEXES: IndexDefinition[] = [
   // One registration per identity name: `claim` upserts on this key, which is
   // what moves a recreated test consumer to its new owner instead of
   // recording two.
@@ -1030,11 +1133,8 @@ const IDENTITY_INDEXES: IndexDefinition[] = [
     name: 'ix_gateway_identities_user',
     key: { user_id: 1, namespace: 1 },
   },
-];
 
-/** Indexes added by `011_credential_ordinal`. */
-const ORDINAL_INDEXES: IndexDefinition[] = [
-  // Partial, so any number of unresolved legacy documents (no ordinal) coexist
+  // Partial, so documents with an unknown ordinal can coexist
   // — the SQL dialects get that from NULLs being distinct in a unique index.
   // Two *assigned* ordinals can never collide within a consumer and type.
   {
@@ -1045,69 +1145,6 @@ const ORDINAL_INDEXES: IndexDefinition[] = [
     partialFilterExpression: { edge_ordinal: { $type: 'number' } },
   },
 ];
-
-/**
- * Backfill `edge_ordinal` — the Mongo half of `011_credential_ordinal.sql`.
- *
- * Same rule as the SQL dialects: within one `(ferrum_consumer_id,
- * credential_type)` group the documents are numbered from 1 in `(created_at,
- * _id)` order, but only when no two *live* documents of the group share a
- * `created_at`. An ambiguous group is set to `null` throughout and left for an
- * administrator's reconciliation (`docs/operations.md` §12), because nothing on
- * either side can say which gateway entry is which.
- */
-async function backfillCredentialOrdinals(db: Db): Promise<void> {
-  const collection = db.collection<NexusDoc>('credential_metadata');
-  const groups = new Map<string, Row[]>();
-  const cursor = collection.find(
-    {},
-    { projection: { _id: 1, ferrum_consumer_id: 1, credential_type: 1, created_at: 1, status: 1 } },
-  );
-  for await (const doc of cursor) {
-    const row = doc as Row;
-    const key = `${str(row.ferrum_consumer_id)}\u0000${str(row.credential_type)}`;
-    const group = groups.get(key);
-    if (group) group.push(row);
-    else groups.set(key, [row]);
-  }
-
-  // Plain code-point order, matching the binary collation the SQL sort uses.
-  const byAppend = (a: Row, b: Row): number => {
-    const stamp = compareStrings(str(a.created_at), str(b.created_at));
-    return stamp !== 0 ? stamp : compareStrings(str(a._id), str(b._id));
-  };
-
-  const writes: AnyBulkWriteOperation<NexusDoc>[] = [];
-  for (const group of groups.values()) {
-    group.sort(byAppend);
-    const liveStamps = new Set<string>();
-    let ambiguous = false;
-    for (const row of group) {
-      if (str(row.status) === 'revoked') continue;
-      const stamp = str(row.created_at);
-      if (liveStamps.has(stamp)) {
-        ambiguous = true;
-        break;
-      }
-      liveStamps.add(stamp);
-    }
-    group.forEach((row, index) => {
-      writes.push({
-        updateOne: {
-          filter: { _id: str(row._id) },
-          update: { $set: { edge_ordinal: ambiguous ? null : index + 1 } },
-        },
-      });
-    });
-  }
-  if (writes.length > 0) await collection.bulkWrite(writes, { ordered: false });
-}
-
-function compareStrings(a: string, b: string): number {
-  if (a < b) return -1;
-  if (a > b) return 1;
-  return 0;
-}
 
 /** Create one batch of {@link IndexDefinition}s. */
 async function createIndexes(db: Db, indexes: IndexDefinition[]): Promise<void> {
@@ -1122,121 +1159,11 @@ async function createIndexes(db: Db, indexes: IndexDefinition[]): Promise<void> 
   }
 }
 
-/** Keep the most recently updated document for each API/plugin pair. */
-async function deduplicateApiPlugins(db: Db): Promise<void> {
-  const collection = db.collection<NexusDoc>('api_plugins');
-  const duplicateGroups = collection.aggregate<{ duplicate_ids: string[] }>([
-    { $sort: { api_id: 1, plugin_name: 1, updated_at: -1, created_at: -1, _id: -1 } },
-    {
-      $group: {
-        _id: { api_id: '$api_id', plugin_name: '$plugin_name' },
-        ids: { $push: '$_id' },
-        count: { $sum: 1 },
-      },
-    },
-    { $match: { count: { $gt: 1 } } },
-    {
-      $project: {
-        _id: 0,
-        duplicate_ids: { $slice: ['$ids', 1, { $subtract: ['$count', 1] }] },
-      },
-    },
-  ]);
-  for await (const group of duplicateGroups) {
-    await collection.deleteMany({ _id: { $in: group.duplicate_ids } });
-  }
-}
-
-/**
- * Mongo's "migrations".
- *
- * Mostly index creation rather than DDL, but the ids stay in lockstep with the
- * SQL variants so `schema_migrations` means the same thing on every driver and
- * each step lands exactly once here too.
- */
+/** The buildout baseline creates every index; document fields are written by repositories. */
 const MONGO_MIGRATIONS: { id: string; apply: (db: Db) => Promise<void> }[] = [
   {
     id: '001_initial',
     apply: (db: Db): Promise<void> => createIndexes(db, INDEXES),
-  },
-  {
-    id: '003_verification_token_purpose',
-    apply: async (db: Db): Promise<void> => {
-      // The SQL dialects backfill through a column default; Mongo has to write
-      // the field. Every document that predates the column is a verification
-      // token, since that was the only kind the table held.
-      await db
-        .collection('email_verification_tokens')
-        .updateMany({ purpose: { $exists: false } }, { $set: { purpose: 'email_verification' } });
-      await createIndexes(db, PURPOSE_INDEXES);
-    },
-  },
-  {
-    id: '006_email_token_issue_claims',
-    apply: async (): Promise<void> => undefined,
-  },
-  {
-    id: '007_api_plugins',
-    // Upgraded databases have already run `001_initial`, so install the new
-    // indexes explicitly. Remove any duplicates created before the unique
-    // index existed, retaining the configuration with the latest update.
-    apply: async (db: Db): Promise<void> => {
-      await deduplicateApiPlugins(db);
-      await createIndexes(db, API_PLUGIN_INDEXES);
-    },
-  },
-  {
-    id: '008_gateway_teardown_jobs',
-    // The unique index on `user_id` is what makes `upsertPending` a per-account
-    // reset rather than a queue of duplicate revocations; the collection itself
-    // is created on the first insert.
-    apply: (db: Db): Promise<void> => createIndexes(db, TEARDOWN_JOB_INDEXES),
-  },
-  {
-    id: '009_edge_leases',
-    apply: (db: Db): Promise<void> => createIndexes(db, LEASE_INDEXES),
-  },
-  {
-    id: '010_message_sender_index',
-    apply: (db: Db): Promise<void> => createIndexes(db, SENDER_INDEXES),
-  },
-  {
-    id: '011_credential_ordinal',
-    // Backfill first: the unique index would otherwise be built over documents
-    // that are about to change under it.
-    apply: async (db: Db): Promise<void> => {
-      await backfillCredentialOrdinals(db);
-      await createIndexes(db, ORDINAL_INDEXES);
-    },
-  },
-  {
-    id: '012_gateway_identities',
-    // The unique name index is what makes `claim` a per-identity upsert; the
-    // collection itself is created on the first insert.
-    apply: (db: Db): Promise<void> => createIndexes(db, IDENTITY_INDEXES),
-  },
-  {
-    id: '013_teardown_generation',
-    apply: async (db: Db): Promise<void> => {
-      await db
-        .collection('gateway_teardown_jobs')
-        .updateMany({ generation: { $exists: false } }, { $set: { generation: '' } });
-    },
-  },
-  {
-    // Nothing to do: the SQL dialects add a nullable column, and a document
-    // with no `ferrum_plugin_config_id` already maps to the same `null`. The id
-    // is recorded anyway so `schema_migrations` means the same thing here.
-    id: '015_api_plugin_config_id',
-    apply: async (): Promise<void> => undefined,
-  },
-  {
-    id: '016_outbox_generation',
-    apply: async (db: Db): Promise<void> => {
-      await db
-        .collection('email_outbox')
-        .updateMany({ generation: { $exists: false } }, { $set: { generation: '' } });
-    },
   },
 ];
 
@@ -1296,6 +1223,24 @@ class MongoStore implements NexusStore {
       .project<Row>({ edge_ordinal: 1 })
       .toArray();
     return num(top[0]?.edge_ordinal ?? 0) + 1;
+  }
+
+  /**
+   * One more than the largest `revision_seq` recorded for an API.
+   *
+   * Called only from inside the create transaction, exactly as the SQL
+   * adapters read the next position inside theirs; the unique index on
+   * `(api_id, revision_seq)` is what catches two revisions that read one
+   * position anyway.
+   */
+  private async nextSpecRevisionSeq(apiId: string): Promise<number> {
+    const top = await this.col(COLLECTIONS.apiSpecs)
+      .find({ api_id: apiId } as Filter<NexusDoc>, this.opts)
+      .sort(SPEC_HISTORY_ORDER)
+      .limit(1)
+      .project<Row>({ revision_seq: 1 })
+      .toArray();
+    return num(top[0]?.revision_seq ?? 0) + 1;
   }
 
   /** Session option threaded through every operation of a scoped store. */
@@ -1731,6 +1676,115 @@ class MongoStore implements NexusStore {
       ).deletedCount,
   };
 
+  /* ── applications ─────────────────────────────────────────────────────── */
+
+  readonly applications: ApplicationRepo = {
+    create: async (input) => {
+      const meta = stamps(input);
+      // `name_lower` is the derived companion of SQL's `lower(name)` index:
+      // MongoDB has no expression indexes, so the value is stored.
+      await mapConflict('You already have an application with that name', () =>
+        this.col(COLLECTIONS.applications).insertOne(
+          {
+            _id: meta.id,
+            owner_user_id: input.owner_user_id,
+            name: input.name,
+            name_lower: input.name.trim().toLowerCase(),
+            description: input.description ?? null,
+            status: input.status,
+            created_at: meta.created_at,
+            updated_at: meta.updated_at,
+          } as NexusDoc,
+          this.opts,
+        ),
+      );
+      const created = await this.applications.findById(meta.id);
+      if (!created) throw new Error('applications.create: row vanished immediately after insert');
+      return created;
+    },
+
+    findById: async (id) => {
+      const row = asRow(await this.col(COLLECTIONS.applications).findOne({ _id: id }, this.opts));
+      return row ? mapApplication(row) : null;
+    },
+
+    findByOwnerAndName: async (ownerUserId, name) => {
+      const row = asRow(
+        await this.col(COLLECTIONS.applications).findOne(
+          { owner_user_id: ownerUserId, name_lower: name.trim().toLowerCase() },
+          this.opts,
+        ),
+      );
+      return row ? mapApplication(row) : null;
+    },
+
+    findManyByIds: async (ids) => {
+      if (ids.length === 0) return [];
+      const docs = await this.col(COLLECTIONS.applications)
+        .find({ _id: { $in: ids } } as Filter<NexusDoc>, this.opts)
+        .toArray();
+      return docs.map((doc) => mapApplication(doc as Row));
+    },
+
+    update: async (id, patch) => {
+      const set = setDoc({
+        name: patch.name,
+        name_lower: patch.name === undefined ? undefined : patch.name.trim().toLowerCase(),
+        description: patch.description,
+        status: patch.status,
+      });
+      if (set) {
+        await mapConflict('You already have an application with that name', () =>
+          this.col(COLLECTIONS.applications).updateOne(
+            { _id: id },
+            { $set: { ...set, updated_at: nowIso() } },
+            this.opts,
+          ),
+        );
+      }
+      return this.applications.findById(id);
+    },
+
+    list: async (filter, options) =>
+      this.paginate(
+        COLLECTIONS.applications,
+        applicationFilter(filter),
+        NEWEST_FIRST,
+        options,
+        mapApplication,
+      ),
+
+    count: async (filter = {}) =>
+      this.col(COLLECTIONS.applications).countDocuments(applicationFilter(filter), this.opts),
+
+    delete: async (id) => {
+      // Stand in for `… REFERENCES applications (id) ON DELETE CASCADE`, which
+      // the three SQL schemas declare on every scoped table. MongoDB has no
+      // foreign keys, so without this an application's grants, requests,
+      // credentials and consumer mapping outlived the application on Mongo and
+      // not on PostgreSQL — the kind of divergence the cross-adapter suite
+      // exists to catch, and it caught this one.
+      //
+      // Before the row, not after: a cascade that ran second would leave the
+      // scoped rows orphaned if it failed, with nothing left to find them by.
+      for (const collection of [
+        COLLECTIONS.grants,
+        COLLECTIONS.accessRequests,
+        COLLECTIONS.credentials,
+        COLLECTIONS.consumers,
+      ]) {
+        await this.col(collection).deleteMany(
+          { application_id: id } as Filter<NexusDoc>,
+          this.opts,
+        );
+      }
+      return (
+        (await this.col(COLLECTIONS.applications).deleteOne({ _id: id }, this.opts)).deletedCount >
+        0
+      );
+    },
+  };
+
   /* ── apis ─────────────────────────────────────────────────────────────── */
 
   readonly apis: ApiRepo = {
@@ -1760,6 +1814,7 @@ class MongoStore implements NexusStore {
             spec_enforcement: input.spec_enforcement ?? DEFAULT_SPEC_ENFORCEMENT,
             status: input.status,
             visibility: input.visibility,
+            gateway_state: input.gateway_state ?? 'deployed',
             created_at: meta.created_at,
             updated_at: meta.updated_at,
           } as NexusDoc,
@@ -1823,6 +1878,7 @@ class MongoStore implements NexusStore {
         spec_enforcement: patch.spec_enforcement,
         status: patch.status,
         visibility: patch.visibility,
+        gateway_state: patch.gateway_state,
       });
       if (set) {
         await mapConflict('An API with that slug already exists', () =>
@@ -1883,6 +1939,9 @@ class MongoStore implements NexusStore {
               parsed_title: input.parsed_title ?? null,
               parsed_version: input.parsed_version ?? null,
               is_current: input.is_current,
+              revision_seq: await tx.nextSpecRevisionSeq(input.api_id),
+              created_by: input.created_by ?? null,
+              rolled_back_from_id: input.rolled_back_from_id ?? null,
               created_at: meta.created_at,
               updated_at: meta.updated_at,
             } as NexusDoc,
@@ -1938,28 +1997,35 @@ class MongoStore implements NexusStore {
       return this.paginate(
         COLLECTIONS.apiSpecs,
         query as Filter<NexusDoc>,
-        NEWEST_FIRST,
+        SPEC_REVISIONS_ORDER,
         options,
         mapApiSpec,
       );
     },
 
-    delete: async (id) =>
-      (await this.col(COLLECTIONS.apiSpecs).deleteOne({ _id: id }, this.opts)).deletedCount > 0,
+    delete: async (id) => {
+      await this.clearRollbackLinks([id]);
+      return (
+        (await this.col(COLLECTIONS.apiSpecs).deleteOne({ _id: id }, this.opts)).deletedCount > 0
+      );
+    },
 
+    // No link-clearing here: every `rolled_back_from_id` points at a revision
+    // of the *same* API, and this removes all of them.
     deleteByApi: async (apiId) =>
       (await this.col(COLLECTIONS.apiSpecs).deleteMany({ api_id: apiId }, this.opts)).deletedCount,
 
     pruneHistory: async (apiId, keep) => {
       const doomed = await this.col(COLLECTIONS.apiSpecs)
         .find({ api_id: apiId, is_current: false } as Filter<NexusDoc>, this.opts)
-        .sort(NEWEST_FIRST)
+        .sort(SPEC_HISTORY_ORDER)
         .skip(Math.max(0, keep))
         .limit(SPEC_HISTORY_PRUNE_BATCH)
         .project({ _id: 1 })
         .toArray();
       if (doomed.length === 0) return 0;
       const ids = doomed.map((row) => String(row._id));
+      await this.clearRollbackLinks(ids);
       return (
         await this.col(COLLECTIONS.apiSpecs).deleteMany(
           { _id: { $in: ids } } as Filter<NexusDoc>,
@@ -1968,6 +2034,27 @@ class MongoStore implements NexusStore {
       ).deletedCount;
     },
   };
+
+  /**
+   * Stand in for `api_specs.rolled_back_from_id … ON DELETE SET NULL`.
+   *
+   * The SQL schemas declare that constraint so a rollback's provenance goes to
+   * `null` once retention drops the revision it restored — the link is
+   * provenance, not a dependency, and it must never keep a revision alive or
+   * outlive it as a dangling id. MongoDB has no foreign keys, so the adapter
+   * has to do it: without this, a rollback on Mongo kept pointing at a
+   * revision that no longer existed while the same row on PostgreSQL read
+   * `null`, which is exactly the kind of divergence the cross-adapter suite
+   * exists to catch.
+   */
+  private async clearRollbackLinks(specIds: readonly string[]): Promise<void> {
+    if (specIds.length === 0) return;
+    await this.col(COLLECTIONS.apiSpecs).updateMany(
+      { rolled_back_from_id: { $in: [...specIds] } } as Filter<NexusDoc>,
+      { $set: { rolled_back_from_id: null } } as UpdateFilter<NexusDoc>,
+      this.opts,
+    );
+  }
 
   /* ── apiPlugins ───────────────────────────────────────────────────────── */
 
@@ -2039,6 +2126,86 @@ class MongoStore implements NexusStore {
       ).deletedCount,
   };
 
+  /* ── apiViewers ───────────────────────────────────────────────────────── */
+
+  readonly apiViewers: ApiViewerRepo = {
+    upsert: async (input) => {
+      const meta = stamps(input);
+      // One upsert against the unique `(api_id, user_id)` index, so two
+      // concurrent invitations converge on one document. `$setOnInsert` keeps
+      // the moment this account was first authorized across a replace.
+      await mapConflict('That account is already authorized for this API', () =>
+        this.col(COLLECTIONS.apiViewers).updateOne(
+          { api_id: input.api_id, user_id: input.user_id } as Filter<NexusDoc>,
+          {
+            $set: {
+              granted_by: input.granted_by ?? null,
+              note: input.note ?? null,
+              updated_at: meta.updated_at,
+            },
+            $setOnInsert: {
+              _id: meta.id,
+              api_id: input.api_id,
+              user_id: input.user_id,
+              created_at: meta.created_at,
+            },
+          } as UpdateFilter<NexusDoc>,
+          { ...this.opts, upsert: true },
+        ),
+      );
+      const saved = await this.apiViewers.find(input.api_id, input.user_id);
+      if (!saved) throw new Error('apiViewers.upsert: row vanished immediately after write');
+      return saved;
+    },
+
+    find: async (apiId, userId) => {
+      const row = asRow(
+        await this.col(COLLECTIONS.apiViewers).findOne(
+          { api_id: apiId, user_id: userId },
+          this.opts,
+        ),
+      );
+      return row ? mapApiViewer(row) : null;
+    },
+
+    list: async (filter, options) => {
+      const query: Record<string, unknown> = {};
+      if (filter.api_id !== undefined) query.api_id = filter.api_id;
+      if (filter.user_id !== undefined) query.user_id = filter.user_id;
+      return this.paginate(
+        COLLECTIONS.apiViewers,
+        query as Filter<NexusDoc>,
+        NEWEST_FIRST,
+        options,
+        mapApiViewer,
+      );
+    },
+
+    listApiIdsByUser: async (userId) =>
+      (
+        await this.col(COLLECTIONS.apiViewers)
+          .find({ user_id: userId } as Filter<NexusDoc>, this.opts)
+          .project({ api_id: 1 })
+          .toArray()
+      ).map((doc) => str((doc as Row).api_id)),
+
+    delete: async (apiId, userId) =>
+      (
+        await this.col(COLLECTIONS.apiViewers).deleteOne(
+          { api_id: apiId, user_id: userId } as Filter<NexusDoc>,
+          this.opts,
+        )
+      ).deletedCount > 0,
+
+    deleteByApi: async (apiId) =>
+      (
+        await this.col(COLLECTIONS.apiViewers).deleteMany(
+          { api_id: apiId } as Filter<NexusDoc>,
+          this.opts,
+        )
+      ).deletedCount,
+  };
+
   /* ── accessRequests ───────────────────────────────────────────────────── */
 
   readonly accessRequests: AccessRequestRepo = {
@@ -2050,6 +2217,7 @@ class MongoStore implements NexusStore {
             _id: meta.id,
             api_id: input.api_id,
             user_id: input.user_id,
+            application_id: input.application_id ?? null,
             justification: input.justification,
             status: input.status,
             decided_by: input.decided_by ?? null,
@@ -2114,12 +2282,11 @@ class MongoStore implements NexusStore {
         mapAccessRequest,
       ),
 
-    findPendingByApiAndUser: async (apiId, userId) => {
+    findPendingByApiAndUser: async (apiId, userId, applicationId = null) => {
+      const query: Record<string, unknown> = { api_id: apiId, user_id: userId, status: 'pending' };
+      scopeQuery(query, applicationId);
       const row = asRow(
-        await this.col(COLLECTIONS.accessRequests).findOne(
-          { api_id: apiId, user_id: userId, status: 'pending' },
-          this.opts,
-        ),
+        await this.col(COLLECTIONS.accessRequests).findOne(query as Filter<NexusDoc>, this.opts),
       );
       return row ? mapAccessRequest(row) : null;
     },
@@ -2175,6 +2342,7 @@ class MongoStore implements NexusStore {
             _id: meta.id,
             api_id: input.api_id,
             user_id: input.user_id,
+            application_id: input.application_id ?? null,
             access_request_id: input.access_request_id ?? null,
             acl_group: input.acl_group,
             status: input.status,
@@ -2234,19 +2402,20 @@ class MongoStore implements NexusStore {
     list: async (filter, options) =>
       this.paginate(COLLECTIONS.grants, grantFilter(filter), NEWEST_FIRST, options, mapGrant),
 
-    findActiveByApiAndUser: async (apiId, userId) => {
+    findActiveByApiAndUser: async (apiId, userId, applicationId = null) => {
+      const query: Record<string, unknown> = { api_id: apiId, user_id: userId, status: 'active' };
+      scopeQuery(query, applicationId);
       const row = asRow(
-        await this.col(COLLECTIONS.grants).findOne(
-          { api_id: apiId, user_id: userId, status: 'active' },
-          this.opts,
-        ),
+        await this.col(COLLECTIONS.grants).findOne(query as Filter<NexusDoc>, this.opts),
       );
       return row ? mapGrant(row) : null;
     },
 
-    listActiveByUser: async (userId) => {
+    listActiveByUser: async (userId, applicationId) => {
+      const query: Record<string, unknown> = { user_id: userId, status: 'active' };
+      scopeQuery(query, applicationId);
       const docs = await this.col(COLLECTIONS.grants)
-        .find({ user_id: userId, status: 'active' }, this.opts)
+        .find(query as Filter<NexusDoc>, this.opts)
         .toArray();
       return docs.map((doc) => mapGrant(doc as Row));
     },
@@ -2279,6 +2448,7 @@ class MongoStore implements NexusStore {
           {
             _id: meta.id,
             user_id: input.user_id,
+            application_id: input.application_id ?? null,
             ferrum_consumer_id: input.ferrum_consumer_id,
             credential_type: input.credential_type,
             ferrum_credential_id: input.ferrum_credential_id,
@@ -2366,6 +2536,7 @@ class MongoStore implements NexusStore {
           {
             _id: meta.id,
             user_id: input.user_id,
+            application_id: input.application_id ?? null,
             namespace: input.namespace,
             ferrum_consumer_id: input.ferrum_consumer_id,
             ferrum_username: input.ferrum_username,
@@ -2385,9 +2556,11 @@ class MongoStore implements NexusStore {
       return row ? mapConsumer(row) : null;
     },
 
-    findByUserAndNamespace: async (userId, namespace) => {
+    findByUserAndNamespace: async (userId, namespace, applicationId = null) => {
+      const query: Record<string, unknown> = { user_id: userId, namespace };
+      scopeQuery(query, applicationId);
       const row = asRow(
-        await this.col(COLLECTIONS.consumers).findOne({ user_id: userId, namespace }, this.opts),
+        await this.col(COLLECTIONS.consumers).findOne(query as Filter<NexusDoc>, this.opts),
       );
       return row ? mapConsumer(row) : null;
     },
@@ -2434,6 +2607,7 @@ class MongoStore implements NexusStore {
       const query: Record<string, unknown> = {};
       if (filter.user_id !== undefined) query.user_id = filter.user_id;
       if (filter.namespace !== undefined) query.namespace = filter.namespace;
+      scopeQuery(query, filter.application_id);
       return this.paginate(
         COLLECTIONS.consumers,
         query as Filter<NexusDoc>,
@@ -2705,8 +2879,7 @@ class MongoStore implements NexusStore {
 
     countBySenderSince: async (senderUserId, sinceIso) =>
       this.col(COLLECTIONS.messages).countDocuments(
-        // `$ne: true` rather than `false`, so documents written before
-        // `017_message_broadcast` — which have no such field — still count.
+        // Match mapMessage: only explicitly marked broadcasts are exempt.
         { sender_user_id: senderUserId, created_at: { $gte: sinceIso }, broadcast: { $ne: true } },
         this.opts,
       ),

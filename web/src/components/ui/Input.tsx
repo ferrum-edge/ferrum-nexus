@@ -4,7 +4,8 @@ import { cn } from '../../lib/cn';
 import { Icon } from './Icon';
 
 const CONTROL_CLASS =
-  'w-full rounded-md border border-border bg-inset px-3 py-2 text-sm text-fg placeholder:text-fg-subtle ' +
+  'w-full min-w-0 max-w-full rounded-md border border-border bg-inset px-3 py-2 text-sm ' +
+  'text-fg placeholder:text-fg-subtle ' +
   'shadow-[0_1px_2px_rgb(0_0_0/0.06)_inset] transition-[border-color,box-shadow] ' +
   'hover:border-border-strong focus:border-accent focus:ring-2 focus:ring-accent-ring focus:outline-none ' +
   'disabled:cursor-not-allowed disabled:opacity-60 ' +
@@ -31,7 +32,7 @@ export function Field({
   children,
 }: FieldProps): ReactElement {
   return (
-    <div className={cn('flex flex-col gap-1.5', className)}>
+    <div className={cn('flex min-w-0 flex-col gap-1.5', className)}>
       <label htmlFor={htmlFor} className="text-sm font-medium text-fg">
         {label}
         {required ? (

@@ -1,5 +1,7 @@
 -- Ferrum Nexus initial schema — MySQL 8 dialect.
 --
+-- Buildout baseline: edit this schema directly; recreate development databases.
+--
 -- Mirrors 001_initial.sql table for table, column for column and index for
 -- index. The conventions are identical to the SQLite variant:
 --   * every id is a string UUID (VARCHAR(64), never a native UUID/BINARY type);
@@ -107,22 +109,30 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 -- ── APIs ───────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS apis (
-  id              VARCHAR(64)  NOT NULL,
-  name            VARCHAR(255) NOT NULL,
-  slug            VARCHAR(255) NOT NULL,
-  description     TEXT,
-  owner_user_id   VARCHAR(64)  NOT NULL,
-  ferrum_proxy_id VARCHAR(128) DEFAULT NULL,
-  namespace       VARCHAR(128) NOT NULL,
-  version         VARCHAR(64)  NOT NULL,
-  spec_format     VARCHAR(32)  NOT NULL DEFAULT 'openapi',
-  requestable     TINYINT      NOT NULL DEFAULT 0,
-  auth_plugin     VARCHAR(32)  NOT NULL,
-  rate_limit_json TEXT,
-  status          VARCHAR(32)  NOT NULL DEFAULT 'published',
-  visibility      VARCHAR(32)  NOT NULL DEFAULT 'public',
-  created_at      VARCHAR(32)  NOT NULL,
-  updated_at      VARCHAR(32)  NOT NULL,
+  id                   VARCHAR(64)  NOT NULL,
+  upstream_url         TEXT,
+  cors_json            TEXT,
+  allowed_methods_json TEXT,
+  timeouts_json        TEXT,
+  circuit_breaker      TINYINT NOT NULL DEFAULT 0,
+  spec_enforcement     VARCHAR(32) NOT NULL DEFAULT 'docs_only',
+  name                 VARCHAR(255) NOT NULL,
+  slug                 VARCHAR(255) NOT NULL,
+  description          TEXT,
+  owner_user_id        VARCHAR(64)  NOT NULL,
+  ferrum_proxy_id      VARCHAR(128) DEFAULT NULL,
+  namespace            VARCHAR(128) NOT NULL,
+  version              VARCHAR(64)  NOT NULL,
+  spec_format          VARCHAR(32)  NOT NULL DEFAULT 'openapi',
+  requestable          TINYINT      NOT NULL DEFAULT 0,
+  auth_plugin          VARCHAR(32)  NOT NULL,
+  rate_limit_json      TEXT,
+  status               VARCHAR(32)  NOT NULL DEFAULT 'published',
+  visibility           VARCHAR(32)  NOT NULL DEFAULT 'public',
+  gateway_state        VARCHAR(32)  NOT NULL DEFAULT 'deployed',
+  created_at           VARCHAR(32)  NOT NULL,
+  updated_at           VARCHAR(32)  NOT NULL,
+  CONSTRAINT ck_apis_spec_enforcement CHECK (spec_enforcement IN ('docs_only', 'routes')),
   PRIMARY KEY (id),
   UNIQUE KEY ux_apis_slug ((lower(slug))),
   -- A plain UNIQUE index tolerates unlimited NULLs, matching SQLite's
@@ -131,15 +141,57 @@ CREATE TABLE IF NOT EXISTS apis (
   KEY ix_apis_owner (owner_user_id),
   KEY ix_apis_status_visibility (status, visibility),
   KEY ix_apis_created_at (created_at),
+  KEY ix_apis_gateway_state (namespace, gateway_state),
   CONSTRAINT ck_apis_spec_format CHECK (spec_format IN ('openapi')),
   CONSTRAINT ck_apis_requestable CHECK (requestable IN (0, 1)),
   CONSTRAINT ck_apis_auth_plugin CHECK (auth_plugin IN ('key_auth', 'basic_auth', 'jwt_auth')),
   CONSTRAINT ck_apis_status CHECK (status IN ('published', 'retired')),
-  CONSTRAINT ck_apis_visibility CHECK (visibility IN ('public', 'internal')),
+  CONSTRAINT ck_apis_visibility CHECK (visibility IN ('public', 'internal', 'private')),
+  CONSTRAINT ck_apis_gateway_state CHECK (gateway_state IN ('deployed', 'repair_required')),
   CONSTRAINT fk_apis_owner FOREIGN KEY (owner_user_id) REFERENCES users (id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 -- ── API specs ──────────────────────────────────────────────────────────────
+-- ── Applications (per-integration identities) ──────────────────────────────
+--
+-- Owned by a portal account, with their own access requests, grants,
+-- credentials and Ferrum consumer (`nexus-app-<application_id>`). Every row
+-- that can be scoped carries a nullable `application_id`; `NULL` means "the
+-- account itself", which is what every existing row is (issue #289).
+CREATE TABLE IF NOT EXISTS applications (
+  id            VARCHAR(64)  NOT NULL,
+  owner_user_id VARCHAR(64)  NOT NULL,
+  name          VARCHAR(255) NOT NULL,
+  description   TEXT,
+  status        VARCHAR(32)  NOT NULL DEFAULT 'active',
+  created_at    VARCHAR(32)  NOT NULL,
+  updated_at    VARCHAR(32)  NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY ux_applications_owner_name (owner_user_id, (lower(name))),
+  KEY ix_applications_owner (owner_user_id, created_at),
+  CONSTRAINT ck_applications_status CHECK (status IN ('active', 'disabled')),
+  CONSTRAINT fk_applications_owner FOREIGN KEY (owner_user_id) REFERENCES users (id)
+    ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS api_viewers (
+  id         VARCHAR(64) NOT NULL,
+  api_id     VARCHAR(64) NOT NULL,
+  user_id    VARCHAR(64) NOT NULL,
+  granted_by VARCHAR(64) DEFAULT NULL,
+  note       TEXT,
+  created_at VARCHAR(32) NOT NULL,
+  updated_at VARCHAR(32) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY ux_api_viewers_api_user (api_id, user_id),
+  KEY ix_api_viewers_user (user_id),
+  KEY ix_api_viewers_api (api_id, created_at),
+  CONSTRAINT fk_api_viewers_api FOREIGN KEY (api_id) REFERENCES apis (id) ON DELETE CASCADE,
+  CONSTRAINT fk_api_viewers_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+  CONSTRAINT fk_api_viewers_granted_by FOREIGN KEY (granted_by) REFERENCES users (id)
+    ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE IF NOT EXISTS api_specs (
   id             VARCHAR(64)  NOT NULL,
   api_id         VARCHAR(64)  NOT NULL,
@@ -148,6 +200,9 @@ CREATE TABLE IF NOT EXISTS api_specs (
   parsed_title   VARCHAR(255) DEFAULT NULL,
   parsed_version VARCHAR(64)  DEFAULT NULL,
   is_current     TINYINT      NOT NULL DEFAULT 0,
+  revision_seq   INT          NOT NULL,
+  created_by     VARCHAR(64)  DEFAULT NULL,
+  rolled_back_from_id VARCHAR(64) DEFAULT NULL,
   created_at     VARCHAR(32)  NOT NULL,
   updated_at     VARCHAR(32)  NOT NULL,
   -- Emulates `CREATE UNIQUE INDEX ux_api_specs_current ON api_specs (api_id)
@@ -158,9 +213,16 @@ CREATE TABLE IF NOT EXISTS api_specs (
                    VIRTUAL,
   PRIMARY KEY (id),
   UNIQUE KEY ux_api_specs_current (current_key),
-  KEY ix_api_specs_api (api_id, created_at),
+  -- Publication order; see the SQLite schema for why the timestamp is not it.
+  UNIQUE KEY ux_api_specs_seq (api_id, revision_seq),
+  KEY ix_api_specs_created_by (created_by),
+  KEY ix_api_specs_rolled_back_from (rolled_back_from_id),
   CONSTRAINT ck_api_specs_is_current CHECK (is_current IN (0, 1)),
-  CONSTRAINT fk_api_specs_api FOREIGN KEY (api_id) REFERENCES apis (id) ON DELETE CASCADE
+  CONSTRAINT fk_api_specs_api FOREIGN KEY (api_id) REFERENCES apis (id) ON DELETE CASCADE,
+  CONSTRAINT fk_api_specs_created_by FOREIGN KEY (created_by) REFERENCES users (id)
+    ON DELETE SET NULL,
+  CONSTRAINT fk_api_specs_rolled_back_from FOREIGN KEY (rolled_back_from_id)
+    REFERENCES api_specs (id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 -- ── Access requests ────────────────────────────────────────────────────────
@@ -168,6 +230,7 @@ CREATE TABLE IF NOT EXISTS access_requests (
   id            VARCHAR(64) NOT NULL,
   api_id        VARCHAR(64) NOT NULL,
   user_id       VARCHAR(64) NOT NULL,
+  application_id VARCHAR(64) DEFAULT NULL,
   justification TEXT        NOT NULL,
   status        VARCHAR(32) NOT NULL DEFAULT 'pending',
   decided_by    VARCHAR(64) DEFAULT NULL,
@@ -175,22 +238,31 @@ CREATE TABLE IF NOT EXISTS access_requests (
   decision_note TEXT,
   created_at    VARCHAR(32) NOT NULL,
   updated_at    VARCHAR(32) NOT NULL,
-  -- One open request per API/user pair; emulates SQLite's
-  -- `... (api_id, user_id) WHERE status = 'pending'`.
-  pending_key   VARCHAR(160)
+  -- One open request per API and identity; emulates SQLite's
+  -- `... (api_id, user_id, COALESCE(application_id, '')) WHERE status = 'pending'`.
+  -- `COALESCE` rather than the bare column for the same reason SQLite needs
+  -- it: a NULL would make every account-scoped request distinct.
+  pending_key   VARCHAR(240)
                   GENERATED ALWAYS AS (
-                    CASE WHEN status = 'pending' THEN CONCAT(api_id, ':', user_id) ELSE NULL END
+                    CASE
+                      WHEN status = 'pending'
+                        THEN CONCAT(api_id, ':', user_id, ':', COALESCE(application_id, ''))
+                      ELSE NULL
+                    END
                   ) VIRTUAL,
   PRIMARY KEY (id),
   UNIQUE KEY ux_access_requests_pending (pending_key),
   KEY ix_access_requests_api_status (api_id, status),
   KEY ix_access_requests_user (user_id, created_at),
+  KEY ix_access_requests_application (application_id, status),
   CONSTRAINT ck_access_requests_status
     CHECK (status IN ('pending', 'approved', 'denied', 'revoked', 'cancelled')),
   CONSTRAINT fk_access_requests_api FOREIGN KEY (api_id) REFERENCES apis (id) ON DELETE CASCADE,
   CONSTRAINT fk_access_requests_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
   CONSTRAINT fk_access_requests_decider
-    FOREIGN KEY (decided_by) REFERENCES users (id) ON DELETE SET NULL
+    FOREIGN KEY (decided_by) REFERENCES users (id) ON DELETE SET NULL,
+  CONSTRAINT fk_access_requests_application
+    FOREIGN KEY (application_id) REFERENCES applications (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 -- ── Grants ─────────────────────────────────────────────────────────────────
@@ -198,6 +270,7 @@ CREATE TABLE IF NOT EXISTS grants (
   id                VARCHAR(64)  NOT NULL,
   api_id            VARCHAR(64)  NOT NULL,
   user_id           VARCHAR(64)  NOT NULL,
+  application_id    VARCHAR(64)  DEFAULT NULL,
   access_request_id VARCHAR(64)  DEFAULT NULL,
   acl_group         VARCHAR(255) NOT NULL,
   status            VARCHAR(32)  NOT NULL DEFAULT 'active',
@@ -206,45 +279,63 @@ CREATE TABLE IF NOT EXISTS grants (
   revoked_at        VARCHAR(32)  DEFAULT NULL,
   created_at        VARCHAR(32)  NOT NULL,
   updated_at        VARCHAR(32)  NOT NULL,
-  -- At most one active grant per API/user pair; emulates SQLite's
-  -- `... (api_id, user_id) WHERE status = 'active'`.
-  active_key        VARCHAR(160)
+  -- At most one active grant per API and identity; emulates SQLite's
+  -- `... (api_id, user_id, COALESCE(application_id, '')) WHERE status = 'active'`.
+  active_key        VARCHAR(240)
                       GENERATED ALWAYS AS (
-                        CASE WHEN status = 'active' THEN CONCAT(api_id, ':', user_id) ELSE NULL END
+                        CASE
+                          WHEN status = 'active'
+                            THEN CONCAT(api_id, ':', user_id, ':', COALESCE(application_id, ''))
+                          ELSE NULL
+                        END
                       ) VIRTUAL,
   PRIMARY KEY (id),
   UNIQUE KEY ux_grants_active (active_key),
   KEY ix_grants_user_status (user_id, status),
   KEY ix_grants_api_status (api_id, status),
+  KEY ix_grants_application (application_id, status),
   CONSTRAINT ck_grants_status CHECK (status IN ('active', 'revoked')),
   CONSTRAINT fk_grants_api FOREIGN KEY (api_id) REFERENCES apis (id) ON DELETE CASCADE,
   CONSTRAINT fk_grants_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
   CONSTRAINT fk_grants_request
     FOREIGN KEY (access_request_id) REFERENCES access_requests (id) ON DELETE SET NULL,
   CONSTRAINT fk_grants_granted_by FOREIGN KEY (granted_by) REFERENCES users (id) ON DELETE RESTRICT,
-  CONSTRAINT fk_grants_revoked_by FOREIGN KEY (revoked_by) REFERENCES users (id) ON DELETE SET NULL
+  CONSTRAINT fk_grants_revoked_by FOREIGN KEY (revoked_by) REFERENCES users (id) ON DELETE SET NULL,
+  CONSTRAINT fk_grants_application
+    FOREIGN KEY (application_id) REFERENCES applications (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 -- ── Consumers (Edge mapping cache) ─────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS consumers (
   id                 VARCHAR(64)  NOT NULL,
   user_id            VARCHAR(64)  NOT NULL,
+  application_id     VARCHAR(64)  DEFAULT NULL,
   namespace          VARCHAR(128) NOT NULL,
+  -- Emulates SQLite's `(user_id, namespace, COALESCE(application_id, ''))`.
+  identity_key       VARCHAR(320)
+                       GENERATED ALWAYS AS (
+                         CONCAT(user_id, ':', namespace, ':', COALESCE(application_id, ''))
+                       ) VIRTUAL,
   ferrum_consumer_id VARCHAR(128) NOT NULL,
   ferrum_username    VARCHAR(255) NOT NULL,
   created_at         VARCHAR(32)  NOT NULL,
   updated_at         VARCHAR(32)  NOT NULL,
   PRIMARY KEY (id),
-  UNIQUE KEY ux_consumers_user_namespace (user_id, namespace),
+  UNIQUE KEY ux_consumers_user_namespace (identity_key),
+  KEY ix_consumers_application (application_id),
   UNIQUE KEY ux_consumers_ferrum_id (namespace, ferrum_consumer_id),
   UNIQUE KEY ux_consumers_username (namespace, ferrum_username),
-  CONSTRAINT fk_consumers_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+  CONSTRAINT fk_consumers_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+  CONSTRAINT fk_consumers_application
+    FOREIGN KEY (application_id) REFERENCES applications (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 -- ── Credential metadata (show-once: fingerprint + last4 only) ──────────────
 CREATE TABLE IF NOT EXISTS credential_metadata (
   id                   VARCHAR(64)  NOT NULL,
+  edge_ordinal         INT DEFAULT NULL,
   user_id              VARCHAR(64)  NOT NULL,
+  application_id       VARCHAR(64)  DEFAULT NULL,
   ferrum_consumer_id   VARCHAR(128) NOT NULL,
   credential_type      VARCHAR(32)  NOT NULL,
   ferrum_credential_id VARCHAR(128) NOT NULL,
@@ -255,21 +346,25 @@ CREATE TABLE IF NOT EXISTS credential_metadata (
   rotated_from_id      VARCHAR(64)  DEFAULT NULL,
   created_at           VARCHAR(32)  NOT NULL,
   updated_at           VARCHAR(32)  NOT NULL,
+  UNIQUE KEY ux_credentials_ordinal (ferrum_consumer_id, credential_type, edge_ordinal),
   PRIMARY KEY (id),
   UNIQUE KEY ux_credentials_fingerprint (fingerprint),
   KEY ix_credentials_user_status (user_id, status),
+  KEY ix_credentials_application (application_id, status),
   KEY ix_credentials_consumer (ferrum_consumer_id, credential_type, created_at),
   CONSTRAINT ck_credentials_type CHECK (credential_type IN ('keyauth', 'basicauth', 'jwt')),
   CONSTRAINT ck_credentials_status CHECK (status IN ('active', 'retiring', 'revoked')),
   CONSTRAINT fk_credentials_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
   CONSTRAINT fk_credentials_rotated_from
-    FOREIGN KEY (rotated_from_id) REFERENCES credential_metadata (id) ON DELETE SET NULL
+    FOREIGN KEY (rotated_from_id) REFERENCES credential_metadata (id) ON DELETE SET NULL,
+  CONSTRAINT fk_credentials_application
+    FOREIGN KEY (application_id) REFERENCES applications (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 -- ── Messaging ──────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS message_threads (
   id              VARCHAR(64)  NOT NULL,
-  subject         VARCHAR(255) NOT NULL,
+  subject         VARCHAR(300) NOT NULL,
   api_id          VARCHAR(64)  DEFAULT NULL,
   created_by      VARCHAR(64)  NOT NULL,
   participant_a   VARCHAR(64)  NOT NULL,
@@ -291,11 +386,14 @@ CREATE TABLE IF NOT EXISTS message_threads (
 
 CREATE TABLE IF NOT EXISTS messages (
   id             VARCHAR(64) NOT NULL,
+  broadcast      TINYINT NOT NULL DEFAULT 0,
   thread_id      VARCHAR(64) NOT NULL,
   sender_user_id VARCHAR(64) NOT NULL,
   body           TEXT        NOT NULL,
   created_at     VARCHAR(32) NOT NULL,
   updated_at     VARCHAR(32) NOT NULL,
+  CONSTRAINT ck_messages_broadcast CHECK (broadcast IN (0, 1)),
+  KEY ix_messages_sender (sender_user_id, created_at),
   PRIMARY KEY (id),
   KEY ix_messages_thread (thread_id, created_at),
   CONSTRAINT fk_messages_thread
@@ -309,7 +407,7 @@ CREATE TABLE IF NOT EXISTS notifications (
   id         VARCHAR(64)  NOT NULL,
   user_id    VARCHAR(64)  NOT NULL,
   type       VARCHAR(64)  NOT NULL,
-  title      VARCHAR(255) NOT NULL,
+  title      VARCHAR(300) NOT NULL,
   body       TEXT         NOT NULL,
   link       VARCHAR(512) DEFAULT NULL,
   read_at    VARCHAR(32)  DEFAULT NULL,
@@ -327,6 +425,7 @@ CREATE TABLE IF NOT EXISTS notifications (
 -- ── Email outbox ───────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS email_outbox (
   id              VARCHAR(64)  NOT NULL,
+  generation      VARCHAR(64) NOT NULL DEFAULT '',
   to_email        VARCHAR(320) NOT NULL,
   subject         VARCHAR(998) NOT NULL,
   body_html       LONGTEXT     NOT NULL,
@@ -392,16 +491,92 @@ CREATE TABLE IF NOT EXISTS email_templates (
 -- ── Email verification tokens ──────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS email_verification_tokens (
   id         VARCHAR(64)  NOT NULL,
+  purpose    VARCHAR(32) NOT NULL DEFAULT 'email_verification',
   user_id    VARCHAR(64)  NOT NULL,
   token_hash VARCHAR(255) NOT NULL,
   expires_at VARCHAR(32)  NOT NULL,
   used_at    VARCHAR(32)  DEFAULT NULL,
   created_at VARCHAR(32)  NOT NULL,
   updated_at VARCHAR(32)  NOT NULL,
+  KEY ix_verification_tokens_user_purpose (user_id, purpose),
   PRIMARY KEY (id),
   UNIQUE KEY ux_verification_tokens_hash (token_hash),
   KEY ix_verification_tokens_user (user_id),
   KEY ix_verification_tokens_expires (expires_at),
   CONSTRAINT fk_verification_tokens_user
     FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- ── Email token issue claims ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS email_token_issue_claims (
+  user_id   VARCHAR(64) NOT NULL,
+  purpose   VARCHAR(32) NOT NULL,
+  issued_at VARCHAR(30) NOT NULL,
+  PRIMARY KEY (user_id, purpose),
+  CONSTRAINT fk_token_issue_claim_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- ── API palette plugins ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS api_plugins (
+  id                      VARCHAR(64) NOT NULL,
+  ferrum_plugin_config_id VARCHAR(64) DEFAULT NULL,
+  api_id                  VARCHAR(64) NOT NULL,
+  plugin_name             VARCHAR(64) NOT NULL,
+  enabled                 TINYINT     NOT NULL DEFAULT 1,
+  config_json             LONGTEXT    NOT NULL,
+  trigger_json            LONGTEXT    DEFAULT NULL,
+  created_at              VARCHAR(32) NOT NULL,
+  updated_at              VARCHAR(32) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY ux_api_plugins_api_name (api_id, plugin_name),
+  KEY ix_api_plugins_api (api_id, created_at),
+  CONSTRAINT ck_api_plugins_enabled CHECK (enabled IN (0, 1)),
+  CONSTRAINT fk_api_plugins_api FOREIGN KEY (api_id) REFERENCES apis (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- ── Gateway teardown jobs ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS gateway_teardown_jobs (
+  id              VARCHAR(64) NOT NULL,
+  generation      VARCHAR(64) NOT NULL DEFAULT '',
+  user_id         VARCHAR(64) NOT NULL,
+  status          VARCHAR(16) NOT NULL DEFAULT 'pending',
+  attempts        INT         NOT NULL DEFAULT 0,
+  next_attempt_at VARCHAR(32) DEFAULT NULL,
+  last_error      TEXT,
+  requested_by    VARCHAR(64) DEFAULT NULL,
+  created_at      VARCHAR(32) NOT NULL,
+  updated_at      VARCHAR(32) NOT NULL,
+  completed_at    VARCHAR(32) DEFAULT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY ux_gateway_teardown_jobs_user (user_id),
+  KEY ix_gateway_teardown_jobs_due (status, next_attempt_at),
+  CONSTRAINT ck_gateway_teardown_jobs_status CHECK (status IN ('pending', 'sending', 'done')),
+  CONSTRAINT fk_gateway_teardown_jobs_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+  CONSTRAINT fk_gateway_teardown_jobs_requested_by FOREIGN KEY (requested_by) REFERENCES users (id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- ── Edge leases ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS edge_leases (
+  `key`      VARCHAR(255) NOT NULL,
+  owner      VARCHAR(64)  NOT NULL,
+  expires_at VARCHAR(32)  NOT NULL,
+  created_at VARCHAR(32)  NOT NULL,
+  updated_at VARCHAR(32)  NOT NULL,
+  PRIMARY KEY (`key`),
+  KEY ix_edge_leases_expires (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- ── Gateway identities ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS gateway_identities (
+  id                 VARCHAR(64)  NOT NULL,
+  user_id            VARCHAR(64)  NOT NULL,
+  namespace          VARCHAR(128) NOT NULL,
+  ferrum_username    VARCHAR(255) NOT NULL,
+  ferrum_consumer_id VARCHAR(128) DEFAULT NULL,
+  created_at         VARCHAR(32)  NOT NULL,
+  updated_at         VARCHAR(32)  NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY ux_gateway_identities_username (namespace, ferrum_username),
+  KEY ix_gateway_identities_user (user_id, namespace),
+  CONSTRAINT fk_gateway_identities_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;

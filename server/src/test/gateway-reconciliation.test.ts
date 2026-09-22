@@ -313,10 +313,15 @@ describe('gateway reference reconciliation', () => {
     assert.equal(details.revoked_credentials, 1);
   });
 
-  it('clears the dead proxy id and flags the API for republishing', async () => {
+  it('clears the dead proxy id and flags the API for restoration', async () => {
     const flagged = await harness.store.apis.findById(apiId);
     assert.equal(flagged?.ferrum_proxy_id, null, 'the dead proxy id is gone');
     assert.equal(flagged?.status, 'published', 'the catalog entry itself is untouched');
+    assert.equal(
+      flagged?.gateway_state,
+      'repair_required',
+      'clearing the reference does not erase the unresolved deployment condition',
+    );
 
     const rows = await harness.auditRows(AuditAction.API_GATEWAY_REPAIR_REQUIRED);
     const row = rows.find((entry) => entry.target_id === apiId);
@@ -330,19 +335,23 @@ describe('gateway reference reconciliation', () => {
       user_id: provider.user.id,
     });
     assert.ok(
-      notifications.items.some((entry) => entry.title === 'Republish required'),
-      'the API owner is asked to republish',
+      notifications.items.some((entry) => entry.title === 'Gateway deployment missing'),
+      'the API owner is told the deployment is gone',
     );
   });
 
-  it('reports a clean pass once every reference has been repaired', async () => {
+  it('keeps reporting the API whose deployment the repair did not rebuild', async () => {
     const report = await harness.services.reconciliation.scan();
-    assert.equal(report.status, 'ok');
     assert.equal(report.consumers.orphaned, 0);
     assert.equal(report.proxies.orphaned, 0, 'a cleared proxy id is no longer a reference at all');
+    // The point of issue #284: the repair cleared the reference the scan used
+    // to find, and the API still has no deployment. A clean verdict here would
+    // be the portal reporting health it cannot see.
+    assert.equal(report.awaiting_restore, 1);
+    assert.equal(report.status, 'orphaned');
 
     const health = await harness.app.inject({ method: 'GET', url: '/api/health' });
-    assert.equal(health.json<AppHealth>().status, 'ok');
+    assert.equal(health.json<AppHealth>().status, 'degraded');
   });
 
   it('refuses a repair that names neither a target nor `all`', async () => {

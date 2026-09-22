@@ -32,12 +32,8 @@
  * replace or delete. Resolving by name did exactly that: an unchanged palette
  * save deleted it, silently (issue #153).
  *
- * A row written before the column existed carries no id, so the first save or
- * removal after the upgrade backfills one by matching the plugin name on the
- * proxy — the rule that resolved it then. Exactly one match is adopted; when
- * there are several the first is adopted and the rest are left alone. Adopting
- * the wrong config is recoverable by hand; deleting somebody's security control
- * is not.
+ * A row without a recorded config id owns no gateway config. Saving it creates
+ * a new config and records that id; removal leaves unowned configs alone.
  *
  * ## Ordering, and what a failure leaves behind
  *
@@ -78,7 +74,12 @@ import {
 import { AuditAction, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type { ApiPluginRecord, NexusStore, UserRecord } from '../db/store.js';
-import { incompatiblePaletteSibling, palettePriority } from '../ferrum-admin/palette.js';
+import {
+  edgeTriggerFor,
+  incompatiblePaletteSibling,
+  paletteGatewaySettings,
+  palettePriority,
+} from '../ferrum-admin/palette.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import type {
   EdgePluginConfig,
@@ -160,29 +161,6 @@ function present(row: ApiPluginRecord): ApiPlugin {
   };
 }
 
-/**
- * Compile the portal's trigger into the predicate tree Edge expects.
- *
- * A node sets **exactly one** of `all`/`any`/`not`/`match`, and a `match` leaf
- * sets exactly one predicate, so two conditions become an `all` of two leaves
- * and one condition stays a bare leaf — an `all` with a single child would be
- * accepted but is noise in the stored document.
- */
-export function edgeTriggerFor(trigger: ApiPluginTrigger | null): EdgePluginTrigger | null {
-  if (trigger === null) return null;
-  const leaves: Record<string, unknown>[] = [];
-  if (trigger.methods !== undefined && trigger.methods.length > 0) {
-    leaves.push({ match: { method: [...trigger.methods] } });
-  }
-  if (trigger.path_prefix !== undefined && trigger.path_prefix !== '') {
-    leaves.push({ match: { path: { prefix: [trigger.path_prefix] } } });
-  }
-  if (leaves.length === 0) return null;
-  const first = leaves[0];
-  if (leaves.length === 1 && first !== undefined) return { when: first };
-  return { when: { all: leaves } };
-}
-
 /** Build the palette service. */
 export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPluginsService {
   const { config, store, edge, audit, publishing } = deps;
@@ -237,30 +215,13 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
    * keys are *rejected* outside `sync_mode: 'redis'`, so nothing is sent at all
    * in the local case.
    */
-  function gatewaySettings(
-    descriptor: ProviderPluginDescriptor,
-    settings: Record<string, unknown>,
-  ): EdgePluginSettings {
-    if (descriptor.name !== 'request_deduplication') return settings;
-    const sync = config.edge.rateLimit;
-    if (sync.syncMode !== 'redis' || sync.redisUrl === undefined) return settings;
-    return {
-      ...settings,
-      sync_mode: 'redis',
-      redis_url: sync.redisUrl,
-      redis_tls: sync.redisTls,
-    };
-  }
 
   /**
    * The gateway config this API's palette row owns, or `undefined` when there
    * is none to reuse and a fresh one has to be created.
    *
-   * The recorded id is the whole answer, with one exception: a row written
-   * before the column existed carries none, so it is backfilled by matching the
-   * plugin name — how ownership was resolved then. A single match is adopted;
-   * with several, the first is, and every other config of that name is left
-   * exactly where it is (issue #153).
+   * Ownership requires a recorded id. A missing id never authorizes adopting
+   * or deleting an operator's config with the same plugin name.
    *
    * A recorded id that is no longer on the proxy means an operator deleted the
    * config by hand. That is not an error and not a licence to adopt whatever
@@ -271,9 +232,8 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
     onProxy: EdgePluginConfig[],
     pluginName: string,
   ): EdgePluginConfig | undefined {
-    if (!row) return undefined;
+    if (!row?.ferrum_plugin_config_id) return undefined;
     const named = onProxy.filter((plugin) => plugin.plugin_name === pluginName);
-    if (row.ferrum_plugin_config_id === null) return named[0];
     return named.find((plugin) => plugin.id === row.ferrum_plugin_config_id);
   }
 
@@ -345,7 +305,7 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
               target.proxyId,
               existing,
               pluginName,
-              gatewaySettings(descriptor, input.config),
+              paletteGatewaySettings(descriptor.name, input.config, config.edge.rateLimit),
               actor.id,
               undo,
               { enabled: input.enabled, trigger, priorityOverride },
