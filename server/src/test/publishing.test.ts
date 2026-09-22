@@ -5116,6 +5116,7 @@ describe('publishing rate limit', () => {
   let harness: TestApp;
   let first: TestSession;
   let second: TestSession;
+  let revisionDiffUser: TestSession;
 
   before(async () => {
     // The limiter is forced off under `NEXUS_ENV=test`, so this app runs as a
@@ -5127,6 +5128,10 @@ describe('publishing rate limit', () => {
     await harness.registerUser({ email: 'limit-founder@example.test' });
     first = await harness.registerUser({ email: 'limit-one@example.test', role: 'provider' });
     second = await harness.registerUser({ email: 'limit-two@example.test', role: 'provider' });
+    revisionDiffUser = await harness.registerUser({
+      email: 'limit-revision-diff@example.test',
+      role: 'provider',
+    });
   });
 
   after(async () => {
@@ -5175,9 +5180,22 @@ describe('publishing rate limit', () => {
     assert.equal(other.statusCode, 404, other.body);
   });
 
+  it('rate limits revision diffs because they parse and compare two specifications', async () => {
+    const missing = '00000000-0000-4000-8000-000000000000';
+    const url = `/api/apis/${missing}/revisions/${missing}/diff`;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const response = await harness.authed(revisionDiffUser, { method: 'GET', url });
+      assert.equal(response.statusCode, 404, response.body);
+    }
+
+    const refused = await harness.authed(revisionDiffUser, { method: 'GET', url });
+    assert.equal(refused.statusCode, 429, refused.body);
+    assert.equal(errorCode(refused.body), 'RATE_LIMITED');
+  });
+
   it('leaves the reads alone', async () => {
-    // The provider's own list is cheap and the SPA polls it; only the mutations
-    // carry the limit.
+    // The provider's own list is cheap and the SPA polls it, so it remains
+    // unlimited. Expensive revision diffs are the deliberate read-only exception.
     for (let attempt = 0; attempt < 40; attempt += 1) {
       const response = await harness.authed(first, { method: 'GET', url: '/api/apis' });
       assert.equal(response.statusCode, 200, response.body);

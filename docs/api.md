@@ -1646,15 +1646,23 @@ Spec documents arrive as a JSON string field, not a multipart upload — the SPA
 reads the file client-side, which keeps the CSRF story and the error shape
 identical to every other route.
 
-**Two `429`s apply to the mutating routes here** — `POST /`, `PUT /:id/spec`,
-`PATCH /:id`, `DELETE /:id`, `PUT|DELETE /:id/plugins/:name` and
-`POST /:id/test-consumer`:
+**Two `429`s apply here.**
 
-- `429 RATE_LIMITED` — more than **30 of them per minute** from one account
-  (falling back to the IP for an anonymous caller). Installed when
-  `NEXUS_RATE_LIMIT_ENABLED=true`, which is the default outside
-  `NEXUS_ENV=test`. Reads are not limited, apart from `GET /:id/usage`, which
-  keeps its own 30/min limit because it scrapes the gateway.
+- `429 RATE_LIMITED` — more than **30 requests per minute** from one account
+  (falling back to the IP for an anonymous caller) to any one of these routes;
+  each route counts separately:
+  - the mutations — `POST /`, `PATCH /:id`, `DELETE /:id`, `PUT /:id/spec`,
+    `PUT|DELETE /:id/plugins/:name`, `POST /:id/viewers`,
+    `DELETE /:id/viewers/:userId`, `POST /:id/revisions/:revisionId/rollback`,
+    `POST /:id/restore-gateway` and `POST /:id/test-consumer`;
+  - the two spec diffs — `GET /:id/revisions/:revisionId/diff` and
+    `POST /:id/spec/diff` — which change nothing but parse and compare two
+    whole documents on every call.
+
+  Installed when `NEXUS_RATE_LIMIT_ENABLED=true`, which is the default outside
+  `NEXUS_ENV=test`. Other reads are not limited, apart from `GET /:id/usage`,
+  which keeps its own 30/min limit because it scrapes the gateway.
+
 - `429 QUOTA_EXCEEDED` — on `POST /` only, when the account already owns
   `NEXUS_MAX_APIS_PER_OWNER` APIs (default 50; `0` disables the ceiling). The
   body carries `details: { limit, current, setting }`. The check runs before the
