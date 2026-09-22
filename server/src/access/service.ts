@@ -660,6 +660,17 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
 
       const api = await store.apis.findById(apiId);
       if (!api) throw notFound('API', apiId);
+      // `internal` is deliberately not gated: it is unlisted rather than private.
+      // For `private`, conceal the API before emitting any state-dependent error.
+      // This mirrors the catalog's owner/admin/grantee/authorized-viewer rule.
+      if (api.visibility === 'private') {
+        const isInsider =
+          api.owner_user_id === user.id ||
+          roleAtLeast(user.role, 'admin') ||
+          (await store.grants.findActiveByApiAndUser(api.id, user.id)) !== null ||
+          (await store.apiViewers.find(api.id, user.id)) !== null;
+        if (!isInsider) throw notFound('API', apiId);
+      }
       if (api.owner_user_id === user.id) {
         throw conflict('You already own this API');
       }
@@ -669,23 +680,6 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       if (!api.requestable) {
         throw conflict('This API does not accept access requests');
       }
-      // `internal` is deliberately *not* gated here. It means unlisted, not
-      // private (see `catalog/service.ts`): a provider hands out the link and
-      // the recipient requests access through the normal flow. Gating that
-      // would make `internal` + `requestable` a combination nobody could ever
-      // act on.
-      //
-      // `private` is gated, because there the provider-initiated path exists:
-      // an account that cannot see the API cannot ask for it either, and a
-      // request that got through would confirm the API's existence to somebody
-      // who was never shown it. The check mirrors the catalog's read rule —
-      // an authorized viewer may request access exactly like any other client
-      // — and answers `NOT_FOUND` rather than `FORBIDDEN` for the same reason
-      // the catalog does (issue #288).
-      if (api.visibility === 'private' && !(await store.apiViewers.find(api.id, user.id))) {
-        throw notFound('API', apiId);
-      }
-
       if (await store.grants.findActiveByApiAndUser(api.id, user.id, applicationId)) {
         throw conflict(
           applicationId === null

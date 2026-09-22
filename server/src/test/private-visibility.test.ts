@@ -48,6 +48,7 @@ describe('private API visibility', () => {
   async function publish(
     slug: string,
     visibility: 'public' | 'internal' | 'private',
+    requestable = true,
   ): Promise<string> {
     const response = await harness.authed(provider, {
       method: 'POST',
@@ -57,7 +58,7 @@ describe('private API visibility', () => {
         slug,
         spec: SAMPLE_SPEC_YAML,
         auth_plugin: 'key_auth',
-        requestable: true,
+        requestable,
         visibility,
       },
     });
@@ -138,6 +139,34 @@ describe('private API visibility', () => {
       payload: { api_id: privateId, justification: 'Let me in' },
     });
     assert.equal(response.statusCode, 404, response.body);
+  });
+
+  it('conceals private API state before returning requestability errors', async () => {
+    const notRequestableId = await publish('vis-private-closed', 'private', false);
+    const retiredId = await publish('vis-private-retired', 'private');
+    const retired = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${retiredId}`,
+      payload: { status: 'retired' },
+    });
+    assert.equal(retired.statusCode, 200, retired.body);
+
+    for (const apiId of [notRequestableId, retiredId]) {
+      const concealed = await harness.authed(stranger, {
+        method: 'POST',
+        url: '/api/access-requests',
+        payload: { api_id: apiId, justification: 'Tell me about it' },
+      });
+      assert.equal(concealed.statusCode, 404, concealed.body);
+    }
+
+    const adminResponse = await harness.authed(admin, {
+      method: 'POST',
+      url: '/api/access-requests',
+      payload: { api_id: notRequestableId, justification: 'Administrative check' },
+    });
+    assert.equal(adminResponse.statusCode, 409, adminResponse.body);
+    assert.match(adminResponse.body, /does not accept access requests/);
   });
 
   it('shows it to the owner and to administrators', async () => {
@@ -307,6 +336,14 @@ describe('private API visibility', () => {
     assert.ok(!(await harness.store.apiViewers.find(privateId, partner.user.id)));
     assert.ok((await browse(partner)).includes(privateSlug));
     assert.equal(await openDetail(partner, privateSlug), 200);
+
+    const requestedAgain = await harness.authed(partner, {
+      method: 'POST',
+      url: '/api/access-requests',
+      payload: { api_id: privateId, justification: 'Again' },
+    });
+    assert.equal(requestedAgain.statusCode, 409, requestedAgain.body);
+    assert.match(requestedAgain.body, /already have access/);
   });
 
   it('leaves public APIs alone throughout', async () => {
