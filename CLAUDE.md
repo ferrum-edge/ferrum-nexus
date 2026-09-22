@@ -59,7 +59,7 @@ Backend tests boot the full Fastify app against in-memory SQLite plus a mock Fer
 
 **Cross-adapter smoke tests** ([server/src/test/smoke.test.ts](server/src/test/smoke.test.ts)) run SQLite by default and opt into Postgres/MySQL/Mongo via `NEXUS_TEST_POSTGRES_URL`, `NEXUS_TEST_MYSQL_URL`, `NEXUS_TEST_MONGO_URL` (throwaway databases/schemas are created and dropped per run). Set those — e.g. against disposable Docker containers — whenever you change anything under `server/src/db/`.
 
-**Acceptance suite** ([e2e/](e2e/)) runs the **packaged container image** against a real, digest-pinned Ferrum Edge release, PostgreSQL, a deterministic upstream and a real SMTP sink — with a browser journey and data-plane assertions made through the gateway's listener rather than its Admin API. `./e2e/run.sh` brings the stack up, runs it and tears it down; CI runs it as the `acceptance` job (not a ruleset-required check, but treat a failure as blocking). The Edge pin lives only in `e2e/.env.example`. Run it for anything that changes what Nexus writes to Edge, the auth/credential contract, or the container image.
+**Acceptance suite** ([e2e/](e2e/)) runs the **packaged container image** against a real, digest-pinned Ferrum Edge release, PostgreSQL, a deterministic upstream and a real SMTP sink — with a browser journey and data-plane assertions made through the gateway's listener rather than its Admin API. `./e2e/run.sh` brings the stack up, runs it and tears it down; CI runs it as the `acceptance` job, a required check on `main`. The Edge pin lives only in `e2e/.env.example`. Run it for anything that changes what Nexus writes to Edge, the auth/credential contract, or the container image.
 
 ## Architecture rules that affect every change
 

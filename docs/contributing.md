@@ -139,13 +139,12 @@ they reached the backend.
 E2E_KEEP=1 ./e2e/run.sh   # leave the stack up to poke at
 ```
 
-It runs as the `acceptance` job on every push and pull request, and it is the
-release validation path: a change that makes a real gateway refuse a request the
-portal says it approved is exactly what it exists to stop shipping. It is **not**
-one of the `main` ruleset's required checks, so a red `acceptance` does not block
-the merge button by itself — treat it as blocking anyway. Run it locally for
-anything that changes what Nexus writes to Edge, the authentication or
-credential contract, or the container image.
+It runs as the `acceptance` job on every push and pull request and is one of
+the `main` ruleset's **required checks**, so a red run blocks the merge. It is
+the release validation path: a change that makes a real gateway refuse a
+request the portal says it approved is exactly what it exists to stop shipping.
+Run it locally for anything that changes what Nexus writes to Edge, the
+authentication or credential contract, or the container image.
 
 The Edge release is pinned **by digest** in one place, `e2e/.env.example`. The
 CI workflow does not repeat it: `run.sh` generates `e2e/.env` from that file
