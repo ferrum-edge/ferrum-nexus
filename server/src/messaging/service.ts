@@ -72,6 +72,7 @@ import {
   type Uuid,
 } from '@ferrum-nexus/shared';
 
+import { canViewApi, resolveReadAccess } from '../catalog/read-access.js';
 import { AuditAction, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type {
@@ -503,7 +504,22 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
       let apiId: Uuid | null = null;
       if (input.apiId) {
         const api = await store.apis.findById(input.apiId);
-        if (!api) throw notFound('API', input.apiId);
+        // A private API the sender cannot read is reported as absent, exactly
+        // as the catalog reports it. Attaching a thread to it would otherwise
+        // be a metadata read by another route: the thread — in this response
+        // and in every listing after it — embeds the API's name, slug and
+        // listen path (issue #288).
+        //
+        // `internal` and `retired` are not gated here. Neither is secret, and
+        // asking a provider about an API somebody has only a link to, or one
+        // that was retired, is what the messaging surface is for.
+        if (
+          !api ||
+          (api.visibility === 'private' &&
+            !canViewApi(input.actor, api, await resolveReadAccess(store, input.actor, api)))
+        ) {
+          throw notFound('API', input.apiId);
+        }
         apiId = api.id;
       }
 
