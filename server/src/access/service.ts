@@ -11,8 +11,9 @@
  *
  * The `access_control` plugin attached to the API's proxy is written **once**,
  * at publish time, and never touched again — approvals contend on one consumer
- * row rather than on a plugin config shared by every approved user
- * (`ref-edge-admin.md` §7.5).
+ * row rather than on a plugin config shared by every approved user, and a
+ * consumer an `access_control` config names cannot be deleted (Edge
+ * `docs/admin_api.md`, "Consumers").
  *
  * ## Ordering matters, and so does serialisation
  *
@@ -80,6 +81,7 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { AuditAction, type AuditService } from '../audit/service.js';
+import { canViewApi, resolveReadAccess } from '../catalog/read-access.js';
 import type { NexusConfig } from '../config/index.js';
 import type {
   AccessRequestFilter,
@@ -660,28 +662,22 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
 
       const api = await store.apis.findById(apiId);
       if (!api) throw notFound('API', apiId);
-      // `internal` is deliberately *not* gated here. It means unlisted, not
-      // private (see `catalog/service.ts`): a provider hands out the link and
-      // the recipient requests access through the normal flow. Gating that
-      // would make `internal` + `requestable` a combination nobody could ever
-      // act on.
+      // `private` is gated, and gated **first**. An account that cannot see the
+      // API cannot ask for it, and every check below answers differently —
+      // "retired", "does not accept requests" — so running any of them before
+      // this one would turn a guessed id into an existence oracle. The rule is
+      // the catalog's (`read-access.ts`): an authorized viewer, or an account
+      // already holding a grant through any of its identities, may request
+      // access like any other client (issue #288).
       //
-      // `private` is gated, because there the provider-initiated path exists:
-      // an account that cannot see the API cannot ask for it either, and a
-      // request that got through would confirm the API's existence to somebody
-      // who was never shown it. The check mirrors the catalog's `isInsider` —
-      // owner, admin, active grantee or authorized viewer — and answers
-      // `NOT_FOUND` rather than `FORBIDDEN` for the same reason the catalog
-      // does (issue #288). It runs before every state-dependent `CONFLICT`
-      // below, since "already owned", "retired" and "not requestable" would
-      // each confirm the API to an outsider just as surely.
-      if (api.visibility === 'private') {
-        const isInsider =
-          api.owner_user_id === user.id ||
-          roleAtLeast(user.role, 'admin') ||
-          (await store.grants.findActiveByApiAndUser(api.id, user.id)) !== null ||
-          (await store.apiViewers.find(api.id, user.id)) !== null;
-        if (!isInsider) throw notFound('API', apiId);
+      // `internal` is deliberately *not* gated. It means unlisted, not private:
+      // a provider hands out the link and the recipient requests access through
+      // the normal flow.
+      if (
+        api.visibility === 'private' &&
+        !canViewApi(user, api, await resolveReadAccess(store, user, api))
+      ) {
+        throw notFound('API', apiId);
       }
       if (api.owner_user_id === user.id) {
         throw conflict('You already own this API');
@@ -791,6 +787,19 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         }
         if (request.status !== 'pending') {
           throw conflict(`This request is already ${request.status}`);
+        }
+        // A request filed for an application while it was active is still
+        // pending after the application is disabled, and "disabled acquires no
+        // new access" has to hold here too — a check at request time alone
+        // does not cover it. Checked inside the lease, before the decision is
+        // claimed, so the request is left pending for when it is re-enabled.
+        if (request.application_id !== null) {
+          const application = await store.applications.findById(request.application_id);
+          if (!application || application.status !== 'active') {
+            throw conflict('The application this request is for is disabled', {
+              application_id: request.application_id,
+            });
+          }
         }
         // Scoped to the requesting identity: an account holding an
         // account-scoped grant may still request one for an application of

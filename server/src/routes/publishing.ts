@@ -597,6 +597,7 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
 
   app.get(
     '/:id/revisions/:revisionId/diff',
+    { config: MUTATION_RATE_LIMIT },
     async (request): Promise<GetApiRevisionDiffResponse> => {
       const { user } = requireAuth(request);
       const { id, revisionId } = parseOrThrow(revisionParamsSchema, request.params);

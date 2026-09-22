@@ -7,8 +7,8 @@
  * stores only a SHA-256 fingerprint and the last four characters. Even if that
  * discipline slipped, Edge would still hold the line: every ordinary Admin API
  * response redacts `keyauth.key` and `jwt.secret` to the literal `[REDACTED]`
- * and omits `basicauth` entirely (`ref-edge-admin.md` §4.5). There is no read
- * path back to the plaintext on either side.
+ * and omits `basicauth` entirely (Edge `docs/admin_api.md`, "Consumers"). There
+ * is no read path back to the plaintext on either side.
  *
  * ## Credential shapes, and why they are not what a portal would guess
  *
@@ -345,6 +345,9 @@ export interface IssueForConsumerInput {
    */
   ip?: string | null;
 }
+
+/** The key {@link CredentialsService.restoreGatewayAccess} uses for the account's own identity. */
+const ACCOUNT_IDENTITY = 'account';
 
 /** Credential operations. */
 export interface CredentialsService {
@@ -1616,14 +1619,27 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // re-enabling an account that restored only the canonical consumer would
       // leave every application it owns silently without access (issue #289).
       const consumers = await provisioner.listConsumers(userId);
-      if (consumers.length === 0) {
-        if ((await store.grants.listActiveByUser(userId)).length > 0) {
-          throw edgeError('Active grants have no gateway consumer mapping');
-        }
-        // A provider with only disposable test identities needs no canonical
-        // consumer, and re-enabling must not recreate those identities.
-        return;
+      // Every identity that holds an active grant must still have a mapping to
+      // restore it onto. Checked per identity, not "is there any mapping at
+      // all": an account whose applications kept theirs but whose own mapping
+      // went missing would otherwise have its account-scoped grants silently
+      // skipped, and a re-enable that reports success while leaving access
+      // unrestored is worse than one that fails and says why.
+      const mapped = new Set(consumers.map((row) => row.application_id ?? ACCOUNT_IDENTITY));
+      const granted = new Set(
+        (await store.grants.listActiveByUser(userId)).map(
+          (grant) => grant.application_id ?? ACCOUNT_IDENTITY,
+        ),
+      );
+      const unmapped = [...granted].filter((identity) => !mapped.has(identity));
+      if (unmapped.length > 0) {
+        throw edgeError('Active grants have no gateway consumer mapping', {
+          identities: unmapped,
+        });
       }
+      // A provider with only disposable test identities needs no consumer, and
+      // re-enabling must not recreate those identities.
+      if (consumers.length === 0) return;
       for (const consumer of consumers) {
         await edge.serializePerKey(consumer.ferrum_consumer_id, async () => {
           const owner = await store.users.findById(userId);
@@ -1856,6 +1872,18 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         // The owner, not the actor: an admin rotating somebody else's key must
         // not be able to hand a disabled account a working one.
         await assertOwnerActive(current.user_id);
+        // Nor a disabled *application*. Rotation mints a new secret, and a
+        // disabled application acquires no new credentials — the documented
+        // contract. Revoking stays allowed: it takes access away.
+        if (current.application_id !== null) {
+          const application = await store.applications.findById(current.application_id);
+          if (!application || application.status !== 'active') {
+            throw conflict(
+              'This credential belongs to a disabled application; re-enable it to rotate, or revoke the credential',
+              { application_id: current.application_id },
+            );
+          }
+        }
 
         const consumer = await edge.consumers.get(consumerId);
         if (!consumer) throw edgeError('The gateway consumer for this credential no longer exists');

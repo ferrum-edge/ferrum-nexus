@@ -465,9 +465,16 @@ Plugin configs are closed key sets; a typo is a 400. What Nexus sends:
 
 - **auth plugins** — `{}` for all three. `key_auth` defaults to
   `header:X-API-Key` + `hide_credentials: true`, which is exactly what the
-  portal documents; `basic_auth`'s config **must** be `{}` or `null`;
-  `jwt_auth` defaults to `token_lookup: header:Authorization` and
-  `consumer_claim_field: sub`.
+  portal documents; `basic_auth` accepts only `hide_credentials`, which also
+  defaults to `true`; `jwt_auth` defaults to
+  `token_lookup: header:Authorization` and `consumer_claim_field: sub`. Edge
+  has no `hide_credentials` for `jwt_auth` — its config is a closed key set
+  that refuses one — so a bearer token is forwarded to the provider's upstream
+  where a key or a Basic password is stripped. The asymmetry is Edge's, not a
+  Nexus default: it is documented in [`api.md`](api.md),
+  [`security.md`](security.md#5-show-once-credentials) §5 and the client and
+  provider guides, and pinned against the real gateway by
+  `e2e/src/dataplane.test.ts`.
 - **`access_control`** — `{ allowed_groups: ['nexus:api:<api_id>:approved'] }`,
   and nothing else. Never `allowed_consumers`.
 - **`rate_limiting`** — `limit_by: 'consumer'`, `expose_headers: true`, and a

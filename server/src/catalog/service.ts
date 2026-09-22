@@ -92,6 +92,7 @@ import type {
 } from '../db/store.js';
 import { notFound, specInvalid } from '../lib/errors.js';
 import { parseOpenApiSpec, type ParsedSpec } from '../publishing/oas.js';
+import { canListApi, canViewApi, resolveReadAccess, type ApiReadAccess } from './read-access.js';
 import { presentApi, type GatewayUrlSource } from '../publishing/present.js';
 import { rewriteSpecServers } from '../publishing/spec-document.js';
 
@@ -116,24 +117,9 @@ export interface CatalogService {
   /** The normalized current spec with gateway servers, when the caller may see the API. */
   spec(viewer: UserRecord, slug: string): Promise<CatalogSpecResponse>;
   /** Whether `api` appears in `viewer`'s browse list. */
-  canList(viewer: UserRecord, api: ApiRecord, access: CatalogViewerAccess): boolean;
+  canList(viewer: UserRecord, api: ApiRecord, access: ApiReadAccess): boolean;
   /** Whether `viewer` may open `api`'s detail page and read its spec. */
-  canView(viewer: UserRecord, api: ApiRecord, access: CatalogViewerAccess): boolean;
-}
-
-/**
- * One viewer's standing relative to one API, for the permission checks.
- *
- * Two booleans rather than one, because they are two different permissions
- * that happen to widen the same answer. A grant lets an account *call* the
- * API; an authorization only lets it *read the documentation*. Collapsing them
- * would make the next reader believe an invited viewer can invoke.
- */
-export interface CatalogViewerAccess {
-  /** The viewer holds an active grant — they may call the API. */
-  hasGrant: boolean;
-  /** The provider authorized them to read the documentation. */
-  isAuthorizedViewer: boolean;
+  canView(viewer: UserRecord, api: ApiRecord, access: ApiReadAccess): boolean;
 }
 
 /** Dependencies of {@link createCatalogService}. */
@@ -147,53 +133,11 @@ export interface CatalogServiceDeps {
 export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
   const { store, settings } = deps;
 
-  /**
-   * Owner, admin, grantee and authorized viewer always see everything about an
-   * API — including a retired one, because each of those four is either the
-   * provider themselves or somebody the provider deliberately let in.
-   */
-  function isInsider(viewer: UserRecord, api: ApiRecord, access: CatalogViewerAccess): boolean {
-    return (
-      api.owner_user_id === viewer.id ||
-      roleAtLeast(viewer.role, 'admin') ||
-      access.hasGrant ||
-      access.isAuthorizedViewer
-    );
-  }
-
-  function canList(viewer: UserRecord, api: ApiRecord, access: CatalogViewerAccess): boolean {
-    if (isInsider(viewer, api, access)) return true;
-    return api.status === 'published' && api.visibility === 'public';
-  }
-
-  function canView(viewer: UserRecord, api: ApiRecord, access: CatalogViewerAccess): boolean {
-    if (isInsider(viewer, api, access)) return true;
-    // For `public` and `internal`, visibility governs listing rather than
-    // opening: an unlisted API is readable by anyone holding its link, which is
-    // what makes "hand somebody the link and let them request access" work.
-    // `private` is the exception the mode exists for — there, not being on one
-    // of the insider lists is the end of it.
-    return api.status === 'published' && api.visibility !== 'private';
-  }
-
-  /**
-   * One viewer's standing on one API, resolved from the store, carrying the
-   * grant itself because the detail response reports it either way.
-   *
-   * Both halves are looked up even when the first already decides the answer:
-   * one extra indexed read is cheaper than two code paths that could disagree
-   * about who may see what.
-   */
-  async function accessFor(
-    viewer: UserRecord,
-    api: ApiRecord,
-  ): Promise<CatalogViewerAccess & { grant: Grant | null }> {
-    const [grant, authorization] = await Promise.all([
-      store.grants.findActiveByApiAndUser(api.id, viewer.id),
-      store.apiViewers.find(api.id, viewer.id),
-    ]);
-    return { hasGrant: grant !== null, isAuthorizedViewer: authorization !== null, grant };
-  }
+  // The rule is evaluated in `read-access.ts`, shared with the access and
+  // messaging services, so that every surface that can reveal an API answers
+  // "may this account read it?" the same way.
+  const canList = canListApi;
+  const canView = canViewApi;
 
   /** The caller's relationship to an API, for the catalog badge. */
   function accessState(
@@ -344,8 +288,10 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       // forbidden, so the catalog does not leak the existence of internal APIs.
       if (!api) throw notFound('API', slug);
 
-      const access = await accessFor(viewer, api);
+      const access = await resolveReadAccess(store, viewer, api);
       if (!canView(viewer, api, access)) throw notFound('API', slug);
+      // The grant that admits them — the account's own when it has one, else
+      // an application's — is the one the detail reports.
       const { grant } = access;
 
       const [specRecord, owner, request] = await Promise.all([
@@ -376,7 +322,9 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
     async spec(viewer, slug): Promise<CatalogSpecResponse> {
       const api = await store.apis.findBySlug(slug);
       if (!api) throw notFound('API', slug);
-      if (!canView(viewer, api, await accessFor(viewer, api))) throw notFound('API', slug);
+      if (!canView(viewer, api, await resolveReadAccess(store, viewer, api))) {
+        throw notFound('API', slug);
+      }
 
       const record = await store.apiSpecs.findCurrentByApi(api.id);
       if (!record) throw notFound('Specification for API', slug);

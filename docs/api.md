@@ -870,7 +870,9 @@ _session_ → `201`
 ```
 
 Errors: `400 VALIDATION_FAILED` (empty subject/body, or messaging yourself),
-`404 NOT_FOUND` (unknown or disabled recipient, unknown API),
+`404 NOT_FOUND` (unknown or disabled recipient, unknown API, or a `private` API
+the sender may not read — the same rule as the catalog, so a thread cannot be
+used to learn a private API's name, owner or gateway address),
 `429 RATE_LIMITED` (more than 10 a minute from this account),
 `429 QUOTA_EXCEEDED` (the account's rolling 24-hour message budget is spent —
 `details` carries `{ limit, window: "24h", setting: "NEXUS_MAX_MESSAGES_PER_USER_PER_DAY" }`),
@@ -1644,15 +1646,23 @@ Spec documents arrive as a JSON string field, not a multipart upload — the SPA
 reads the file client-side, which keeps the CSRF story and the error shape
 identical to every other route.
 
-**Two `429`s apply to the mutating routes here** — `POST /`, `PUT /:id/spec`,
-`PATCH /:id`, `DELETE /:id`, `PUT|DELETE /:id/plugins/:name` and
-`POST /:id/test-consumer`:
+**Two `429`s apply here.**
 
-- `429 RATE_LIMITED` — more than **30 of them per minute** from one account
-  (falling back to the IP for an anonymous caller). Installed when
-  `NEXUS_RATE_LIMIT_ENABLED=true`, which is the default outside
-  `NEXUS_ENV=test`. Reads are not limited, apart from `GET /:id/usage`, which
-  keeps its own 30/min limit because it scrapes the gateway.
+- `429 RATE_LIMITED` — more than **30 requests per minute** from one account
+  (falling back to the IP for an anonymous caller) to any one of these routes;
+  each route counts separately:
+  - the mutations — `POST /`, `PATCH /:id`, `DELETE /:id`, `PUT /:id/spec`,
+    `PUT|DELETE /:id/plugins/:name`, `POST /:id/viewers`,
+    `DELETE /:id/viewers/:userId`, `POST /:id/revisions/:revisionId/rollback`,
+    `POST /:id/restore-gateway` and `POST /:id/test-consumer`;
+  - the two spec diffs — `GET /:id/revisions/:revisionId/diff` and
+    `POST /:id/spec/diff` — which change nothing but parse and compare two
+    whole documents on every call.
+
+  Installed when `NEXUS_RATE_LIMIT_ENABLED=true`, which is the default outside
+  `NEXUS_ENV=test`. Other reads are not limited, apart from `GET /:id/usage`,
+  which keeps its own 30/min limit because it scrapes the gateway.
+
 - `429 QUOTA_EXCEEDED` — on `POST /` only, when the account already owns
   `NEXUS_MAX_APIS_PER_OWNER` APIs (default 50; `0` disables the ceiling). The
   body carries `details: { limit, current, setting }`. The check runs before the
@@ -1943,7 +1953,19 @@ route. Every field optional; nothing supplied returns the row unchanged.
 when `routes` is asked for and the current revision declares nothing to allow),
 `409 ACCESS_DISRUPTION_CONFIRMATION_REQUIRED` (an `auth_plugin` change that
 would lock grantees out of the API, without `confirm_access_disruption: true`),
-`502 EDGE_ERROR`.
+`409 CONFLICT` (a gateway setting — `upstream_url`, `auth_plugin`, `requestable`,
+`rate_limit`, `cors`, `allowed_methods`, `timeouts`, `circuit_breaker` or
+`spec_enforcement` — on an API with no gateway deployment; `details.fields`
+names them), `502 EDGE_ERROR`.
+
+**An API the gateway no longer serves takes catalog edits only.** While
+`ferrum_proxy_id` is `null` (after a reconciliation repair, or a restore that
+failed) there is no proxy to apply a gateway setting to, and several of them
+carry their own gateway side effects and confirmations. Rather than store a
+value the gateway never saw, the whole `PATCH` is refused; name, description,
+tags, visibility and the other catalog fields still save. Restore the deployment
+with [`POST /api/apis/:id/restore-gateway`](#post-apiapisidrestore-gateway),
+then change the setting.
 
 > **Changing `auth_plugin` locks every credential of the old flavour out of
 > this API.** Edge runs one authentication plugin per proxy, so the moment the
@@ -2137,7 +2159,14 @@ _session_, owner-or-admin. Body: any of `name`, `description`, `status`.
 approvals and credentials; everything already issued goes on working. An
 integration that must stop working is deleted, or has its grants revoked. The
 audit row says so explicitly (`details.revoked_existing_access: false`) rather
-than leaving an operator to infer it.
+than leaving an operator to infer it. Rotating one of its credentials counts as
+issuing a new one and is refused (`409`); revoking stays allowed. An access
+request already pending for it cannot be approved until it is re-enabled.
+
+Re-enabling checks the gateway identity before it reports success: if the
+application holds active grants but the portal has no consumer mapping for it,
+the call fails `502 EDGE_ERROR` (`details.identities`) rather than re-enabling
+an identity whose grants reach nothing.
 
 ### `DELETE /api/applications/:id`
 
@@ -2321,6 +2350,14 @@ Approved clients keep the credentials they were issued — the ACL group is
 derived from the API id, so the moment the rebuilt proxy's `access_control`
 plugin is associated, the groups already on their consumers match again.
 
+What the portal does not store does not come back. Edge deleted the proxy's
+plugin configs with the proxy, so anything made or changed directly on the
+gateway — an operator's own plugin config, or a hand-edit such as
+`hide_credentials: false` on the portal's authentication plugin — is gone
+before the restore starts; re-apply it afterwards. A `spec_enforcement`
+conversion is different: the proxy is still live when it begins, and it
+carries those configs across as they are.
+
 What is rebuilt, in the order a publish builds it: the proxy (through the
 API-spec importer in `routes` mode, so the `openapi_validator` is regenerated),
 the authentication plugin, `access_control` when the API is `requestable`, the
@@ -2335,13 +2372,13 @@ written. A provider who wants to correct the document first can `PUT
 /api/apis/:id/spec` — that keeps working on an undeployed API — and then
 restore.
 
-| Status           | Meaning                                                                                                                                                                                 |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `200`            | rebuilt, or (`rebuilt: false` in the audit row) the stored proxy turned out to be live after all and the flag was simply cleared                                                        |
-| `403 FORBIDDEN`  | not the owner and not an admin                                                                                                                                                          |
-| `404 NOT_FOUND`  | no such API                                                                                                                                                                             |
-| `409 CONFLICT`   | the API already has a live gateway proxy, or has no stored specification revision to redeploy, or another restore of the same API is in flight                                          |
-| `502 EDGE_ERROR` | the gateway could not be reached or refused a write. **Nothing is inferred from this** — an unreachable gateway is never read as a deleted proxy, and the row is left exactly as it was |
+| Status           | Meaning                                                                                                                                                                                                                                                                                   |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `200`            | rebuilt, or (`rebuilt: false` in the audit row) the stored proxy turned out to be live after all and the flag was simply cleared                                                                                                                                                          |
+| `403 FORBIDDEN`  | not the owner and not an admin                                                                                                                                                                                                                                                            |
+| `404 NOT_FOUND`  | no such API                                                                                                                                                                                                                                                                               |
+| `409 CONFLICT`   | the API already has a live gateway proxy, or has no stored specification revision to redeploy, or another restore of the same API is in flight, or the API's deployment settings or current specification changed while the proxy was being built (the build is withdrawn; restore again) |
+| `502 EDGE_ERROR` | the gateway could not be reached or refused a write. **Nothing is inferred from this** — an unreachable gateway is never read as a deleted proxy, and the row is left exactly as it was                                                                                                   |
 
 A restore that reaches the gateway and then fails deletes what it created,
 records `api.gateway_restore_failed` (with `stranded_proxy_id` when the
@@ -2552,11 +2589,17 @@ bound is `429` (`RATE_LIMITED` or `QUOTA_EXCEEDED` with
 
 Errors, all `409 CONFLICT`: you own this API; the API is retired; the API does
 not accept access requests (`requestable: false`); you already have access; you
-already have a pending request. `404 NOT_FOUND` for an unknown API.
+already have a pending request. `404 NOT_FOUND` for an unknown API, and for a
+`private` API the caller may not read.
 
-Visibility is deliberately **not** checked — an `internal` API is unlisted, not
-private, and gating requests on visibility would make `internal` +
-`requestable` a combination nobody could act on.
+The `private` check comes **first**, before any of the `409`s, so a probe for
+an API the caller cannot see gets the same `404` whether the id exists, is
+retired or is not requestable — the answers would otherwise confirm it exists.
+"May read" is the catalog's rule: the owner, an admin, an authorized viewer, or
+an account holding an active grant through any of its identities.
+`internal` is deliberately **not** gated — it is unlisted, not private, and
+gating requests on it would make `internal` + `requestable` a combination
+nobody could act on.
 
 ```bash
 curl -sS -b cookies.txt -X POST http://127.0.0.1:8787/api/access-requests \
@@ -2595,8 +2638,10 @@ the grant row is committed. The requester gets a notification and an
 `access_approved` email.
 
 Errors: `403 FORBIDDEN` (neither a provider owner nor an admin), `409 CONFLICT`
-(already decided, the user already holds an active grant, or the API is retired
-or no longer requestable),
+(already decided, the user already holds an active grant, the API is retired
+or no longer requestable, or the request was made for an application that has
+since been disabled or deleted — the request stays `pending` until the
+application is re-enabled or the request is denied),
 `502 EDGE_ERROR` / `502 EDGE_UNAVAILABLE` — failed approval attempts compensate
 unowned ACL additions and return the request to `pending` where possible.
 Compensation also removes additions whose gateway write was not acknowledged.
@@ -2693,6 +2738,31 @@ The `secret` shape depends on the type:
 | `basicauth`       | `username` (= the consumer username), `password`  | HTTP Basic `<consumer username>:<password>`                                            |
 | `jwt`             | `jwt_secret`, `jwt_key` (= the consumer username) | HS256 JWT signed with `jwt_secret`, `sub` = `jwt_key`, sent as `Authorization: Bearer` |
 
+#### What the provider's upstream sees
+
+The gateway removes a key or a Basic password before it proxies the request,
+but it **forwards a bearer token**:
+
+| `credential_type` | Does the credential reach the provider's backend?                                         |
+| ----------------- | ----------------------------------------------------------------------------------------- |
+| `keyauth`         | **No** — Edge's `key_auth` runs with `hide_credentials: true`, so `X-API-Key` is stripped |
+| `basicauth`       | **No** — `basic_auth` likewise strips the `Authorization: Basic` field                    |
+| `jwt`             | **Yes** — `Authorization: Bearer <token>` is forwarded unchanged                          |
+
+This is not a Nexus setting. Of the three authentication plugins, Edge offers
+`hide_credentials` on `key_auth` and `basic_auth`; `jwt_auth` has no
+credential-hiding option, and its config is a closed key set that refuses one.
+A backend offered JWT commonly wants the claims, so Edge forwards the token.
+
+The practical consequence for a caller holding a `jwt` credential: the
+provider's server sees the tokens you sign. Your **signing secret is never
+forwarded**, so a provider cannot mint tokens as you — but it can replay a token
+you sent it until that token's `exp` — which Edge requires by default but does
+not cap, so the lifetime is whatever you sign. Keep `exp` short, and put nothing
+in a custom claim you would not show the provider. Which
+method an API uses is the provider's choice, published on the catalog entry; see
+the [client guide](guides/client-guide.md).
+
 Errors: `409 CONFLICT` when you already hold
 `FERRUM_MAX_CREDENTIALS_PER_TYPE` (default 2) live credentials of that type —
 revoke or rotate one first; `502 EDGE_ERROR` / `502 EDGE_UNAVAILABLE`.
@@ -2762,7 +2832,9 @@ the audit row and as the subject of the Edge write. The notification and email
 go to the owner.
 
 Errors: `403 FORBIDDEN` (someone else's credential), `403 USER_DISABLED` (the
-owner's account was disabled), `409 CONFLICT` (already revoked), `502
+owner's account was disabled), `409 CONFLICT` (already revoked, or the
+credential belongs to a disabled application — re-enable it to rotate, or
+revoke the credential, which stays allowed), `502
 EDGE_ERROR` — including the case where the gateway's credential list no longer
 matches the portal's view, which is refused rather than guessed at.
 

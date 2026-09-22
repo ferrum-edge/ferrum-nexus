@@ -727,6 +727,18 @@ omits `basicauth` entirely. Even a Nexus bug that tried to read a secret back
 would get a redaction. There is no read path to the plaintext on either side —
 if a user loses it, the answer is rotation, not recovery.
 
+**What a provider's upstream sees is a separate question, and it differs by
+type.** Edge strips `X-API-Key` (`key_auth`) and `Authorization: Basic`
+(`basic_auth`) before proxying — both run with `hide_credentials` at its default
+`true`, because Nexus sends each an empty config. `jwt_auth` has no such option:
+its config is a closed key set, so `Authorization: Bearer <token>` reaches the
+provider's backend. The HS256 signing secret never leaves the client, so a
+provider cannot mint tokens, but it holds a token it can replay until that
+token's `exp`, which Edge requires by default and nobody caps. This is Edge
+behaviour Nexus cannot configure away; it is documented for callers in
+[`api.md`](api.md) and the client guide and for providers in the provider
+guide, and `e2e/src/dataplane.test.ts` pins it against the real gateway.
+
 Rotation is append-then-delete: below the cap the replacement is created first
 and both secrets are briefly live **during the server operation**, then the old
 entry is deleted before the response returns. Callers therefore have no

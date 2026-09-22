@@ -371,6 +371,65 @@ describe('restoring a missing gateway deployment', () => {
     assert.equal(asAdmin.statusCode, 200, asAdmin.body);
   });
 
+  it('refuses gateway-setting changes while the deployment is missing', async () => {
+    deleteProxyOnly(originalProxyId);
+    await reconcileAndRepair();
+
+    // Applied by writing to a proxy that does not exist: accepting it would be
+    // answering 200 for a change nothing ever made.
+    const gateway = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${apiId}`,
+      payload: { rate_limit: { limit: 7, window_seconds: 60 } },
+    });
+    assert.equal(gateway.statusCode, 409, gateway.body);
+    assert.match(gateway.json<{ error: { message: string } }>().error.message, /Restore it/);
+
+    // Catalog-only fields have nothing to do with the gateway and still work.
+    const catalog = await harness.authed(provider, {
+      method: 'PATCH',
+      url: `/api/apis/${apiId}`,
+      payload: { description: 'Updated while undeployed' },
+    });
+    assert.equal(catalog.statusCode, 200, catalog.body);
+  });
+
+  it('does not commit a proxy built from a specification replaced mid-restore', async () => {
+    deleteProxyOnly(originalProxyId);
+    await reconcileAndRepair();
+
+    // Hold the restore after it has read the current revision and started
+    // building, then publish a new revision underneath it. With no proxy to
+    // lease on, the upload has nothing to wait for — so the restore is what has
+    // to notice.
+    harness.edge.delay('/plugins/config', 300, 'POST');
+    const restoring = restore(provider, apiId);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const revised = await harness.authed(provider, {
+      method: 'PUT',
+      url: `/api/apis/${apiId}/spec`,
+      payload: { spec: SAMPLE_SPEC_YAML.replace('2.4.0', '2.5.0') },
+    });
+    assert.equal(revised.statusCode, 200, revised.body);
+
+    const result = await restoring;
+    assert.equal(result.statusCode, 409, result.body);
+    const row = await harness.store.apis.findById(apiId);
+    assert.equal(row?.gateway_state, 'repair_required', 'still flagged, not half-deployed');
+    assert.equal(row?.ferrum_proxy_id, null);
+    assert.equal(
+      [...harness.edge.proxies.values()].filter((proxy) => proxy.name === 'nexus-restore-billing')
+        .length,
+      0,
+      'the proxy built from the replaced revision was withdrawn',
+    );
+
+    // A retry deploys the revision the catalog now shows.
+    const retried = await restore(provider, apiId);
+    assert.equal(retried.statusCode, 200, retried.body);
+    assert.equal(retried.json<RestoreApiGatewayResponse>().spec.parsed_version, '2.5.0');
+  });
+
   it('serialises concurrent restores onto one proxy', async () => {
     deleteProxyOnly(originalProxyId);
     await reconcileAndRepair();

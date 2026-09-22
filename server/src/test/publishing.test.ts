@@ -363,7 +363,7 @@ describe('publishing', () => {
       assert.equal(row.details.spec_paths, 2);
     });
 
-    it('sends basic_auth an empty config, which is the only shape Edge accepts', async () => {
+    it("sends basic_auth an empty config, taking Edge's hide_credentials default", async () => {
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
@@ -3312,6 +3312,39 @@ describe('publishing', () => {
       assert.match(listed.body, /security_headers/);
     });
 
+    it("keeps an operator's hand-edit to the auth plugin across both conversions", async () => {
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'enf-auth-edit', auth_plugin: 'basic_auth' }),
+      });
+      assert.equal(published.statusCode, 201, published.body);
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
+
+      // Nexus publishes `{}` and never sets `hide_credentials`; a legacy backend
+      // that needs the Basic password is an operator's call, made on the gateway.
+      const auth = harness.edge.pluginForProxy(proxyId, 'basic_auth');
+      assert.ok(auth);
+      auth.config = { hide_credentials: false };
+      const authId = String(auth.id);
+
+      for (const level of ['routes', 'docs_only'] as const) {
+        const converted = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${apiId}`,
+          payload: { spec_enforcement: level },
+        });
+        assert.equal(converted.statusCode, 200, converted.body);
+        // A conversion deletes and recreates the proxy, which cascades its
+        // plugin configs; the auth plugin must come back as it was on the
+        // gateway, not as the `{}` the portal would publish.
+        const rebuilt = harness.edge.pluginForProxy(proxyId, 'basic_auth');
+        assert.equal(rebuilt?.id, authId, level);
+        assert.deepEqual(rebuilt?.config, { hide_credentials: false }, level);
+      }
+    });
+
     it('leaves the spec untouched when a CORS change lands on a routes API', async () => {
       const published = await harness.authed(provider, {
         method: 'POST',
@@ -5083,6 +5116,7 @@ describe('publishing rate limit', () => {
   let harness: TestApp;
   let first: TestSession;
   let second: TestSession;
+  let revisionDiffUser: TestSession;
 
   before(async () => {
     // The limiter is forced off under `NEXUS_ENV=test`, so this app runs as a
@@ -5094,6 +5128,10 @@ describe('publishing rate limit', () => {
     await harness.registerUser({ email: 'limit-founder@example.test' });
     first = await harness.registerUser({ email: 'limit-one@example.test', role: 'provider' });
     second = await harness.registerUser({ email: 'limit-two@example.test', role: 'provider' });
+    revisionDiffUser = await harness.registerUser({
+      email: 'limit-revision-diff@example.test',
+      role: 'provider',
+    });
   });
 
   after(async () => {
@@ -5142,9 +5180,22 @@ describe('publishing rate limit', () => {
     assert.equal(other.statusCode, 404, other.body);
   });
 
+  it('rate limits revision diffs because they parse and compare two specifications', async () => {
+    const missing = '00000000-0000-4000-8000-000000000000';
+    const url = `/api/apis/${missing}/revisions/${missing}/diff`;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const response = await harness.authed(revisionDiffUser, { method: 'GET', url });
+      assert.equal(response.statusCode, 404, response.body);
+    }
+
+    const refused = await harness.authed(revisionDiffUser, { method: 'GET', url });
+    assert.equal(refused.statusCode, 429, refused.body);
+    assert.equal(errorCode(refused.body), 'RATE_LIMITED');
+  });
+
   it('leaves the reads alone', async () => {
-    // The provider's own list is cheap and the SPA polls it; only the mutations
-    // carry the limit.
+    // The provider's own list is cheap and the SPA polls it, so it remains
+    // unlimited. Expensive revision diffs are the deliberate read-only exception.
     for (let attempt = 0; attempt < 40; attempt += 1) {
       const response = await harness.authed(first, { method: 'GET', url: '/api/apis' });
       assert.equal(response.statusCode, 200, response.body);

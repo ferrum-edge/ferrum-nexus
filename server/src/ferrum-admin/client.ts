@@ -159,8 +159,8 @@ export interface FerrumAdminClient {
   /** Unauthenticated `GET /live`. `true` when the gateway answered `200`. */
   live(): Promise<boolean>;
   /**
-   * Best-effort version probe. Edge has **no `/version` endpoint**
-   * (`ref-edge-admin.md` §10.5), so this returns `null` on a 404 rather than
+   * Best-effort version probe. Edge has **no `/version` endpoint** (none in its
+   * `docs/admin_api.md`), so this returns `null` on a 404 rather than
    * failing; take the real version from your deployment metadata.
    */
   version(): Promise<string | null>;
@@ -478,7 +478,7 @@ function isPluginBody(value: unknown): boolean {
     ['global', 'proxy', 'proxy_group'].includes(value.scope) &&
     (value.proxy_id == null || isIdentifier(value.proxy_id)) &&
     typeof value.enabled === 'boolean' &&
-    // Edge permits null for plugins with no settings (e.g. basic_auth).
+    // Edge permits null for plugins whose settings are all optional (e.g. basic_auth).
     (value.config === null || isRecord(value.config))
   );
 }

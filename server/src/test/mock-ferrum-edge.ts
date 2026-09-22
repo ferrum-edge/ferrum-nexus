@@ -3,7 +3,8 @@
  *
  * It is a real `node:http` server, not a fetch stub, so the undici dispatcher,
  * timeouts, headers and JSON handling in `ferrum-admin/client.ts` are all
- * exercised. The implemented subset follows `ref-edge-admin.md` closely enough
+ * exercised. The implemented subset follows Edge's `docs/admin_api.md`,
+ * `docs/plugins.md` and `openapi.yaml` closely enough
  * that a test failing here would very likely fail against a real gateway:
  *
  * - HS256 admin JWT verification: required `iss`/`sub`/`iat`/`nbf`/`exp`/`jti`/
@@ -512,8 +513,9 @@ const PROXY_KEYS = new Set([
 
 /**
  * Plugin configs the mock validates strictly, mirroring Edge's closed key
- * allowlists (`ref-edge-admin.md` §8.7–8.8). Anything not listed here is stored
- * without inspection, exactly as an unknown-to-Nexus plugin would be.
+ * allowlists (Edge `docs/plugins.md`, one section per plugin). Anything not
+ * listed here is stored without inspection, exactly as an unknown-to-Nexus
+ * plugin would be.
  */
 const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = {
   prometheus_metrics: [
@@ -525,8 +527,9 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
     'stale_entry_ttl_seconds',
   ],
   key_auth: ['key_location', 'hide_credentials'],
-  // `basic_auth` accepts *no* fields at all — an empty list is the point.
-  basic_auth: [],
+  // `basic_auth` accepts exactly one field: `hide_credentials`, which defaults
+  // to `true`. `null` and `{}` are equally valid, and both mean that default.
+  basic_auth: ['hide_credentials'],
   jwt_auth: [
     'token_lookup',
     'consumer_claim_field',
@@ -979,9 +982,6 @@ function validatePluginConfig(pluginName: string, config: unknown): string | nul
   if (!isRecord(config)) return `${pluginName}: config must be a JSON object`;
 
   const keys = Object.keys(config);
-  if (pluginName === 'basic_auth' && keys.length > 0) {
-    return 'basic_auth: no configuration fields are supported';
-  }
   for (const field of keys) {
     if (!allowed.includes(field)) {
       return `${pluginName}: unknown configuration field(s): ${field}`;

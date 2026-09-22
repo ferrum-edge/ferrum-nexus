@@ -30,7 +30,8 @@
  * because a proxy may legitimately carry a second config of the same name that
  * an operator made and the portal must never replace or delete (issue #153).
  *
- * @see ref-edge-admin.md §3 (proxies), §8 (plugin configs)
+ * @see Edge `docs/admin_api.md`, "Proxies" and "Plugin Configs"; per-plugin
+ *   `config` keys in Edge `docs/plugins.md`
  */
 
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
