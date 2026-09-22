@@ -1625,12 +1625,13 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // when the delete could not be confirmed. `DELETE` tolerates a 404,
           // so a create that genuinely never landed unwinds cleanly and the row
           // says `withdrawn: true`.
-          for (const pluginId of created.pluginIds) {
-            await edge.pluginConfigs.delete(pluginId, owner.id).catch(() => undefined);
-          }
           // Deleting the proxy is what makes the withdrawal complete — it
           // cascades the configs and, on a `routes` API, the spec — so it is
-          // also what decides whether anything is left behind.
+          // also what decides whether anything is left behind. It goes first:
+          // a failure after the cutover leaves the proxy live on its public
+          // path, and deleting auth or ACL before it would open the upstream
+          // for as long as the proxy delete took, or for good if it failed. A
+          // stranded proxy keeps every plugin, so it stays fail-closed.
           let strandedProxyId: string | null = null;
           if (created.proxyId) {
             const target = created.proxyId;
@@ -1638,6 +1639,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               .delete(target, owner.id)
               .then(() => null)
               .catch(() => target);
+          }
+          if (strandedProxyId === null) {
+            for (const pluginId of created.pluginIds) {
+              await edge.pluginConfigs.delete(pluginId, owner.id).catch(() => undefined);
+            }
           }
           await audit
             .record(
@@ -2674,9 +2680,6 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // leaving a half-built proxy squatting the slug's staging path — and
           // say so out loud when it could not be undone, because a swallowed
           // compensation reads exactly like a clean one.
-          for (const pluginId of created.pluginIds) {
-            await edge.pluginConfigs.delete(pluginId, actor.id).catch(() => undefined);
-          }
           let strandedProxyId: string | null = null;
           if (created.proxyId) {
             const target = created.proxyId;
@@ -2684,6 +2687,16 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               .delete(target, actor.id)
               .then(() => null)
               .catch(() => target);
+          }
+          // A proxy may already be live on its public path. Remove it before
+          // its security configs: deleting auth or ACL first would briefly
+          // expose the upstream, or expose it indefinitely if proxy deletion
+          // then failed. When the proxy is stranded, leave every plugin in
+          // place so the failed restore remains fail-closed.
+          if (strandedProxyId === null) {
+            for (const pluginId of created.pluginIds) {
+              await edge.pluginConfigs.delete(pluginId, actor.id).catch(() => undefined);
+            }
           }
           // The row keeps `gateway_state: 'repair_required'` and a null proxy
           // reference, which is the truthful state: the API is still not
