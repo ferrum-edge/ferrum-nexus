@@ -479,4 +479,44 @@ describe('application-scoped identities', () => {
       await limited.close();
     }
   });
+
+  it('serializes concurrent application quota checks for one owner', async () => {
+    const limited = await buildTestApp({
+      env: { NEXUS_MAX_APPLICATIONS_PER_OWNER: '1' },
+      wrapStore: (store) => ({
+        ...store,
+        applications: {
+          ...store.applications,
+          async count(filter) {
+            // Capture the count before yielding. Without the per-owner lock,
+            // every concurrent request observes zero and all inserts succeed.
+            const current = await store.applications.count(filter);
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            return current;
+          },
+        },
+      }),
+    });
+    try {
+      await limited.registerUser({ email: 'race-super@example.test' });
+      const client = await limited.registerUser({ email: 'race@example.test', role: 'client' });
+      const responses = await Promise.all(
+        Array.from({ length: 6 }, (_, index) =>
+          limited.authed(client, {
+            method: 'POST',
+            url: '/api/applications',
+            payload: { name: `Concurrent ${index}` },
+          }),
+        ),
+      );
+
+      assert.deepEqual(
+        responses.map((response) => response.statusCode).sort(),
+        [201, 429, 429, 429, 429, 429],
+      );
+      assert.equal(await limited.store.applications.count({ owner_user_id: client.user.id }), 1);
+    } finally {
+      await limited.close();
+    }
+  });
 });

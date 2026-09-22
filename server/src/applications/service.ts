@@ -209,22 +209,24 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
       // consumer, and an unbounded number of them is an unbounded number of
       // Edge resources one account can create.
       const limit = config.maxApplicationsPerOwner;
-      if (limit > 0) {
-        const current = await store.applications.count({ owner_user_id: actor.id });
-        if (current >= limit) {
-          throw quotaExceeded('You have reached the maximum number of applications', {
-            limit,
-            current,
-            setting: 'NEXUS_MAX_APPLICATIONS_PER_OWNER',
-          });
+      const created = await edge.serializePerKey(`application-owner:${actor.id}`, async () => {
+        if (limit > 0) {
+          const current = await store.applications.count({ owner_user_id: actor.id });
+          if (current >= limit) {
+            throw quotaExceeded('You have reached the maximum number of applications', {
+              limit,
+              current,
+              setting: 'NEXUS_MAX_APPLICATIONS_PER_OWNER',
+            });
+          }
         }
-      }
 
-      const created = await store.applications.create({
-        owner_user_id: actor.id,
-        name,
-        description: input.description?.trim() || null,
-        status: 'active',
+        return store.applications.create({
+          owner_user_id: actor.id,
+          name,
+          description: input.description?.trim() || null,
+          status: 'active',
+        });
       });
 
       // The gateway identity is *not* created here. An application with no
