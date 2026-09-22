@@ -7,8 +7,8 @@
  * stores only a SHA-256 fingerprint and the last four characters. Even if that
  * discipline slipped, Edge would still hold the line: every ordinary Admin API
  * response redacts `keyauth.key` and `jwt.secret` to the literal `[REDACTED]`
- * and omits `basicauth` entirely (`ref-edge-admin.md` §4.5). There is no read
- * path back to the plaintext on either side.
+ * and omits `basicauth` entirely (Edge `docs/admin_api.md`, "Consumers"). There
+ * is no read path back to the plaintext on either side.
  *
  * ## Credential shapes, and why they are not what a portal would guess
  *

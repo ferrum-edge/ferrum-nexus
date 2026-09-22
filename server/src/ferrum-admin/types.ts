@@ -7,9 +7,12 @@
  *    `#[serde(deny_unknown_fields)]`. **Sending a field Edge does not know is a
  *    400, never a silent no-op.** The request types below are therefore
  *    deliberately narrow — add a field only after confirming it against
- *    `ref-edge-admin.md`.
+ *    Edge's `openapi.yaml`, which holds the full field lists.
  * 2. Every plugin's `config` is hand-parsed against a **closed key allowlist**,
  *    so the plugin config types are exact, not "at least these keys".
+ *
+ * "Edge `docs/…`" in this module and across the server means the ferrum-edge
+ * repository at the release `e2e/.env.example` pins, cited by section title.
  */
 
 import type { AuthPluginType, EdgeCredentialType, HttpMethod } from '@ferrum-nexus/shared';
@@ -300,8 +303,9 @@ export interface EdgeJwtAuthConfig {
 
 /**
  * `access_control` config — exactly five accepted keys, at least one of which
- * must be non-empty. Nexus only ever sets `allowed_groups`; see
- * `ref-edge-admin.md` §7.5 for why usernames are a trap.
+ * must be non-empty. Nexus only ever sets `allowed_groups`. Usernames are a
+ * trap: a consumer an `access_control` config names cannot be deleted (Edge
+ * `docs/admin_api.md`, "Consumers").
  */
 export interface EdgeAccessControlConfig {
   allowed_consumers?: string[];
@@ -629,7 +633,7 @@ export interface EdgeProbe {
   /**
    * Gateway version string, or `null`.
    *
-   * Edge has **no `/version` endpoint** (`ref-edge-admin.md` §10.5); this is
+   * Edge has **no `/version` endpoint** (none in its `docs/admin_api.md`); this is
    * populated only if a deployment exposes one, and is `null` otherwise.
    */
   version: string | null;
