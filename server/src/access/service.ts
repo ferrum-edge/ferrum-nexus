@@ -660,9 +660,21 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
 
       const api = await store.apis.findById(apiId);
       if (!api) throw notFound('API', apiId);
-      // `internal` is deliberately not gated: it is unlisted rather than private.
-      // For `private`, conceal the API before emitting any state-dependent error.
-      // This mirrors the catalog's owner/admin/grantee/authorized-viewer rule.
+      // `internal` is deliberately *not* gated here. It means unlisted, not
+      // private (see `catalog/service.ts`): a provider hands out the link and
+      // the recipient requests access through the normal flow. Gating that
+      // would make `internal` + `requestable` a combination nobody could ever
+      // act on.
+      //
+      // `private` is gated, because there the provider-initiated path exists:
+      // an account that cannot see the API cannot ask for it either, and a
+      // request that got through would confirm the API's existence to somebody
+      // who was never shown it. The check mirrors the catalog's `isInsider` —
+      // owner, admin, active grantee or authorized viewer — and answers
+      // `NOT_FOUND` rather than `FORBIDDEN` for the same reason the catalog
+      // does (issue #288). It runs before every state-dependent `CONFLICT`
+      // below, since "already owned", "retired" and "not requestable" would
+      // each confirm the API to an outsider just as surely.
       if (api.visibility === 'private') {
         const isInsider =
           api.owner_user_id === user.id ||
