@@ -458,7 +458,8 @@ Plugin configs are closed key sets; a typo is a 400. What Nexus sends:
 
 - **auth plugins** — `{}` for all three. `key_auth` defaults to
   `header:X-API-Key` + `hide_credentials: true`, which is exactly what the
-  portal documents; `basic_auth`'s config **must** be `{}` or `null`;
+  portal documents; `basic_auth` accepts only `hide_credentials`, whose `true`
+  default is what the portal wants;
   `jwt_auth` defaults to `token_lookup: header:Authorization` and
   `consumer_claim_field: sub`.
 - **`access_control`** — `{ allowed_groups: ['nexus:api:<api_id>:approved'] }`,
