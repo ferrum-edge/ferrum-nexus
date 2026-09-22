@@ -35,6 +35,7 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { AuditAction } from '../audit/service.js';
+import type { NexusStore } from '../db/store.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
 const NAMESPACE = 'nexus';
@@ -314,6 +315,34 @@ describe('restoring a missing gateway deployment', () => {
     assert.equal(proxies.length, 1, 'the failed attempt left no duplicate behind');
     assert.equal(proxies[0]?.id, proxyId);
     assert.equal((await harness.store.apis.findById(apiId))?.gateway_state, 'deployed');
+  });
+
+  it('keeps security plugins attached when a public proxy cannot be withdrawn', async () => {
+    deleteProxyOnly(originalProxyId);
+    await reconcileAndRepair();
+
+    // Force the failure after public cutover, then prevent compensation from
+    // withdrawing that proxy. The stranded public path must remain gated.
+    const realTransaction = harness.store.transaction.bind(harness.store);
+    harness.store.transaction = async <T>(_fn: (tx: NexusStore) => Promise<T>): Promise<T> => {
+      throw new Error('database unavailable after cutover');
+    };
+    harness.edge.queueFailure(503, { error: 'gateway unavailable' }, '/proxies/', 'DELETE');
+    const failed = await restore(provider, apiId);
+    harness.store.transaction = realTransaction;
+    assert.equal(failed.statusCode, 500, failed.body);
+
+    const serving = harness.edge.proxyServing(
+      listenPathFor(NAMESPACE, 'restore-billing'),
+      NAMESPACE,
+    );
+    assert.ok(serving, 'the failed proxy withdrawal leaves the public proxy in place');
+    assert.equal(typeof serving.id, 'string');
+    const effective = harness.edge
+      .effectivePluginsForProxy(serving.id as string, NAMESPACE)
+      .map((plugin) => plugin.plugin_name);
+    assert.ok(effective.includes('key_auth'), 'authentication remains attached');
+    assert.ok(effective.includes(ACCESS_CONTROL_PLUGIN), 'access control remains attached');
   });
 
   it('never reads an unreachable gateway as a deleted proxy', async () => {

@@ -2567,9 +2567,6 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // leaving a half-built proxy squatting the slug's staging path — and
           // say so out loud when it could not be undone, because a swallowed
           // compensation reads exactly like a clean one.
-          for (const pluginId of created.pluginIds) {
-            await edge.pluginConfigs.delete(pluginId, actor.id).catch(() => undefined);
-          }
           let strandedProxyId: string | null = null;
           if (created.proxyId) {
             const target = created.proxyId;
@@ -2577,6 +2574,16 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               .delete(target, actor.id)
               .then(() => null)
               .catch(() => target);
+          }
+          // A proxy may already be live on its public path. Remove it before
+          // its security configs: deleting auth or ACL first would briefly
+          // expose the upstream, or expose it indefinitely if proxy deletion
+          // then failed. When the proxy is stranded, leave every plugin in
+          // place so the failed restore remains fail-closed.
+          if (strandedProxyId === null) {
+            for (const pluginId of created.pluginIds) {
+              await edge.pluginConfigs.delete(pluginId, actor.id).catch(() => undefined);
+            }
           }
           // The row keeps `gateway_state: 'repair_required'` and a null proxy
           // reference, which is the truthful state: the API is still not
