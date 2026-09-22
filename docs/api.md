@@ -2722,6 +2722,31 @@ The `secret` shape depends on the type:
 | `basicauth`       | `username` (= the consumer username), `password`  | HTTP Basic `<consumer username>:<password>`                                            |
 | `jwt`             | `jwt_secret`, `jwt_key` (= the consumer username) | HS256 JWT signed with `jwt_secret`, `sub` = `jwt_key`, sent as `Authorization: Bearer` |
 
+#### What the provider's upstream sees
+
+The gateway removes a key or a Basic password before it proxies the request,
+but it **forwards a bearer token**:
+
+| `credential_type` | Does the credential reach the provider's backend?                                         |
+| ----------------- | ----------------------------------------------------------------------------------------- |
+| `keyauth`         | **No** — Edge's `key_auth` runs with `hide_credentials: true`, so `X-API-Key` is stripped |
+| `basicauth`       | **No** — `basic_auth` likewise strips the `Authorization: Basic` field                    |
+| `jwt`             | **Yes** — `Authorization: Bearer <token>` is forwarded unchanged                          |
+
+This is not a Nexus setting. Of the three authentication plugins, Edge offers
+`hide_credentials` on `key_auth` and `basic_auth`; `jwt_auth` has no
+credential-hiding option, and its config is a closed key set that refuses one.
+A backend offered JWT commonly wants the claims, so Edge forwards the token.
+
+The practical consequence for a caller holding a `jwt` credential: the
+provider's server sees the tokens you sign. Your **signing secret is never
+forwarded**, so a provider cannot mint tokens as you — but it can replay a token
+you sent it until that token's `exp` — which Edge requires by default but does
+not cap, so the lifetime is whatever you sign. Keep `exp` short, and put nothing
+in a custom claim you would not show the provider. Which
+method an API uses is the provider's choice, published on the catalog entry; see
+the [client guide](guides/client-guide.md).
+
 Errors: `409 CONFLICT` when you already hold
 `FERRUM_MAX_CREDENTIALS_PER_TYPE` (default 2) live credentials of that type —
 revoke or rotate one first; `502 EDGE_ERROR` / `502 EDGE_UNAVAILABLE`.

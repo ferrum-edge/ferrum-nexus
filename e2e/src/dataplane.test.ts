@@ -105,6 +105,13 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
     // claims. That asymmetry is worth knowing about — a provider's upstream
     // does see its clients' live JWTs — so the suite states it rather than
     // asserting a uniform rule that is not true.
+    //
+    // It is not Nexus's to change either. Of these three plugins only
+    // `key_auth` and `basic_auth` take `hide_credentials`; `jwt_auth`'s config
+    // is a closed key set that refuses it, so setting it would 400 the publish
+    // rather than hide the token. `docs/api.md`, `docs/security.md` §5 and the
+    // client and provider guides document the difference — if a future Edge
+    // adds the option and Nexus sets it, move them with this flag.
     { plugin: 'key_auth', credential: 'keyauth', forwardsCredential: false },
     { plugin: 'basic_auth', credential: 'basicauth', forwardsCredential: false },
     { plugin: 'jwt_auth', credential: 'jwt', forwardsCredential: true },
@@ -150,7 +157,7 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
         names.has('authorization'),
         flavour.forwardsCredential,
         flavour.forwardsCredential
-          ? 'a bearer token is forwarded to the backend, which is Edge’s jwt_auth default'
+          ? 'a bearer token is forwarded to the backend: jwt_auth cannot hide it'
           : 'the Authorization header is stripped at the gateway',
       );
     });
