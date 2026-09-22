@@ -159,8 +159,8 @@ export interface FerrumAdminClient {
   /** Unauthenticated `GET /live`. `true` when the gateway answered `200`. */
   live(): Promise<boolean>;
   /**
-   * Best-effort version probe. Edge has **no `/version` endpoint**
-   * (`ref-edge-admin.md` §10.5), so this returns `null` on a 404 rather than
+   * Best-effort version probe. Edge has **no `/version` endpoint** (none in its
+   * `docs/admin_api.md`), so this returns `null` on a 404 rather than
    * failing; take the real version from your deployment metadata.
    */
   version(): Promise<string | null>;

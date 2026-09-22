@@ -33,10 +33,11 @@
  * ## Serialisation
  *
  * `PUT /consumers/{id}` is a whole-resource replace with no concurrency token
- * (`ref-edge-admin.md` §4.4/§7.2), so **every** consumer mutation goes through
- * `edge.serializePerKey(consumerId, …)`. Two approvals for the same user
- * landing at once would otherwise lose one ACL group. {@link mutateAclGroups}
- * is the read-modify-write helper both services use.
+ * (Edge `docs/admin_api.md`, "Replace semantics for `PUT`"), so **every**
+ * consumer mutation goes through `edge.serializePerKey(consumerId, …)`. Two
+ * approvals for the same user landing at once would otherwise lose one ACL
+ * group. {@link mutateAclGroups} is the read-modify-write helper both services
+ * use.
  *
  * The **Ferrum consumer id** is the canonical lock key for a consumer, used by
  * every path that touches one — this helper, and issue/rotate/revoke/teardown

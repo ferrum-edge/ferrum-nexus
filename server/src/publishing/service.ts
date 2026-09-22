@@ -184,7 +184,8 @@
  * operation: it revokes every grant, tears the Edge objects down and removes
  * the rows.
  *
- * @see ref-edge-admin.md §3 (proxies), §7 (access_control), §8 (plugin configs)
+ * @see Edge `docs/admin_api.md`, "Proxies" and "Plugin Configs"; `access_control`
+ *   and the other per-plugin `config` keys in Edge `docs/plugins.md`
  */
 
 import { randomBytes } from 'node:crypto';

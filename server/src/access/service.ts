@@ -11,8 +11,9 @@
  *
  * The `access_control` plugin attached to the API's proxy is written **once**,
  * at publish time, and never touched again — approvals contend on one consumer
- * row rather than on a plugin config shared by every approved user
- * (`ref-edge-admin.md` §7.5).
+ * row rather than on a plugin config shared by every approved user, and a
+ * consumer an `access_control` config names cannot be deleted (Edge
+ * `docs/admin_api.md`, "Consumers").
  *
  * ## Ordering matters, and so does serialisation
  *
