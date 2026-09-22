@@ -29,7 +29,7 @@
 import assert from 'node:assert/strict';
 import { after, afterEach, before, describe, it } from 'node:test';
 
-import type { GetApiResponse, PublishApiResponse } from '@ferrum-nexus/shared';
+import { listenPathFor, type GetApiResponse, type PublishApiResponse } from '@ferrum-nexus/shared';
 
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
@@ -413,6 +413,48 @@ describe('a gateway write whose acknowledgement is lost', () => {
 
     // Leave the namespace as the other tests expect to find it.
     harness.edge.proxies.delete(`nexus/${String(stranded.id)}`);
+  });
+
+  it('keeps a public proxy gated when a failure after cutover strands it', async () => {
+    // The store write is the one step after the cutover, so failing it fails
+    // the publish with the proxy already live on its public path; the failed
+    // DELETE then strands it there.
+    const realTransaction = harness.store.transaction.bind(harness.store);
+    harness.store.transaction = async <T>(): Promise<T> => {
+      throw new Error('database unavailable after cutover');
+    };
+    harness.edge.queueFailure(503, { error: 'unavailable' }, '/proxies/', 'DELETE');
+    let failed;
+    try {
+      failed = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload('lost-ack-gated', { requestable: true }),
+      });
+    } finally {
+      harness.store.transaction = realTransaction;
+    }
+    assert.equal(failed.statusCode, 500, failed.body);
+
+    const stranded = harness.edge.proxyByName('nexus-lost-ack-gated');
+    assert.ok(stranded, 'the proxy really is still on the gateway');
+    const strandedId = String(stranded.id);
+    assert.equal(
+      stranded.listen_path,
+      listenPathFor('nexus', 'lost-ack-gated'),
+      'the failure came after the cutover onto the public path',
+    );
+    const effective = harness.edge
+      .effectivePluginsForProxy(strandedId)
+      .map((plugin) => plugin.plugin_name);
+    assert.ok(effective.includes('key_auth'), 'authentication stays attached');
+    assert.ok(effective.includes('access_control'), 'access control stays attached');
+
+    // Leave the namespace as the other tests expect to find it.
+    for (const [key, config] of harness.edge.pluginConfigs) {
+      if (config.proxy_id === strandedId) harness.edge.pluginConfigs.delete(key);
+    }
+    harness.edge.proxies.delete(`nexus/${strandedId}`);
   });
 
   it('records nothing when a publish is refused before it touches the gateway', async () => {
