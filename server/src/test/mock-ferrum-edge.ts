@@ -525,8 +525,9 @@ const PLUGIN_CONFIG_ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = 
     'stale_entry_ttl_seconds',
   ],
   key_auth: ['key_location', 'hide_credentials'],
-  // `basic_auth` accepts *no* fields at all — an empty list is the point.
-  basic_auth: [],
+  // `basic_auth` accepts exactly one field: `hide_credentials`, which defaults
+  // to `true`. `null` and `{}` are equally valid, and both mean that default.
+  basic_auth: ['hide_credentials'],
   jwt_auth: [
     'token_lookup',
     'consumer_claim_field',
@@ -979,9 +980,6 @@ function validatePluginConfig(pluginName: string, config: unknown): string | nul
   if (!isRecord(config)) return `${pluginName}: config must be a JSON object`;
 
   const keys = Object.keys(config);
-  if (pluginName === 'basic_auth' && keys.length > 0) {
-    return 'basic_auth: no configuration fields are supported';
-  }
   for (const field of keys) {
     if (!allowed.includes(field)) {
       return `${pluginName}: unknown configuration field(s): ${field}`;

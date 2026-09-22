@@ -276,8 +276,16 @@ export interface EdgeKeyAuthConfig {
   hide_credentials?: boolean;
 }
 
-/** `basic_auth` takes no configuration at all — `{}` or `null` only. */
-export type EdgeBasicAuthConfig = Record<string, never>;
+/** `basic_auth` config — `hide_credentials` is the only accepted key. */
+export interface EdgeBasicAuthConfig {
+  /**
+   * Strip the verified `Authorization: Basic` field before forwarding. Default
+   * `true`; `false` is the legacy opt-out for a backend that needs the
+   * reusable password. Nexus never sets it — it sends `{}` and takes the
+   * default — but Edge accepts it, so the type says so.
+   */
+  hide_credentials?: boolean;
+}
 
 /** `jwt_auth` config subset Nexus sets. */
 export interface EdgeJwtAuthConfig {
@@ -458,7 +466,7 @@ export interface EdgePluginConfig {
   id: string;
   namespace: string;
   plugin_name: string;
-  /** Edge permits null for plugins without settings, including basic_auth. */
+  /** Edge permits null for plugins whose settings are all optional, e.g. basic_auth. */
   config: Record<string, unknown> | null;
   scope: EdgePluginScope;
   proxy_id?: string | null;

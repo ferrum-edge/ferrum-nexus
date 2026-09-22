@@ -478,7 +478,7 @@ function isPluginBody(value: unknown): boolean {
     ['global', 'proxy', 'proxy_group'].includes(value.scope) &&
     (value.proxy_id == null || isIdentifier(value.proxy_id)) &&
     typeof value.enabled === 'boolean' &&
-    // Edge permits null for plugins with no settings (e.g. basic_auth).
+    // Edge permits null for plugins whose settings are all optional (e.g. basic_auth).
     (value.config === null || isRecord(value.config))
   );
 }

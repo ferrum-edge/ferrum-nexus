@@ -363,7 +363,7 @@ describe('publishing', () => {
       assert.equal(row.details.spec_paths, 2);
     });
 
-    it('sends basic_auth an empty config, which is the only shape Edge accepts', async () => {
+    it("sends basic_auth an empty config, taking Edge's hide_credentials default", async () => {
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',

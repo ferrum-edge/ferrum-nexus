@@ -355,6 +355,35 @@ describe('ferrum admin client', () => {
     assert.deepEqual(effectiveIds(), [auth.id, acl.id, addition.id]);
   });
 
+  it('accepts the one basic_auth config key Edge accepts, and rejects the rest', async () => {
+    await client.proxies.create({
+      id: 'basic-auth-config',
+      listen_path: '/basic-auth-config',
+      backend_host: 'billing.internal',
+      backend_port: 443,
+    });
+    const attach = (config: Record<string, unknown>) =>
+      client.pluginConfigs.create({
+        plugin_name: 'basic_auth',
+        scope: 'proxy',
+        proxy_id: 'basic-auth-config',
+        enabled: true,
+        config,
+      });
+
+    // Nexus sends `{}`; an operator may set the legacy opt-out by hand.
+    assert.deepEqual((await attach({})).config, {});
+    assert.deepEqual((await attach({ hide_credentials: false })).config, {
+      hide_credentials: false,
+    });
+
+    // The key set is still closed — `key_auth`'s other key does not carry over.
+    await assert.rejects(
+      () => attach({ key_location: 'header:X-API-Key' }),
+      (error: unknown) => isNexusError(error) && error.code === 'EDGE_ERROR',
+    );
+  });
+
   it('preserves null basic_auth config over HTTP through binder restore and rollback', async () => {
     const binder = createEdgePluginBinder(client);
     const proxyBody = {
