@@ -480,22 +480,80 @@ describe('application-scoped identities', () => {
     }
   });
 
+  it('rate limits application mutations once the limiter is enabled', async () => {
+    // The routes always declared a per-route limit, but nothing in the
+    // `/api/applications` scope registered the plugin that enforces one, so
+    // the limit was dead config. The limiter is forced off under
+    // `NEXUS_ENV=test`, so this app runs as a development one with it on.
+    const limited = await buildTestApp({
+      env: {
+        NEXUS_ENV: 'development',
+        NEXUS_RATE_LIMIT_ENABLED: 'true',
+        NEXUS_MAX_APPLICATIONS_PER_OWNER: '0',
+      },
+      deps: { startOutboxWorker: false },
+    });
+    try {
+      await limited.registerUser({ email: 'app-limit-super@example.test' });
+      const client = await limited.registerUser({
+        email: 'app-limit@example.test',
+        role: 'client',
+      });
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const created = await limited.authed(client, {
+          method: 'POST',
+          url: '/api/applications',
+          payload: { name: `Limited ${attempt}` },
+        });
+        assert.equal(created.statusCode, 201, created.body);
+      }
+      const refused = await limited.authed(client, {
+        method: 'POST',
+        url: '/api/applications',
+        payload: { name: 'One too many' },
+      });
+      assert.equal(refused.statusCode, 429, refused.body);
+      assert.match(refused.body, /RATE_LIMITED/);
+    } finally {
+      await limited.close();
+    }
+  });
+
   it('serializes concurrent application quota checks for one owner', async () => {
     const limited = await buildTestApp({
       env: { NEXUS_MAX_APPLICATIONS_PER_OWNER: '1' },
-      wrapStore: (store) => ({
-        ...store,
-        applications: {
-          ...store.applications,
-          async count(filter) {
-            // Capture the count before yielding. Without the per-owner lock,
-            // every concurrent request observes zero and all inserts succeed.
-            const current = await store.applications.count(filter);
-            await new Promise((resolve) => setTimeout(resolve, 25));
-            return current;
+      // A Proxy rather than a spread: `{ ...store }` copies only own fields,
+      // so the store's prototype methods — `transaction` among them — would be
+      // lost and the first registration would fail. Same shape as
+      // `faultInjectingStore`.
+      wrapStore: (store) =>
+        new Proxy(store, {
+          get(target, property, receiver) {
+            if (property === 'applications') {
+              const applications = target.applications;
+              return new Proxy(applications, {
+                get(repo, method, repoReceiver) {
+                  if (method !== 'count') {
+                    const value: unknown = Reflect.get(repo, method, repoReceiver);
+                    return typeof value === 'function' ? value.bind(repo) : value;
+                  }
+                  return async (
+                    filter: Parameters<typeof applications.count>[0],
+                  ): Promise<number> => {
+                    // Capture the count before yielding. Without the per-owner
+                    // lock, every concurrent request observes zero and all
+                    // inserts succeed.
+                    const current = await repo.count(filter);
+                    await new Promise((resolve) => setTimeout(resolve, 25));
+                    return current;
+                  };
+                },
+              });
+            }
+            const value: unknown = Reflect.get(target, property, receiver);
+            return typeof value === 'function' ? value.bind(target) : value;
           },
-        },
-      }),
+        }),
     });
     try {
       await limited.registerUser({ email: 'race-super@example.test' });
