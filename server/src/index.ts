@@ -748,9 +748,15 @@ export async function buildServer(
     { prefix: '/api/credentials' },
   );
 
-  await app.register(async (scope) => scope.register(applicationRoutes, { applications }), {
-    prefix: '/api/applications',
-  });
+  await app.register(
+    async (scope) => {
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
+      }
+      await scope.register(applicationRoutes, { applications });
+    },
+    { prefix: '/api/applications' },
+  );
 
   registerApiNotFoundRoutes(app);
 

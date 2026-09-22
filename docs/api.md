@@ -2149,7 +2149,12 @@ first approval or the first credential, exactly as an account's is.
 `429 QUOTA_EXCEEDED` when the account already owns
 `NEXUS_MAX_APPLICATIONS_PER_OWNER` (default 20; `0` disables the ceiling) —
 each application is a gateway consumer, so this bounds the Edge resources one
-semi-trusted account can create.
+semi-trusted account can create. The count and the insert run under one
+per-owner lock, so concurrent creates cannot overshoot the ceiling.
+
+`429 RATE_LIMITED` beyond 30 requests per minute from one account, counted
+separately for this route, `PATCH /:id` and `DELETE /:id`, when
+`NEXUS_RATE_LIMIT_ENABLED=true` (the default outside `NEXUS_ENV=test`).
 
 ### `PATCH /api/applications/:id`
 
