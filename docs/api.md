@@ -2342,6 +2342,14 @@ Approved clients keep the credentials they were issued — the ACL group is
 derived from the API id, so the moment the rebuilt proxy's `access_control`
 plugin is associated, the groups already on their consumers match again.
 
+What the portal does not store does not come back. Edge deleted the proxy's
+plugin configs with the proxy, so anything made or changed directly on the
+gateway — an operator's own plugin config, or a hand-edit such as
+`hide_credentials: false` on the portal's authentication plugin — is gone
+before the restore starts; re-apply it afterwards. A `spec_enforcement`
+conversion is different: the proxy is still live when it begins, and it
+carries those configs across as they are.
+
 What is rebuilt, in the order a publish builds it: the proxy (through the
 API-spec importer in `routes` mode, so the `openapi_validator` is regenerated),
 the authentication plugin, `access_control` when the API is `requestable`, the
