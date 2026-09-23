@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, screen, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { renderPage } from '../../test/helpers';
+import { renderPage } from '../../../test/helpers';
 import { AdminGodPage } from './AdminGodPage';
 
 const { revoke, remove, disable, sendBroadcast, recent } = vi.hoisted(() => ({

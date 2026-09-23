@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GatewayTeardownState, Organization, User } from '@ferrum-nexus/shared';
 import { organizationsApi, usersApi } from '../../lib/api';
 import { TooltipProvider } from '../../components/ui/Tooltip';
-import { renderPage } from '../../test/helpers';
+import { renderPage } from '../../../test/helpers';
 import { AdminUsersPage } from './AdminUsersPage';
 
 vi.mock('../../components/layout/RoleGuard', () => ({
