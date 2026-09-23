@@ -1,5 +1,6 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type { ReactElement, ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GatewayTeardownState, Organization, User } from '@ferrum-nexus/shared';
@@ -78,6 +79,11 @@ function renderUsers(organizations: Organization[] = []): void {
   vi.spyOn(organizationsApi, 'list').mockResolvedValue({
     items: organizations,
     total: organizations.length,
+  });
+  vi.spyOn(organizationsApi, 'get').mockImplementation(async (id) => {
+    const organization = organizations.find((entry) => entry.id === id);
+    if (!organization) throw new Error('Organization not found');
+    return { organization };
   });
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -207,23 +213,33 @@ describe('organization and status management', () => {
       expect(list).toHaveBeenCalledWith(expect.objectContaining({ status: 'disabled' })),
     );
 
-    fireEvent.change(screen.getByLabelText('Filter by organization'), {
-      target: { value: GLOBEX.id },
+    fireEvent.click(screen.getByRole('button', { name: 'Filter by organization' }));
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search Filter by organization' }), {
+      target: { value: GLOBEX.name },
     });
+    fireEvent.click(await screen.findByRole('option', { name: GLOBEX.name }));
     await waitFor(() =>
       expect(list).toHaveBeenCalledWith(expect.objectContaining({ org_id: GLOBEX.id })),
     );
   });
 
   it('assigns an account to another organization and renames it', async () => {
+    const actor = userEvent.setup();
     vi.spyOn(usersApi, 'list').mockResolvedValue(page);
     const update = vi.spyOn(usersApi, 'update').mockResolvedValue({ user: member });
     renderUsers([ACME, GLOBEX]);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Edit Ada Member' }));
-    const dialog = within(await screen.findByRole('dialog'));
+    await actor.click(await screen.findByRole('button', { name: 'Edit Ada Member' }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Edit Ada Member' }));
+    await waitFor(() =>
+      expect(dialog.getByRole('button', { name: 'Organization' })).toHaveTextContent(ACME.name),
+    );
     fireEvent.change(dialog.getByLabelText(/^Display name/), { target: { value: 'Ada Lovelace' } });
-    fireEvent.change(dialog.getByLabelText('Organization'), { target: { value: GLOBEX.id } });
+    fireEvent.click(dialog.getByRole('button', { name: 'Organization' }));
+    fireEvent.change(dialog.getByRole('searchbox', { name: 'Search Organization' }), {
+      target: { value: GLOBEX.name },
+    });
+    fireEvent.click(await dialog.findByRole('option', { name: GLOBEX.name }));
     fireEvent.click(dialog.getByRole('button', { name: 'Save' }));
 
     await waitFor(() =>
@@ -235,19 +251,65 @@ describe('organization and status management', () => {
   });
 
   it('clears an organization from an account', async () => {
+    const actor = userEvent.setup();
     vi.spyOn(usersApi, 'list').mockResolvedValue(page);
     const update = vi.spyOn(usersApi, 'update').mockResolvedValue({ user: member });
     renderUsers([ACME, GLOBEX]);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Edit Ada Member' }));
-    const dialog = within(await screen.findByRole('dialog'));
-    fireEvent.change(dialog.getByLabelText('Organization'), { target: { value: '__none__' } });
+    await actor.click(await screen.findByRole('button', { name: 'Edit Ada Member' }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Edit Ada Member' }));
+    fireEvent.click(dialog.getByRole('button', { name: 'Organization' }));
+    fireEvent.click(await dialog.findByRole('option', { name: 'No organization' }));
     fireEvent.click(dialog.getByRole('button', { name: 'Save' }));
 
     await waitFor(() =>
       expect(update).toHaveBeenCalledWith(member.id, {
         display_name: member.display_name,
         org_id: null,
+      }),
+    );
+  });
+
+  it('searches beyond the first organization page and resolves an out-of-page org id', async () => {
+    const actor = userEvent.setup();
+    const late = { ...GLOBEX, id: 'org-201', name: 'Zeta 201' };
+    const assigned = { ...member, org_id: late.id };
+    vi.spyOn(usersApi, 'list').mockResolvedValue({ ...page, items: [assigned] });
+    const update = vi.spyOn(usersApi, 'update').mockResolvedValue({ user: assigned });
+    renderUsers([late]);
+    const listOrganizations = vi
+      .spyOn(organizationsApi, 'list')
+      .mockImplementation(async (query = {}) => ({
+        items: query.q === 'Zeta 201' ? [late] : [],
+        total: query.q === 'Zeta 201' ? 1 : 0,
+      }));
+    expect(await screen.findByText(late.name)).toBeInTheDocument();
+    await waitFor(() => expect(organizationsApi.get).toHaveBeenCalledWith(late.id));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Filter by organization' }));
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search Filter by organization' }), {
+      target: { value: late.name },
+    });
+    fireEvent.click(await screen.findByRole('option', { name: late.name }));
+    await waitFor(() =>
+      expect(usersApi.list).toHaveBeenCalledWith(expect.objectContaining({ org_id: late.id })),
+    );
+    expect(listOrganizations).toHaveBeenCalledWith(expect.objectContaining({ q: late.name }));
+
+    await actor.click(await screen.findByRole('button', { name: 'Edit Ada Member' }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Edit Ada Member' }));
+    expect(dialog.getByRole('button', { name: 'Organization' })).toHaveTextContent(late.name);
+    fireEvent.click(dialog.getByRole('button', { name: 'Organization' }));
+    fireEvent.change(dialog.getByRole('searchbox', { name: 'Search Organization' }), {
+      target: { value: late.name },
+    });
+    fireEvent.click(await dialog.findByRole('option', { name: late.name }));
+    expect(dialog.getByRole('button', { name: 'Organization' })).toHaveTextContent(late.name);
+    fireEvent.click(dialog.getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect(update).toHaveBeenCalledWith(assigned.id, {
+        display_name: assigned.display_name,
+        org_id: late.id,
       }),
     );
   });

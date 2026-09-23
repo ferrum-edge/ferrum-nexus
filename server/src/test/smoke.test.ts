@@ -594,6 +594,8 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(member.org_id, org.id);
 
       assert.ok((await store.organizations.list({ limit: 100 })).total >= 2);
+      const searched = await store.organizations.list({ q: name.slice(0, 5), limit: 10 });
+      assert.ok(searched.items.some((entry) => entry.id === org.id));
       assert.equal(await store.organizations.delete(renamed.id), true);
       assert.equal(await store.organizations.delete(renamed.id), false);
     });

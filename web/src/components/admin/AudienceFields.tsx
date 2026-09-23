@@ -22,7 +22,6 @@
 import { useState, type ReactElement } from 'react';
 import {
   ELEVATED_ROLES,
-  MAX_PAGE_SIZE,
   ROLE_LABELS,
   ROLE_ORDER,
   type MassEmailAudience,
@@ -30,11 +29,14 @@ import {
   type UserStatus,
 } from '@ferrum-nexus/shared';
 import { cn } from '../../lib/cn';
-import { useOrganizations, useUsers } from '../../hooks/useUsers';
+import { useUsers } from '../../hooks/useUsers';
+import { organizationsApi } from '../../lib/api';
+import { queryKeys } from '../../hooks/keys';
+import { AsyncSelect } from '../ui/AsyncSelect';
 import { Button } from '../ui/Button';
 import { Icon } from '../ui/Icon';
 import { Checkbox, Field, FieldGroup, Input } from '../ui/Input';
-import { LabeledSelect } from '../ui/Select';
+import type { SelectOption } from '../ui/Select';
 
 /**
  * Sentinel for "no organization filter". A select item's value may not be the
@@ -221,12 +223,10 @@ export function AudienceFields({
 }: AudienceFieldsProps): ReactElement {
   const [search, setSearch] = useState('');
   const term = search.trim();
-  const organizations = useOrganizations({ limit: MAX_PAGE_SIZE }, value.scope === 'filtered');
   const matches = useUsers(
     { q: term, limit: 10, status: 'active' },
     value.scope === 'explicit' && term.length > 0,
   );
-  const orgs = organizations.data?.items ?? [];
   const chosen = new Set(value.recipients.map((recipient) => recipient.id));
 
   const toggleRole = (role: Role, checked: boolean): void => {
@@ -248,13 +248,12 @@ export function AudienceFields({
     onChange({ ...value, recipients: value.recipients.filter((entry) => entry.id !== id) });
   };
 
-  const chooseOrg = (next: string): void => {
+  const chooseOrg = (next: string, option: SelectOption): void => {
     if (next === ANY_ORG) {
       onChange({ ...value, orgId: null, orgName: null });
       return;
     }
-    const org = orgs.find((entry) => entry.id === next);
-    onChange({ ...value, orgId: next, orgName: org?.name ?? next });
+    onChange({ ...value, orgId: next, orgName: option.label });
   };
 
   return (
@@ -318,15 +317,18 @@ export function AudienceFields({
               />
             </div>
           </FieldGroup>
-          <LabeledSelect
+          <AsyncSelect
             className="md:col-span-2"
             label="Organization"
             value={value.orgId ?? ANY_ORG}
             onValueChange={chooseOrg}
-            options={[
-              { value: ANY_ORG, label: 'Every organization' },
-              ...orgs.map((org) => ({ value: org.id, label: org.name })),
-            ]}
+            queryKey={queryKeys.organizations.picker}
+            fetchPage={({ q, limit, offset }) => organizationsApi.list({ q, limit, offset })}
+            toOption={(org) => ({ value: org.id, label: org.name })}
+            fixedOptions={[{ value: ANY_ORG, label: 'Every organization' }]}
+            selectedLabel={value.orgName ?? undefined}
+            searchPlaceholder="Search organizations"
+            emptyLabel="No organizations found."
           />
         </div>
       ) : null}

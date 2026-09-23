@@ -14,6 +14,7 @@ import {
   ROLE_ORDER,
   type CreateOrganizationResponse,
   type GetMeUserResponse,
+  type GetOrganizationResponse,
   type GetUserResponse,
   type ListOrganizationsResponse,
   type ListUsersResponse,
@@ -67,6 +68,8 @@ const updateOrganizationBody = z.object({
   name: z.string().trim().min(1).max(200).optional(),
   description: z.string().trim().max(2000).nullish(),
 });
+
+const listOrganizationsQuery = listQuerySchema.extend({ q: z.string().trim().max(200).optional() });
 
 /** `/api/users` route plugin. */
 export const usersRoutes: FastifyPluginAsync<UsersRoutesOptions> = async (app, options) => {
@@ -152,8 +155,13 @@ export const organizationRoutes: FastifyPluginAsync<UsersRoutesOptions> = async 
   app.addHook('onRequest', requireRole('admin'));
 
   app.get('/', async (request): Promise<ListOrganizationsResponse> => {
-    const query = parseOrThrow(listQuerySchema, request.query);
-    return users.listOrganizations(listOptions(query));
+    const query = parseOrThrow(listOrganizationsQuery, request.query);
+    return users.listOrganizations({ ...listOptions(query), ...(query.q ? { q: query.q } : {}) });
+  });
+
+  app.get('/:id', async (request): Promise<GetOrganizationResponse> => {
+    const { id } = parseOrThrow(idParamSchema, request.params);
+    return { organization: await users.getOrganization(id) };
   });
 
   app.post('/', async (request, reply): Promise<CreateOrganizationResponse> => {

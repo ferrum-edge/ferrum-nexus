@@ -64,6 +64,7 @@ import {
   type GetThreadQuery,
   type GetThreadResponse,
   type GetUserResponse,
+  type GetOrganizationResponse,
   type GodBroadcastRequest,
   type GodBroadcastResponse,
   type GodDeleteApiRequest,
@@ -381,6 +382,8 @@ export const usersApi = {
 export const organizationsApi = {
   list: (query: ListOrganizationsQuery = {}): Promise<ListOrganizationsResponse> =>
     get<ListOrganizationsResponse>('/organizations', { ...query }),
+  get: (id: string): Promise<GetOrganizationResponse> =>
+    get<GetOrganizationResponse>(`/organizations/${encodeURIComponent(id)}`),
   create: (body: CreateOrganizationRequest): Promise<CreateOrganizationResponse> =>
     post<CreateOrganizationResponse>('/organizations', body),
 };

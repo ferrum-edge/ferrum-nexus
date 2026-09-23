@@ -921,11 +921,16 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
     list: async (options) => {
       const { limit, offset } = page(options);
-      const total = await queryCount(exec, 'SELECT COUNT(*) AS cnt FROM organizations');
+      const where = new SqlWhereBuilder().addSearch(options?.q, ['name']).build();
+      const total = await queryCount(
+        exec,
+        `SELECT COUNT(*) AS cnt FROM organizations${where.sql}`,
+        where.params,
+      );
       const rows = await queryAll(
         exec,
-        'SELECT * FROM organizations ORDER BY lower(name) ASC LIMIT ? OFFSET ?',
-        [limit, offset],
+        `SELECT * FROM organizations${where.sql} ORDER BY lower(name) ASC LIMIT ? OFFSET ?`,
+        [...where.params, limit, offset],
       );
       return { items: rows.map(mapOrganization), total };
     },
