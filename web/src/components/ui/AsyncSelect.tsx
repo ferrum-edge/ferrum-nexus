@@ -218,7 +218,9 @@ export function AsyncSelect<TItem>({
           ) : null}
           {total > pageSize ? (
             <div className="flex items-center justify-between gap-2 border-t border-border px-1 pt-2">
-              <p className="text-xs text-fg-muted tabular-nums">{first}–{last} of {total}</p>
+              <p className="text-xs text-fg-muted tabular-nums">
+                {first}–{last} of {total}
+              </p>
               <div className="flex items-center gap-1">
                 <Button
                   size="icon-sm"

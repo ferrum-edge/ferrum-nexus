@@ -316,7 +316,10 @@ describe('per-identity catalog access', () => {
       url: '/api/applications?mine=true&status=active&q=application%20b',
     });
     const found = searched.json<ListApplicationsResponse>();
-    assert.deepEqual(found.items.map((item) => item.id), [appB]);
+    assert.deepEqual(
+      found.items.map((item) => item.id),
+      [appB],
+    );
     assert.equal(found.total, 1);
 
     const oversized = await harness.authed(owner, {
