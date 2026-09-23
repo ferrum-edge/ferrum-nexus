@@ -309,7 +309,7 @@ curl -s http://127.0.0.1:8787/api/health -b admin.txt | jq '.edge | {status, rea
 `configured` is the portal's `FERRUM_NAMESPACE`; `active` is the gateway's. The
 gateway reports its own side directly too, on the authenticated Admin API — and
 that call needs a **minted admin JWT**, not the signing secret.
-`FERRUM_ADMIN_JWT_SECRET` is a key you *sign a token with*; pasting it straight
+`FERRUM_ADMIN_JWT_SECRET` is a key you _sign a token with_; pasting it straight
 into an `Authorization: Bearer …` header authenticates nothing. Mint a
 short-lived one (HS256, carrying the `iss`/`sub`/`iat`/`nbf`/`exp`/`jti`/`role`
 claims Edge requires) and ask the gateway:
