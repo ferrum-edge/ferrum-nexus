@@ -1,7 +1,8 @@
-import { act, cleanup, fireEvent, screen, within } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { renderPage } from '../../../test/helpers';
+import { organizationsApi } from '../../lib/api';
 import { AdminGodPage } from './AdminGodPage';
 
 const { revoke, remove, disable, sendBroadcast, recent } = vi.hoisted(() => ({
@@ -48,11 +49,22 @@ vi.mock('../../components/layout/RoleGuard', () => ({
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.clearAllMocks();
   vi.unstubAllGlobals();
 });
 
 const oldest = '12345678-1234-4234-8234-123456789abc';
+
+function renderGodPage(): void {
+  vi.spyOn(organizationsApi, 'list').mockResolvedValue({ items: [], total: 0 });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <AdminGodPage />
+    </QueryClientProvider>,
+  );
+}
 
 describe('emergency targets beyond the first page', () => {
   it.each([
@@ -66,7 +78,7 @@ describe('emergency targets beyond the first page', () => {
       index: 2,
     },
   ])('submits the unlisted 201st target through $label after confirmation', (entry) => {
-    renderPage(<AdminGodPage />);
+    renderGodPage();
     const send = [revoke, remove, disable][entry.index]!;
     expect(recent.some((record) => record.id === oldest)).toBe(false);
     fireEvent.change(screen.getByLabelText(entry.label), { target: { value: ` ${oldest} ` } });
@@ -92,7 +104,7 @@ describe('emergency targets beyond the first page', () => {
 describe('broadcast email campaign identity', () => {
   it('keeps HTTP-compatible retry keys until success and starts a new campaign afterward', () => {
     vi.stubGlobal('crypto', { getRandomValues: crypto.getRandomValues.bind(crypto) });
-    renderPage(<AdminGodPage />);
+    renderGodPage();
     const compose = () => {
       fireEvent.change(screen.getByLabelText(/^Subject/), { target: { value: 'Maintenance' } });
       fireEvent.change(screen.getByLabelText(/^Message/), { target: { value: 'Sunday window' } });
@@ -133,7 +145,7 @@ describe('broadcast email campaign identity', () => {
  */
 describe('broadcast audience', () => {
   it('reaches both administrative roles when the shortcut is used', () => {
-    renderPage(<AdminGodPage />);
+    renderGodPage();
     fireEvent.click(screen.getByLabelText('Filtered'));
     fireEvent.click(screen.getByRole('button', { name: 'All administrative roles' }));
     fireEvent.change(screen.getByLabelText(/^Subject/), { target: { value: 'Rotate now' } });

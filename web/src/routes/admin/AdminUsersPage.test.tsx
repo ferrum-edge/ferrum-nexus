@@ -1,10 +1,11 @@
-import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type { ReactElement, ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GatewayTeardownState, Organization, User } from '@ferrum-nexus/shared';
 import { organizationsApi, usersApi } from '../../lib/api';
 import { TooltipProvider } from '../../components/ui/Tooltip';
-import { renderPage } from '../../../test/helpers';
 import { AdminUsersPage } from './AdminUsersPage';
 
 vi.mock('../../components/layout/RoleGuard', () => ({
@@ -84,10 +85,15 @@ function renderUsers(organizations: Organization[] = []): void {
     if (!organization) throw new Error('Organization not found');
     return { organization };
   });
-  renderPage(
-    <TooltipProvider>
-      <AdminUsersPage />
-    </TooltipProvider>,
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={client}>
+      <TooltipProvider>
+        <AdminUsersPage />
+      </TooltipProvider>
+    </QueryClientProvider>,
   );
 }
 
@@ -218,12 +224,16 @@ describe('organization and status management', () => {
   });
 
   it('assigns an account to another organization and renames it', async () => {
+    const actor = userEvent.setup();
     vi.spyOn(usersApi, 'list').mockResolvedValue(page);
     const update = vi.spyOn(usersApi, 'update').mockResolvedValue({ user: member });
     renderUsers([ACME, GLOBEX]);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Edit Ada Member' }));
-    const dialog = within(await screen.findByRole('dialog'));
+    await actor.click(await screen.findByRole('button', { name: 'Edit Ada Member' }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Edit Ada Member' }));
+    await waitFor(() =>
+      expect(dialog.getByRole('button', { name: 'Organization' })).toHaveTextContent(ACME.name),
+    );
     fireEvent.change(dialog.getByLabelText(/^Display name/), { target: { value: 'Ada Lovelace' } });
     fireEvent.click(dialog.getByRole('button', { name: 'Organization' }));
     fireEvent.change(dialog.getByRole('searchbox', { name: 'Search Organization' }), {
@@ -241,12 +251,13 @@ describe('organization and status management', () => {
   });
 
   it('clears an organization from an account', async () => {
+    const actor = userEvent.setup();
     vi.spyOn(usersApi, 'list').mockResolvedValue(page);
     const update = vi.spyOn(usersApi, 'update').mockResolvedValue({ user: member });
     renderUsers([ACME, GLOBEX]);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Edit Ada Member' }));
-    const dialog = within(await screen.findByRole('dialog'));
+    await actor.click(await screen.findByRole('button', { name: 'Edit Ada Member' }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Edit Ada Member' }));
     fireEvent.click(dialog.getByRole('button', { name: 'Organization' }));
     fireEvent.click(await dialog.findByRole('option', { name: 'No organization' }));
     fireEvent.click(dialog.getByRole('button', { name: 'Save' }));
@@ -260,6 +271,7 @@ describe('organization and status management', () => {
   });
 
   it('searches beyond the first organization page and resolves an out-of-page org id', async () => {
+    const actor = userEvent.setup();
     const late = { ...GLOBEX, id: 'org-201', name: 'Zeta 201' };
     const assigned = { ...member, org_id: late.id };
     vi.spyOn(usersApi, 'list').mockResolvedValue({ ...page, items: [assigned] });
@@ -284,8 +296,9 @@ describe('organization and status management', () => {
     );
     expect(listOrganizations).toHaveBeenCalledWith(expect.objectContaining({ q: late.name }));
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Edit Ada Member' }));
-    const dialog = within(await screen.findByRole('dialog'));
+    await actor.click(await screen.findByRole('button', { name: 'Edit Ada Member' }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Edit Ada Member' }));
+    expect(dialog.getByRole('button', { name: 'Organization' })).toHaveTextContent(late.name);
     fireEvent.click(dialog.getByRole('button', { name: 'Organization' }));
     fireEvent.change(dialog.getByRole('searchbox', { name: 'Search Organization' }), {
       target: { value: late.name },
