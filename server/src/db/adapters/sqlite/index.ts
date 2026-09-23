@@ -1029,11 +1029,18 @@ class SqliteStore implements NexusStore {
 
     list: async (options) => {
       const { limit, offset } = page(options);
-      const total = queryCount(this.db, 'SELECT COUNT(*) AS count FROM organizations');
+      const q = options?.q?.trim().toLowerCase() ?? '';
+      const where = q === '' ? '' : ' WHERE lower(name) LIKE ?';
+      const params = q === '' ? [] : [`%${q}%`];
+      const total = queryCount(
+        this.db,
+        `SELECT COUNT(*) AS count FROM organizations${where}`,
+        params,
+      );
       const rows = queryAll(
         this.db,
-        'SELECT * FROM organizations ORDER BY lower(name) ASC LIMIT ? OFFSET ?',
-        [limit, offset],
+        `SELECT * FROM organizations${where} ORDER BY lower(name) ASC LIMIT ? OFFSET ?`,
+        [...params, limit, offset],
       );
       return { items: rows.map(mapOrganization), total };
     },

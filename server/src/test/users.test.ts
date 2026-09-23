@@ -347,6 +347,25 @@ describe('users and organizations', () => {
 
     const listed = await harness.authed(admin, { method: 'GET', url: '/api/organizations' });
     assert.equal(listed.json<Paginated<Organization>>().total, 1);
+
+    const searched = await harness.authed(admin, {
+      method: 'GET',
+      url: '/api/organizations?q=acme&limit=1',
+    });
+    assert.deepEqual(
+      searched.json<Paginated<Organization>>().items.map((entry) => entry.id),
+      [organization.id],
+    );
+    const byId = await harness.authed(admin, {
+      method: 'GET',
+      url: `/api/organizations/${organization.id}`,
+    });
+    assert.equal(byId.json<{ organization: Organization }>().organization.id, organization.id);
+    const invalidSearch = await harness.authed(admin, {
+      method: 'GET',
+      url: `/api/organizations?q=${'x'.repeat(201)}`,
+    });
+    assert.equal(invalidSearch.statusCode, 400);
   });
 
   it('guards elevated reactivation without blocking ordinary account recovery', async () => {

@@ -1,7 +1,7 @@
+import { useQueries } from '@tanstack/react-query';
 import { useMemo, useState, type ReactElement } from 'react';
 import {
   DEFAULT_PAGE_SIZE,
-  MAX_PAGE_SIZE,
   ROLE_LABELS,
   ROLE_ORDER,
   type Organization,
@@ -11,7 +11,6 @@ import {
 } from '@ferrum-nexus/shared';
 import { formatDateTime, formatRelative } from '../../lib/format';
 import {
-  useOrganizations,
   useRetryGatewayTeardown,
   useUpdateUser,
   useUser,
@@ -28,9 +27,12 @@ import { Dialog } from '../../components/ui/Dialog';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { Icon } from '../../components/ui/Icon';
 import { LabeledInput, SearchInput } from '../../components/ui/Input';
-import { LabeledSelect, Select } from '../../components/ui/Select';
 import { RoleBadge, StatusPill } from '../../components/ui/StatusPill';
 import { Tooltip } from '../../components/ui/Tooltip';
+import { AsyncSelect } from '../../components/ui/AsyncSelect';
+import { Select } from '../../components/ui/Select';
+import { queryKeys } from '../../hooks/keys';
+import { organizationsApi } from '../../lib/api';
 
 /**
  * Sentinel for "no organization". A select item's value may not be the empty
@@ -112,11 +114,11 @@ function GatewayTeardownBadge({ userId }: { userId: string }): ReactElement | nu
  */
 function EditUserDialog({
   user,
-  organizations,
+  selectedOrganization,
   onClose,
 }: {
   user: User;
-  organizations: readonly Organization[];
+  selectedOrganization?: Organization;
   onClose: () => void;
 }): ReactElement {
   const update = useUpdateUser();
@@ -174,14 +176,17 @@ function EditUserDialog({
           value={displayName}
           onChange={(event) => setDisplayName(event.target.value)}
         />
-        <LabeledSelect
+        <AsyncSelect<Organization>
           label="Organization"
-          value={orgId}
-          onValueChange={setOrgId}
-          options={[
-            { value: NO_ORG, label: 'No organization' },
-            ...organizations.map((org) => ({ value: org.id, label: org.name })),
-          ]}
+          value={orgId === NO_ORG ? '' : orgId}
+          onValueChange={(value) => setOrgId(value || NO_ORG)}
+          queryKey={queryKeys.organizations.picker}
+          fetchPage={({ q, limit, offset }) => organizationsApi.list({ q, limit, offset })}
+          toOption={(org) => ({ value: org.id, label: org.name })}
+          fixedOptions={[{ value: '', label: 'No organization' }]}
+          selectedLabel={selectedOrganization?.name}
+          searchPlaceholder="Search organizations"
+          emptyLabel="No organizations found."
           hint="Groups accounts for filtering and for mass email; it grants nothing on its own."
         />
       </div>
@@ -206,11 +211,31 @@ function UsersTable(): ReactElement {
     ...(orgFilter === 'all' ? {} : { org_id: orgFilter }),
   });
 
-  // The directory shows an organization per row and filters by one, so the list
-  // is fetched here rather than per row.
-  const organizations = useOrganizations({ limit: MAX_PAGE_SIZE });
-  const orgs = useMemo(() => organizations.data?.items ?? [], [organizations.data]);
-  const orgNames = useMemo(() => new Map(orgs.map((org) => [org.id, org.name])), [orgs]);
+  // Resolve only the organizations represented on this user page. The API
+  // lookup keeps names available even when the organization list is paginated.
+  const organizationIds = [
+    ...new Set(
+      (query.data?.items ?? []).flatMap((entry) => (entry.org_id ? [entry.org_id] : [])),
+    ),
+  ];
+  const organizationDetails = useQueries({
+    queries: organizationIds.map((id) => ({
+      queryKey: queryKeys.organizations.detail(id),
+      queryFn: () => organizationsApi.get(id),
+      staleTime: 60_000,
+    })),
+  });
+  const orgNames = useMemo(
+    () =>
+      new Map(
+        organizationDetails.flatMap((detail) =>
+          detail.data
+            ? [[detail.data.organization.id, detail.data.organization.name] as const]
+            : [],
+        ),
+      ),
+    [organizationDetails],
+  );
 
   const update = useUpdateUser();
   const toast = useToast();
@@ -382,18 +407,19 @@ function UsersTable(): ReactElement {
                 { value: 'disabled', label: 'Disabled' },
               ]}
             />
-            <Select
-              aria-label="Filter by organization"
-              className="w-48"
-              value={orgFilter}
+            <AsyncSelect<Organization>
+              label="Filter by organization"
+              value={orgFilter === 'all' ? '' : orgFilter}
               onValueChange={(value) => {
-                setOrgFilter(value);
+                setOrgFilter(value || 'all');
                 setOffset(0);
               }}
-              options={[
-                { value: 'all', label: 'All organizations' },
-                ...orgs.map((org) => ({ value: org.id, label: org.name })),
-              ]}
+              queryKey={queryKeys.organizations.picker}
+              fetchPage={({ q, limit, offset }) => organizationsApi.list({ q, limit, offset })}
+              toOption={(org) => ({ value: org.id, label: org.name })}
+              fixedOptions={[{ value: '', label: 'All organizations' }]}
+              searchPlaceholder="Search organizations"
+              emptyLabel="No organizations found."
             />
           </>
         }
@@ -410,7 +436,10 @@ function UsersTable(): ReactElement {
         <EditUserDialog
           key={editTarget.id}
           user={editTarget}
-          organizations={orgs}
+          selectedOrganization={
+            organizationDetails.find((detail) => detail.data?.organization.id === editTarget.org_id)
+              ?.data?.organization
+          }
           onClose={() => setEditTarget(null)}
         />
       ) : null}

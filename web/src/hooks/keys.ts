@@ -78,6 +78,8 @@ export const queryKeys = {
   organizations: {
     all: ['organizations'] as const,
     list: (params: unknown) => ['organizations', 'list', params] as const,
+    picker: ['organizations', 'picker'] as const,
+    detail: (id: string) => ['organizations', 'detail', id] as const,
   },
 
   adminSettings: ['admin', 'settings'] as const,

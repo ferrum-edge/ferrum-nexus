@@ -178,7 +178,8 @@ export interface UsersService {
     targetId: Uuid,
     ip?: string | null,
   ): Promise<RetryGatewayTeardownResult>;
-  listOrganizations(options?: ListOptions): Promise<Paginated<Organization>>;
+  listOrganizations(options?: ListOptions & { q?: string }): Promise<Paginated<Organization>>;
+  getOrganization(id: Uuid): Promise<Organization>;
   createOrganization(
     actor: UserRecord,
     input: { name: string; description?: string | null },
@@ -617,6 +618,12 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
 
     async listOrganizations(options): Promise<Paginated<Organization>> {
       return store.organizations.list(options);
+    },
+
+    async getOrganization(id: Uuid): Promise<Organization> {
+      const organization = await store.organizations.findById(id);
+      if (!organization) throw notFound('Organization');
+      return organization;
     },
 
     async createOrganization(actor, input, ip = null): Promise<Organization> {

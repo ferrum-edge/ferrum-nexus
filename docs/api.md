@@ -790,7 +790,13 @@ Registered under `/api/organizations`. The **entire** plugin requires _admin_.
 
 ### `GET /api/organizations`
 
-_admin_ — `Paginated<Organization>`, ordered by name. Accepts `limit`/`offset`.
+_admin_ — `Paginated<Organization>`, ordered by name. Accepts `limit`/`offset` and
+`q` (case-insensitive substring search on the organization name, up to 200 characters).
+
+### `GET /api/organizations/:id`
+
+_admin_ → `{ "organization": Organization }`. Returns `404 NOT_FOUND` when the id does not
+exist.
 
 ### `POST /api/organizations`
 

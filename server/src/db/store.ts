@@ -679,7 +679,7 @@ export interface OrganizationRepo {
   /** Case-insensitive lookup by name; names are unique. */
   findByName(name: string): Promise<OrganizationRecord | null>;
   update(id: Uuid, patch: UpdateInput<OrganizationRecord>): Promise<OrganizationRecord | null>;
-  list(options?: ListOptions): Promise<Paginated<OrganizationRecord>>;
+  list(options?: ListOptions & { q?: string }): Promise<Paginated<OrganizationRecord>>;
   /** Members keep their `org_id` unless the caller clears it first. */
   delete(id: Uuid): Promise<boolean>;
 }

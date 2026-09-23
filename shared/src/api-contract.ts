@@ -303,10 +303,18 @@ export interface RetryGatewayTeardownResponse {
 }
 
 /** `GET /api/organizations` (admin) */
-export type ListOrganizationsQuery = ListQuery;
+export interface ListOrganizationsQuery extends ListQuery {
+  /** Case-insensitive organization-name search. */
+  q?: string;
+}
 
 /** `GET /api/organizations` (admin) */
 export type ListOrganizationsResponse = Paginated<Organization>;
+
+/** `GET /api/organizations/:id` (admin) */
+export interface GetOrganizationResponse {
+  organization: Organization;
+}
 
 /** `POST /api/organizations` (admin) */
 export interface CreateOrganizationRequest {

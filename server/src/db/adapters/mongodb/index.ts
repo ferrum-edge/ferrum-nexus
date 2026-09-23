@@ -1603,7 +1603,13 @@ class MongoStore implements NexusStore {
     },
 
     list: async (options) =>
-      this.paginate(COLLECTIONS.organizations, {}, { name_lower: 1 }, options, mapOrganization),
+      this.paginate(
+        COLLECTIONS.organizations,
+        options?.q?.trim() ? { name_lower: containsInsensitive(options.q.trim()) } : {},
+        { name_lower: 1 },
+        options,
+        mapOrganization,
+      ),
 
     delete: async (id) =>
       (await this.col(COLLECTIONS.organizations).deleteOne({ _id: id }, this.opts)).deletedCount >
