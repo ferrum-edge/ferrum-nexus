@@ -1,6 +1,6 @@
 ---
 name: fable-agents
-description: Dispatch and orchestrate external Claude Code Fable 5 agents from Codex for Ferrum Nexus issue, PR, review-feedback, CI-repair, and shepherding work. Use when the user asks GPT or Codex to delegate to Claude Fable agents, run multiple Fable workers, select medium or high effort, resume interrupted Fable runs, or drive agent-owned branches and PRs. Do not use for other Claude models, unsupported effort levels, Codex-native subagents, or ordinary single-agent edits.
+description: Dispatch and orchestrate external Claude Code Fable 5 agents from Codex for Ferrum Nexus issue, PR, review-feedback, CI-repair, and shepherding work. Use when the user asks GPT or Codex to delegate to Claude Fable agents, run multiple Fable workers, select low/medium/high/xhigh/max effort, resume interrupted Fable runs, or drive agent-owned branches and PRs. Do not use for other Claude models, unsupported effort levels, Codex-native subagents, or ordinary single-agent edits.
 ---
 
 # Fable agents
@@ -49,8 +49,8 @@ prompt, including continuation prompts.
    - `CLAUDE_BIN` if it points at an executable absolute path,
    - `~/.local/bin/claude`, `/opt/homebrew/bin/claude`, `/usr/local/bin/claude`,
    - `claude` on `PATH`.
-3. Confirm that the installed CLI accepts `claude-fable-5` and exposes `--effort` with `medium`
-   and `high`.
+3. Confirm that the installed CLI accepts `claude-fable-5` and exposes `--effort` with `low`, `medium`,
+   `high`, `xhigh`, and `max`.
 4. Use only the pinned model `claude-fable-5`. Do not expose a model override in the launcher.
 5. Stop and report the problem if authentication or Fable access is unavailable. Do not silently
    substitute another model or effort.
@@ -72,12 +72,15 @@ sandbox Claude from the rest of the host.
 
 ## Select effort deliberately
 
+- `low`: use for simple, well-scoped changes where latency matters.
 - `medium`: use for narrow fixes, review findings, tests, documentation, CI repairs with a known
   failure mode, and other routine work where latency and cost matter.
-- `high`: use for unfamiliar or multi-module work, concurrency and lifecycle bugs, protocol
+- `high`: default. Use for unfamiliar or multi-module work, concurrency and lifecycle bugs, protocol
   correctness, security boundaries, greenfield features, and difficult root-cause analysis.
+- `xhigh`: use for especially difficult reasoning and capability-sensitive coding.
+- `max`: use for the hardest long-running tasks when the additional reasoning cost is justified.
 
-Honor an explicit user choice. Use only `medium` or `high`; do not translate another requested
+Honor an explicit user choice. Use only `low`, `medium`, `high`, `xhigh`, or `max`; do not translate another requested
 level into one of them. Record the selected level beside each worker and preserve it across
 continuation rounds unless verified evidence justifies changing it.
 
@@ -98,7 +101,7 @@ the prompt file to the bundled launcher from one long-lived execution session:
 <ABS_SKILL_DIR>/scripts/dispatch-agent.sh \
   --worktree <ABS_WORKTREE> \
   --prompt-file <ABS_PROMPT_FILE> \
-  --effort <medium|high>
+  --effort <low|medium|high|xhigh|max>
 ```
 
 The launcher pins `claude-fable-5`, clears environment variables that can override model, effort,
@@ -194,7 +197,7 @@ them guardrail rejections.
    failures.
 6. If a worker dies, inspect its worktree and remote branch before relaunching. Preserve valid
    commits or intentional WIP, write a compact state snapshot, and launch a continuation round at
-   the same effort unless the evidence justifies escalation from `medium` to `high`.
+   the same effort unless the evidence justifies escalation to a higher supported level.
 7. Merge only when the user authorized it, your independent review is complete, and every
    completion gate the user assigned is satisfied.
 
@@ -219,5 +222,5 @@ worker logs.
 - An explicitly requested review receives no response: verify the trigger, bot identity, credits
   or availability, and head SHA before posting another trigger.
 - Model or effort mismatch: stop that worker, capture the exact diagnostic, correct the launch
-  contract, and relaunch. Never claim Fable, `high`, or `medium` unless the launch and resulting
+  contract, and relaunch. Never claim Fable 5 or a selected effort unless the launch and resulting
   session evidence support it.

@@ -105,7 +105,7 @@ The shared binary resolver lives at `.agents/skills/_lib/resolve-agent-bin.sh`.
 | `astra-agents`                                  | GPT-6 Astra             | `codex`        | `--effort low\|medium\|high\|xhigh\|max\|ultra` (`--fast` only on explicit request) |
 | `opus-agents`                                   | Claude Opus 5 1M        | `claude`       | `--effort low\|medium\|high\|xhigh\|max` (`--fast` only on explicit request)        |
 | `fable-5-1-agents`                              | Claude Fable 5.1        | `claude`       | `--effort low\|medium\|high\|xhigh\|max`                                            |
-| `fable-agents`                                  | Claude Fable 5          | `claude`       | `--effort medium\|high`                                                             |
+| `fable-agents`                                  | Claude Fable 5          | `claude`       | `--effort low\|medium\|high\|xhigh\|max`                                            |
 | `grok-agents`                                   | Cursor Grok 4.6         | `cursor-agent` | `--effort low\|medium\|high\|xhigh\|max` maps to a `cursor-grok-4.6-*` sku          |
 | `composer-agents`                               | Cursor Composer 2.5     | `cursor-agent` | pinned model; `--effort low\|medium\|high\|xhigh\|max`                              |
 | `opencode-laguna-agents`                        | opencode laguna-s-2.1   | `opencode`     | pinned model; `--effort medium\|high\|xhigh\|max`                                   |
