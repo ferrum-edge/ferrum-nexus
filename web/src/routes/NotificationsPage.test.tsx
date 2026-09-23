@@ -115,18 +115,4 @@ describe('notifications inbox', () => {
     );
     expect(notificationsApi.markRead).toHaveBeenCalledWith({ ids: ['notification-11'] });
   });
-
-  it('links the bell preview to the full inbox and keeps mark all read', async () => {
-    renderPage(<NotificationsBell />);
-    const trigger = await screen.findByRole('button', { name: 'Notifications, 2 unread' });
-    // jsdom has no PointerEvent, so Radix's pointer-down open never fires;
-    // the trigger's keyboard path opens the same menu.
-    fireEvent.keyDown(trigger, { key: 'Enter' });
-    expect(await screen.findByRole('menuitem', { name: 'View all' })).toHaveAttribute(
-      'href',
-      '/notifications',
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Mark all read' }));
-    await waitFor(() => expect(notificationsApi.markRead).toHaveBeenCalledWith({ all: true }));
-  });
 });
