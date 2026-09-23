@@ -846,9 +846,7 @@ export function resolveUpstream(spec: ParsedSpec, explicit?: string | null): Spe
     Array.isArray(servers) &&
     servers.some(
       (server) =>
-        isRecord(server) &&
-        typeof server.url === 'string' &&
-        expandServerUrl(server).url === null,
+        isRecord(server) && typeof server.url === 'string' && expandServerUrl(server).url === null,
     )
   ) {
     throw specInvalid(

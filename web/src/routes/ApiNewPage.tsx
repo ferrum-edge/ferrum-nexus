@@ -143,7 +143,8 @@ function PublishForm(): ReactElement {
   const upstreamError = specServer.oversizedField
     ? `${specServer.oversizedField} exceeds the ${MAX_UPSTREAM_URL_LENGTH}-character limit.`
     : explicitUpstream &&
-        (explicitUpstream.length > MAX_UPSTREAM_URL_LENGTH || !parseAbsoluteHttpUrl(explicitUpstream))
+        (explicitUpstream.length > MAX_UPSTREAM_URL_LENGTH ||
+          !parseAbsoluteHttpUrl(explicitUpstream))
       ? `Enter an absolute http:// or https:// URL of at most ${MAX_UPSTREAM_URL_LENGTH} characters.`
       : spec.trim() && !explicitUpstream && !specServer.url
         ? 'Enter an upstream URL; this document has no usable absolute server URL.'
