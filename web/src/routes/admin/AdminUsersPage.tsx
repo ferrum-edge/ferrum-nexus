@@ -11,12 +11,7 @@ import {
   type UserStatus,
 } from '@ferrum-nexus/shared';
 import { formatDateTime, formatRelative } from '../../lib/format';
-import {
-  useRetryGatewayTeardown,
-  useUpdateUser,
-  useUser,
-  useUsers,
-} from '../../hooks/useUsers';
+import { useRetryGatewayTeardown, useUpdateUser, useUser, useUsers } from '../../hooks/useUsers';
 import { useToast } from '../../stores/toast';
 import { RoleGuard } from '../../components/layout/RoleGuard';
 import { Badge } from '../../components/ui/Badge';
@@ -133,13 +128,7 @@ function OrganizationName({ id }: { id: string }): ReactElement {
  * accounts by editing the user's org_id" had no second step in the browser.
  * Mounted per target so its fields start from that account every time.
  */
-function EditUserDialog({
-  user,
-  onClose,
-}: {
-  user: User;
-  onClose: () => void;
-}): ReactElement {
+function EditUserDialog({ user, onClose }: { user: User; onClose: () => void }): ReactElement {
   const selectedOrganization = useOrganizationDetail(user.org_id);
   const update = useUpdateUser();
   const toast = useToast();
@@ -431,11 +420,7 @@ function UsersTable(): ReactElement {
       />
 
       {editTarget ? (
-        <EditUserDialog
-          key={editTarget.id}
-          user={editTarget}
-          onClose={() => setEditTarget(null)}
-        />
+        <EditUserDialog key={editTarget.id} user={editTarget} onClose={() => setEditTarget(null)} />
       ) : null}
 
       <ConfirmDialog
