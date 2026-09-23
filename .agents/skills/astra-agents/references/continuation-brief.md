@@ -1,14 +1,12 @@
 # Ferrum Nexus Astra continuation brief
 
 Resume the existing worktree and branch named in the dispatch prompt. Follow every rule in
-`agent-brief.md`, especially isolation, direct implementation, host discipline, the
+`agent-brief.md`, especially isolation, direct implementation, the
 controller-defined stopping point, final reporting, and the prohibition on merging. The
 orchestrator must provide absolute paths to both briefs; do not use this continuation brief alone.
 
-Do not run local builds, tests, benchmarks, `npm run typecheck`, or `npm run lint`, including
-through wrappers. Follow the remote CI validation policy in `agent-brief.md`: use failed remote job logs
-to drive fixes and matching pushed-head CI results to confirm them. Formatting and source/diff
-inspection are allowed. Report pending CI honestly and preserve the assigned stopping point.
+Validate only through remote CI, as the "Remote CI validation" section of `agent-brief.md`
+requires, and report pending CI honestly.
 
 ## Implement directly
 

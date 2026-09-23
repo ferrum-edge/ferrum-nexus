@@ -19,24 +19,10 @@ Fable.
 
 ## Remote CI validation
 
-Do not run local builds, tests, benchmarks, or compilation-based checks, including `npm run build`,
-`npm test`, `npm run typecheck`, `npm run lint`, and their workspace-scoped forms, or wrappers that
-invoke them. Do not make an exception for a targeted check, an ambiguous failure, or a controller's
-routine validation request. Local source inspection, formatting with `npx prettier --write`, and
-`git diff --check` are allowed.
-
-Use remote CI results for the exact pushed head SHA as build/test confirmation. Inspect failed
-job logs, fix the demonstrated failure, push the change, and use the next CI run to confirm it.
-Pending, skipped, unavailable, or earlier-head checks are not evidence that the change passed.
-Keep adding or updating relevant tests; remote CI executes them.
-
-The controller owns post-push CI monitoring unless the worker is explicitly assigned a CI repair
-or shepherd round. A worker assigned to exit after pushing must report the head SHA and CI status
-as pending or unverified and exit; the controller continues the CI-driven fix loop. Never report
-build/test success without matching remote evidence.
-
-Include the no-local-build/test rule and remote CI confirmation requirement in every dispatch
-prompt, including continuation prompts and any permitted nested delegation.
+The full no-local-build/test policy is the "Remote CI validation" section of
+[references/agent-brief.md](references/agent-brief.md). It binds you as orchestrator too: do not run
+local builds or tests, and accept only remote CI results for the exact pushed head SHA as build/test
+confirmation. Every dispatch prompt, including continuation prompts, must carry that section.
 
 ## Preflight
 
@@ -161,9 +147,9 @@ After every Fable run, review its exact output and the resulting repository and 
 accepting the work. Fable's security guardrails can reject a request or cause the platform to route
 the affected turn to another model even though the CLI process exits normally.
 
-Treat an explicit refusal, safeguard or fallback notice, a response that identifies a non-Fable
-serving model, or structured output showing `stop_reason: "refusal"` as confirmation. Missing or
-poor work alone is not proof; inspect the transcript and state first.
+Treat an explicit refusal, safeguard or fallback notice, or a response that identifies a non-Fable
+serving model as confirmation. The launcher captures text output, so `stop_reason` is not visible;
+missing or poor work alone is not proof, so inspect the transcript and state first.
 
 When a safeguard rejection or model reroute is confirmed:
 
@@ -185,13 +171,14 @@ them guardrail rejections.
 
 1. Poll each retained execution session separately. Use `pgrep -x claude` only as a secondary
    fleet-wide cross-check, never as the identity of a particular worker.
-2. Give the user a concise progress update at least once a minute while workers are active.
+2. Keep the user posted as the fleet changes: say when you launch a worker, when one finishes or
+   fails, and when you need a decision from them.
 3. On completion, perform the safeguard check above, then verify the claims relevant to the
    prompt, such as the branch, pushed head, PR, requested validation, and any explicitly assigned
    review or CI actions.
 4. Fetch `origin/main` and independently inspect `git diff origin/main...HEAD` in the worker's
    worktree. Use a three-dot diff. Review fail-closed behavior, hot paths, docs/spec parity,
-   production panics, tests, and scope creep.
+   unhandled errors and promise rejections, tests, and scope creep.
 5. Own post-push review and CI monitoring. Diagnose red checks from logs, rerun only demonstrated
    infrastructure failures or known flakes, and dispatch bounded repair work for deterministic
    failures.

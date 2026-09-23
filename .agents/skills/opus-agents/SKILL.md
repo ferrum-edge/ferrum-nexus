@@ -11,34 +11,20 @@ final merge recommendation. Require each worker to carry its assigned scope thro
 point in the prompt. Never accept a worker's report without checking the repository and GitHub
 state yourself.
 
-**Guard: do NOT use this skill when you are yourself a dispatched worker.** If your session
-prompt says you were dispatched by an orchestrator — it references the `astra-agents` briefs
-(`agent-brief.md` / `continuation-brief.md`), says "YOU are the implementer", or hands you an
-existing worktree and findings to fix — then this skill does not apply: implement directly in
-your session. Your model and reasoning effort were chosen deliberately by the dispatching
-orchestrator; delegating to an Opus worker silently substitutes different hands at a different
-effort. This skill is only for sessions where the USER asked Codex to delegate to Claude.
+**Guard: do not use this skill when you are yourself a dispatched worker.** If your session
+prompt says you were dispatched by an orchestrator — it references this skill's `agent-brief.md`
+or `continuation-brief.md`, says "YOU are the implementer", or hands you an existing worktree and
+findings to fix — then this skill does not apply: implement directly in your session. Your model
+and reasoning effort were chosen deliberately by the dispatching orchestrator; delegating to an
+Opus worker silently substitutes different hands at a different effort. This skill is only for
+sessions where the user asked the orchestrator to delegate to Claude.
 
 ## Remote CI validation
 
-Do not run local builds, tests, benchmarks, or compilation-based checks, including `npm run build`,
-`npm test`, `npm run typecheck`, `npm run lint`, and their workspace-scoped forms, or wrappers that
-invoke them. Do not make an exception for a targeted check, an ambiguous failure, or a controller's
-routine validation request. Local source inspection, formatting with `npx prettier --write`, and
-`git diff --check` are allowed.
-
-Use remote CI results for the exact pushed head SHA as build/test confirmation. Inspect failed
-job logs, fix the demonstrated failure, push the change, and use the next CI run to confirm it.
-Pending, skipped, unavailable, or earlier-head checks are not evidence that the change passed.
-Keep adding or updating relevant tests; remote CI executes them.
-
-The controller owns post-push CI monitoring unless the worker is explicitly assigned a CI repair
-or shepherd round. A worker assigned to exit after pushing must report the head SHA and CI status
-as pending or unverified and exit; the controller continues the CI-driven fix loop. Never report
-build/test success without matching remote evidence.
-
-Include the no-local-build/test rule and remote CI confirmation requirement in every dispatch
-prompt, including continuation prompts and any permitted nested delegation.
+The full no-local-build/test policy is the "Remote CI validation" section of
+[references/agent-brief.md](references/agent-brief.md). It binds you as orchestrator too: do not run
+local builds or tests, and accept only remote CI results for the exact pushed head SHA as build/test
+confirmation. Every dispatch prompt, including continuation prompts, must carry that section.
 
 ## Preflight
 
@@ -78,14 +64,13 @@ sandbox Claude from the rest of the host.
 
 ## Select effort deliberately
 
-- `low`: reserve for mechanical, fully specified edits — a one-line revert, a rename, a version
-  bump, or applying a formatter diff. Do not use it for anything requiring root-cause analysis.
-- `medium`: use for small, well-understood changes with a known fix location: a single-file bug
-  fix, a doc or comment update, or adding a test for behavior that is already specified.
-- `high`: default for scoped fixes, review findings, tests, documentation, and CI repairs with a
-  known failure mode.
-- `xhigh`: use for unfamiliar multi-module work, concurrency or lifecycle bugs, protocol
+- `low`: use for mechanical, fully specified edits — a one-line revert, a rename, a version bump,
+  or applying a formatter diff.
+- `medium`: use for scoped fixes with a known location, review findings, tests, documentation, and
+  CI repairs with a known failure mode.
+- `high`: default. Use for unfamiliar multi-module work, concurrency or lifecycle bugs, protocol
   correctness, security boundaries, greenfield features, and difficult root-cause analysis.
+- `xhigh`: use after a worker has failed at `high` on the same task, or when the user asks for it.
 - `max`: reserve for the hardest deeply coupled work, repeated failure at `xhigh`, or a user
   override. Prefer one focused `max` worker over a whole `max` fleet; it has unconstrained
   reasoning spend and can overthink.
@@ -173,12 +158,16 @@ actionable work appears. Do not add a review trigger unless the controller expli
 
 1. Poll each retained execution session separately. Use `pgrep -x claude` only as a secondary
    fleet-wide cross-check, never as the identity of a particular worker.
-2. Give the user a concise progress update at least once a minute while workers are active.
-3. On completion, verify the claims relevant to the prompt, such as the branch, pushed head, PR,
+2. Keep the user posted as the fleet changes: say when you launch a worker, when one finishes or
+   fails, and when you need a decision from them.
+3. On completion, check the worker output for a refusal, safeguard, or fallback notice first:
+   Opus 5 runs cybersecurity safeguards, so security-boundary work in this repository can be
+   declined. If one appears, stop and report it to the user; do not rephrase the prompt to get
+   around it. Then verify the claims relevant to the prompt, such as the branch, pushed head, PR,
    requested validation, and any explicitly assigned review or CI actions.
 4. Fetch `origin/main` and independently inspect `git diff origin/main...HEAD` in the worker's
    worktree. Use a three-dot diff. Review fail-closed behavior, hot paths, docs/spec parity,
-   production panics, tests, and scope creep.
+   unhandled errors and promise rejections, tests, and scope creep.
 5. Own post-push review and CI monitoring. Diagnose red checks from logs, rerun only demonstrated
    infrastructure failures or known flakes, and dispatch bounded repair work for deterministic
    failures.

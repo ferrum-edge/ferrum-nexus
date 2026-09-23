@@ -65,7 +65,9 @@ Do not run local builds, tests, benchmarks, or compilation-based checks, includi
 `npm test`, `npm run typecheck`, `npm run lint`, and their workspace-scoped forms, or wrappers that
 invoke them. Do not make an exception for a targeted check, an ambiguous failure, or a controller's
 routine validation request. Local source inspection, formatting with `npx prettier --write`, and
-`git diff --check` are allowed.
+`git diff --check` are allowed. This rule overrides the local test, smoke-suite, and
+`./e2e/run.sh` guidance in `CLAUDE.md`; CI's `store-contracts` and `acceptance` jobs run those
+suites against the pushed head.
 
 Use remote CI results for the exact pushed head SHA as build/test confirmation. Inspect failed
 job logs, fix the demonstrated failure, push the change, and use the next CI run to confirm it.
