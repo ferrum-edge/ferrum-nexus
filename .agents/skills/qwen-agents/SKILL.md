@@ -24,24 +24,10 @@ worker. The orchestrator selected this session's model deliberately.
 
 ## Remote CI validation
 
-Do not run local builds, tests, benchmarks, or compilation-based checks, including `npm run build`,
-`npm test`, `npm run typecheck`, `npm run lint`, and their workspace-scoped forms, or wrappers that
-invoke them. Do not make an exception for a targeted check, an ambiguous failure, or a controller's
-routine validation request. Local source inspection, formatting with `npx prettier --write`, and
-`git diff --check` are allowed.
-
-Use remote CI results for the exact pushed head SHA as build/test confirmation. Inspect failed
-job logs, fix the demonstrated failure, push the change, and use the next CI run to confirm it.
-Pending, skipped, unavailable, or earlier-head checks are not evidence that the change passed.
-Keep adding or updating relevant tests; remote CI executes them.
-
-The controller owns post-push CI monitoring unless the worker is explicitly assigned a CI repair
-or shepherd round. A worker assigned to exit after pushing must report the head SHA and CI status
-as pending or unverified and exit; the controller continues the CI-driven fix loop. Never report
-build/test success without matching remote evidence.
-
-Include the no-local-build/test rule and remote CI confirmation requirement in every dispatch
-prompt, including continuation prompts.
+The full no-local-build/test policy is the "Remote CI validation" section of
+[references/agent-brief.md](references/agent-brief.md). It binds you as orchestrator too: do not run
+local builds or tests, and accept only remote CI results for the exact pushed head SHA as build/test
+confirmation. Every dispatch prompt, including continuation prompts, must carry that section.
 
 ## Preflight
 
