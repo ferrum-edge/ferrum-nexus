@@ -207,9 +207,10 @@ API. Check `FERRUM_ADMIN_URL`, that the secret matches on both sides, and that
 namespace this portal publishes into**. An anonymous `GET /api/health` only
 reveals the verdict — `edge.status: "degraded"`,
 `edge.reason: "namespace_unserved"` and `edge.namespace_routing.unserved: true`.
-The names of **both** sides (`configured` vs `active`) are admin-only, so the
-walkthrough reads them in [step 4](#4-first-run-register-the-founding-super-admin),
-once the founding admin's session exists.
+The portal's side (`configured`) is public, but the gateway's side (`active`)
+is admin-only, so the walkthrough compares them in
+[step 4](#4-first-run-register-the-founding-super-admin), once the founding
+admin's session exists.
 
 While they disagree, publishing is refused with `409 EDGE_NAMESPACE_UNSERVED`
 rather than creating an API that cannot answer. Fix it by setting the portal's
@@ -336,7 +337,7 @@ curl -s http://127.0.0.1:9000/health -H "Authorization: Bearer $ADMIN_JWT" | jq 
 
 Adjust `iss` above to whatever the gateway was started with if you set
 `FERRUM_ADMIN_JWT_ISSUER`, and `ns` to your `FERRUM_NAMESPACE`. The token is
-good for one minute (Edge caps the lifetime at an hour); it is only for peeking
+good for one minute (Edge caps the lifetime at an hour by default, `FERRUM_ADMIN_JWT_MAX_TTL`); it is only for peeking
 at the health block — Nexus mints its own tokens for real Admin API calls.
 
 > Create a **second** `super_admin` before you go to production. The last active

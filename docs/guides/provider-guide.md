@@ -66,7 +66,7 @@ info:
   version: 2.4.0
   description: Invoices and payments for partner integrations.
 servers:
-  - url: https://billing.example.com/v2
+  - url: https://www.example.com/billing/v2
 paths:
   /invoices:
     get:
@@ -108,8 +108,9 @@ Nexus checks the upstream against its SSRF guard. With the default
 `NEXUS_ALLOW_PRIVATE_UPSTREAMS=false`, a loopback, RFC 1918 / CGNAT / link-local
 address, a `.local` / `.internal` / `.localhost` / `.home.arpa` name, or a name
 that resolves to any private address is refused (and a name that does not
-resolve at all is refused too). That is why the minimal document above uses a public
-hostname — it publishes cleanly on the default settings, whereas a
+resolve at all is refused too). That is why the minimal document above uses a
+public hostname that resolves — it publishes cleanly on the default settings,
+whereas a
 `…billing.internal…` upstream would not. A portal that legitimately fronts
 internal services (or local development against `host.docker.internal`) opts in
 with `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`; see
