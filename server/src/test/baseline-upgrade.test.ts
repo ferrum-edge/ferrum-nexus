@@ -984,10 +984,16 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
         try {
           await store.migrate();
           upgraded = await target.ledger();
-          assert.deepEqual(upgraded.map((row) => row.id), target.currentIds);
+          assert.deepEqual(
+            upgraded.map((row) => row.id),
+            target.currentIds,
+          );
           // The released rows are the ones the baseline wrote: nothing was
           // re-applied or re-recorded on the way up.
-          assert.deepEqual(upgraded.filter((row) => RELEASED_IDS.includes(row.id)), baseline);
+          assert.deepEqual(
+            upgraded.filter((row) => RELEASED_IDS.includes(row.id)),
+            baseline,
+          );
           preserved = await assertFixturePreserved(store, fixture);
           await assertPortalInvariants(store);
 
