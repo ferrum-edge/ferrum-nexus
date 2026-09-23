@@ -1,5 +1,4 @@
 import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Notification } from '@ferrum-nexus/shared';
 import { CREATED_AT } from '../../test/fixtures';
@@ -118,14 +117,14 @@ describe('notifications inbox', () => {
   });
 
   it('links the bell preview to the full inbox and keeps mark all read', async () => {
-    const user = userEvent.setup();
     renderPage(<NotificationsBell />);
-    await user.click(await screen.findByRole('button', { name: 'Notifications, 2 unread' }));
-    expect(await screen.findByRole('link', { name: 'View all' })).toHaveAttribute(
+    const trigger = await screen.findByRole('button', { name: 'Notifications, 2 unread' });
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+    expect(await screen.findByRole('menuitem', { name: 'View all' })).toHaveAttribute(
       'href',
       '/notifications',
     );
-    await user.click(screen.getByRole('button', { name: 'Mark all read' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Mark all read' }));
     await waitFor(() => expect(notificationsApi.markRead).toHaveBeenCalledWith({ all: true }));
   });
 });

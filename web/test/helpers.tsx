@@ -1,6 +1,12 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, type RenderResult } from '@testing-library/react';
-import { useId, type ReactElement, type ReactNode } from 'react';
+import {
+  forwardRef,
+  useId,
+  type AnchorHTMLAttributes,
+  type ReactElement,
+  type ReactNode,
+} from 'react';
 import type { LabeledSelectProps } from '../src/components/ui/Select';
 import { ToastProvider } from '../src/stores/toast';
 
@@ -60,25 +66,23 @@ export function NativeLabeledSelect<T extends string>({
   );
 }
 
-// Preserve concrete destinations while rendering pages without a router.
-export function TestLink({
-  to,
-  params = {},
-  children,
-  className,
-}: {
+// Preserve concrete destinations and composed element props while rendering without a router.
+type TestLinkProps = Omit<AnchorHTMLAttributes<HTMLAnchorElement>, 'href'> & {
   to: string;
   params?: Record<string, string>;
-  children: ReactNode;
-  className?: string;
-}): ReactElement {
+};
+
+export const TestLink = forwardRef<HTMLAnchorElement, TestLinkProps>(function TestLink(
+  { to, params = {}, children, ...anchorProps },
+  ref,
+): ReactElement {
   const href = to.replace(/\$(\w+)/g, (_match, key: string) => params[key] ?? '');
   return (
-    <a href={href} className={className}>
+    <a {...anchorProps} href={href} ref={ref}>
       {children}
     </a>
   );
-}
+});
 
 export function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
