@@ -236,6 +236,7 @@ the life of the stack; save them in a secret manager rather than generating new
 ones when restarting it. Run from the repository root:
 
 <!-- compose-quickstart:start -->
+
 ```bash
 cp docker/docker-compose.example.yml docker-compose.yml
 set -a
@@ -247,6 +248,7 @@ export FERRUM_ADMIN_JWT_SECRET=$(openssl rand -hex 32)
 export FERRUM_BASIC_AUTH_HMAC_SECRET=$(openssl rand -hex 32)
 docker compose up -d
 ```
+
 <!-- compose-quickstart:end -->
 
 The portal is at <http://127.0.0.1:8787>. `docker compose logs nexus` shows
