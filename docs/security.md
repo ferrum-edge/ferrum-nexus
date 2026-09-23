@@ -296,6 +296,7 @@ the route, while "is this your API" is a property of the row.
 | Register, sign in, manage own profile              | ✓      | ✓        | ✓     | ✓           |
 | Browse catalog, read specs                         | ✓      | ✓        | ✓     | ✓           |
 | Request access, cancel own request                 | ✓      | ✓        | ✓     | ✓           |
+| Read **own** identities' request/grant on an API   | ✓      | ✓        | ✓     | ✓           |
 | Issue / rotate / revoke **own** credentials        | ✓      | ✓        | ✓     | ✓           |
 | Messaging, notifications                           | ✓      | ✓        | ✓     | ✓           |
 | Publish an API, update own API/spec                | —      | ✓        | ✓     | ✓           |

@@ -295,6 +295,13 @@ export const DEFAULT_PAGE_SIZE = 25;
 /** Largest `limit` a list endpoint will honour. */
 export const MAX_PAGE_SIZE = 200;
 
+/**
+ * The `application_id` query value meaning "the account's own identity", on
+ * the endpoints where an absent parameter would mean something else — a query
+ * string has no `null`.
+ */
+export const ACCOUNT_IDENTITY_SCOPE = 'account';
+
 /** Session idle lifetime in seconds (12 hours). */
 export const DEFAULT_SESSION_TTL_SECONDS = 43_200;
 

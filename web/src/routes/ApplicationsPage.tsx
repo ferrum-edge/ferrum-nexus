@@ -1,5 +1,5 @@
-import { useMemo, useState, type FormEvent, type ReactElement } from 'react';
-import { MAX_PAGE_SIZE, type Application } from '@ferrum-nexus/shared';
+import { useEffect, useMemo, useState, type FormEvent, type ReactElement } from 'react';
+import { DEFAULT_PAGE_SIZE, type Application } from '@ferrum-nexus/shared';
 import { formatDateTime } from '../lib/format';
 import {
   useApplications,
@@ -43,7 +43,12 @@ function ApplicationsList(): ReactElement {
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<Application | null>(null);
 
-  const query = useApplications({ limit: MAX_PAGE_SIZE });
+  // Paged: an owner's application ceiling can exceed one page (or be
+  // unlimited), and every application has to stay reachable here to be
+  // disabled or deleted (issue #310).
+  const [offset, setOffset] = useState(0);
+  const limit = DEFAULT_PAGE_SIZE;
+  const query = useApplications({ limit, offset }, true, true);
   const create = useCreateApplication();
   const update = useUpdateApplication();
   const remove = useDeleteApplication();
@@ -147,6 +152,13 @@ function ApplicationsList(): ReactElement {
     [toast, update],
   );
 
+  // Deleting the last row of the last page leaves an empty page; step back.
+  useEffect(() => {
+    if (query.data && query.data.items.length === 0 && offset > 0) {
+      setOffset(Math.max(0, offset - limit));
+    }
+  }, [query.data, offset, limit]);
+
   const submit = (event: FormEvent): void => {
     event.preventDefault();
     setError(null);
@@ -208,7 +220,7 @@ function ApplicationsList(): ReactElement {
           <CardBody>
             <p className="text-sm text-danger">Your applications could not be loaded.</p>
           </CardBody>
-        ) : (query.data?.total ?? 0) === 0 ? (
+        ) : (query.data?.total ?? 0) === 0 && offset === 0 ? (
           <EmptyState
             icon="stack"
             title="No applications yet"
@@ -221,7 +233,14 @@ function ApplicationsList(): ReactElement {
             }
           />
         ) : (
-          <DataTable columns={columns} data={query.data?.items ?? []} />
+          <DataTable
+            columns={columns}
+            data={query.data?.items ?? []}
+            total={query.data?.total ?? 0}
+            offset={offset}
+            limit={limit}
+            onOffsetChange={setOffset}
+          />
         )}
       </Card>
 

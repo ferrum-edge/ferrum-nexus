@@ -15,6 +15,7 @@
  */
 
 import {
+  ACCOUNT_IDENTITY_SCOPE,
   CSRF_COOKIE,
   CSRF_HEADER,
   ERROR_CODES,
@@ -26,6 +27,7 @@ import {
   type CancelAccessRequestResponse,
   type CaptchaConfigResponse,
   type CatalogDetailResponse,
+  type CatalogIdentityAccessResponse,
   type CreateApplicationRequest,
   type CreateApplicationResponse,
   type DeleteApplicationResponse,
@@ -392,6 +394,17 @@ export const catalogApi = {
     get<CatalogDetailResponse>(`/catalog/${encodeURIComponent(slug)}`),
   spec: (slug: string): Promise<CatalogSpecResponse> =>
     get<CatalogSpecResponse>(`/catalog/${encodeURIComponent(slug)}/spec`),
+  /**
+   * One identity's request and grant on an API: `null` is the account itself,
+   * an id one of the caller's own applications.
+   */
+  identityAccess: (
+    slug: string,
+    applicationId: string | null,
+  ): Promise<CatalogIdentityAccessResponse> =>
+    get<CatalogIdentityAccessResponse>(`/catalog/${encodeURIComponent(slug)}/access`, {
+      application_id: applicationId ?? ACCOUNT_IDENTITY_SCOPE,
+    }),
 };
 
 /* ── Applications ───────────────────────────────────────────────────────── */

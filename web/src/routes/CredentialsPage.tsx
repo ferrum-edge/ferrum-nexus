@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
 import {
   DEFAULT_PAGE_SIZE,
-  MAX_PAGE_SIZE,
   type CredentialMetadata,
   type CredentialType,
   type ShowOnceSecret,
@@ -14,25 +13,23 @@ import {
   useIssueCredential,
   useRotateCredential,
 } from '../hooks/useCredentials';
-import { useApplications } from '../hooks/useApplications';
+import { useApplicationsById } from '../hooks/useApplications';
 import { useGrants } from '../hooks/useGrants';
 import { useToast } from '../stores/toast';
+import { ACCOUNT_IDENTITY, IdentityPicker } from '../components/applications/IdentityPicker';
 import { ShowOnceSecretDialog } from '../components/credentials/ShowOnceSecretDialog';
 import { FormNotice } from '../components/auth/AuthShell';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import { Card, CardHeader, PageHeader } from '../components/ui/Card';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
-import { DataTable, type Columns } from '../components/ui/DataTable';
+import { DataTable, PaginationBar, type Columns } from '../components/ui/DataTable';
 import { Dialog } from '../components/ui/Dialog';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Icon, type IconName } from '../components/ui/Icon';
 import { LabeledInput } from '../components/ui/Input';
 import { LabeledSelect } from '../components/ui/Select';
 import { StatusPill } from '../components/ui/StatusPill';
-
-/** The "my account" option value; a select has no `null`. */
-const ACCOUNT_IDENTITY = 'account';
 
 interface ShowOnceState {
   secret: ShowOnceSecret;
@@ -103,21 +100,36 @@ function CopyableValue({ label, value }: { label: string; value: string }): Reac
  * the gateway's, not this portal's — so the two belong on the same page. When
  * no gateway origin is configured the listen path is shown instead, since that
  * is genuinely all the portal knows.
+ *
+ * Paged like every other list: one `MAX_PAGE_SIZE` page is not "every grant"
+ * once an account holds more than that (issue #310). Each row names the
+ * identity holding the grant, because an application's grant reaches only
+ * that application's credentials.
  */
 function MyAccessCard(): ReactElement {
-  const grants = useGrants({ mine: true, status: 'active', limit: MAX_PAGE_SIZE });
+  const [offset, setOffset] = useState(0);
+  const limit = DEFAULT_PAGE_SIZE;
+  const grants = useGrants({ mine: true, status: 'active', limit, offset }, true, true);
   const items = grants.data?.items ?? [];
+  const total = grants.data?.total ?? 0;
 
-  if (grants.isLoading || items.length === 0) return <></>;
+  // A revocation can empty the last page; step back rather than show nothing.
+  useEffect(() => {
+    if (grants.data && items.length === 0 && offset > 0) {
+      setOffset(Math.max(0, offset - limit));
+    }
+  }, [grants.data, items.length, offset, limit]);
+
+  if (grants.isLoading || total === 0) return <></>;
 
   return (
     <Card className="mt-6">
       <CardHeader
         title="Your API access"
         icon="grant"
-        description="Every API your active grants cover, with the URL to send requests to."
+        description="The APIs your account and its applications hold active grants for, with the URL to send requests to."
       />
-      <ul>
+      <ul aria-busy={grants.isPlaceholderData || undefined}>
         {items.map((grant) => {
           const name = grant.api?.name ?? grant.api_id;
           const address = grant.api ? (grant.api.invoke_url ?? grant.api.listen_path) : null;
@@ -127,7 +139,14 @@ function MyAccessCard(): ReactElement {
               className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border px-5 py-3 last:border-b-0"
             >
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm font-medium text-fg">{name}</span>
+                <span className="flex flex-wrap items-center gap-1.5">
+                  <span className="truncate text-sm font-medium text-fg">{name}</span>
+                  {grant.application_id ? (
+                    <Badge tone="accent">{grant.application?.name ?? 'Application'}</Badge>
+                  ) : (
+                    <Badge tone="neutral">My account</Badge>
+                  )}
+                </span>
                 {address ? (
                   <CopyableValue label={`${name} address`} value={address} />
                 ) : (
@@ -143,6 +162,9 @@ function MyAccessCard(): ReactElement {
           );
         })}
       </ul>
+      {total > limit ? (
+        <PaginationBar offset={offset} limit={limit} total={total} onOffsetChange={setOffset} />
+      ) : null}
     </Card>
   );
 }
@@ -160,32 +182,20 @@ export function CredentialsPage(): ReactElement {
   // account itself, which is the default and what every credential issued
   // before applications existed uses.
   const [identity, setIdentity] = useState<string>(ACCOUNT_IDENTITY);
+  const [identityName, setIdentityName] = useState<string>('My account');
   const [showOnce, setShowOnce] = useState<ShowOnceState | null>(null);
   const [rotating, setRotating] = useState<CredentialMetadata | null>(null);
   const [revoking, setRevoking] = useState<CredentialMetadata | null>(null);
 
-  // Every application, not only the active ones: the table has to name the
-  // identity a credential belongs to even after its application is disabled,
-  // or a disabled application's credentials read as an anonymous "Application".
-  // Only the picker is narrowed to active ones, because a disabled application
-  // cannot be issued anything.
-  const applications = useApplications({ limit: MAX_PAGE_SIZE });
-  const applicationNames = useMemo(
-    () => new Map((applications.data?.items ?? []).map((item) => [item.id, item.name])),
-    [applications.data],
-  );
-  const activeApplications = useMemo(
-    () => (applications.data?.items ?? []).filter((item) => item.status === 'active'),
-    [applications.data],
-  );
-  const disabledApplications = useMemo(
-    () =>
-      new Set(
-        (applications.data?.items ?? [])
-          .filter((item) => item.status !== 'active')
-          .map((item) => item.id),
-      ),
-    [applications.data],
+  // The applications this page of credentials authenticates as, fetched by
+  // id. Loading one page of applications and looking names up in it left any
+  // application past that page an anonymous "Application" (issue #310).
+  // Disabled ones are included: a disabled application keeps its
+  // credentials, so the table still has to say whose they are.
+  const applications = useApplicationsById(
+    (query.data?.items ?? [])
+      .map((item) => item.application_id)
+      .filter((id): id is string => id !== null),
   );
 
   const issue = useIssueCredential();
@@ -221,9 +231,9 @@ export function CredentialsPage(): ReactElement {
           row.original.application_id ? (
             <span className="flex flex-wrap items-center gap-1.5">
               <Badge tone="accent">
-                {applicationNames.get(row.original.application_id) ?? 'Application'}
+                {applications.get(row.original.application_id)?.name ?? 'Application'}
               </Badge>
-              {disabledApplications.has(row.original.application_id) ? (
+              {applications.get(row.original.application_id)?.status === 'disabled' ? (
                 <Badge tone="warning">Disabled</Badge>
               ) : null}
             </span>
@@ -281,7 +291,7 @@ export function CredentialsPage(): ReactElement {
         ),
       },
     ],
-    [applicationNames, disabledApplications],
+    [applications],
   );
 
   return (
@@ -357,6 +367,7 @@ export function CredentialsPage(): ReactElement {
                       setIssueOpen(false);
                       setLabel('');
                       setIdentity(ACCOUNT_IDENTITY);
+                      setIdentityName('My account');
                       setShowOnce({
                         secret: response.secret,
                         consumerUsername: response.consumer_username,
@@ -376,22 +387,19 @@ export function CredentialsPage(): ReactElement {
           {/* The identity comes first because it is the only field here that
               changes what the credential can *reach*. `Label` is a note to
               yourself; this is a permission boundary (issue #289). */}
-          <LabeledSelect<string>
+          <IdentityPicker
             label="Identity"
             value={identity}
-            onValueChange={setIdentity}
+            selectedLabel={identityName}
+            onValueChange={(value, name) => {
+              setIdentity(value);
+              setIdentityName(name);
+            }}
             hint={
               identity === ACCOUNT_IDENTITY
                 ? 'This credential can call every API your account is approved for.'
-                : `This credential can call only the APIs ${applicationNames.get(identity) ?? 'this application'} is approved for.`
+                : `This credential can call only the APIs ${identityName} is approved for.`
             }
-            options={[
-              { value: ACCOUNT_IDENTITY, label: 'My account' },
-              ...activeApplications.map((application) => ({
-                value: application.id,
-                label: application.name,
-              })),
-            ]}
           />
           <LabeledSelect<CredentialType>
             label="Credential type"

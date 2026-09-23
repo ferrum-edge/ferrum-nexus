@@ -3,15 +3,15 @@ import { useState, type ReactElement, type ReactNode } from 'react';
 import {
   AUTH_PLUGIN_LABELS,
   MAX_JUSTIFICATION_LENGTH,
-  MAX_PAGE_SIZE,
+  type CatalogApi,
   type CatalogDetailResponse,
 } from '@ferrum-nexus/shared';
 import { formatDateTime } from '../lib/format';
-import { useCatalogApi, useCatalogSpec } from '../hooks/useCatalog';
+import { useCatalogApi, useCatalogIdentityAccess, useCatalogSpec } from '../hooks/useCatalog';
 import { useCancelAccessRequest, useCreateAccessRequest } from '../hooks/useAccessRequests';
-import { useApplications } from '../hooks/useApplications';
 import { useAuth } from '../stores/auth';
 import { useToast } from '../stores/toast';
+import { ACCOUNT_IDENTITY, IdentityPicker } from '../components/applications/IdentityPicker';
 import { CallApiPanel } from '../components/catalog/CallApiPanel';
 import { OpenApiView } from '../components/openapi/OpenApiView';
 import { StartThreadDialog } from '../components/messaging/StartThreadDialog';
@@ -23,13 +23,9 @@ import { CopyField } from '../components/ui/CopyField';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Icon, type IconName } from '../components/ui/Icon';
 import { LabeledTextarea } from '../components/ui/Input';
-import { LabeledSelect } from '../components/ui/Select';
 import { LoadingPanel } from '../components/ui/Spinner';
 import { StatusPill } from '../components/ui/StatusPill';
 import { Tabs } from '../components/ui/Tabs';
-
-/** The "my account" option value; a select has no `null`. */
-const ACCOUNT_IDENTITY = 'account';
 
 /** One tile in the strip of runtime facts under the page header. */
 function GlanceTile({
@@ -169,20 +165,186 @@ function Documentation({ slug, hasSpec }: { slug: string; hasSpec: boolean }): R
   return <OpenApiView text={specQuery.data.raw_spec} />;
 }
 
-function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElement {
-  const { api, my_request: myRequest, my_grant: myGrant } = detail;
+/**
+ * The request/grant state of the identity chosen in the access form, and the
+ * form itself when that identity may ask.
+ *
+ * Grants and pending requests are separate per identity — the account, and
+ * each of its applications — so this reads the **selected** identity's own
+ * rows (`GET /api/catalog/:slug/access`). The detail's `my_request`/`my_grant`
+ * are account-wide representatives: gating the form on them hid "Request
+ * access" for every identity once any one of them had a pending request or a
+ * grant (issue #314).
+ */
+function IdentityAccess({
+  api,
+  identity,
+  identityName,
+}: {
+  api: CatalogApi;
+  identity: string;
+  identityName: string;
+}): ReactElement {
+  const applicationId = identity === ACCOUNT_IDENTITY ? null : identity;
+  const access = useCatalogIdentityAccess(api.slug, applicationId);
   const [justification, setJustification] = useState('');
-  // Which identity the access is for. `ACCOUNT_IDENTITY` is the account
-  // itself, the default and what every request made before applications
-  // existed is (issue #289).
-  const [identity, setIdentity] = useState<string>(ACCOUNT_IDENTITY);
-  const applications = useApplications({ status: 'active', limit: MAX_PAGE_SIZE });
   const createRequest = useCreateAccessRequest();
   const cancelRequest = useCancelAccessRequest();
   const toast = useToast();
 
-  // Only shown once the caller could actually make the call: an approved grant,
-  // or an API that needs no approval at all.
+  if (access.isLoading) return <LoadingPanel label="Checking access" />;
+  if (access.isError || !access.data) {
+    return (
+      <p className="text-sm text-danger" role="alert">
+        The access state for this identity could not be loaded. Try again in a moment.
+      </p>
+    );
+  }
+
+  const { grant, request } = access.data;
+  // The name the server resolved wins: it is the application's current one.
+  const name = access.data.application?.name ?? identityName;
+
+  // Who holds the grant decides which credentials can call the API, so the
+  // notice says it outright: an application's grant is on that application's
+  // gateway consumer only, never the account's.
+  const holder = applicationId === null ? 'your account' : name;
+
+  let body: ReactElement;
+  if (grant && grant.status === 'active') {
+    body = (
+      <div className="flex flex-col gap-4">
+        {applicationId === null ? (
+          <FormNotice tone="success">
+            Access granted to your account {formatDateTime(grant.created_at)}. Your account’s
+            gateway consumer carries{' '}
+            <code className="font-mono text-xs break-all">{grant.acl_group}</code>, so every
+            credential issued to your account can call this API.
+          </FormNotice>
+        ) : (
+          <FormNotice tone="success">
+            Access granted to {name} {formatDateTime(grant.created_at)}. Only {name}’s gateway
+            consumer carries <code className="font-mono text-xs break-all">{grant.acl_group}</code>:
+            credentials issued to {name} can call this API, and credentials issued to your account
+            or your other applications cannot.
+          </FormNotice>
+        )}
+        <p className="flex flex-wrap items-center gap-1.5 text-sm text-fg-muted">
+          Call it with a credential of type{' '}
+          <Badge tone="info">{AUTH_PLUGIN_LABELS[api.auth_plugin]}</Badge> issued to {holder} — the
+          address and the header are below.
+        </p>
+        <div>
+          <Link to="/credentials" className={buttonClassName({ variant: 'secondary', size: 'sm' })}>
+            <Icon name="key" />
+            Manage your credentials
+          </Link>
+        </div>
+      </div>
+    );
+  } else if (request && request.status === 'pending') {
+    const subject = applicationId === null ? 'Your account’s request' : `The request for ${name}`;
+    body = (
+      <div className="flex flex-col gap-4">
+        <FormNotice tone="info">
+          {subject} is awaiting review (submitted {formatDateTime(request.created_at)}).
+        </FormNotice>
+        <div>
+          <Button
+            variant="secondary"
+            loading={cancelRequest.isPending}
+            onClick={() =>
+              cancelRequest.mutate(request.id, {
+                onSuccess: () => toast.success('Request withdrawn'),
+              })
+            }
+          >
+            Withdraw request
+          </Button>
+        </div>
+      </div>
+    );
+  } else {
+    body = (
+      <form
+        className="flex flex-col gap-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          createRequest.mutate(
+            {
+              api_id: api.id,
+              justification: justification.trim(),
+              application_id: applicationId,
+            },
+            {
+              onSuccess: () => {
+                setJustification('');
+                toast.success('Access request submitted');
+              },
+            },
+          );
+        }}
+      >
+        <LabeledTextarea
+          label="Why do you need access?"
+          required
+          rows={5}
+          maxLength={MAX_JUSTIFICATION_LENGTH}
+          value={justification}
+          onChange={(event) => setJustification(event.target.value)}
+          placeholder="Which product or workflow needs this data, and what will you do with it?"
+          hint={
+            <span className="flex flex-wrap items-center justify-between gap-2">
+              <span>The provider reviews this note.</span>
+              <span className="tabular-nums">
+                {justification.length}/{MAX_JUSTIFICATION_LENGTH} characters
+              </span>
+            </span>
+          }
+        />
+        <div>
+          <Button
+            type="submit"
+            variant="primary"
+            loading={createRequest.isPending}
+            disabled={justification.trim().length === 0}
+          >
+            Request access
+          </Button>
+        </div>
+      </form>
+    );
+  }
+
+  return (
+    <>
+      {body}
+      {request && request.status !== 'pending' ? (
+        <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-border pt-4 text-sm text-fg-muted">
+          <span>Last decision{applicationId === null ? '' : ` for ${name}`}:</span>
+          <StatusPill status={request.status} />
+          {request.decision_note ? (
+            <span className="min-w-0 italic">“{request.decision_note}”</span>
+          ) : null}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElement {
+  const { api, my_grant: myGrant } = detail;
+  // Which identity the access is for. `ACCOUNT_IDENTITY` is the account
+  // itself, the default and what every request made before applications
+  // existed is (issue #289). The selector stays available whatever any
+  // identity's state is, so a grant or pending request for one application
+  // never hides the form for another (issue #314).
+  const [identity, setIdentity] = useState<string>(ACCOUNT_IDENTITY);
+  const [identityName, setIdentityName] = useState('My account');
+
+  // Only shown once the caller could actually make the call through one of
+  // their identities: an approved grant, or an API that needs no approval.
+  // `my_grant` is account-wide on purpose here.
   const canCall = (myGrant !== null && myGrant.status === 'active') || !api.requestable;
 
   if (api.access_state === 'owner') {
@@ -215,135 +377,42 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
           actions={<StatusPill status={api.access_state} />}
           description={
             api.requestable
-              ? 'This API is protected by an access-control policy. Approved requests add your consumer to its ACL group.'
+              ? 'This API is protected by an access-control policy. Access is approved per identity — your account, or one of your applications — and an approval adds only that identity’s gateway consumer to its ACL group.'
               : 'This API does not require an access request — issue a credential and start calling it.'
           }
         />
         <CardBody>
-          {myGrant && myGrant.status === 'active' ? (
-            <div className="flex flex-col gap-4">
-              <FormNotice tone="success">
-                Access granted {formatDateTime(myGrant.created_at)}. Your gateway consumer carries{' '}
-                <code className="font-mono text-xs break-all">{myGrant.acl_group}</code>.
-              </FormNotice>
-              <p className="flex flex-wrap items-center gap-1.5 text-sm text-fg-muted">
-                Call it with a credential of type
-                <Badge tone="info">{AUTH_PLUGIN_LABELS[api.auth_plugin]}</Badge>— the address and
-                the header are below.
-              </p>
-              <div>
-                <Link
-                  to="/credentials"
-                  className={buttonClassName({ variant: 'secondary', size: 'sm' })}
-                >
-                  <Icon name="key" />
-                  Manage your credentials
-                </Link>
-              </div>
-            </div>
-          ) : myRequest && myRequest.status === 'pending' ? (
-            <div className="flex flex-col gap-4">
-              <FormNotice tone="info">
-                Your request is awaiting review (submitted {formatDateTime(myRequest.created_at)}).
-              </FormNotice>
-              <div>
-                <Button
-                  variant="secondary"
-                  loading={cancelRequest.isPending}
-                  onClick={() =>
-                    cancelRequest.mutate(myRequest.id, {
-                      onSuccess: () => toast.success('Request withdrawn'),
-                    })
-                  }
-                >
-                  Withdraw request
-                </Button>
-              </div>
-            </div>
-          ) : !api.requestable ? (
+          {!api.requestable ? (
             <p className="text-sm text-fg-muted">
               No approval needed. Issue a credential from the credentials page to start calling this
               API.
             </p>
           ) : (
-            <form
-              className="flex flex-col gap-4"
-              onSubmit={(event) => {
-                event.preventDefault();
-                createRequest.mutate(
-                  {
-                    api_id: api.id,
-                    justification: justification.trim(),
-                    application_id: identity === ACCOUNT_IDENTITY ? null : identity,
-                  },
-                  {
-                    onSuccess: () => {
-                      setJustification('');
-                      setIdentity(ACCOUNT_IDENTITY);
-                      toast.success('Access request submitted');
-                    },
-                  },
-                );
-              }}
-            >
-              {(applications.data?.items.length ?? 0) > 0 ? (
-                <LabeledSelect<string>
-                  label="Requesting for"
-                  value={identity}
-                  onValueChange={setIdentity}
-                  hint={
-                    identity === ACCOUNT_IDENTITY
-                      ? 'Approval adds this API to your account, so every credential issued to your account can call it.'
-                      : 'Approval adds this API to that application only. Its credentials can call it; your account’s cannot.'
-                  }
-                  options={[
-                    { value: ACCOUNT_IDENTITY, label: 'My account' },
-                    ...(applications.data?.items ?? []).map((application) => ({
-                      value: application.id,
-                      label: application.name,
-                    })),
-                  ]}
-                />
-              ) : null}
-              <LabeledTextarea
-                label="Why do you need access?"
-                required
-                rows={5}
-                maxLength={MAX_JUSTIFICATION_LENGTH}
-                value={justification}
-                onChange={(event) => setJustification(event.target.value)}
-                placeholder="Which product or workflow needs this data, and what will you do with it?"
+            <div className="flex flex-col gap-4">
+              <IdentityPicker
+                label="Requesting for"
+                value={identity}
+                selectedLabel={identityName}
+                onValueChange={(value, name) => {
+                  setIdentity(value);
+                  setIdentityName(name);
+                }}
                 hint={
-                  <span className="flex flex-wrap items-center justify-between gap-2">
-                    <span>The provider reviews this note.</span>
-                    <span className="tabular-nums">
-                      {justification.length}/{MAX_JUSTIFICATION_LENGTH} characters
-                    </span>
-                  </span>
+                  identity === ACCOUNT_IDENTITY
+                    ? 'Approval adds this API to your account, so every credential issued to your account can call it.'
+                    : 'Approval adds this API to that application only. Its credentials can call it; your account’s cannot.'
                 }
               />
-              <div>
-                <Button
-                  type="submit"
-                  variant="primary"
-                  loading={createRequest.isPending}
-                  disabled={justification.trim().length === 0}
-                >
-                  Request access
-                </Button>
-              </div>
-            </form>
-          )}
-
-          {myRequest && myRequest.status !== 'pending' ? (
-            <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-border pt-4 text-sm text-fg-muted">
-              <span>Last decision:</span>
-              <StatusPill status={myRequest.status} />
-              {myRequest.decision_note ? (
-                <span className="min-w-0 italic">“{myRequest.decision_note}”</span>
-              ) : null}
+              {/* Keyed by identity so a half-written justification for one
+                  identity is not submitted for another. */}
+              <IdentityAccess
+                key={identity}
+                api={api}
+                identity={identity}
+                identityName={identityName}
+              />
             </div>
-          ) : null}
+          )}
         </CardBody>
       </Card>
 

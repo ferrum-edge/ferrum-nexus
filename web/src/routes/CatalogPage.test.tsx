@@ -3,9 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_PAGE_SIZE,
   MAX_JUSTIFICATION_LENGTH,
+  type AccessRequest,
+  type Application,
+  type ApplicationSummary,
   type CatalogDetailResponse,
+  type CatalogIdentityAccessResponse,
   type CatalogListResponse,
   type CatalogSpecResponse,
+  type Grant,
 } from '@ferrum-nexus/shared';
 import {
   API,
@@ -17,7 +22,7 @@ import {
   catalogEntry,
 } from '../../test/fixtures';
 import { changeField, clearClients, deferred, renderPage, selectTab } from '../../test/helpers';
-import { accessRequestsApi, catalogApi, threadsApi } from '../lib/api';
+import { accessRequestsApi, applicationsApi, catalogApi, threadsApi } from '../lib/api';
 import { CatalogDetailPage } from './CatalogDetailPage';
 import { CatalogPage } from './CatalogPage';
 
@@ -33,13 +38,21 @@ vi.mock('../stores/auth', () => ({
 }));
 
 let detail: CatalogDetailResponse;
+/** Each identity's own standing, keyed by application id or `account`. */
+let identities: Record<string, CatalogIdentityAccessResponse>;
+
+const NO_ACCESS: CatalogIdentityAccessResponse = { application: null, request: null, grant: null };
 
 beforeEach(() => {
   session.canAdmin = false;
   navigate.mockReset();
   detail = { api: catalogEntry(), spec: SPEC, my_request: null, my_grant: null };
+  identities = {};
   vi.spyOn(catalogApi, 'list').mockResolvedValue({ items: [], total: 0 });
   vi.spyOn(catalogApi, 'detail').mockImplementation(async () => detail);
+  vi.spyOn(catalogApi, 'identityAccess').mockImplementation(
+    async (_slug, applicationId) => identities[applicationId ?? 'account'] ?? NO_ACCESS,
+  );
   vi.spyOn(catalogApi, 'spec').mockResolvedValue({
     api_id: API.id,
     version: API.version,
@@ -190,15 +203,17 @@ describe('catalog access', () => {
   it('validates a justification, submits it, and withdraws the pending request', async () => {
     vi.spyOn(accessRequestsApi, 'create').mockImplementation(async () => {
       detail = { ...detail, api: catalogEntry({ access_state: 'pending' }), my_request: REQUEST };
+      identities.account = { ...NO_ACCESS, request: REQUEST };
       return { access_request: REQUEST };
     });
     vi.spyOn(accessRequestsApi, 'cancel').mockImplementation(async () => {
       const cancelled = { ...REQUEST, status: 'cancelled' as const };
       detail = { ...detail, api: catalogEntry(), my_request: cancelled };
+      identities.account = { ...NO_ACCESS, request: cancelled };
       return { access_request: cancelled };
     });
     await openDetail('Access');
-    expect(screen.getByRole('button', { name: 'Request access' })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: 'Request access' })).toBeDisabled();
     expect(screen.getByLabelText(/Why do you need access/)).toHaveAttribute(
       'maxlength',
       String(MAX_JUSTIFICATION_LENGTH),
@@ -225,6 +240,7 @@ describe('catalog access', () => {
   it('keeps the justification for retry when submission fails', async () => {
     vi.spyOn(accessRequestsApi, 'create').mockRejectedValue(new Error('Gateway unavailable'));
     await openDetail('Access');
+    await screen.findByRole('button', { name: 'Request access' });
     changeField(/Why do you need access/, 'Reconcile invoices');
     fireEvent.click(screen.getByRole('button', { name: 'Request access' }));
     await waitFor(() => expect(accessRequestsApi.create).toHaveBeenCalledTimes(1));
@@ -245,7 +261,9 @@ describe('catalog access', () => {
       api: catalogEntry({ access_state: 'granted', auth_plugin: authPlugin }),
       my_grant: GRANT,
     };
+    identities.account = { ...NO_ACCESS, grant: GRANT };
     await openDetail('Access');
+    await screen.findByText(/Access granted to your account/);
     expect(screen.getByText('Call this API')).toBeInTheDocument();
     expect(screen.getByText(recipe)).toBeInTheDocument();
     expect(screen.getByText(GRANT.acl_group)).toBeInTheDocument();
@@ -286,8 +304,12 @@ describe('catalog access', () => {
       my_request: { ...REQUEST, status: 'denied', decision_note: 'Explain your use case' },
       my_grant: { ...GRANT, status: 'revoked' },
     };
+    identities.account = {
+      ...NO_ACCESS,
+      request: { ...REQUEST, status: 'denied', decision_note: 'Explain your use case' },
+    };
     await openDetail('Access');
-    expect(screen.getByText(/Explain your use case/)).toBeInTheDocument();
+    expect(await screen.findByText(/Explain your use case/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Request access' })).toBeDisabled();
     expect(screen.queryByText('Call this API')).not.toBeInTheDocument();
   });
@@ -327,5 +349,188 @@ describe('catalog access', () => {
       to: '/messages/$threadId',
       params: { threadId: 'thread-1' },
     });
+  });
+});
+
+describe('per-identity catalog access (issue #314)', () => {
+  const application = (id: string, name: string): Application => ({
+    id,
+    owner_user_id: 'user-1',
+    name,
+    description: null,
+    status: 'active',
+    active_grants: 0,
+    active_credentials: 0,
+    created_at: API.created_at,
+    updated_at: API.created_at,
+  });
+  const summary = (item: Application): ApplicationSummary => ({
+    id: item.id,
+    name: item.name,
+    owner_user_id: item.owner_user_id,
+    status: item.status,
+  });
+  const APP_A = application('app-a', 'Application A');
+  const APP_B = application('app-b', 'Application B');
+  const requestFor = (item: Application): AccessRequest => ({
+    ...REQUEST,
+    id: `request-${item.id}`,
+    application_id: item.id,
+    application: summary(item),
+  });
+  const grantFor = (item: Application): Grant => ({
+    ...GRANT,
+    id: `grant-${item.id}`,
+    application_id: item.id,
+    application: summary(item),
+  });
+
+  beforeEach(() => {
+    vi.spyOn(applicationsApi, 'list').mockResolvedValue({ items: [APP_A, APP_B], total: 2 });
+    vi.spyOn(accessRequestsApi, 'create').mockResolvedValue({ access_request: REQUEST });
+  });
+
+  async function chooseIdentity(name: string): Promise<void> {
+    fireEvent.click(screen.getByLabelText('Requesting for'));
+    fireEvent.click(await screen.findByRole('option', { name }));
+  }
+
+  it('shows A pending while B, and the account, can still request', async () => {
+    // The account-wide representative is A's pending request — the very thing
+    // that used to hide the form for every identity.
+    detail = {
+      ...detail,
+      api: catalogEntry({ access_state: 'pending' }),
+      my_request: requestFor(APP_A),
+    };
+    identities['app-a'] = { application: summary(APP_A), request: requestFor(APP_A), grant: null };
+    identities['app-b'] = { ...NO_ACCESS, application: summary(APP_B) };
+    await openDetail('Access');
+
+    // The account has neither a request nor a grant of its own.
+    expect(await screen.findByRole('button', { name: 'Request access' })).toBeInTheDocument();
+    expect(catalogApi.identityAccess).toHaveBeenCalledWith('billing', null);
+
+    await chooseIdentity('Application A');
+    expect(
+      await screen.findByText(/The request for Application A is awaiting review/),
+    ).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Withdraw request' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Request access' })).not.toBeInTheDocument();
+    expect(catalogApi.identityAccess).toHaveBeenCalledWith('billing', 'app-a');
+    // The picker searches the caller's own active applications on the server.
+    expect(applicationsApi.list).toHaveBeenCalledWith({
+      mine: true,
+      status: 'active',
+      limit: DEFAULT_PAGE_SIZE,
+      offset: 0,
+    });
+
+    await chooseIdentity('Application B');
+    fireEvent.change(await screen.findByLabelText(/Why do you need access/), {
+      target: { value: 'Second integration' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Request access' }));
+    await waitFor(() =>
+      expect(accessRequestsApi.create).toHaveBeenCalledWith({
+        api_id: API.id,
+        justification: 'Second integration',
+        application_id: 'app-b',
+      }),
+    );
+  });
+
+  it('shows A granted — on its credentials only — while B can still request', async () => {
+    detail = {
+      ...detail,
+      api: catalogEntry({ access_state: 'granted' }),
+      my_grant: grantFor(APP_A),
+    };
+    identities['app-a'] = { application: summary(APP_A), request: null, grant: grantFor(APP_A) };
+    identities['app-b'] = { ...NO_ACCESS, application: summary(APP_B) };
+    await openDetail('Access');
+
+    // The account itself is not the grantee, so it may still ask.
+    expect(await screen.findByRole('button', { name: 'Request access' })).toBeInTheDocument();
+    expect(screen.queryByText(/Access granted to your account/)).not.toBeInTheDocument();
+
+    await chooseIdentity('Application A');
+    expect(await screen.findByText(/Access granted to Application A/)).toBeInTheDocument();
+    expect(screen.getByText(/Only Application A’s gateway consumer carries/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/credentials issued to your account or your other applications cannot/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Request access' })).not.toBeInTheDocument();
+
+    await chooseIdentity('Application B');
+    expect(await screen.findByRole('button', { name: 'Request access' })).toBeInTheDocument();
+    expect(screen.queryByText(/Access granted/)).not.toBeInTheDocument();
+  });
+
+  it('describes an account-level grant as reaching every account credential', async () => {
+    detail = { ...detail, api: catalogEntry({ access_state: 'granted' }), my_grant: GRANT };
+    identities.account = { ...NO_ACCESS, grant: GRANT };
+    identities['app-a'] = { ...NO_ACCESS, application: summary(APP_A) };
+    await openDetail('Access');
+
+    expect(await screen.findByText(/Access granted to your account/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/every credential issued to your account can call this API/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Request access' })).not.toBeInTheDocument();
+
+    // An application does not inherit the account's grant; it asks on its own.
+    await chooseIdentity('Application A');
+    expect(await screen.findByRole('button', { name: 'Request access' })).toBeInTheDocument();
+  });
+
+  it('pages and searches the identity picker on the server', async () => {
+    const many = Array.from({ length: DEFAULT_PAGE_SIZE + 5 }, (_, index) =>
+      application(`app-${index}`, `Integration ${index}`),
+    );
+    vi.mocked(applicationsApi.list).mockImplementation(async (query = {}) => {
+      const matching = many.filter(
+        (item) => query.q === undefined || item.name.toLowerCase().includes(query.q.toLowerCase()),
+      );
+      const offset = query.offset ?? 0;
+      return {
+        items: matching.slice(offset, offset + (query.limit ?? DEFAULT_PAGE_SIZE)),
+        total: matching.length,
+      };
+    });
+    await openDetail('Access');
+    await screen.findByRole('button', { name: 'Request access' });
+
+    fireEvent.click(screen.getByLabelText('Requesting for'));
+    await screen.findByRole('option', { name: 'Integration 0' });
+    expect(screen.queryByRole('option', { name: 'Integration 29' })).not.toBeInTheDocument();
+    expect(screen.getByText(`1–${DEFAULT_PAGE_SIZE} of ${many.length}`)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'More Requesting for results' }));
+    expect(await screen.findByRole('option', { name: 'Integration 29' })).toBeInTheDocument();
+    expect(applicationsApi.list).toHaveBeenLastCalledWith({
+      mine: true,
+      status: 'active',
+      limit: DEFAULT_PAGE_SIZE,
+      offset: DEFAULT_PAGE_SIZE,
+    });
+
+    fireEvent.change(screen.getByLabelText('Search Requesting for'), {
+      target: { value: ' integration 7 ' },
+    });
+    await waitFor(() =>
+      expect(applicationsApi.list).toHaveBeenLastCalledWith({
+        mine: true,
+        status: 'active',
+        q: 'integration 7',
+        limit: DEFAULT_PAGE_SIZE,
+        offset: 0,
+      }),
+    );
+    fireEvent.click(await screen.findByRole('option', { name: 'Integration 7' }));
+    expect(
+      await screen.findByText(/Approval adds this API to that application only/),
+    ).toBeVisible();
+    expect(catalogApi.identityAccess).toHaveBeenLastCalledWith('billing', 'app-7');
   });
 });

@@ -27,6 +27,7 @@ import type {
   AppHealth,
   Application,
   ApplicationStatus,
+  ApplicationSummary,
   AuditLog,
   BrandingSettings,
   CaptchaEnforcement,
@@ -344,8 +345,42 @@ export interface CatalogDetailResponse {
   spec: ApiSpecSummary | null;
   /** The caller's open access request for this API, when one exists. */
   my_request: AccessRequest | null;
-  /** The caller's active grant for this API, when one exists. */
+  /**
+   * The caller's active grant for this API, when one exists.
+   *
+   * An **account-wide representative**: the account's own grant, or else one
+   * held by any of its applications. It is what admits the caller to a private
+   * API's documentation, not the state of any one identity — the access form
+   * reads {@link CatalogIdentityAccessResponse} for that.
+   */
   my_grant: Grant | null;
+}
+
+/** `GET /api/catalog/:slug/access?application_id` */
+export interface CatalogIdentityAccessQuery {
+  /**
+   * One of the caller's own applications, or the literal `account`
+   * (`ACCOUNT_IDENTITY_SCOPE`, and the default when absent) for the account
+   * itself.
+   */
+  application_id?: Uuid;
+}
+
+/**
+ * `GET /api/catalog/:slug/access` — one identity's standing on one API.
+ *
+ * The per-identity counterpart of `my_request`/`my_grant`: grants and pending
+ * requests are separate per `(api, account, application)`, so "may this
+ * identity ask?" is answered from this identity's own rows, never from a row
+ * another of the account's identities holds.
+ */
+export interface CatalogIdentityAccessResponse {
+  /** The identity described; `null` for the account itself. */
+  application: ApplicationSummary | null;
+  /** This identity's newest request for the API, any status; `null` when none. */
+  request: AccessRequest | null;
+  /** This identity's active grant for the API; `null` when none. */
+  grant: Grant | null;
 }
 
 /** `GET /api/catalog/:slug/spec` — the normalized document plus its metadata. */
@@ -535,7 +570,13 @@ export type ListApplicationsResponse = Paginated<Application>;
 export interface ListApplicationsQuery extends ListQuery {
   /** Admin-only: somebody else's. A client always sees their own. */
   owner_user_id?: Uuid;
+  /**
+   * Only the caller's own, even for an administrator — what an identity
+   * picker wants, since nobody may act as somebody else's application.
+   */
+  mine?: boolean;
   status?: ApplicationStatus;
+  /** Case-insensitive substring match on name or description (≤ 200 characters). */
   q?: string;
 }
 

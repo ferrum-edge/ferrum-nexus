@@ -2,7 +2,6 @@ import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_PAGE_SIZE,
-  MAX_PAGE_SIZE,
   type Application,
   type CredentialMetadata,
   type IssueCredentialResponse,
@@ -277,7 +276,8 @@ describe('credential management', () => {
     expect(grantsApi.list).toHaveBeenCalledWith({
       mine: true,
       status: 'active',
-      limit: MAX_PAGE_SIZE,
+      limit: DEFAULT_PAGE_SIZE,
+      offset: 0,
     });
     expect(screen.getByText(API.invoke_url!)).toBeInTheDocument();
     expect(screen.getByText(/Gateway address not published/)).toBeInTheDocument();
@@ -309,25 +309,138 @@ describe('application identities', () => {
 
   it('names a disabled application in the table but does not offer it for issuance', async () => {
     // A disabled application keeps its credentials (they are still listed and
-    // still revocable), so the table must still say whose they are.
+    // still revocable), so the table must still say whose they are. Its name
+    // is fetched by id rather than looked up in a page of applications.
+    vi.spyOn(applicationsApi, 'get').mockResolvedValue({
+      application: application('app-off', 'Retired batch job', 'disabled'),
+    });
     vi.spyOn(applicationsApi, 'list').mockResolvedValue({
-      items: [
-        application('app-live', 'Billing worker', 'active'),
-        application('app-off', 'Retired batch job', 'disabled'),
-      ],
-      total: 2,
+      items: [application('app-live', 'Billing worker', 'active')],
+      total: 1,
     });
     credentials = [{ ...CREDENTIAL, application_id: 'app-off', label: 'Nightly export' }];
     renderPage(<CredentialsPage />);
     expect(await screen.findByText('Retired batch job')).toBeInTheDocument();
     expect(screen.getByText('Disabled')).toBeInTheDocument();
-    expect(applicationsApi.list).toHaveBeenCalledWith({ limit: MAX_PAGE_SIZE });
+    expect(applicationsApi.get).toHaveBeenCalledWith('app-off');
+    // Nothing is listed until the picker is opened.
+    expect(applicationsApi.list).not.toHaveBeenCalled();
 
     openIssue();
-    const identity = screen.getByLabelText('Identity');
-    const offered = within(identity)
+    fireEvent.click(screen.getByLabelText('Identity'));
+    await screen.findByRole('option', { name: 'Billing worker' });
+    const offered = within(screen.getByRole('listbox', { name: 'Identity' }))
       .getAllByRole('option')
       .map((option) => option.textContent);
     expect(offered).toEqual(['My account', 'Billing worker']);
+    // Only the caller's own active applications are offered.
+    expect(applicationsApi.list).toHaveBeenCalledWith({
+      mine: true,
+      status: 'active',
+      limit: DEFAULT_PAGE_SIZE,
+      offset: 0,
+    });
+  });
+
+  it('names an application from beyond the first page of applications', async () => {
+    // With more applications than one page holds, a credential's application
+    // may be one a single page would never have loaded (issue #310).
+    vi.spyOn(applicationsApi, 'get').mockImplementation(async (id) => ({
+      application: application(id, `Integration ${id}`, 'active'),
+    }));
+    credentials = [
+      { ...CREDENTIAL, id: 'credential-a', application_id: 'app-201', label: 'Late one' },
+      { ...CREDENTIAL, id: 'credential-b', application_id: 'app-201', label: 'Same app' },
+    ];
+    renderPage(<CredentialsPage />);
+    expect(await screen.findAllByText('Integration app-201')).toHaveLength(2);
+    expect(applicationsApi.get).toHaveBeenCalledTimes(1);
+  });
+
+  it('issues a credential to an application found by searching and paging', async () => {
+    const many = Array.from({ length: DEFAULT_PAGE_SIZE + 3 }, (_, index) =>
+      application(`app-${index}`, `Worker ${index}`, 'active'),
+    );
+    vi.spyOn(applicationsApi, 'list').mockImplementation(async (query = {}) => {
+      const matching = many.filter(
+        (item) => query.q === undefined || item.name.toLowerCase().includes(query.q.toLowerCase()),
+      );
+      const offset = query.offset ?? 0;
+      return {
+        items: matching.slice(offset, offset + (query.limit ?? DEFAULT_PAGE_SIZE)),
+        total: matching.length,
+      };
+    });
+    renderPage(<CredentialsPage />);
+    await screen.findByText('No credentials yet');
+    openIssue();
+    fireEvent.click(screen.getByLabelText('Identity'));
+    await screen.findByRole('option', { name: 'Worker 0' });
+    fireEvent.click(screen.getByRole('button', { name: 'More Identity results' }));
+    expect(await screen.findByRole('option', { name: 'Worker 27' })).toBeInTheDocument();
+
+    // Worker 3 is on the first page, not the one on screen, so it only
+    // appears once the search has gone to the server.
+    fireEvent.change(screen.getByLabelText('Search Identity'), { target: { value: 'worker 3' } });
+    fireEvent.click(await screen.findByRole('option', { name: 'Worker 3' }));
+    expect(applicationsApi.list).toHaveBeenLastCalledWith({
+      mine: true,
+      status: 'active',
+      q: 'worker 3',
+      limit: DEFAULT_PAGE_SIZE,
+      offset: 0,
+    });
+    expect(
+      screen.getByText('This credential can call only the APIs Worker 3 is approved for.'),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Issue' }));
+    await screen.findByRole('dialog', { name: 'Save your new credential' });
+    expect(credentialsApi.issue).toHaveBeenCalledWith({
+      credential_type: 'keyauth',
+      label: null,
+      application_id: 'app-3',
+    });
+  });
+});
+
+describe('your API access', () => {
+  it('pages through every active grant and names the identity holding each', async () => {
+    const grants = Array.from({ length: DEFAULT_PAGE_SIZE + 2 }, (_, index) => ({
+      ...GRANT,
+      id: `grant-${index}`,
+      api: { ...API, name: `API ${index}` },
+      ...(index === 1
+        ? {
+            application_id: 'app-1',
+            application: {
+              id: 'app-1',
+              name: 'Billing worker',
+              owner_user_id: 'user-1',
+              status: 'active' as const,
+            },
+          }
+        : {}),
+    }));
+    vi.mocked(grantsApi.list).mockImplementation(async (query = {}) => {
+      const offset = query.offset ?? 0;
+      return {
+        items: grants.slice(offset, offset + (query.limit ?? DEFAULT_PAGE_SIZE)),
+        total: grants.length,
+      };
+    });
+    renderPage(<CredentialsPage />);
+    expect(await screen.findByText('API 0')).toBeInTheDocument();
+    expect(screen.getByText('Billing worker')).toBeInTheDocument();
+    expect(screen.queryByText(/Every API your active grants cover/)).not.toBeInTheDocument();
+    expect(screen.queryByText(`API ${DEFAULT_PAGE_SIZE + 1}`)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    expect(await screen.findByText(`API ${DEFAULT_PAGE_SIZE + 1}`)).toBeInTheDocument();
+    expect(grantsApi.list).toHaveBeenLastCalledWith({
+      mine: true,
+      status: 'active',
+      limit: DEFAULT_PAGE_SIZE,
+      offset: DEFAULT_PAGE_SIZE,
+    });
   });
 });

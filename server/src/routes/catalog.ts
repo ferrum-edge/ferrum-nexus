@@ -10,10 +10,12 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 
-import type {
-  CatalogDetailResponse,
-  CatalogListResponse,
-  CatalogSpecResponse,
+import {
+  ACCOUNT_IDENTITY_SCOPE,
+  type CatalogDetailResponse,
+  type CatalogIdentityAccessResponse,
+  type CatalogListResponse,
+  type CatalogSpecResponse,
 } from '@ferrum-nexus/shared';
 
 import type { CatalogService } from '../catalog/service.js';
@@ -34,6 +36,15 @@ const catalogQuery = listQuerySchema.extend({
 });
 
 const slugParams = z.object({ slug: z.string().trim().min(1).max(120) });
+
+const identityAccessQuery = z.object({
+  /**
+   * One of the caller's applications, or the literal `account` (and the
+   * default) for the account itself. A sentinel, as on the credential list,
+   * because a query string has no `null`.
+   */
+  application_id: z.string().trim().min(1).max(64).optional(),
+});
 
 /** `/api/catalog` route plugin. */
 export const catalogRoutes: FastifyPluginAsync<CatalogRoutesOptions> = async (app, options) => {
@@ -60,6 +71,22 @@ export const catalogRoutes: FastifyPluginAsync<CatalogRoutesOptions> = async (ap
     const { user } = requireAuth(request);
     const { slug } = parseOrThrow(slugParams, request.params);
     return catalog.detail(user, slug);
+  });
+
+  /**
+   * One identity's request and grant on this API — what decides whether the
+   * access form offers a new request for that identity. Authorization is the
+   * detail page's, plus ownership of the application named.
+   */
+  app.get('/:slug/access', async (request): Promise<CatalogIdentityAccessResponse> => {
+    const { user } = requireAuth(request);
+    const { slug } = parseOrThrow(slugParams, request.params);
+    const query = parseOrThrow(identityAccessQuery, request.query);
+    const applicationId =
+      query.application_id === undefined || query.application_id === ACCOUNT_IDENTITY_SCOPE
+        ? null
+        : query.application_id;
+    return catalog.identityAccess(user, slug, applicationId);
   });
 
   app.get('/:slug/spec', async (request): Promise<CatalogSpecResponse> => {
