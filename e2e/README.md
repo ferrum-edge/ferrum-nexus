@@ -42,10 +42,10 @@ stack left up with `E2E_KEEP=1` works.
 
 `FERRUM_EDGE_IMAGE` names a release **by digest**. A suite whose whole claim is
 "the portal agrees with a real gateway" has to name the gateway build it agreed
-with, and a tag can be re-pointed where a digest cannot. `e2e/.env.example` is
-the only place it is written — the CI workflow does not repeat it, because
-`run.sh` generates `e2e/.env` from the example whenever none exists, and a CI
-checkout never has one. Moving to a newer Edge is a deliberate one-line edit
+with, and a tag can be re-pointed where a digest cannot. The
+[compatibility record](../release/compatibility.env) is the only place it is
+written; `run.sh` copies it into `e2e/.env` when none exists, and CI starts
+from a clean checkout. Moving to a newer Edge is a deliberate one-line edit
 there, and the diff says which release the guarantee now covers.
 
 A local `e2e/.env` is generated once and then kept, so it does not follow a

@@ -911,7 +911,7 @@ Drop `NEXUS_BOOTSTRAP_TOKEN` and the container prints a generated one on its
 first start (`docker logs`); see
 [First run](#first-run-and-the-bootstrap-token).
 
-The image is a two-stage build on current `node:22-bookworm-slim`, above the
+The image is a two-stage build on digest-pinned `node:22-bookworm-slim`, above the
 Node 22.14 minimum required by SQLite's Node-API 10 binding. Both stages use
 the same base. better-sqlite3 13 bundles the Linux x64/arm64 binaries, so SQLite
 does not need an install script or compiler in this image. Hosted CI opens,
@@ -937,27 +937,26 @@ brings up Nexus + PostgreSQL + a Ferrum Edge gateway:
 
 ```bash
 cp docker/docker-compose.example.yml docker-compose.yml
+set -a
+. ./release/compatibility.env
+set +a
 export NEXUS_SECRET_KEY=$(openssl rand -hex 32)
 export NEXUS_DB_PASSWORD=$(openssl rand -hex 16)
 export FERRUM_ADMIN_JWT_SECRET=$(openssl rand -hex 32)
 export FERRUM_BASIC_AUTH_HMAC_SECRET=$(openssl rand -hex 32)
-# Replace with a complete image reference from a successfully published release.
-export FERRUM_EDGE_IMAGE='<published image tag or digest>'
 docker compose up -d
 ```
 
-All four are required — every one of them is declared `${VAR:?...}`, so compose
-refuses to start rather than falling back to a shipped default. The image
-reference is also required: choose a published version or immutable digest
-from the [Edge releases](https://github.com/ferrum-edge/ferrum-edge/releases).
-A source tag or chart version alone does not prove image publication, and
-historical `latest` images are no longer refreshed by Edge main CI.
+All four secrets and the Edge image are required — each is declared
+`${VAR:?...}`, so compose refuses to start if one is missing. Keep the secrets
+stable across restarts. The [compatibility record](../release/compatibility.env)
+selects a published Edge image by digest; do not use a moving `latest` tag.
 
 > **Which Edge release is this portal actually known to work against?** The
 > acceptance suite ([`e2e/`](../e2e/README.md)) runs the packaged image against
 > one pinned release on every CI run and asserts through the gateway's
-> data-plane listener. The digest in `e2e/.env.example` is the release the
-> guarantee covers; running against a different one is supported and untested.
+> data-plane listener. The digest in `release/compatibility.env` is the release
+> candidate tested with this checkout. Other Edge versions are unverified.
 
 Portal on `http://127.0.0.1:8787`, gateway proxy listener on
 `http://127.0.0.1:8000`. Points worth understanding before adapting it:
@@ -984,9 +983,9 @@ Portal on `http://127.0.0.1:8787`, gateway proxy listener on
   `NEXUS_DB_URL`, so there is one value to rotate and none hard-coded.
 - A `ferrum-edge-init` one-shot container `chown`s the `ferrumdata` volume to
   `65532:65532` before the gateway starts, and the gateway `depends_on` it with
-  `condition: service_completed_successfully`. The Edge image is distroless
-  `nonroot` and ships no `/data`, so without this a fresh named volume is
-  root-owned and SQLite cannot create its database file.
+  `condition: service_completed_successfully`. Edge v0.9.5 pre-creates `/data`
+  for that UID; the init also repairs a volume left root-owned by an older
+  image.
 - `FERRUM_BASIC_AUTH_HMAC_SECRET` must be set **before** anyone publishes a
   `basic_auth` API — see the gateway env table in [§1](#ferrum-edge-integration).
 
