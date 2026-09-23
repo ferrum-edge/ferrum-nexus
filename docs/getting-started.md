@@ -40,15 +40,28 @@ to match on both sides: the **admin JWT secret**, and **`FERRUM_NAMESPACE`**.
 > `nexus` on both sides; [step 3](#3-set-up-ferrum-nexus) shows how the portal
 > reports a mismatch.
 
-The gateway image is distroless `nonroot` and runs as **UID 65532**, and it
-bakes in no `/data` directory. A brand-new named volume is therefore root-owned,
-so SQLite cannot create its database file and the container exits on startup.
-Create the volume and hand it to that user first — this is a one-time step:
+The gateway image is distroless `nonroot` and runs as **UID 65532**. The
+published release image (v0.9.5 onwards) pre-creates `/data` owned by
+`65532:65532`, and Docker copies that ownership into a **fresh** named or
+anonymous volume mounted there — so a brand-new volume works as-is, and you can
+even skip the create step and let the `docker run` below make `ferrum-data` on
+first use:
 
 ```bash
 docker volume create ferrum-data
+```
+
+You only need the chown repair for a volume or **bind mount** whose ownership is
+already wrong: a host directory you bind-mount never inherits image ownership,
+and an existing volume created against an older image that lacked `/data` keeps
+whatever owner it was made with. Fix those before starting SQLite:
+
+```bash
 docker run --rm -v ferrum-data:/data alpine chown 65532:65532 /data
 ```
+
+See the Edge [Docker guide](https://github.com/ferrum-edge/ferrum-edge/blob/main/docs/docker.md#volume-mounts)
+for the same fresh-volume behaviour.
 
 Choose a complete image reference from a successfully published
 [Edge release](https://github.com/ferrum-edge/ferrum-edge/releases): a version
@@ -191,35 +204,12 @@ API. Check `FERRUM_ADMIN_URL`, that the secret matches on both sides, and that
 `FERRUM_ADMIN_JWT_ISSUER` matches the gateway's issuer.
 
 `edge: "degraded"` means the gateway is up and healthy but does **not route the
-namespace this portal publishes into**. Sign in as an admin and read the detail,
-which names both sides:
-
-```bash
-curl -s http://127.0.0.1:8787/api/health -b cookies.txt | jq '.edge | {status, reason, namespace_routing}'
-```
-
-```json
-{
-  "status": "degraded",
-  "reason": "namespace_unserved",
-  "namespace_routing": {
-    "configured": "nexusiso",
-    "active": "nexus",
-    "serving_scope": "single-namespace-data-plane",
-    "data_plane_single_namespace": true,
-    "unserved": true,
-    "unserved_mutation_observed": false,
-    "checked_at": "2026-09-12T09:12:44.117Z"
-  }
-}
-```
-
-`configured` is the portal's `FERRUM_NAMESPACE`; `active` is the gateway's. The
-gateway reports its own directly too, on the authenticated Admin API:
-
-```bash
-curl -s http://127.0.0.1:9000/health -H "Authorization: Bearer $ADMIN_JWT" | jq .namespace
-```
+namespace this portal publishes into**. An anonymous `GET /api/health` only
+reveals the verdict — `edge.status: "degraded"`,
+`edge.reason: "namespace_unserved"` and `edge.namespace_routing.unserved: true`.
+The names of **both** sides (`configured` vs `active`) are admin-only, so the
+walkthrough reads them in [step 4](#4-first-run-register-the-founding-super-admin),
+once the founding admin's session exists.
 
 While they disagree, publishing is refused with `409 EDGE_NAMESPACE_UNSERVED`
 rather than creating an API that cannot answer. Fix it by setting the portal's
@@ -288,6 +278,66 @@ every mutation needs it echoed in a header:
 ```bash
 ADMIN_CSRF=$(curl -sS -b admin.txt http://127.0.0.1:8787/api/auth/me | jq -r .csrf_token)
 ```
+
+### If `edge.status` reported `degraded`: read the namespace detail
+
+You now hold an admin session, which is what the health route requires before it
+fills in the gateway's side of the namespace story. Re-read it with the
+**`admin.txt`** cookie jar the founder login just created:
+
+```bash
+curl -s http://127.0.0.1:8787/api/health -b admin.txt | jq '.edge | {status, reason, namespace_routing}'
+```
+
+```json
+{
+  "status": "degraded",
+  "reason": "namespace_unserved",
+  "namespace_routing": {
+    "configured": "nexusiso",
+    "active": "nexus",
+    "serving_scope": "single-namespace-data-plane",
+    "data_plane_single_namespace": true,
+    "unserved": true,
+    "unserved_mutation_observed": false,
+    "checked_at": "2026-09-12T09:12:44.117Z"
+  }
+}
+```
+
+`configured` is the portal's `FERRUM_NAMESPACE`; `active` is the gateway's. The
+gateway reports its own side directly too, on the authenticated Admin API — and
+that call needs a **minted admin JWT**, not the signing secret.
+`FERRUM_ADMIN_JWT_SECRET` is a key you *sign a token with*; pasting it straight
+into an `Authorization: Bearer …` header authenticates nothing. Mint a
+short-lived one (HS256, carrying the `iss`/`sub`/`iat`/`nbf`/`exp`/`jti`/`role`
+claims Edge requires) and ask the gateway:
+
+```bash
+b64url() { openssl base64 | tr -d '\n' | tr '+/' '-_' | tr -d '='; }
+now=$(date +%s)
+header=$(printf '{"alg":"HS256","typ":"JWT"}' | b64url)
+payload=$(printf '{"iss":"ferrum-edge","sub":"ferrum-nexus","iat":%s,"nbf":%s,"exp":%s,"jti":"walkthrough","role":"admin","ns":"nexus"}' \
+  "$now" "$now" "$((now + 60))" | b64url)
+signature=$(printf '%s.%s' "$header" "$payload" \
+  | openssl dgst -sha256 -binary -hmac "$FERRUM_ADMIN_JWT_SECRET" | b64url)
+ADMIN_JWT="$header.$payload.$signature"
+
+curl -s http://127.0.0.1:9000/health -H "Authorization: Bearer $ADMIN_JWT" | jq .namespace
+```
+
+```json
+{
+  "active": "nexus",
+  "serving_scope": "single-namespace-data-plane",
+  "data_plane_single_namespace": true
+}
+```
+
+Adjust `iss` above to whatever the gateway was started with if you set
+`FERRUM_ADMIN_JWT_ISSUER`, and `ns` to your `FERRUM_NAMESPACE`. The token is
+good for one minute (Edge caps the lifetime at an hour); it is only for peeking
+at the health block — Nexus mints its own tokens for real Admin API calls.
 
 > Create a **second** `super_admin` before you go to production. The last active
 > one cannot be demoted or disabled, which is a safety net, not a lock you want
