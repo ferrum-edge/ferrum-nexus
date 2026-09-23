@@ -77,9 +77,8 @@ services:
       ferrum-edge-init:
         condition: service_completed_successfully
 
-  # The Edge image is distroless `nonroot` (UID 65532) and bakes in no `/data`,
-  # so a fresh named volume is root-owned and SQLite cannot create its file.
-  # One-shot chown; a no-op on every run after the first.
+  # Edge v0.9.5 pre-creates /data for UID 65532. This one-shot chown also
+  # repairs older root-owned volumes; it is a no-op on later starts.
   ferrum-edge-init:
     image: alpine:3@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
     command: ['chown', '65532:65532', '/data']

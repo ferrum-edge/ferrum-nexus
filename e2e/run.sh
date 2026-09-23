@@ -19,6 +19,13 @@ ROOT="$(cd "$HERE/.." && pwd)"
 ARTIFACTS="${E2E_ARTIFACTS:-$HERE/artifacts}"
 SUITE="${1:-all}"
 
+# The release candidate and the shipped Compose quickstart use the same Edge
+# digest. An explicit environment override remains available for experiments.
+EDGE_OVERRIDE="${FERRUM_EDGE_IMAGE:-}"
+# shellcheck disable=SC1091
+source "$ROOT/release/compatibility.env"
+FERRUM_EDGE_IMAGE="${EDGE_OVERRIDE:-$FERRUM_EDGE_IMAGE}"
+
 # `docker compose` (v2 plugin) or the standalone `docker-compose`. Anything
 # else is a clear failure rather than a confusing one 40 lines later.
 if docker compose version >/dev/null 2>&1; then
@@ -39,7 +46,8 @@ cd "$HERE"
 if [[ ! -f .env ]]; then
   echo "==> generating e2e/.env"
   {
-    grep -E '^(FERRUM_EDGE_IMAGE|NEXUS_IMAGE|NEXUS_PORT|FERRUM_PROXY_PORT|FERRUM_ADMIN_PORT|MAILPIT_HTTP_PORT)=' .env.example
+    printf 'FERRUM_EDGE_IMAGE=%s\n' "$FERRUM_EDGE_IMAGE"
+    grep -E '^(NEXUS_IMAGE|NEXUS_PORT|FERRUM_PROXY_PORT|FERRUM_ADMIN_PORT|MAILPIT_HTTP_PORT)=' .env.example
     echo "NEXUS_SECRET_KEY=$(openssl rand -hex 32)"
     echo "NEXUS_BOOTSTRAP_TOKEN=$(openssl rand -hex 32)"
     echo "NEXUS_DB_PASSWORD=$(openssl rand -hex 16)"
@@ -56,6 +64,8 @@ source .env
 set +a
 NEXUS_IMAGE="${IMAGE_OVERRIDE:-${NEXUS_IMAGE:-ferrum-nexus:e2e}}"
 export NEXUS_IMAGE
+FERRUM_EDGE_IMAGE="${EDGE_OVERRIDE:-$FERRUM_EDGE_IMAGE}"
+export FERRUM_EDGE_IMAGE
 
 # ── The image under test ───────────────────────────────────────────────────
 #
