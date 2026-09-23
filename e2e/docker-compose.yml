@@ -77,9 +77,8 @@ services:
       ferrum-edge-init:
         condition: service_completed_successfully
 
-  # The Edge image is distroless `nonroot` (UID 65532) and bakes in no `/data`,
-  # so a fresh named volume is root-owned and SQLite cannot create its file.
-  # One-shot chown; a no-op on every run after the first.
+  # Edge v0.9.5 pre-creates /data for UID 65532. This one-shot chown also
+  # repairs older root-owned volumes; it is a no-op on later starts.
   #
   # The backup-and-restore case also runs one-off copies of this container to
   # copy the gateway's database to and from `/backup`: a separate volume, so

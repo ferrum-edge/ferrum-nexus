@@ -65,18 +65,25 @@ docker run --rm -v ferrum-data:/data alpine chown 65532:65532 /data
 See the Edge [Docker guide](https://github.com/ferrum-edge/ferrum-edge/blob/main/docs/docker.md#volume-mounts)
 for the same fresh-volume behaviour.
 
-Choose a complete image reference from a successfully published
-[Edge release](https://github.com/ferrum-edge/ferrum-edge/releases): a version
-tag or immutable digest, using the same `FERRUM_EDGE_IMAGE` variable as the
-[Compose example](operations.md#compose). A source tag or chart version alone
-does not prove image publication; historical `latest` images are no longer
-refreshed by Edge main CI.
+Clone Nexus first so this walkthrough and the
+[Compose example](operations.md#compose) use the same published Edge image
+from the [compatibility record](../release/compatibility.env). For a released
+deployment, check out the Nexus tag named in the release notes before sourcing
+the record (for example, `git checkout --detach <published-Nexus-tag>` after
+cloning). The first Nexus tag has not been published yet; until then this is a
+buildout walkthrough from the current checkout.
+
+```bash
+git clone https://github.com/ferrum-edge/ferrum-nexus.git
+cd ferrum-nexus
+set -a
+. ./release/compatibility.env
+set +a
+```
 
 Then start the gateway:
 
 ```bash
-# Replace with the complete published image reference selected above.
-export FERRUM_EDGE_IMAGE='<published image tag or digest>'
 export FERRUM_ADMIN_JWT_SECRET="$(openssl rand -hex 32)"
 export FERRUM_BASIC_AUTH_HMAC_SECRET="$(openssl rand -hex 32)"
 
@@ -137,8 +144,6 @@ curl -s -o /dev/null http://127.0.0.1:8000/ && echo "proxy listener up"
 ## 3. Set up Ferrum Nexus
 
 ```bash
-git clone https://github.com/ferrum-edge/ferrum-nexus.git
-cd ferrum-nexus
 npm install
 
 cp .env.example .env

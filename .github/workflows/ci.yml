@@ -9,6 +9,13 @@ permissions:
   contents: read
 
 jobs:
+  quickstart-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify README full-stack Compose configuration
+        run: env -i PATH="$PATH" HOME="$HOME" bash ci/check-compose-quickstart.sh
+
   checks:
     runs-on: ubuntu-latest
     strategy:
@@ -157,8 +164,8 @@ jobs:
   #
   # A required check in the `main` ruleset: a change that makes a real gateway
   # refuse a request the portal says it approved is exactly what this exists to
-  # stop shipping. The Edge release is pinned only in e2e/.env.example, which
-  # run.sh copies into the e2e/.env a fresh checkout does not have.
+  # stop shipping. The Edge release is pinned in release/compatibility.env,
+  # which run.sh copies into the e2e/.env a fresh checkout does not have.
   acceptance:
     runs-on: ubuntu-latest
     timeout-minutes: 30

@@ -234,18 +234,40 @@ docker run --rm -p 127.0.0.1:8787:8787 \
 The bootstrap token is printed to the container log
 (`docker logs`); pass `-e NEXUS_BOOTSTRAP_TOKEN=…` to choose it instead.
 
-For a full stack alongside Postgres and a Ferrum Edge instance, copy
-[`docker/docker-compose.example.yml`](docker/docker-compose.example.yml) and
-export its four required secrets first — compose refuses to start without them:
+For a full stack alongside Postgres and a Ferrum Edge instance, use the
+[compatibility record](release/compatibility.env) from this checkout. It selects
+the published Edge v0.9.5 image by digest, the same image selected by CI. The
+Nexus image is built from this checkout; once a Nexus version tag is published,
+check out that tag before running these commands. See the
+[draft release notes](docs/release-notes.md) for the release boundary.
+
+The four secrets and the Edge image are required. Keep the secrets stable for
+the life of the stack; save them in a secret manager rather than generating new
+ones when restarting it. Run from the repository root:
+
+<!-- compose-quickstart:start -->
 
 ```bash
 cp docker/docker-compose.example.yml docker-compose.yml
+set -a
+. ./release/compatibility.env
+set +a
 export NEXUS_SECRET_KEY=$(openssl rand -hex 32)
 export NEXUS_DB_PASSWORD=$(openssl rand -hex 16)
 export FERRUM_ADMIN_JWT_SECRET=$(openssl rand -hex 32)
 export FERRUM_BASIC_AUTH_HMAC_SECRET=$(openssl rand -hex 32)
 docker compose up -d
 ```
+
+<!-- compose-quickstart:end -->
+
+The portal is at <http://127.0.0.1:8787>. `docker compose logs nexus` shows
+the first-run bootstrap token. For retained data, TLS, backup and restore, and
+the supported single-active-writer model, read
+[operations](docs/operations.md). This checkout is still a buildout snapshot;
+the release tag and production upgrade contract are pending. Follow the
+[getting-started walkthrough](docs/getting-started.md) to register, publish an
+API, and make an authenticated request through Edge.
 
 ## Documentation
 

@@ -1,5 +1,5 @@
 # ── Build stage ─────────────────────────────────────────────────────────────
-FROM node:22-bookworm-slim AS build
+FROM node:22-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9 AS build
 WORKDIR /app
 
 COPY package.json package-lock.json ./
@@ -22,7 +22,7 @@ RUN npm run build --workspace shared \
 RUN npm ci --omit=dev --ignore-scripts
 
 # ── Runtime stage ───────────────────────────────────────────────────────────
-FROM node:22-bookworm-slim
+FROM node:22-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9
 ENV NODE_ENV=production
 WORKDIR /app
 
