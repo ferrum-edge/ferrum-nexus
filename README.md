@@ -26,10 +26,20 @@ and per-user authorization before forwarding to Edge.
 
 ## Development status
 
-Ferrum Nexus is in active buildout, with no users or production data to preserve.
-Breaking changes are expected. Database changes are folded into one initial schema
-per SQL dialect; recreate disposable development databases when that schema changes.
-See [database setup and reset](docs/operations.md#buildout-schema-policy).
+Ferrum Nexus is in active buildout and has not published a supported release yet.
+Breaking changes are expected until it does.
+
+- **Development databases.** Schema changes are still folded into one `001_initial`
+  baseline per backend. When it changes, recreate your disposable development
+  database — see the [development reset](docs/operations.md#buildout-schema-policy).
+  Never apply that reset to a database you need to keep.
+- **Production upgrades.** The first supported release freezes that baseline. From
+  then on, schema changes ship as forward migrations that upgrade a released
+  database in place, CI rejects edits to released migrations, and upgrades never
+  require a reset — see
+  [schema versioning and upgrades](docs/operations.md#schema-versioning-and-upgrades)
+  and [backup and restore](docs/operations.md#5-backup-and-restore). No version has a
+  supported upgrade path before that release.
 
 ## Features
 

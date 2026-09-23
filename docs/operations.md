@@ -1,8 +1,8 @@
 # Operations
 
-Deployment reference for Ferrum Nexus (currently in buildout, with no users):
-configuration, databases, containers, TLS, backups, key rotation, the email outbox, scaling limits, health checks, metrics,
-and the credential mirror.
+Deployment reference for Ferrum Nexus (currently in buildout, before its first supported
+release): configuration, databases and upgrades, containers, TLS, backup and restore, key
+rotation, the email outbox, scaling limits, health checks, metrics, and the credential mirror.
 
 - Architecture background: [`architecture.md`](architecture.md)
 - Security posture: [`security.md`](security.md)
@@ -686,16 +686,163 @@ administrative decision rather than an invisible host-level one.
 Migrations are **applied automatically at startup**: `main()` calls
 `store.init()` then `store.migrate()` before building the server. Running them
 is idempotent — applied ids are recorded in a `schema_migrations` table (or
-collection) and skipped on the next boot.
+collection) and skipped on the next boot. A migration that fails stops the
+runner at that migration and the server does not start; see
+[Upgrade failures and rollback](#upgrade-failures-and-rollback).
+
+The two sections below are deliberately separate. **Schema versioning and
+upgrades** is the production contract: how a database a release created is
+carried forward without losing data. **Buildout schema policy** is the
+development-only reset procedure, which destroys data and never applies to a
+production database.
+
+### Schema versioning and upgrades
+
+**The released baseline.** `001_initial` — the three SQL files in
+`server/src/db/migrations/` and the MongoDB step of the same id in
+`server/src/db/adapters/mongodb/index.ts` — is the first released schema
+baseline. It is **to be frozen at the first supported release**: the manifest
+in `server/src/db/released-migrations.ts` lists it with its per-backend
+SHA-256 checksums and `release: null`, and the release step that publishes the
+first supported version sets `release` to that version. No Nexus release has
+been published yet, so **no version currently has a supported upgrade path**;
+until then the [buildout schema policy](#buildout-schema-policy) applies.
+
+**After a migration is released it never changes.** A database is upgraded by
+applying the migrations its ledger does not record yet, so an edit to one it
+has already applied is an edit that database never sees: fresh and upgraded
+installs would silently diverge. Every schema change after the first supported
+release is therefore a **new forward migration**:
+
+1. Give it the next id (`002_description`, …). It must sort after every
+   released id — the runner applies migrations in id order.
+2. Implement it for every backend under the same id: `NNN_description.sql`,
+   `.pg.sql` and `.mysql.sql`, and a new step in `MONGO_MIGRATIONS` that
+   declares the indexes it creates.
+3. Make it safe to re-run where the backend cannot roll it back (MySQL DDL,
+   MongoDB steps; see the backend notes below), and never make it depend on
+   data a portal may not have.
+4. At release, add it to `RELEASED_MIGRATIONS` with its checksums, and commit
+   `server/src/db/released/NNN_description.mongodb.json`, the frozen snapshot
+   of its MongoDB indexes.
+
+The first forward migration also retires the buildout-only checks that
+`001_initial` is the sole migration: the first case in
+`server/src/db/initial-schema.test.ts` and the image assertion in the `docker`
+CI job.
+
+**CI enforces this.** `server/src/db/released-migrations.test.ts` fails when a
+released migration's file (or MongoDB snapshot) no longer matches its recorded
+checksum, when a released migration is deleted or renamed, when a new migration
+sorts before a released one, when the four backends disagree on the migration
+ids, or when a released MongoDB step's indexes drift from its snapshot. The
+failure message says which of those happened and what to do instead. While the
+baseline is still pending release, an intended edit to it updates its checksums
+in the same change.
+
+**Upgrade coverage.** `server/src/test/baseline-upgrade.test.ts` builds a
+database exactly as the released migrations leave it, seeds it with raw
+baseline-shaped rows — accounts and roles, API ids and slugs, provider
+ownership, specification history, requests and grants (active and revoked),
+Edge consumer mappings, credential metadata, gateway identities, plain and
+encrypted settings, audit rows and email templates — then opens it with the
+current store, migrates, reads every value back, and migrates again in the same
+process and after a restart to prove the re-run changes nothing. SQLite runs in
+every CI job; PostgreSQL, MySQL and MongoDB run in the `store-contracts` job
+against real servers. What that proves, and what it does not, per backend:
+
+- **SQLite and PostgreSQL.** Each migration and its ledger row commit in one
+  transaction. A failed migration leaves no trace; earlier migrations of the
+  same run stay applied and are skipped on the retry.
+- **MySQL.** DDL commits statement by statement, outside any transaction. The
+  baseline is replay-safe because it contains only
+  `CREATE TABLE IF NOT EXISTS`, and a database-scoped advisory lock serializes
+  migrators across instances
+  ([retrying interrupted initialization](#retrying-interrupted-mysql-initialization)).
+  The runner currently **rejects** any other statement, so the first forward
+  migration that needs `ALTER TABLE` or a data change must first extend the
+  MySQL runner with a replay-safe strategy for it. Until then there is no
+  MySQL upgrade path beyond the baseline to support.
+- **MongoDB.** A replica set is required, as it is at runtime. A step is
+  recorded only after it completes; an interrupted step runs again from the
+  start on the next boot, so every step must be idempotent (index creation is).
+  The guard freezes each released step's declared indexes, not the code of a
+  step that transforms documents — review such a step by hand. A standalone
+  deployment (`NEXUS_DB_ALLOW_STANDALONE=true`) is not a supported production
+  configuration and carries no upgrade guarantee.
+
+**Downgrades are not supported.** Nexus does not refuse to start against a
+database a newer release has migrated; an older binary simply ignores ledger
+ids it does not know and runs against a schema it was not written for. Roll
+back by restoring the pre-upgrade backup, never by redeploying the previous
+image over an upgraded database.
+
+#### Production upgrade procedure
+
+1. Read the release notes: the source versions the release supports upgrading
+   from, and the Ferrum Edge release it was validated against.
+2. Take a backup of the Nexus database and record the secrets it needs
+   ([§5](#5-backup-and-restore)). This backup is the rollback.
+3. Stop every Nexus instance, so no old binary writes to the database while the
+   new one migrates it.
+4. Run the migration once, from the **new** image, with the production
+   environment (and, for SQLite, the same data volume):
+
+   ```bash
+   docker run --rm --env-file nexus.env <new-image> node server/dist/db/migrate-cli.js
+   ```
+
+   It prints `Migrations applied (driver: …).` and exits `0`, or exits non-zero
+   and changes nothing further.
+
+5. Start the new release on every instance. Their own startup migration is now
+   a no-op.
+6. Verify: `GET /api/health` is `ok`; the `schema_migrations` ledger lists the
+   release's migration ids; an administrator can sign in; and a known client
+   can still make an authenticated request through the gateway (see
+   [Verifying a restore](#verifying-a-restore) — the same checks apply).
+
+Re-running step 4 is always safe: applied ids are skipped.
+
+#### Upgrade failures and rollback
+
+A failed migration exits non-zero, names the migration, and leaves every
+migration before it applied. What to do next depends on the backend:
+
+- **SQLite, PostgreSQL:** the failed migration was rolled back. Fix the cause
+  (disk space, permissions, a lock held by a process you forgot to stop) and
+  run step 4 again.
+- **MySQL:** the failed migration may have committed some of its statements.
+  Re-run it only if that migration is documented as replay-safe; otherwise
+  restore the pre-upgrade backup.
+- **MongoDB:** re-run; steps are written to be idempotent.
+- **A failure that repeats** is a defect in the release, not in your database.
+  Restore the pre-upgrade backup, redeploy the previous release, and report it.
+
+Never edit or delete `schema_migrations` rows to get past a failure. Removing
+an id makes the runner replay that migration over tables it already changed,
+and adding one skips a change the code depends on.
+
+Rolling back an upgrade is a **restore**, with the limits in
+[§5](#recovery-and-rollback-limits): everything written after the backup —
+including gateway changes Nexus made — is lost.
 
 ### Buildout schema policy
 
-Ferrum Nexus is in active buildout and has no users or production data to preserve.
-The entire SQL schema lives in `001_initial.sql`, `001_initial.pg.sql`, and
-`001_initial.mysql.sql` under `server/src/db/migrations/`. MongoDB creates its
-initial indexes in `server/src/db/adapters/mongodb/index.ts` under the same
-`001_initial` id. Edit these baselines directly; do not add incremental migrations,
-legacy data backfills, or mixed-version upgrade procedures during buildout.
+**Development only.** This is how disposable buildout databases are reset. It
+destroys data and never applies to a production database or to a database a
+supported release created; for those, see
+[Schema versioning and upgrades](#schema-versioning-and-upgrades).
+
+Until the first supported release, the entire SQL schema lives in
+`001_initial.sql`, `001_initial.pg.sql`, and `001_initial.mysql.sql` under
+`server/src/db/migrations/`, and MongoDB creates its initial indexes in
+`server/src/db/adapters/mongodb/index.ts` under the same `001_initial` id. Edit
+these baselines directly; do not add incremental migrations, legacy data
+backfills, or mixed-version upgrade procedures during buildout. Each edit also
+updates the baseline's checksums in `server/src/db/released-migrations.ts` (and,
+for a MongoDB index change, `server/src/db/released/001_initial.mongodb.json`)
+in the same change — CI fails with the value to use otherwise.
 
 **Recreate disposable development databases after a schema change.** Stop all Nexus
 instances and workers first. For SQLite, remove the configured development database
@@ -706,8 +853,10 @@ replaying `CREATE TABLE IF NOT EXISTS` does not update an older table definition
 The application does not reset databases automatically.
 
 This baseline replaces the former 001–017 history. Old buildout databases must be
-recreated even if their ledger already contains `001_initial`. Versioned migrations
-and upgrade procedures become necessary once the application begins serving users.
+recreated even if their ledger already contains `001_initial`. Once the first
+supported release freezes the baseline, schema changes become forward migrations
+([Schema versioning and upgrades](#schema-versioning-and-upgrades)), and this reset
+procedure no longer applies to any database a release created.
 
 ### Initializing the schema
 
@@ -803,7 +952,10 @@ inline, so a retry can finish an interrupted initialization of the same baseline
 A database-specific advisory lock serializes initializers across instances. The
 runner records `001_initial` only after every table succeeds; there is no per-step
 journal or legacy ALTER/backfill recovery. If the baseline itself changed, recreate
-the development database according to the buildout policy above.
+the development database according to the buildout policy above. The runner refuses
+any statement other than `CREATE TABLE IF NOT EXISTS`, so the first forward MySQL
+migration needs a replay-safe strategy added to it first
+([Schema versioning and upgrades](#schema-versioning-and-upgrades)).
 
 ### MongoDB
 
@@ -832,7 +984,10 @@ place, and you can end up with a grant row whose ACL group was never written
 
 Indexes are created in code on `migrate()`; collections without indexes appear
 on their first write. There are no `.sql` files for Mongo, but the same
-`schema_migrations` bookkeeping applies.
+`schema_migrations` bookkeeping applies. Each step in `MONGO_MIGRATIONS` declares
+the indexes it creates as data, and a released step's declaration is frozen by a
+committed snapshot in `server/src/db/released/`
+([Schema versioning and upgrades](#schema-versioning-and-upgrades)).
 
 ### Transactions and contention retries
 
@@ -1043,16 +1198,72 @@ overwrite them; see [`security.md`](security.md#8-csp-and-response-headers).
 
 ---
 
-## 5. Backups
+## 5. Backup and restore
 
-Back up **two** things: the Nexus database and `NEXUS_SECRET_KEY`. A database
-restored without its original secret key loses every encrypted setting and
-every live session (see [§7](#7-rotating-nexus_secret_key)). Store the key in a
-secret manager, not next to the dump.
+A Nexus deployment is only recoverable as a **pair**: the Nexus database and the
+Ferrum Edge state it points into, taken at the same moment, plus the secrets
+both were running with. Neither half can be rebuilt from the other. Nexus holds
+the gateway's consumer and proxy ids ([§13](#13-retargeting-or-rebuilding-ferrum-edge))
+but never the credential material, which is show-once; Edge holds the
+credentials and ACL groups but knows nothing of accounts, requests, approvals or
+audit history.
 
-What is _not_ in the Nexus database: proxies, plugins, consumers and
-credentials — those live in Ferrum Edge and need their own backup. A Nexus
-restore alone leaves grant rows pointing at consumers that may not exist.
+### What to back up
+
+1. **The Nexus database** — every table, including `schema_migrations`,
+   `consumers`, `gateway_identities` and `credential_metadata`, which are the
+   mapping into Edge. Commands per driver are below.
+2. **The Nexus secrets.** `NEXUS_SECRET_KEY`: without the same key, every
+   encrypted setting (SMTP password, CAPTCHA secret) reads as absent and every
+   session and email token stops resolving ([§7](#7-rotating-nexus_secret_key)).
+   `FERRUM_ADMIN_JWT_SECRET`, plus `FERRUM_ADMIN_JWT_ISSUER`, `FERRUM_NAMESPACE`
+   and `FERRUM_ADMIN_URL`, so the restored portal talks to the restored gateway
+   in the same namespace. Keep them in a secret manager, not next to the dumps.
+3. **The Ferrum Edge state** for that namespace: proxies, consumers with their
+   credentials and ACL groups, plugin configs, upstreams and API specs. Either
+   back up Edge's configuration database with its own database tooling, or
+   export it with Edge's Admin API `GET /backup` (restored with
+   `POST /restore?confirm=true`; see Edge's
+   [backup and restore reference](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.5/docs/admin_backup_restore.md)).
+4. **The Edge secrets**, above all `FERRUM_BASIC_AUTH_HMAC_SECRET`: Edge stores
+   basic-auth credentials only as an HMAC under it, so a restore under a
+   different value refuses every basic-auth client. Edge's documentation is
+   authoritative for the rest of its secrets.
+5. **The versions** that wrote them: the Nexus image digest and the Edge image
+   digest. A backup is restored into those versions first
+   ([compatible versions](#compatible-versions)).
+
+**Treat the Edge backup as live credential material.** Edge stores `keyauth`
+keys and `jwt` secrets recoverably, and `GET /backup` exports them unredacted:
+anyone holding the file can call every API those clients can. The Nexus
+database holds only fingerprints and the last four characters of each
+credential, but it does hold password hashes, session-token hashes and the
+encrypted settings. Encrypt both at rest and restrict who can read them.
+
+### Ordering and consistency
+
+The two backups must describe **one point in time**. Nexus is the only writer
+of the Edge resources it manages, and it writes them as part of approvals,
+revocations, credential issues and rotations, publishes and account changes. A
+Nexus backup and an Edge backup taken minutes apart disagree about exactly
+those operations.
+
+The consistent procedure costs a short portal outage. The Edge data plane keeps
+serving traffic throughout, unless you stop Edge to copy its database files:
+
+1. **Stop every Nexus instance**, workers included. From here nothing changes
+   either store on the portal's behalf. Pause any other Admin API writer
+   (operators, automation) for the same window.
+2. **Back up the Nexus database** with the command for its driver.
+3. **Back up the Edge state**: `GET /backup`, or Edge's database. Stop Edge (or
+   snapshot its database consistently) if you copy its files.
+4. **Start Nexus again.**
+
+If Nexus cannot be stopped, take the Nexus backup first and the Edge backup
+immediately after, and expect drift for anything that happened in between: run
+`POST /api/admin/gateway/reconcile` after a restore, and treat any credential
+issued or rotated in that window as needing re-issue
+([§12](#12-the-credential-mirror)). A hot pair is never guaranteed consistent.
 
 | Driver     | Backup                                                               | Notes                                                                                                                                                                          |
 | ---------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -1061,9 +1272,127 @@ restore alone leaves grant rows pointing at consumers that may not exist.
 | MySQL      | `mysqldump --single-transaction --routines nexus > nexus.sql`        | `--single-transaction` gives a consistent snapshot on InnoDB.                                                                                                                  |
 | MongoDB    | `mongodump --uri="$NEXUS_DB_URL" --out /backups/$(date +%F)`         | Restore with `mongorestore`. On a replica set, dump from a secondary to spare the primary.                                                                                     |
 
-Rehearse the restore. Verify afterwards by signing in and opening the admin
-settings page: if `smtp.password_set` and `captcha.secret_set` are `true` and
-mail still sends, the secret key survived the round trip.
+### Compatible versions
+
+- **Nexus:** restore a database into the **same** Nexus release that wrote it,
+  confirm it works, and only then upgrade through the
+  [production upgrade procedure](#production-upgrade-procedure). Never restore
+  into an older release ([downgrades are not supported](#schema-versioning-and-upgrades)).
+  Pre-release buildout databases have no supported restore into a released
+  version.
+- **Ferrum Edge:** restore Edge state into the Edge release that wrote it, or
+  one Edge documents as compatible with it. Each Nexus change is validated in CI
+  against the single Edge release pinned by digest in `e2e/.env.example`
+  (currently Ferrum Edge `v0.9.5`); a supported Nexus release names the Edge
+  release it was validated against in its release notes.
+- **Same driver.** A backup restores into the database engine that produced it;
+  moving between drivers is a data migration, not a restore.
+
+### Restoring
+
+**Restore both halves from the same backup** whenever an Edge backup exists. It
+is the only path that keeps every issued credential working:
+
+1. Stop every Nexus instance.
+2. Restore the Edge state with Edge's secrets unchanged — its database with
+   Edge stopped, or `POST /restore?confirm=true` with the `GET /backup` export
+   — and start Edge.
+3. Restore the Nexus database into an **empty** database of the same driver.
+4. Start the **same** Nexus release with the same `NEXUS_SECRET_KEY`,
+   `FERRUM_ADMIN_JWT_SECRET`, `FERRUM_ADMIN_JWT_ISSUER`, `FERRUM_NAMESPACE` and a
+   `FERRUM_ADMIN_URL` naming the restored gateway. Its startup migration must be
+   a no-op.
+5. Verify ([below](#verifying-a-restore)) before reopening the portal.
+
+**Rebuilding Edge without a backup** is a different operation with a different
+outcome. The Nexus database alone cannot recreate credentials: it stores a
+SHA-256 fingerprint and the last four characters, never the secret. Follow
+[§13](#13-retargeting-or-rebuilding-ferrum-edge): restore the Nexus database,
+point it at the new gateway, reconcile, then
+`POST /api/admin/gateway/repair`. The repair recreates each consumer under its
+original identity and replays the ACL groups of **active** grants only — a
+revoked grant is not replayed, so revoked access stays revoked — and marks
+every credential `revoked` with a count of `credentials_requiring_reissue`.
+Every client must issue new credentials, and every flagged API must be restored
+with `POST /api/apis/:id/restore-gateway`. Plan for that client-facing
+disruption; it is why the Edge backup matters.
+
+**Restoring only the Nexus database** against a live Edge that has moved on
+leaves the portal describing the past: grants approved after the backup still
+work at Edge but are invisible in the portal, grants revoked after it show as
+active while Edge refuses them, and credentials issued or rotated after it make
+the credential mirror disagree with Edge, so rotate and revoke refuse as drift
+([§12](#12-the-credential-mirror)). Prefer restoring Edge to the same point.
+
+### Recovery and rollback limits
+
+A restore returns both stores to the moment of the backup. Everything after it
+is gone, and some of what is gone matters for security:
+
+- **Revocations after the backup are undone.** A grant revoked, an account
+  disabled or a credential revoked after the backup is active again in both
+  stores. The audit log that recorded the revocation is in the restored
+  database too, so it is gone with it — keep revocation records somewhere else
+  (email notifications, an exported audit log, your ticketing system) and
+  re-apply every one of them before reopening the portal.
+- **Rotations after the backup are undone.** The retired credential works
+  again and its replacement does not. If a rotation was a response to a leak,
+  revoke the restored credential.
+- **New work after the backup is lost:** registrations, published APIs,
+  approvals, issued credentials (whose clients now hold secrets Edge does not
+  know, answered `401`), messages and settings changes.
+- **Sessions and email links come back** until they expire. When the restore
+  follows a compromise, rotate `NEXUS_SECRET_KEY` afterwards
+  ([§7](#7-rotating-nexus_secret_key)) to invalidate all of them.
+- **Outbox rows come back as they were.** Mail that was pending at the backup
+  is sent again; mail queued after it never is.
+- **Nothing reconstructs show-once material.** No backup of the Nexus database
+  alone, and no repair, can bring a credential back.
+
+### Verifying a restore
+
+Keep a canary for this, because show-once credentials cannot be recovered to
+test with afterwards: one provider-owned API, one client account with an
+approved grant, and one client whose grant was **revoked** — each holding a
+`keyauth` credential you store with the backups' secrets. Before restoring
+production for real, rehearse on a copy.
+
+1. `GET /api/health` answers `200` with `status: "ok"`, `edge.status: "ok"` and
+   `edge.reconciliation.status: "ok"`. Run `POST /api/admin/gateway/reconcile`
+   as a `super_admin` for a fresh pass: zero `orphaned_consumers`, zero
+   `orphaned_proxies`, zero `awaiting_restore`.
+2. Sign in as an administrator and open the admin settings: `smtp.password_set`
+   and `captcha.secret_set` are `true` where they were before, and a test mail
+   is delivered. That proves `NEXUS_SECRET_KEY` survived.
+3. **An authenticated request goes through.** With the approved canary's key:
+
+   ```bash
+   curl -i -H "X-API-Key: $CANARY_KEY" "$GATEWAY_URL/<listen-path>/<operation>"
+   ```
+
+   The answer comes from the upstream (`200` or whatever it serves). A `401`
+   means Edge no longer holds the credential; a `404` means the proxy is
+   missing — both mean the Edge restore is incomplete.
+
+4. **Revoked access stays revoked.** The same request with the revoked canary's
+   key answers `403`: the credential still authenticates and the missing ACL
+   group refuses it. `200` means the restore resurrected a revocation; `401`
+   means the credential itself is gone and the check proved nothing.
+5. The portal agrees: the approved canary's grant is `active` and its
+   credential `active`; the revoked canary's grant is `revoked`.
+6. Re-apply the revocations recorded outside the backup
+   ([limits](#recovery-and-rollback-limits)), then reopen the portal.
+
+**CI runs this exercise on every change.** The acceptance suite
+(`e2e/src/dataplane.test.ts`, _restores Nexus and Edge from one backup_)
+stops Nexus and then Edge, dumps PostgreSQL with `pg_dump` and copies Edge's
+database files, destroys both, restores both, restarts Edge before Nexus, and
+asserts steps 3–5 against the real gateway: the approved client's pre-backup
+credential is served by the upstream, the revoked client is refused with `403`,
+and sessions issued before the backup still resolve under the unchanged
+`NEXUS_SECRET_KEY`. It does not cover `GET /backup`/`POST /restore`, the other
+database drivers, or a restore into a different Edge release; those remain the
+manual procedure above.
 
 ---
 
@@ -1300,7 +1629,7 @@ old HMAC key; password sign-in is unaffected.
 ### Procedure
 
 1. **Announce a short window.** Everyone will be signed out.
-2. Back up the database (see [§5](#5-backups)) and record the current
+2. Back up the database (see [§5](#5-backup-and-restore)) and record the current
    `NEXUS_SECRET_KEY`. That is your rollback **before** the rotation runs; once
    it has, the key that matters — and the one most likely to be lost — is the
    new one, so persist it where the server reads its configuration (step 4) and

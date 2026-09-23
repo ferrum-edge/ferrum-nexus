@@ -857,7 +857,8 @@ function auditFilter(filter: AuditLogFilter): Filter<NexusDoc> {
 
 /* ── Index definitions ──────────────────────────────────────────────────── */
 
-interface IndexDefinition {
+/** One MongoDB index, declared as data so a released step's definition can be frozen. */
+export interface IndexDefinition {
   collection: string;
   name: string;
   key: IndexSpecification;
@@ -868,6 +869,11 @@ interface IndexDefinition {
 /**
  * Every index of `001_initial`, translated.
  *
+ * Frozen once the baseline ships: `db/released/001_initial.mongodb.json` is the
+ * committed snapshot and `db/released-migrations.test.ts` fails when this list
+ * drifts from it. After the release an index change is a new step in
+ * {@link MONGO_MIGRATIONS}, never an edit here.
+ *
  * Partial *unique* indexes map directly onto `partialFilterExpression`. The one
  * non-unique partial index — SQLite's `ix_notifications_unread ... WHERE
  * read_at IS NULL` — becomes the composite `(user_id, read_at)` instead: it is
@@ -875,7 +881,7 @@ interface IndexDefinition {
  * that is required (the MySQL migration makes the same trade for the same
  * reason).
  */
-const INDEXES: IndexDefinition[] = [
+export const BASELINE_INDEXES: readonly IndexDefinition[] = [
   // organizations — `name_lower` is the derived companion of `lower(name)`.
   {
     collection: 'organizations',
@@ -1147,7 +1153,7 @@ const INDEXES: IndexDefinition[] = [
 ];
 
 /** Create one batch of {@link IndexDefinition}s. */
-async function createIndexes(db: Db, indexes: IndexDefinition[]): Promise<void> {
+async function createIndexes(db: Db, indexes: readonly IndexDefinition[]): Promise<void> {
   for (const index of indexes) {
     await db.collection(index.collection).createIndex(index.key, {
       name: index.name,
@@ -1159,13 +1165,67 @@ async function createIndexes(db: Db, indexes: IndexDefinition[]): Promise<void> 
   }
 }
 
-/** The buildout baseline creates every index; document fields are written by repositories. */
-const MONGO_MIGRATIONS: { id: string; apply: (db: Db) => Promise<void> }[] = [
+/**
+ * One MongoDB migration step. Mongo migrations are code rather than `.sql`
+ * files, so each step also declares the indexes it creates as data: that
+ * declaration is what the released-migration guard compares with the step's
+ * frozen snapshot.
+ */
+export interface MongoMigrationStep {
+  id: string;
+  indexes: readonly IndexDefinition[];
+  apply: (db: Db) => Promise<void>;
+}
+
+/** The baseline creates every index; document fields are written by repositories. */
+export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
   {
     id: '001_initial',
-    apply: (db: Db): Promise<void> => createIndexes(db, INDEXES),
+    indexes: BASELINE_INDEXES,
+    apply: (db: Db): Promise<void> => createIndexes(db, BASELINE_INDEXES),
   },
 ];
+
+/**
+ * Apply every step of `steps` not yet recorded in `schema_migrations`, in id
+ * order, under the same protocol as the SQL adapters. `steps` defaults to the
+ * full list; the upgrade tests pass the released prefix to build a database as
+ * an earlier release left it.
+ */
+export async function runMongoMigrations(
+  db: Db,
+  steps: readonly MongoMigrationStep[] = MONGO_MIGRATIONS,
+): Promise<void> {
+  const collection = db.collection<NexusDoc>(SCHEMA_MIGRATIONS_TABLE);
+  const byId = new Map(steps.map((step) => [step.id, step.apply]));
+  const driver: MigrationDriver = {
+    ensureMigrationsTable: async (): Promise<void> => {
+      // `_id` is the migration id, so the implicit unique index is all the
+      // bookkeeping this needs; the collection is created on first insert.
+    },
+    listApplied: async (): Promise<string[]> => {
+      const docs = await collection.find({}).toArray();
+      return docs.map((doc) => str((doc as Row)._id));
+    },
+    applyMigration: async (migration: MigrationFile): Promise<void> => {
+      const apply = byId.get(migration.id);
+      if (!apply) {
+        throw new NexusError(
+          'INTERNAL',
+          `No MongoDB implementation for migration '${migration.id}'`,
+        );
+      }
+      await apply(db);
+      await collection.insertOne({ _id: migration.id, applied_at: nowIso() });
+    },
+  };
+  const files: MigrationFile[] = steps.map((step) => ({
+    id: step.id,
+    filename: `${step.id}.mongodb`,
+    sql: '',
+  }));
+  await runMigrations(driver, files);
+}
 
 /* ── Shared connection state ────────────────────────────────────────────── */
 
@@ -1293,36 +1353,7 @@ class MongoStore implements NexusStore {
   }
 
   async migrate(): Promise<void> {
-    const db = this.ctx.db;
-    const collection = db.collection<NexusDoc>(SCHEMA_MIGRATIONS_TABLE);
-    const steps = new Map(MONGO_MIGRATIONS.map((step) => [step.id, step.apply]));
-    const driver: MigrationDriver = {
-      ensureMigrationsTable: async (): Promise<void> => {
-        // `_id` is the migration id, so the implicit unique index is all the
-        // bookkeeping this needs; the collection is created on first insert.
-      },
-      listApplied: async (): Promise<string[]> => {
-        const docs = await collection.find({}).toArray();
-        return docs.map((doc) => str((doc as Row)._id));
-      },
-      applyMigration: async (migration: MigrationFile): Promise<void> => {
-        const apply = steps.get(migration.id);
-        if (!apply) {
-          throw new NexusError(
-            'INTERNAL',
-            `No MongoDB implementation for migration '${migration.id}'`,
-          );
-        }
-        await apply(db);
-        await collection.insertOne({ _id: migration.id, applied_at: nowIso() });
-      },
-    };
-    const files: MigrationFile[] = MONGO_MIGRATIONS.map((step) => ({
-      id: step.id,
-      filename: `${step.id}.mongodb`,
-      sql: '',
-    }));
-    await runMigrations(driver, files);
+    await runMongoMigrations(this.ctx.db);
   }
 
   async close(): Promise<void> {

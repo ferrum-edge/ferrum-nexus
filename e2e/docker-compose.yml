@@ -79,11 +79,16 @@ services:
 
   # Edge v0.9.5 pre-creates /data for UID 65532. This one-shot chown also
   # repairs older root-owned volumes; it is a no-op on later starts.
+  #
+  # The backup-and-restore case also runs one-off copies of this container to
+  # copy the gateway's database to and from `/backup`: a separate volume, so
+  # wiping `/data` cannot take the backup with it.
   ferrum-edge-init:
     image: alpine:3@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
     command: ['chown', '65532:65532', '/data']
     volumes:
       - ferrumdata:/data
+      - backups:/backup
     restart: 'no'
 
   nexus:
@@ -124,3 +129,4 @@ services:
 
 volumes:
   ferrumdata:
+  backups:

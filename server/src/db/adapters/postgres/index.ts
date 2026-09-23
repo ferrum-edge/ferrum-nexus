@@ -65,7 +65,8 @@ function pgExecutor(queryable: PgQueryable): SqlExecutor {
   };
 }
 
-function createMigrationDriver(pool: PgPool): MigrationDriver {
+/** The PostgreSQL migration primitives; exported for the baseline upgrade tests. */
+export function createPostgresMigrationDriver(pool: PgPool): MigrationDriver {
   return {
     async ensureMigrationsTable(): Promise<void> {
       await pool.query(
@@ -124,7 +125,7 @@ class PostgresBackend implements SqlStoreBackend {
   }
 
   async migrate(): Promise<void> {
-    await runMigrations(createMigrationDriver(this.db), loadMigrations('pg'));
+    await runMigrations(createPostgresMigrationDriver(this.db), loadMigrations('pg'));
   }
 
   async close(): Promise<void> {

@@ -582,7 +582,8 @@ export function openSqliteDatabase(path: string): Database {
   return db;
 }
 
-function createMigrationDriver(db: Database): MigrationDriver {
+/** The SQLite migration primitives; exported for the baseline upgrade tests. */
+export function createSqliteMigrationDriver(db: Database): MigrationDriver {
   return {
     async ensureMigrationsTable(): Promise<void> {
       db.exec(
@@ -729,7 +730,7 @@ class SqliteStore implements NexusStore {
   }
 
   async migrate(): Promise<void> {
-    await runMigrations(createMigrationDriver(this.db), loadMigrations('sqlite'));
+    await runMigrations(createSqliteMigrationDriver(this.db), loadMigrations('sqlite'));
   }
 
   async close(): Promise<void> {
