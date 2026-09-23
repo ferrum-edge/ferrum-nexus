@@ -8,6 +8,26 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Added
 
+- A released-schema boundary with upgrade and restore guarantees (#286).
+  `server/src/db/released-migrations.ts` lists each released migration with a
+  SHA-256 checksum per backend (the MongoDB step through a committed index
+  snapshot), and `released-migrations.test.ts` fails CI when a released
+  migration is edited, renamed, deleted or preceded by a new one, or when the
+  backends disagree on migration ids. `001_initial` is listed as the baseline
+  **to be frozen at the first supported release**; until then its checksums are
+  updated with each buildout edit. A baseline-shaped fixture (accounts, API
+  ids and slugs, provider ownership, specification history, grants, credential
+  metadata, gateway mappings, plain and encrypted settings) is upgraded to the
+  current schema and re-migrated as a no-op on SQLite in every run and on
+  PostgreSQL, MySQL and MongoDB in `store-contracts`. `docs/operations.md`
+  separates the development reset from the production upgrade procedure and
+  gains a backup-and-restore runbook for the Nexus/Edge pair, and the acceptance
+  suite now backs up, destroys and restores the packaged portal's PostgreSQL
+  database together with the real gateway's, then proves an approved client's
+  pre-backup credential is still served and a revoked client is still refused.
+  The MongoDB adapter exports `BASELINE_INDEXES`, `MONGO_MIGRATIONS` and
+  `runMongoMigrations`, and the SQLite and PostgreSQL migration drivers are
+  exported for the upgrade tests.
 - Branding presets, so a portal can be re-skinned from **Administration →
   Settings → Branding** without touching CSS. `PUT /api/admin/settings`
   `branding` and `GET /api/branding` gain `radius` (`none`|`sm`|`md`|`lg`),

@@ -58,6 +58,26 @@ async function compose(...args: string[]): Promise<void> {
   });
 }
 
+/** Run one command inside the PostgreSQL service, as its superuser over the local socket. */
+async function inPostgres(...command: string[]): Promise<void> {
+  await compose('exec', '-T', 'postgres', ...command);
+}
+
+/**
+ * Run a shell script against the gateway's data volume (`/data`) and the
+ * backup volume (`/backup`), in a one-off copy of the init container: Edge's
+ * own image is distroless and has no shell to do it with.
+ */
+async function onGatewayVolume(script: string): Promise<void> {
+  const oneOff = ['run', '--rm', '-T', '--no-deps', '--entrypoint', 'sh', 'ferrum-edge-init'];
+  await compose(...oneOff, '-c', script);
+}
+
+/** The slice of a portal list response the restore case reads. */
+interface Listed {
+  items: { id: string; status: string }[];
+}
+
 describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, () => {
   let provider: Session;
   let outsider: Session;
@@ -478,6 +498,89 @@ describe('packaged Nexus against a real Ferrum Edge', { concurrency: false }, ()
       body: {},
     });
     assert.equal(again.status, 409, await again.text());
+  });
+
+  /* ── Backup and restore of the Nexus/Edge pair (issue #286) ───────────── */
+
+  it('restores Nexus and Edge from one backup: access still works, revocation still holds', async () => {
+    // Inside the PostgreSQL container, which outlives both database drops.
+    const dump = '/tmp/e2e-backup.dump';
+    const kept = await newClient();
+    const former = await newClient();
+    const api = await publishApi(provider, {
+      name: `E2E backup ${RUN}`,
+      slug: `e2e-backup-${RUN}`,
+      authPlugin: 'key_auth',
+    });
+    await grantAccess(kept, provider, api.id);
+    const keptCredential = await issueCredential(kept, 'keyauth');
+    const { grantId } = await grantAccess(former, provider, api.id);
+    const formerCredential = await issueCredential(former, 'keyauth');
+    const keptHeaders = authHeadersFor(keptCredential, 'keyauth');
+    const formerHeaders = authHeadersFor(formerCredential, 'keyauth');
+
+    await waitFor('the approved client to be served before the backup', async () => {
+      const response = await callGateway(`${api.listen_path}/invoices`, { headers: keptHeaders });
+      return response.status === 200;
+    });
+    await portal('POST', `/api/grants/${grantId}/revoke`, {
+      session: provider,
+      body: { reason: 'Revoked before the backup' },
+      expect: 200,
+    });
+    await waitFor('the revoked client to be refused before the backup', async () => {
+      const response = await callGateway(`${api.listen_path}/invoices`, { headers: formerHeaders });
+      return response.status === 403;
+    });
+
+    // The backup, in the runbook's order (docs/operations.md §5): stop Nexus
+    // first so it cannot write to Edge after Edge's copy is taken, then Edge,
+    // then copy both stores while nothing writes to either. The two copies are
+    // one point in time only because both writers are stopped.
+    await compose('stop', 'nexus');
+    await compose('stop', 'ferrum-edge');
+    await inPostgres('pg_dump', '-U', 'nexus', '--format=custom', `--file=${dump}`, 'nexus');
+    await onGatewayVolume(
+      'rm -rf /backup/edge && mkdir -p /backup/edge && cp -a /data/. /backup/edge/',
+    );
+
+    // The disaster: both stores lost.
+    await inPostgres('sh', '-c', 'dropdb -U nexus --force nexus && createdb -U nexus nexus');
+    await onGatewayVolume('rm -rf /data/* /data/.[!.]*');
+
+    // The restore: both stores back from the same backup, then Edge before
+    // Nexus, with every secret unchanged. Nexus migrates the restored database
+    // on boot, which must be a no-op.
+    await inPostgres('pg_restore', '-U', 'nexus', '-d', 'nexus', '--exit-on-error', dump);
+    await onGatewayVolume('cp -a /backup/edge/. /data/ && chown -R 65532:65532 /data');
+    await compose('start', 'ferrum-edge');
+    await compose('start', 'nexus');
+    await waitForStack();
+
+    // An authenticated request through the restored pair, with the credential
+    // issued before the backup — show-once material the restore could only
+    // keep because Edge's own copy of it came back.
+    await waitFor('the restored gateway to serve the approved client', async () => {
+      const response = await callGateway(`${api.listen_path}/invoices`, { headers: keptHeaders });
+      return response.status === 200;
+    });
+    const served = await callGateway(`${api.listen_path}/invoices`, { headers: keptHeaders });
+    assert.equal(served.status, 200);
+    assert.ok(reachedUpstream(served), 'the restored pair reaches the real upstream');
+
+    // Revocation survived: the credential still authenticates, the grant is
+    // still gone, and the request never reaches the backend.
+    const refused = await callGateway(`${api.listen_path}/invoices`, { headers: formerHeaders });
+    assert.equal(refused.status, 403);
+    assert.equal(reachedUpstream(refused), false);
+
+    // And the portal agrees with the gateway. The sessions below were issued
+    // before the backup; they still resolve only because NEXUS_SECRET_KEY did
+    // not change.
+    const grants = await portal<Listed>('GET', '/api/grants', { session: former, expect: 200 });
+    assert.equal(grants.items.find((grant) => grant.id === grantId)?.status, 'revoked');
+    const issued = await portal<Listed>('GET', '/api/credentials', { session: kept, expect: 200 });
+    assert.equal(issued.items.find((item) => item.id === keptCredential.id)?.status, 'active');
   });
 });
 

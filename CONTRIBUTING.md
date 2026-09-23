@@ -8,8 +8,11 @@ Ferrum Nexus is in active buildout and has no users or production data to preser
 Breaking changes are acceptable during this phase. Keep database changes in the
 single `001_initial` schema for each SQL dialect and the MongoDB initial index
 setup; do not add incremental migrations, legacy backfills, or upgrade paths.
-Recreate disposable development databases after schema changes. Introduce versioned
-upgrade migrations when the application begins serving users.
+Recreate disposable development databases after schema changes, and update the
+baseline's checksums in `server/src/db/released-migrations.ts` in the same change (CI
+reports the value to use). The first supported release freezes that baseline; from then
+on a schema change is a new forward migration, never an edit to a released one — see
+[schema versioning and upgrades](docs/operations.md#schema-versioning-and-upgrades).
 
 ## Prerequisites
 

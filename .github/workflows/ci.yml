@@ -114,6 +114,8 @@ jobs:
             'for (let i = 0; i < 60; i++) { if (db.hello().isWritablePrimary) quit(0); sleep(1000); } quit(1);'
       - run: npm ci
       - run: npm run build --workspace shared
+      # Also the released-baseline upgrade fixture (issue #286) on every
+      # backend; `npm test` in `checks` covers only its SQLite lane.
       - name: Run all four store contracts
         working-directory: server
         env:
@@ -123,6 +125,7 @@ jobs:
         run: >-
           node --import tsx --test src/test/smoke.test.ts
           src/test/mysql-migration-recovery.test.ts src/test/mysql-user-transition.test.ts
+          src/test/baseline-upgrade.test.ts
 
   docker:
     runs-on: ubuntu-latest

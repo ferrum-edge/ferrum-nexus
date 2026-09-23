@@ -80,11 +80,16 @@ services:
   # The Edge image is distroless `nonroot` (UID 65532) and bakes in no `/data`,
   # so a fresh named volume is root-owned and SQLite cannot create its file.
   # One-shot chown; a no-op on every run after the first.
+  #
+  # The backup-and-restore case also runs one-off copies of this container to
+  # copy the gateway's database to and from `/backup`: a separate volume, so
+  # wiping `/data` cannot take the backup with it.
   ferrum-edge-init:
     image: alpine:3@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
     command: ['chown', '65532:65532', '/data']
     volumes:
       - ferrumdata:/data
+      - backups:/backup
     restart: 'no'
 
   nexus:
@@ -125,3 +130,4 @@ services:
 
 volumes:
   ferrumdata:
+  backups:

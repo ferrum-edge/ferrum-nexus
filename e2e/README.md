@@ -72,7 +72,11 @@ pulling a new one.
 - both services restarted, and everything still working from persisted state;
 - an API whose proxy an operator deleted, restored in place: the same client,
   with the credential it already had, at the same address — and an unapproved
-  account still refused.
+  account still refused;
+- the Nexus database and the Edge database backed up together, both lost, and
+  both restored from that backup (the runbook in `docs/operations.md` §5): an
+  approved client's pre-backup credential is served through the restored pair,
+  and a client whose grant was revoked before the backup is still refused.
 
 **`src/journey.spec.ts`** — what a person can do, in a real browser: register,
 verify by following the link out of a real email, sign in, find the API, read

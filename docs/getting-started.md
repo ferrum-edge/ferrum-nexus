@@ -3,8 +3,10 @@
 A complete walkthrough: from an empty machine to a client calling a published
 API through the gateway with a credential the portal issued.
 
-**Buildout:** the application has no users yet, and schema changes may require a
-fresh development database. See the [schema policy](operations.md#buildout-schema-policy).
+**Buildout:** there is no supported release yet, and schema changes may require a
+fresh development database — see the [development reset](operations.md#buildout-schema-policy).
+Production deployments follow [schema versioning and upgrades](operations.md#schema-versioning-and-upgrades)
+instead.
 
 You will play three roles in sequence — the operator who runs the stack, a
 **provider** who publishes an API, and a **client** who requests access and
