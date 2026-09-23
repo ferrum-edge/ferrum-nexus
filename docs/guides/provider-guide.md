@@ -66,7 +66,7 @@ info:
   version: 2.4.0
   description: Invoices and payments for partner integrations.
 servers:
-  - url: https://billing.internal:8443/v2
+  - url: https://www.example.com/billing/v2
 paths:
   /invoices:
     get:
@@ -102,6 +102,21 @@ with a clear error naming `upstream_url`.
 Scheme, host, port and base path are all taken from that URL. It must be
 resolvable **from the gateway**: `localhost` on your laptop is not the
 gateway's localhost.
+
+**Private destinations are refused by default.** Before a publish is saved,
+Nexus checks the upstream against its SSRF guard. With the default
+`NEXUS_ALLOW_PRIVATE_UPSTREAMS=false`, a loopback, RFC 1918 / CGNAT / link-local
+address, a `.local` / `.internal` / `.localhost` / `.home.arpa` name, or a name
+that resolves to any private address is refused (and a name that does not
+resolve at all is refused too). That is why the minimal document above uses a
+public hostname that resolves — it publishes cleanly on the default settings,
+whereas a
+`…billing.internal…` upstream would not. A portal that legitimately fronts
+internal services (or local development against `host.docker.internal`) opts in
+with `NEXUS_ALLOW_PRIVATE_UPSTREAMS=true`; see
+[`../operations.md`](../operations.md#server) and
+[`../security.md`](../security.md#1-threat-model). Keep the restrictive default
+anywhere the catalog is not fully trusted.
 
 If the gateway rejects a spec's structure or validation during publish, revision,
 or enforcement conversion, Nexus returns `400 EDGE_REJECTED_SPEC` with the
