@@ -161,9 +161,9 @@ After every Fable run, review its exact output and the resulting repository and 
 accepting the work. Fable's security guardrails can reject a request or cause the platform to route
 the affected turn to another model even though the CLI process exits normally.
 
-Treat an explicit refusal, safeguard or fallback notice, a response that identifies a non-Fable
-serving model, or structured output showing `stop_reason: "refusal"` as confirmation. Missing or
-poor work alone is not proof; inspect the transcript and state first.
+Treat an explicit refusal, safeguard or fallback notice, or a response that identifies a non-Fable
+serving model as confirmation. The launcher captures text output, so `stop_reason` is not visible;
+missing or poor work alone is not proof, so inspect the transcript and state first.
 
 When a safeguard rejection or model reroute is confirmed:
 
