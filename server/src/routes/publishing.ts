@@ -17,6 +17,7 @@ import {
   AUTH_PLUGIN_TYPES,
   DEFAULT_SPEC_ENFORCEMENT,
   HTTP_METHODS,
+  MAX_API_SLUG_LENGTH,
   MAX_BACKEND_TIMEOUT_MS,
   MAX_CORS_ORIGINS,
   MAX_RATE_LIMIT_REQUESTS,
@@ -247,12 +248,12 @@ const listApisQuery = listQuerySchema.extend({
 
 const publishBody = z.object({
   name: z.string().trim().min(1).max(200),
-  slug: z.string().trim().max(60).optional(),
+  // A requested slug is normalized with the shared `slugify` contract, so API
+  // callers that send `My_API` keep working; the browser validates first.
+  slug: z.string().trim().max(MAX_API_SLUG_LENGTH).optional(),
   description: z.string().trim().max(4_000).nullish(),
   version: z.string().trim().max(60).optional(),
-  // Optional here even though the shared DTO marks it required: a document with
-  // an absolute `servers[0].url` already names its upstream, and demanding the
-  // provider retype it is friction with no safety benefit.
+  // A usable absolute root server URL in the document supplies the default.
   upstream_url: z.string().trim().max(MAX_UPSTREAM_URL_LENGTH).optional(),
   spec: specField,
   auth_plugin: z.enum(AUTH_PLUGIN_TYPES),
