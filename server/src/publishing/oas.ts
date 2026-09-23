@@ -70,7 +70,12 @@ import {
   MAX_SPEC_RENDER_UNITS,
   MAX_UPSTREAM_URL_LENGTH,
   OPENAPI_OPERATION_METHODS,
+  expandServerUrl,
+  firstUsableSpecServerUrl,
+  parseAbsoluteHttpUrl,
 } from '@ferrum-nexus/shared';
+
+export { slugify } from '@ferrum-nexus/shared';
 
 import { specInvalid, type NexusError } from '../lib/errors.js';
 
@@ -163,16 +168,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  */
 export function parseUpstreamUrl(raw: string): SpecUpstream | null {
   const trimmed = raw.trim();
-  if (trimmed === '' || /[{}]/.test(trimmed)) return null;
-  let url: URL;
-  try {
-    url = new URL(trimmed);
-  } catch {
-    return null;
-  }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
-  if (url.hostname === '' || url.username !== '' || url.password !== '') return null;
-  if (/[{}]/.test(url.hostname)) return null;
+  const url = parseAbsoluteHttpUrl(trimmed);
+  if (!url) return null;
 
   // `URL.hostname` keeps IPv6 literals in brackets; Edge wants the bare form.
   const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
@@ -814,54 +811,16 @@ function readPaths(paths: Record<string, unknown>): SpecPath[] {
   return declared;
 }
 
-/** Expand declared string defaults once; never pass unresolved templates to URL parsing. */
-function expandServerUrl(server: Record<string, unknown>, field = 'servers[].url'): string | null {
-  if (typeof server.url !== 'string') return null;
-  const variables = isRecord(server.variables) ? server.variables : {};
-  const template = server.url.trim();
-  const parts: string[] = [];
-  let offset = 0;
-  let expandedLength = 0;
-  const append = (part: string): void => {
-    expandedLength += part.length;
-    if (expandedLength > MAX_UPSTREAM_URL_LENGTH) {
-      throw specInvalid(
-        `${field} must not exceed ${MAX_UPSTREAM_URL_LENGTH} characters after expansion`,
-        { field, limit: MAX_UPSTREAM_URL_LENGTH },
-      );
-    }
-    parts.push(part);
-  };
-  for (const match of template.matchAll(/\{([^{}]+)\}/g)) {
-    const name = match[1] as string;
-    append(template.slice(offset, match.index));
-    const variable = Object.hasOwn(variables, name) ? variables[name] : undefined;
-    if (
-      !isRecord(variable) ||
-      typeof variable.default !== 'string' ||
-      (variable.enum !== undefined &&
-        (!Array.isArray(variable.enum) || !variable.enum.includes(variable.default)))
-    ) {
-      return null;
-    }
-    append(variable.default);
-    offset = match.index + match[0].length;
-  }
-  append(template.slice(offset));
-  const expanded = parts.join('');
-  return !/[{}]/.test(expanded) ? expanded : null;
-}
-
 /** First usable expanded server URL, skipping relative or unresolved entries. */
 function readDefaultUpstream(servers: unknown): SpecUpstream | null {
-  if (!Array.isArray(servers)) return null;
-  for (const [index, server] of servers.entries()) {
-    if (!isRecord(server) || typeof server.url !== 'string') continue;
-    const expanded = expandServerUrl(server, `servers[${index}].url`);
-    const parsed = expanded === null ? null : parseUpstreamUrl(expanded);
-    if (parsed) return parsed;
+  const result = firstUsableSpecServerUrl(servers);
+  if (result.oversizedField) {
+    throw specInvalid(
+      `${result.oversizedField} must not exceed ${MAX_UPSTREAM_URL_LENGTH} characters after expansion`,
+      { field: result.oversizedField, limit: MAX_UPSTREAM_URL_LENGTH },
+    );
   }
-  return null;
+  return result.url === null ? null : parseUpstreamUrl(result.url);
 }
 
 /**
@@ -887,7 +846,9 @@ export function resolveUpstream(spec: ParsedSpec, explicit?: string | null): Spe
     Array.isArray(servers) &&
     servers.some(
       (server) =>
-        isRecord(server) && typeof server.url === 'string' && expandServerUrl(server) === null,
+        isRecord(server) &&
+        typeof server.url === 'string' &&
+        expandServerUrl(server).url === null,
     )
   ) {
     throw specInvalid(
@@ -899,16 +860,6 @@ export function resolveUpstream(spec: ParsedSpec, explicit?: string | null): Spe
     "No upstream could be determined: supply 'upstream_url', or give the document an absolute 'servers[].url'",
     { field: 'upstream_url' },
   );
-}
-
-/** Turn a name into a URL-safe slug candidate (`Billing API v2` → `billing-api-v2`). */
-export function slugify(name: string): string {
-  return name
-    .normalize('NFKD')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 60);
 }
 
 /**

@@ -6,6 +6,8 @@ import type { LightMyRequestResponse } from 'fastify';
 import {
   aclGroupForApi,
   MAX_SPEC_DEPTH,
+  MAX_API_SLUG_LENGTH,
+  slugify,
   type ApiErrorBody,
   type CatalogDetailResponse,
   type CatalogListResponse,
@@ -197,6 +199,28 @@ describe('publishing', () => {
   describe('publish', () => {
     beforeEach(() => {
       harness.edge.reset();
+    });
+
+    it('accepts the shared generated slug for long and accented names', async () => {
+      for (const name of ['a'.repeat(MAX_API_SLUG_LENGTH + 1), 'Caféine API']) {
+        const slug = slugify(name);
+        const response = await harness.authed(provider, {
+          method: 'POST',
+          url: '/api/apis',
+          payload: publishPayload({ name, slug }),
+        });
+        assert.equal(response.statusCode, 201, response.body);
+        assert.equal(response.json<PublishApiResponse>().api.slug, slug);
+      }
+    });
+
+    it('rejects a custom slug outside the published slug contract', async () => {
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'Invalid Slug!' }),
+      });
+      assert.equal(response.statusCode, 400);
     });
 
     it('refuses oversized derived URLs and excessive nesting before any gateway call', async () => {

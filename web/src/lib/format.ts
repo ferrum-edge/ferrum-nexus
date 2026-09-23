@@ -44,16 +44,6 @@ export function formatRelative(value: string | null | undefined): string {
   return formatter.format(Math.round(deltaMs / 1000), 'second');
 }
 
-/** Turn a free-text API name into a URL-safe slug. */
-export function slugify(value: string): string {
-  return value
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 64);
-}
-
 /** Turn a snake_case identifier into a human-readable label. */
 export function humanize(value: string): string {
   const spaced = value.replace(/[_.]+/g, ' ').trim();

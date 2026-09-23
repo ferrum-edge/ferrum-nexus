@@ -4,6 +4,7 @@ import {
   DEFAULT_BACKEND_READ_TIMEOUT_MS,
   DEFAULT_BACKEND_WRITE_TIMEOUT_MS,
   DEFAULT_PAGE_SIZE,
+  MAX_API_SLUG_LENGTH,
   MAX_CORS_ORIGINS,
   MAX_RATE_LIMIT_REQUESTS,
   type PublishApiResponse,
@@ -138,7 +139,7 @@ describe('API publishing', () => {
   it('preserves a custom slug and publishes the selected runtime policy', async () => {
     renderPage(<ApiNewPage />);
     fillIdentity();
-    changeField(/^Slug/, 'Custom Invoices!');
+    changeField(/^Slug/, 'custom-invoices');
     changeField(/^Name/, '  Renamed billing  ');
     expect(screen.getByLabelText(/^Slug/)).toHaveValue('custom-invoices');
     changeField(/^Description/, '  Export invoice data  ');
@@ -207,6 +208,89 @@ describe('API publishing', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Publish API' }));
     await screen.findByText('API published');
     expect(screen.queryByText(/Fix it before publishing/)).not.toBeInTheDocument();
+  });
+
+  it('bounds generated slugs and normalizes accents like the server', () => {
+    renderPage(<ApiNewPage />);
+    const slug = screen.getByLabelText(/^Slug/);
+    changeField(/^Name/, 'a'.repeat(MAX_API_SLUG_LENGTH + 1));
+    expect(slug).toHaveValue('a'.repeat(MAX_API_SLUG_LENGTH));
+    expect(slug).toHaveAttribute('maxLength', String(MAX_API_SLUG_LENGTH));
+    changeField(/^Name/, 'Caféine API');
+    expect(slug).toHaveValue('cafeine-api');
+  });
+
+  it('flags invalid custom slugs inline and blocks submission', () => {
+    renderPage(<ApiNewPage />);
+    fillIdentity();
+    changeField(/^Slug/, 'Bad Slug!');
+    expect(screen.getByLabelText(/^Slug/)).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByRole('alert')).toHaveTextContent('lowercase letters');
+    expect(screen.getByRole('button', { name: 'Publish API' })).toBeDisabled();
+    submitForm();
+    expect(apisApi.publish).not.toHaveBeenCalled();
+    changeField(/^Slug/, 'a'.repeat(MAX_API_SLUG_LENGTH + 1));
+    expect(screen.getByRole('alert')).toHaveTextContent(`at most ${MAX_API_SLUG_LENGTH}`);
+    expect(screen.getByRole('button', { name: 'Publish API' })).toBeDisabled();
+    changeField(/^Slug/, 'valid-slug');
+    expect(screen.getByRole('button', { name: 'Publish API' })).toBeEnabled();
+  });
+
+  it('uses an expanded spec server URL when the optional upstream field is empty', async () => {
+    renderPage(<ApiNewPage />);
+    changeField(/^Name/, 'Billing API');
+    const document = JSON.parse(RAW_SPEC) as Record<string, unknown>;
+    changeField(
+      /OpenAPI specification/,
+      JSON.stringify({
+        ...document,
+        servers: [
+          { url: '/relative' },
+          {
+            url: 'https://{environment}.example.com/v1',
+            variables: { environment: { default: 'prod' } },
+          },
+        ],
+      }),
+    );
+    expect(screen.getByLabelText(/^Upstream URL/)).not.toBeRequired();
+    expect(
+      screen.getByText(/OpenAPI server URL: https:\/\/prod.example.com\/v1/),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Publish API' }));
+    await screen.findByText('API published');
+    expect(vi.mocked(apisApi.publish).mock.calls[0]?.[0]).not.toHaveProperty('upstream_url');
+  });
+
+  it('requires an explicit upstream when the spec has no usable absolute server URL', () => {
+    renderPage(<ApiNewPage />);
+    changeField(/^Name/, 'Billing API');
+    const document = JSON.parse(RAW_SPEC) as Record<string, unknown>;
+    changeField(
+      /OpenAPI specification/,
+      JSON.stringify({ ...document, servers: [{ url: '/v1' }] }),
+    );
+    expect(screen.getByRole('alert')).toHaveTextContent('no usable absolute server URL');
+    expect(screen.getByRole('button', { name: 'Publish API' })).toBeDisabled();
+    submitForm();
+    expect(apisApi.publish).not.toHaveBeenCalled();
+  });
+
+  it('keeps an explicit upstream URL as the override', async () => {
+    renderPage(<ApiNewPage />);
+    changeField(/^Name/, 'Billing API');
+    const document = JSON.parse(RAW_SPEC) as Record<string, unknown>;
+    changeField(
+      /OpenAPI specification/,
+      JSON.stringify({ ...document, servers: [{ url: 'https://spec.example.com' }] }),
+    );
+    changeField(/^Upstream URL/, 'https://override.example.com');
+    expect(screen.getByText(/OpenAPI server URL: https:\/\/spec.example.com/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Publish API' }));
+    await screen.findByText('API published');
+    expect(apisApi.publish).toHaveBeenCalledWith(
+      expect.objectContaining({ upstream_url: 'https://override.example.com' }),
+    );
   });
 
   it.each(['', '0', String(MAX_RATE_LIMIT_REQUESTS + 1)])(

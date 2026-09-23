@@ -387,8 +387,8 @@ export interface PublishApiRequest {
   slug: string;
   description?: string | null;
   version: string;
-  /** Upstream the Edge proxy forwards to. */
-  upstream_url: string;
+  /** Optional override; otherwise the first usable root server URL in the spec is used. */
+  upstream_url?: string;
   /** The OpenAPI document as uploaded (JSON or YAML text). */
   spec: string;
   auth_plugin: AuthPluginType;

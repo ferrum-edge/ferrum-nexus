@@ -4,8 +4,14 @@ import {
   AUTH_PLUGIN_LABELS,
   AUTH_PLUGIN_TYPES,
   HTTP_METHODS,
+  MAX_API_SLUG_LENGTH,
   MAX_CORS_ORIGINS,
   MAX_RATE_LIMIT_REQUESTS,
+  MAX_UPSTREAM_URL_LENGTH,
+  firstUsableSpecServerUrl,
+  isValidApiSlug,
+  parseAbsoluteHttpUrl,
+  slugify,
   type ApiVisibility,
   type AuthPluginType,
   type CorsConfig,
@@ -13,12 +19,12 @@ import {
   type RateLimitConfig,
   type SpecEnforcementLevel,
 } from '@ferrum-nexus/shared';
-import { parseCorsOrigins, slugify } from '../lib/format';
+import { parseCorsOrigins } from '../lib/format';
 import { usePublishApi } from '../hooks/useApis';
 import { useToast } from '../stores/toast';
 import { RoleGuard } from '../components/layout/RoleGuard';
 import { FormNotice } from '../components/auth/AuthShell';
-import { declaredMethods } from '../components/openapi/parse';
+import { declaredMethods, parseSpecText } from '../components/openapi/parse';
 import {
   AdvancedProxySettings,
   EMPTY_TIMEOUT_DRAFT,
@@ -119,6 +125,29 @@ function PublishForm(): ReactElement {
   const [error, setError] = useState<string | null>(null);
 
   const effectiveSlug = slugTouched ? slug : slugify(name);
+  const slugError =
+    effectiveSlug === ''
+      ? name.trim() || slugTouched
+        ? 'Enter a slug using lowercase letters and numbers.'
+        : null
+      : !isValidApiSlug(effectiveSlug)
+        ? `Use at most ${MAX_API_SLUG_LENGTH} lowercase letters, numbers and single hyphens.`
+        : null;
+  const specServer = useMemo(() => {
+    const parsed = parseSpecText(spec);
+    return parsed.ok
+      ? firstUsableSpecServerUrl(parsed.spec.doc.servers)
+      : { url: null, oversizedField: null };
+  }, [spec]);
+  const explicitUpstream = upstreamUrl.trim();
+  const upstreamError = specServer.oversizedField
+    ? `${specServer.oversizedField} exceeds the ${MAX_UPSTREAM_URL_LENGTH}-character limit.`
+    : explicitUpstream &&
+        (explicitUpstream.length > MAX_UPSTREAM_URL_LENGTH || !parseAbsoluteHttpUrl(explicitUpstream))
+      ? `Enter an absolute http:// or https:// URL of at most ${MAX_UPSTREAM_URL_LENGTH} characters.`
+      : spec.trim() && !explicitUpstream && !specServer.url
+        ? 'Enter an upstream URL; this document has no usable absolute server URL.'
+        : null;
   // The document is right here, so the method list it declares is the obvious
   // starting point for the allow-list — issue #36's "default with an override".
   const specMethods = useMemo<HttpMethod[]>(() => {
@@ -133,6 +162,7 @@ function PublishForm(): ReactElement {
       setError('The OpenAPI document could not be parsed. Fix it before publishing.');
       return;
     }
+    if (slugError || upstreamError || !isValidApiSlug(effectiveSlug)) return;
     const parsedLimit = Number.parseInt(rateLimitValue, 10);
     if (
       rateLimitEnabled &&
@@ -176,7 +206,7 @@ function PublishForm(): ReactElement {
         slug: effectiveSlug,
         description: description.trim() || null,
         version: version.trim(),
-        upstream_url: upstreamUrl.trim(),
+        ...(explicitUpstream ? { upstream_url: explicitUpstream } : {}),
         spec,
         auth_plugin: authPlugin,
         requestable,
@@ -249,12 +279,14 @@ function PublishForm(): ReactElement {
                 <LabeledInput
                   label="Slug"
                   required
+                  maxLength={MAX_API_SLUG_LENGTH}
                   value={effectiveSlug}
                   onChange={(event) => {
                     setSlugTouched(true);
-                    setSlug(slugify(event.target.value));
+                    setSlug(event.target.value);
                   }}
                   hint="Used in the listen path."
+                  error={slugError}
                 />
                 <LabeledInput
                   label="Version"
@@ -340,11 +372,16 @@ function PublishForm(): ReactElement {
               <LabeledInput
                 label="Upstream URL"
                 type="url"
-                required
+                maxLength={MAX_UPSTREAM_URL_LENGTH}
                 placeholder="https://api.internal.example.com"
                 value={upstreamUrl}
                 onChange={(event) => setUpstreamUrl(event.target.value)}
-                hint="Where the gateway forwards matching requests."
+                hint={
+                  specServer.url
+                    ? `OpenAPI server URL: ${specServer.url}. Leave this field empty to use it.`
+                    : 'No usable absolute server URL in the document; enter one here.'
+                }
+                error={upstreamError}
               />
               <Checkbox
                 label="Enforce a rate limit"
@@ -437,7 +474,7 @@ function PublishForm(): ReactElement {
                 type="submit"
                 variant="primary"
                 loading={publish.isPending}
-                disabled={!name.trim() || !effectiveSlug || !upstreamUrl.trim() || !spec.trim()}
+                disabled={!name.trim() || !!slugError || !!upstreamError || !spec.trim()}
               >
                 Publish API
               </Button>
