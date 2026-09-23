@@ -1,53 +1,54 @@
 ---
-name: grok-agents
-description: Dispatch and orchestrate local Cursor Grok 4.6 agents via the standalone cursor-agent CLI for Ferrum Nexus issue, PR, review-feedback, CI-repair, and shepherding work, with optional fast mode only when the user explicitly requests it. Use when the user asks GPT, Codex, or Claude to delegate to Grok or Cursor Grok workers, run multiple Grok 4.6 agents, resume interrupted Grok runs, or drive agent-owned branches and PRs. Do not use for Codex-native subagents, Claude Code workers, or ordinary single-agent edits.
+name: sol-agents
+description: Dispatch and orchestrate external GPT-6 Sol Codex CLI agents for Ferrum Nexus issues, PRs, review-feedback fixes, CI repair, and shepherding, with optional fast mode only when the user explicitly requests it. Use when the user asks Codex or GPT to delegate to Sol or Codex CLI workers, run multiple GPT-6 Sol agents, select low/medium/high/xhigh/max/ultra reasoning effort, resume interrupted Sol runs, or drive agent-owned branches and PRs. Do not use for Codex-native collaboration subagents or ordinary single-agent work.
 ---
 
-# Grok agents
+# Sol agents
 
-Act as the orchestrator. Treat local Cursor Grok 4.6 processes as implementation workers. Own
-task decomposition, worktree isolation, liveness, independent diff review, and the final merge
-recommendation. Require each worker to carry its assigned scope through the stopping point in the
-prompt. Never accept a worker's report without checking the repository and GitHub state yourself.
+Act as the Codex orchestrator. Treat external GPT-6 Sol Codex CLI processes as implementation
+workers. Own task decomposition, worktree isolation, effort selection, liveness, independent diff
+review, and the final merge recommendation. Require each worker to carry its assigned scope through
+the stopping point in the prompt. Never accept a worker's report without checking the repository
+and GitHub state yourself.
 
 **Guard: do not use this skill when you are yourself a dispatched worker.** If the session prompt
 references this skill's `agent-brief.md` or `continuation-brief.md`, says "YOU are the implementer,"
 or assigns an existing worktree and findings to fix, implement directly in the current session.
-Do not recursively dispatch another Grok, Opus, or Fable worker. The orchestrator selected
-this session's model deliberately.
+Do not recursively dispatch another Sol or Opus worker. The orchestrator selected this session's
+model and reasoning effort deliberately.
 
 ## Remote CI validation
 
 The full no-local-build/test policy is the "Remote CI validation" section of
 [references/agent-brief.md](references/agent-brief.md). It binds you as orchestrator too: do not run
 local builds or tests, and accept only remote CI results for the exact pushed head SHA as build/test
-confirmation. Every dispatch prompt, including continuation prompts, must carry that section.
+confirmation. Every dispatch prompt, including continuation prompts and any permitted nested
+delegation, must carry that section.
 
 ## Preflight
 
 1. Read `CLAUDE.md` (`AGENTS.md` is a symlink to it), the relevant `docs/*.md`, and the issue
    or PR before dispatching.
-2. Confirm the standalone `cursor-agent` CLI is resolvable. The launcher resolves it in this order
-   and refuses any candidate under `com.conductor.app`, because Conductor's bundled copies lag the
-   standalone releases:
-   - `CURSOR_AGENT_BIN` if it points at an executable absolute path,
-   - `~/.local/bin/cursor-agent`, `/opt/homebrew/bin/cursor-agent`, `/usr/local/bin/cursor-agent`,
-   - `cursor-agent` on `PATH`.
-3. Authenticate every spawned worker either through an exported `CURSOR_API_KEY` (the launcher
-   leaves it in the environment for `cursor-agent` to read and pins Cursor's process-local memory
-   credential store so the API-key path cannot fall through to macOS Keychain; the key is never
-   placed on argv, where `ps` would expose it) or through the CLI's own stored login — check with
-   `cursor-agent status`. Never print the key or put it in prompts, files, arguments, or logs, and
-   do not ask a worker to perform an interactive login.
-4. Use only the pinned SKUs `cursor-grok-4.6-{low,medium,high,xhigh}` and their published `-fast`
-   variants; confirm with `cursor-agent models`. Select a `-fast` SKU only when the user explicitly
-   requested fast mode. Stop and report the exact error if authentication or model access is
-   rejected. Do not silently substitute `composer-2.5`, `auto`, a Fast SKU without explicit
-   authorization, or another provider.
+2. Confirm the standalone codex CLI is resolvable, then run `codex --version`, `codex login status`,
+   and `codex exec --help` against it. The launcher resolves the binary in this order and refuses
+   any candidate under `com.conductor.app`, because Conductor's bundled copy lags the standalone
+   release:
+   - `CODEX_BIN` if it points at an executable absolute path,
+   - `/opt/homebrew/bin/codex`, `/usr/local/bin/codex`, `~/.local/bin/codex`,
+   - `codex` on `PATH`.
+3. Confirm that the installed CLI supports `--model`, `--config`, `--sandbox`, `--cd`, and reading
+   a prompt from stdin with `-`. If the user explicitly requests fast mode, also confirm the
+   bundled model catalog lists the `priority` service tier for `gpt-6-sol`.
+4. Use the pinned model `gpt-6-sol`. Stop and report the exact error if authentication, model
+   access, requested effort, or requested service tier is rejected. Do not silently substitute
+   another model, effort, or service tier. Confirm the installed model catalog advertises the
+   selected effort (including `ultra`) before dispatch.
+5. Use `danger-full-access` only for a trusted repository task where the user's requested workflow
+   authorizes implementation. Worktree isolation prevents git collisions; it is not a host sandbox.
 
 ## Isolate every worker
 
-Create or locate the worker's git worktree before launching Grok. Never launch a write-enabled
+Create or locate the worker's git worktree before launching Codex. Never launch a write-enabled
 worker in the orchestrator's checkout or another worker's worktree.
 
 - Fresh issue: fetch `origin/main`, create a purpose-named branch from `origin/main`, and add a
@@ -56,7 +57,26 @@ worker in the orchestrator's checkout or another worker's worktree.
 - Follow-up round: reuse the PR's existing worktree after verifying its branch and state.
 
 Include the absolute worktree path, branch, base branch, and current head SHA in every prompt.
-Worktree isolation prevents git collisions; it is not a host sandbox.
+Do not discard unexplained changes in an existing worktree; reconstruct and preserve valid work.
+
+## Select effort deliberately
+
+- `low`: use for simple, mechanical work with minimal reasoning needs.
+- `medium`: use for easier tasks and quick singular code fixes — a single-file change, a mechanical
+  refactor, a documentation correction, or a review finding with an obvious and contained fix.
+- `high`: default. Use for challenging multi-step coding across interconnected components, where the
+  change touches several modules and the worker must reason about how they fit together.
+- `xhigh`: reserve for very high-stakes tasks that need lots of thinking — security boundaries,
+  concurrency and lifecycle bugs, protocol correctness, difficult root-cause analysis, or repeated
+  failure at `high`. Prefer one focused `xhigh` worker over a fleet of them.
+
+- `max`: use for the hardest problems requiring more reasoning than `xhigh`.
+- `ultra`: use when explicitly requested for maximum reasoning with automatic task delegation.
+  This is a Codex harness option advertised by the installed model catalog, not an API effort.
+  Allow Codex-managed automatic delegation at this level; do not invoke external dispatch skills.
+
+Honor an explicit user choice and record the selected level beside each worker. Keep the effort
+stable across initial and continuation rounds unless evidence or the user justifies changing it.
 
 ## Dispatch with the exact model contract
 
@@ -73,29 +93,25 @@ one long-lived execution session:
 ```bash
 <ABS_SKILL_DIR>/scripts/dispatch-agent.sh \
   --worktree <ABS_WORKTREE> \
-  --prompt-file <ABS_PROMPT_FILE>
+  --prompt-file <ABS_PROMPT_FILE> \
+  --effort <low|medium|high|xhigh|max|ultra>
 ```
-
-`--effort low|medium|high|xhigh|max` selects the Grok reasoning SKU and defaults to `high`. Cursor
-publishes four tiers, so `low`/`medium`/`high`/`xhigh` map to
-`cursor-grok-4.6-{low,medium,high,xhigh}` and `max` clamps to `xhigh` with a warning. Do not claim a
-tier above `xhigh` was applied.
 
 `--fast` is an opt-in controller flag. Append it only when the user explicitly requests fast mode
 for the dispatch or fleet. Never infer it from urgency, deadlines, task size, or available credits.
 Omit it for every other run, including continuations unless they remain within the same explicit
 request. Record the selected mode beside each worker.
 
-The launcher resolves the operator's own `cursor-agent`, verifies the worktree root, and runs
-`cursor-agent --print --force --trust --model <sku> --output-format text --workspace <worktree>`
-with the prompt file on stdin. It pins the non-Fast SKU by default and appends `-fast` only with
-`--fast`; Fast runs consume fast credits. Delete the temporary prompt after the worker exits.
+The launcher pins `gpt-6-sol`, the reasoning effort, `danger-full-access`, the verified worktree
+root, and stdin prompt mode. It pins `service_tier="default"` normally and selects the model's Fast
+`priority` tier only with `--fast`. The prompt file reaches EOF cleanly, avoiding the non-TTY hang
+caused by a prompt argument with open stdin. Delete the temporary prompt after the worker exits.
 
 Start each worker in its own long-lived execution session and retain its exact session handle or
-PID. Prefer one tool call per worker so completions and failures remain attributable. Never wrap
-the fleet in a single shell command, use `killall node`, or broadly kill `cursor-agent` processes;
-the user may have unrelated Cursor sessions. Cap this workflow at seven concurrent Grok
-workers unless the user sets a lower limit.
+PID. One worker per tool call keeps completion and failure attributable. Use `pgrep -x codex` only
+as a fleet-wide cross-check because it can include unrelated Codex sessions. Never kill processes
+by name. Cap this workflow at seven concurrent workers unless the user explicitly sets a different
+cap.
 
 ## Pin the worker role
 
@@ -107,11 +123,12 @@ Do not stop at analysis, partial implementation, or a handoff for someone else t
 commit, push, PR, review, and CI actions only when the prompt assigns them. Do not request or wait
 for a separate review-bot pass unless explicitly assigned. After the final requested push and
 report, exit; the controller owns post-push CI and review monitoring. Do not invoke agent-dispatch
-skills or scripts (including grok-agents, astra-agents, sol-agents, luna-agents, opus-agents, fable-5-1-agents, or any
-.agents/skills/*/scripts/dispatch-agent.sh), and do not spawn nested workers.
+skills or scripts (including astra-agents, sol-agents, luna-agents, opus-agents, fable-5-1-agents, grok-agents, or any
+.agents/skills/*/scripts/dispatch-agent.sh), and do not manually spawn nested workers.
+Codex-managed automatic delegation is permitted only when the controller explicitly selected `ultra`.
 ```
 
-This prevents a worker from replacing the selected model through nested delegation.
+This prevents a worker from replacing the selected model or effort through nested delegation.
 
 ## Construct prompts by mode
 
@@ -153,7 +170,8 @@ actionable work appears. Do not add a review trigger unless the controller expli
    infrastructure failures or repository-known flakes, and dispatch bounded repair work for
    deterministic failures.
 6. If a worker dies, inspect its worktree, local commits, upstream, and remote branch before
-   relaunching. Preserve useful work and launch a continuation round.
+   relaunching. Preserve useful work and launch a continuation round at the same effort unless the
+   evidence justifies escalation.
 7. Merge only when the user authorized it, your independent review is complete, and every
    completion gate the user assigned is satisfied.
 
@@ -161,22 +179,24 @@ When review handling is explicitly in scope, a worker's rebuttal is not by itsel
 Require a recognized clean verdict on the current head, reviewer acceptance, resolved threads, or
 an explicit repository policy permitting the orchestrator to close a proven false positive.
 
-Never put credentials, tokens, cookies, or secrets in prompts or worker logs. Do not print
-`CURSOR_API_KEY`.
+Treat the model context window as headroom, not a reason to paste the repository or whole CI logs
+into prompts. Never put credentials, tokens, cookies, or secrets in prompts or worker logs.
 
 ## Failure handling
 
 - Capacity or transport failure: verify local and remote state before retrying; useful work may
   already be committed or pushed.
-- `cursor-agent` unresolvable, or resolution refused because the only candidate lives under
-  `com.conductor.app`: stop and report the exact path failure. Install the standalone CLI or set
-  `CURSOR_AGENT_BIN`; do not fall back to Conductor's bundled harness.
-- Neither `CURSOR_API_KEY` nor a stored `cursor-agent` login is available: stop and report. Do not
-  attempt an interactive login or fall back to another model provider.
 - Worker exits after its completed push and report: continue post-push review and CI monitoring as
   the controller. If it exits before its assigned implementation or validation stopping point,
   inspect the state and launch a continuation round; do not accept unfinished work as complete.
 - An explicitly requested review receives no response: verify the trigger, bot identity,
   availability, and head SHA before posting another trigger.
-- Model mismatch: stop the worker, record the exact diagnostic, correct the launch contract, and
-  relaunch. Never claim a Grok SKU or fast mode without launch evidence.
+- Model, effort, or service-tier mismatch: stop the worker, record the exact diagnostic, correct
+  the launch contract, and relaunch. Never claim a selected effort, `gpt-6-sol`, or fast mode without launch evidence.
+
+## Model contract source
+
+The installed Codex `models_cache.json` entry for `gpt-6-sol` advertises
+`low`, `medium`, `high`, `xhigh`, `max`, and `ultra` (verified 2026-09-23).
+The [API model page](https://developers.openai.com/api/docs/models/gpt-6-sol)
+lists API efforts through `max`; `ultra` is specific to the Codex harness.
