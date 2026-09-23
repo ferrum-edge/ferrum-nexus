@@ -53,5 +53,6 @@ satisfied; do not hand back partial work. After the final requested push and rep
 controller owns post-push review and CI monitoring and will dispatch another bounded round if new
 actionable work appears.
 
-End with the full final report required by `agent-brief.md`, including the old and new head SHAs and
-the review, CI, or continuation state the prompt assigned.
+End with the full final report required by `agent-brief.md`, including the old and new head SHAs,
+the review, CI, or continuation state the prompt assigned, and any refusal or model-fallback
+notice.

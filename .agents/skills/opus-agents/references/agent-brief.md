@@ -100,4 +100,5 @@ and report, exit; the controller owns post-push CI and review monitoring.
 
 Report the branch, worktree, commit SHA, push status, PR number and URL if created, review trigger
 and outcome only if requested, requested CI status, validation commands, findings fixed or
-rebutted, and remaining risks or blockers. Distinguish verified facts from assumptions.
+rebutted, and remaining risks or blockers. Also report any refusal, safeguard, fallback, or
+serving-model notice shown by Claude Code. Distinguish verified facts from assumptions.
