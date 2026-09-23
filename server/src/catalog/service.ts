@@ -72,9 +72,11 @@ import {
   type AccessRequest,
   type ApiSpecSummary,
   type ApiVisibility,
+  type ApplicationSummary,
   type CatalogAccessState,
   type CatalogApi,
   type CatalogDetailResponse,
+  type CatalogIdentityAccessResponse,
   type CatalogSpecResponse,
   type Grant,
   type Paginated,
@@ -114,6 +116,16 @@ export interface CatalogService {
   ): Promise<Paginated<CatalogApi>>;
   /** One API by slug, with the caller's open request and active grant. */
   detail(viewer: UserRecord, slug: string): Promise<CatalogDetailResponse>;
+  /**
+   * One of the caller's identities' standing on an API: its newest request
+   * and its active grant. `applicationId` `null` is the account itself;
+   * anything else must be one of the caller's **own** applications.
+   */
+  identityAccess(
+    viewer: UserRecord,
+    slug: string,
+    applicationId: Uuid | null,
+  ): Promise<CatalogIdentityAccessResponse>;
   /** The normalized current spec with gateway servers, when the caller may see the API. */
   spec(viewer: UserRecord, slug: string): Promise<CatalogSpecResponse>;
   /** Whether `api` appears in `viewer`'s browse list. */
@@ -316,6 +328,57 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
         spec,
         my_request: request,
         my_grant: grant,
+      };
+    },
+
+    async identityAccess(viewer, slug, applicationId): Promise<CatalogIdentityAccessResponse> {
+      // The same gate as `detail`, in the same order: an API the caller may
+      // not open is absent, and nothing about any identity's standing on it
+      // is answered — otherwise this would be an existence oracle for private
+      // APIs that `detail` refuses to be.
+      const api = await store.apis.findBySlug(slug);
+      if (!api) throw notFound('API', slug);
+      if (!canView(viewer, api, await resolveReadAccess(store, viewer, api))) {
+        throw notFound('API', slug);
+      }
+
+      // Only the caller's own applications, with no administrator exception:
+      // this reads one identity's requests and grants, and an account sees its
+      // own and its applications' — never somebody else's. Somebody else's
+      // application reads as absent, as it does on `GET /api/applications/:id`
+      // for a non-admin. A disabled application is still answered: it keeps
+      // whatever access it already holds, and the page has to be able to say so.
+      let application: ApplicationSummary | null = null;
+      if (applicationId !== null) {
+        const record = await store.applications.findById(applicationId);
+        if (!record || record.owner_user_id !== viewer.id) {
+          throw notFound('Application', applicationId);
+        }
+        application = {
+          id: record.id,
+          name: record.name,
+          owner_user_id: record.owner_user_id,
+          status: record.status,
+        };
+      }
+
+      // Both reads are scoped to this identity: `null` selects the account's
+      // own rows, an id that application's. Grants and pending requests are
+      // unique per `(api, user, application)`, which is exactly the key the
+      // access-request duplicate checks use.
+      const [grant, requests] = await Promise.all([
+        store.grants.findActiveByApiAndUser(api.id, viewer.id, applicationId),
+        store.accessRequests.list(
+          { api_id: api.id, user_id: viewer.id, application_id: applicationId },
+          { limit: 1, offset: 0 },
+        ),
+      ]);
+      const request = requests.items[0] ?? null;
+
+      return {
+        application,
+        request: request ? { ...request, ...(application ? { application } : {}) } : null,
+        grant: grant ? { ...grant, ...(application ? { application } : {}) } : null,
       };
     },
 

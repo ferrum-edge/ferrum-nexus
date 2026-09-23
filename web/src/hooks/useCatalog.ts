@@ -1,6 +1,7 @@
 import { useQuery, type UseQueryResult } from '@tanstack/react-query';
 import type {
   CatalogDetailResponse,
+  CatalogIdentityAccessResponse,
   CatalogListQuery,
   CatalogListResponse,
   CatalogSpecResponse,
@@ -32,5 +33,21 @@ export function useCatalogSpec(slug: string, enabled = true): UseQueryResult<Cat
     queryFn: () => catalogApi.spec(slug),
     enabled: enabled && slug.length > 0,
     staleTime: 60_000,
+  });
+}
+
+/**
+ * One identity's request and grant on a catalog entry — the access form's
+ * gate. `null` is the account itself, an id one of the caller's applications.
+ */
+export function useCatalogIdentityAccess(
+  slug: string,
+  applicationId: string | null,
+  enabled = true,
+): UseQueryResult<CatalogIdentityAccessResponse> {
+  return useQuery({
+    queryKey: queryKeys.catalog.identityAccess(slug, applicationId),
+    queryFn: () => catalogApi.identityAccess(slug, applicationId),
+    enabled: enabled && slug.length > 0,
   });
 }

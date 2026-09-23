@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Application } from '@ferrum-nexus/shared';
+import { DEFAULT_PAGE_SIZE, type Application } from '@ferrum-nexus/shared';
 import { API } from '../../test/fixtures';
 import { changeField, clearClients, renderPage } from '../../test/helpers';
 import { applicationsApi } from '../lib/api';
@@ -91,5 +91,41 @@ describe('applications', () => {
     fireEvent.click(confirm);
     await screen.findByText('Application deleted');
     expect(applicationsApi.remove).toHaveBeenCalledWith('app-1');
+  });
+
+  it('pages through every application so each can be managed', async () => {
+    // An owner's ceiling can exceed one page, or be unlimited (issue #310).
+    const many = Array.from({ length: DEFAULT_PAGE_SIZE + 1 }, (_, index) => ({
+      ...APPLICATION,
+      id: `app-${index}`,
+      name: `Integration ${index}`,
+    }));
+    vi.mocked(applicationsApi.list).mockImplementation(async (query = {}) => {
+      const offset = query.offset ?? 0;
+      return {
+        items: many.slice(offset, offset + (query.limit ?? DEFAULT_PAGE_SIZE)),
+        total: many.length,
+      };
+    });
+    await renderPage(<ApplicationsPage />);
+    expect(await screen.findByText('Integration 0')).toBeInTheDocument();
+    expect(applicationsApi.list).toHaveBeenCalledWith({ limit: DEFAULT_PAGE_SIZE, offset: 0 });
+    expect(screen.queryByText(`Integration ${DEFAULT_PAGE_SIZE}`)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    expect(await screen.findByText(`Integration ${DEFAULT_PAGE_SIZE}`)).toBeInTheDocument();
+    expect(applicationsApi.list).toHaveBeenLastCalledWith({
+      limit: DEFAULT_PAGE_SIZE,
+      offset: DEFAULT_PAGE_SIZE,
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Delete this application' });
+    changeField(/Type/, `Integration ${DEFAULT_PAGE_SIZE}`);
+    const confirm = within(dialog).getByRole('button', { name: 'Delete application' });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+    await screen.findByText('Application deleted');
+    expect(applicationsApi.remove).toHaveBeenCalledWith(`app-${DEFAULT_PAGE_SIZE}`);
   });
 });

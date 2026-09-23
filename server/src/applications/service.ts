@@ -77,6 +77,11 @@ export interface UpdateApplicationInput {
 export interface ApplicationListFilter {
   /** Admin-only: somebody else's applications. Clients always see their own. */
   owner_user_id?: Uuid;
+  /**
+   * Only the actor's own, even for an admin. An identity picker wants exactly
+   * this: {@link ApplicationsService.resolveForActor} refuses anybody else's.
+   */
+  mine?: boolean;
   status?: ApplicationStatus;
   q?: string;
 }
@@ -187,7 +192,7 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
       // A client only ever sees their own; `owner_user_id` is the admin's
       // opt-in, exactly as it is on the API listing.
       const isAdmin = roleAtLeast(actor.role, 'admin');
-      const owner = isAdmin ? filter.owner_user_id : actor.id;
+      const owner = isAdmin && filter.mine !== true ? filter.owner_user_id : actor.id;
       const page = await store.applications.list(
         {
           ...(owner !== undefined ? { owner_user_id: owner } : {}),

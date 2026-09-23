@@ -137,7 +137,16 @@ provider has stopped onboarding — message them.
 
 An API accepts requests only if the provider marked it **requestable**. If the
 Request access button is missing, the API is either not requestable, retired, or
-you already have access or a pending request.
+the identity chosen under **Requesting for** already has access or a pending
+request.
+
+Access is tracked per identity — your account and each of your applications
+separately. The **Access** tab shows the status of whichever identity you have
+selected, and says which application owns an existing request or grant. A
+pending request or a grant for one application does not stop you requesting the
+same API for another application, or for your account; pick that identity and
+submit. The picker searches and pages through your active applications, so it
+works however many you have.
 
 Click **Request access** and write a justification (up to 2000 characters).
 Treat it as the case you are making to a human, because it is one. Say:

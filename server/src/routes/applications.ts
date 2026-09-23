@@ -26,7 +26,13 @@ import type {
 import type { ApplicationsService } from '../applications/service.js';
 import { clientIp, requireAuth, requireAuthHook } from '../middleware/auth-plugin.js';
 import { parseOrThrow } from '../middleware/error-handler.js';
-import { idParamSchema, listOptions, listQuerySchema } from './common.js';
+import {
+  booleanQuerySchema,
+  idParamSchema,
+  listOptions,
+  listQuerySchema,
+  toBoolean,
+} from './common.js';
 
 /** Services this route plugin needs. */
 export interface ApplicationRoutesOptions {
@@ -36,7 +42,10 @@ export interface ApplicationRoutesOptions {
 const listApplicationsQuery = listQuerySchema.extend({
   /** Admin-only: somebody else's. A client always sees their own. */
   owner_user_id: z.string().trim().min(1).max(64).optional(),
+  /** Only the caller's own, even for an admin: what an identity picker lists. */
+  mine: booleanQuerySchema,
   status: z.enum(['active', 'disabled']).optional(),
+  /** Name/description search, bounded so a picker's query stays cheap. */
   q: z.string().trim().max(200).optional(),
 });
 
@@ -65,10 +74,12 @@ export const applicationRoutes: FastifyPluginAsync<ApplicationRoutesOptions> = a
   app.get('/', async (request): Promise<ListApplicationsResponse> => {
     const { user } = requireAuth(request);
     const query = parseOrThrow(listApplicationsQuery, request.query);
+    const mine = toBoolean(query.mine);
     return applications.list(
       user,
       {
         ...(query.owner_user_id !== undefined ? { owner_user_id: query.owner_user_id } : {}),
+        ...(mine !== undefined ? { mine } : {}),
         ...(query.status !== undefined ? { status: query.status } : {}),
         ...(query.q !== undefined ? { q: query.q } : {}),
       },

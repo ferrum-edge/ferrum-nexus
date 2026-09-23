@@ -1,4 +1,5 @@
 import {
+  keepPreviousData,
   useMutation,
   useQuery,
   useQueryClient,
@@ -14,15 +15,22 @@ import type {
 import { grantsApi } from '../lib/api';
 import { queryKeys } from './keys';
 
-/** List grants (own grants for clients, an API's grants for its provider). */
+/**
+ * List grants (own grants for clients, an API's grants for its provider).
+ *
+ * `keepPrevious` holds the current page on screen while the next one loads,
+ * for a paged list that should not collapse between pages.
+ */
 export function useGrants(
   query: ListGrantsQuery = {},
   enabled = true,
+  keepPrevious = false,
 ): UseQueryResult<ListGrantsResponse> {
   return useQuery({
     queryKey: queryKeys.grants.list(query),
     queryFn: () => grantsApi.list(query),
     enabled,
+    ...(keepPrevious ? { placeholderData: keepPreviousData } : {}),
   });
 }
 

@@ -1602,6 +1602,45 @@ _session_
 latest request for this API; `my_grant` their active grant. Both may be `null`.
 `404 NOT_FOUND` when the API does not exist or is not viewable.
 
+Both are **account-wide representatives**, not the state of any one identity:
+`my_request` is the newest request by any of the caller's identities, and
+`my_grant` the account's own active grant or else one held by one of its
+applications — the grant that admits the caller to a `private` API's
+documentation. Whether a particular identity may ask for access is answered by
+[`GET /api/catalog/:slug/access`](#get-apicatalogslugaccess).
+
+### `GET /api/catalog/:slug/access`
+
+_session_ — one identity's standing on one API.
+
+| Query            | Type                                                                                    |
+| ---------------- | --------------------------------------------------------------------------------------- |
+| `application_id` | one of the caller's own applications, or `account` (the default) for the account itself |
+
+```json
+{
+  "application": { "id": "…", "name": "Billing worker", "owner_user_id": "…", "status": "active" },
+  "request": { …, "application_id": "…", "status": "pending" },
+  "grant": null
+}
+```
+
+`application` is `null` for the account itself. `request` is that identity's
+newest request for the API (any status) and `grant` its active grant; both are
+scoped to exactly that identity — a grant or pending request held by another of
+the account's identities is never reported here. Grants and pending requests are
+unique per `(api, account, application)`, the same key
+[`POST /api/access-requests`](#post-apiaccess-requests) uses to refuse a
+duplicate, so an identity with neither may request access even while another of
+the account's identities is pending or approved.
+
+Authorization is the detail read's, checked first: `404 NOT_FOUND` when the API
+does not exist or is not viewable, whatever identity is named. The application
+must then be the caller's own — **not even an administrator** reads another
+account's application here — and anything else answers `404 NOT_FOUND`. A
+disabled application is still answered, since it keeps the access it already
+holds.
+
 ### `GET /api/catalog/:slug/spec`
 
 _session_ — the normalized current document for consumers.
@@ -2128,7 +2167,22 @@ administering their account.
 ### `GET /api/applications`
 
 _session_ — `Paginated<Application>`, newest first. A client always sees their
-own; an admin may pass `owner_user_id`. `status` and `q` narrow further.
+own; an admin sees every account's unless they pass `owner_user_id`, or
+`mine=true` to list only their own (what an identity picker wants, since
+nobody may act as somebody else's application). `status` and `q` narrow
+further.
+
+| Query             | Type                                                                      |
+| ----------------- | ------------------------------------------------------------------------- |
+| `mine`            | boolean — only the caller's own, even for an admin                        |
+| `owner_user_id`   | uuid, admin-only                                                          |
+| `status`          | `active` \| `disabled`                                                    |
+| `q`               | case-insensitive substring match on name or description, ≤ 200 characters |
+| `limit`, `offset` | pagination                                                                |
+
+`q` runs inside the owner scope, which is indexed (`owner_user_id`,
+`created_at`), so a picker's search stays bounded by one account's
+applications.
 
 Each item carries `active_grants` and `active_credentials`, so a list view
 needs no second call.
