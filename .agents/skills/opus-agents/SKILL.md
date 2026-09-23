@@ -179,7 +179,7 @@ actionable work appears. Do not add a review trigger unless the controller expli
    requested validation, and any explicitly assigned review or CI actions.
 4. Fetch `origin/main` and independently inspect `git diff origin/main...HEAD` in the worker's
    worktree. Use a three-dot diff. Review fail-closed behavior, hot paths, docs/spec parity,
-   production panics, tests, and scope creep.
+   unhandled errors and promise rejections, tests, and scope creep.
 5. Own post-push review and CI monitoring. Diagnose red checks from logs, rerun only demonstrated
    infrastructure failures or known flakes, and dispatch bounded repair work for deterministic
    failures.
