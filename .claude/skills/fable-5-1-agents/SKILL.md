@@ -45,4 +45,4 @@ as pending or unverified and exit; the controller continues the CI-driven fix lo
 build/test success without matching remote evidence.
 
 Include the no-local-build/test rule and remote CI confirmation requirement in every dispatch
-prompt, including continuation prompts and any permitted nested delegation.
+prompt, including continuation prompts.
