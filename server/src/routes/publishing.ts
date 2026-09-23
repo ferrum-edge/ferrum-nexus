@@ -25,7 +25,6 @@ import {
   MAX_SPEC_BYTES,
   MAX_UPSTREAM_URL_LENGTH,
   SPEC_ENFORCEMENT_LEVELS,
-  isValidApiSlug,
   type ApiUsageResponse,
   MIN_BACKEND_TIMEOUT_MS,
   type CorsConfig,
@@ -249,15 +248,9 @@ const listApisQuery = listQuerySchema.extend({
 
 const publishBody = z.object({
   name: z.string().trim().min(1).max(200),
-  slug: z
-    .string()
-    .trim()
-    .max(MAX_API_SLUG_LENGTH)
-    .refine(
-      (slug) => slug === '' || isValidApiSlug(slug),
-      'Use lowercase letters, numbers and single hyphens',
-    )
-    .optional(),
+  // A requested slug is normalized with the shared `slugify` contract, so API
+  // callers that send `My_API` keep working; the browser validates first.
+  slug: z.string().trim().max(MAX_API_SLUG_LENGTH).optional(),
   description: z.string().trim().max(4_000).nullish(),
   version: z.string().trim().max(60).optional(),
   // A usable absolute root server URL in the document supplies the default.

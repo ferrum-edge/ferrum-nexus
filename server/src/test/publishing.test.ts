@@ -214,13 +214,14 @@ describe('publishing', () => {
       }
     });
 
-    it('rejects a custom slug outside the published slug contract', async () => {
+    it('normalizes a custom slug with the shared slug contract', async () => {
       const response = await harness.authed(provider, {
         method: 'POST',
         url: '/api/apis',
-        payload: publishPayload({ slug: 'Invalid Slug!' }),
+        payload: publishPayload({ slug: 'Custom_Slug!' }),
       });
-      assert.equal(response.statusCode, 400);
+      assert.equal(response.statusCode, 201, response.body);
+      assert.equal(response.json<PublishApiResponse>().api.slug, 'custom-slug');
     });
 
     it('refuses oversized derived URLs and excessive nesting before any gateway call', async () => {
