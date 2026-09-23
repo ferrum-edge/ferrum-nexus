@@ -78,14 +78,13 @@ sandbox Claude from the rest of the host.
 
 ## Select effort deliberately
 
-- `low`: reserve for mechanical, fully specified edits — a one-line revert, a rename, a version
-  bump, or applying a formatter diff. Do not use it for anything requiring root-cause analysis.
-- `medium`: use for small, well-understood changes with a known fix location: a single-file bug
-  fix, a doc or comment update, or adding a test for behavior that is already specified.
-- `high`: default for scoped fixes, review findings, tests, documentation, and CI repairs with a
-  known failure mode.
-- `xhigh`: use for unfamiliar multi-module work, concurrency or lifecycle bugs, protocol
+- `low`: use for mechanical, fully specified edits — a one-line revert, a rename, a version bump,
+  or applying a formatter diff.
+- `medium`: use for scoped fixes with a known location, review findings, tests, documentation, and
+  CI repairs with a known failure mode.
+- `high`: default. Use for unfamiliar multi-module work, concurrency or lifecycle bugs, protocol
   correctness, security boundaries, greenfield features, and difficult root-cause analysis.
+- `xhigh`: use after a worker has failed at `high` on the same task, or when the user asks for it.
 - `max`: reserve for the hardest deeply coupled work, repeated failure at `xhigh`, or a user
   override. Prefer one focused `max` worker over a whole `max` fleet; it has unconstrained
   reasoning spend and can overthink.
