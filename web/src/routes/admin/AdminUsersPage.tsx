@@ -1,9 +1,10 @@
-import { useQueries } from '@tanstack/react-query';
+import { useQuery, type UseQueryResult } from '@tanstack/react-query';
 import { useMemo, useState, type ReactElement } from 'react';
 import {
   DEFAULT_PAGE_SIZE,
   ROLE_LABELS,
   ROLE_ORDER,
+  type GetOrganizationResponse,
   type Organization,
   type Role,
   type User,
@@ -105,6 +106,26 @@ function GatewayTeardownBadge({ userId }: { userId: string }): ReactElement | nu
 }
 
 /**
+ * One organization by id, cached per id. Rows and the editor resolve names this
+ * way so an organization beyond any loaded list page still shows its name, and
+ * so the table's column definitions never depend on lookups that settle later
+ * (a changed cell renderer remounts every row's cells).
+ */
+function useOrganizationDetail(id: string | null): UseQueryResult<GetOrganizationResponse> {
+  return useQuery({
+    queryKey: queryKeys.organizations.detail(id ?? ''),
+    queryFn: () => organizationsApi.get(id ?? ''),
+    enabled: id !== null,
+    staleTime: 60_000,
+  });
+}
+
+function OrganizationName({ id }: { id: string }): ReactElement {
+  const detail = useOrganizationDetail(id);
+  return <>{detail.data?.organization.name ?? id}</>;
+}
+
+/**
  * The account editor the admin guide's organization procedure needs.
  *
  * `PATCH /api/users/:id` has always accepted `org_id` and `display_name`; the
@@ -114,13 +135,12 @@ function GatewayTeardownBadge({ userId }: { userId: string }): ReactElement | nu
  */
 function EditUserDialog({
   user,
-  selectedOrganization,
   onClose,
 }: {
   user: User;
-  selectedOrganization?: Organization;
   onClose: () => void;
 }): ReactElement {
+  const selectedOrganization = useOrganizationDetail(user.org_id);
   const update = useUpdateUser();
   const toast = useToast();
   const [displayName, setDisplayName] = useState(user.display_name);
@@ -184,7 +204,7 @@ function EditUserDialog({
           fetchPage={({ q, limit, offset }) => organizationsApi.list({ q, limit, offset })}
           toOption={(org) => ({ value: org.id, label: org.name })}
           fixedOptions={[{ value: '', label: 'No organization' }]}
-          selectedLabel={selectedOrganization?.name}
+          selectedLabel={selectedOrganization.data?.organization.name}
           searchPlaceholder="Search organizations"
           emptyLabel="No organizations found."
           hint="Groups accounts for filtering and for mass email; it grants nothing on its own."
@@ -210,32 +230,6 @@ function UsersTable(): ReactElement {
     ...(statusFilter === 'all' ? {} : { status: statusFilter }),
     ...(orgFilter === 'all' ? {} : { org_id: orgFilter }),
   });
-
-  // Resolve only the organizations represented on this user page. The API
-  // lookup keeps names available even when the organization list is paginated.
-  const organizationIds = [
-    ...new Set(
-      (query.data?.items ?? []).flatMap((entry) => (entry.org_id ? [entry.org_id] : [])),
-    ),
-  ];
-  const organizationDetails = useQueries({
-    queries: organizationIds.map((id) => ({
-      queryKey: queryKeys.organizations.detail(id),
-      queryFn: () => organizationsApi.get(id),
-      staleTime: 60_000,
-    })),
-  });
-  const orgNames = useMemo(
-    () =>
-      new Map(
-        organizationDetails.flatMap((detail) =>
-          detail.data
-            ? [[detail.data.organization.id, detail.data.organization.name] as const]
-            : [],
-        ),
-      ),
-    [organizationDetails],
-  );
 
   const update = useUpdateUser();
   const toast = useToast();
@@ -295,7 +289,11 @@ function UsersTable(): ReactElement {
         cell: ({ row }) => {
           const orgId = row.original.org_id;
           if (orgId === null) return <span className="text-fg-subtle">—</span>;
-          return <span className="text-fg-muted">{orgNames.get(orgId) ?? orgId}</span>;
+          return (
+            <span className="text-fg-muted">
+              <OrganizationName id={orgId} />
+            </span>
+          );
         },
       },
       {
@@ -352,7 +350,7 @@ function UsersTable(): ReactElement {
         ),
       },
     ],
-    [update, toast, pendingTeardowns, orgNames],
+    [update, toast, pendingTeardowns],
   );
 
   return (
@@ -436,10 +434,6 @@ function UsersTable(): ReactElement {
         <EditUserDialog
           key={editTarget.id}
           user={editTarget}
-          selectedOrganization={
-            organizationDetails.find((detail) => detail.data?.organization.id === editTarget.org_id)
-              ?.data?.organization
-          }
           onClose={() => setEditTarget(null)}
         />
       ) : null}
