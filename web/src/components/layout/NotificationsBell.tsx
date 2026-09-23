@@ -1,5 +1,5 @@
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { useNavigate } from '@tanstack/react-router';
+import { Link, useNavigate } from '@tanstack/react-router';
 import { useState, type ReactElement } from 'react';
 import type { Notification } from '@ferrum-nexus/shared';
 import { formatRelative } from '../../lib/format';
@@ -117,7 +117,15 @@ export function NotificationsBell(): ReactElement {
             )}
           </div>
 
-          <div className="flex items-center justify-end border-t border-border bg-inset/40 px-3 py-2">
+          <div className="flex items-center justify-between border-t border-border bg-inset/40 px-3 py-2">
+            <DropdownMenu.Item asChild>
+              <Link
+                to="/notifications"
+                className="rounded-md px-2 py-1.5 text-xs font-medium text-accent outline-none hover:underline focus-visible:ring-2 focus-visible:ring-accent-ring"
+              >
+                View all
+              </Link>
+            </DropdownMenu.Item>
             <Button
               size="sm"
               variant="ghost"

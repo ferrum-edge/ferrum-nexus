@@ -438,7 +438,10 @@ The bell in the header. You are notified when:
   **removed**;
 - an administrator sends a **platform announcement**.
 
-Click one to jump to the relevant page; **Mark all read** clears the badge.
+The bell shows the ten latest notifications. Select **View all** to browse older
+ones in the notifications inbox, page through them, or show only unread items.
+Click a notification to mark it read and open its relevant page when it has one;
+**Mark all read** clears the badge.
 Most of these arrive by email too, if the portal has SMTP configured.
 
 Notifications are a convenience, not a record. If you need to know exactly what

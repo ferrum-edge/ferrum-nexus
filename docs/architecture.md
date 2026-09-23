@@ -99,7 +99,7 @@ docs/      this tree
 | `access/service.ts`                            | request → approve/deny → grant → revoke, and the ACL-group writes.                                                                              |
 | `credentials/`                                 | `service.ts` (show-once issue/rotate/revoke), `consumers.ts` (the provisioner), `teardown-worker.ts` (retries a disabled account's revocation). |
 | `messaging/service.ts`                         | 1:1 threads and the platform inbox.                                                                                                             |
-| `notifications/service.ts`                     | The header bell. Courtesy channel only — never the record.                                                                                      |
+| `notifications/service.ts`                     | The header bell and paginated inbox. Courtesy channel only — never the record.                                                                |
 | `email/`                                       | `service.ts` (render + enqueue), `outbox-worker.ts` (the only SMTP caller), `templates.ts`.                                                     |
 | `admin/`                                       | `settings-service.ts`, `mass-email-service.ts`, `god-service.ts`, `gateway-reconciliation.ts` (orphaned Edge references).                       |
 | `routes/`                                      | One plugin per domain. Routes validate shapes and delegate; they never import a service module.                                                 |
@@ -109,7 +109,7 @@ docs/      this tree
 
 Pages under `routes/` (public: `LoginPage`, `RegisterPage`, `VerifyEmailPage`;
 authenticated: `DashboardPage`, `CatalogPage`, `CatalogDetailPage`,
-`CredentialsPage`, `MessagesPage`, `MessageThreadPage`, `ProfilePage`,
+`CredentialsPage`, `MessagesPage`, `MessageThreadPage`, `NotificationsPage`, `ProfilePage`,
 `ApisPage`, `ApiNewPage`, `ApiDetailPage`; admin: `AdminUsersPage`,
 `AdminOrgsPage`, `AdminApisPage`, `AdminAuditPage`, `AdminSettingsPage`,
 `AdminMassEmailPage`, `AdminGodPage`). The route tree lives in `router.tsx`;

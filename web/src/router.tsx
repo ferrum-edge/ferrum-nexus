@@ -112,6 +112,12 @@ const messagesRoute = createRoute({
   component: lazyRouteComponent(() => import('./routes/MessagesPage'), 'MessagesPage'),
 });
 
+const notificationsRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: '/notifications',
+  component: lazyRouteComponent(() => import('./routes/NotificationsPage'), 'NotificationsPage'),
+});
+
 const messageThreadRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/messages/$threadId',
@@ -203,6 +209,7 @@ const routeTree = rootRoute.addChildren([
     applicationsRoute,
     credentialsRoute,
     messagesRoute,
+    notificationsRoute,
     messageThreadRoute,
     profileRoute,
     apisRoute,
