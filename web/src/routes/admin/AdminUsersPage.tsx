@@ -352,7 +352,7 @@ function UsersTable(): ReactElement {
         ),
       },
     ],
-    [update, toast, pendingTeardowns, orgNames],
+    [update, toast, pendingTeardowns, orgNames, setEditTarget, setStatusTarget],
   );
 
   return (
