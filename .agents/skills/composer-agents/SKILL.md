@@ -14,7 +14,7 @@ worker's report without checking the repository and GitHub state yourself.
 **Guard: do not use this skill when you are yourself a dispatched worker.** If the session prompt
 references this skill's `agent-brief.md` or `continuation-brief.md`, says "YOU are the implementer,"
 or assigns an existing worktree and findings to fix, implement directly in the current session.
-Do not recursively dispatch another Composer, Grok, Sol, Opus, or Fable worker. The orchestrator
+Do not recursively dispatch another Composer, Grok, Opus, or Fable worker. The orchestrator
 selected this session's model deliberately.
 
 ## Remote CI validation

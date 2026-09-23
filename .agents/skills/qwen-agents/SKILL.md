@@ -19,7 +19,7 @@ governed docs) does not fit a smaller worker.
 **Guard: do not use this skill when you are yourself a dispatched worker.** If the session prompt
 references this skill's `agent-brief.md` or `continuation-brief.md`, says "YOU are the implementer,"
 or assigns an existing worktree and findings to fix, implement directly in the current session.
-Do not recursively dispatch another Qwen3.8 Max, opencode, Grok, Sol, Opus, Fable, or Composer
+Do not recursively dispatch another Qwen3.8 Max, opencode, Grok, Opus, Fable, or Composer
 worker. The orchestrator selected this session's model deliberately.
 
 ## Remote CI validation
