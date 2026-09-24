@@ -24,18 +24,27 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-function stubApi(authenticated: boolean, status: number, message: string): void {
+function stubApi(
+  authenticated: boolean,
+  status: number,
+  message: string,
+  { keepSession = false }: { keepSession?: boolean } = {},
+): void {
+  let signedIn = authenticated;
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (init?.method !== 'GET') {
+        // A 401 normally means the session is gone, so the follow-up /me probe
+        // fails too; keepSession models a late 401 sent with a rotated cookie.
+        if (status === 401 && !keepSession) signedIn = false;
         const code = status === 401 ? ERROR_CODES.UNAUTHORIZED : ERROR_CODES.VALIDATION_FAILED;
         return Promise.resolve(json({ error: { code, message } }, status));
       }
       if (url === '/api/auth/me') {
         return Promise.resolve(
-          authenticated
+          signedIn
             ? json({
                 user: {
                   id: 'admin',
@@ -183,6 +192,23 @@ describe('App mutation error policy', () => {
     const input = await screen.findByLabelText(/^Display name/);
     fireEvent.submit(input.closest('form')!);
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeInTheDocument();
+    expect(screen.queryByText('Request failed')).not.toBeInTheDocument();
+  });
+
+  it('keeps the session when a late unauthorized mutation re-probes successfully', async () => {
+    stubApi(true, 401, 'Session expired', { keepSession: true });
+    await openApp('/profile');
+    const input = await screen.findByLabelText(/^Display name/);
+    const meCalls = (): number =>
+      vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === '/api/auth/me').length;
+    const before = meCalls();
+    fireEvent.submit(input.closest('form')!);
+    await waitFor(() => expect(meCalls()).toBeGreaterThan(before));
+    // Let the re-probe settle so a wrongful teardown would have rendered.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Session expired');
+    expect(screen.getByLabelText(/^Display name/)).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Sign in' })).not.toBeInTheDocument();
     expect(screen.queryByText('Request failed')).not.toBeInTheDocument();
   });
 });

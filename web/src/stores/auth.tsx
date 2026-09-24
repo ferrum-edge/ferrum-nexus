@@ -206,3 +206,12 @@ export function useAuth(): AuthContextValue {
   if (!context) throw new Error('useAuth must be used within an AuthProvider');
   return context;
 }
+
+/**
+ * Access the auth store when one is mounted, or `null` outside
+ * {@link AuthProvider}. For shared hooks whose auth coupling is a side effect
+ * (such as refreshing the principal after a self-edit), not a requirement.
+ */
+export function useOptionalAuth(): AuthContextValue | null {
+  return useContext(AuthContext);
+}

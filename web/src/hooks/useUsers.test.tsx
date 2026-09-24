@@ -71,4 +71,22 @@ describe('useUpdateUser', () => {
     expect(authApi.meSilent).toHaveBeenCalledTimes(2);
     queryClient.clear();
   });
+
+  it('updates a user without an AuthProvider in the tree', async () => {
+    const meSilent = vi.spyOn(authApi, 'meSilent');
+    vi.spyOn(usersApi, 'update').mockResolvedValue({ user: adminUser });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }): ReactElement => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+    const { result } = renderHook(() => useUpdateUser(), { wrapper });
+
+    await act(async () => {
+      await result.current.mutateAsync({ id: clientUser.id, body: { role: 'admin' } });
+    });
+
+    expect(usersApi.update).toHaveBeenCalledWith(clientUser.id, { role: 'admin' });
+    expect(meSilent).not.toHaveBeenCalled();
+    queryClient.clear();
+  });
 });

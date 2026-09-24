@@ -20,7 +20,7 @@ import type {
   UpdateUserResponse,
 } from '@ferrum-nexus/shared';
 import { organizationsApi, usersApi } from '../lib/api';
-import { useAuth } from '../stores/auth';
+import { useOptionalAuth } from '../stores/auth';
 import { queryKeys } from './keys';
 
 /** Admin user directory. */
@@ -71,13 +71,14 @@ export function useUpdateUser(): UseMutationResult<
   { id: string; body: UpdateUserRequest }
 > {
   const queryClient = useQueryClient();
-  const { user, refresh } = useAuth();
+  const auth = useOptionalAuth();
   return useMutation({
     mutationFn: ({ id, body }: { id: string; body: UpdateUserRequest }) =>
       usersApi.update(id, body),
     onSuccess: (_response, variables) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.users.all });
-      if (variables.id === user?.id) void refresh();
+      // Editing one's own account changes role/nav; pull the new principal.
+      if (auth && variables.id === auth.user?.id) void auth.refresh();
     },
   });
 }
