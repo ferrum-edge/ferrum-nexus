@@ -353,6 +353,30 @@ export function createGodService(deps: GodServiceDeps): GodService {
         : await lifecycle();
       const updated = outcome.row;
 
+      // The disable has committed, so it is audited whatever fails from here
+      // on: a throw that skipped the audit rows below left a disabled account
+      // with no record of who disabled it or why. A failed step is named in
+      // both rows' details, and its error is raised once they are written.
+      const failedSteps: string[] = [];
+      let failure: unknown = null;
+      const attempt = async <T>(step: string, fallback: T, run: () => Promise<T>): Promise<T> => {
+        try {
+          return await run();
+        } catch (error) {
+          if (failedSteps.length === 0) failure = error;
+          failedSteps.push(step);
+          deps.log?.(
+            {
+              user_id: target.id,
+              step,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            'A god-mode disable step failed after the disable committed',
+          );
+          return fallback;
+        }
+      };
+
       // Only once the disable has committed. The checks above are advisory and
       // the transaction re-decides — a concurrent demotion can make this the
       // last super admin, a concurrent edit can move the row — and revoking
@@ -360,11 +384,17 @@ export function createGodService(deps: GodServiceDeps): GodService {
       // that stayed active (issue #337). Revoking is a per-grant claim plus an
       // ACL removal, neither of which minds the account being disabled; it runs
       // before the teardown so each group comes off a consumer that still exists.
-      const revoked = revokeGrants ? await access.revokeAllForUser(actor, target.id, why, ip) : 0;
+      const revoked = revokeGrants
+        ? await attempt('revoke_grants', 0, () =>
+            access.revokeAllForUser(actor, target.id, why, ip),
+          )
+        : 0;
 
       // A disabled account keeps no usable browser session — and no working
       // gateway identity, which a session cookie has nothing to do with.
-      const terminated = await store.sessions.deleteForUser(target.id);
+      const terminated = await attempt('terminate_sessions', 0, () =>
+        store.sessions.deleteForUser(target.id),
+      );
       const teardown = await runGatewayTeardown({
         credentials,
         store,
@@ -384,6 +414,7 @@ export function createGodService(deps: GodServiceDeps): GodService {
           to_status: 'disabled',
           terminated_sessions: terminated,
           ...teardown.details,
+          ...(failedSteps.length ? { failed_steps: failedSteps } : {}),
         },
         ip,
       );
@@ -398,9 +429,13 @@ export function createGodService(deps: GodServiceDeps): GodService {
           terminated_sessions: terminated,
           previous_status: target.status,
           ...teardown.details,
+          ...(failedSteps.length ? { failed_steps: failedSteps } : {}),
         },
         ip,
       );
+      // Audited above; the caller still learns the disable did not finish, and
+      // repeating it re-runs every step against the already-disabled account.
+      if (failedSteps.length) throw failure;
 
       return {
         user: toPublicUser(updated),

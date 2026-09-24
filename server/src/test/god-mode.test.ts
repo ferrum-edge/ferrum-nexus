@@ -335,6 +335,52 @@ describe('API deletion and god mode', () => {
       assert.equal(revocations.length, 0);
     });
 
+    it('audits a committed disable even when revoking its grants fails', async (t) => {
+      // Revocation runs after the disable commits (#337), so a throw there used
+      // to skip every audit row for an account that was already disabled.
+      const victim = await harness.registerUser({
+        email: 'god-revoke-failure@example.test',
+        role: 'client',
+      });
+      const apiId = await publish(provider, 'god-revoke-failure');
+      const grantId = await grantAccess(victim, provider, apiId);
+
+      t.mock.method(harness.store.grants, 'listActiveByUser', async () => {
+        throw new Error('store unavailable');
+      });
+      const response = await harness.authed(superAdmin, {
+        method: 'POST',
+        url: '/api/admin/god/disable-user',
+        payload: { user_id: victim.user.id, reason: 'Revocation fails.', revoke_grants: true },
+      });
+      assert.equal(response.statusCode, 500, response.body);
+      t.mock.restoreAll();
+
+      assert.equal((await harness.store.users.findById(victim.user.id))?.status, 'disabled');
+      // The remaining steps still ran: sessions are gone and the gateway
+      // identity was torn down, which also strips the ACL group.
+      const afterwards = await harness.authed(victim, { method: 'GET', url: '/api/catalog' });
+      assert.equal(afterwards.statusCode, 401);
+      assert.ok(!groupsOf(victim.user.id).includes(aclGroupForApi(apiId)));
+      for (const action of ['user.disable', 'god.disable_user']) {
+        const row = (await harness.auditRows(action)).find(
+          (entry) => entry.target_id === victim.user.id,
+        );
+        assert.deepEqual(row?.details.failed_steps, ['revoke_grants'], action);
+      }
+      assert.equal((await harness.store.grants.findById(grantId))?.status, 'active');
+
+      // Repeating the disable finishes the revocation.
+      const retried = await harness.authed(superAdmin, {
+        method: 'POST',
+        url: '/api/admin/god/disable-user',
+        payload: { user_id: victim.user.id, reason: 'Revocation fails.', revoke_grants: true },
+      });
+      assert.equal(retried.statusCode, 200, retried.body);
+      assert.equal(retried.json<GodDisableUserResponse>().revoked_grants, 1);
+      assert.equal((await harness.store.grants.findById(grantId))?.status, 'revoked');
+    });
+
     it('deletes the gateway credentials of the account it disables', async () => {
       const victim = await harness.registerUser({
         email: 'god-credential-victim@example.test',
