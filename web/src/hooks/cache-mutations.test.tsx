@@ -1,12 +1,14 @@
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { act, cleanup, renderHook } from '@testing-library/react';
+import type { GodDisableUserResponse } from '@ferrum-nexus/shared';
 import type { ReactElement, ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { API, CREDENTIAL, GRANT } from '../../test/fixtures';
-import { apisApi, credentialsApi, grantsApi } from '../lib/api';
+import { apisApi, credentialsApi, godApi, grantsApi } from '../lib/api';
 import { queryKeys } from './keys';
 import { useDeleteApi } from './useApis';
 import { useDeleteCredential, useIssueCredential, useRotateCredential } from './useCredentials';
+import { useGodDisableUser, useGodRevokeGrant } from './useGodMode';
 import { useRevokeGrant } from './useGrants';
 
 /** Cached screens a mutation may or may not have to refresh (issue #336). */
@@ -50,6 +52,9 @@ beforeEach(() => {
   });
   vi.spyOn(credentialsApi, 'remove').mockResolvedValue({ ok: true });
   vi.spyOn(apisApi, 'remove').mockResolvedValue({ ok: true });
+  vi.spyOn(godApi, 'revokeGrant').mockResolvedValue({ grant: { ...GRANT, status: 'revoked' } });
+  // Only the invalidations are under test, so the response body is a stub.
+  vi.spyOn(godApi, 'disableUser').mockResolvedValue({} as GodDisableUserResponse);
 });
 
 afterEach(() => {
@@ -64,7 +69,27 @@ describe('grant and credential mutations', () => {
     await act(async () => {
       await result.current.mutateAsync({ id: GRANT.id });
     });
-    expectStale('grants', 'requests', 'catalog', 'apis');
+    expectStale('grants', 'requests', 'catalog', 'apis', 'applications');
+  });
+
+  it('refreshes every grant surface after a god-mode revocation', async () => {
+    const { result } = renderHook(useGodRevokeGrant, { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync({ grant_id: GRANT.id, reason: 'incident' });
+    });
+    expectStale('grants', 'requests', 'catalog', 'apis', 'applications');
+  });
+
+  it('refreshes every grant surface after a god-mode disable that revokes grants', async () => {
+    const { result } = renderHook(useGodDisableUser, { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync({
+        user_id: GRANT.user_id,
+        reason: 'incident',
+        revoke_grants: true,
+      });
+    });
+    expectStale('grants', 'requests', 'catalog', 'apis', 'applications');
   });
 
   it.each([

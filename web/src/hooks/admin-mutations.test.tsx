@@ -181,7 +181,7 @@ describe('administrative mutations', () => {
       expect(response.terminated_sessions).toBe(2);
     });
     expect(godApi.disableUser).toHaveBeenCalledWith(body);
-    expectStale('users', 'grants');
+    expectStale('users', 'grants', 'requests', 'apis', 'catalog');
   });
 
   it('forwards the broadcast audience and retry key and refreshes message surfaces', async () => {
