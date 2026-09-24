@@ -8,6 +8,7 @@ import {
   type UpdateUserResponse,
 } from '@ferrum-nexus/shared';
 
+import { AuditAction } from '../audit/service.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
 async function publish(h: TestApp, provider: TestSession, slug: string) {
@@ -150,6 +151,23 @@ test('an active-status retry repairs a failed ACL restore', async () => {
     const live = await h.edgeClient.consumers.get(mapping!.ferrum_consumer_id);
     assert.deepEqual(live?.acl_groups, [aclGroupForApi(apiId)]);
     assert.equal(live?.credentials.keyauth?.length ?? 0, 0);
+
+    // Issue #337: the retry writes to Edge, so it is audited like the enable
+    // it completes: one row for the transition, one for the retry.
+    const rows = (await h.auditRows(AuditAction.USER_ENABLE)).filter(
+      (row) => row.target_id === client.user.id,
+    );
+    assert.equal(rows.length, 2);
+    const retry = rows.find((row) => row.details.gateway_restore_retry === true);
+    const transition = rows.find((row) => row !== retry);
+    assert.equal(retry?.actor_user_id, founder.user.id);
+    assert.deepEqual(retry?.details, {
+      changed_fields: [],
+      from_status: 'active',
+      to_status: 'active',
+      gateway_restore_retry: true,
+    });
+    assert.deepEqual(transition?.details.changed_fields, ['status']);
   } finally {
     await h.close();
   }

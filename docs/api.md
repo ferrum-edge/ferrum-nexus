@@ -1468,7 +1468,8 @@ credentials are still live and the revocation is queued for retry. Errors:
 `409 LAST_SUPER_ADMIN` when the target is the last active super admin —
 **including when that is you**, because "promote someone else first" is the
 useful message; `409 CONFLICT` for any other attempt to disable your own
-account.
+account. `revoke_grants: true` revokes the account's grants only after the
+disable has committed, so a refused disable leaves every grant in place.
 
 #### `POST /api/admin/god/broadcast`
 
