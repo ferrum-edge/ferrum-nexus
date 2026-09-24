@@ -31,7 +31,11 @@ import {
 import type { NexusConfig } from '../config/index.js';
 import type { EmailOutboxRecord, NexusStore } from '../db/store.js';
 import type { NexusCrypto } from '../lib/crypto.js';
-import { validateTemplateLinks } from './template-links.js';
+import {
+  isUrlVariable,
+  validateRenderedTextLinks,
+  validateTemplateLinks,
+} from './template-links.js';
 import {
   DEFAULT_EMAIL_TEMPLATES,
   renderTemplate,
@@ -472,9 +476,30 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
     const common = await commonVars();
     return (vars: TemplateVars = {}) => {
       try {
-        const rendered = renderTemplate(content, { ...common, ...vars }, { rawHtmlVars });
+        const merged = { ...common, ...vars };
+        const rendered = renderTemplate(content, merged, { rawHtmlVars });
         // Recheck substituted destinations, including raw HTML from the composer.
+        // Plain-text values are escaped text, not destinations, so they are
+        // judged as an inert stand-in: rechecking them for real read a display
+        // name like `Big Data: Ops` as a `data:` URL and dropped the mail (#324).
+        // Template validation already confines them to text, since only a
+        // `*_url` placeholder may fill a link or attribute.
+        const standIn: TemplateVars = {};
+        for (const [name, value] of Object.entries(merged)) {
+          const inert =
+            value !== undefined &&
+            value !== null &&
+            !isUrlVariable(name) &&
+            !rawHtmlVars.includes(name);
+          standIn[name] = inert ? 'x' : value;
+        }
+        const checked = renderTemplate(content, standIn, { rawHtmlVars });
         validateTemplateLinks(
+          { subject: checked.subject, body_html: checked.html, body_text: checked.text },
+          config,
+        );
+        // An explicit off-portal URL in text is still autolinked by mail clients.
+        validateRenderedTextLinks(
           { subject: rendered.subject, body_html: rendered.html, body_text: rendered.text },
           config,
         );

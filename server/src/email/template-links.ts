@@ -5,6 +5,8 @@ import type { EmailTemplateContent } from './templates.js';
 export const TEMPLATE_LINK_HOSTS_SETTING = 'NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS';
 
 const PLACEHOLDER = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g;
+/** Destination variables: the only placeholders a link, attribute or CSS url() may hold. */
+const URL_VARIABLE = /_url$/;
 const ACTION_URL = /\{\{\s*(?:reset_url|verification_url)\s*\}\}/g;
 const URL_ATTRIBUTE = /^(?:href|src|action|srcset|data|poster|formaction|background|xlink:href)$/;
 const ACTIVE_TAG =
@@ -33,6 +35,39 @@ const ENTITIES: Readonly<Record<string, string>> = {
   NewLine: '\n',
 };
 
+/**
+ * True when `name` is a destination variable (`portal_url`, `reset_url`, …).
+ *
+ * Every other variable is plain text — a display name, an API name, a note —
+ * and is only ever interpolated as text (#324).
+ */
+export function isUrlVariable(name: string): boolean {
+  return URL_VARIABLE.test(name);
+}
+
+/**
+ * Decode HTML character references the way {@link validateTemplateLinks} reads
+ * a template, refusing anything a mail client might decode differently.
+ */
+function decodeEntities(value: string, refuse: (construct: string) => never): string {
+  return value.replace(
+    /&#(x[0-9a-f]+|[0-9]+);?|&([a-z][a-z0-9]*);/gi,
+    (_match: string, code: string | undefined, name: string | undefined) => {
+      if (code) {
+        const number = code.toLowerCase().startsWith('x')
+          ? parseInt(code.slice(1), 16)
+          : parseInt(code, 10);
+        if (number === 0 || number > 0x10ffff || (number >= 0xd800 && number <= 0xdfff)) {
+          refuse('invalid HTML entity');
+        }
+        return String.fromCodePoint(number);
+      }
+      if (!name || !Object.hasOwn(ENTITIES, name)) refuse('unsupported HTML entity');
+      return ENTITIES[name] ?? refuse('unsupported HTML entity');
+    },
+  );
+}
+
 /** Validate destinations without ever including a URL path or token in errors. */
 export function validateTemplateLinks(
   content: EmailTemplateContent,
@@ -49,22 +84,7 @@ export function validateTemplateLinks(
     }
 
     function decode(value: string): string {
-      return value.replace(
-        /&#(x[0-9a-f]+|[0-9]+);?|&([a-z][a-z0-9]*);/gi,
-        (_match: string, code: string | undefined, name: string | undefined) => {
-          if (code) {
-            const number = code.toLowerCase().startsWith('x')
-              ? parseInt(code.slice(1), 16)
-              : parseInt(code, 10);
-            if (number === 0 || number > 0x10ffff || (number >= 0xd800 && number <= 0xdfff)) {
-              refuse('invalid HTML entity');
-            }
-            return String.fromCodePoint(number);
-          }
-          if (!name || !Object.hasOwn(ENTITIES, name)) refuse('unsupported HTML entity');
-          return ENTITIES[name] ?? refuse('unsupported HTML entity');
-        },
-      );
+      return decodeEntities(value, refuse);
     }
 
     function destination(value: string, construct: string): void {
@@ -73,6 +93,12 @@ export function validateTemplateLinks(
       if (variables.length) {
         if (variables.length !== 1 || variables[0]?.[0] !== value.trim()) {
           refuse(`concatenated placeholder in ${construct}`);
+        }
+        // Only a destination variable may be a destination (#324): the send-time
+        // check sees plain-text values as inert stand-ins, so a display name in
+        // an href would otherwise go unchecked.
+        if (!isUrlVariable(variables[0]?.[1] ?? '')) {
+          refuse(`non-URL placeholder in ${construct}`);
         }
         return; // The entire substituted value is checked again before enqueueing.
       }
@@ -202,5 +228,53 @@ export function validateTemplateLinks(
       }
     }
     if (/url\s*\(/i.test(decodedText)) css(decodedText);
+  }
+}
+
+/**
+ * Refuse an absolute `http(s)://` URL in a real rendering that points off the
+ * portal origin and the link allowlist (#324).
+ *
+ * The send-time {@link validateTemplateLinks} pass judges a rendering in which
+ * every plain-text variable is an inert stand-in, because escaped text such as
+ * `Big Data: Ops` or `Bob//Team` is not a destination. Mail clients do,
+ * however, autolink an explicit URL in text, so this pass reads the message the
+ * recipient actually gets — covering a URL inside a value as well as one a
+ * value completes next to template text. Only explicit `http:`/`https:` URLs
+ * count: a word followed by a colon, or a bare `//`, is ordinary text.
+ */
+export function validateRenderedTextLinks(
+  rendered: EmailTemplateContent,
+  config: Pick<NexusConfig, 'publicUrl' | 'emailTemplateAllowedLinkHosts'>,
+): void {
+  const portal = new URL(config.publicUrl);
+
+  for (const field of ['subject', 'body_html', 'body_text'] as const) {
+    function refuse(construct: string): never {
+      throw validationFailed(
+        `Email ${field} refuses ${construct}; check ${TEMPLATE_LINK_HOSTS_SETTING}`,
+        { field, construct, setting: TEMPLATE_LINK_HOSTS_SETTING },
+      );
+    }
+
+    // The subject and text body are shown verbatim; only HTML decodes references.
+    const source =
+      field === 'body_html' ? decodeEntities(rendered[field], refuse) : rendered[field];
+    const text = source.replace(/[\r\n]/g, ' ').replace(/[\u0000-\u001f\u007f]/g, '');
+    for (const match of text.matchAll(/https?:[/\\]{2}[^\s<>"'()]+/gi)) {
+      let url: URL;
+      try {
+        url = new URL(match[0].replace(/\\/g, '/'));
+      } catch {
+        refuse('invalid URL in text');
+      }
+      if (url.username || url.password) refuse('URL credentials in text');
+      if (
+        url.origin !== portal.origin &&
+        !config.emailTemplateAllowedLinkHosts.includes(url.host.toLowerCase())
+      ) {
+        refuse(`host '${url.host}' in text`);
+      }
+    }
   }
 }

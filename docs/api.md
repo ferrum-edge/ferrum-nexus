@@ -1336,7 +1336,7 @@ also refused; see the [template authoring rules](guides/admin-guide.md#placehold
 of an HTML anchor or a whitespace-delimited URL in `body_text`. Other attributes,
 HTML text, subjects and concatenation into another URL are refused, including
 URLs on approved hosts. Any placeholder in a URL or attribute must supply the
-entire value. A violation returns `400 VALIDATION_FAILED` before saving or
+entire value and name a `*_url` variable. A violation returns `400 VALIDATION_FAILED` before saving or
 auditing; the message names the field, offending host or construct, and setting.
 `details` contains `field`, `construct`, and `setting`. URL paths, query strings
 and token values are not included in these errors. Stored templates and their
