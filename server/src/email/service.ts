@@ -494,6 +494,15 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
             !rawHtmlVars.includes(name);
           standIn[name] = inert ? 'x' : value;
         }
+        // Each raw-HTML value must also stand alone as complete markup. In
+        // context it is judged next to stand-ins, so a value ending inside an
+        // open tag or attribute (`<a href="`) would pass there and let the
+        // plain-text value that follows it become the link.
+        for (const name of rawHtmlVars) {
+          const value = merged[name];
+          if (value === undefined || value === null) continue;
+          validateTemplateLinks({ subject: '', body_html: String(value), body_text: '' }, config);
+        }
         const checked = renderTemplate(content, standIn, { rawHtmlVars });
         validateTemplateLinks(
           { subject: checked.subject, body_html: checked.html, body_text: checked.text },

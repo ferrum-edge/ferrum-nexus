@@ -595,6 +595,70 @@ describe('email template plain-text values', () => {
     assert.ok(allowed.text.includes('https://assets.example.test/team'));
   });
 
+  it('splits text URLs at control characters the way a mail client does', async () => {
+    // A mail client treats TAB, VT and FF as whitespace and autolinks the
+    // second URL; deleting them hid it inside the first one's path.
+    for (const separator of ['\t', '\u000b', '\u000c']) {
+      await assert.rejects(
+        harness.services.email.render('verification', {
+          ...actionVars,
+          recipient_name: `Eve https://portal.test/${separator}https://attacker.example/x`,
+        }),
+        /host 'attacker\.example'/,
+        JSON.stringify(separator),
+      );
+    }
+    // And a portal URL followed by a tab and a word is not a foreign host.
+    const rendered = await harness.services.email.render('verification', {
+      ...actionVars,
+      recipient_name: 'Ada https://portal.test\tRead',
+    });
+    assert.ok(rendered.text.includes('https://portal.test\tRead'), rendered.text);
+  });
+
+  it('refuses a raw-HTML value that leaves a tag for a later value to finish', async () => {
+    await harness.store.emailTemplates.upsert('mass', {
+      ...DEFAULT_EMAIL_TEMPLATES.mass,
+      body_html: '<div>{{body_html}}{{subject}}">Open</a></div>',
+    });
+    try {
+      for (const subject of ['//attacker.example/x', 'javascript:alert(1)']) {
+        await assert.rejects(
+          harness.services.email.render(
+            'mass',
+            { body_html: '<p>Hi</p><a href="', subject, body_text: 'Hi' },
+            [...MASS_RAW_HTML_VARS],
+          ),
+          /body_html refuses malformed/,
+          subject,
+        );
+      }
+      // A complete fragment still renders in that template.
+      const sent = await harness.services.email.render(
+        'mass',
+        { body_html: '<p>Hi</p>', subject: 'News', body_text: 'Hi' },
+        [...MASS_RAW_HTML_VARS],
+      );
+      assert.ok(sent.html.includes('<p>Hi</p>News'), sent.html);
+    } finally {
+      await harness.store.emailTemplates.delete('mass');
+    }
+  });
+
+  it('refuses a template URL that a control character splits from a foreign one', async () => {
+    const response = await harness.authed(founder, {
+      method: 'PUT',
+      url: '/api/admin/email-templates/verification',
+      payload: {
+        ...DEFAULT_EMAIL_TEMPLATES.verification,
+        body_text: 'Docs: https://portal.test/\thttps://attacker.example/x',
+      },
+    });
+    assert.equal(response.statusCode, 400, response.body);
+    assert.match(response.json<ApiErrorBody>().error.message, /attacker\.example/);
+    assert.equal(await harness.store.emailTemplates.get('verification'), null);
+  });
+
   it('refuses a non-URL placeholder in a link or attribute at save time', async () => {
     for (const payload of [
       { body_html: '<a href="{{recipient_name}}">Me</a>' },

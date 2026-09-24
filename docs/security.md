@@ -355,7 +355,10 @@ substituted destinations are also checked before enqueueing. Only a `*_url`
 placeholder may fill a URL or attribute, so every other value (a display, portal
 or API name, a note) is escaped text: the send-time recheck judges it as an
 inert stand-in, and refuses it only when it carries an explicit off-policy
-`http(s)://` URL that a mail client would autolink. HTTP(S) links,
+`http(s)://` URL that a mail client would autolink (text is split at control
+characters such as TAB, as a mail client splits it). Raw HTML from the
+mass-email composer must also be complete markup on its own, so it cannot leave
+a tag or attribute open for a later value to fill. HTTP(S) links,
 protocol-relative URLs, URL attributes and CSS `url(...)` must resolve to the
 `NEXUS_PUBLIC_URL` origin or an exact host explicitly configured by the operator
 in `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS` (empty by default). Scheme/host case
