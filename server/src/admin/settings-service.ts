@@ -281,9 +281,7 @@ export async function readStoredSmtp(store: NexusStore): Promise<StoredSmtpSetti
  * relay's secret to another (issue #342).
  */
 export type EncryptedSettingRead =
-  | { state: 'absent' }
-  | { state: 'value'; value: string }
-  | { state: 'unreadable' };
+  { state: 'absent' } | { state: 'value'; value: string } | { state: 'unreadable' };
 
 /** Read an encrypted `app_settings` value, telling absent from undecryptable. */
 export async function readEncryptedSettingState(

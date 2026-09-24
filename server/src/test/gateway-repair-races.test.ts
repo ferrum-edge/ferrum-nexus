@@ -128,7 +128,10 @@ describe('gateway repair against a restored deployment', () => {
   it('flags an orphaned proxy only under the restore key, after asking the gateway', async () => {
     deleteProxyOnly();
     const held = new Set<string>();
-    watchKeys((key) => held.add(key), (key) => held.delete(key));
+    watchKeys(
+      (key) => held.add(key),
+      (key) => held.delete(key),
+    );
     let checkedUnderKey = false;
     watchProxyReads((id) => {
       if (id === proxyId && held.has(apiRestoreLockKey(apiId))) checkedUnderKey = true;
