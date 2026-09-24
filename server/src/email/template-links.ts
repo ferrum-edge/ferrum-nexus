@@ -128,8 +128,15 @@ export function validateTemplateLinks(
       refuse('javascript: or data: scheme');
     }
     // Scan all fields, including text and URLs in otherwise unrecognised attributes.
-    for (const match of decoded.matchAll(/(?:https?\s*:\s*[/\\]{2}|[/\\]{2})[^\s<>"'()]+/gi)) {
-      destination(match[0], 'absolute URL');
+    // A URL parser strips control characters, so they are deleted for the scan;
+    // a mail client autolinking text splits at them instead, so the text is also
+    // scanned with them as spaces — otherwise a TAB hides a second URL in the
+    // first one's path.
+    const split = decode(source).replace(/[\u0000-\u001f\u007f]/g, ' ');
+    for (const scanned of [decoded, split]) {
+      for (const match of scanned.matchAll(/(?:https?\s*:\s*[/\\]{2}|[/\\]{2})[^\s<>"'()]+/gi)) {
+        destination(match[0], 'absolute URL');
+      }
     }
     if (field !== 'body_html') {
       const links =
@@ -260,7 +267,9 @@ export function validateRenderedTextLinks(
     // The subject and text body are shown verbatim; only HTML decodes references.
     const source =
       field === 'body_html' ? decodeEntities(rendered[field], refuse) : rendered[field];
-    const text = source.replace(/[\r\n]/g, ' ').replace(/[\u0000-\u001f\u007f]/g, '');
+    // A mail client splits text at a control character (TAB, VT, FF, …) rather
+    // than joining around it, so each side is judged as its own URL.
+    const text = source.replace(/[\u0000-\u001f\u007f]/g, ' ');
     for (const match of text.matchAll(/https?:[/\\]{2}[^\s<>"'()]+/gi)) {
       let url: URL;
       try {
