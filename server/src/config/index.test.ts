@@ -229,6 +229,47 @@ describe('loadConfig', () => {
     expectConfigError(baseEnv({ NEXUS_MAX_APIS_PER_OWNER: '2.5' }), 'NEXUS_MAX_APIS_PER_OWNER');
   });
 
+  it('accepts only plain decimal integers (#339)', () => {
+    assert.equal(loadConfig(baseEnv({ NEXUS_PORT: ' 8080 ' })).port, 8080);
+    assert.equal(loadConfig(baseEnv({ NEXUS_PORT: '0' })).port, 0);
+    assert.equal(loadConfig(baseEnv({ NEXUS_SMTP_PORT: '0025' })).smtp.port, 25);
+    // `Number()` reads all of these as integers in range, so each used to be
+    // accepted as a different value from the one written.
+    for (const value of ['0x1F90', '1e3', '0b11', '0o17', '+5', '8_080', '80 80', '-0', '5.0']) {
+      expectConfigError(baseEnv({ NEXUS_PORT: value }), 'NEXUS_PORT must be an integer');
+      expectConfigError(
+        baseEnv({ NEXUS_MAX_APIS_PER_OWNER: value }),
+        'NEXUS_MAX_APIS_PER_OWNER must be an integer',
+      );
+    }
+  });
+
+  it('keeps a plain http(s) NEXUS_PUBLIC_URL and trims its trailing slash', () => {
+    for (const [url, expected] of [
+      ['https://portal.example.com/', 'https://portal.example.com'],
+      ['http://127.0.0.1:5173', 'http://127.0.0.1:5173'],
+      ['HTTPS://Portal.Example.com/portal//', 'https://portal.example.com/portal'],
+    ] as const) {
+      assert.equal(loadConfig(baseEnv({ NEXUS_PUBLIC_URL: url })).publicUrl, expected);
+    }
+  });
+
+  it('refuses a NEXUS_PUBLIC_URL that is not a plain http(s) origin (#339)', () => {
+    for (const [url, needle] of [
+      ['portal.example.com', 'must be an absolute URL'],
+      ['ftp://portal.example.com', 'must use http:// or https://'],
+      ['javascript:alert(1)', 'must use http:// or https://'],
+      ['https://admin@portal.example.com', 'must not contain a username or password'],
+      ['https://admin:secret@portal.example.com', 'must not contain a username or password'],
+      ['https://portal.example.com/?tenant=a', 'must not contain a query string or fragment'],
+      ['https://portal.example.com/?', 'must not contain a query string or fragment'],
+      ['https://portal.example.com/#/home', 'must not contain a query string or fragment'],
+      ['https://portal.example.com#', 'must not contain a query string or fragment'],
+    ] as const) {
+      expectConfigError(baseEnv({ NEXUS_PUBLIC_URL: url }), `NEXUS_PUBLIC_URL ${needle}`);
+    }
+  });
+
   it('treats blank optional variables as unset', () => {
     const config = loadConfig(
       baseEnv({ FERRUM_ADMIN_JWT_AUDIENCE: '   ', FERRUM_ADMIN_CA_FILE: '', NEXUS_SMTP_HOST: '' }),

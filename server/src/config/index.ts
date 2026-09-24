@@ -435,7 +435,11 @@ const intish = (
     .optional()
     .transform((raw, ctx) => {
       if (raw === undefined || raw.trim() === '') return defaultValue;
-      const value = Number(raw);
+      // Plain decimal digits only: `Number()` alone also accepts `0x1F90`,
+      // `1e3`, `0b11` and `+5`, so a typo could silently become a different
+      // port or quota (#339). Every range starts at 0, so no sign is needed.
+      const digits = raw.trim();
+      const value = /^\d+$/.test(digits) ? Number(digits) : Number.NaN;
       if (!Number.isSafeInteger(value) || value < min || value > max) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -641,11 +645,26 @@ export function loadConfig(env: EnvRecord): NexusConfig {
   }
 
   // ── Public URL ───────────────────────────────────────────────────────────
+  // Every emailed link, the email link policy's origin and the CORS/cookie
+  // decisions start from this value, so it must be a plain web origin (plus an
+  // optional path): no other scheme, no credentials, and no query or fragment
+  // that each appended route would land inside (#339).
   let publicUrl = raw.NEXUS_PUBLIC_URL;
+  let publicParsed: URL | undefined;
   try {
-    publicUrl = new URL(publicUrl).toString().replace(/\/+$/, '');
+    publicParsed = new URL(publicUrl);
   } catch {
     problems.push('NEXUS_PUBLIC_URL must be an absolute URL, e.g. https://portal.example.com');
+  }
+  if (publicParsed) {
+    if (publicParsed.protocol !== 'http:' && publicParsed.protocol !== 'https:') {
+      problems.push('NEXUS_PUBLIC_URL must use http:// or https://');
+    } else if (publicParsed.username || publicParsed.password) {
+      problems.push('NEXUS_PUBLIC_URL must not contain a username or password');
+    } else if (publicParsed.search || publicParsed.hash || /[?#]/.test(publicUrl)) {
+      problems.push('NEXUS_PUBLIC_URL must not contain a query string or fragment');
+    }
+    publicUrl = publicParsed.toString().replace(/\/+$/, '');
   }
 
   const emailTemplateAllowedLinkHosts: string[] = [];
