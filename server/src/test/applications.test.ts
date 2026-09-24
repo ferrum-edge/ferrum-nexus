@@ -593,8 +593,14 @@ describe('application-scoped identities', () => {
     assert.equal(listed.statusCode, 200, listed.body);
     const page = listed.json<ListApplicationsResponse>();
     assert.equal(page.total, 4);
-    assert.deepEqual(grouped.map((method) => method.mock.callCount()), [1, 1]);
-    assert.deepEqual(perRow.map((method) => method.mock.callCount()), [0, 0, 0]);
+    assert.deepEqual(
+      grouped.map((method) => method.mock.callCount()),
+      [1, 1],
+    );
+    assert.deepEqual(
+      perRow.map((method) => method.mock.callCount()),
+      [0, 0, 0],
+    );
 
     const counts = new Map(
       page.items.map((item) => [item.id, [item.active_grants, item.active_credentials]]),

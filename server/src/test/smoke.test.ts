@@ -2372,9 +2372,15 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       // an empty list matches nothing.
       const liveStatuses = ['active', 'retiring'] as const;
       const live = await store.credentials.listByConsumer(user.id, 'keyauth', liveStatuses);
-      assert.deepEqual(live.map((row) => row.id), [first.id, second.id]);
+      assert.deepEqual(
+        live.map((row) => row.id),
+        [first.id, second.id],
+      );
       const revoked = await store.credentials.listByConsumer(user.id, undefined, ['revoked']);
-      assert.deepEqual(revoked.map((row) => row.id), [afterRevoke.id, afterSecondRevoke.id]);
+      assert.deepEqual(
+        revoked.map((row) => row.id),
+        [afterRevoke.id, afterSecondRevoke.id],
+      );
       assert.deepEqual(await store.credentials.listByConsumer(user.id, 'keyauth', []), []);
       assert.equal((await store.credentials.listByConsumer(user.id, 'keyauth')).length, 4);
       assert.equal(await store.credentials.count({ user_id: user.id, status: 'active' }), 1);
