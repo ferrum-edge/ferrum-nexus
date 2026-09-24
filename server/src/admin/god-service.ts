@@ -300,8 +300,6 @@ export function createGodService(deps: GodServiceDeps): GodService {
       }
       if (target.id === actor.id) throw conflict('You cannot disable your own account');
 
-      const revoked = revokeGrants ? await access.revokeAllForUser(actor, target.id, why, ip) : 0;
-
       // The count and the write share one transaction body, exactly as
       // `users.updateUser` does: the pre-check above is advisory, because two
       // concurrent disables both pass it and leave the portal with no active
@@ -354,6 +352,16 @@ export function createGodService(deps: GodServiceDeps): GodService {
         ? await locks(SUPER_ADMIN_LOCK_KEY, lifecycle)
         : await lifecycle();
       const updated = outcome.row;
+
+      // Only once the disable has committed. The checks above are advisory and
+      // the transaction re-decides — a concurrent demotion can make this the
+      // last super admin, a concurrent edit can move the row — and revoking
+      // first meant a refused disable still stripped every grant of an account
+      // that stayed active (issue #337). Revoking is a per-grant claim plus an
+      // ACL removal, neither of which minds the account being disabled; it runs
+      // before the teardown so each group comes off a consumer that still exists.
+      const revoked = revokeGrants ? await access.revokeAllForUser(actor, target.id, why, ip) : 0;
+
       // A disabled account keeps no usable browser session — and no working
       // gateway identity, which a session cookie has nothing to do with.
       const terminated = await store.sessions.deleteForUser(target.id);

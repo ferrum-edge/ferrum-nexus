@@ -369,6 +369,8 @@ after it. Do not put it in the subject, HTML text, an image, CSS, another
 attribute, or a URL query parameter. This restriction also applies to
 `{{verification_url}}`. Any placeholder in a URL or attribute must supply the
 entire value; concatenated values such as `{{portal_url}}/help` are refused.
+Only a `*_url` placeholder (`portal_url`, `api_url`, `thread_url`, …) may fill a
+URL or attribute; names and notes such as `{{recipient_name}}` belong in text.
 
 All template fields permit outbound HTTP(S) destinations only on the portal's
 public origin or an operator-approved exact host. An operator can set

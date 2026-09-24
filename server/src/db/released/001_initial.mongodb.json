@@ -148,6 +148,11 @@
       "key": { "user_id": 1, "created_at": 1 }
     },
     {
+      "collection": "access_requests",
+      "name": "ix_access_requests_application",
+      "key": { "application_id": 1, "status": 1 }
+    },
+    {
       "collection": "grants",
       "name": "ux_grants_active",
       "key": { "api_id": 1, "user_id": 1, "application_id": 1 },
@@ -202,6 +207,11 @@
       "collection": "credential_metadata",
       "name": "ix_credentials_user_status",
       "key": { "user_id": 1, "status": 1 }
+    },
+    {
+      "collection": "credential_metadata",
+      "name": "ix_credentials_application",
+      "key": { "application_id": 1, "status": 1 }
     },
     {
       "collection": "credential_metadata",

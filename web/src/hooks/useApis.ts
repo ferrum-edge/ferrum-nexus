@@ -2,6 +2,8 @@ import {
   useMutation,
   useQuery,
   useQueryClient,
+  type Query,
+  type QueryClient,
   type UseMutationResult,
   type UseQueryResult,
 } from '@tanstack/react-query';
@@ -281,13 +283,48 @@ export function useRestoreApiGateway(): UseMutationResult<
   });
 }
 
+/** Every per-API key carries the id third: `['apis', <kind>, id, …]`. */
+function isQueryForApi(query: Query, id: string): boolean {
+  return query.queryKey[0] === queryKeys.apis.all[0] && query.queryKey[2] === id;
+}
+
+/**
+ * Drop a deleted API's cached queries without refetching them.
+ *
+ * Invalidating `apis.all` after a delete refetched the page's still-mounted
+ * detail, spec and usage queries; each now answers 404 and surfaced a "Could
+ * not load data" toast while the page navigated away (issue #336). Removing a
+ * mounted query is no better — the next render of its observer rebuilds and
+ * fetches it. So in-flight loads are cancelled, unobserved entries go now, and
+ * the ones the departing page still observes are left untouched (never marked
+ * stale, so nothing refetches) until their last observer unmounts.
+ */
+function forgetDeletedApi(queryClient: QueryClient, id: string): void {
+  const cache = queryClient.getQueryCache();
+  const predicate = (query: Query): boolean => isQueryForApi(query, id);
+  const forget = (query: Query): void => {
+    if (query.getObserversCount() === 0) cache.remove(query);
+  };
+  void queryClient.cancelQueries({ predicate });
+  cache.findAll({ predicate }).forEach(forget);
+  if (cache.findAll({ predicate }).length === 0) return;
+  const unsubscribe = cache.subscribe((event) => {
+    if (event.type === 'observerRemoved' && predicate(event.query)) forget(event.query);
+    if (cache.findAll({ predicate }).length === 0) unsubscribe();
+  });
+}
+
 /** Delete an API and its Edge proxy. */
 export function useDeleteApi(): UseMutationResult<DeleteApiResponse, Error, string> {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => apisApi.remove(id),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.apis.all });
+    onSuccess: (_response, id) => {
+      forgetDeletedApi(queryClient, id);
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.apis.all,
+        predicate: (query) => !isQueryForApi(query, id),
+      });
       void queryClient.invalidateQueries({ queryKey: queryKeys.catalog.all });
     },
   });
@@ -349,5 +386,9 @@ export function useCreateTestConsumer(): UseMutationResult<
   return useMutation({
     mutationFn: ({ id, body }: { id: string; body?: CreateTestConsumerRequest }) =>
       apisApi.createTestConsumer(id, body ?? {}),
+    // The response carries the sandbox credential's plaintext secret: once the
+    // page resets the mutation, it leaves the mutation cache immediately
+    // (issue #336).
+    gcTime: 0,
   });
 }

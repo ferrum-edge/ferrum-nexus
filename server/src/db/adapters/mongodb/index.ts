@@ -982,6 +982,11 @@ export const BASELINE_INDEXES: readonly IndexDefinition[] = [
     name: 'ix_access_requests_user',
     key: { user_id: 1, created_at: 1 },
   },
+  {
+    collection: 'access_requests',
+    name: 'ix_access_requests_application',
+    key: { application_id: 1, status: 1 },
+  },
 
   {
     collection: 'grants',
@@ -1028,6 +1033,11 @@ export const BASELINE_INDEXES: readonly IndexDefinition[] = [
     collection: 'credential_metadata',
     name: 'ix_credentials_user_status',
     key: { user_id: 1, status: 1 },
+  },
+  {
+    collection: 'credential_metadata',
+    name: 'ix_credentials_application',
+    key: { application_id: 1, status: 1 },
   },
   {
     collection: 'credential_metadata',
@@ -1642,9 +1652,21 @@ class MongoStore implements NexusStore {
         mapOrganization,
       ),
 
-    delete: async (id) =>
-      (await this.col(COLLECTIONS.organizations).deleteOne({ _id: id }, this.opts)).deletedCount >
-      0,
+    delete: async (id) => {
+      // Stand in for `users.org_id … REFERENCES organizations (id) ON DELETE
+      // SET NULL`: without it a member kept pointing at an organization that no
+      // longer existed on Mongo while the same row on PostgreSQL read `null`.
+      // Through the same session as the delete, so a transaction covers both.
+      await this.col(COLLECTIONS.users).updateMany(
+        { org_id: id } as Filter<NexusDoc>,
+        { $set: { org_id: null } } as UpdateFilter<NexusDoc>,
+        this.opts,
+      );
+      return (
+        (await this.col(COLLECTIONS.organizations).deleteOne({ _id: id }, this.opts)).deletedCount >
+        0
+      );
+    },
   };
 
   /* ── sessions ─────────────────────────────────────────────────────────── */
@@ -1943,8 +1965,18 @@ class MongoStore implements NexusStore {
       return docs.map((doc) => str((doc as Row)._id));
     },
 
-    delete: async (id) =>
-      (await this.col(COLLECTIONS.apis).deleteOne({ _id: id }, this.opts)).deletedCount > 0,
+    delete: async (id) => {
+      // Stand in for `message_threads.api_id … REFERENCES apis (id) ON DELETE
+      // SET NULL`: a conversation about an API outlives it, but must not keep
+      // a dangling id the SQL backends would have cleared. Through the same
+      // session as the delete, so a transaction covers both.
+      await this.col(COLLECTIONS.threads).updateMany(
+        { api_id: id } as Filter<NexusDoc>,
+        { $set: { api_id: null } } as UpdateFilter<NexusDoc>,
+        this.opts,
+      );
+      return (await this.col(COLLECTIONS.apis).deleteOne({ _id: id }, this.opts)).deletedCount > 0;
+    },
   };
 
   /* ── apiSpecs ─────────────────────────────────────────────────────────── */
@@ -3491,19 +3523,38 @@ class MongoStore implements NexusStore {
 
   readonly verificationTokens: VerificationTokenRepo = {
     claimIssue: async (userId, purpose, issuedAt, notBefore) => {
+      // Two statements that cannot collide, mirroring the SQL adapters' insert
+      // and conditional update. A single conditional upsert would try to insert
+      // a second `_id` whenever the existing claim is still inside the window,
+      // and inside a multi-document transaction that duplicate-key error aborts
+      // the transaction server-side: `withTransaction` re-runs the body, which
+      // collides again until the retry budget turns a throttled request into
+      // CONFLICT (issue #326).
+      const claims = this.col(COLLECTIONS.tokenIssueClaims);
+      const _id = `${userId}:${purpose}`;
+      const fields = { user_id: userId, purpose, issued_at: issuedAt };
+      const renewed = await claims.updateOne(
+        {
+          _id,
+          $or: [{ issued_at: { $lte: notBefore } }, { issued_at: { $exists: false } }],
+        } as Filter<NexusDoc>,
+        { $set: fields },
+        this.opts,
+      );
+      if (renewed.matchedCount > 0) return true;
       try {
-        const result = await this.col(COLLECTIONS.tokenIssueClaims).updateOne(
-          {
-            _id: `${userId}:${purpose}`,
-            $or: [{ issued_at: { $lte: notBefore } }, { issued_at: { $exists: false } }],
-          } as Filter<NexusDoc>,
-          { $set: { user_id: userId, purpose, issued_at: issuedAt } },
+        // Matches any existing claim by `_id` alone, so an in-window claim is a
+        // no-op rather than an insert that collides with it.
+        const created = await claims.updateOne(
+          { _id },
+          { $setOnInsert: fields },
           { ...this.opts, upsert: true },
         );
-        return result.matchedCount > 0 || result.upsertedCount > 0;
+        return created.upsertedCount > 0;
       } catch (error) {
-        // A concurrent upsert won the unique `_id` race and therefore owns
-        // this throttle window.
+        // Outside a transaction, a concurrent upsert that won the unique `_id`
+        // race owns this throttle window. (The server already retries an
+        // equality-on-`_id` upsert that loses that race, so this is a backstop.)
         if ((error as { code?: unknown }).code === 11000) return false;
         throw error;
       }

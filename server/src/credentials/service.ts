@@ -169,7 +169,6 @@
 import {
   CREDENTIAL_TYPE_FOR_PLUGIN,
   MAX_PAGE_SIZE,
-  consumerUsernameForUser,
   roleAtLeast,
   type CredentialMetadata,
   type CredentialType,
@@ -2109,7 +2108,11 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           }
         }
 
-        return { created, previous };
+        // The consumer the credential actually lives on — an application's
+        // `nexus-app-<id>` or a test consumer's `nexus-test-<api_id>` as often
+        // as the account's own — so the response names where the new secret
+        // is, not where an account credential would be (#329).
+        return { created, previous, consumerUsername: consumer.username };
       });
 
       await audit.record(
@@ -2157,7 +2160,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       return {
         credential: result.created.credential,
         previous: result.previous,
-        consumer_username: consumerUsernameForUser(target.user_id),
+        consumer_username: result.consumerUsername,
         secret: result.created.secret,
       };
     },

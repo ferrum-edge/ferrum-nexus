@@ -141,6 +141,33 @@ export function runSettingsTransactionContract(
       });
     }
 
+    it('rolls back an email template save when its audit row fails (#334)', async () => {
+      const beforeTemplate = await target.store.emailTemplates.get('mass');
+      const beforeAudit = await harness.auditRows('admin.template_update');
+      faults.failAfter('auditLogs', 'create', 0);
+      const response = await harness.authed(founder, {
+        method: 'PUT',
+        url: '/api/admin/email-templates/mass',
+        payload: { subject: 'Unaudited', body_html: '<p>Unaudited</p>', body_text: 'Unaudited' },
+      });
+      assert.equal(response.statusCode, 500);
+      assert.deepEqual(faults.pending(), [], 'the intended failure was reached');
+      assert.deepEqual(await target.store.emailTemplates.get('mass'), beforeTemplate);
+      assert.deepEqual(await harness.auditRows('admin.template_update'), beforeAudit);
+
+      const saved = await harness.authed(founder, {
+        method: 'PUT',
+        url: '/api/admin/email-templates/mass',
+        payload: { subject: 'Audited', body_html: '<p>Audited</p>', body_text: 'Audited' },
+      });
+      assert.equal(saved.statusCode, 200, saved.body);
+      assert.equal((await target.store.emailTemplates.get('mass'))?.subject, 'Audited');
+      assert.equal(
+        (await harness.auditRows('admin.template_update')).length,
+        beforeAudit.length + 1,
+      );
+    });
+
     it('commits the complete patch and one audit row without exposing secret values', async () => {
       const beforeAudit = await harness.auditRows('admin.settings_update');
       const response = await harness.authed(founder, {

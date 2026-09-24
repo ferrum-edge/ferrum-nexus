@@ -100,7 +100,12 @@ for (const initialStatus of ['active', 'disabled'] as const) {
           const expected = [];
           if (roleChanged) expected.push('user.role_change');
           if (statusChanged) expected.push(status === 'active' ? 'user.enable' : 'user.disable');
+          // `status: 'active'` on an already-active account changes no column
+          // but re-runs the gateway restore, and is audited as a retry (#337).
+          const restoreRetry = !roleChanged && !statusChanged && status === 'active';
+          if (restoreRetry) expected.push('user.enable');
           assert.deepEqual(rows.map((row) => row.action).sort(), expected.sort());
+          if (restoreRetry) assert.equal(rows[0]?.details.gateway_restore_retry, true);
           for (const row of rows) {
             if (roleChanged) {
               assert.equal(row.details.from_role, 'client');

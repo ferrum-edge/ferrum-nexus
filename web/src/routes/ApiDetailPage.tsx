@@ -618,17 +618,25 @@ function SpecTab({ api }: { api: Api }): ReactElement {
   const toast = useToast();
   const [draft, setDraft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [review, setReview] = useState<SpecDiff | null>(null);
+  // The diff travels with the exact document it was computed from. The editor
+  // stays live while the comparison is in flight, so publishing whatever the
+  // editor holds at confirm time could ship a document nobody reviewed
+  // (issue #330): the confirmation publishes `review.spec` and nothing else.
+  const [review, setReview] = useState<{ diff: SpecDiff; spec: string } | null>(null);
 
   const value = draft ?? specQuery.data?.raw_spec ?? '';
 
-  /** Publish `value`, clearing the editor's draft state on success. */
-  const publish = (): void => {
+  /**
+   * Publish the reviewed document. The draft is cleared only when it still
+   * matches what was published — edits made after the review stay in the
+   * editor as unsaved changes rather than being silently dropped.
+   */
+  const publish = (spec: string): void => {
     updateSpec.mutate(
-      { id: api.id, body: { spec: value } },
+      { id: api.id, body: { spec } },
       {
         onSuccess: () => {
-          setDraft(null);
+          setDraft((current) => (current === spec ? null : current));
           setReview(null);
           toast.success('Specification updated');
         },
@@ -681,14 +689,15 @@ function SpecTab({ api }: { api: Api }): ReactElement {
             disabled={draft === null || draft.trim().length === 0}
             onClick={() => {
               setError(null);
-              if (!isSpecValid(value)) {
+              const spec = value;
+              if (!isSpecValid(spec)) {
                 setError('The OpenAPI document could not be parsed.');
                 return;
               }
               reviewDiff.mutate(
-                { id: api.id, body: { spec: value } },
+                { id: api.id, body: { spec } },
                 {
-                  onSuccess: (response) => setReview(response.diff),
+                  onSuccess: (response) => setReview({ diff: response.diff, spec }),
                   onError: (mutationError: Error) => setError(mutationError.message),
                 },
               );
@@ -714,11 +723,25 @@ function SpecTab({ api }: { api: Api }): ReactElement {
         title="Publish this revision"
         description="The new document replaces the current one and is recorded as a new revision. The previous revisions stay in history."
         confirmLabel="Publish revision"
-        danger={(review?.potentially_breaking.length ?? 0) > 0}
+        danger={(review?.diff.potentially_breaking.length ?? 0) > 0}
         loading={updateSpec.isPending}
-        onConfirm={publish}
+        onConfirm={() => {
+          if (review) publish(review.spec);
+        }}
       >
-        {review ? <SpecDiffView diff={review} /> : <></>}
+        {review ? (
+          <>
+            {review.spec !== value ? (
+              <FormNotice tone="warning">
+                The editor changed after this comparison was made. Publishing sends the reviewed
+                document shown here; your newer edits stay in the editor as unsaved changes.
+              </FormNotice>
+            ) : null}
+            <SpecDiffView diff={review.diff} />
+          </>
+        ) : (
+          <></>
+        )}
       </ConfirmDialog>
     </div>
   );
@@ -1200,7 +1223,11 @@ function TestConsumerTab({ api }: { api: Api }): ReactElement {
           secret={secret.secret}
           consumerUsername={secret.username}
           title="Save your test credential"
-          onAcknowledge={() => setSecret(null)}
+          onAcknowledge={() => {
+            setSecret(null);
+            // Drop the plaintext from the mutation result too (issue #336).
+            create.reset();
+          }}
         />
       ) : null}
     </>

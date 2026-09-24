@@ -123,6 +123,7 @@ import {
   intOrNull,
   json,
   mapSqlConflict,
+  NexusError,
   page,
   queryAll,
   queryCount,
@@ -1565,28 +1566,27 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     },
 
     updateIfStatus: async (id, expected, patch) => {
-      // See `users.updateIfMatches` for why "no rows changed" is re-read
-      // rather than reported as a lost race outright.
-      const stillMatches = async (): Promise<AccessRequestRecord | null> => {
+      const set = setParts(accessRequestUpdateColumns(patch));
+      if (!set) {
+        // An empty patch is only a guarded read; it must not touch updated_at.
         const row = await queryOne(
           exec,
-          'SELECT id FROM access_requests WHERE id = ? AND status = ?',
+          'SELECT * FROM access_requests WHERE id = ? AND status = ?',
           [id, expected],
         );
-        return row ? accessRequests.findById(id) : null;
-      };
+        return row ? mapAccessRequest(row) : null;
+      }
 
-      const set = setParts(accessRequestUpdateColumns(patch));
-      if (!set) return stillMatches();
-
-      const changed = await mapSqlConflict('You already have a pending request for this API', () =>
+      const matched = await mapSqlConflict('You already have a pending request for this API', () =>
         execute(
           exec,
           `UPDATE access_requests SET ${set.sql}, updated_at = ? WHERE id = ? AND status = ?`,
           [...set.params, nowIso(), id, expected],
         ),
       );
-      return changed > 0 ? accessRequests.findById(id) : stillMatches();
+      // Zero matched rows is a genuine lost race; see `users.updateIfMatches`
+      // for why it is not re-read with an ordinary SELECT.
+      return matched > 0 ? accessRequests.findById(id) : null;
     },
 
     list: async (filter, options) => {
@@ -1628,13 +1628,12 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
     listLatestForUser: async (userId, apiIds) => {
       if (apiIds.length === 0) return [];
-      // One row per API — the newest request the user made for it. SQLite gets
-      // there with `GROUP BY r.api_id`; the portable spelling is a window
-      // function, supported by PostgreSQL and MySQL 8.
+      // One row per API — the newest request the user made for it, ties on
+      // `created_at` broken by id exactly as the SQLite adapter breaks them.
       const rows = await queryAll(
         exec,
-        `SELECT id, api_id, user_id, justification, status, decided_by, decided_at,
-                decision_note, created_at, updated_at
+        `SELECT id, api_id, user_id, application_id, justification, status, decided_by,
+                decided_at, decision_note, created_at, updated_at
          FROM (
            SELECT r.*,
                   ROW_NUMBER() OVER (
@@ -1723,20 +1722,17 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     },
 
     updateIfStatus: async (id, expected, patch) => {
-      // See `users.updateIfMatches` for why "no rows changed" is re-read
-      // rather than reported as a lost race outright.
-      const stillMatches = async (): Promise<GrantRecord | null> => {
-        const row = await queryOne(exec, 'SELECT id FROM grants WHERE id = ? AND status = ?', [
+      const set = setParts(grantUpdateColumns(patch));
+      if (!set) {
+        // An empty patch is only a guarded read; it must not touch updated_at.
+        const row = await queryOne(exec, 'SELECT * FROM grants WHERE id = ? AND status = ?', [
           id,
           expected,
         ]);
-        return row ? grants.findById(id) : null;
-      };
+        return row ? mapGrant(row) : null;
+      }
 
-      const set = setParts(grantUpdateColumns(patch));
-      if (!set) return stillMatches();
-
-      const changed = await mapSqlConflict(
+      const matched = await mapSqlConflict(
         'An active grant already exists for this API and user',
         () =>
           execute(
@@ -1745,7 +1741,9 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
             [...set.params, nowIso(), id, expected],
           ),
       );
-      return changed > 0 ? grants.findById(id) : stillMatches();
+      // Zero matched rows is a genuine lost race; see `users.updateIfMatches`
+      // for why it is not re-read with an ordinary SELECT.
+      return matched > 0 ? grants.findById(id) : null;
     },
 
     list: async (filter, options) => {
@@ -2411,6 +2409,8 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
   /* ── emailOutbox ────────────────────────────────────────────────────── */
 
+  const PINNED_OUTBOX_ID_TAKEN = 'An outbox entry with that id already exists';
+
   const emailOutbox: EmailOutboxRepo = {
     enqueue: async (input) => {
       const key = input.idempotency_key ?? null;
@@ -2419,36 +2419,66 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         if (existing) return { entry: existing, created: false };
       }
       const meta = stamps({ id: input.id });
-      try {
-        await execute(
-          exec,
-          `INSERT INTO email_outbox
+      const insertSql = `INSERT INTO email_outbox
              (id, to_email, subject, body_html, body_text, status, attempts, next_attempt_at,
               last_error, idempotency_key, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?, ?)`,
-          [
-            meta.id,
-            input.to_email,
-            input.subject,
-            input.body_html,
-            input.body_text,
-            input.next_attempt_at ?? meta.created_at,
-            key,
-            meta.created_at,
-            meta.updated_at,
-          ],
-        );
-      } catch (error) {
-        // Lost a race on the idempotency key — return the winner.
-        if (key !== null) {
-          const existing = await emailOutbox.findByIdempotencyKey(key);
-          if (existing) return { entry: existing, created: false };
-        }
-        throw error;
+           VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?, ?)`;
+      const params = [
+        meta.id,
+        input.to_email,
+        input.subject,
+        input.body_html,
+        input.body_text,
+        input.next_attempt_at ?? meta.created_at,
+        key,
+        meta.created_at,
+        meta.updated_at,
+      ];
+      if (key === null) {
+        await execute(exec, insertSql, params);
+        const entry = await emailOutbox.findById(meta.id);
+        if (!entry) throw new Error('emailOutbox.enqueue: row vanished immediately after insert');
+        return { entry, created: true };
       }
-      const entry = await emailOutbox.findById(meta.id);
-      if (!entry) throw new Error('emailOutbox.enqueue: row vanished immediately after insert');
-      return { entry, created: true };
+
+      // Losing the idempotency-key race must not be an error (issue #332):
+      // inside a transaction a failed INSERT aborts PostgreSQL's transaction
+      // outright, so a catch-and-re-read cannot run, and MySQL's re-read saw
+      // the transaction's REPEATABLE READ snapshot, from before the winner
+      // committed. So the insert yields to the key instead of failing on it.
+      // MySQL spells that `ON DUPLICATE KEY UPDATE id = id` rather than
+      // `INSERT IGNORE`, which would also downgrade a NOT NULL, length or
+      // CHECK violation to a warning and write an adjusted row. Under
+      // CLIENT_FOUND_ROWS its affected-row count cannot say which way the
+      // upsert went, so the id of the row that now holds the key does.
+      await mapSqlConflict(PINNED_OUTBOX_ID_TAKEN, () =>
+        execute(
+          exec,
+          exec.dialect === 'pg'
+            ? `${insertSql} ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
+               DO NOTHING`
+            : `${insertSql} ON DUPLICATE KEY UPDATE id = id`,
+          params,
+        ),
+      );
+      // A locking read, so MySQL sees the latest committed winner rather than
+      // the snapshot; PostgreSQL's READ COMMITTED gives every statement a
+      // fresh snapshot already.
+      const row = await queryOne(
+        exec,
+        `SELECT * FROM email_outbox WHERE idempotency_key = ?${
+          exec.dialect === 'mysql' ? ' FOR SHARE' : ''
+        }`,
+        [key],
+      );
+      if (!row) {
+        // Only a primary-key collision on a pinned id leaves no row for the
+        // key: MySQL's upsert yields to any unique key, not just this one.
+        // (PostgreSQL's names its conflict target, so it raised instead.)
+        throw new NexusError('CONFLICT', PINNED_OUTBOX_ID_TAKEN);
+      }
+      const entry = mapOutbox(row);
+      return { entry, created: entry.id === meta.id };
     },
 
     findById: async (id) => {

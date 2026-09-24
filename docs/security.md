@@ -233,7 +233,8 @@ self-describing format (`scrypt:N:r:p:<salt b64>:<hash b64>`) so parameters can
 be raised later without invalidating existing hashes. Verification is
 constant-time and returns `false` — never throws — for malformed input.
 Minimum length at registration is 12 characters; a self-service password change
-requires the current password.
+requires the current password, and that check is rate-limited per account (see
+[Rate limiting](#rate-limiting)).
 
 ---
 
@@ -350,7 +351,11 @@ the text body. They cannot be embedded in image URLs, CSS, other attributes,
 subjects, or another URL, even when that destination is allowed.
 
 Every field is checked on save and again before rendering a stored template;
-substituted destinations are also checked before enqueueing. HTTP(S) links,
+substituted destinations are also checked before enqueueing. Only a `*_url`
+placeholder may fill a URL or attribute, so every other value (a display, portal
+or API name, a note) is escaped text: the send-time recheck judges it as an
+inert stand-in, and refuses it only when it carries an explicit off-policy
+`http(s)://` URL that a mail client would autolink. HTTP(S) links,
 protocol-relative URLs, URL attributes and CSS `url(...)` must resolve to the
 `NEXUS_PUBLIC_URL` origin or an exact host explicitly configured by the operator
 in `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS` (empty by default). Scheme/host case
@@ -956,6 +961,11 @@ the **authenticated account** (`userOrIpKey`, falling back to `request.ip` when
 there is no session) rather than the address. See
 [Messaging abuse resistance](#messaging-abuse-resistance).
 
+`/api/users` takes one the same way, carried only by `PATCH /api/users/me`:
+**10 requests per minute per account**. That route checks `current_password`
+before a change, so without a ceiling of its own a hijacked session was an
+unthrottled password oracle outside the `/api/auth` budget.
+
 Controlled by `NEXUS_RATE_LIMIT_ENABLED` (default `true`); forced off under
 `NEXUS_ENV=test`. The store is in-memory and therefore **per process** — with
 N instances the effective limit is N × 20/min, so enforce the real limit at the
@@ -1497,7 +1507,7 @@ ordinary reporting.
 | -------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `user.update`                    | `user`         | A profile or account field changed without a role/status change. `details.self` distinguishes self-service from an admin edit; `changed_fields` lists what moved (`password` appears as a field name, never a value). A self-service password change also ends every other session, counted in `terminated_sessions`.                                                                              |
 | `user.role_change`               | `user`         | An admin changed an account's role. `details`: `from_role`, `to_role`.                                                                                                                                                                                                                                                                                                                             |
-| `user.enable`                    | `user`         | An admin re-enabled an account. `details`: `from_status`, `to_status`.                                                                                                                                                                                                                                                                                                                             |
+| `user.enable`                    | `user`         | An admin re-enabled an account. `details`: `from_status`, `to_status`. Repeating `status: "active"` on an account that is already active re-runs the gateway restore and is recorded too, with `changed_fields: []`, `from_status` and `to_status` both `active`, and `gateway_restore_retry: true`.                                                                                               |
 | `user.disable`                   | `user`         | An admin disabled an account via the ordinary or god-mode route. `details`: `from_status`, `to_status`, `terminated_sessions`, plus the gateway teardown: `gateway_teardown` (`ok` / `no_consumer` / `pending`), `gateway_consumer_id`, `revoked_credentials`, `removed_acl_groups`, `gateway_error`. `pending` means the revocation is queued and being retried — the credentials are still live. |
 | `user.gateway_teardown_complete` | `user`         | The teardown worker finished a revocation a disable had left pending. Written by the system, so `actor_user_id` is `null`. `details`: `attempts`, `gateway_teardown`, `gateway_consumer_id`, `revoked_credentials`, `removed_acl_groups`.                                                                                                                                                          |
 | `user.gateway_teardown_retry`    | `user`         | An admin re-ran a pending gateway revocation by hand via `POST /api/users/:id/gateway-teardown/retry`. `details`: `attempts` so far, plus the same teardown fields.                                                                                                                                                                                                                                |

@@ -29,6 +29,7 @@ import {
   type ListCredentialsResponse,
   type ListGrantsResponse,
   type PublishApiResponse,
+  type RotateCredentialResponse,
 } from '@ferrum-nexus/shared';
 
 import { AuditAction } from '../audit/service.js';
@@ -173,11 +174,15 @@ describe('application-scoped identities', () => {
       payload: {},
     });
     assert.equal(rotated.statusCode, 200, rotated.body);
+    const rotatedBody = rotated.json<RotateCredentialResponse>();
     assert.equal(
-      rotated.json<IssueCredentialResponse>().credential.application_id,
+      rotatedBody.credential.application_id,
       appA,
       'a rotation never moves a credential between identities',
     );
+    // …and it names the consumer the new secret actually lives on, not the
+    // account's (#329).
+    assert.equal(rotatedBody.consumer_username, consumerUsernameForApplication(appA));
 
     const scoped = await harness.authed(owner, {
       method: 'GET',
@@ -221,6 +226,31 @@ describe('application-scoped identities', () => {
 
     assert.deepEqual(groupsOf(appA), [], 'A lost it');
     assert.deepEqual(groupsOf(appB), [aclGroupForApi(apiX)], 'B kept it');
+  });
+
+  it('strips a deleted API’s group from every grantee identity', async () => {
+    // Issue #335: the delete read only each grantee's *account* consumer, so an
+    // application's consumer kept `nexus:api:<id>:approved` for an API that no
+    // longer exists. Two grants on one API (the account and application A),
+    // plus A's grant on a surviving API that must keep its group.
+    await grant(owner, apiX, null);
+    await grant(owner, apiX, appA);
+    await grant(owner, apiY, appA);
+    assert.deepEqual(groupsOf(null), [aclGroupForApi(apiX)]);
+    assert.deepEqual(groupsOf(appA), [aclGroupForApi(apiX), aclGroupForApi(apiY)]);
+
+    const deleted = await harness.authed(provider, {
+      method: 'DELETE',
+      url: `/api/apis/${apiX}`,
+    });
+    assert.equal(deleted.statusCode, 200, deleted.body);
+
+    assert.deepEqual(groupsOf(null), [], 'the account lost the deleted API’s group');
+    assert.deepEqual(
+      groupsOf(appA),
+      [aclGroupForApi(apiY)],
+      'the application lost it too, and kept the surviving API’s',
+    );
   });
 
   it('shows the provider which application is asking', async () => {

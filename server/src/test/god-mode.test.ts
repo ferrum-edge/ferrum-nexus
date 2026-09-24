@@ -287,6 +287,54 @@ describe('API deletion and god mode', () => {
       assert.equal(godRow?.details.revoked_grants, 1);
     });
 
+    it('leaves the grants alone when the transaction refuses the disable', async (t) => {
+      // Issue #337: grants were revoked before the transaction that re-decides
+      // the disable, so a disable refused there still stripped the access of an
+      // account that stayed active.
+      const victim = await harness.registerUser({
+        email: 'god-refused-victim@example.test',
+        role: 'client',
+      });
+      const apiId = await publish(provider, 'god-refused-disable');
+      const grantId = await grantAccess(victim, provider, apiId);
+      assert.ok(groupsOf(victim.user.id).includes(aclGroupForApi(apiId)));
+
+      // Another administrator moves the account after the service read it and
+      // before its transaction opened; the conditional write then refuses.
+      const transaction = harness.store.transaction.bind(harness.store);
+      let armed = true;
+      t.mock.method(
+        harness.store,
+        'transaction',
+        async (...args: Parameters<typeof transaction>) => {
+          if (armed) {
+            armed = false;
+            await harness.store.users.update(victim.user.id, { role: 'provider' });
+          }
+          return transaction(...args);
+        },
+      );
+
+      const response = await harness.authed(superAdmin, {
+        method: 'POST',
+        url: '/api/admin/god/disable-user',
+        payload: { user_id: victim.user.id, reason: 'Refused mid-flight.', revoke_grants: true },
+      });
+      assert.equal(response.statusCode, 409, response.body);
+      assert.equal(errorCode(response.body), 'CONFLICT');
+
+      assert.equal((await harness.store.users.findById(victim.user.id))?.status, 'active');
+      assert.equal((await harness.store.grants.findById(grantId))?.status, 'active');
+      assert.ok(
+        groupsOf(victim.user.id).includes(aclGroupForApi(apiId)),
+        'a refused disable keeps the gateway authorization',
+      );
+      const revocations = (await harness.auditRows('access.revoke')).filter(
+        (row) => row.target_id === grantId,
+      );
+      assert.equal(revocations.length, 0);
+    });
+
     it('deletes the gateway credentials of the account it disables', async () => {
       const victim = await harness.registerUser({
         email: 'god-credential-victim@example.test',

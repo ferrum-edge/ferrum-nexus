@@ -186,6 +186,7 @@ describe('gateway credentials', () => {
     const body = response.json<RotateCredentialResponse>();
 
     assert.notEqual(body.secret.key, original.secret.key);
+    assert.equal(body.consumer_username, consumerUsernameForUser(rotator.user.id));
     assert.equal(body.credential.rotated_from_id, original.credential.id);
     assert.equal(body.credential.status, 'active');
     assert.equal(body.credential.label, 'Production', 'the label carries over by default');

@@ -45,6 +45,20 @@ const updateMeBody = z.object({
   new_password: z.string().min(MIN_PASSWORD_LENGTH).max(1024).optional(),
 });
 
+/**
+ * Per-account burst limit on `PATCH /api/users/me`, enforced by the
+ * `@fastify/rate-limit` instance the composition root registers on this scope
+ * with `global: false` (so every other route here stays unthrottled).
+ *
+ * The route checks `current_password`, which makes it a password oracle for
+ * anyone holding a session — a stolen cookie, an unlocked laptop — and it sat
+ * outside the `/api/auth` limiter that bounds every other place a password is
+ * checked (issue #333). Keyed per account rather than per IP, because the
+ * guesser is by definition already signed in. Ten a minute is far more than a
+ * person editing their own profile needs.
+ */
+export const UPDATE_ME_RATE_LIMIT = { max: 10, timeWindow: '1 minute' } as const;
+
 const listUsersQuery = listQuerySchema.extend({
   role: z.enum(ROLE_ORDER).optional(),
   status: z.enum(['active', 'disabled']).optional(),
@@ -80,15 +94,19 @@ export const usersRoutes: FastifyPluginAsync<UsersRoutesOptions> = async (app, o
     return { user: users.getMe(user) };
   });
 
-  app.patch('/me', async (request, reply): Promise<UpdateMeResponse> => {
-    const { user } = requireAuth(request);
-    const input = parseOrThrow(updateMeBody, request.body);
-    const result = await users.updateMe(user, input, requestContext(request));
-    // A password change killed every session, including this request's own;
-    // the replacement has to reach the browser or the caller is signed out.
-    if (result.reissued) setSessionCookies(reply, config, result.reissued);
-    return { user: result.user };
-  });
+  app.patch(
+    '/me',
+    { config: { rateLimit: { ...UPDATE_ME_RATE_LIMIT } } },
+    async (request, reply): Promise<UpdateMeResponse> => {
+      const { user } = requireAuth(request);
+      const input = parseOrThrow(updateMeBody, request.body);
+      const result = await users.updateMe(user, input, requestContext(request));
+      // A password change killed every session, including this request's own;
+      // the replacement has to reach the browser or the caller is signed out.
+      if (result.reissued) setSessionCookies(reply, config, result.reissued);
+      return { user: result.user };
+    },
+  );
 
   app.get('/', { onRequest: requireRole('admin') }, async (request): Promise<ListUsersResponse> => {
     const query = parseOrThrow(listUsersQuery, request.query);

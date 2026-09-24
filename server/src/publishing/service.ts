@@ -249,6 +249,7 @@ import {
 import type {
   EdgeCircuitBreakerConfig,
   EdgeConsumer,
+  EdgeCorsConfig,
   EdgePluginConfig,
   EdgePluginSettings,
   EdgeProxy,
@@ -542,7 +543,7 @@ export function corsPluginConfig(
   cors: CorsConfig,
   authPlugin: AuthPluginType,
   methods: HttpMethod[] | null,
-): EdgePluginSettings {
+): EdgeCorsConfig {
   return {
     allowed_origins: [...cors.allowed_origins],
     allow_credentials: cors.allow_credentials,
@@ -1026,10 +1027,26 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     return summary;
   }
 
-  /** Remove the ACL group of `apiId` from one grantee's consumer, best effort. */
-  async function stripGroup(userId: Uuid, apiId: Uuid): Promise<void> {
-    const consumer = await store.consumers.findByUserAndNamespace(userId, namespace);
-    if (!consumer) return;
+  /**
+   * Remove the ACL group of `apiId` from one grantee identity's consumer, best
+   * effort.
+   *
+   * The identity is the grant's — the account, or the application named by
+   * `applicationId` — because each has its own consumer and the approval put
+   * the group on that one; reading only the account's left every application
+   * grantee carrying the group of an API that no longer exists (#335).
+   * `stripped` is the set of consumers already handled, so an identity holding
+   * several grants is written once.
+   */
+  async function stripGroup(
+    userId: Uuid,
+    applicationId: Uuid | null,
+    apiId: Uuid,
+    stripped: Set<string>,
+  ): Promise<void> {
+    const consumer = await store.consumers.findByUserAndNamespace(userId, namespace, applicationId);
+    if (!consumer || stripped.has(consumer.ferrum_consumer_id)) return;
+    stripped.add(consumer.ferrum_consumer_id);
     const group = aclGroupForApi(apiId);
     await credentials.provisioner.mutateAclGroups(
       consumer.ferrum_consumer_id,
@@ -1954,7 +1971,20 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // carries, whereas rewriting the config can and did.
           //
           // A genuine change merges over the live config rather than rebuilding
-          // it, so operator keys outside the portal's view survive that too.
+          // it, so operator keys outside the portal's view survive that too —
+          // and so do the operator's resource-level switches: a config they
+          // disabled stays disabled and keeps its trigger, where a write with
+          // no options would re-enable it and run it on every request (#328).
+          //
+          // Telling an operator's CORS header from one the portal wrote needs
+          // the whole list the portal generated last time, not just the
+          // provider's extras: `X-API-Key` is the portal's own addition for
+          // `key_auth`, and read as the operator's it outlived a switch away
+          // from `key_auth` forever (#328).
+          const previousPortalCorsHeaders =
+            api.cors === null
+              ? undefined
+              : corsPluginConfig(api.cors, api.auth_plugin, api.allowed_methods).allowed_headers;
           const reconcilePluginSetting = async <T>(
             gatewayProxyId: string,
             pluginName: string,
@@ -2007,10 +2037,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 : mergeOperatorSettings(
                     live,
                     settingsFor(next),
-                    pluginName === CORS_PLUGIN ? api.cors?.allowed_headers : undefined,
+                    pluginName === CORS_PLUGIN ? previousPortalCorsHeaders : undefined,
                   ),
               actor.id,
               undo,
+              live ? { enabled: live.enabled, trigger: live.trigger ?? null } : undefined,
             );
             return true;
           };
@@ -2888,13 +2919,21 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       //    consumers is not okay. A failure here cannot make the gateway serve
       //    anything, so it does not fail the request; it is logged, because
       //    nothing else will ever revisit it.
+      const stripped = new Set<string>();
       for (const grant of grants) {
-        await stripGroup(grant.user_id, api.id).catch((error: unknown) => {
-          deps.log?.(
-            { api_id: api.id, user_id: grant.user_id, error: errorMessage(error) },
-            'the ACL group of a deleted API could not be stripped from a grantee consumer',
-          );
-        });
+        await stripGroup(grant.user_id, grant.application_id, api.id, stripped).catch(
+          (error: unknown) => {
+            deps.log?.(
+              {
+                api_id: api.id,
+                user_id: grant.user_id,
+                application_id: grant.application_id,
+                error: errorMessage(error),
+              },
+              'the ACL group of a deleted API could not be stripped from a grantee consumer',
+            );
+          },
+        );
       }
 
       await audit.record(
@@ -3627,12 +3666,14 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * material it breaks.
    *
    * Credential material hangs off a **consumer**, not an API — one canonical
-   * consumer per portal account per namespace, plus the throwaway
-   * `nexus-test-<api_id>` consumer a provider makes for their own API — so the
-   * reach of a swap is a derived reading rather than a column, and the two
-   * halves of it are owned by different people and must be treated differently.
+   * consumer per portal identity (an account, or one of its applications) per
+   * namespace, plus the throwaway `nexus-test-<api_id>` consumer a provider
+   * makes for their own API — so the reach of a swap is a derived reading
+   * rather than a column, and the two halves of it are owned by different
+   * people and must be treated differently.
    *
-   * `grantees` are the accounts with an active grant on this API that hold a
+   * `grantees` are the accounts with an active grant on this API whose granted
+   * identity — the account itself or the application the grant names — holds a
    * live credential of its current flavour. They are what the refusal counts
    * and who the confirmed change notifies, and **nothing of theirs is
    * revoked**: their credential is their consumer's, not this API's, and it
@@ -3655,10 +3696,18 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   async function authSwapImpact(api: ApiRecord): Promise<AuthSwapImpact> {
     const type = CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin];
     const grantees = new Set<Uuid>();
+    // A grant belongs to an identity — the account, or one of its applications
+    // (`application_id`) — and each identity has its own consumer, so the
+    // credential that the swap strands is the grant's consumer's, not the
+    // account's (#327). Dedupe by consumer: one owner may hold several grants.
+    const checkedConsumers = new Set<string>();
     for (const grant of await store.grants.listActiveByApi(api.id)) {
-      if (grantees.has(grant.user_id)) continue;
-      const consumer = await credentials.provisioner.findConsumer(grant.user_id);
-      if (!consumer) continue;
+      const consumer = await credentials.provisioner.findConsumer(
+        grant.user_id,
+        grant.application_id,
+      );
+      if (!consumer || checkedConsumers.has(consumer.ferrum_consumer_id)) continue;
+      checkedConsumers.add(consumer.ferrum_consumer_id);
       const rows = await store.credentials.listByConsumer(consumer.ferrum_consumer_id, type);
       if (rows.some((row) => row.status !== 'revoked')) grantees.add(grant.user_id);
     }

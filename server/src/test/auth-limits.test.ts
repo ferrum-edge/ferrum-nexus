@@ -145,6 +145,44 @@ describe('auth rate-limit scopes', () => {
       assert.equal(response.statusCode, 200, response.body);
     }
   });
+
+  it('bounds current-password checks on PATCH /api/users/me per account', async () => {
+    // Issue #333: the self-service change checks `current_password`, and sat
+    // outside every limiter, so a stolen session could guess it unthrottled.
+    const founder = await harness.registerUser();
+    const guesser = await harness.registerUser();
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const response = await harness.authed(guesser, {
+        method: 'PATCH',
+        url: '/api/users/me',
+        // Rotating source addresses must not buy a fresh allowance.
+        remoteAddress: `198.51.100.${attempt + 50}`,
+        payload: { current_password: `guess-${attempt}`, new_password: 'a-new-password-1' },
+      });
+      assert.equal(response.statusCode, 403, response.body);
+      assert.equal(response.json<ApiErrorBody>().error.code, 'FORBIDDEN');
+    }
+    // The right password is refused too once the budget is spent: the limit
+    // is what stops the guessing, not a lockout after a hit.
+    const limited = await harness.authed(guesser, {
+      method: 'PATCH',
+      url: '/api/users/me',
+      payload: { current_password: TEST_PASSWORD, new_password: 'a-new-password-1' },
+    });
+    assert.equal(limited.statusCode, 429, limited.body);
+    assert.equal(limited.json<ApiErrorBody>().error.code, 'RATE_LIMITED');
+
+    // Reads on the same scope stay unthrottled, and another account keeps its
+    // own budget.
+    const me = await harness.authed(guesser, { method: 'GET', url: '/api/users/me' });
+    assert.equal(me.statusCode, 200, me.body);
+    const other = await harness.authed(founder, {
+      method: 'PATCH',
+      url: '/api/users/me',
+      payload: { display_name: 'Founder' },
+    });
+    assert.equal(other.statusCode, 200, other.body);
+  });
 });
 
 it('uses the trusted proxy client for the shared bootstrap budget', async () => {

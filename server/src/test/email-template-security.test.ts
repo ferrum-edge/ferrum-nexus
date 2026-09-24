@@ -8,8 +8,9 @@ import {
   type GetEmailTemplateResponse,
 } from '@ferrum-nexus/shared';
 
+import { BRANDING_SETTINGS_KEY } from '../admin/settings-service.js';
 import { REGISTRATION_SETTINGS_KEY } from '../auth/service.js';
-import { DEFAULT_EMAIL_TEMPLATES } from '../email/templates.js';
+import { DEFAULT_EMAIL_TEMPLATES, MASS_RAW_HTML_VARS } from '../email/templates.js';
 import { TEMPLATE_LINK_HOSTS_SETTING } from '../email/template-links.js';
 import { buildTestApp, TEST_PASSWORD, type TestApp, type TestSession } from './helpers.js';
 
@@ -454,5 +455,213 @@ describe('email template destination boundaries', () => {
     } finally {
       warning.mock.restore();
     }
+  });
+});
+
+describe('SMTP test message', () => {
+  let harness: TestApp;
+
+  before(async () => {
+    harness = await buildTestApp();
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  it('escapes the portal name in the HTML body only (#334)', async () => {
+    await harness.store.settings.set(
+      BRANDING_SETTINGS_KEY,
+      { portal_name: '<img src=x onerror=alert(1)> Tom & Co' },
+      false,
+    );
+    const result = await harness.services.email.sendTest('probe@example.test');
+    assert.deepEqual(result, { ok: true, error: null });
+    const mail = harness.mailbox.sent.at(-1) ?? assert.fail('the probe must be sent');
+    assert.equal(
+      mail.html,
+      '<p>This is a test message from &lt;img src=x onerror=alert(1)&gt; Tom &amp; Co. ' +
+        'SMTP is configured correctly.</p>',
+    );
+    assert.equal(mail.subject, '<img src=x onerror=alert(1)> Tom & Co SMTP test');
+    assert.ok(mail.text.startsWith('This is a test message from <img src=x onerror=alert(1)>'));
+  });
+});
+
+/**
+ * Plain-text values are text, not destinations (#324). The send-time recheck
+ * used to judge escaped display, portal and API names as links, so a colon or
+ * a `//` in one silently dropped the mail.
+ */
+describe('email template plain-text values', () => {
+  let harness: TestApp;
+  let founder: TestSession;
+
+  before(async () => {
+    harness = await buildTestApp({
+      env: {
+        NEXUS_PUBLIC_URL: 'https://portal.test',
+        NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS: 'assets.example.test',
+      },
+    });
+    founder = await harness.registerUser({ email: 'text-founder@example.test' });
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  const actionVars = {
+    reset_url: 'https://portal.test/reset-password?token=reset-secret',
+    verification_url: 'https://portal.test/verify-email?token=verification-secret',
+    api_url: 'https://portal.test/apis/market-data',
+    thread_url: 'https://portal.test/messages/thread-1',
+    credentials_url: 'https://portal.test/credentials',
+  };
+
+  it('delivers reset mail to display names with a colon or a double slash', async () => {
+    for (const display_name of ['Big Data: Ops', 'Bob//Team']) {
+      const email = `${display_name.replace(/\W/g, '').toLowerCase()}@example.test`;
+      await harness.registerUser({ email, display_name });
+      harness.mailbox.clear();
+      const requested = await harness.app.inject({
+        method: 'POST',
+        url: '/api/auth/forgot-password',
+        payload: { email },
+      });
+      assert.equal(requested.statusCode, 200, requested.body);
+      assert.equal((await harness.tick()).sent, 1, display_name);
+      const mail = harness.mailbox.sent.at(-1) ?? assert.fail(`no mail for ${display_name}`);
+      assert.equal(mail.to, email);
+      assert.ok(mail.text.includes(`Hello ${display_name},`), mail.text);
+      assert.ok(mail.html.includes(`Hello ${display_name},`), mail.html);
+    }
+  });
+
+  it('renders every template for a portal name and an API name with a colon', async () => {
+    await harness.store.settings.set(
+      BRANDING_SETTINGS_KEY,
+      { portal_name: 'Open Data: Portal' },
+      false,
+    );
+    for (const key of EMAIL_TEMPLATE_KEYS) {
+      const rendered = await harness.services.email.render(key, {
+        ...actionVars,
+        recipient_name: 'Big Data: Ops',
+        api_name: 'Market Data: EU',
+        decided_by_name: 'Bob//Team',
+        decision_note: 'Note: see //wiki for details',
+        subject: 'Data: news',
+        body_text: 'Data: news',
+      });
+      assert.ok(rendered.html.includes('Open Data: Portal'), key);
+    }
+    for (const templateKey of ['access_approved', 'access_denied', 'access_revoked'] as const) {
+      harness.mailbox.clear();
+      await harness.services.email.enqueue({
+        to: founder.user.email,
+        templateKey,
+        vars: { ...actionVars, api_name: 'Market Data: EU' },
+      });
+      assert.equal((await harness.tick()).sent, 1, templateKey);
+      assert.ok(harness.mailbox.sent.at(-1)?.subject.endsWith(': Market Data: EU'));
+    }
+  });
+
+  it('still refuses an off-portal absolute URL inside a plain-text value', async () => {
+    for (const recipient_name of [
+      'Eve https://attacker.example/x',
+      'Eve HTTPS://attacker.example/x',
+      'Eve http:\\\\attacker.example',
+      'Eve https://portal.test@attacker.example/x',
+    ]) {
+      await assert.rejects(
+        harness.services.email.render('verification', { ...actionVars, recipient_name }),
+        /attacker\.example|credentials/,
+        recipient_name,
+      );
+    }
+    await assert.rejects(
+      harness.services.email.render('mass', { subject: 'Visit https://attacker.example/' }, [
+        ...MASS_RAW_HTML_VARS,
+      ]),
+      /subject refuses host 'attacker\.example'/,
+    );
+    // The portal origin and allowlisted hosts are as welcome in text as in links.
+    const allowed = await harness.services.email.render('verification', {
+      ...actionVars,
+      recipient_name: 'Ada https://assets.example.test/team and https://portal.test/about',
+    });
+    assert.ok(allowed.text.includes('https://assets.example.test/team'));
+  });
+
+  it('refuses a non-URL placeholder in a link or attribute at save time', async () => {
+    for (const payload of [
+      { body_html: '<a href="{{recipient_name}}">Me</a>' },
+      { body_html: '<a href="{{ portal_name }}">Portal</a>' },
+      { body_html: '<img src="{{recipient_email}}">' },
+      { body_html: '<p title="{{recipient_name}}">Hello</p>' },
+      { body_html: '<p style="background:url({{recipient_name}})">Hello</p>' },
+      { body_text: 'href="{{recipient_name}}"' },
+      { subject: 'src={{recipient_name}}' },
+    ]) {
+      const response = await harness.authed(founder, {
+        method: 'PUT',
+        url: '/api/admin/email-templates/verification',
+        payload: { ...DEFAULT_EMAIL_TEMPLATES.verification, ...payload },
+      });
+      assert.equal(response.statusCode, 400, JSON.stringify(payload));
+      const { error } = response.json<ApiErrorBody>();
+      assert.equal(error.code, 'VALIDATION_FAILED');
+      assert.match(error.message, /placeholder/, error.message);
+    }
+    assert.equal(await harness.store.emailTemplates.get('verification'), null);
+
+    // A stored override that predates the rule falls back to the built-in.
+    await harness.store.emailTemplates.upsert('verification', {
+      ...DEFAULT_EMAIL_TEMPLATES.verification,
+      body_html: '<a href="{{recipient_name}}">Me</a>',
+    });
+    try {
+      const rendered = await harness.services.email.render('verification', {
+        ...actionVars,
+        recipient_name: 'javascript:alert(1)',
+      });
+      assert.ok(!rendered.html.includes('href="javascript'), rendered.html);
+      assert.ok(rendered.html.includes(`href="${actionVars.verification_url}"`));
+    } finally {
+      await harness.store.emailTemplates.delete('verification');
+    }
+  });
+
+  it('fully checks raw-HTML mass-email variables', async () => {
+    const raw = [...MASS_RAW_HTML_VARS];
+    for (const body_html of [
+      '<img src="https://attacker.example/pixel">',
+      '<a href="javascript:alert(1)">Open</a>',
+      '<p>Data: <a href="data:text/html,hello">x</a></p>',
+      '<p>Visit https://attacker.example/</p>',
+      '<a href="//attacker.example/">Open</a>',
+      '<a href="{{recipient_name}}">Open</a>',
+      '<script>alert(1)</script>',
+    ]) {
+      await assert.rejects(
+        harness.services.email.render('mass', { body_html, subject: 'News' }, raw),
+        /body_html refuses/,
+        body_html,
+      );
+    }
+    const sent = await harness.services.email.render(
+      'mass',
+      {
+        subject: 'Data: news',
+        // Raw HTML is judged like a template, so only the plain-text parts may
+        // carry a `Data:` that would read as a scheme in markup.
+        body_html: '<p>Release notes</p><a href="https://portal.test/news">Read</a>',
+        body_text: 'Big Data: Ops',
+      },
+      raw,
+    );
+    assert.ok(sent.html.includes('<a href="https://portal.test/news">Read</a>'));
   });
 });

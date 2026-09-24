@@ -156,9 +156,10 @@ Ordering inside the block is dependency order: audit → captcha → email →
 notifications → auth → settings → users → messaging → massEmail → provisioner
 → catalog → credentials → publishing → access → god → outbox → teardown.
 
-Two background pollers hang off the end of that list and are stopped on
-`onClose`: the email outbox worker (§7) and the gateway teardown worker (§7.1).
-Both are off under `NEXUS_ENV=test`, where tests drive `tick()` themselves.
+Three background pollers hang off the end of that list and are stopped on
+`onClose`: the email outbox worker (§7), the gateway teardown worker (§7.1) and
+the hourly expiry sweep of sessions and email tokens (§8.1). All three are off
+under `NEXUS_ENV=test`, where tests drive `tick()` themselves.
 
 ---
 
@@ -1170,6 +1171,10 @@ allowed to commit ahead of the revocation at all.
   `UPDATE` per request.
 - A session whose account was disabled or deleted is destroyed on the next
   request, along with every other session for that user.
+- **Expired rows are purged.** The expiry sweep
+  (`server/src/auth/expiry-sweep.ts`) deletes sessions and verification/reset
+  tokens past their `expires_at` once at startup and then hourly. Reads already
+  ignore them; the sweep only keeps both tables from growing forever.
 
 ### 8.2 CSRF
 

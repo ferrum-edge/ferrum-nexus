@@ -1646,7 +1646,7 @@ export function createFerrumAdminClient(
       },
       async listByProxy(proxyId: string): Promise<EdgePluginConfig[]> {
         const attached: EdgePluginConfig[] = [];
-        await scanPages<EdgePluginConfig>(
+        const complete = await scanPages<EdgePluginConfig>(
           '/plugins/config',
           EDGE_MAX_PAGE_SIZE,
           MAX_PLUGIN_CONFIG_SCAN_PAGES,
@@ -1657,6 +1657,16 @@ export function createFerrumAdminClient(
             return true;
           },
         );
+        // A partial list is not "everything on this proxy": callers act on
+        // what is missing from it — create a config that seems absent, or
+        // conclude a teardown left nothing behind — so a scan the page cap cut
+        // short has to fail rather than answer (#335).
+        if (!complete) {
+          throw edgeError('Could not scan all gateway plugin configs', {
+            proxy_id: proxyId,
+            scanned: EDGE_MAX_PAGE_SIZE * MAX_PLUGIN_CONFIG_SCAN_PAGES,
+          });
+        }
         return attached;
       },
       async get(id: string): Promise<EdgePluginConfig | null> {

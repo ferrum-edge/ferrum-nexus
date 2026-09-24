@@ -636,6 +636,9 @@ type Mediator = <T>(work: () => Promise<T>) => Promise<T>;
 /** The shape every repository method has: arguments in, promise out. */
 type RepoMethod = (...args: unknown[]) => Promise<unknown>;
 
+/** Every repository {@link guardRepo} has produced. */
+const GUARDED_REPOS = new WeakSet<object>();
+
 /**
  * Return a copy of `repo` whose every method runs through `mediate`.
  *
@@ -655,7 +658,16 @@ function guardRepo<R extends object>(repo: R, mediate: Mediator): R {
     const method = member as RepoMethod;
     guarded[name] = (...args: unknown[]): Promise<unknown> => mediate(() => method(...args));
   }
+  GUARDED_REPOS.add(guarded);
   return guarded as unknown as R;
+}
+
+/**
+ * Whether `repo` came out of {@link guardRepo}. Exported for the test that
+ * holds the constructor to gating every repository the store exposes.
+ */
+export function isGuardedRepo(repo: unknown): boolean {
+  return typeof repo === 'object' && repo !== null && GUARDED_REPOS.has(repo);
 }
 
 /** The SQLite {@link NexusStore}. Construct it with {@link createSqliteStore}. */
@@ -696,14 +708,16 @@ class SqliteStore implements NexusStore {
     // The repository literals below run straight against the connection; the
     // process sees them only through the ownership gate. Every repository the
     // store exposes must be listed here — an unguarded one would reopen the
-    // hole the gate closes.
+    // hole the gate closes, which is what `index.test.ts` checks.
     const mediate: Mediator = (work) => this.mediate(work);
     this.users = guardRepo(this.users, mediate);
     this.organizations = guardRepo(this.organizations, mediate);
     this.sessions = guardRepo(this.sessions, mediate);
+    this.applications = guardRepo(this.applications, mediate);
     this.apis = guardRepo(this.apis, mediate);
     this.apiSpecs = guardRepo(this.apiSpecs, mediate);
     this.apiPlugins = guardRepo(this.apiPlugins, mediate);
+    this.apiViewers = guardRepo(this.apiViewers, mediate);
     this.accessRequests = guardRepo(this.accessRequests, mediate);
     this.grants = guardRepo(this.grants, mediate);
     this.credentials = guardRepo(this.credentials, mediate);
@@ -1725,16 +1739,22 @@ class SqliteStore implements NexusStore {
 
     listLatestForUser: async (userId, apiIds) => {
       if (apiIds.length === 0) return [];
+      // One row per API — the newest request the user made for it. The window
+      // breaks a `created_at` tie by id, as the other adapters do; a
+      // `MAX(created_at) … GROUP BY` would pick an arbitrary row of the tie.
       const rows = queryAll(
         this.db,
-        `SELECT r.* FROM access_requests r
-         WHERE r.user_id = ?
-           AND r.api_id IN (${apiIds.map(() => '?').join(', ')})
-           AND r.created_at = (
-             SELECT MAX(r2.created_at) FROM access_requests r2
-             WHERE r2.api_id = r.api_id AND r2.user_id = r.user_id
-           )
-         GROUP BY r.api_id`,
+        `SELECT id, api_id, user_id, application_id, justification, status, decided_by,
+                decided_at, decision_note, created_at, updated_at
+         FROM (
+           SELECT r.*,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY r.api_id ORDER BY r.created_at DESC, r.id DESC
+                  ) AS rn
+           FROM access_requests r
+           WHERE r.user_id = ? AND r.api_id IN (${apiIds.map(() => '?').join(', ')})
+         ) ranked
+         WHERE rn = 1`,
         [userId, ...apiIds],
       );
       return rows.map(mapAccessRequest);

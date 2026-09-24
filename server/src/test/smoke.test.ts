@@ -48,7 +48,7 @@ import {
 } from '../auth/service.js';
 import { loadConfig } from '../config/index.js';
 import { createStore } from '../db/index.js';
-import type { NexusStore, UserRecord } from '../db/store.js';
+import type { EnqueueEmailInput, NexusStore, UserRecord } from '../db/store.js';
 import { createCrypto } from '../lib/crypto.js';
 import { isNexusError } from '../lib/errors.js';
 import { isoInSeconds, newId, nowIso } from '../lib/ids.js';
@@ -599,6 +599,47 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(await store.organizations.delete(renamed.id), true);
       assert.equal(await store.organizations.delete(renamed.id), false);
     });
+
+    for (const transactional of [false, true]) {
+      it(`deletes clear references, as ON DELETE SET NULL does (transaction=${transactional})`, async () => {
+        // Issue #340: the SQL schemas declare `users.org_id` and
+        // `message_threads.api_id` ON DELETE SET NULL; MongoDB has no foreign
+        // keys, so its adapter has to clear them itself.
+        const org = await store.organizations.create({ name: `Gone-${newId().slice(0, 8)}` });
+        const member = await makeUser({ org_id: org.id });
+        const bystander = await makeUser();
+        const provider = await makeUser({ role: 'provider' });
+        const api = await makeApi(provider.id);
+        const kept = await makeApi(provider.id);
+        const thread = await store.threads.create({
+          subject: `About ${api.slug}`,
+          api_id: api.id,
+          created_by: member.id,
+          participant_a: member.id,
+          participant_b: provider.id,
+        });
+        const other = await store.threads.create({
+          subject: `About ${kept.slug}`,
+          api_id: kept.id,
+          created_by: bystander.id,
+          participant_a: bystander.id,
+          participant_b: provider.id,
+        });
+
+        const remove = async (db: NexusStore): Promise<void> => {
+          assert.equal(await db.apis.delete(api.id), true);
+          assert.equal(await db.organizations.delete(org.id), true);
+        };
+        if (transactional) await store.transaction(remove);
+        else await remove(store);
+
+        // Exactly the reference is cleared: nothing else about either row moves.
+        assert.deepEqual(await store.threads.findById(thread.id), { ...thread, api_id: null });
+        assert.deepEqual(await store.users.findById(member.id), { ...member, org_id: null });
+        assert.deepEqual(await store.threads.findById(other.id), other, 'other threads are kept');
+        assert.deepEqual(await store.users.findById(bystander.id), bystander);
+      });
+    }
 
     /* ── sessions ─────────────────────────────────────────────────────── */
 
@@ -1882,8 +1923,8 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.deepEqual(await store.grants.updateIfStatus(grant.id, 'revoked', {}), stored);
 
       // A patch that writes the values the row already holds is a *win*, not a
-      // miss — MySQL reports zero *changed* rows for it, so the adapter has to
-      // re-read the predicate rather than trust the affected-row count. The
+      // miss — MySQL would report zero *changed* rows for it, which is why the
+      // adapter pins CLIENT_FOUND_ROWS and counts matched rows instead. The
       // statement still ran, so `updated_at` may have moved; everything the
       // caller decides on must not have.
       const rewritten = await store.grants.updateIfStatus(grant.id, 'revoked', {
@@ -1915,6 +1956,121 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal((await store.grants.findActiveByApiAndUser(api.id, client.id))?.id, regrant.id);
 
       assert.equal(await store.grants.deleteByApi(api.id), 2);
+    });
+
+    it('updateIfStatus in a transaction loses to a decision committed outside it', async (t) => {
+      // Issue #331: a conditional UPDATE that matched nothing was re-checked
+      // with an ordinary SELECT, which under MySQL REPEATABLE READ still sees
+      // the transaction's first snapshot — and so reported the stale row as a
+      // win for a decision another instance had already made.
+      if (!target.peer) return t.skip('one connection: an outside write cannot interleave');
+      const owner = await makeUser({ role: 'provider' });
+      const client = await makeUser();
+      const api = await makeApi(owner.id);
+      const request = await store.accessRequests.create({
+        api_id: api.id,
+        user_id: client.id,
+        justification: 'please',
+        status: 'pending',
+      });
+      const grant = await store.grants.create({
+        api_id: api.id,
+        user_id: client.id,
+        acl_group: `nexus:api:${api.id}:approved`,
+        status: 'active',
+        granted_by: owner.id,
+      });
+
+      const peer = await target.peer();
+      try {
+        let runs = 0;
+        const outcomes = await store.transaction(async (tx) => {
+          runs += 1;
+          // Reading first fixes a REPEATABLE READ snapshot before the outside
+          // decisions commit. (MongoDB instead aborts on the write conflict and
+          // re-runs the body, which then reads the decided rows.)
+          await tx.accessRequests.findById(request.id);
+          await tx.grants.findById(grant.id);
+          if (runs === 1) {
+            assert.ok(
+              await peer.accessRequests.updateIfStatus(request.id, 'pending', {
+                status: 'cancelled',
+              }),
+            );
+            assert.ok(await peer.grants.updateIfStatus(grant.id, 'active', { status: 'revoked' }));
+          }
+          return [
+            await tx.accessRequests.updateIfStatus(request.id, 'pending', {
+              status: 'approved',
+              decided_by: owner.id,
+              decided_at: nowIso(),
+            }),
+            await tx.grants.updateIfStatus(grant.id, 'active', {
+              status: 'revoked',
+              revoked_by: owner.id,
+              revoked_at: nowIso(),
+            }),
+          ];
+        });
+        assert.deepEqual(outcomes, [null, null], 'both writes lost to the committed decisions');
+      } finally {
+        await peer.close();
+      }
+      assert.equal((await store.accessRequests.findById(request.id))?.status, 'cancelled');
+      const stored = await store.grants.findById(grant.id);
+      assert.equal(stored?.status, 'revoked');
+      assert.equal(stored?.revoked_by, null, 'the losing revocation wrote nothing');
+    });
+
+    it('accessRequests: listLatestForUser carries the application and breaks ties by id', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const client = await makeUser();
+      const tied = await makeApi(owner.id);
+      const other = await makeApi(owner.id);
+      const app = await store.applications.create({
+        owner_user_id: client.id,
+        name: `Latest ${newId().slice(0, 8)}`,
+        description: 'Latest-request fixture',
+        status: 'active',
+      });
+
+      // Two requests for one API in the same instant: the id breaks the tie,
+      // identically in every adapter.
+      const at = isoInSeconds(-30);
+      const [lowId, highId] = [newId(), newId()].sort() as [string, string];
+      await store.accessRequests.create({
+        id: highId,
+        api_id: tied.id,
+        user_id: client.id,
+        application_id: app.id,
+        justification: 'for the application',
+        status: 'pending',
+        created_at: at,
+      });
+      await store.accessRequests.create({
+        id: lowId,
+        api_id: tied.id,
+        user_id: client.id,
+        justification: 'for the account',
+        status: 'denied',
+        created_at: at,
+      });
+      const account = await store.accessRequests.create({
+        api_id: other.id,
+        user_id: client.id,
+        justification: 'account only',
+        status: 'pending',
+        created_at: at,
+      });
+
+      const latest = await store.accessRequests.listLatestForUser(client.id, [tied.id, other.id]);
+      const byApi = new Map(latest.map((row) => [row.api_id, row]));
+      assert.equal(latest.length, 2);
+      assert.equal(byApi.get(tied.id)?.id, highId, 'a created_at tie resolves to the higher id');
+      assert.equal(byApi.get(tied.id)?.application_id, app.id, 'the application survives');
+      assert.deepEqual(byApi.get(tied.id), await store.accessRequests.findById(highId));
+      assert.deepEqual(byApi.get(other.id), account);
+      assert.equal(byApi.get(other.id)?.application_id, null);
     });
 
     /* ── consumers and credentials ────────────────────────────────────── */
@@ -2662,6 +2818,117 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       }
     });
 
+    /** A keyed outbox message, as the verification and mass-email paths enqueue one. */
+    function keyedEmail(key: string, subject = 'Keyed'): EnqueueEmailInput {
+      return {
+        to_email: 'keyed@example.test',
+        subject,
+        body_html: '<p>k</p>',
+        body_text: 'k',
+        idempotency_key: key,
+      };
+    }
+
+    it('emailOutbox: a repeated key inside a transaction returns the first row', async () => {
+      const key = `tx-key-${newId()}`;
+      const [first, second] = await store.transaction(async (tx) => [
+        await tx.emailOutbox.enqueue(keyedEmail(key, 'First')),
+        await tx.emailOutbox.enqueue(keyedEmail(key, 'Second')),
+      ]);
+      assert.equal(first?.created, true);
+      assert.equal(second?.created, false);
+      assert.deepEqual(second?.entry, first?.entry);
+
+      const outside = await store.emailOutbox.enqueue(keyedEmail(key, 'Outside'));
+      assert.equal(outside.created, false);
+      assert.deepEqual(outside.entry, first?.entry, 'the committed row, unchanged');
+
+      // A pinned id that is already taken is still an error with a fresh key —
+      // yielding to the idempotency key must not swallow other collisions.
+      const fresh = `pinned-${newId()}`;
+      await assert.rejects(() =>
+        store.emailOutbox.enqueue({ ...keyedEmail(fresh), id: first?.entry.id }),
+      );
+      assert.equal(await store.emailOutbox.findByIdempotencyKey(fresh), null);
+    });
+
+    it('emailOutbox: a key committed after the snapshot is returned, not raised', async (t) => {
+      // Issue #332, MySQL: the transaction's REPEATABLE READ snapshot predates
+      // the other instance's commit, so the old re-read after the duplicate-key
+      // error could not see the winner and rethrew the driver error.
+      if (!target.peer) return t.skip('one connection: an outside write cannot interleave');
+      const key = `snapshot-key-${newId()}`;
+      const peer = await target.peer();
+      try {
+        let winner: string | undefined;
+        const [ours, after] = await store.transaction(async (tx) => {
+          // Fix the snapshot while the key is still free.
+          await tx.emailOutbox.findById(newId());
+          if (winner === undefined) {
+            winner = (await peer.emailOutbox.enqueue(keyedEmail(key, 'Peer'))).entry.id;
+          }
+          return [
+            await tx.emailOutbox.enqueue(keyedEmail(key, 'Ours')),
+            // A write after the lost race, which an aborted transaction loses.
+            await tx.emailOutbox.enqueue(keyedEmail(`${key}-after`)),
+          ];
+        });
+        assert.equal(ours?.created, false);
+        assert.equal(ours?.entry.id, winner);
+        assert.equal(ours?.entry.subject, 'Peer');
+        assert.equal(after?.created, true);
+        assert.ok(await store.emailOutbox.findByIdempotencyKey(`${key}-after`));
+      } finally {
+        await peer.close();
+      }
+    });
+
+    it('emailOutbox: two transactions racing on one key both commit', async (t) => {
+      // Issue #332, PostgreSQL: the losing INSERT waits for the winner's
+      // transaction, then raised a unique violation that aborted its own
+      // transaction, so the re-read that should have returned the winner failed.
+      if (!target.peer) return t.skip('one connection: two bodies cannot contend');
+      const key = `race-key-${newId()}`;
+      const peer = await target.peer();
+      try {
+        let release = (): void => {};
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let peerInserted = (): void => {};
+        const inserted = new Promise<void>((resolve) => {
+          peerInserted = resolve;
+        });
+        const winner = peer.transaction(async (tx) => {
+          const result = await tx.emailOutbox.enqueue(keyedEmail(key, 'Winner'));
+          peerInserted();
+          await gate;
+          return result;
+        });
+        await inserted;
+
+        // This insert blocks on the winner's uncommitted row (MongoDB instead
+        // retries on the write conflict) until the gate opens.
+        const loser = store.transaction(async (tx) => [
+          await tx.emailOutbox.enqueue(keyedEmail(key, 'Loser')),
+          await tx.emailOutbox.enqueue(keyedEmail(`${key}-after`)),
+        ]);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        release();
+
+        const won = await winner;
+        const [lost, after] = await loser;
+        assert.equal(won.created, true);
+        assert.equal(lost?.created, false);
+        assert.equal(lost?.entry.id, won.entry.id);
+        assert.equal(lost?.entry.subject, 'Winner');
+        assert.equal(after?.created, true, 'and the losing transaction carried on');
+        assert.ok(await store.emailOutbox.findByIdempotencyKey(`${key}-after`));
+      } finally {
+        await peer.close();
+      }
+    });
+
     it('emailOutbox: claims due rows once, then retries and fails', async () => {
       const marker = `claim-${newId()}@example.test`;
       await store.emailOutbox.enqueue({
@@ -3198,6 +3465,55 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
           'password_reset',
           '2026-01-01T00:10:00.001Z',
           first,
+        ),
+        true,
+      );
+    });
+
+    it('verificationTokens: a throttled claim inside a transaction commits it at once', async () => {
+      // Issue #326: on MongoDB the throttled claim was an upsert that collided
+      // with the existing claim's `_id`, which aborts a multi-document
+      // transaction; the body then re-ran until the retry budget ran out.
+      const user = await makeUser();
+      const first = '2026-01-01T00:00:00.000Z';
+      const second = '2026-01-01T00:05:00.000Z';
+      const cutoff = '2025-12-31T23:50:00.000Z';
+      const tokenHash = `claim-tx-${newId()}`;
+      let runs = 0;
+      const started = Date.now();
+      const claims = await store.transaction(async (tx) => {
+        runs += 1;
+        const result = [
+          await tx.verificationTokens.claimIssue(user.id, 'password_reset', first, cutoff),
+          await tx.verificationTokens.claimIssue(user.id, 'password_reset', second, cutoff),
+        ];
+        // A write after the throttled claim, which an aborted transaction loses.
+        await tx.verificationTokens.create({
+          user_id: user.id,
+          token_hash: tokenHash,
+          purpose: 'password_reset',
+          expires_at: isoInSeconds(600),
+        });
+        return result;
+      });
+      assert.deepEqual(claims, [true, false], 'the second claim is throttled, not an error');
+      assert.equal(runs, 1, 'the body is not re-run');
+      assert.ok(Date.now() - started < 5000, 'and the transaction commits promptly');
+      assert.ok(await store.verificationTokens.findByTokenHash(tokenHash, 'password_reset'));
+
+      // The same against a claim an earlier request already committed.
+      runs = 0;
+      const again = await store.transaction(async (tx) => {
+        runs += 1;
+        return tx.verificationTokens.claimIssue(user.id, 'password_reset', second, cutoff);
+      });
+      assert.equal(again, false);
+      assert.equal(runs, 1);
+
+      // An expired window is still renewed from inside a transaction.
+      assert.equal(
+        await store.transaction((tx) =>
+          tx.verificationTokens.claimIssue(user.id, 'password_reset', second, first),
         ),
         true,
       );

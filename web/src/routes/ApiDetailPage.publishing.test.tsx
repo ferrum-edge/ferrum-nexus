@@ -1,3 +1,4 @@
+import type { QueryClient } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -88,10 +89,11 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function openTab(tab: string): Promise<void> {
-  renderPage(<ApiDetailPage />);
+async function openTab(tab: string): Promise<QueryClient> {
+  const { client } = renderPage(<ApiDetailPage />);
   await screen.findByRole('heading', { name: API.name });
   selectTab(tab);
+  return client;
 }
 
 function save(): void {
@@ -309,6 +311,28 @@ describe('provider API workspace', () => {
     await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: '/apis' }));
     expect(apisApi.remove).toHaveBeenCalledWith(API.id);
   });
+
+  it('does not refetch the deleted API on its way out (issue #336)', async () => {
+    await openTab('Settings');
+    await waitFor(() => expect(apisApi.spec).toHaveBeenCalled());
+    const loads = (): number[] => [
+      vi.mocked(apisApi.get).mock.calls.length,
+      vi.mocked(apisApi.spec).mock.calls.length,
+      vi.mocked(apisApi.usage).mock.calls.length,
+    ];
+    const before = loads();
+    fireEvent.click(screen.getByRole('button', { name: 'Delete API' }));
+    const dialog = await screen.findByRole('dialog');
+    changeField(/Type billing to confirm/, 'billing');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete API' }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: '/apis' }));
+    // Give any refetch a chance to start: a deleted API's detail, spec and
+    // usage would all answer 404 now.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(loads()).toEqual(before);
+  });
 });
 
 describe('provider specification and sandbox credentials', () => {
@@ -395,6 +419,36 @@ describe('provider specification and sandbox credentials', () => {
     expect(screen.queryByText('Specification updated')).not.toBeInTheDocument();
   });
 
+  it('publishes exactly the reviewed document and keeps newer edits (issue #330)', async () => {
+    const comparison = deferred<{ diff: SpecDiff }>();
+    vi.mocked(apisApi.diffSpec).mockImplementationOnce(() => comparison.promise);
+    await openTab('Specification');
+    await screen.findByLabelText(/OpenAPI specification/);
+    const reviewed = RAW_SPEC.replace('1.0.0', '2.0.0');
+    const newer = RAW_SPEC.replace('1.0.0', '3.0.0');
+    changeField(/OpenAPI specification/, reviewed);
+    fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+    await waitFor(() => expect(apisApi.diffSpec).toHaveBeenCalledWith(API.id, { spec: reviewed }));
+
+    // The provider keeps typing while the comparison is still in flight.
+    changeField(/OpenAPI specification/, newer);
+    await act(async () => {
+      comparison.resolve({ diff: EMPTY_DIFF });
+    });
+
+    const dialog = await screen.findByRole('dialog', { name: 'Publish this revision' });
+    expect(within(dialog).getByText(/editor changed after this comparison/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Publish revision' }));
+
+    await screen.findByText('Specification updated');
+    expect(apisApi.updateSpec).toHaveBeenCalledTimes(1);
+    expect(apisApi.updateSpec).toHaveBeenCalledWith(API.id, { spec: reviewed });
+    // The unreviewed edit is neither published nor discarded.
+    expect(screen.getByLabelText(/OpenAPI specification/)).toHaveValue(newer);
+    expect(screen.getByRole('button', { name: 'Discard changes' })).toBeEnabled();
+    expect(screen.getByText('Unsaved changes')).toBeInTheDocument();
+  });
+
   it('lists revision history and rolls one back after reviewing it', async () => {
     const earlier = {
       ...SPEC,
@@ -430,7 +484,7 @@ describe('provider specification and sandbox credentials', () => {
   });
 
   it('creates a sandbox credential and forgets its display after acknowledgement', async () => {
-    await openTab('Test consumer');
+    const client = await openTab('Test consumer');
     expect(screen.getByText('nexus-test-api-1')).toBeInTheDocument();
     changeField('Label', '  Manual smoke check  ');
     fireEvent.click(screen.getByRole('button', { name: 'Create test credential' }));
@@ -443,6 +497,17 @@ describe('provider specification and sandbox credentials', () => {
     fireEvent.click(within(dialog).getByRole('checkbox'));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
     expect(screen.queryByText('test-only-sandbox-key')).not.toBeInTheDocument();
+    // …nor does the mutation cache keep it once acknowledged (issue #336).
+    await waitFor(() =>
+      expect(
+        JSON.stringify(
+          client
+            .getMutationCache()
+            .getAll()
+            .map((mutation) => mutation.state),
+        ),
+      ).not.toContain('test-only-sandbox-key'),
+    );
   });
 });
 

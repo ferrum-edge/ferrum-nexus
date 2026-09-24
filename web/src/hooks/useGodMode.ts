@@ -24,6 +24,10 @@ export function useGodRevokeGrant(): UseMutationResult<
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.grants.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.accessRequests.all });
+      // Same surfaces as an ordinary revocation: the API workspace's grant
+      // counts and the catalog's per-identity access state (issue #336).
+      void queryClient.invalidateQueries({ queryKey: queryKeys.apis.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.catalog.all });
     },
   });
 }

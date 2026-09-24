@@ -48,6 +48,9 @@ export function useRevokeGrant(): UseMutationResult<
       void queryClient.invalidateQueries({ queryKey: queryKeys.grants.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.accessRequests.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.catalog.all });
+      // The provider's API workspace counts active grants, so a revocation
+      // made from the Grants tab must refresh its stats too (issue #336).
+      void queryClient.invalidateQueries({ queryKey: queryKeys.apis.all });
     },
   });
 }

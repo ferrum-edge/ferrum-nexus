@@ -274,21 +274,25 @@ export function CredentialsPage(): ReactElement {
       {
         id: 'actions',
         header: '',
-        cell: ({ row }) => (
-          <div className="flex justify-end gap-1.5">
-            <Button size="sm" variant="secondary" onClick={() => setRotating(row.original)}>
-              Rotate
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              className="hover:bg-danger-soft hover:text-danger"
-              onClick={() => setRevoking(row.original)}
-            >
-              Revoke
-            </Button>
-          </div>
-        ),
+        // A revoked credential is history: there is nothing left on the
+        // gateway to rotate or revoke, so offering either only invites a
+        // failed request (issue #336).
+        cell: ({ row }) =>
+          row.original.status === 'revoked' ? null : (
+            <div className="flex justify-end gap-1.5">
+              <Button size="sm" variant="secondary" onClick={() => setRotating(row.original)}>
+                Rotate
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="hover:bg-danger-soft hover:text-danger"
+                onClick={() => setRevoking(row.original)}
+              >
+                Revoke
+              </Button>
+            </div>
+          ),
       },
     ],
     [applications],
@@ -480,7 +484,14 @@ export function CredentialsPage(): ReactElement {
           secret={showOnce.secret}
           consumerUsername={showOnce.consumerUsername}
           title={showOnce.title}
-          onAcknowledge={() => setShowOnce(null)}
+          onAcknowledge={() => {
+            setShowOnce(null);
+            // The mutation result still holds the plaintext; drop it so the
+            // secret really is shown once (issue #336). The hooks set
+            // `gcTime: 0`, so the reset mutation leaves the cache at once.
+            issue.reset();
+            rotate.reset();
+          }}
         />
       ) : null}
     </>

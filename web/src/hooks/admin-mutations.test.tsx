@@ -149,7 +149,7 @@ describe('administrative mutations', () => {
     expect(client.getQueryData(queryKeys.apis.detail(API.id))).toEqual({ cached: true });
   });
 
-  it('refreshes requests and grants after emergency revocation', async () => {
+  it('refreshes requests, grants, API counts and the catalog after emergency revocation', async () => {
     const { result } = renderHook(useActions, { wrapper });
     const body = { grant_id: GRANT.id, reason: 'Access no longer authorized' };
     await act(async () => {
@@ -157,7 +157,9 @@ describe('administrative mutations', () => {
       expect(response.grant.status).toBe('revoked');
     });
     expect(godApi.revokeGrant).toHaveBeenCalledWith(body);
-    expectStale('requests', 'grants');
+    // The API workspace's grant counts and the catalog's access state change
+    // with it, exactly as for an ordinary revocation (issue #336).
+    expectStale('requests', 'grants', 'apis', 'catalog');
   });
 
   it('refreshes the catalog, API workspace, and grants after emergency deletion', async () => {

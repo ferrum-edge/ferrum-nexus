@@ -478,7 +478,25 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
       if (changed.length === 0) {
         // A gateway failure after the status commit is recoverable by repeating
         // the same PATCH, even though the portal account is already active.
-        if (patch.status === 'active') await credentials.restoreGatewayAccess(target.id, actor.id);
+        if (patch.status === 'active') {
+          // That repeat writes to Edge — it puts the ACL groups of every active
+          // grant back on the account's consumers — so it is a state change like any
+          // other and leaves an audit row, recorded before the gateway is
+          // touched exactly as the first enable's is (issue #337).
+          await audit.record(
+            { id: actor.id, role: actor.role },
+            AuditAction.USER_ENABLE,
+            { type: 'user', id: target.id },
+            {
+              changed_fields: [],
+              from_status: target.status,
+              to_status: target.status,
+              gateway_restore_retry: true,
+            },
+            ip,
+          );
+          await credentials.restoreGatewayAccess(target.id, actor.id);
+        }
         return { user: toPublicUser(target) };
       }
 

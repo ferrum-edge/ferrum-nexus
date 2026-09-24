@@ -697,6 +697,10 @@ organization.
 | `new_password`     | string         | ≥ 12 chars                              |
 
 → `{ "user": User }`. `403 FORBIDDEN` when `current_password` is wrong.
+`429 RATE_LIMITED` beyond 10 requests per minute from one account — the route
+checks a password, so it is bounded like the sign-in routes — when
+`NEXUS_RATE_LIMIT_ENABLED=true` (the default; always off under
+`NEXUS_ENV=test`).
 
 ### `GET /api/users`
 
@@ -1336,7 +1340,7 @@ also refused; see the [template authoring rules](guides/admin-guide.md#placehold
 of an HTML anchor or a whitespace-delimited URL in `body_text`. Other attributes,
 HTML text, subjects and concatenation into another URL are refused, including
 URLs on approved hosts. Any placeholder in a URL or attribute must supply the
-entire value. A violation returns `400 VALIDATION_FAILED` before saving or
+entire value and name a `*_url` variable. A violation returns `400 VALIDATION_FAILED` before saving or
 auditing; the message names the field, offending host or construct, and setting.
 `details` contains `field`, `construct`, and `setting`. URL paths, query strings
 and token values are not included in these errors. Stored templates and their
@@ -1464,7 +1468,8 @@ credentials are still live and the revocation is queued for retry. Errors:
 `409 LAST_SUPER_ADMIN` when the target is the last active super admin —
 **including when that is you**, because "promote someone else first" is the
 useful message; `409 CONFLICT` for any other attempt to disable your own
-account.
+account. `revoke_grants: true` revokes the account's grants only after the
+disable has committed, so a refused disable leaves every grant in place.
 
 #### `POST /api/admin/god/broadcast`
 
