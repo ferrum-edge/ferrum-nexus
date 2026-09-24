@@ -600,18 +600,35 @@ All notable changes to Ferrum Nexus are documented here. The format follows
     `acl_group_removed: false` and `cause`, and the disable answers with the
     error (`502 EDGE_ERROR`, `details.failed_grants`) after both audit rows
     record `failed_steps: ["revoke_grants"]`, `failed_grant_revocations` and
-    `failed_grants`. The account teardown that follows strips the group. The
+    `failed_grants`. The account teardown that follows strips the group; if it
+    fails too, it stays queued. A store failure while finding the consumer is
+    reported as stage `lookup` (`500 INTERNAL`), not as a gateway failure, and
+    a consumer already gone from the gateway counts as its group removed. The
     sweep also moves each originating request to `revoked`, as a targeted
     revocation does.
+  - Re-enabling an account rebuilds each identity's `nexus:api:<id>:approved`
+    groups from its active grants alone instead of merging them into the live
+    list. A re-enable cancels a queued teardown, so a sweep whose ACL removal
+    failed, followed by a teardown that failed as well, used to leave a
+    revoked grant's group live on the gateway — access the portal showed as
+    revoked, that no provider could revoke again. Groups outside that
+    namespace, which the portal did not create, are kept.
   - `POST /api/admin/credentials/reconcile` only acts on a consumer the portal
     owns — a recorded mapping whose username still matches the live consumer,
     a registered gateway identity bound to it, or portal credential rows
-    against it — and answers `403 FORBIDDEN` before touching the gateway for
-    anything else, such as a consumer an operator created by hand.
+    against it whose live username is still the one Nexus derives for their
+    owner — and answers `403 FORBIDDEN` before any gateway write for anything
+    else, such as a consumer an operator created by hand. A `consumer_id` that
+    is not consumer-id shaped is `400 VALIDATION_FAILED` before a lease is
+    taken on it.
   - Revoking a grant holds the API's `proxy:<id>` lease, the one approval holds,
-    from its claim through the ACL removal, so a re-request approved while a
-    revocation is in flight can no longer have its new group stripped by the
-    older revocation.
+    from its claim through the ACL removal and the grantee's notice, so a
+    re-request approved while a revocation is in flight can no longer have its
+    new group stripped by the older revocation, nor be announced before it.
+  - An approval writes its grant inside the consumer key, straight after the
+    ACL group lands, and re-checks the application there. An application
+    delete between the two could leave, on MongoDB, an active grant for an
+    application that no longer existed.
 - **Store adapter parity for the case-insensitive matching and retry edges**
   (#345). SQLite's built-in `lower()` folds ASCII only — unlike PostgreSQL,
   MySQL and the JS `toLowerCase()` the search term uses — so the adapter now

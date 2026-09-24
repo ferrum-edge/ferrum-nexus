@@ -708,8 +708,13 @@ for every identity, the registered ones included — and refuses
 just before the re-enable cannot strip a live account, nor a test consumer the
 account recreated after it. The worker drops such a job rather than
 rescheduling it. Re-enabling also restores retained active-grant ACL groups on
-its canonical consumer under that consumer's serializer. Grants are read inside
-the section, so a concurrent revocation either excludes its group from the
+each of its identities' consumers under that consumer's serializer. The
+Nexus-owned `nexus:api:<id>:approved` groups are rebuilt from active grants
+alone — one without an active grant is dropped rather than kept, because the
+teardown that would have stripped it (say, after a god-mode sweep whose ACL
+removal failed) is exactly what the re-enable just cancelled — while groups
+outside that namespace are left as they are. Grants are read inside the
+section, so a concurrent revocation either excludes its group from the
 restore or removes it afterwards. Revoked credential material and disposable
 test identities are never restored. A gateway error is returned to the operator;
 repeating the active-status PATCH retries the restore after a partial failure.
@@ -1620,13 +1625,24 @@ before the ACL write. The removal, kept or orphan fields describe compensation.
 An orphan field means the group may remain live and needs investigation.
 
 A targeted revocation holds the API's `proxy:<id>` lease — the one an approval
-holds — from its claim through the ACL removal, so a re-request approved while
-the revocation is in flight is ordered behind it rather than having its new
-group stripped. The god-mode grant sweep (`bulk: true`) differs in one way: a
-grant whose ACL removal fails is **not** put back to `active`, because that let
-a later re-enable replay the access a super admin removed. Its `access.revoke`
-row adds `acl_group_removed: false` and `cause`, no `access.revoke_rollback` is
-written, and the account teardown that follows the sweep strips the group.
+holds — from its claim through the ACL removal and its notice to the grantee,
+so a re-request approved while the revocation is in flight is ordered behind it
+rather than having its new group stripped, and "approved" never reaches the
+grantee before the "revoked" it followed. An approval writes its grant row
+inside the consumer's key, straight after the group lands, so an application
+delete — which removes the consumer and cascades the rows under that key — can
+never leave a grant for an application that no longer exists.
+
+The god-mode grant sweep (`bulk: true`) differs in one way: a grant whose ACL
+removal fails is **not** put back to `active`, because that let a later
+re-enable replay the access a super admin removed. Its `access.revoke` row adds
+`acl_group_removed: false` and `cause`, and no `access.revoke_rollback` is
+written. The account teardown that follows the sweep strips the group; if that
+fails too, the teardown stays queued. A re-enable cancels a queued teardown, so
+re-enabling rebuilds each identity's Nexus-owned `nexus:api:<id>:approved`
+groups from its **active grants only** — any such group without one is dropped,
+groups outside that namespace are kept — and the stray group cannot outlive
+both. A consumer already gone from the gateway counts as its group removed.
 Every revocation, targeted or bulk, moves the originating request to `revoked`.
 
 | Action                    | Target type      | Description                                                                                                                                                                                                                                                                                                                    |
@@ -1644,9 +1660,14 @@ Every revocation, targeted or bulk, moves the originating request to `revoked`.
 `credential.reconcile` is only ever written for a consumer the portal owns: a
 recorded mapping whose username still matches the live consumer, a registered
 gateway identity bound to it, or portal credential rows against it (a live
-consumer must then still carry a `nexus-` username). Any other `consumer_id` —
-one an operator created on the gateway by hand, or an id nothing records — is
-refused with `403 FORBIDDEN` before the gateway is touched, and writes no row.
+consumer must then still carry the exact username Nexus derives for the rows'
+owner — `nexus-user-<user_id>`, `nexus-app-<application_id>`, or
+`nexus-test-<api_id>` for an API the portal still has — not merely a `nexus-`
+prefix). Any other `consumer_id` — one an operator created on the gateway by
+hand, or an id nothing records — is refused with `403 FORBIDDEN` before any
+gateway write (the consumer is only read), and writes no row. An id that is not
+consumer-id shaped is `400 VALIDATION_FAILED` before the lease keyed on it is
+taken.
 
 | Action                       | Target type  | Description                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | ---------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1696,9 +1717,10 @@ and then failed to record its outcome is still charged and still named.
 grant could not be fully revoked, `god.disable_user` and `user.disable` both
 carry `failed_steps` including `revoke_grants`, `failed_grant_revocations` (the
 count) and `failed_grants` (`grant_id`, `api_id`, `application_id`, and the
-`stage` it stopped at: `claim`, `gateway` or `audit`), `revoked_grants` counts
-only the grants that were fully revoked, and the request answers with the error
-— `502 EDGE_ERROR` when a gateway step failed — rather than success.
+`stage` it stopped at: `claim`, `lookup`, `gateway` or `audit`),
+`revoked_grants` counts only the grants that were fully revoked, and the
+request answers with the error — `502 EDGE_ERROR` when a gateway step failed,
+`500 INTERNAL` otherwise — rather than success.
 
 | Action                   | Target type | Description                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | ------------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

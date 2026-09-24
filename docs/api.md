@@ -776,7 +776,10 @@ Guards enforced in the service:
 - Re-enabling an account (`status: "active"`) cancels any queued revocation, so
   a retry can never strip a live account's credentials. It then restores retained
   active-grant ACL groups without restoring revoked credentials or test
-  consumers. A gateway failure returns `502 EDGE_ERROR` after the portal status
+  consumers: each identity's `nexus:api:<id>:approved` groups are rebuilt from
+  its active grants alone, so one left behind by a revocation the gateway never
+  applied is dropped, while groups outside that namespace are kept. A gateway
+  failure returns `502 EDGE_ERROR` after the portal status
   commit; repeat the same `status: "active"` PATCH to retry restoration.
 - `404 NOT_FOUND` when `org_id` names an organization that does not exist.
 
@@ -1013,8 +1016,12 @@ which case only the portal rows changed. Idempotent: a second call revokes
 nothing and clears an already-empty type. Only a consumer the portal owns can be
 reconciled — one with a recorded mapping whose username still matches the live
 consumer, a registered gateway identity bound to it, or portal credential rows
-against it; anything else, such as a consumer an operator created on the
-gateway, is refused before the gateway is touched.
+against it whose live username is still the one Nexus derives for their owner
+(`nexus-user-<user_id>`, `nexus-app-<application_id>`, or `nexus-test-<api_id>`
+for an API the portal still has); anything else, such as a consumer an operator
+created on the gateway, is refused before any gateway write (the consumer is
+only read). A `consumer_id` that is not consumer-id shaped
+(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`) is refused before even that read.
 
 Errors: `400 VALIDATION_FAILED`, `403 FORBIDDEN` (not a portal-owned consumer),
 `502 EDGE_ERROR` / `502 EDGE_UNAVAILABLE` (nothing is revoked when the gateway
@@ -1488,11 +1495,18 @@ fully revoked, the disable (already committed) is audited with
 `failed_steps: ["revoke_grants"]` and the grants that failed, and the request
 answers with the error — `502 EDGE_ERROR` when a gateway step failed — whose
 `details.failed_grants` lists each one's `grant_id`, `api_id`,
-`application_id` and the `stage` it stopped at (`claim`, `gateway`, `audit`). A
-grant stopped at `gateway` stays `revoked` in the portal, so a later re-enable
-does not restore it, and the account teardown in the same request strips its
-ACL group. Repeating the request retries whatever is left. Each swept grant's
-originating access request moves to `revoked`, as with a targeted revocation.
+`application_id` and the `stage` it stopped at (`claim`, `lookup`, `gateway`,
+`audit`). A grant stopped at `lookup` or `gateway` stays `revoked` in the
+portal, so a later re-enable does not restore it; the account teardown in the
+same request strips its ACL group, and when that fails too it stays queued for
+the teardown worker. Should the account be re-enabled before the worker gets
+to it, the re-enable — which cancels the queued teardown — rebuilds each
+identity's `nexus:api:<id>:approved` groups from its active grants alone, so the
+group is dropped then (groups outside that namespace are left alone). Only a
+`claim` failure leaves a grant active; repeating the request retries it, and
+re-runs the teardown. A consumer already gone from the gateway counts as its
+group removed. Each swept grant's originating access request moves to
+`revoked`, as with a targeted revocation.
 
 #### `POST /api/admin/god/broadcast`
 

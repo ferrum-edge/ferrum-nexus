@@ -399,9 +399,11 @@ export function createGodService(deps: GodServiceDeps): GodService {
       // A sweep that could not revoke every grant is not a success, and is
       // never reported as one (issue #341): the step is named in
       // `failed_steps`, the grants in the audit rows, and the request answers
-      // with the error once they are written. A grant stopped at the gateway
+      // with the error once they are written. A grant stopped after its claim
       // stays `revoked` in the portal, so neither a retry nor a later
-      // re-enable replays it; the teardown below strips its group.
+      // re-enable replays it: the teardown below strips its group, and should
+      // that fail as well, a re-enable rebuilds the account's approval groups
+      // from its active grants alone, dropping this one.
       const failedGrants = sweep.failed.map((entry) => ({
         grant_id: entry.grant_id,
         api_id: entry.api_id,
@@ -409,9 +411,14 @@ export function createGodService(deps: GodServiceDeps): GodService {
         stage: entry.stage,
       }));
       if (failedGrants.length > 0) {
+        // Only a `claim` failure leaves a grant active for a repeat of the
+        // disable to sweep again; every other stage already revoked it in the
+        // portal, and what is left of it on the gateway is the teardown's.
         const message =
           `${failedGrants.length} of this account's grants could not be fully revoked. The ` +
-          'disable is committed; repeating it retries what is left and strips the gateway again.';
+          'disable is committed. A grant that could not be claimed is still active, and ' +
+          'repeating the disable retries it; a revoked grant whose group may still be on the ' +
+          "gateway is taken off by the account's gateway teardown, queued until it succeeds.";
         fail(
           'revoke_grants',
           failedGrants.some((entry) => entry.stage === 'gateway')

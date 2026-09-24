@@ -167,11 +167,12 @@
  */
 
 import {
-  APPLICATION_CONSUMER_USERNAME_PREFIX,
-  CONSUMER_USERNAME_PREFIX,
   CREDENTIAL_TYPE_FOR_PLUGIN,
   MAX_PAGE_SIZE,
   TEST_CONSUMER_USERNAME_PREFIX,
+  apiIdFromAclGroup,
+  consumerUsernameForApplication,
+  consumerUsernameForUser,
   roleAtLeast,
   type CredentialMetadata,
   type CredentialType,
@@ -247,15 +248,11 @@ export function gatewayIdentityLockKey(username: string): string {
 }
 
 /**
- * Every username shape Nexus gives a consumer it creates — an account's, an
- * application's and a provider test consumer's. What `reconcile` requires of
- * a live consumer that only portal credential rows vouch for.
+ * What `reconcile` accepts as a consumer id before it takes a lease keyed on
+ * it — the shape `FERRUM_NAMESPACE` is held to, which every id Nexus derives
+ * and every id Edge assigns (both UUIDs) fits.
  */
-const PORTAL_USERNAME_PREFIXES: readonly string[] = [
-  CONSUMER_USERNAME_PREFIX,
-  APPLICATION_CONSUMER_USERNAME_PREFIX,
-  TEST_CONSUMER_USERNAME_PREFIX,
-];
+const CONSUMER_ID_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 /**
  * Raised whenever the Nexus mirror and the live Edge array disagree in a way
@@ -453,8 +450,10 @@ export interface CredentialsService {
    *
    * Only for a consumer the portal owns — one with a recorded mapping, a
    * registered gateway identity bound to it, or portal credential rows against
-   * it. Anything else is refused with `FORBIDDEN` before the gateway is touched
-   * (architecture rule 13, issue #341).
+   * it whose owner the live username still derives from. Anything else is
+   * refused with `FORBIDDEN` before any gateway write — the consumer is read,
+   * never changed (architecture rule 13, issue #341). An id that is not
+   * consumer-id shaped is `VALIDATION_FAILED` before even that read.
    */
   reconcile(
     actor: UserRecord,
@@ -488,7 +487,16 @@ export interface CredentialsService {
    * touch what an earlier attempt already completed.
    */
   disableGatewayAccess(userId: Uuid, subject: string): Promise<GatewayTeardown>;
-  /** Restore retained active-grant groups, without restoring credential material. */
+  /**
+   * Restore retained active-grant groups, without restoring credential material.
+   *
+   * Each identity's Nexus-owned `nexus:api:<id>:approved` groups are rebuilt
+   * **strictly** from its active grants: one the portal holds no active grant
+   * for is dropped, not merged back — a sweep whose ACL removal failed left it
+   * behind with the grant already `revoked`, and a re-enable that deleted the
+   * owed teardown before it ran must not turn it into live access (issue
+   * #341). Groups outside that namespace are an operator's and are kept.
+   */
   restoreGatewayAccess(userId: Uuid, subject: string): Promise<void>;
   /** Append a credential to an arbitrary consumer — the test-consumer path. */
   issueForConsumer(
@@ -1691,12 +1699,27 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           // replay that used the account's whole grant list would hand every
           // application every API the account can reach.
           const grants = await store.grants.listActiveByUser(userId, consumer.application_id);
-          if (grants.length === 0) return;
           const live = await edge.consumers.get(consumer.ferrum_consumer_id);
-          if (!live) throw edgeError('The gateway consumer for this identity no longer exists');
-          const groups = [
-            ...new Set([...(live.acl_groups ?? []), ...grants.map((grant) => grant.acl_group)]),
-          ];
+          if (!live) {
+            // Nothing to restore onto, and nothing on it to leave behind.
+            if (grants.length === 0) return;
+            throw edgeError('The gateway consumer for this identity no longer exists');
+          }
+          // The portal's approval groups come from its active grants and
+          // nowhere else (issue #341). Merging the live list back in kept any
+          // `nexus:api:<id>:approved` group the portal had already revoked —
+          // a god-mode sweep whose ACL removal failed leaves exactly that,
+          // relying on the teardown this re-enable just cancelled — and so
+          // re-enabled access the portal shows as revoked, that no provider
+          // could revoke again and no reconciliation would ever remove. A
+          // group outside that namespace is an operator's, and is kept.
+          const current = live.acl_groups ?? [];
+          const retained = current.filter((group) => apiIdFromAclGroup(group) === null);
+          const groups = [...new Set([...retained, ...grants.map((grant) => grant.acl_group)])];
+          const stray = current.some(
+            (group) => apiIdFromAclGroup(group) !== null && !groups.includes(group),
+          );
+          if (grants.length === 0 && !stray) return;
           await edge.consumers.replace(
             live.id,
             {
@@ -2226,6 +2249,13 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       if (!(CREDENTIAL_TYPES as readonly string[]).includes(type)) {
         throw validationFailed(`Unsupported credential type '${String(type)}'`);
       }
+      // The id becomes a lease key before anything decides whether it is
+      // ours, so it must look like a consumer id and nothing else: every other
+      // lease namespace (`proxy:…`, `consumer-name:…`, `test-consumer:…`)
+      // carries a `:`, which this shape can never contain.
+      if (!CONSUMER_ID_SHAPE.test(consumerId)) {
+        throw validationFailed('That is not a gateway consumer id');
+      }
 
       const result = await edge.serializePerKey(consumerId, async () => {
         const live = await edge.consumers.get(consumerId);
@@ -2326,15 +2356,28 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     }
     // 3. Portal credential rows against the id — a consumer Nexus appended
     //    credentials to before the registry existed. A live consumer must
-    //    still carry a portal-shaped username for that to count.
+    //    still carry the exact username Nexus derives for the identity those
+    //    rows name, not merely a `nexus-` prefix an operator could reuse: the
+    //    account's (`nexus-user-<user_id>`) or the application's
+    //    (`nexus-app-<application_id>`), or — for a provider test consumer,
+    //    whose rows name the provider rather than the API — a
+    //    `nexus-test-<api_id>` whose API the portal still has.
     const rows = await store.credentials.list(
       { ferrum_consumer_id: consumerId },
       { limit: 1, offset: 0 },
     );
-    if (rows.total === 0) return false;
+    const [row] = rows.items;
+    if (!row) return false;
     if (live === null) return true;
     const { username } = live;
-    return PORTAL_USERNAME_PREFIXES.some((prefix) => username.startsWith(prefix));
+    const derived =
+      row.application_id === null
+        ? consumerUsernameForUser(row.user_id)
+        : consumerUsernameForApplication(row.application_id);
+    if (username === derived) return true;
+    if (!username.startsWith(TEST_CONSUMER_USERNAME_PREFIX)) return false;
+    const apiId = username.slice(TEST_CONSUMER_USERNAME_PREFIX.length);
+    return apiId.length > 0 && (await store.apis.findById(apiId)) !== null;
   }
 
   /**

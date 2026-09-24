@@ -66,16 +66,21 @@
  * access standing.
  *
  * `revoke` also holds the API's `proxy:<id>` lease — the one `approve` holds —
- * from its claim through the ACL removal, so a re-request approved while a
- * revocation is in flight can never have its fresh group stripped by the
- * older revocation's delayed removal (issue #341).
+ * from its claim through the ACL removal and its notice, so a re-request
+ * approved while a revocation is in flight can never have its fresh group
+ * stripped by the older revocation's delayed removal, nor have "approved"
+ * delivered before "revoked" (issue #341). `approve` writes its grant row
+ * inside the consumer key, straight after the group lands, so an application
+ * delete or a re-enable holding that key sees the pair whole or not at all.
  *
  * The sweep differs in one more way. It runs only after an account disable
  * has committed, on access a super admin asked to remove, so a gateway failure
  * is **not** unwound back to `active` — that would let a later re-enable
  * replay the group. The grant stays `revoked`, the failure is returned to the
  * caller grant by grant, and the account teardown that follows strips every
- * group the account's identities hold.
+ * group the account's identities hold. A re-enable that cancels that teardown
+ * before it has run rebuilds the approval groups from active grants alone, so
+ * the group cannot outlive both.
  */
 
 import {
@@ -119,7 +124,12 @@ import { accessRequestBudgetLockKey, type KeyedSerializer } from '../lib/keyed-s
 import { nowIso } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
 import { presentApiSummary, type GatewayUrlSource } from '../publishing/present.js';
-import { withGroup, withoutGroup, type ConsumerProvisioner } from '../credentials/consumers.js';
+import {
+  withGroup,
+  withoutGroup,
+  type ConsumerProvisioner,
+  type MutateAclGroupsOptions,
+} from '../credentials/consumers.js';
 
 /** Filters accepted by {@link AccessService.listRequests}. */
 export interface AccessRequestListFilter {
@@ -195,10 +205,13 @@ export interface AccessService {
    *
    * Never swallows a failure: every grant that could not be fully revoked is
    * named in `failed`, with the stage it stopped at, and is not counted in
-   * `revoked`. A `gateway` failure leaves the grant `revoked` in the portal —
-   * it is not put back to `active`, so a later re-enable cannot replay the
-   * access a super admin asked to remove — and relies on the account's
-   * gateway teardown, which strips every group, to take the group off.
+   * `revoked`. A `lookup` or `gateway` failure leaves the grant `revoked` in
+   * the portal — it is not put back to `active`, so a later re-enable cannot
+   * replay the access a super admin asked to remove — and relies on the
+   * account's gateway teardown, which strips every group, to take the group
+   * off; failing that, on a re-enable, which rebuilds the approval groups from
+   * active grants only. A consumer already gone from the gateway counts as
+   * removed.
    */
   revokeAllForUser(
     actor: UserRecord,
@@ -215,11 +228,14 @@ export interface BulkRevocationFailure {
   application_id: Uuid | null;
   /**
    * Where it stopped. `claim`: nothing changed and the grant is still active.
-   * `gateway`: the grant is `revoked` in the portal but its ACL group may still
-   * be on the consumer. `audit`: revoked on both sides, but its
-   * `access.revoke` row could not be written.
+   * `lookup`: the grant is `revoked` in the portal, but reading which consumer
+   * to take its group off failed in the store, so the group may still be on
+   * it. `gateway`: the grant is `revoked` in the portal but the gateway
+   * refused the ACL removal, so its group may still be on the consumer.
+   * `audit`: revoked on both sides, but its `access.revoke` row could not be
+   * written.
    */
-  stage: 'claim' | 'gateway' | 'audit';
+  stage: 'claim' | 'lookup' | 'gateway' | 'audit';
   error: string;
 }
 
@@ -380,12 +396,18 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
    *
    * Serialised per consumer by the provisioner, so concurrent decisions for the
    * same user compose instead of overwriting each other.
+   *
+   * `options.afterWrite` runs inside the consumer key once the write landed —
+   * how an approval commits its grant before anything else can act on the
+   * consumer. `options.absentIsDone` lets a removal treat a consumer that is
+   * already gone as done.
    */
   async function setGroupMembership(
     user: UserRecord,
     apiId: Uuid,
     present: boolean,
     applicationId: Uuid | null,
+    options: Pick<MutateAclGroupsOptions, 'afterWrite' | 'absentIsDone'> = {},
   ): Promise<string> {
     const group = aclGroupForApi(apiId);
     // The identity, not the account. An application's grant belongs on its own
@@ -407,7 +429,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       // Only the *grant* re-checks the account: an approval that passed its
       // authorisation before the grantee was disabled would otherwise hand a
       // stripped consumer its group back. Removing one is always safe.
-      present ? { requireActiveUser: user.id } : {},
+      present ? { ...options, requireActiveUser: user.id } : options,
     );
     return group;
   }
@@ -901,13 +923,50 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         const group = aclGroupForApi(api.id);
         let addedGroup: string | null = group;
         let groupPossiblyApplied = true;
-        let grant: GrantRecord;
+        const committed: { grant?: GrantRecord } = {};
         try {
           try {
             // A rejected write may still have landed. Register compensation
             // before attempting it, even if the gateway never acknowledges it.
-            await setGroupMembership(requester, api.id, true, request.application_id);
-            groupPossiblyApplied = false;
+            //
+            // The grant row is written *inside* the consumer key, straight
+            // after the group lands (issue #341). Released in between, an
+            // application delete — which removes the consumer and cascades
+            // the rows under this key — could run first, and the grant then
+            // landed for an application that no longer exists: the SQL
+            // foreign key refuses it, but MongoDB has none. A re-enable, which
+            // rebuilds the groups from active grants under the same key, is
+            // likewise ordered wholly before or after the pair.
+            await setGroupMembership(requester, api.id, true, request.application_id, {
+              afterWrite: async () => {
+                groupPossiblyApplied = false;
+                committed.grant = await store.transaction(async (tx) => {
+                  // Re-read under the key the delete holds: an application
+                  // gone or disabled since the admission check above gets no
+                  // grant, and the catch below takes the group back off.
+                  if (request.application_id !== null) {
+                    const application = await tx.applications.findById(request.application_id);
+                    if (!application || application.owner_user_id !== requester.id) {
+                      throw notFound('Application', request.application_id);
+                    }
+                    if (application.status !== 'active') {
+                      throw conflict('The application this request is for is disabled', {
+                        application_id: request.application_id,
+                      });
+                    }
+                  }
+                  return tx.grants.create({
+                    api_id: api.id,
+                    application_id: request.application_id,
+                    user_id: requester.id,
+                    access_request_id: request.id,
+                    acl_group: group,
+                    status: 'active',
+                    granted_by: actor.id,
+                  });
+                });
+              },
+            });
           } catch (error) {
             // The provisioner's active-user guard runs before the ACL write.
             if (isNexusError(error) && error.code === 'USER_DISABLED') {
@@ -916,17 +975,6 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
             }
             throw error;
           }
-          grant = await store.transaction(async (tx) =>
-            tx.grants.create({
-              api_id: api.id,
-              application_id: request.application_id,
-              user_id: requester.id,
-              access_request_id: request.id,
-              acl_group: group,
-              status: 'active',
-              granted_by: actor.id,
-            }),
-          );
         } catch (error) {
           await unwindApproval({
             actor,
@@ -941,6 +989,8 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           });
           throw error;
         }
+        const grant = committed.grant;
+        if (!grant) throw new NexusError('INTERNAL', 'The approval recorded no grant');
 
         await audit.record(
           { id: actor.id, role: actor.role },
@@ -1054,11 +1104,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       // ordered: an approval that goes second adds the group back after this
       // removal, and one that went first holds a grant this claim never
       // touches.
-      const withdraw = async (): Promise<{
-        api: ApiRecord;
-        grantee: UserRecord | null;
-        updated: GrantRecord;
-      }> => {
+      const withdraw = async (): Promise<GrantRecord> => {
         // Re-read under the lease: whatever held it may have revoked this
         // grant or moved the API, and the snapshot above is from before.
         const grant = await store.grants.findById(grantId);
@@ -1129,35 +1175,37 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           },
           ip,
         );
-        return { api, grantee, updated };
+
+        // Inside the lease, as an approval announces inside it: a revocation
+        // and a quick re-approval of the same API are ordered by the lease,
+        // and their notices have to be too, or "approved" could reach the
+        // grantee before the "revoked" it followed. `announce` never throws.
+        if (grantee) {
+          await announce(
+            grantee,
+            {
+              type: 'access_revoked',
+              title: `Access revoked: ${api.name}`,
+              body: `${actor.display_name} revoked your access to ${api.name}.`,
+              link: `/catalog/${api.slug}`,
+            },
+            {
+              templateKey: 'access_revoked',
+              vars: {
+                api_name: api.name,
+                api_slug: api.slug,
+                revoked_by_name: actor.display_name,
+                reason: reason ?? '',
+              },
+            },
+          );
+        }
+        return updated;
       };
 
-      const { api, grantee, updated } = initialApi.ferrum_proxy_id
+      const updated = initialApi.ferrum_proxy_id
         ? await edge.serializePerKey(`proxy:${initialApi.ferrum_proxy_id}`, withdraw)
         : await withdraw();
-
-      // A courtesy, outside the lease: nothing in it can change what the
-      // gateway serves, and every approval of this API waits on the lease.
-      if (grantee) {
-        await announce(
-          grantee,
-          {
-            type: 'access_revoked',
-            title: `Access revoked: ${api.name}`,
-            body: `${actor.display_name} revoked your access to ${api.name}.`,
-            link: `/catalog/${api.slug}`,
-          },
-          {
-            templateKey: 'access_revoked',
-            vars: {
-              api_name: api.name,
-              api_slug: api.slug,
-              revoked_by_name: actor.display_name,
-              reason: reason ?? '',
-            },
-          },
-        );
-      }
 
       const [decorated] = await decorateGrants([updated]);
       return decorated ?? updated;
@@ -1231,19 +1279,46 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         // portal row stays `revoked` (fail closed), the failure is reported to
         // the caller, and the account's gateway teardown — which runs after
         // this sweep and strips every group off every identity the account
-        // holds — is what takes the group off. Also why the sweep takes no
-        // proxy lease: the account is already disabled, and an approval's
-        // active-owner check inside the consumer key refuses to add a group
-        // back for it.
-        let gatewayCause: string | null = null;
+        // holds — is what takes the group off. Should that fail too and the
+        // account be re-enabled before its retry, the re-enable rebuilds the
+        // approval groups from active grants only, so the group goes then.
+        // Also why the sweep takes no proxy lease: the account is already
+        // disabled, and an approval's active-owner check inside the consumer
+        // key refuses to add a group back for it.
+        //
+        // What to take off is read first, and a store failure there is
+        // reported as one (`lookup`), not as a gateway failure.
+        let cause: string | null = null;
+        let consumerId: string | null = null;
         try {
           const api = await store.apis.findById(grant.api_id);
           const grantee = await store.users.findById(userId);
           if (api && grantee) {
-            await setGroupMembership(grantee, api.id, false, grant.application_id);
+            const consumer = await store.consumers.findByUserAndNamespace(
+              userId,
+              namespace,
+              grant.application_id,
+            );
+            // No consumer, no group: the identity never reached the gateway.
+            consumerId = consumer?.ferrum_consumer_id ?? null;
           }
         } catch (error) {
-          gatewayCause = fail(grant, 'gateway', error);
+          cause = fail(grant, 'lookup', error);
+        }
+        if (consumerId !== null) {
+          const group = aclGroupForApi(grant.api_id);
+          try {
+            // A consumer already gone from the gateway took its groups with
+            // it: the access is gone, which is all this removal is for.
+            await provisioner.mutateAclGroups(
+              consumerId,
+              (groups) => withoutGroup(groups, group),
+              userId,
+              { absentIsDone: true },
+            );
+          } catch (error) {
+            cause = fail(grant, 'gateway', error);
+          }
         }
 
         try {
@@ -1259,16 +1334,16 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
               reason,
               bulk: true,
               // The portal withdrew it; the gateway had not yet followed.
-              ...(gatewayCause !== null ? { acl_group_removed: false, cause: gatewayCause } : {}),
+              ...(cause !== null ? { acl_group_removed: false, cause } : {}),
             },
             ip,
           );
         } catch (error) {
-          // A grant already reported at the gateway stage is not listed twice.
-          if (gatewayCause === null) fail(grant, 'audit', error);
+          // A grant already reported at an earlier stage is not listed twice.
+          if (cause === null) fail(grant, 'audit', error);
           continue;
         }
-        if (gatewayCause === null) revoked += 1;
+        if (cause === null) revoked += 1;
       }
       return { revoked, failed };
     },

@@ -95,13 +95,17 @@ export interface ConsumerProvisioner {
    *
    * The body sent back is built from the `GET` response, so redacted credential
    * placeholders round-trip intact (§4.4) and no API key is ever dropped.
+   *
+   * Resolves to the consumer as written, or `null` when the consumer was
+   * already gone and {@link MutateAclGroupsOptions.absentIsDone} said that is
+   * fine.
    */
   mutateAclGroups(
     ferrumConsumerId: string,
     change: (groups: string[]) => string[],
     subject?: string,
     options?: MutateAclGroupsOptions,
-  ): Promise<EdgeConsumer>;
+  ): Promise<EdgeConsumer | null>;
 }
 
 /** Extra conditions {@link ConsumerProvisioner.mutateAclGroups} checks. */
@@ -117,6 +121,26 @@ export interface MutateAclGroupsOptions {
    * removals are always safe and never need it.
    */
   requireActiveUser?: Uuid;
+  /**
+   * Treat a consumer that no longer exists on the gateway as a finished
+   * write, rather than an `EDGE_ERROR`. Only for a *removal*: the groups of a
+   * consumer that is gone are gone with it, so there is nothing left to take
+   * off. An addition always needs the consumer, and never passes this.
+   */
+  absentIsDone?: boolean;
+  /**
+   * Runs **inside** the critical section, once the gateway write has landed,
+   * before the consumer key is released.
+   *
+   * For the portal record that has to be ordered with the write against every
+   * other holder of the key — an approval's grant row, which an application
+   * delete (which removes the consumer and cascades the rows under this same
+   * key) or a re-enable (which rebuilds the groups from active grants under
+   * it) must see either entirely or not at all (issue #341). It must not take
+   * this key itself: `serializePerKey` is a queue, not a re-entrant lock. A
+   * throw from it propagates after the write, which the caller compensates.
+   */
+  afterWrite?: (consumer: EdgeConsumer) => Promise<void>;
 }
 
 /** Dependencies of {@link createConsumerProvisioner}. */
@@ -222,7 +246,12 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
       });
     },
 
-    async mutateAclGroups(ferrumConsumerId, change, subject, options): Promise<EdgeConsumer> {
+    async mutateAclGroups(
+      ferrumConsumerId,
+      change,
+      subject,
+      options,
+    ): Promise<EdgeConsumer | null> {
       return edge.serializePerKey(ferrumConsumerId, async () => {
         const requiredActive = options?.requireActiveUser;
         if (requiredActive !== undefined) {
@@ -235,12 +264,13 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
         }
         const current = await edge.consumers.get(ferrumConsumerId);
         if (!current) {
+          if (options?.absentIsDone) return null;
           throw edgeError('The gateway consumer for this account no longer exists', {
             consumer_id: ferrumConsumerId,
           });
         }
         const groups = change([...(current.acl_groups ?? [])]);
-        return edge.consumers.replace(
+        const written = await edge.consumers.replace(
           ferrumConsumerId,
           {
             id: current.id,
@@ -251,6 +281,8 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
           },
           subject,
         );
+        if (options?.afterWrite) await options.afterWrite(written);
+        return written;
       });
     },
   };
