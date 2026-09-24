@@ -134,6 +134,7 @@ export function useUpdateApiSpec(): UseMutationResult<
 > {
   const queryClient = useQueryClient();
   return useMutation({
+    meta: { silent: true },
     mutationFn: ({ id, body }: { id: string; body: UpdateApiSpecRequest }) =>
       apisApi.updateSpec(id, body),
     onSuccess: () => {
@@ -165,6 +166,7 @@ export function useAuthorizeApiViewer(): UseMutationResult<
 > {
   const queryClient = useQueryClient();
   return useMutation({
+    meta: { silent: true },
     mutationFn: ({ id, body }: { id: string; body: AuthorizeApiViewerRequest }) =>
       apisApi.authorizeViewer(id, body),
     onSuccess: () => {
@@ -181,6 +183,7 @@ export function useRevokeApiViewer(): UseMutationResult<
 > {
   const queryClient = useQueryClient();
   return useMutation({
+    meta: { silent: true },
     mutationFn: ({ id, userId }: { id: string; userId: string }) =>
       apisApi.revokeViewer(id, userId),
     onSuccess: () => {
@@ -240,6 +243,7 @@ export function useDiffApiSpec(): UseMutationResult<
   { id: string; body: DiffApiSpecRequest }
 > {
   return useMutation({
+    meta: { silent: true },
     mutationFn: ({ id, body }: { id: string; body: DiffApiSpecRequest }) =>
       apisApi.diffSpec(id, body),
   });
@@ -253,6 +257,7 @@ export function useRollbackApiSpec(): UseMutationResult<
 > {
   const queryClient = useQueryClient();
   return useMutation({
+    meta: { silent: true },
     mutationFn: ({ id, revisionId }: { id: string; revisionId: string }) =>
       apisApi.rollbackSpec(id, revisionId),
     onSuccess: () => {
@@ -275,6 +280,7 @@ export function useRestoreApiGateway(): UseMutationResult<
 > {
   const queryClient = useQueryClient();
   return useMutation({
+    meta: { silent: true },
     mutationFn: (id: string) => apisApi.restoreGateway(id),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.apis.all });
@@ -354,6 +360,7 @@ export function useSetApiPlugin(): UseMutationResult<
 > {
   const queryClient = useQueryClient();
   return useMutation({
+    meta: { silent: true },
     mutationFn: ({ id, name, body }: { id: string; name: string; body: SetApiPluginRequest }) =>
       apisApi.setPlugin(id, name, body),
     onSuccess: (_result, variables) => {
@@ -370,6 +377,7 @@ export function useRemoveApiPlugin(): UseMutationResult<
 > {
   const queryClient = useQueryClient();
   return useMutation({
+    meta: { silent: true },
     mutationFn: ({ id, name }: { id: string; name: string }) => apisApi.removePlugin(id, name),
     onSuccess: (_result, variables) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.apis.plugins(variables.id) });

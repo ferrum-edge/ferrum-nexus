@@ -274,7 +274,7 @@ function ReferenceCount({
  * URL and clients have to be told the address by hand.
  */
 function GatewayTab({ settings }: { settings: AdminSettingsResponse }): ReactElement {
-  const update = useUpdateAdminSettings();
+  const update = useUpdateAdminSettings(true);
   const toast = useToast();
   const { canSuperAdmin } = useAuth();
   const [publicUrl, setPublicUrl] = useState(settings.gateway.public_url ?? '');

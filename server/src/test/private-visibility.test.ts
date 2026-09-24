@@ -19,6 +19,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { after, before, describe, it } from 'node:test';
 
 import {
@@ -277,6 +278,37 @@ describe('private API visibility', () => {
     });
     assert.equal(response.statusCode, 400, response.body);
     assert.match(response.json<{ error: { message: string } }>().error.message, /register first/);
+  });
+
+  it('answers for an administrator exactly as for an account that does not exist', async () => {
+    // Administrators read every API, so there is nothing to authorize — but a
+    // distinct "that is an administrator" answer made this endpoint an oracle
+    // for which addresses hold the admin role (issue #344).
+    /** Status and body of one authorization attempt. */
+    async function authorize(payload: Record<string, string>): Promise<[number, unknown]> {
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: `/api/apis/${privateId}/viewers`,
+        payload,
+      });
+      return [response.statusCode, response.json()];
+    }
+
+    const byUnknownEmail = await authorize({ email: 'nobody@example.test' });
+    const byAdminEmail = await authorize({ email: 'private-super@example.test' });
+    assert.equal(byAdminEmail[0], 400);
+    assert.deepEqual(byAdminEmail, byUnknownEmail);
+
+    const byUnknownId = await authorize({ user_id: randomUUID() });
+    const byAdminId = await authorize({ user_id: admin.user.id });
+    assert.equal(byAdminId[0], 400);
+    assert.deepEqual(byAdminId, byUnknownId);
+
+    assert.equal(
+      await harness.store.apiViewers.find(privateId, admin.user.id),
+      null,
+      'and nothing was written for the administrator',
+    );
   });
 
   it('keeps the viewer list to whoever administers the API', async () => {

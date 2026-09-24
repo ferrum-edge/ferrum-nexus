@@ -2,12 +2,13 @@
  * Re-encrypt every encrypted `app_settings` row under a new master key.
  *
  * `NEXUS_SECRET_KEY` derives the AES-256-GCM key that protects the SMTP
- * password and the CAPTCHA secret. Rotating it used to mean those rows simply
- * stopped decrypting: `readEncryptedSetting` returns `null` on failure, so SMTP
- * fell back to the environment and CAPTCHA — which fails closed — locked every
- * administrator out before they could re-enter the secret. This is the offline
- * step that makes rotation complete: read each blob with the previous key,
- * write it back under the new one, all in one transaction.
+ * password and the CAPTCHA secret. Rotating it without this step leaves those
+ * rows undecryptable: SMTP then sends no password at all (it once fell back to
+ * the environment's and presented it to the stored relay — issue #342), and
+ * CAPTCHA — which fails closed — locks every administrator out before they can
+ * re-enter the secret. This is the offline step that makes rotation complete:
+ * read each blob with the previous key, write it back under the new one, all in
+ * one transaction.
  *
  * It is deliberately all-or-nothing. A row that the previous key cannot open
  * is a wrong key or an already-rotated database, and either way writing the

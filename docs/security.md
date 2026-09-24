@@ -56,14 +56,23 @@ Three checks run, in that order:
 1. **Name suffixes.** `.local`, `.internal`, `.localhost` and `.home.arpa`, and
    the bare name `localhost`, are refused outright.
 2. **IP literals.** A loopback, RFC 1918, carrier-grade NAT, link-local,
-   multicast, unspecified or IPv4-mapped literal is refused. A literal _is_ the
-   destination, so nothing further is looked up.
+   IPv6 unique-local or site-local (`fec0::/10`), multicast or unspecified
+   literal is refused. An IPv6 address that is really a way of reaching an IPv4
+   one — IPv4-mapped (`::ffff:0:0/96`), NAT64 (`64:ff9b::/96`) or 6to4
+   (`2002::/16`) — is judged as the IPv4 address it carries, so
+   `64:ff9b::a00:1` is refused as `10.0.0.1` and `::ffff:93.184.216.34` is
+   accepted as the public address it is. The deprecated IPv4-compatible form
+   (`::a.b.c.d`), the rest of `::/16`, and the rest of `64:ff9b::/32` —
+   including the local-use NAT64 prefix `64:ff9b:1::/48` — are refused whatever
+   they carry. A literal _is_ the destination, so nothing further is looked up.
 3. **Resolved addresses.** Any other hostname is resolved (A **and** AAAA,
-   ~5 s, 2 tries) and **every** address it answers with must be public. One
-   private answer refuses the whole set, an IPv4-mapped answer is judged as the
-   IPv4 address it carries, and an empty answer set, an `NXDOMAIN`, a `SERVFAIL`
-   or a timeout all refuse as well — the lookup **fails closed**, because none
-   of those outcomes shows the destination to be public.
+   ~5 s, 2 tries) and **every** address it answers with must be public by the
+   same rules. One private answer refuses the whole set, and an empty answer
+   set, an `NXDOMAIN`, a `SERVFAIL` or a timeout all refuse as well — the
+   lookup **fails closed**, because none of those outcomes shows the
+   destination to be public. Unwrapping NAT64 matters most here: on a
+   DNS64/NAT64 network an AAAA-only name answers inside `64:ff9b::/96`, and
+   the translator delivers to whatever IPv4 address the low 32 bits spell.
 
 Step 3 is what closes `127.0.0.1.nip.io` and any attacker-controlled record
 pointing into RFC 1918 space: a hostname on no denylist still reaches loopback
@@ -148,6 +157,22 @@ routes`, see the [provider guide](guides/provider-guide.md#enforcement-level)),
 - **Sign-in does not leak which addresses exist.** A missing account still
   costs one real scrypt derivation against a decoy hash, and "no such account"
   and "wrong password" return the identical `401 UNAUTHORIZED`.
+- **Registration does say whether an address is taken — an accepted risk.**
+  `POST /api/auth/register` answers `409 CONFLICT` for an address that already
+  has an account. Unlike the recovery endpoints below it cannot answer a
+  duplicate the way it answers a success: with email verification off (the
+  default) a successful registration signs the new account straight in, and a
+  refusal cannot imitate that session. Making registration non-enumerating
+  would mean always verifying new addresses and answering every attempt with
+  "check your inbox" — mailing the existing owner rather than creating
+  anything — which is a change to the sign-up contract, not a hardening of it.
+  What is done instead: the password is scrypt-hashed **before** the address is
+  looked up, so a refusal costs what a sign-up costs and its latency says
+  nothing its status does not; the route shares the sensitive `/api/auth`
+  limiter (20 requests per minute per IP) and, when one is configured, the
+  registration CAPTCHA, which bound how fast addresses can be tested; and a
+  portal with self-registration closed refuses with `403` before any lookup,
+  so the question never reaches the user table.
 - **Resetting a password ends every session.** Unlike a self-service change,
   a reset assumes the account may already be in someone else's hands, so it
   keeps nothing: `POST /api/auth/reset-password` deletes every session of the
@@ -208,6 +233,15 @@ they are built to answer nothing:
   or rolls back with it, so a store fault cannot burn the recipient's
   10-minute window on a link that was never issued and leave the retry
   answering the uniform `200` while sending nothing.
+- **So does a failed delivery.** The message is part of the same unit. It is
+  rendered _before_ the claim — a template that cannot be rendered fails the
+  attempt with nothing claimed — and queued through the minting transaction
+  (`tx.emailOutbox.enqueue`, idempotency key `reset:<token id>` or
+  `verify:<token id>`), so an outbox insert that fails rolls back the claim,
+  the token and the audit row with it. Delivery used to run after the claim had
+  committed and swallow its own failures, which spent the window on a link
+  nobody was sent. Either failure is logged at `warn` and answered with the
+  same uniform `200`, and the next request issues the link.
 - **The audit log is where the truth is.** `auth.password_reset_request` and
   `auth.verification_resend` are written only when a link was really issued, so
   operators can see what the response would not say.
@@ -401,6 +435,13 @@ already rendered into the outbox before upgrading are not revalidated.
   upload or parser diagnostics. This redacts server entries, not arbitrary URLs
   a provider writes in prose, examples or other fields. The original spec and
   provider editor use `GET /api/apis/:id/spec`, restricted to owner or admin.
+- **Authorizing a `private` API's viewer** (`POST /api/apis/:id/viewers`) is
+  not an oracle for the user table or for who administers the portal. An
+  administrator's address or user id — administrators read every API already —
+  gets exactly the answer an unknown one gets, `400 VALIDATION_FAILED` with the
+  same message, and nothing is written for either. A provider still learns that an
+  address belongs to an ordinary account when authorizing it succeeds; naming
+  the account is what the feature is for.
 
 ### The provider / operator split on gateway plugins
 
@@ -877,9 +918,32 @@ Before changing `NEXUS_SECRET_KEY`, stop all Nexus instances and run
 environment.
 The command re-encrypts SMTP/CAPTCHA blobs and every other encrypted setting
 in one transaction, refusing all writes if any blob cannot be decrypted. A
-bare key swap without re-encryption leaves those settings unreadable and
-CAPTCHA fails closed. Follow the complete rotation and rollback procedure in
+bare key swap without re-encryption leaves those settings unreadable, and both
+fail closed: CAPTCHA refuses, and SMTP sends **no** password. Follow the
+complete rotation and rollback procedure in
 [`operations.md`](operations.md#7-rotating-nexus_secret_key).
+
+### The environment SMTP password stays with the environment relay
+
+`NEXUS_SMTP_PASSWORD` is a credential for the connection `NEXUS_SMTP_HOST`,
+`_PORT`, `_SECURE` and `_USER` describe, and the email service presents it only
+there. The password it sends is decided by where it would come from:
+
+- a stored `smtp.password` that decrypts is used;
+- a stored `smtp.password` that **does not** decrypt — a key swapped without
+  `rotate-secret-key`, or a damaged row — is not treated as absent: no password
+  is sent, and a `warn` line (naming the condition, never a value) says the
+  override must be re-entered. It used to read as absent and fall back to the
+  environment's password, which was then presented to the _stored_ host under
+  the _stored_ username — relay A's secret handed to relay B;
+- with no stored password at all, the environment's is used only while the
+  effective host, port, TLS mode and username all equal the environment's.
+  Otherwise no password is sent and the condition is logged.
+
+That is the same rule the settings endpoint applies before it lets an override
+be cleared back to the environment. `smtp.password_set` follows it too: it is
+`true` only when a password would actually be presented, so an unreadable
+override reads `false`.
 
 ---
 
@@ -977,6 +1041,11 @@ proxy if you run more than one. The limiter keys on `request.ip`, which honours
 (unset — trust nothing — by default). Trusting an unfiltered header would let a
 client rotate the limiter's key once per request _and_ forge the IP recorded in
 the audit log, so the allowlist/hop-count form is the only one accepted.
+Every allowlist entry is parsed before the server is built — a real IPv4 or
+IPv6 address, with a prefix of 1–32 or 1–128 respectively — so a typo is a
+configuration error naming the variable rather than a crash inside Fastify, and
+a `/0` block, which Fastify refuses too, cannot bring "trust everything" back
+under another spelling.
 
 ### Publishing is bounded per account
 

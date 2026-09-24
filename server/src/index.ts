@@ -43,8 +43,8 @@ import { createExpirySweepWorker, type ExpirySweepWorker } from './auth/expiry-s
 import {
   createAuthService,
   type AuthService,
-  type OnEmailTokenIssued,
   type OnRegistered,
+  type PrepareEmailToken,
 } from './auth/service.js';
 import { createCatalogService, type CatalogService } from './catalog/service.js';
 import { environmentWithEnvFile, type EnvOverride } from './config/env-file.js';
@@ -366,13 +366,13 @@ export async function buildServer(
     locks,
     log: warn,
     onRegistered: deps.onRegistered ?? defaultOnRegistered(config, email, notifications, warn),
-    onVerificationResend: emailTokenSender(config, email, warn, {
+    prepareVerificationResend: emailTokenPreparer(config, email, {
       templateKey: 'verification',
       keyPrefix: 'verify',
       path: '/verify-email',
       urlVar: 'verification_url',
     }),
-    onPasswordResetRequested: emailTokenSender(config, email, warn, {
+    preparePasswordReset: emailTokenPreparer(config, email, {
       templateKey: 'password_reset',
       keyPrefix: 'reset',
       path: '/reset-password',
@@ -825,45 +825,45 @@ interface EmailTokenDelivery {
 }
 
 /**
- * Build the hook that delivers a minted link — a password reset, or a re-sent
- * verification.
+ * Build the hook that prepares a minted link's message — a password reset, or a
+ * re-sent verification.
+ *
+ * The message is rendered here, before the auth service claims anything, and
+ * the returned function queues it through the mint's own transaction. That
+ * split is the point (issue #342): delivery used to run after the claim had
+ * committed and swallow its own failures, so a broken template or a failed
+ * outbox insert spent the recipient's throttle window on a link nobody was ever
+ * sent, and every retry for the next ten minutes answered `200` and sent
+ * nothing. Now a render failure happens with nothing claimed, and an insert
+ * failure rolls the claim back with it. Either failure propagates to the auth
+ * service, which logs it and still answers uniformly — the endpoint's contract
+ * is that its answer never varies.
  *
  * The idempotency key is bound to the *token*, not the user, so a second
  * request that mints a second token can still be delivered while one minted
- * token stays at most one message. A queueing failure is logged and swallowed:
- * the token is already in the database and the endpoint's whole contract is
- * that its answer never varies, so throwing here would turn a broken outbox
- * into precisely the signal the endpoint exists to withhold.
+ * token stays at most one message.
  */
-function emailTokenSender(
+function emailTokenPreparer(
   config: NexusConfig,
   email: EmailService,
-  log: (obj: Record<string, unknown>, message: string) => void,
   delivery: EmailTokenDelivery,
-): OnEmailTokenIssued {
-  return async ({ user, token, tokenId }) => {
-    try {
-      const url = `${config.publicUrl}${delivery.path}?token=${encodeURIComponent(token)}`;
-      await email.enqueue({
-        to: user.email,
-        templateKey: delivery.templateKey,
-        idempotencyKey: `${delivery.keyPrefix}:${tokenId}`,
-        vars: {
-          recipient_name: user.display_name,
-          recipient_email: user.email,
-          [delivery.urlVar]: url,
-        },
+): PrepareEmailToken {
+  return async ({ user, token }) => {
+    const url = `${config.publicUrl}${delivery.path}?token=${encodeURIComponent(token)}`;
+    const rendered = await email.render(delivery.templateKey, {
+      recipient_name: user.display_name,
+      recipient_email: user.email,
+      [delivery.urlVar]: url,
+    });
+    return async (tx, tokenId) => {
+      await tx.emailOutbox.enqueue({
+        to_email: user.email,
+        subject: rendered.subject,
+        body_html: rendered.html,
+        body_text: rendered.text,
+        idempotency_key: `${delivery.keyPrefix}:${tokenId}`,
       });
-    } catch (error) {
-      log(
-        {
-          user_id: user.id,
-          template: delivery.templateKey,
-          error: error instanceof Error ? error.message : String(error),
-        },
-        'Could not queue a single-use link email',
-      );
-    }
+    };
   };
 }
 

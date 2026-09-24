@@ -266,6 +266,7 @@ import {
   validationFailed,
 } from '../lib/errors.js';
 import { newId } from '../lib/ids.js';
+import { apiRestoreLockKey } from '../lib/keyed-serializer.js';
 import type { NotificationsService } from '../notifications/service.js';
 import { createEdgePluginBinder, mergeOperatorSettings } from './edge-plugins.js';
 import { presentApi, type GatewayUrlSource } from './present.js';
@@ -2462,8 +2463,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // — that is the whole condition — so this is the only thing standing
       // between two restores of the same API and two live proxies claiming one
       // listen path. Everything from the missing-deployment check to the store
-      // write runs inside it.
-      const restored = await edge.serializePerKey(`api-restore:${apiId}`, async () => {
+      // write runs inside it. The gateway repair takes the same key before it
+      // flags an orphaned proxy, so it can never clear a reference this has
+      // just committed (issue #342).
+      const restored = await edge.serializePerKey(apiRestoreLockKey(apiId), async () => {
         const api = await loadApi(apiId);
         assertCanAdminister(actor, api);
 

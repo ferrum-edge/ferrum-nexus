@@ -479,6 +479,30 @@ describe('upstream destination policy', () => {
     'fd12::1',
     'fe80::1',
     'ff02::1',
+    // Site-local fec0::/10 (deprecated, never global).
+    'fec0::1',
+    'feff::1',
+    // NAT64 well-known prefix carrying a private IPv4 address, in both spellings.
+    '64:ff9b::a00:1',
+    '64:ff9b::10.0.0.1',
+    '64:ff9b::7f00:1',
+    '64:ff9b::a9fe:a9fe',
+    // Local-use NAT64 and the rest of 64:ff9b::/32, whatever they embed.
+    '64:ff9b:1::a00:1',
+    '64:ff9b:1::5db8:d822',
+    '64:ff9b:0:0:1::5db8:d822',
+    // 6to4 relaying to a private IPv4 address.
+    '2002:a00:1::1',
+    '2002:c0a8:101::',
+    '2002:7f00:1::1',
+    '2002::1',
+    // IPv4-mapped in its uncompressed and hex spellings.
+    '0:0:0:0:0:ffff:a00:1',
+    '::ffff:a00:1',
+    // Deprecated IPv4-compatible and SIIT-translated forms, even of a public address.
+    '::10.0.0.1',
+    '::93.184.216.34',
+    '::ffff:0:5db8:d822',
     'localhost',
     'app.localhost',
     'service.internal',
@@ -491,6 +515,12 @@ describe('upstream destination policy', () => {
     '172.32.0.1',
     '100.128.0.1',
     '2606:4700:4700::1111',
+    // Transition addresses are judged by the IPv4 address they deliver to.
+    '::ffff:93.184.216.34',
+    '0:0:0:0:0:ffff:5db8:d822',
+    '64:ff9b::5db8:d822',
+    '64:ff9b::93.184.216.34',
+    '2002:5db8:d822::1',
     'example.com',
     'api.internal.example.com',
   ];
@@ -579,6 +609,33 @@ describe('upstream destination policy — DNS resolution', () => {
 
   it('accepts an IPv4-mapped answer whose IPv4 address is public', async () => {
     await check([{ address: '::ffff:93.184.216.34', family: 6 }]);
+  });
+
+  it('refuses NAT64, 6to4 and site-local answers that reach private space', async () => {
+    // On a DNS64/NAT64 network an AAAA-only name answers inside 64:ff9b::/96,
+    // and the translator delivers to the IPv4 address in its low 32 bits.
+    for (const address of [
+      '64:ff9b::a00:1',
+      '64:ff9b::169.254.169.254',
+      '64:ff9b:1::a00:1',
+      '2002:a00:1::1',
+      '2002:c0a8:10a::1',
+      'fec0::1',
+    ]) {
+      const error = await refusal([{ address, family: 6 }]);
+      assert.deepEqual(
+        (error.details as { resolved: string[] }).resolved,
+        [address],
+        `${address} must be refused`,
+      );
+    }
+  });
+
+  it('accepts NAT64 and 6to4 answers whose IPv4 address is public', async () => {
+    await check([
+      { address: '64:ff9b::5db8:d822', family: 6 },
+      { address: '2002:5db8:d822::1', family: 6 },
+    ]);
   });
 
   it('refuses a mixed answer set: one private address is enough', async () => {

@@ -5,6 +5,7 @@ import { buttonClassName } from '../components/ui/Button';
 import { Icon } from '../components/ui/Icon';
 import { Spinner } from '../components/ui/Spinner';
 import { ApiError, authApi } from '../lib/api';
+import { useAuth } from '../stores/auth';
 
 type VerifyState =
   | { kind: 'idle' }
@@ -15,6 +16,7 @@ type VerifyState =
 /** Consumes the `?token=` link from the verification email. */
 export function VerifyEmailPage(): ReactElement {
   const { token } = useSearch({ from: '/verify-email' });
+  const { refresh } = useAuth();
   const [state, setState] = useState<VerifyState>({ kind: 'idle' });
   const attempted = useRef(false);
 
@@ -29,6 +31,7 @@ export function VerifyEmailPage(): ReactElement {
     authApi
       .verifyEmail({ token })
       .then((response) => {
+        if (response.verified) void refresh();
         setState(
           response.verified
             ? { kind: 'verified', email: response.user.email }
@@ -41,7 +44,7 @@ export function VerifyEmailPage(): ReactElement {
           message: ApiError.is(error) ? error.message : 'Verification failed.',
         });
       });
-  }, [token]);
+  }, [token, refresh]);
 
   return (
     <AuthShell title="Email verification">

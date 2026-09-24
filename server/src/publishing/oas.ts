@@ -369,31 +369,16 @@ export async function assertUpstreamAllowed(
 /**
  * Whether one resolved address is a public destination.
  *
- * An IPv4-mapped answer (`::ffff:10.0.0.1`) is judged as the IPv4 address it
- * carries. Reading it as "some address in `::/8`" would refuse every mapped
- * public address, and a naive `fc00::`-style check would accept every mapped
- * private one; the mapping is unwrapped instead so the RFC 1918 rules apply to
- * what the packet actually reaches. An answer that is not an IP address at all
- * is refused rather than ignored.
+ * An IPv6 answer that carries an IPv4 address the packet is really delivered
+ * to — IPv4-mapped (`::ffff:10.0.0.1`), NAT64 (`64:ff9b::a00:1`) or 6to4
+ * (`2002:a00:1::1`) — is judged as that IPv4 address; see
+ * {@link isPublicIpv6}. An answer that is not an IP address at all is refused
+ * rather than ignored.
  */
 export function isPublicResolvedAddress(entry: ResolvedAddress): boolean {
   const version = isIP(entry.address);
   if (version === 0) return false;
-  if (version === 4) return isPublicIpv4(entry.address);
-  const mapped = ipv4FromMapped(entry.address);
-  return mapped === null ? isPublicIpv6(entry.address) : isPublicIpv4(mapped);
-}
-
-/** The IPv4 address inside an IPv4-mapped IPv6 address, in either spelling. */
-function ipv4FromMapped(address: string): string | null {
-  const normalized = address.toLowerCase();
-  const dotted = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(normalized);
-  if (dotted) return dotted[1] ?? null;
-  const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(normalized);
-  if (!hex) return null;
-  const high = Number.parseInt(hex[1] as string, 16);
-  const low = Number.parseInt(hex[2] as string, 16);
-  return [high >>> 8, high & 0xff, low >>> 8, low & 0xff].join('.');
+  return version === 4 ? isPublicIpv4(entry.address) : isPublicIpv6(entry.address);
 }
 
 /**
@@ -436,17 +421,109 @@ function isPublicIpv4(host: string): boolean {
   );
 }
 
+/**
+ * Whether an IPv6 address is a public destination.
+ *
+ * Three prefixes are transports for IPv4 rather than IPv6 destinations of
+ * their own, and a check that only read the leading hextet would get them
+ * wrong in both directions — refusing every mapped public address, and
+ * accepting a NAT64 or 6to4 address that a translator or relay delivers to
+ * RFC 1918 space (issue #344). Each is unwrapped and the IPv4 address it
+ * carries is judged by the IPv4 rules instead:
+ *
+ * - `::ffff:0:0/96`, IPv4-mapped (RFC 4291 §2.5.5.2);
+ * - `64:ff9b::/96`, the NAT64 well-known prefix (RFC 6052), which on a
+ *   DNS64/NAT64 network is what an AAAA-only name resolves to;
+ * - `2002::/16`, 6to4 (RFC 3056), whose relay forwards to the IPv4 address in
+ *   the second and third hextets.
+ *
+ * Everything else in `::/16` — unspecified, loopback, the deprecated
+ * IPv4-compatible `::a.b.c.d` (RFC 4291 §2.5.5.1) and SIIT's `::ffff:0:0:0/96` —
+ * is refused outright, whatever IPv4 address it spells: none of them is a
+ * destination a public API is published at. So is the rest of `64:ff9b::/32`,
+ * including the local-use NAT64 prefix `64:ff9b:1::/48` (RFC 8215), whose
+ * embedding position the operator chooses and which is private by definition.
+ */
 function isPublicIpv6(host: string): boolean {
-  const normalized = host.toLowerCase();
-  if (normalized === '::' || normalized === '::1') return false;
+  const hextets = ipv6Hextets(host);
+  if (hextets === null) return false;
 
-  const first = Number.parseInt(normalized.split(':', 1)[0] || '0', 16);
+  const embedded = embeddedIpv4(hextets);
+  if (embedded !== null) return isPublicIpv4(embedded);
+
+  const first = hextets[0] ?? 0;
+  const second = hextets[1] ?? 0;
   return !(
-    first === 0 || // unspecified, IPv4-compatible, and IPv4-mapped forms
+    first === 0 || // unspecified, loopback, IPv4-compatible and the rest of ::/16
+    (first === 0x64 && second === 0xff9b) || // NAT64 outside the well-known /96
     (first >= 0xfc00 && first <= 0xfdff) || // unique-local fc00::/7
-    (first >= 0xfe80 && first <= 0xfebf) || // link-local fe80::/10
-    (first >= 0xff00 && first <= 0xffff) // multicast ff00::/8
+    (first >= 0xfe80 && first <= 0xfeff) || // link-local fe80::/10, site-local fec0::/10
+    first >= 0xff00 // multicast ff00::/8
   );
+}
+
+/**
+ * The IPv4 address an IPv4-mapped, NAT64 well-known-prefix or 6to4 address
+ * delivers to, or `null` for any other IPv6 address.
+ */
+function embeddedIpv4(hextets: readonly number[]): string | null {
+  const at = (index: number): number => hextets[index] ?? 0;
+  if (allZero(hextets, 0, 5) && at(5) === 0xffff) return dottedQuad(at(6), at(7));
+  if (at(0) === 0x64 && at(1) === 0xff9b && allZero(hextets, 2, 6)) {
+    return dottedQuad(at(6), at(7));
+  }
+  if (at(0) === 0x2002) return dottedQuad(at(1), at(2));
+  return null;
+}
+
+/** Whether the hextets in `[from, to)` are all zero. */
+function allZero(hextets: readonly number[], from: number, to: number): boolean {
+  return hextets.slice(from, to).every((group) => group === 0);
+}
+
+/** The IPv4 address spelled by two hextets, high one first. */
+function dottedQuad(high: number, low: number): string {
+  return [high >>> 8, high & 0xff, low >>> 8, low & 0xff].join('.');
+}
+
+/**
+ * The eight 16-bit groups of an IPv6 address in any textual form — compressed
+ * (`::`), with a trailing dotted-quad IPv4 part, or with a zone index, which is
+ * dropped — or `null` when `address` is not one.
+ */
+function ipv6Hextets(address: string): number[] | null {
+  let text = address.toLowerCase();
+  const zone = text.indexOf('%');
+  if (zone !== -1) text = text.slice(0, zone);
+
+  const lastColon = text.lastIndexOf(':');
+  const tail = text.slice(lastColon + 1);
+  if (tail.includes('.')) {
+    if (isIP(tail) !== 4) return null;
+    const [a, b, c, d] = tail.split('.').map(Number) as [number, number, number, number];
+    const high = ((a << 8) | b).toString(16);
+    const low = ((c << 8) | d).toString(16);
+    text = `${text.slice(0, lastColon + 1)}${high}:${low}`;
+  }
+
+  const halves = text.split('::');
+  if (halves.length > 2) return null;
+  const head = parseHextets(halves[0] ?? '');
+  const rest = halves.length === 2 ? parseHextets(halves[1] ?? '') : [];
+  if (head === null || rest === null) return null;
+
+  if (halves.length === 1) return head.length === 8 ? head : null;
+  const missing = 8 - head.length - rest.length;
+  if (missing < 1) return null;
+  return [...head, ...new Array<number>(missing).fill(0), ...rest];
+}
+
+/** Colon-separated hex groups, or `null` if any group is not one. */
+function parseHextets(part: string): number[] | null {
+  if (part === '') return [];
+  const groups = part.split(':');
+  if (!groups.every((group) => /^[0-9a-f]{1,4}$/.test(group))) return null;
+  return groups.map((group) => Number.parseInt(group, 16));
 }
 
 /** Parse `text` as JSON, falling back to YAML (JSON is a subset, so order matters). */
