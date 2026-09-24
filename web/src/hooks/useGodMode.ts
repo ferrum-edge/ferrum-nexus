@@ -28,6 +28,7 @@ export function useGodRevokeGrant(): UseMutationResult<
       // counts and the catalog's per-identity access state (issue #336).
       void queryClient.invalidateQueries({ queryKey: queryKeys.apis.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.catalog.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.applications.all });
     },
   });
 }
@@ -61,6 +62,12 @@ export function useGodDisableUser(): UseMutationResult<
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.users.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.grants.all });
+      // `revoke_grants` revokes every grant of the account, so everything an
+      // ordinary revocation refreshes goes stale too (issue #336).
+      void queryClient.invalidateQueries({ queryKey: queryKeys.accessRequests.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.apis.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.catalog.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.applications.all });
     },
   });
 }
