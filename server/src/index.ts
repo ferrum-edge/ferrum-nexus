@@ -39,6 +39,7 @@ import {
   type CaptchaService,
   type CaptchaTransport,
 } from './auth/captcha.js';
+import { createExpirySweepWorker, type ExpirySweepWorker } from './auth/expiry-sweep.js';
 import {
   createAuthService,
   type AuthService,
@@ -117,6 +118,11 @@ export interface NexusServices {
    * one cycle deterministically in tests.
    */
   teardown: TeardownWorker;
+  /**
+   * Hourly purge of expired sessions and verification tokens; `tick()` runs one
+   * pass deterministically in tests.
+   */
+  expirySweep: ExpirySweepWorker;
   notifications: NotificationsService;
   settings: SettingsService;
   users: UsersService;
@@ -186,6 +192,12 @@ export interface BuildServerDeps {
    * `services.teardown.tick()` themselves.
    */
   startTeardownWorker?: boolean;
+  /**
+   * Start the expired-session and expired-token sweep. Same default as
+   * {@link BuildServerDeps.startOutboxWorker}: tests drive
+   * `services.expirySweep.tick()` themselves.
+   */
+  startExpirySweepWorker?: boolean;
   /**
    * Start the periodic gateway-reference reconciliation pass. Same default as
    * {@link BuildServerDeps.startOutboxWorker}: tests drive
@@ -515,6 +527,11 @@ export async function buildServer(
     log: warn,
   });
 
+  // Deletes the sessions and single-use links that have outlived `expires_at`.
+  // Every read already ignores them; without this nothing ever removed them and
+  // both tables grew for good (issue #338).
+  const expirySweep = createExpirySweepWorker({ store: deps.store, log: warn });
+
   // Reads only, on a slow timer, until a super admin asks for a repair: the
   // pass that notices `FERRUM_ADMIN_URL` now points at a gateway which does not
   // hold the consumer and proxy ids this database stores (issue #235).
@@ -534,6 +551,7 @@ export async function buildServer(
     email,
     outbox,
     teardown,
+    expirySweep,
     notifications,
     settings,
     users,
@@ -777,16 +795,19 @@ export async function buildServer(
   app.addHook('onClose', async () => {
     await outbox.stop();
     await teardown.stop();
+    await expirySweep.stop();
     await reconciliation.stop();
     await deps.edge.close();
   });
 
   await app.ready();
 
-  // Tests drive `services.outbox.tick()`, `services.teardown.tick()` and
-  // `services.reconciliation.scan()` by hand so no timer ever fires mid-assert.
+  // Tests drive `services.outbox.tick()`, `services.teardown.tick()`,
+  // `services.expirySweep.tick()` and `services.reconciliation.scan()` by hand
+  // so no timer ever fires mid-assert.
   if (deps.startOutboxWorker ?? config.env !== 'test') outbox.start();
   if (deps.startTeardownWorker ?? config.env !== 'test') teardown.start();
+  if (deps.startExpirySweepWorker ?? config.env !== 'test') expirySweep.start();
   if (deps.startReconciliationWorker ?? config.env !== 'test') reconciliation.start();
 
   return app;

@@ -2062,8 +2062,8 @@ surface as `500 INTERNAL`; they do not indicate an unreachable gateway.
 
 ### Shutdown
 
-`SIGINT`/`SIGTERM` trigger a graceful shutdown: the outbox and gateway-teardown
-pollers stop, the Edge dispatcher closes, Fastify drains, then the store closes.
+`SIGINT`/`SIGTERM` trigger a graceful shutdown: the outbox, gateway-teardown
+and expiry-sweep pollers stop, the Edge dispatcher closes, Fastify drains, then the store closes.
 Give the container at least a few seconds of termination grace. Anything a
 poller had claimed and did not finish is picked up by the stale sweep at the top
 of some worker's next tick — this instance's after a restart, or another
