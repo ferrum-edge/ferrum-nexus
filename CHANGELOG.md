@@ -604,6 +604,22 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `uniquelocal` keywords are lower-cased before they reach Fastify, which
   matches them case-sensitively.
 
+- A password-reset or verification-resend delivery that failed no longer
+  spends the recipient's 10-minute throttle window (#342). The message is now
+  rendered before the throttle claim and queued through the minting
+  transaction, so a template that cannot be rendered claims nothing and an
+  outbox insert that fails rolls back the claim, the token and the audit row
+  with it. Both endpoints still answer the uniform `200 { "ok": true }`, and
+  the next request issues the link.
+- The gateway repair no longer clears the proxy reference of an API a restore
+  has just rebuilt (#342). `POST /api/admin/gateway/repair` now flags an
+  orphaned proxy under the same per-API lock `restore-gateway` holds, asks the
+  gateway again before clearing anything, and writes the cleared reference and
+  its `api.gateway_repair_required` row in one transaction. An API whose proxy
+  is live again is reported with `flagged: false` and left deployed, instead of
+  being marked `repair_required` with its live proxy still holding the listen
+  path and the next restore answering `409`.
+
 ### Security
 
 The rewrite was reviewed twice — once by an adversarial pass over the whole
@@ -721,3 +737,12 @@ fails without the fix.
   auth association by overwriting each other's whole-resource `PUT`. The
   single-writer topology in the operations guide is no longer required;
   proxy delete-and-recreate paths remain outside the lease and say so.
+- **The environment SMTP password is never sent to another relay** (#342).
+  A stored `smtp.password` that no longer decrypts — `NEXUS_SECRET_KEY`
+  swapped without `rotate-secret-key` — used to read as absent, so the email
+  service fell back to `NEXUS_SMTP_PASSWORD` and presented it to the _stored_
+  host under the _stored_ username. An unreadable override now fails closed
+  (no password is sent, and a `warn` line without any secret says so), and the
+  environment password is used only while the effective host, port, TLS mode
+  and username are the environment's own. `smtp.password_set` now reports
+  whether a password would actually be presented.

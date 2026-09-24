@@ -10,7 +10,10 @@
  * deployment default and the `smtp` / `smtp.password` `app_settings` rows
  * override it at runtime, so an admin can point the portal at a different relay
  * without a redeploy. The password is AES-256-GCM encrypted at rest and is
- * never returned by any endpoint.
+ * never returned by any endpoint. `NEXUS_SMTP_PASSWORD` is only ever presented
+ * to the environment's own connection: a stored override that no longer
+ * decrypts, or a stored host/port/TLS/username that differs from the
+ * environment's, sends no password rather than the environment's.
  *
  * `enqueue` is at-most-once when given an `idempotencyKey`: a second call with
  * the same key returns the existing row and inserts nothing.
@@ -24,9 +27,11 @@ import type { EmailTemplateKey } from '@ferrum-nexus/shared';
 
 import {
   readBranding,
-  readEncryptedSetting,
+  readEncryptedSettingState,
   readStoredSmtp,
+  smtpConnectionMatchesEnvironment,
   SMTP_PASSWORD_SETTINGS_KEY,
+  type StoredSmtpSettings,
 } from '../admin/settings-service.js';
 import type { NexusConfig } from '../config/index.js';
 import type { EmailOutboxRecord, NexusStore } from '../db/store.js';
@@ -391,18 +396,74 @@ export interface EmailServiceDeps {
 export function createEmailService(deps: EmailServiceDeps): EmailService {
   const { config, store, crypto } = deps;
 
+  /** The last password-source warning logged, so a misconfiguration is not logged every poll. */
+  let lastPasswordWarning: string | null = null;
+
+  /** Log a password-source problem once per distinct condition. Never logs a value. */
+  function warnPasswordSource(condition: string, message: string): void {
+    if (lastPasswordWarning === condition) return;
+    lastPasswordWarning = condition;
+    deps.log?.({ setting: SMTP_PASSWORD_SETTINGS_KEY, condition }, message);
+  }
+
+  /**
+   * The SMTP password to present, decided by where it would come from.
+   *
+   * `smtp.password` and `NEXUS_SMTP_PASSWORD` are credentials for different
+   * relays as soon as the stored connection moves, so the environment's is a
+   * fallback only in the one case it was issued for (issue #342):
+   *
+   * - a stored override that decrypts is used;
+   * - a stored override that does **not** decrypt — `NEXUS_SECRET_KEY`
+   *   rotated without `rotate-key`, or a corrupted row — fails closed: no
+   *   password is sent, and the condition is logged. It used to read as
+   *   "absent" and fall through to the environment's password, which then went
+   *   to the *stored* host under the *stored* username;
+   * - with no override at all, the environment's password is used only while
+   *   the effective connection is the environment's own
+   *   ({@link smtpConnectionMatchesEnvironment}), the same rule the settings
+   *   endpoint applies before it lets an override be cleared.
+   */
+  async function resolvePassword(stored: StoredSmtpSettings): Promise<string | null> {
+    const override = await readEncryptedSettingState(store, crypto, SMTP_PASSWORD_SETTINGS_KEY);
+    if (override.state === 'value') {
+      lastPasswordWarning = null;
+      return override.value;
+    }
+    if (override.state === 'unreadable') {
+      warnPasswordSource(
+        'unreadable',
+        'The stored SMTP password cannot be decrypted with the current NEXUS_SECRET_KEY; ' +
+          'sending no SMTP password until an administrator re-enters it (see the key ' +
+          'rotation runbook)',
+      );
+      return null;
+    }
+    if (config.smtp.password === undefined) {
+      lastPasswordWarning = null;
+      return null;
+    }
+    if (!smtpConnectionMatchesEnvironment(stored, config)) {
+      warnPasswordSource(
+        'environment-mismatch',
+        'NEXUS_SMTP_PASSWORD belongs to the environment SMTP connection, and the stored ' +
+          'connection differs from it; sending no SMTP password until an administrator ' +
+          'stores one for the configured relay',
+      );
+      return null;
+    }
+    lastPasswordWarning = null;
+    return config.smtp.password;
+  }
+
   async function resolveSettings(): Promise<ResolvedSmtpSettings> {
     const stored = await readStoredSmtp(store);
-    const password =
-      (await readEncryptedSetting(store, crypto, SMTP_PASSWORD_SETTINGS_KEY)) ??
-      config.smtp.password ??
-      null;
     return {
       host: stored.host ?? config.smtp.host ?? null,
       port: stored.port ?? config.smtp.port,
       secure: stored.secure ?? config.smtp.secure,
       user: stored.username ?? config.smtp.user ?? null,
-      password,
+      password: await resolvePassword(stored),
       from: stored.from_address ?? config.smtp.from,
     };
   }

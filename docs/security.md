@@ -233,6 +233,15 @@ they are built to answer nothing:
   or rolls back with it, so a store fault cannot burn the recipient's
   10-minute window on a link that was never issued and leave the retry
   answering the uniform `200` while sending nothing.
+- **So does a failed delivery.** The message is part of the same unit. It is
+  rendered _before_ the claim — a template that cannot be rendered fails the
+  attempt with nothing claimed — and queued through the minting transaction
+  (`tx.emailOutbox.enqueue`, idempotency key `reset:<token id>` or
+  `verify:<token id>`), so an outbox insert that fails rolls back the claim,
+  the token and the audit row with it. Delivery used to run after the claim had
+  committed and swallow its own failures, which spent the window on a link
+  nobody was sent. Either failure is logged at `warn` and answered with the
+  same uniform `200`, and the next request issues the link.
 - **The audit log is where the truth is.** `auth.password_reset_request` and
   `auth.verification_resend` are written only when a link was really issued, so
   operators can see what the response would not say.
@@ -909,9 +918,32 @@ Before changing `NEXUS_SECRET_KEY`, stop all Nexus instances and run
 environment.
 The command re-encrypts SMTP/CAPTCHA blobs and every other encrypted setting
 in one transaction, refusing all writes if any blob cannot be decrypted. A
-bare key swap without re-encryption leaves those settings unreadable and
-CAPTCHA fails closed. Follow the complete rotation and rollback procedure in
+bare key swap without re-encryption leaves those settings unreadable, and both
+fail closed: CAPTCHA refuses, and SMTP sends **no** password. Follow the
+complete rotation and rollback procedure in
 [`operations.md`](operations.md#7-rotating-nexus_secret_key).
+
+### The environment SMTP password stays with the environment relay
+
+`NEXUS_SMTP_PASSWORD` is a credential for the connection `NEXUS_SMTP_HOST`,
+`_PORT`, `_SECURE` and `_USER` describe, and the email service presents it only
+there. The password it sends is decided by where it would come from:
+
+- a stored `smtp.password` that decrypts is used;
+- a stored `smtp.password` that **does not** decrypt — a key swapped without
+  `rotate-secret-key`, or a damaged row — is not treated as absent: no password
+  is sent, and a `warn` line (naming the condition, never a value) says the
+  override must be re-entered. It used to read as absent and fall back to the
+  environment's password, which was then presented to the _stored_ host under
+  the _stored_ username — relay A's secret handed to relay B;
+- with no stored password at all, the environment's is used only while the
+  effective host, port, TLS mode and username all equal the environment's.
+  Otherwise no password is sent and the condition is logged.
+
+That is the same rule the settings endpoint applies before it lets an override
+be cleared back to the environment. `smtp.password_set` follows it too: it is
+`true` only when a password would actually be presented, so an unreadable
+override reads `false`.
 
 ---
 

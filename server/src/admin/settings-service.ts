@@ -270,23 +270,79 @@ export async function readStoredSmtp(store: NexusStore): Promise<StoredSmtpSetti
 }
 
 /**
+ * What an encrypted `app_settings` row holds, with "there is no row" kept
+ * apart from "there is a row and it cannot be used".
+ *
+ * The two call for opposite answers wherever a fallback exists. An absent SMTP
+ * password override means the environment's password is in charge; a stored
+ * override that no longer decrypts — `NEXUS_SECRET_KEY` rotated without
+ * `rotate-key` — means the administrator chose a credential the server can no
+ * longer read, and substituting the environment's for it would present one
+ * relay's secret to another (issue #342).
+ */
+export type EncryptedSettingRead =
+  { state: 'absent' } | { state: 'value'; value: string } | { state: 'unreadable' };
+
+/** Read an encrypted `app_settings` value, telling absent from undecryptable. */
+export async function readEncryptedSettingState(
+  store: NexusStore,
+  crypto: NexusCrypto,
+  key: string,
+): Promise<EncryptedSettingRead> {
+  const row = await store.settings.get(key);
+  if (!row) return { state: 'absent' };
+  if (!row.encrypted) {
+    return typeof row.value === 'string'
+      ? { state: 'value', value: row.value }
+      : { state: 'unreadable' };
+  }
+  try {
+    const decrypted = crypto.decryptJson<unknown>(String(row.value));
+    return typeof decrypted === 'string' && decrypted !== ''
+      ? { state: 'value', value: decrypted }
+      : { state: 'unreadable' };
+  } catch {
+    return { state: 'unreadable' };
+  }
+}
+
+/**
  * Decrypt an encrypted `app_settings` value, or `null` when absent or
  * undecryptable (which happens after `NEXUS_SECRET_KEY` is rotated).
+ *
+ * Only for callers that fail closed either way, like the CAPTCHA secret. A
+ * caller with a fallback must use {@link readEncryptedSettingState}, because
+ * the two `null`s need different answers there.
  */
 export async function readEncryptedSetting(
   store: NexusStore,
   crypto: NexusCrypto,
   key: string,
 ): Promise<string | null> {
-  const row = await store.settings.get(key);
-  if (!row) return null;
-  if (!row.encrypted) return typeof row.value === 'string' ? row.value : null;
-  try {
-    const decrypted = crypto.decryptJson<unknown>(String(row.value));
-    return typeof decrypted === 'string' && decrypted !== '' ? decrypted : null;
-  } catch {
-    return null;
-  }
+  const read = await readEncryptedSettingState(store, crypto, key);
+  return read.state === 'value' ? read.value : null;
+}
+
+/**
+ * True when the effective SMTP connection is the environment's own: the stored
+ * overrides, applied over `NEXUS_SMTP_*`, name the same host, port, TLS mode
+ * and username the environment does.
+ *
+ * `NEXUS_SMTP_PASSWORD` is a credential for exactly that connection. It may be
+ * presented — and an override may be cleared back to it — only while the
+ * connection still is that one; anything else would hand the environment's
+ * secret to a relay, an account or a plaintext channel it was never issued for.
+ */
+export function smtpConnectionMatchesEnvironment(
+  stored: StoredSmtpSettings,
+  config: NexusConfig,
+): boolean {
+  return (
+    (str(stored.host) ?? config.smtp.host ?? null) === (config.smtp.host ?? null) &&
+    (stored.port ?? config.smtp.port) === config.smtp.port &&
+    (stored.secure ?? config.smtp.secure) === config.smtp.secure &&
+    (str(stored.username) ?? config.smtp.user ?? null) === (config.smtp.user ?? null)
+  );
 }
 
 /**
@@ -416,13 +472,22 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
 
   async function readSmtp(): Promise<SmtpSettings> {
     const stored = await readStoredSmtp(store);
-    const password = await store.settings.get(SMTP_PASSWORD_SETTINGS_KEY);
+    const password = await readEncryptedSettingState(store, crypto, SMTP_PASSWORD_SETTINGS_KEY);
     return {
       host: stored.host ?? config.smtp.host ?? null,
       port: stored.port ?? config.smtp.port,
       secure: stored.secure ?? config.smtp.secure,
       username: stored.username ?? config.smtp.user ?? null,
-      password_set: password !== null || config.smtp.password !== undefined,
+      // Whether a password will actually be presented, by the rule the email
+      // service applies: a readable override, or — with no override at all —
+      // the environment's, and only on the environment's own connection. An
+      // override that no longer decrypts reads `false`, which is what tells an
+      // administrator to re-enter it (issue #342).
+      password_set:
+        password.state === 'value' ||
+        (password.state === 'absent' &&
+          config.smtp.password !== undefined &&
+          smtpConnectionMatchesEnvironment(stored, config)),
       from_address: stored.from_address ?? config.smtp.from,
     };
   }
@@ -678,11 +743,7 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
           const storedPassword = await tx.settings.get(SMTP_PASSWORD_SETTINGS_KEY);
           const passwordSet = storedPassword !== null || config.smtp.password !== undefined;
           const clearingPassword = patch.smtp.password === null || patch.smtp.password === '';
-          const connectionMatchesEnvironment =
-            (str(next.host) ?? config.smtp.host ?? null) === (config.smtp.host ?? null) &&
-            (next.port ?? config.smtp.port) === config.smtp.port &&
-            (next.secure ?? config.smtp.secure) === config.smtp.secure &&
-            (str(next.username) ?? config.smtp.user ?? null) === (config.smtp.user ?? null);
+          const connectionMatchesEnvironment = smtpConnectionMatchesEnvironment(next, config);
           // Clearing an override restores the environment credential. Its connection
           // must also belong to the environment, even when this patch did not move it.
           if (clearingPassword && !connectionMatchesEnvironment) {
