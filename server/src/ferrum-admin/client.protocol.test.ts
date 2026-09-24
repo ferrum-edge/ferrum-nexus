@@ -29,11 +29,19 @@ const plugin = {
 };
 
 async function fixture(t: TestContext) {
-  const reply: { status: number; body: string | Buffer; location: string; disconnect: boolean } = {
+  const reply: {
+    status: number;
+    body: string | Buffer;
+    location: string;
+    disconnect: boolean;
+    /** Overrides `body` with one computed from the request URL, e.g. to echo a page offset. */
+    respond: ((url: URL) => string) | null;
+  } = {
     status: 200,
     body: '',
     location: '/redirect-target',
     disconnect: false,
+    respond: null,
   };
   const requests: string[] = [];
   const logs: unknown[] = [];
@@ -48,7 +56,9 @@ async function fixture(t: TestContext) {
       'content-type': 'application/json',
       location: reply.location,
     });
-    res.end(reply.body);
+    res.end(
+      reply.respond ? reply.respond(new URL(req.url ?? '/', 'http://edge.test')) : reply.body,
+    );
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
@@ -214,6 +224,44 @@ describe('Edge response contracts over HTTP sockets', () => {
     const spec = { id: 'spec-1', proxy_id: 'proxy-1' };
     reply.body = JSON.stringify({ items: [spec], offset: 0, limit: 1, total: 1 });
     assert.deepEqual(await client.apiSpecs.findByProxy('proxy-1'), spec);
+  });
+
+  it('refuses a plugin-config listing the page cap cut short (#335)', async (t) => {
+    const { client, reply, requests } = await fixture(t);
+    // Every page full and a total no scan reaches: the walk stops at its page
+    // cap with configs unread, which must not be reported as the whole list.
+    const page = Array.from({ length: 1000 }, (_, index) => ({
+      ...plugin,
+      id: `plugin-${index}`,
+      proxy_id: index === 0 ? 'proxy-1' : 'another-proxy',
+    }));
+    // Each page echoes the offset it was asked for, as Edge does; the client
+    // refuses a page that answers a different one.
+    let total = 1_000_000;
+    reply.respond = (url) =>
+      JSON.stringify({
+        data: page,
+        pagination: { offset: Number(url.searchParams.get('offset')), limit: 1000, total },
+      });
+    const before = requests.length;
+    await assert.rejects(
+      () => client.pluginConfigs.listByProxy('proxy-1'),
+      (error: unknown) => {
+        assert.ok(isNexusError(error));
+        assert.equal(error.code, 'EDGE_ERROR');
+        assert.match(error.message, /Could not scan all gateway plugin configs/);
+        return true;
+      },
+    );
+    assert.equal(requests.length - before, 50, 'the scan read up to its page cap');
+
+    // The same page closing out the total is a complete answer.
+    total = 1000;
+    const attached = await client.pluginConfigs.listByProxy('proxy-1');
+    assert.deepEqual(
+      attached.map((config) => config.id),
+      ['plugin-0'],
+    );
   });
 
   it('accepts 204 deletes and requires bodies for credential-index deletes', async (t) => {

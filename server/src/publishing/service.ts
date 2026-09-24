@@ -1027,10 +1027,26 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     return summary;
   }
 
-  /** Remove the ACL group of `apiId` from one grantee's consumer, best effort. */
-  async function stripGroup(userId: Uuid, apiId: Uuid): Promise<void> {
-    const consumer = await store.consumers.findByUserAndNamespace(userId, namespace);
-    if (!consumer) return;
+  /**
+   * Remove the ACL group of `apiId` from one grantee identity's consumer, best
+   * effort.
+   *
+   * The identity is the grant's — the account, or the application named by
+   * `applicationId` — because each has its own consumer and the approval put
+   * the group on that one; reading only the account's left every application
+   * grantee carrying the group of an API that no longer exists (#335).
+   * `stripped` is the set of consumers already handled, so an identity holding
+   * several grants is written once.
+   */
+  async function stripGroup(
+    userId: Uuid,
+    applicationId: Uuid | null,
+    apiId: Uuid,
+    stripped: Set<string>,
+  ): Promise<void> {
+    const consumer = await store.consumers.findByUserAndNamespace(userId, namespace, applicationId);
+    if (!consumer || stripped.has(consumer.ferrum_consumer_id)) return;
+    stripped.add(consumer.ferrum_consumer_id);
     const group = aclGroupForApi(apiId);
     await credentials.provisioner.mutateAclGroups(
       consumer.ferrum_consumer_id,
@@ -2903,13 +2919,21 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       //    consumers is not okay. A failure here cannot make the gateway serve
       //    anything, so it does not fail the request; it is logged, because
       //    nothing else will ever revisit it.
+      const stripped = new Set<string>();
       for (const grant of grants) {
-        await stripGroup(grant.user_id, api.id).catch((error: unknown) => {
-          deps.log?.(
-            { api_id: api.id, user_id: grant.user_id, error: errorMessage(error) },
-            'the ACL group of a deleted API could not be stripped from a grantee consumer',
-          );
-        });
+        await stripGroup(grant.user_id, grant.application_id, api.id, stripped).catch(
+          (error: unknown) => {
+            deps.log?.(
+              {
+                api_id: api.id,
+                user_id: grant.user_id,
+                application_id: grant.application_id,
+                error: errorMessage(error),
+              },
+              'the ACL group of a deleted API could not be stripped from a grantee consumer',
+            );
+          },
+        );
       }
 
       await audit.record(
