@@ -575,6 +575,40 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `api.auth_plugin_changed` summary. Those revocations run last, after the swap
   is durable, so a swap the gateway refuses leaves every credential exactly as
   it was. The settings form warns and carries the acknowledgement.
+- **Credential and access concurrency and ownership gaps (#341).**
+  - Deleting an application runs under the identity's provisioning name key,
+    the one a first credential or approval provisions its Ferrum consumer
+    under, and `ensureConsumer` re-reads the application (existence, owner,
+    `active`) inside that key. A delete racing a first issue can no longer
+    leave a live `nexus-app-<id>` consumer — with a working key on it — that
+    nothing in the portal tracks, on SQL (where the mapping insert failed the
+    foreign key after the consumer was created) or MongoDB (where the mapping
+    was written for a deleted application). With no mapping, the delete looks
+    for the consumer at the derived id and removes it only when it still
+    carries the application's username; `application.delete` then records
+    `unmapped_consumer: true`.
+  - Issuing a credential re-checks the application inside the consumer key, as
+    rotation already did: an application disabled or deleted after the route
+    resolved it gets `409` / `404`, never a new secret.
+  - The god-mode grant sweep (`revoke_grants: true`) no longer swallows gateway
+    failures. A grant whose ACL removal fails stays `revoked` instead of being
+    put back to `active` — which let a later re-enable restore the access the
+    super admin removed — its `access.revoke` row carries
+    `acl_group_removed: false` and `cause`, and the disable answers with the
+    error (`502 EDGE_ERROR`, `details.failed_grants`) after both audit rows
+    record `failed_steps: ["revoke_grants"]`, `failed_grant_revocations` and
+    `failed_grants`. The account teardown that follows strips the group. The
+    sweep also moves each originating request to `revoked`, as a targeted
+    revocation does.
+  - `POST /api/admin/credentials/reconcile` only acts on a consumer the portal
+    owns — a recorded mapping whose username still matches the live consumer,
+    a registered gateway identity bound to it, or portal credential rows
+    against it — and answers `403 FORBIDDEN` before touching the gateway for
+    anything else, such as a consumer an operator created by hand.
+  - Revoking a grant holds the API's `proxy:<id>` lease, the one approval holds,
+    from its claim through the ACL removal, so a re-request approved while a
+    revocation is in flight can no longer have its new group stripped by the
+    older revocation.
 
 ### Security
 

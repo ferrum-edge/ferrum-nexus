@@ -167,8 +167,11 @@
  */
 
 import {
+  APPLICATION_CONSUMER_USERNAME_PREFIX,
+  CONSUMER_USERNAME_PREFIX,
   CREDENTIAL_TYPE_FOR_PLUGIN,
   MAX_PAGE_SIZE,
+  TEST_CONSUMER_USERNAME_PREFIX,
   roleAtLeast,
   type CredentialMetadata,
   type CredentialType,
@@ -195,7 +198,11 @@ import type {
 } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
-import type { EdgeCredentialEntry, EdgeCredentialMap } from '../ferrum-admin/types.js';
+import type {
+  EdgeConsumer,
+  EdgeCredentialEntry,
+  EdgeCredentialMap,
+} from '../ferrum-admin/types.js';
 import type { NexusCrypto } from '../lib/crypto.js';
 import { last4, randomSecret, randomToken } from '../lib/crypto.js';
 import {
@@ -238,6 +245,17 @@ const REDACTED_MATERIAL = '[REDACTED]';
 export function gatewayIdentityLockKey(username: string): string {
   return `test-consumer:${username}`;
 }
+
+/**
+ * Every username shape Nexus gives a consumer it creates — an account's, an
+ * application's and a provider test consumer's. What `reconcile` requires of
+ * a live consumer that only portal credential rows vouch for.
+ */
+const PORTAL_USERNAME_PREFIXES: readonly string[] = [
+  CONSUMER_USERNAME_PREFIX,
+  APPLICATION_CONSUMER_USERNAME_PREFIX,
+  TEST_CONSUMER_USERNAME_PREFIX,
+];
 
 /**
  * Raised whenever the Nexus mirror and the live Edge array disagree in a way
@@ -432,6 +450,11 @@ export interface CredentialsService {
    * append ordinal and share a timestamp. Edge exposes neither an id nor the
    * material of an entry on read, so nothing finer-grained than "clear the type
    * and reissue" can be done without guessing which entry is which.
+   *
+   * Only for a consumer the portal owns — one with a recorded mapping, a
+   * registered gateway identity bound to it, or portal credential rows against
+   * it. Anything else is refused with `FORBIDDEN` before the gateway is touched
+   * (architecture rule 13, issue #341).
    */
   reconcile(
     actor: UserRecord,
@@ -1440,6 +1463,22 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     }
     return edge.serializePerKey(input.consumerId, async () => {
       await assertOwnerActive(input.user.id);
+      // And the application, for the same reason and on the same terms as
+      // `rotate`: the route resolved it before this section was entered, and
+      // an application disabled or deleted since then acquires no new
+      // credential. Inside the consumer key, so an application delete — which
+      // takes this key to remove the consumer — is either fully before this
+      // check or fully after the append (issue #341).
+      const applicationId = input.applicationId ?? null;
+      if (applicationId !== null) {
+        const application = await store.applications.findById(applicationId);
+        if (!application || application.owner_user_id !== input.user.id) {
+          throw notFound('Application', applicationId);
+        }
+        if (application.status !== 'active') {
+          throw conflict('This application is disabled', { application_id: applicationId });
+        }
+      }
       // The gateway, not the mirror, says where `POST` will put the entry —
       // and the read is race-free because the consumer's lease is already
       // held, exactly as it is for `rotate`. Counting from the mirror is what
@@ -2190,6 +2229,17 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
 
       const result = await edge.serializePerKey(consumerId, async () => {
         const live = await edge.consumers.get(consumerId);
+        // Only a consumer the portal owns (issue #341). `consumer_id` is free
+        // text from the request, and without this any administrator could
+        // empty a credential type on a consumer an operator created by hand
+        // on the gateway — a resource Nexus did not create and must never
+        // address (architecture rule 13). Decided inside the consumer key,
+        // against the same read the delete below acts on.
+        if (!(await portalOwnsConsumer(consumerId, live))) {
+          throw forbidden(
+            'This gateway consumer is not managed by the portal; only a consumer the portal created can be reconciled here',
+          );
+        }
         // Gateway first: a row may only say `revoked` once its entry is gone.
         // The whole-type delete is idempotent, so a type Edge no longer holds
         // — or never shows, as with `basicauth` on every read — costs one 204.
@@ -2243,6 +2293,49 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       };
     },
   };
+
+  /**
+   * Whether `consumerId` names a consumer the portal created and may address.
+   *
+   * Fails closed: an id nothing in the portal vouches for is not Nexus's, and
+   * neither is a live consumer whose username contradicts what the portal
+   * recorded for that id. `live` is the caller's read of the consumer, taken
+   * inside its key.
+   */
+  async function portalOwnsConsumer(
+    consumerId: string,
+    live: EdgeConsumer | null,
+  ): Promise<boolean> {
+    // 1. A recorded mapping — an account's or an application's identity. The
+    //    id is ours; a live consumer under it must still be the identity the
+    //    mapping names, or the id now belongs to something else.
+    const mapping = await store.consumers.findByFerrumId(consumerId);
+    if (mapping) {
+      if (mapping.namespace !== namespace) return false;
+      return live === null || live.username === mapping.ferrum_username;
+    }
+    // 2. A registered gateway identity (a provider test consumer) that names
+    //    this id — bound to it, or not yet bound and deriving to it.
+    if (live) {
+      const identity = await store.gatewayIdentities.findByUsername(namespace, live.username);
+      if (identity) {
+        const bound = identity.ferrum_consumer_id;
+        if (bound === consumerId) return true;
+        if (bound === null && edge.consumers.derivedId(live.username) === consumerId) return true;
+      }
+    }
+    // 3. Portal credential rows against the id — a consumer Nexus appended
+    //    credentials to before the registry existed. A live consumer must
+    //    still carry a portal-shaped username for that to count.
+    const rows = await store.credentials.list(
+      { ferrum_consumer_id: consumerId },
+      { limit: 1, offset: 0 },
+    );
+    if (rows.total === 0) return false;
+    if (live === null) return true;
+    const { username } = live;
+    return PORTAL_USERNAME_PREFIXES.some((prefix) => username.startsWith(prefix));
+  }
 
   /**
    * Refuse a gateway write on behalf of an account that is no longer active.
