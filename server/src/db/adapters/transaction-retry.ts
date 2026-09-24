@@ -95,16 +95,29 @@ export function transactionRetryDelayMs(
  * caller to do. It is also the only thing a service or a route ever sees of a
  * driver's deadlock or write-conflict error — `cause` keeps the original for
  * the log without putting it in the response body.
+ *
+ * When `commitOutcome: 'unknown'` is passed — the MongoDB
+ * `UnknownTransactionCommitResult` the driver surfaced after its own commit
+ * retries gave up — the message must **not** claim nothing was saved: the
+ * commit may have applied, so the honest answer is "the outcome is unknown".
  */
 export function transactionContentionError(
   driver: DbDriver,
   attempts: number,
   cause: unknown,
+  options: { commitOutcome?: 'not_applied' | 'unknown' } = {},
 ): NexusError {
+  if (options.commitOutcome === 'unknown') {
+    return new NexusError(
+      'CONFLICT',
+      'The change may or may not have been committed: the commit outcome is unknown. Check the current state before retrying.',
+      { reason: 'transaction_commit_unknown', driver, attempts },
+      { cause },
+    );
+  }
   return new NexusError(
     'CONFLICT',
-    'Another change to the same data was committed first, so this one was rolled back and not ' +
-      'applied. Nothing was saved — please try again.',
+    'Another change to the same data was committed first, so this one was rolled back and not applied. Nothing was saved — please try again.',
     { reason: 'transaction_contention', driver, attempts },
     { cause },
   );
@@ -264,17 +277,26 @@ function hasErrorLabel(error: unknown, label: string): boolean {
   return Array.isArray(labels) && labels.includes(label);
 }
 
-/** `ER_LOCK_DEADLOCK` (1213) and `ER_LOCK_WAIT_TIMEOUT` (1205), plus SQLSTATE `40001`. */
-const MYSQL_RETRYABLE_CODES = new Set(['ER_LOCK_DEADLOCK', 'ER_LOCK_WAIT_TIMEOUT']);
-const MYSQL_RETRYABLE_ERRNOS = new Set([1213, 1205]);
+/**
+ * `ER_LOCK_DEADLOCK` (1213), plus SQLSTATE `40001` — the errors InnoDB raises
+ * when it has already rolled the victim's transaction back and is asking the
+ * application to run it again.
+ *
+ * `ER_LOCK_WAIT_TIMEOUT` (1205) is deliberately **not** here. It surfaces only
+ * after InnoDB has already waited out `innodb_lock_wait_timeout` (50 s by
+ * default), and a retry would wait that whole period again while the lock is
+ * most likely still held. Retrying it the full five-attempt budget could stall
+ * one request for ~250 s, so it propagates immediately instead of being re-run.
+ */
+const MYSQL_RETRYABLE_CODES = new Set(['ER_LOCK_DEADLOCK']);
+const MYSQL_RETRYABLE_ERRNOS = new Set([1213]);
 
 /**
  * Is this mysql2 error InnoDB asking for the transaction to be run again?
  *
- * A deadlock victim's transaction is rolled back entirely by the server. A lock
- * wait timeout rolls back only the statement by default, which is why the
- * adapter still issues its own `ROLLBACK` before this is consulted — by the
- * time a retry starts, either way, nothing of the attempt survives.
+ * A deadlock victim's transaction is rolled back entirely by the server, so a
+ * retry starts from a clean state. A lock wait timeout is **not** retried; see
+ * {@link MYSQL_RETRYABLE_CODES}.
  */
 export function isMysqlRetryableTransactionError(error: unknown): boolean {
   if (errorField(error, 'sqlState') === '40001') return true;
@@ -311,4 +333,17 @@ export function isMongoTransactionContentionError(error: unknown): boolean {
   if (hasErrorLabel(error, 'UnknownTransactionCommitResult')) return true;
   if (errorField(error, 'code') === MONGO_WRITE_CONFLICT_CODE) return true;
   return errorField(error, 'name') === 'MongoOperationTimeoutError';
+}
+
+/**
+ * Is this MongoDB error the "we do not know whether the commit landed" outcome?
+ *
+ * Distinct from a write conflict: `session.withTransaction()` re-runs the
+ * commit itself when the server reports `UnknownTransactionCommitResult`, and
+ * only surfaces the label once it has given up on resolving it — at which point
+ * the transaction may or may not have committed. Callers must not be told the
+ * work was definitively rolled back.
+ */
+export function isUnknownTransactionCommitResult(error: unknown): boolean {
+  return hasErrorLabel(error, 'UnknownTransactionCommitResult');
 }

@@ -3939,6 +3939,118 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       await extra.store.close();
       await extra.teardown();
     });
+
+    /* ── adapter parity (issue #345) ───────────────────────────────────── */
+
+    it('organizations and applications enforce Unicode case-insensitive unique names', async () => {
+      // SQLite's built-in lower() folds ASCII only; the search filter and the
+      // case-insensitive unique indexes must agree with JS toLowerCase, as they
+      // already do on PostgreSQL, MySQL and MongoDB.
+      const name = `Übersicht-${newId().slice(0, 8)}`;
+      const org = await store.organizations.create({ name });
+      assert.deepEqual(
+        await store.organizations.findByName(name.toLowerCase()),
+        org,
+        'a non-ASCII name is found case-insensitively',
+      );
+      await assert.rejects(
+        () => store.organizations.create({ name: name.toLowerCase() }),
+        (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
+        'one owner cannot keep both "Übersicht" and "übersicht"',
+      );
+      const searched = await store.organizations.list({ q: name.toLowerCase(), limit: 10 });
+      assert.ok(
+        searched.items.some((entry) => entry.id === org.id),
+        'search finds the fold',
+      );
+
+      const owner = await makeUser({ role: 'client' });
+      const appName = `Émile-${newId().slice(0, 8)}`;
+      const app = await store.applications.create({
+        owner_user_id: owner.id,
+        name: appName,
+        status: 'active',
+      });
+      assert.deepEqual(
+        await store.applications.findByOwnerAndName(owner.id, appName.toLowerCase()),
+        app,
+      );
+      await assert.rejects(
+        () =>
+          store.applications.create({
+            owner_user_id: owner.id,
+            name: appName.toLowerCase(),
+            status: 'active',
+          }),
+        (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
+      );
+    });
+
+    it('filters combine singular and plural forms on the same field (both must hold)', async () => {
+      const superAdmin = await makeUser({ role: 'super_admin' });
+      const providerUser = await makeUser({ role: 'provider' });
+      const client = await makeUser({ role: 'client' });
+      const myIds = [superAdmin.id, providerUser.id, client.id];
+
+      // role AND roles: a super_admin among { client, provider } matches none.
+      const overlapping = await store.users.list({
+        ids: myIds,
+        role: 'super_admin',
+        roles: ['client', 'provider'],
+      });
+      assert.equal(overlapping.total, 0);
+      assert.equal((await store.users.list({ ids: myIds, roles: ['client'] })).total, 1);
+
+      // api_id AND api_ids on grants.
+      const provider = await makeUser({ role: 'provider' });
+      const apiA = await makeApi(provider.id);
+      const apiB = await makeApi(provider.id);
+      await store.grants.create({
+        api_id: apiA.id,
+        user_id: client.id,
+        acl_group: `nexus:api:${apiA.id}:approved`,
+        status: 'active',
+        granted_by: provider.id,
+      });
+      assert.equal((await store.grants.list({ api_id: apiA.id, api_ids: [apiB.id] })).total, 0);
+      assert.equal((await store.grants.list({ api_id: apiA.id })).total, 1);
+
+      // action AND actions on audit logs.
+      const actionA = `parity.approve-${newId().slice(0, 8)}`;
+      const actionB = `parity.revoke-${newId().slice(0, 8)}`;
+      await store.auditLogs.create({ action: actionA, target_type: 'grant', details: {} });
+      await store.auditLogs.create({ action: actionB, target_type: 'grant', details: {} });
+      assert.equal((await store.auditLogs.list({ action: actionA, actions: [actionB] })).total, 0);
+      assert.equal((await store.auditLogs.list({ action: actionA })).total, 1);
+    });
+
+    it('notifications: createMany is atomic — a failing row rolls back the whole batch', async () => {
+      const user = await makeUser();
+      const sharedId = newId();
+      // Two rows claiming one id: the second insert fails and must roll the first back too.
+      const attempt = store.notifications.createMany([
+        { id: sharedId, user_id: user.id, type: 'system', title: 'One', body: 'a' },
+        { id: sharedId, user_id: user.id, type: 'system', title: 'Two', body: 'b' },
+      ]);
+      await assert.rejects(attempt);
+      assert.equal(
+        await store.notifications.findById(sharedId),
+        null,
+        'nothing of the batch survives a duplicate key',
+      );
+    });
+
+    it('settings: setMany is atomic — a failing entry rolls back the whole batch', async () => {
+      const firstKey = `atomic-${newId().slice(0, 8)}`;
+      // A BigInt is not JSON-serialisable, so the second upsert throws midway
+      // through the batch and must roll the first entry back too.
+      const attempt = store.settings.setMany([
+        { key: firstKey, value: { saved: true } },
+        { key: `atomic-bad-${newId().slice(0, 8)}`, value: 1n },
+      ]);
+      await assert.rejects(attempt, /BigInt/);
+      assert.equal(await store.settings.get(firstKey), null, 'the earlier entry was rolled back');
+    });
   });
 }
 

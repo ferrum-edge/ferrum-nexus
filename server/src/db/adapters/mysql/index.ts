@@ -126,7 +126,9 @@ class MysqlBackend implements SqlStoreBackend {
       } catch (error) {
         // Explicit even for a deadlock victim, whose transaction the server has
         // already rolled back: a lock wait timeout rolls back only the
-        // statement, and the shell may run the body again on this same pool.
+        // statement, so without this the connection would go back to the pool
+        // still mid-transaction. The shell re-runs deadlock victims; a lock wait
+        // timeout propagates immediately (see transaction-retry.ts).
         await connection.rollback().catch(() => undefined);
         throw error;
       }

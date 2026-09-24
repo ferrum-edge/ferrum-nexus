@@ -25,12 +25,14 @@ import {
   isMongoTransactionContentionError,
   isMysqlRetryableTransactionError,
   isPostgresRetryableTransactionError,
+  isUnknownTransactionCommitResult,
   MONGO_CONTENTION_BUDGET_MS,
   type MongoContentionGate,
   runWithTransactionRetry,
   TRANSACTION_RETRY_ATTEMPTS,
   TRANSACTION_RETRY_BASE_DELAY_MS,
   TRANSACTION_RETRY_MAX_DELAY_MS,
+  transactionContentionError,
   transactionRetryDelayMs,
 } from './transaction-retry.js';
 
@@ -63,19 +65,8 @@ function postgresSerializationFailure(): Error {
 /* ── Classification ─────────────────────────────────────────────────────── */
 
 describe('transaction retry — classification', () => {
-  it('MySQL: deadlock victims and lock wait timeouts are retryable', () => {
+  it('MySQL: deadlock victims are retryable', () => {
     assert.equal(isMysqlRetryableTransactionError(mysqlDeadlock()), true);
-    assert.equal(
-      isMysqlRetryableTransactionError(
-        Object.assign(new Error('Lock wait timeout exceeded'), {
-          code: 'ER_LOCK_WAIT_TIMEOUT',
-          errno: 1205,
-          sqlState: 'HY000',
-        }),
-      ),
-      true,
-      'a lock wait timeout carries no 40001, so the code is what classifies it',
-    );
     assert.equal(
       isMysqlRetryableTransactionError(Object.assign(new Error('victim'), { errno: 1213 })),
       true,
@@ -87,6 +78,20 @@ describe('transaction retry — classification', () => {
       ),
       true,
       'SQLSTATE alone is enough',
+    );
+  });
+
+  it('MySQL: a lock wait timeout is not retried — the server already waited out the lock', () => {
+    assert.equal(
+      isMysqlRetryableTransactionError(
+        Object.assign(new Error('Lock wait timeout exceeded'), {
+          code: 'ER_LOCK_WAIT_TIMEOUT',
+          errno: 1205,
+          sqlState: 'HY000',
+        }),
+      ),
+      false,
+      'retrying would wait innodb_lock_wait_timeout again, so it propagates instead',
     );
   });
 
@@ -142,6 +147,15 @@ describe('transaction retry — classification', () => {
       'a commit whose result is unknown is the other half of the envelope',
     );
     assert.equal(
+      isUnknownTransactionCommitResult({ errorLabels: ['UnknownTransactionCommitResult'] }),
+      true,
+    );
+    assert.equal(
+      isUnknownTransactionCommitResult(mongoWriteConflict()),
+      false,
+      'a write conflict has a known outcome, so it must not be reported as unknown',
+    );
+    assert.equal(
       isMongoTransactionContentionError({ name: 'MongoOperationTimeoutError' }),
       true,
       'this is how the wall-clock budget expires',
@@ -153,6 +167,33 @@ describe('transaction retry — classification', () => {
       false,
     );
     assert.equal(isMongoTransactionContentionError(new Error('boom')), false);
+  });
+});
+
+/* ── The terminal CONFLICT message ─────────────────────────────────────── */
+
+describe('transaction retry — the terminal CONFLICT message', () => {
+  it('does not claim nothing was saved when the commit outcome is unknown', () => {
+    const cause = { errorLabels: ['UnknownTransactionCommitResult'] };
+    const error = transactionContentionError('mongodb', 2, cause, { commitOutcome: 'unknown' });
+    assert.equal(error.code, 'CONFLICT');
+    assert.ok(
+      !error.message.includes('Nothing was saved'),
+      'the commit may have applied, so the message must not assert a rollback',
+    );
+    assert.match(error.message, /unknown/i);
+    assert.deepEqual(error.details, {
+      reason: 'transaction_commit_unknown',
+      driver: 'mongodb',
+      attempts: 2,
+    });
+  });
+
+  it('still reports rollback for a definitely-not-applied attempt', () => {
+    const error = transactionContentionError('mysql', 5, mysqlDeadlock());
+    assert.equal(error.code, 'CONFLICT');
+    assert.ok(error.message.includes('Nothing was saved'));
+    assert.equal((error.details as { reason: string }).reason, 'transaction_contention');
   });
 });
 

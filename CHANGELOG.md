@@ -612,6 +612,22 @@ All notable changes to Ferrum Nexus are documented here. The format follows
     from its claim through the ACL removal, so a re-request approved while a
     revocation is in flight can no longer have its new group stripped by the
     older revocation.
+- **Store adapter parity for the case-insensitive matching and retry edges**
+  (#345). SQLite's built-in `lower()` folds ASCII only — unlike PostgreSQL,
+  MySQL and the JS `toLowerCase()` the search term uses — so the adapter now
+  registers a deterministic Unicode `lower` in `openSqliteDatabase`; the
+  `ux_organizations_name` and `ux_applications_owner_name` unique indexes now
+  refuse "Übersicht" alongside "übersicht" and search finds non-ASCII fold
+  matches (an existing file database must be recreated, or those `lower(...)`
+  indexes `REINDEX`ed, under the disposable buildout policy). MongoDB filters
+  now `AND` a singular and its plural (`role`/`roles`, `api_id`/`api_ids`,
+  `action`/`actions`) instead of overwriting one with the other, and
+  `notifications.createMany` / `settings.setMany` run in a session transaction
+  so a failing batch rolls back the entries before it, matching SQL. A MySQL
+  `ER_LOCK_WAIT_TIMEOUT` is no longer retried — the server already waited out
+  `innodb_lock_wait_timeout` — so one request can no longer stall ~250 s, and a
+  MongoDB `UnknownTransactionCommitResult` no longer surfaces a `CONFLICT`
+  claiming "Nothing was saved"; it reports the commit outcome as unknown.
 - **The private-upstream check unwraps IPv6 transition addresses** (#344).
   It read only the leading hextet of an IPv6 address, so a NAT64
   (`64:ff9b::a00:1`, i.e. `10.0.0.1`), 6to4 (`2002::/16`) or site-local
