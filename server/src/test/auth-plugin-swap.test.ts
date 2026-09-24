@@ -34,10 +34,12 @@ import type { LightMyRequestResponse } from 'fastify';
 
 import {
   aclGroupForApi,
+  consumerUsernameForApplication,
   consumerUsernameForUser,
   type AccessDisruptionDetails,
   type ApiErrorBody,
   type CreateAccessRequestResponse,
+  type CreateApplicationResponse,
   type CreateTestConsumerResponse,
   type CredentialType,
   type IssueCredentialResponse,
@@ -86,12 +88,23 @@ describe('auth_plugin swaps and the access they disrupt', () => {
     return harness.registerUser({ email: `swap-client-${clients}@example.test`, role: 'client' });
   }
 
-  /** Request access as `client` and approve it as `provider`. */
-  async function grant(apiId: string, client: TestSession): Promise<void> {
+  /**
+   * Request access as `client` — for the account itself, or for one of its
+   * applications — and approve it as `provider`.
+   */
+  async function grant(
+    apiId: string,
+    client: TestSession,
+    applicationId: string | null = null,
+  ): Promise<void> {
     const requested = await harness.authed(client, {
       method: 'POST',
       url: '/api/access-requests',
-      payload: { api_id: apiId, justification: 'Integration work' },
+      payload: {
+        api_id: apiId,
+        justification: 'Integration work',
+        ...(applicationId === null ? {} : { application_id: applicationId }),
+      },
     });
     assert.equal(requested.statusCode, 201, requested.body);
     const id = requested.json<CreateAccessRequestResponse>().access_request.id;
@@ -102,18 +115,36 @@ describe('auth_plugin swaps and the access they disrupt', () => {
     assert.equal(approved.statusCode, 200, approved.body);
   }
 
-  /** Mint a credential on `session`'s own canonical consumer. */
+  /**
+   * Mint a credential on `session`'s own canonical consumer, or on the consumer
+   * of one of its applications.
+   */
   async function issue(
     session: TestSession,
     type: CredentialType,
+    applicationId: string | null = null,
   ): Promise<IssueCredentialResponse> {
     const response = await harness.authed(session, {
       method: 'POST',
       url: '/api/credentials',
-      payload: { credential_type: type },
+      payload: {
+        credential_type: type,
+        ...(applicationId === null ? {} : { application_id: applicationId }),
+      },
     });
     assert.equal(response.statusCode, 201, response.body);
     return response.json<IssueCredentialResponse>();
+  }
+
+  /** Create an application owned by `session`. */
+  async function createApplication(session: TestSession, name: string): Promise<string> {
+    const response = await harness.authed(session, {
+      method: 'POST',
+      url: '/api/applications',
+      payload: { name, description: `${name} integration` },
+    });
+    assert.equal(response.statusCode, 201, response.body);
+    return response.json<CreateApplicationResponse>().application.id;
   }
 
   /** `PATCH /api/apis/:id` as the owning provider. */
@@ -304,6 +335,65 @@ describe('auth_plugin swaps and the access they disrupt', () => {
     assert.match(announced.body, /basicauth credential/);
     assert.match(announced.body, /still valid for your other APIs/);
     assert.equal(announced.link, '/credentials');
+  });
+
+  it('counts a grant held by an application, on that application’s consumer', async () => {
+    // Issue #327: each application is its own consumer, with its own
+    // credentials. A reading that only ever looked at the *account's* consumer
+    // saw an application's grant as credential-less, and let the swap through
+    // unconfirmed — a silent `401` for exactly the integration it strands.
+    const api = await publish('swap-application');
+    const client = await newClient();
+    const applicationId = await createApplication(client, 'Swap application');
+    await grant(api.id, client, applicationId);
+    const credential = await issue(client, 'keyauth', applicationId);
+    assert.equal(credential.consumer_username, consumerUsernameForApplication(applicationId));
+    assert.equal(
+      harness.edge.consumerByUsername(consumerUsernameForUser(client.user.id)),
+      undefined,
+      'the account itself has no consumer, so only the application’s can count',
+    );
+
+    const refused = await patchApi(api.id, { auth_plugin: 'basic_auth' });
+    assert.equal(refused.statusCode, 409, refused.body);
+    const error = errorBody(refused.body);
+    assert.equal(error.code, 'ACCESS_DISRUPTION_CONFIRMATION_REQUIRED');
+    assert.equal((error.details as AccessDisruptionDetails).affected_grantees, 1);
+    assert.equal((await harness.store.apis.findById(api.id))?.auth_plugin, 'key_auth');
+    assert.ok(harness.edge.pluginForProxy(api.proxyId, 'key_auth'));
+
+    const confirmed = await patchApi(api.id, {
+      auth_plugin: 'basic_auth',
+      confirm_access_disruption: true,
+    });
+    assert.equal(confirmed.statusCode, 200, confirmed.body);
+    assert.equal(
+      (await harness.store.credentials.findById(credential.credential.id))?.status,
+      'active',
+      'the application keeps its credential, exactly as an account grantee does',
+    );
+    const consumer = harness.edge.consumerByUsername(consumerUsernameForApplication(applicationId));
+    assert.equal(consumer?.credentials.keyauth?.length, 1);
+
+    const [summary] = await summaryRows(api.id);
+    assert.ok(summary);
+    assert.equal(summary.details.affected_grantees, 1);
+    assert.deepEqual(
+      summary.details.affected_grantee_ids,
+      [client.user.id],
+      'the account that owns the application is the one told',
+    );
+
+    const notifications = await harness.authed(client, {
+      method: 'GET',
+      url: '/api/notifications?type=system',
+    });
+    assert.equal(notifications.statusCode, 200, notifications.body);
+    const announced = notifications
+      .json<ListNotificationsResponse>()
+      .items.find((item) => item.title.includes('authentication method'));
+    assert.ok(announced, 'the application’s owner is told, not left to discover a 401');
+    assert.match(announced.body, /basicauth credential/);
   });
 
   it('leaves the credentials alone when the gateway refuses the swap', async () => {

@@ -3627,12 +3627,14 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * material it breaks.
    *
    * Credential material hangs off a **consumer**, not an API — one canonical
-   * consumer per portal account per namespace, plus the throwaway
-   * `nexus-test-<api_id>` consumer a provider makes for their own API — so the
-   * reach of a swap is a derived reading rather than a column, and the two
-   * halves of it are owned by different people and must be treated differently.
+   * consumer per portal identity (an account, or one of its applications) per
+   * namespace, plus the throwaway `nexus-test-<api_id>` consumer a provider
+   * makes for their own API — so the reach of a swap is a derived reading
+   * rather than a column, and the two halves of it are owned by different
+   * people and must be treated differently.
    *
-   * `grantees` are the accounts with an active grant on this API that hold a
+   * `grantees` are the accounts with an active grant on this API whose granted
+   * identity — the account itself or the application the grant names — holds a
    * live credential of its current flavour. They are what the refusal counts
    * and who the confirmed change notifies, and **nothing of theirs is
    * revoked**: their credential is their consumer's, not this API's, and it
@@ -3655,10 +3657,18 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   async function authSwapImpact(api: ApiRecord): Promise<AuthSwapImpact> {
     const type = CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin];
     const grantees = new Set<Uuid>();
+    // A grant belongs to an identity — the account, or one of its applications
+    // (`application_id`) — and each identity has its own consumer, so the
+    // credential that the swap strands is the grant's consumer's, not the
+    // account's (#327). Dedupe by consumer: one owner may hold several grants.
+    const checkedConsumers = new Set<string>();
     for (const grant of await store.grants.listActiveByApi(api.id)) {
-      if (grantees.has(grant.user_id)) continue;
-      const consumer = await credentials.provisioner.findConsumer(grant.user_id);
-      if (!consumer) continue;
+      const consumer = await credentials.provisioner.findConsumer(
+        grant.user_id,
+        grant.application_id,
+      );
+      if (!consumer || checkedConsumers.has(consumer.ferrum_consumer_id)) continue;
+      checkedConsumers.add(consumer.ferrum_consumer_id);
       const rows = await store.credentials.listByConsumer(consumer.ferrum_consumer_id, type);
       if (rows.some((row) => row.status !== 'revoked')) grantees.add(grant.user_id);
     }
