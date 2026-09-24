@@ -676,9 +676,27 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         throw emailNotVerified('Please verify your email address before signing in');
       }
 
+      // Issue under the password-change lease, and only against the hash that
+      // was just verified. The scrypt check above takes ~100 ms with nothing
+      // held, and a reset or self-service change that commits inside that
+      // window deletes every session of the account — before this one exists.
+      // Issuing unconditionally afterwards minted a live session from a
+      // password the account no longer has (issue #325). Both changers hold
+      // this lease from their transaction through their own issuance, so a
+      // re-read inside it sees either the old hash with no change pending, or
+      // the new one.
       const at = nowIso();
-      await store.users.touchLastLogin(record.id, at);
-      const issued = await issueSession(record, context);
+      const issued = await serializePasswordChange(record.id, async () => {
+        const current = await store.users.findById(record.id);
+        // The same answer a wrong password gets: from the caller's side, the
+        // password it presented is no longer the account's.
+        if (!current || current.password_hash !== record.password_hash) {
+          throw unauthorized('Email address or password is incorrect');
+        }
+        if (current.status !== 'active') throw userDisabled();
+        await store.users.touchLastLogin(record.id, at);
+        return issueSession(current, context);
+      });
 
       await audit.record(
         { id: record.id, role: record.role },
