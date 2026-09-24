@@ -67,10 +67,17 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-function setup(): { expire: () => void; finishBob: () => void } {
+function setup(): {
+  expire: () => void;
+  finishBob: () => void;
+  startLate401: () => void;
+  resolveLate401: () => void;
+} {
   let principal = alice;
   let expired = false;
   let finishBob = (): void => undefined;
+  let resolveLate401 = (): void => undefined;
+  let late401: Promise<Response> | null = null;
   const bobCredentials = new Promise<Response>((resolve) => {
     finishBob = () => resolve(json({ items: [], total: 0 }));
   });
@@ -89,6 +96,11 @@ function setup(): { expire: () => void; finishBob: () => void } {
       }
       if (url === '/api/auth/logout') return Promise.resolve(json({ ok: true }));
       if (url === '/api/auth/me') {
+        if (late401) {
+          const response = late401;
+          late401 = null;
+          return response;
+        }
         return Promise.resolve(
           expired
             ? json({ error: { code: ERROR_CODES.UNAUTHORIZED, message: 'Expired' } }, 401)
@@ -101,6 +113,9 @@ function setup(): { expire: () => void; finishBob: () => void } {
           json({ items: [{ id: 'alice-credential', label: 'Alice private metadata' }], total: 1 }),
         );
       }
+      if (url === '/api/notifications') {
+        return Promise.resolve(json({ items: [], total: 0, unread_count: 0 }));
+      }
       throw new Error(`Unexpected request: ${url}`);
     }),
   );
@@ -111,7 +126,17 @@ function setup(): { expire: () => void; finishBob: () => void } {
       </AuthProvider>
     </QueryClientProvider>,
   );
-  return { expire: () => (expired = true), finishBob };
+  return {
+    expire: () => (expired = true),
+    finishBob,
+    startLate401: () => {
+      late401 = new Promise<Response>((resolve) => {
+        resolveLate401 = () =>
+          resolve(json({ error: { code: ERROR_CODES.UNAUTHORIZED, message: 'Old cookie' } }, 401));
+      });
+    },
+    resolveLate401: () => resolveLate401(),
+  };
 }
 
 afterEach(() => {
@@ -236,6 +261,19 @@ describe.each(['light', 'dark'] as const)('authenticated branding in %s theme', 
       client.setQueryData(queryKeys.branding, { ...branding, portal_name: 'Renamed portal' });
     });
     await waitFor(() => expect(document.title).toBe('Renamed portal'));
+  });
+});
+
+describe('late unauthorized responses', () => {
+  it('keeps the current session when a follow-up me probe succeeds', async () => {
+    const { startLate401, resolveLate401 } = setup();
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+    startLate401();
+    fireEvent.click(screen.getByRole('button', { name: 'Probe' }));
+    await act(async () => resolveLate401());
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+    expect(screen.getByTestId('credentials')).toHaveTextContent('alice-credential');
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => url === '/api/auth/me')).toHaveLength(3);
   });
 });
 

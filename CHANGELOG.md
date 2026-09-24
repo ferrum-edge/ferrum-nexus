@@ -230,6 +230,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Web mutations with local error handling no longer show a second global toast;
+  stale 401 responses recheck the session before signing out, and email
+  verification and self-edits refresh the auth store (#346).
 - Open catalog APIs (`requestable: false`) now report `access_state: 'open'`
   instead of `'none'`, so the catalog card and detail page show **Open access**
   rather than **No access** (#267).

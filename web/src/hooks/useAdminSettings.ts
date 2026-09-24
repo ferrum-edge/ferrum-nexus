@@ -32,13 +32,12 @@ export function useAdminSettings(enabled = true): UseQueryResult<AdminSettingsRe
 }
 
 /** Persist a partial settings update; omitted sections are untouched. */
-export function useUpdateAdminSettings(): UseMutationResult<
-  UpdateSettingsResponse,
-  Error,
-  UpdateSettingsRequest
-> {
+export function useUpdateAdminSettings(
+  silent = false,
+): UseMutationResult<UpdateSettingsResponse, Error, UpdateSettingsRequest> {
   const queryClient = useQueryClient();
   return useMutation({
+    ...(silent ? { meta: { silent: true } } : {}),
     mutationFn: (body: UpdateSettingsRequest) => adminApi.updateSettings(body),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.adminSettings });
