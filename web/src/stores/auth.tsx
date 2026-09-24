@@ -73,6 +73,7 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
   const [user, setUser] = useState<User | null>(null);
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
   const previousUserId = useRef<string | null>(null);
+  const unauthorizedProbe = useRef<Promise<void> | null>(null);
 
   const clearSessionCache = useCallback(() => {
     // Public observers mount before auth resolves and stay mounted across sessions.
@@ -112,10 +113,24 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
     clearSessionCache();
   }, [clearSessionCache]);
 
+  const confirmUnauthorized = useCallback((): void => {
+    if (unauthorizedProbe.current) return;
+    const probe = authApi
+      .meSilent()
+      .then((me) => acceptUser(me.user, me.capabilities))
+      .catch((error: unknown) => {
+        if (ApiError.is(error) && error.status === 401) clearLocalSession();
+      })
+      .finally(() => {
+        unauthorizedProbe.current = null;
+      });
+    unauthorizedProbe.current = probe;
+  }, [acceptUser, clearLocalSession]);
+
   useEffect(() => {
-    setUnauthorizedHandler(clearLocalSession);
+    setUnauthorizedHandler(confirmUnauthorized);
     return () => setUnauthorizedHandler(null);
-  }, [clearLocalSession]);
+  }, [confirmUnauthorized]);
 
   const refresh = useCallback(async () => {
     try {

@@ -20,6 +20,7 @@ import type {
   UpdateUserResponse,
 } from '@ferrum-nexus/shared';
 import { organizationsApi, usersApi } from '../lib/api';
+import { useAuth } from '../stores/auth';
 import { queryKeys } from './keys';
 
 /** Admin user directory. */
@@ -70,11 +71,13 @@ export function useUpdateUser(): UseMutationResult<
   { id: string; body: UpdateUserRequest }
 > {
   const queryClient = useQueryClient();
+  const { user, refresh } = useAuth();
   return useMutation({
     mutationFn: ({ id, body }: { id: string; body: UpdateUserRequest }) =>
       usersApi.update(id, body),
-    onSuccess: () => {
+    onSuccess: (_response, variables) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.users.all });
+      if (variables.id === user?.id) void refresh();
     },
   });
 }
@@ -83,6 +86,7 @@ export function useUpdateUser(): UseMutationResult<
 export function useUpdateProfile(): UseMutationResult<UpdateMeResponse, Error, UpdateMeRequest> {
   const queryClient = useQueryClient();
   return useMutation({
+    meta: { silent: true },
     mutationFn: (body: UpdateMeRequest) => usersApi.updateMe(body),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.users.all });
