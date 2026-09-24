@@ -29,6 +29,7 @@ import {
   type ListCredentialsResponse,
   type ListGrantsResponse,
   type PublishApiResponse,
+  type RotateCredentialResponse,
 } from '@ferrum-nexus/shared';
 
 import { AuditAction } from '../audit/service.js';
@@ -173,11 +174,15 @@ describe('application-scoped identities', () => {
       payload: {},
     });
     assert.equal(rotated.statusCode, 200, rotated.body);
+    const rotatedBody = rotated.json<RotateCredentialResponse>();
     assert.equal(
-      rotated.json<IssueCredentialResponse>().credential.application_id,
+      rotatedBody.credential.application_id,
       appA,
       'a rotation never moves a credential between identities',
     );
+    // …and it names the consumer the new secret actually lives on, not the
+    // account's (#329).
+    assert.equal(rotatedBody.consumer_username, consumerUsernameForApplication(appA));
 
     const scoped = await harness.authed(owner, {
       method: 'GET',

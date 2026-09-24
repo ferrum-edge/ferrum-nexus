@@ -15,6 +15,7 @@ import {
   type GetApiResponse,
   type ListApisResponse,
   type PublishApiResponse,
+  type RotateCredentialResponse,
   type UpdateApiResponse,
   type UpdateApiSpecResponse,
 } from '@ferrum-nexus/shared';
@@ -2802,6 +2803,40 @@ describe('publishing', () => {
         (entry) => entry.target_id === apiId && entry.details.replaced === true,
       );
       assert.ok(row, 'the replacement is recorded as such');
+    });
+
+    it('rotates a test credential on the test consumer and says so', async () => {
+      // Issue #329: the rotation response used to name the *account's*
+      // consumer whatever the credential's own was, pointing the provider at
+      // an identity the new secret does not live on.
+      harness.edge.reset();
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'testcon-rotate' }),
+      });
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const created = await harness.authed(provider, {
+        method: 'POST',
+        url: `/api/apis/${apiId}/test-consumer`,
+        payload: {},
+      });
+      assert.equal(created.statusCode, 201, created.body);
+      const credential = created.json<CreateTestConsumerResponse>().credential;
+
+      const rotated = await harness.authed(provider, {
+        method: 'POST',
+        url: `/api/credentials/${credential.id}/rotate`,
+        payload: {},
+      });
+      assert.equal(rotated.statusCode, 200, rotated.body);
+      const body = rotated.json<RotateCredentialResponse>();
+      assert.equal(body.consumer_username, `nexus-test-${apiId}`);
+      const stored = harness.edge.consumerByUsername(`nexus-test-${apiId}`);
+      assert.deepEqual(
+        stored?.credentials.keyauth?.map((entry) => entry.key),
+        [body.secret.key],
+      );
     });
 
     it('revokes the credential rows of the consumer it replaced', async () => {
