@@ -44,6 +44,13 @@
  * in `credentials/service.ts`. That matters because the serializer now takes an
  * `edge_leases` row for the key as well as queueing in process, so a second
  * Nexus instance is ordered against this one only if it locks the same string.
+ *
+ * Before an identity has an id, its key is the **provisioning name key**
+ * ({@link canonicalConsumerLockKey}): {@link ConsumerProvisioner.ensureConsumer}
+ * holds it while it creates the consumer and records the mapping, and an
+ * application delete holds it for the whole of the deletion, so the two are
+ * ordered and neither can leave the other an identity to orphan. The lock
+ * order is always name key, then consumer id key — never the reverse.
  */
 
 import {
@@ -57,7 +64,7 @@ import type { NexusConfig } from '../config/index.js';
 import type { ConsumerRecord, NexusStore, UserRecord } from '../db/store.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import type { EdgeConsumer } from '../ferrum-admin/types.js';
-import { edgeError, userDisabled } from '../lib/errors.js';
+import { conflict, edgeError, notFound, userDisabled } from '../lib/errors.js';
 
 /** Provisioning and ACL-group maintenance for Edge consumers. */
 export interface ConsumerProvisioner {
@@ -67,8 +74,10 @@ export interface ConsumerProvisioner {
    *
    * `applicationId` selects the identity: `null` or omitted is the account's
    * own canonical consumer, an id is that application's. The application must
-   * already exist and be owned by `user` — this does not check, because every
-   * caller has already loaded it to decide it may act.
+   * exist, be owned by `user` and be `active`; that is re-checked **inside**
+   * the provisioning name key — the key an application delete holds — so a
+   * delete or disable that lands after the caller loaded it is refused
+   * (`NOT_FOUND` / `CONFLICT`) rather than provisioned (issue #341).
    */
   ensureConsumer(
     user: Pick<UserRecord, 'id'>,
@@ -86,13 +95,17 @@ export interface ConsumerProvisioner {
    *
    * The body sent back is built from the `GET` response, so redacted credential
    * placeholders round-trip intact (§4.4) and no API key is ever dropped.
+   *
+   * Resolves to the consumer as written, or `null` when the consumer was
+   * already gone and {@link MutateAclGroupsOptions.absentIsDone} said that is
+   * fine.
    */
   mutateAclGroups(
     ferrumConsumerId: string,
     change: (groups: string[]) => string[],
     subject?: string,
     options?: MutateAclGroupsOptions,
-  ): Promise<EdgeConsumer>;
+  ): Promise<EdgeConsumer | null>;
 }
 
 /** Extra conditions {@link ConsumerProvisioner.mutateAclGroups} checks. */
@@ -108,6 +121,26 @@ export interface MutateAclGroupsOptions {
    * removals are always safe and never need it.
    */
   requireActiveUser?: Uuid;
+  /**
+   * Treat a consumer that no longer exists on the gateway as a finished
+   * write, rather than an `EDGE_ERROR`. Only for a *removal*: the groups of a
+   * consumer that is gone are gone with it, so there is nothing left to take
+   * off. An addition always needs the consumer, and never passes this.
+   */
+  absentIsDone?: boolean;
+  /**
+   * Runs **inside** the critical section, once the gateway write has landed,
+   * before the consumer key is released.
+   *
+   * For the portal record that has to be ordered with the write against every
+   * other holder of the key — an approval's grant row, which an application
+   * delete (which removes the consumer and cascades the rows under this same
+   * key) or a re-enable (which rebuilds the groups from active grants under
+   * it) must see either entirely or not at all (issue #341). It must not take
+   * this key itself: `serializePerKey` is a queue, not a re-entrant lock. A
+   * throw from it propagates after the write, which the caller compensates.
+   */
+  afterWrite?: (consumer: EdgeConsumer) => Promise<void>;
 }
 
 /** Dependencies of {@link createConsumerProvisioner}. */
@@ -126,6 +159,21 @@ export function canonicalConsumerLockKey(namespace: string, username: string): s
 export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): ConsumerProvisioner {
   const { config, store, edge } = deps;
   const namespace = config.edge.namespace;
+
+  /**
+   * Refuse to provision an application identity that is gone, not `owner`'s,
+   * or disabled. Fails closed: every one of those is `NOT_FOUND` or
+   * `CONFLICT`, never a consumer.
+   */
+  async function assertApplicationUsable(owner: Uuid, applicationId: Uuid): Promise<void> {
+    const application = await store.applications.findById(applicationId);
+    if (!application || application.owner_user_id !== owner) {
+      throw notFound('Application', applicationId);
+    }
+    if (application.status !== 'active') {
+      throw conflict('This application is disabled', { application_id: applicationId });
+    }
+  }
 
   return {
     async findConsumer(userId, applicationId = null): Promise<ConsumerRecord | null> {
@@ -161,6 +209,17 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
           : consumerUsernameForApplication(applicationId);
       const customId = applicationId ?? user.id;
       return edge.serializePerKey(canonicalConsumerLockKey(namespace, username), async () => {
+        // The application is re-read *inside* the name key, because that key
+        // is what `ApplicationsService.remove` holds for the whole of a
+        // deletion. The caller's copy was loaded before this section was
+        // entered, and acting on it is how a delete landing in between left
+        // an Edge consumer nothing in the portal tracks: created here, then
+        // refused a mapping by the SQL foreign key — or, on MongoDB, which
+        // has none, given a mapping for an application that no longer exists.
+        // Checked before the cached mapping too, so a stale caller cannot be
+        // handed an identity whose application is gone or disabled.
+        if (applicationId !== null) await assertApplicationUsable(user.id, applicationId);
+
         const cached = await store.consumers.findByUserAndNamespace(
           user.id,
           namespace,
@@ -168,6 +227,10 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
         );
         if (cached) return cached;
 
+        // A mapping insert that fails after this leaves an empty consumer at
+        // the *derived* id, which the next call adopts without a scan and
+        // which an application delete finds the same way when there is no
+        // mapping to read it from.
         const { consumer } = await edge.consumers.ensure(
           { username, custom_id: customId, acl_groups: [] },
           user.id,
@@ -183,7 +246,12 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
       });
     },
 
-    async mutateAclGroups(ferrumConsumerId, change, subject, options): Promise<EdgeConsumer> {
+    async mutateAclGroups(
+      ferrumConsumerId,
+      change,
+      subject,
+      options,
+    ): Promise<EdgeConsumer | null> {
       return edge.serializePerKey(ferrumConsumerId, async () => {
         const requiredActive = options?.requireActiveUser;
         if (requiredActive !== undefined) {
@@ -196,12 +264,13 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
         }
         const current = await edge.consumers.get(ferrumConsumerId);
         if (!current) {
+          if (options?.absentIsDone) return null;
           throw edgeError('The gateway consumer for this account no longer exists', {
             consumer_id: ferrumConsumerId,
           });
         }
         const groups = change([...(current.acl_groups ?? [])]);
-        return edge.consumers.replace(
+        const written = await edge.consumers.replace(
           ferrumConsumerId,
           {
             id: current.id,
@@ -212,6 +281,8 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
           },
           subject,
         );
+        if (options?.afterWrite) await options.afterWrite(written);
+        return written;
       });
     },
   };

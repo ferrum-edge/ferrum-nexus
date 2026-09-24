@@ -2527,7 +2527,11 @@ portal row for the pair to `revoked`, writes a `credential.reconcile` audit row
 (with the optional `reason`) and notifies each affected account. The response
 reports `revoked_credentials` and whether the gateway consumer still existed
 (`gateway_cleared`). It is admin-only, idempotent, and destructive by design:
-every live credential of that type on that consumer stops working.
+every live credential of that type on that consumer stops working. It only acts
+on a consumer the portal owns — a recorded mapping, a registered gateway
+identity, or portal credential rows against the id — and answers
+`403 FORBIDDEN` for anything else, so it cannot be pointed at a consumer an
+operator created on the gateway by hand.
 
 Before running it, see what the portal thinks is live:
 

@@ -39,12 +39,16 @@
  * is deleted on Edge first, then the row, whose cascade removes the grants,
  * requests, credentials and consumer mapping. Gateway first, because a row
  * deleted before its consumer leaves a live identity nothing in the portal can
- * find — the same ordering every teardown in this codebase uses.
+ * find — the same ordering every teardown in this codebase uses. The whole
+ * delete holds the identity's provisioning name key, the one a first approval
+ * or credential provisions the consumer under, so the two can never interleave
+ * into a consumer that outlives its application (issue #341).
  */
 
 import {
   MAX_PAGE_SIZE,
   clampPageSize,
+  consumerUsernameForApplication,
   roleAtLeast,
   type Application,
   type ApplicationStatus,
@@ -55,7 +59,7 @@ import {
 
 import { AuditAction, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
-import type { ConsumerProvisioner } from '../credentials/consumers.js';
+import { canonicalConsumerLockKey, type ConsumerProvisioner } from '../credentials/consumers.js';
 import type { ApplicationRecord, ListOptions, NexusStore, UserRecord } from '../db/store.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import { conflict, forbidden, notFound, quotaExceeded, validationFailed } from '../lib/errors.js';
@@ -283,41 +287,85 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
       applicationId,
       ip = null,
     ): Promise<{ revoked_grants: number; revoked_credentials: number }> {
-      const application = await load(actor, applicationId);
-      const consumer = await provisioner.findConsumer(application.owner_user_id, application.id);
+      await load(actor, applicationId);
+      const username = consumerUsernameForApplication(applicationId);
 
-      const grants = await store.grants.count({
-        application_id: application.id,
-        status: 'active',
-      });
-      const credentials = await store.credentials
-        .list({ application_id: application.id, status: 'active' }, { limit: 1, offset: 0 })
-        .then((page) => page.total);
+      // The whole delete runs under the identity's provisioning name key —
+      // the key `ensureConsumer` holds while it creates the consumer and
+      // records the mapping (issue #341). Without it, a delete that read "no
+      // mapping yet" while a first credential or approval was provisioning
+      // one deleted the rows by cascade and left a live consumer, with a
+      // working key on it, that nothing in the portal tracks and no account
+      // disable would ever find. `ensureConsumer` re-reads the application
+      // under the same key, so whichever of the two goes second sees the
+      // other's work: a provisioning that follows this is refused, and this
+      // delete, following a provisioning, finds the mapping it wrote.
+      const outcome = await edge.serializePerKey(
+        canonicalConsumerLockKey(config.edge.namespace, username),
+        async () => {
+          // Re-read under the key: a concurrent delete may have finished.
+          const application = await load(actor, applicationId);
+          const mapped = await provisioner.findConsumer(application.owner_user_id, application.id);
 
-      // Gateway first. A row deleted before its consumer leaves a live
-      // identity — with its ACL groups and its credential material — that
-      // nothing in the portal can find any more, which is strictly worse than
-      // a row whose consumer is already gone.
-      if (consumer) {
-        await edge.serializePerKey(consumer.ferrum_consumer_id, async () => {
-          const live = await edge.consumers.get(consumer.ferrum_consumer_id);
-          if (live) await edge.consumers.delete(consumer.ferrum_consumer_id, actor.id);
-        });
-      }
+          // No mapping is not proof of no consumer. A provisioning whose
+          // mapping insert failed left one at the id Nexus derives from the
+          // username, and it is ours by construction — so look there before
+          // concluding there is nothing on the gateway to take down. Only a
+          // consumer that still carries this identity's username is touched.
+          let consumerId = mapped?.ferrum_consumer_id ?? null;
+          let unmapped = false;
+          if (consumerId === null) {
+            const derivedId = edge.consumers.derivedId(username);
+            const live = await edge.consumers.get(derivedId);
+            if (live && live.username === username) {
+              consumerId = derivedId;
+              unmapped = true;
+            }
+          }
 
-      // The row's cascade takes the grants, requests, credential rows and the
-      // consumer mapping with it.
-      await store.applications.delete(application.id);
+          const drop = async (): Promise<{ grants: number; credentials: number }> => {
+            const grants = await store.grants.count({
+              application_id: application.id,
+              status: 'active',
+            });
+            const credentials = await store.credentials
+              .list({ application_id: application.id, status: 'active' }, { limit: 1, offset: 0 })
+              .then((page) => page.total);
+            // The row's cascade takes the grants, requests, credential rows
+            // and the consumer mapping with it.
+            await store.applications.delete(application.id);
+            return { grants, credentials };
+          };
 
+          // Gateway first. A row deleted before its consumer leaves a live
+          // identity — with its ACL groups and its credential material — that
+          // nothing in the portal can find any more, which is strictly worse
+          // than a row whose consumer is already gone. The row goes inside
+          // the consumer's own key as well, so an issue queued on it either
+          // appended before the consumer went (and went with it) or finds
+          // the consumer, or the application, gone.
+          const target = consumerId;
+          if (target === null) return { application, consumerId, unmapped, ...(await drop()) };
+          const tally = await edge.serializePerKey(target, async () => {
+            const live = await edge.consumers.get(target);
+            if (live) await edge.consumers.delete(target, actor.id);
+            return drop();
+          });
+          return { application, consumerId: target, unmapped, ...tally };
+        },
+      );
+
+      const { application, consumerId, unmapped, grants, credentials } = outcome;
       await audit.record(
         { id: actor.id, role: actor.role },
         AuditAction.APPLICATION_DELETE,
         { type: 'application', id: application.id },
         {
           name: application.name,
-          consumer_id: consumer?.ferrum_consumer_id ?? null,
+          consumer_id: consumerId,
           revoked_grants: grants,
           revoked_credentials: credentials,
+          ...(unmapped ? { unmapped_consumer: true } : {}),
         },
         ip,
       );

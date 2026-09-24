@@ -409,27 +409,43 @@ describe('credential positions follow the append ordinal', () => {
       assert.equal(invalid.statusCode, 400, invalid.body);
       assert.equal(errorOf(invalid.body).code, 'VALIDATION_FAILED');
 
-      // A consumer Edge no longer has: nothing to clear there, rows still settle.
-      const gone = await reconcile(founder, {
+      // An id nothing in the portal knows is not the portal's to reconcile
+      // (issue #341), whether or not Edge has it.
+      const unknown = await reconcile(founder, {
         consumer_id: 'no-such-consumer',
+        credential_type: 'keyauth',
+      });
+      assert.equal(unknown.statusCode, 403, unknown.body);
+      assert.equal(errorOf(unknown.body).code, 'FORBIDDEN');
+
+      // A portal consumer Edge no longer has: nothing to clear there, rows
+      // still settle.
+      const other = await client();
+      const stranded = await issue(other, 'keyauth');
+      const strandedId = stranded.credential.ferrum_consumer_id;
+      for (const stored of [...harness.edge.consumers.keys()]) {
+        if (stored.endsWith(`/${strandedId}`)) harness.edge.consumers.delete(stored);
+      }
+      const gone = await reconcile(founder, {
+        consumer_id: strandedId,
         credential_type: 'keyauth',
       });
       assert.equal(gone.statusCode, 200, gone.body);
       assert.deepEqual(gone.json<ReconcileCredentialsResponse>(), {
-        consumer_id: 'no-such-consumer',
+        consumer_id: strandedId,
         credential_type: 'keyauth',
-        revoked_credentials: 0,
+        revoked_credentials: 1,
         gateway_cleared: false,
       });
 
       // Only the named type is touched.
-      const other = await issue(user, 'jwt');
+      const otherType = await issue(user, 'jwt');
       const cleared = await reconcile(founder, { consumer_id: consumerId, credential_type: 'jwt' });
       assert.equal(cleared.statusCode, 200, cleared.body);
       assert.equal(cleared.json<ReconcileCredentialsResponse>().revoked_credentials, 1);
       assert.deepEqual(liveMaterial(user.user.id, 'jwt'), []);
       assert.deepEqual(liveMaterial(user.user.id, 'keyauth'), [materialOf(issued.secret)]);
-      assert.equal(await statusOf(other.credential.id), 'revoked');
+      assert.equal(await statusOf(otherType.credential.id), 'revoked');
       assert.equal(await statusOf(issued.credential.id), 'active');
 
       const listed = await harness.authed(user, { method: 'GET', url: '/api/credentials' });

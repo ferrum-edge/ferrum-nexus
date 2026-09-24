@@ -776,7 +776,10 @@ Guards enforced in the service:
 - Re-enabling an account (`status: "active"`) cancels any queued revocation, so
   a retry can never strip a live account's credentials. It then restores retained
   active-grant ACL groups without restoring revoked credentials or test
-  consumers. A gateway failure returns `502 EDGE_ERROR` after the portal status
+  consumers: each identity's `nexus:api:<id>:approved` groups are rebuilt from
+  its active grants alone, so one left behind by a revocation the gateway never
+  applied is dropped, while groups outside that namespace are kept. A gateway
+  failure returns `502 EDGE_ERROR` after the portal status
   commit; repeat the same `status: "active"` PATCH to retry restoration.
 - `404 NOT_FOUND` when `org_id` names an organization that does not exist.
 
@@ -1010,7 +1013,17 @@ Body: `consumer_id` (the Edge consumer id carried on
 
 `gateway_cleared` is `false` when the gateway consumer no longer existed, in
 which case only the portal rows changed. Idempotent: a second call revokes
-nothing and clears an already-empty type. Errors: `400 VALIDATION_FAILED`,
+nothing and clears an already-empty type. Only a consumer the portal owns can be
+reconciled — one with a recorded mapping whose username still matches the live
+consumer, a registered gateway identity bound to it, or portal credential rows
+against it whose live username is still the one Nexus derives for their owner
+(`nexus-user-<user_id>`, `nexus-app-<application_id>`, or `nexus-test-<api_id>`
+for an API the portal still has); anything else, such as a consumer an operator
+created on the gateway, is refused before any gateway write (the consumer is
+only read). A `consumer_id` that is not consumer-id shaped
+(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`) is refused before even that read.
+
+Errors: `400 VALIDATION_FAILED`, `403 FORBIDDEN` (not a portal-owned consumer),
 `502 EDGE_ERROR` / `502 EDGE_UNAVAILABLE` (nothing is revoked when the gateway
 call fails).
 
@@ -1476,6 +1489,24 @@ credentials are still live and the revocation is queued for retry. Errors:
 useful message; `409 CONFLICT` for any other attempt to disable your own
 account. `revoke_grants: true` revokes the account's grants only after the
 disable has committed, so a refused disable leaves every grant in place.
+
+The sweep never reports a partial result as success. When any grant cannot be
+fully revoked, the disable (already committed) is audited with
+`failed_steps: ["revoke_grants"]` and the grants that failed, and the request
+answers with the error — `502 EDGE_ERROR` when a gateway step failed — whose
+`details.failed_grants` lists each one's `grant_id`, `api_id`,
+`application_id` and the `stage` it stopped at (`claim`, `lookup`, `gateway`,
+`audit`). A grant stopped at `lookup` or `gateway` stays `revoked` in the
+portal, so a later re-enable does not restore it; the account teardown in the
+same request strips its ACL group, and when that fails too it stays queued for
+the teardown worker. Should the account be re-enabled before the worker gets
+to it, the re-enable — which cancels the queued teardown — rebuilds each
+identity's `nexus:api:<id>:approved` groups from its active grants alone, so the
+group is dropped then (groups outside that namespace are left alone). Only a
+`claim` failure leaves a grant active; repeating the request retries it, and
+re-runs the teardown. A consumer already gone from the gateway counts as its
+group removed. Each swept grant's originating access request moves to
+`revoked`, as with a targeted revocation.
 
 #### `POST /api/admin/god/broadcast`
 
@@ -2258,6 +2289,13 @@ first because a row deleted before its consumer leaves a live identity — with
 its ACL groups and its credential material — that nothing in the portal can
 find any more.
 
+The whole delete holds the identity's provisioning name key — the one a first
+credential or approval provisions its consumer under — and provisioning
+re-checks the application under the same key, so a delete racing a first issue
+never leaves a consumer the portal does not track. With no consumer mapping, the
+consumer is looked for at the id Nexus derives from `nexus-app-<id>` and deleted
+only when it still carries that username.
+
 Its credentials stop working immediately. The reversible option is `PATCH` with
 `status: "disabled"`.
 
@@ -2763,6 +2801,9 @@ Removes the ACL group from the grantee's consumer, flips the grant to
 `revoked`, and drags the originating access request to `revoked` too so the
 requester's history reads "approved, then revoked". The grantee is notified and
 emailed. `409 CONFLICT` when the grant is already revoked.
+The claim and the ACL removal hold the API's `proxy:<id>` lease, the one an
+approval holds, so an approval of a fresh request for the same API waits for an
+in-flight revocation rather than having its group stripped by it.
 
 ---
 

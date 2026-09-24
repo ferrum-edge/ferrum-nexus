@@ -56,14 +56,16 @@ import {
   type Uuid,
 } from '@ferrum-nexus/shared';
 
-import type { AccessService } from '../access/service.js';
+import type { AccessService, BulkRevocationResult } from '../access/service.js';
 import { AuditAction, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
 import { runGatewayTeardown, type CredentialsService } from '../credentials/service.js';
 import type { GatewayTeardownJobRecord, NexusStore, UserRecord } from '../db/store.js';
 import type { EmailService } from '../email/service.js';
 import {
+  NexusError,
   conflict,
+  edgeError,
   lastSuperAdmin,
   notFound,
   quotaExceeded,
@@ -359,20 +361,23 @@ export function createGodService(deps: GodServiceDeps): GodService {
       // both rows' details, and its error is raised once they are written.
       const failedSteps: string[] = [];
       let failure: unknown = null;
+      const fail = (step: string, error: unknown): void => {
+        if (failedSteps.length === 0) failure = error;
+        failedSteps.push(step);
+        deps.log?.(
+          {
+            user_id: target.id,
+            step,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'A god-mode disable step failed after the disable committed',
+        );
+      };
       const attempt = async <T>(step: string, fallback: T, run: () => Promise<T>): Promise<T> => {
         try {
           return await run();
         } catch (error) {
-          if (failedSteps.length === 0) failure = error;
-          failedSteps.push(step);
-          deps.log?.(
-            {
-              user_id: target.id,
-              step,
-              error: error instanceof Error ? error.message : String(error),
-            },
-            'A god-mode disable step failed after the disable committed',
-          );
+          fail(step, error);
           return fallback;
         }
       };
@@ -384,11 +389,46 @@ export function createGodService(deps: GodServiceDeps): GodService {
       // that stayed active (issue #337). Revoking is a per-grant claim plus an
       // ACL removal, neither of which minds the account being disabled; it runs
       // before the teardown so each group comes off a consumer that still exists.
-      const revoked = revokeGrants
-        ? await attempt('revoke_grants', 0, () =>
+      const none: BulkRevocationResult = { revoked: 0, failed: [] };
+      const sweep = revokeGrants
+        ? await attempt('revoke_grants', none, () =>
             access.revokeAllForUser(actor, target.id, why, ip),
           )
-        : 0;
+        : none;
+      const revoked = sweep.revoked;
+      // A sweep that could not revoke every grant is not a success, and is
+      // never reported as one (issue #341): the step is named in
+      // `failed_steps`, the grants in the audit rows, and the request answers
+      // with the error once they are written. A grant stopped after its claim
+      // stays `revoked` in the portal, so neither a retry nor a later
+      // re-enable replays it: the teardown below strips its group, and should
+      // that fail as well, a re-enable rebuilds the account's approval groups
+      // from its active grants alone, dropping this one.
+      const failedGrants = sweep.failed.map((entry) => ({
+        grant_id: entry.grant_id,
+        api_id: entry.api_id,
+        application_id: entry.application_id,
+        stage: entry.stage,
+      }));
+      if (failedGrants.length > 0) {
+        // Only a `claim` failure leaves a grant active for a repeat of the
+        // disable to sweep again; every other stage already revoked it in the
+        // portal, and what is left of it on the gateway is the teardown's.
+        const message =
+          `${failedGrants.length} of this account's grants could not be fully revoked. The ` +
+          'disable is committed. A grant that could not be claimed is still active, and ' +
+          'repeating the disable retries it; a revoked grant whose group may still be on the ' +
+          "gateway is taken off by the account's gateway teardown, queued until it succeeds.";
+        fail(
+          'revoke_grants',
+          failedGrants.some((entry) => entry.stage === 'gateway')
+            ? edgeError(message, { failed_grants: failedGrants })
+            : new NexusError('INTERNAL', message, { failed_grants: failedGrants }),
+        );
+      }
+      const sweepDetails = failedGrants.length
+        ? { failed_grant_revocations: failedGrants.length, failed_grants: failedGrants }
+        : {};
 
       // A disabled account keeps no usable browser session — and no working
       // gateway identity, which a session cookie has nothing to do with.
@@ -414,6 +454,7 @@ export function createGodService(deps: GodServiceDeps): GodService {
           to_status: 'disabled',
           terminated_sessions: terminated,
           ...teardown.details,
+          ...sweepDetails,
           ...(failedSteps.length ? { failed_steps: failedSteps } : {}),
         },
         ip,
@@ -429,6 +470,7 @@ export function createGodService(deps: GodServiceDeps): GodService {
           terminated_sessions: terminated,
           previous_status: target.status,
           ...teardown.details,
+          ...sweepDetails,
           ...(failedSteps.length ? { failed_steps: failedSteps } : {}),
         },
         ip,

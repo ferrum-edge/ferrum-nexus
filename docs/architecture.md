@@ -1078,12 +1078,15 @@ old one.
 `POST /api/admin/credentials/reconcile` (`admin`+) takes a `consumer_id` and a
 `credential_type` and, inside the consumer's critical section, issues
 `DELETE /consumers/{id}/credentials/{type}` on Edge and moves every live row
-for the pair to `revoked`. It writes a `credential.reconcile` audit row and
-notifies each affected owner. This is the only repair that needs no per-entry
-identity, which is why it is the documented answer both to a drifted array and
-to ambiguous legacy rows; the account holder then issues fresh credentials,
-which carry ordinals and are addressable again. Operational detail lives in
-[`operations.md`](operations.md#12-the-credential-mirror) §12.
+for the pair to `revoked`. Only a consumer the portal owns — a recorded
+mapping, a registered gateway identity, or portal credential rows against the
+id — can be reconciled; any other id is refused with `403 FORBIDDEN` before Edge
+is touched: Nexus only addresses gateway resources it created. It writes a
+`credential.reconcile` audit row and notifies each affected owner. This is the
+only repair that needs no per-entry identity, which is why it is the documented
+answer both to a drifted array and to ambiguous legacy rows; the account holder
+then issues fresh credentials, which carry ordinals and are addressable again.
+Operational detail lives in [`operations.md`](operations.md#12-the-credential-mirror) §12.
 
 ---
 
