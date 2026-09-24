@@ -314,38 +314,11 @@ curl -s http://127.0.0.1:8787/api/health -b admin.txt | jq '.edge | {status, rea
 ```
 
 `configured` is the portal's `FERRUM_NAMESPACE`; `active` is the gateway's. The
-gateway reports its own side directly too, on the authenticated Admin API — and
-that call needs a **minted admin JWT**, not the signing secret.
-`FERRUM_ADMIN_JWT_SECRET` is a key you _sign a token with_; pasting it straight
-into an `Authorization: Bearer …` header authenticates nothing. Mint a
-short-lived one (HS256, carrying the `iss`/`sub`/`iat`/`nbf`/`exp`/`jti`/`role`
-claims Edge requires) and ask the gateway:
-
-```bash
-b64url() { openssl base64 | tr -d '\n' | tr '+/' '-_' | tr -d '='; }
-now=$(date +%s)
-header=$(printf '{"alg":"HS256","typ":"JWT"}' | b64url)
-payload=$(printf '{"iss":"ferrum-edge","sub":"ferrum-nexus","iat":%s,"nbf":%s,"exp":%s,"jti":"walkthrough","role":"admin","ns":"nexus"}' \
-  "$now" "$now" "$((now + 60))" | b64url)
-signature=$(printf '%s.%s' "$header" "$payload" \
-  | openssl dgst -sha256 -binary -hmac "$FERRUM_ADMIN_JWT_SECRET" | b64url)
-ADMIN_JWT="$header.$payload.$signature"
-
-curl -s http://127.0.0.1:9000/health -H "Authorization: Bearer $ADMIN_JWT" | jq .namespace
-```
-
-```json
-{
-  "active": "nexus",
-  "serving_scope": "single-namespace-data-plane",
-  "data_plane_single_namespace": true
-}
-```
-
-Adjust `iss` above to whatever the gateway was started with if you set
-`FERRUM_ADMIN_JWT_ISSUER`, and `ns` to your `FERRUM_NAMESPACE`. The token is
-good for one minute (Edge caps the lifetime at an hour by default, `FERRUM_ADMIN_JWT_MAX_TTL`); it is only for peeking
-at the health block — Nexus mints its own tokens for real Admin API calls.
+authenticated Nexus health response above already includes the gateway's
+namespace detail, so no direct Edge Admin API call or manually minted admin JWT
+is needed. Keep `FERRUM_ADMIN_JWT_SECRET` out of command-line arguments: it is a
+long-lived signing key with full gateway authority. If you previously ran a
+command that exposed it on an untrusted multi-user host, rotate the secret.
 
 > Create a **second** `super_admin` before you go to production. The last active
 > one cannot be demoted or disabled, which is a safety net, not a lock you want
