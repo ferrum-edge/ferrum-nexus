@@ -132,6 +132,23 @@ export function broadcastLockKey(actorUserId: string): string {
 }
 
 /**
+ * The per-API key every write to an API's **missing-deployment** state runs
+ * under: `publishing.restoreGateway`, and the gateway repair that flags an
+ * orphaned proxy.
+ *
+ * Taken through the Edge client's `serializePerKey`, not a proxy key: the
+ * condition is that there may be no live proxy to hold a lease on. Without a
+ * shared key a repair acting on a pass that predates a restore could re-read the
+ * row, find the proxy id it expected, and clear the reference the restore had
+ * just committed — leaving the rebuilt proxy on the listen path with no row
+ * pointing at it, so the next restore `409`s (issue #342). Never nested inside a
+ * proxy or consumer key.
+ */
+export function apiRestoreLockKey(apiId: string): string {
+  return `api-restore:${apiId}`;
+}
+
+/**
  * `CONFLICT` text for a caller that could not get {@link messageBudgetLockKey}
  * or {@link broadcastLockKey}.
  *
