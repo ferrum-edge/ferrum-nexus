@@ -3491,19 +3491,38 @@ class MongoStore implements NexusStore {
 
   readonly verificationTokens: VerificationTokenRepo = {
     claimIssue: async (userId, purpose, issuedAt, notBefore) => {
+      // Two statements that cannot collide, mirroring the SQL adapters' insert
+      // and conditional update. A single conditional upsert would try to insert
+      // a second `_id` whenever the existing claim is still inside the window,
+      // and inside a multi-document transaction that duplicate-key error aborts
+      // the transaction server-side: `withTransaction` re-runs the body, which
+      // collides again until the retry budget turns a throttled request into
+      // CONFLICT (issue #326).
+      const claims = this.col(COLLECTIONS.tokenIssueClaims);
+      const _id = `${userId}:${purpose}`;
+      const fields = { user_id: userId, purpose, issued_at: issuedAt };
+      const renewed = await claims.updateOne(
+        {
+          _id,
+          $or: [{ issued_at: { $lte: notBefore } }, { issued_at: { $exists: false } }],
+        } as Filter<NexusDoc>,
+        { $set: fields },
+        this.opts,
+      );
+      if (renewed.matchedCount > 0) return true;
       try {
-        const result = await this.col(COLLECTIONS.tokenIssueClaims).updateOne(
-          {
-            _id: `${userId}:${purpose}`,
-            $or: [{ issued_at: { $lte: notBefore } }, { issued_at: { $exists: false } }],
-          } as Filter<NexusDoc>,
-          { $set: { user_id: userId, purpose, issued_at: issuedAt } },
+        // Matches any existing claim by `_id` alone, so an in-window claim is a
+        // no-op rather than an insert that collides with it.
+        const created = await claims.updateOne(
+          { _id },
+          { $setOnInsert: fields },
           { ...this.opts, upsert: true },
         );
-        return result.matchedCount > 0 || result.upsertedCount > 0;
+        return created.upsertedCount > 0;
       } catch (error) {
-        // A concurrent upsert won the unique `_id` race and therefore owns
-        // this throttle window.
+        // Outside a transaction, a concurrent upsert that won the unique `_id`
+        // race owns this throttle window. (The server already retries an
+        // equality-on-`_id` upsert that loses that race, so this is a backstop.)
         if ((error as { code?: unknown }).code === 11000) return false;
         throw error;
       }

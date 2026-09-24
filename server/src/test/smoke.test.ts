@@ -3203,6 +3203,55 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       );
     });
 
+    it('verificationTokens: a throttled claim inside a transaction commits it at once', async () => {
+      // Issue #326: on MongoDB the throttled claim was an upsert that collided
+      // with the existing claim's `_id`, which aborts a multi-document
+      // transaction; the body then re-ran until the retry budget ran out.
+      const user = await makeUser();
+      const first = '2026-01-01T00:00:00.000Z';
+      const second = '2026-01-01T00:05:00.000Z';
+      const cutoff = '2025-12-31T23:50:00.000Z';
+      const tokenHash = `claim-tx-${newId()}`;
+      let runs = 0;
+      const started = Date.now();
+      const claims = await store.transaction(async (tx) => {
+        runs += 1;
+        const result = [
+          await tx.verificationTokens.claimIssue(user.id, 'password_reset', first, cutoff),
+          await tx.verificationTokens.claimIssue(user.id, 'password_reset', second, cutoff),
+        ];
+        // A write after the throttled claim, which an aborted transaction loses.
+        await tx.verificationTokens.create({
+          user_id: user.id,
+          token_hash: tokenHash,
+          purpose: 'password_reset',
+          expires_at: isoInSeconds(600),
+        });
+        return result;
+      });
+      assert.deepEqual(claims, [true, false], 'the second claim is throttled, not an error');
+      assert.equal(runs, 1, 'the body is not re-run');
+      assert.ok(Date.now() - started < 5000, 'and the transaction commits promptly');
+      assert.ok(await store.verificationTokens.findByTokenHash(tokenHash, 'password_reset'));
+
+      // The same against a claim an earlier request already committed.
+      runs = 0;
+      const again = await store.transaction(async (tx) => {
+        runs += 1;
+        return tx.verificationTokens.claimIssue(user.id, 'password_reset', second, cutoff);
+      });
+      assert.equal(again, false);
+      assert.equal(runs, 1);
+
+      // An expired window is still renewed from inside a transaction.
+      assert.equal(
+        await store.transaction((tx) =>
+          tx.verificationTokens.claimIssue(user.id, 'password_reset', second, first),
+        ),
+        true,
+      );
+    });
+
     it('verificationTokens: single use, then invalidation and expiry sweeps', async () => {
       const user = await makeUser();
       const tokenHash = `token-${newId()}`;
