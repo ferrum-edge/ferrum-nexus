@@ -674,9 +674,17 @@ export async function buildServer(
     { prefix: '/api/branding' },
   );
 
-  await app.register(async (scope) => scope.register(usersRoutes, { users, config }), {
-    prefix: '/api/users',
-  });
+  await app.register(
+    async (scope) => {
+      // `global: false` so only `PATCH /me` — the one route here that checks a
+      // password — carries a limit, bucketed per account (see `userOrIpKey`).
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
+      }
+      await scope.register(usersRoutes, { users, config });
+    },
+    { prefix: '/api/users' },
+  );
 
   await app.register(async (scope) => scope.register(organizationRoutes, { users, config }), {
     prefix: '/api/organizations',

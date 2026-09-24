@@ -697,6 +697,10 @@ organization.
 | `new_password`     | string         | ≥ 12 chars                              |
 
 → `{ "user": User }`. `403 FORBIDDEN` when `current_password` is wrong.
+`429 RATE_LIMITED` beyond 10 requests per minute from one account — the route
+checks a password, so it is bounded like the sign-in routes — when
+`NEXUS_RATE_LIMIT_ENABLED=true` (the default; always off under
+`NEXUS_ENV=test`).
 
 ### `GET /api/users`
 

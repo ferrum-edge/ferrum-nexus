@@ -233,7 +233,8 @@ self-describing format (`scrypt:N:r:p:<salt b64>:<hash b64>`) so parameters can
 be raised later without invalidating existing hashes. Verification is
 constant-time and returns `false` — never throws — for malformed input.
 Minimum length at registration is 12 characters; a self-service password change
-requires the current password.
+requires the current password, and that check is rate-limited per account (see
+[Rate limiting](#rate-limiting)).
 
 ---
 
@@ -959,6 +960,11 @@ routes carry one: **10 thread creations and 30 replies per minute**, keyed on
 the **authenticated account** (`userOrIpKey`, falling back to `request.ip` when
 there is no session) rather than the address. See
 [Messaging abuse resistance](#messaging-abuse-resistance).
+
+`/api/users` takes one the same way, carried only by `PATCH /api/users/me`:
+**10 requests per minute per account**. That route checks `current_password`
+before a change, so without a ceiling of its own a hijacked session was an
+unthrottled password oracle outside the `/api/auth` budget.
 
 Controlled by `NEXUS_RATE_LIMIT_ENABLED` (default `true`); forced off under
 `NEXUS_ENV=test`. The store is in-memory and therefore **per process** — with
