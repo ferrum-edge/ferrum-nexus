@@ -3959,7 +3959,10 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         'one owner cannot keep both "Übersicht" and "übersicht"',
       );
       const searched = await store.organizations.list({ q: name.toLowerCase(), limit: 10 });
-      assert.ok(searched.items.some((entry) => entry.id === org.id), 'search finds the fold');
+      assert.ok(
+        searched.items.some((entry) => entry.id === org.id),
+        'search finds the fold',
+      );
 
       const owner = await makeUser({ role: 'client' });
       const appName = `Émile-${newId().slice(0, 8)}`;
@@ -4017,10 +4020,7 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       const actionB = `parity.revoke-${newId().slice(0, 8)}`;
       await store.auditLogs.create({ action: actionA, target_type: 'grant', details: {} });
       await store.auditLogs.create({ action: actionB, target_type: 'grant', details: {} });
-      assert.equal(
-        (await store.auditLogs.list({ action: actionA, actions: [actionB] })).total,
-        0,
-      );
+      assert.equal((await store.auditLogs.list({ action: actionA, actions: [actionB] })).total, 0);
       assert.equal((await store.auditLogs.list({ action: actionA })).total, 1);
     });
 

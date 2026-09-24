@@ -3508,16 +3508,14 @@ class MongoStore implements NexusStore {
     encrypted: boolean,
   ): Promise<void> {
     const at = nowIso();
-    await store
-      .col(COLLECTIONS.settings)
-      .updateOne(
-        { _id: key },
-        {
-          $set: { value: normalizeJson(value ?? null), encrypted, updated_at: at },
-          $setOnInsert: { created_at: at },
-        },
-        { ...store.opts, upsert: true },
-      );
+    await store.col(COLLECTIONS.settings).updateOne(
+      { _id: key },
+      {
+        $set: { value: normalizeJson(value ?? null), encrypted, updated_at: at },
+        $setOnInsert: { created_at: at },
+      },
+      { ...store.opts, upsert: true },
+    );
   }
 
   /* ── emailTemplates ───────────────────────────────────────────────────── */
