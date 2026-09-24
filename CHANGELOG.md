@@ -583,6 +583,11 @@ codebase, once independently — and every finding below was proven with a
 working exploit before being fixed, and is covered by a regression test that
 fails without the fix.
 
+- **CI actions are pinned to commit SHAs** (#351). `actions/checkout`,
+  `actions/setup-node` and `actions/upload-artifact` ran from movable `v4` tags
+  that could be repointed without a reviewed Nexus commit. They are now pinned
+  to the commits those tags resolve to, an `action-pins` CI job rejects any
+  tag-referenced action, and Dependabot proposes grouped action bumps.
 - **A published OpenAPI document can no longer freeze a reader's browser.**
   The catalog viewer parses documents that open with `{` or `[` as JSON — the
   YAML parser accepts JSON but its cost grows quadratically with the width of a
