@@ -48,7 +48,7 @@ import {
 } from '../auth/service.js';
 import { loadConfig } from '../config/index.js';
 import { createStore } from '../db/index.js';
-import type { NexusStore, UserRecord } from '../db/store.js';
+import type { EnqueueEmailInput, NexusStore, UserRecord } from '../db/store.js';
 import { createCrypto } from '../lib/crypto.js';
 import { isNexusError } from '../lib/errors.js';
 import { isoInSeconds, newId, nowIso } from '../lib/ids.js';
@@ -2774,6 +2774,117 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
           body_text: 'x',
         });
         assert.equal(entry.created, true);
+      }
+    });
+
+    /** A keyed outbox message, as the verification and mass-email paths enqueue one. */
+    function keyedEmail(key: string, subject = 'Keyed'): EnqueueEmailInput {
+      return {
+        to_email: 'keyed@example.test',
+        subject,
+        body_html: '<p>k</p>',
+        body_text: 'k',
+        idempotency_key: key,
+      };
+    }
+
+    it('emailOutbox: a repeated key inside a transaction returns the first row', async () => {
+      const key = `tx-key-${newId()}`;
+      const [first, second] = await store.transaction(async (tx) => [
+        await tx.emailOutbox.enqueue(keyedEmail(key, 'First')),
+        await tx.emailOutbox.enqueue(keyedEmail(key, 'Second')),
+      ]);
+      assert.equal(first?.created, true);
+      assert.equal(second?.created, false);
+      assert.deepEqual(second?.entry, first?.entry);
+
+      const outside = await store.emailOutbox.enqueue(keyedEmail(key, 'Outside'));
+      assert.equal(outside.created, false);
+      assert.deepEqual(outside.entry, first?.entry, 'the committed row, unchanged');
+
+      // A pinned id that is already taken is still an error with a fresh key —
+      // yielding to the idempotency key must not swallow other collisions.
+      const fresh = `pinned-${newId()}`;
+      await assert.rejects(() =>
+        store.emailOutbox.enqueue({ ...keyedEmail(fresh), id: first?.entry.id }),
+      );
+      assert.equal(await store.emailOutbox.findByIdempotencyKey(fresh), null);
+    });
+
+    it('emailOutbox: a key committed after the snapshot is returned, not raised', async (t) => {
+      // Issue #332, MySQL: the transaction's REPEATABLE READ snapshot predates
+      // the other instance's commit, so the old re-read after the duplicate-key
+      // error could not see the winner and rethrew the driver error.
+      if (!target.peer) return t.skip('one connection: an outside write cannot interleave');
+      const key = `snapshot-key-${newId()}`;
+      const peer = await target.peer();
+      try {
+        let winner: string | undefined;
+        const [ours, after] = await store.transaction(async (tx) => {
+          // Fix the snapshot while the key is still free.
+          await tx.emailOutbox.findById(newId());
+          if (winner === undefined) {
+            winner = (await peer.emailOutbox.enqueue(keyedEmail(key, 'Peer'))).entry.id;
+          }
+          return [
+            await tx.emailOutbox.enqueue(keyedEmail(key, 'Ours')),
+            // A write after the lost race, which an aborted transaction loses.
+            await tx.emailOutbox.enqueue(keyedEmail(`${key}-after`)),
+          ];
+        });
+        assert.equal(ours?.created, false);
+        assert.equal(ours?.entry.id, winner);
+        assert.equal(ours?.entry.subject, 'Peer');
+        assert.equal(after?.created, true);
+        assert.ok(await store.emailOutbox.findByIdempotencyKey(`${key}-after`));
+      } finally {
+        await peer.close();
+      }
+    });
+
+    it('emailOutbox: two transactions racing on one key both commit', async (t) => {
+      // Issue #332, PostgreSQL: the losing INSERT waits for the winner's
+      // transaction, then raised a unique violation that aborted its own
+      // transaction, so the re-read that should have returned the winner failed.
+      if (!target.peer) return t.skip('one connection: two bodies cannot contend');
+      const key = `race-key-${newId()}`;
+      const peer = await target.peer();
+      try {
+        let release = (): void => {};
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let peerInserted = (): void => {};
+        const inserted = new Promise<void>((resolve) => {
+          peerInserted = resolve;
+        });
+        const winner = peer.transaction(async (tx) => {
+          const result = await tx.emailOutbox.enqueue(keyedEmail(key, 'Winner'));
+          peerInserted();
+          await gate;
+          return result;
+        });
+        await inserted;
+
+        // This insert blocks on the winner's uncommitted row (MongoDB instead
+        // retries on the write conflict) until the gate opens.
+        const loser = store.transaction(async (tx) => [
+          await tx.emailOutbox.enqueue(keyedEmail(key, 'Loser')),
+          await tx.emailOutbox.enqueue(keyedEmail(`${key}-after`)),
+        ]);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        release();
+
+        const won = await winner;
+        const [lost, after] = await loser;
+        assert.equal(won.created, true);
+        assert.equal(lost?.created, false);
+        assert.equal(lost?.entry.id, won.entry.id);
+        assert.equal(lost?.entry.subject, 'Winner');
+        assert.equal(after?.created, true, 'and the losing transaction carried on');
+        assert.ok(await store.emailOutbox.findByIdempotencyKey(`${key}-after`));
+      } finally {
+        await peer.close();
       }
     });
 

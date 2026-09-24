@@ -123,6 +123,7 @@ import {
   intOrNull,
   json,
   mapSqlConflict,
+  NexusError,
   page,
   queryAll,
   queryCount,
@@ -2408,6 +2409,8 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
   /* ── emailOutbox ────────────────────────────────────────────────────── */
 
+  const PINNED_OUTBOX_ID_TAKEN = 'An outbox entry with that id already exists';
+
   const emailOutbox: EmailOutboxRepo = {
     enqueue: async (input) => {
       const key = input.idempotency_key ?? null;
@@ -2416,36 +2419,66 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         if (existing) return { entry: existing, created: false };
       }
       const meta = stamps({ id: input.id });
-      try {
-        await execute(
-          exec,
-          `INSERT INTO email_outbox
+      const insertSql = `INSERT INTO email_outbox
              (id, to_email, subject, body_html, body_text, status, attempts, next_attempt_at,
               last_error, idempotency_key, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?, ?)`,
-          [
-            meta.id,
-            input.to_email,
-            input.subject,
-            input.body_html,
-            input.body_text,
-            input.next_attempt_at ?? meta.created_at,
-            key,
-            meta.created_at,
-            meta.updated_at,
-          ],
-        );
-      } catch (error) {
-        // Lost a race on the idempotency key — return the winner.
-        if (key !== null) {
-          const existing = await emailOutbox.findByIdempotencyKey(key);
-          if (existing) return { entry: existing, created: false };
-        }
-        throw error;
+           VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?, ?)`;
+      const params = [
+        meta.id,
+        input.to_email,
+        input.subject,
+        input.body_html,
+        input.body_text,
+        input.next_attempt_at ?? meta.created_at,
+        key,
+        meta.created_at,
+        meta.updated_at,
+      ];
+      if (key === null) {
+        await execute(exec, insertSql, params);
+        const entry = await emailOutbox.findById(meta.id);
+        if (!entry) throw new Error('emailOutbox.enqueue: row vanished immediately after insert');
+        return { entry, created: true };
       }
-      const entry = await emailOutbox.findById(meta.id);
-      if (!entry) throw new Error('emailOutbox.enqueue: row vanished immediately after insert');
-      return { entry, created: true };
+
+      // Losing the idempotency-key race must not be an error (issue #332):
+      // inside a transaction a failed INSERT aborts PostgreSQL's transaction
+      // outright, so a catch-and-re-read cannot run, and MySQL's re-read saw
+      // the transaction's REPEATABLE READ snapshot, from before the winner
+      // committed. So the insert yields to the key instead of failing on it.
+      // MySQL spells that `ON DUPLICATE KEY UPDATE id = id` rather than
+      // `INSERT IGNORE`, which would also downgrade a NOT NULL, length or
+      // CHECK violation to a warning and write an adjusted row. Under
+      // CLIENT_FOUND_ROWS its affected-row count cannot say which way the
+      // upsert went, so the id of the row that now holds the key does.
+      await mapSqlConflict(PINNED_OUTBOX_ID_TAKEN, () =>
+        execute(
+          exec,
+          exec.dialect === 'pg'
+            ? `${insertSql} ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
+               DO NOTHING`
+            : `${insertSql} ON DUPLICATE KEY UPDATE id = id`,
+          params,
+        ),
+      );
+      // A locking read, so MySQL sees the latest committed winner rather than
+      // the snapshot; PostgreSQL's READ COMMITTED gives every statement a
+      // fresh snapshot already.
+      const row = await queryOne(
+        exec,
+        `SELECT * FROM email_outbox WHERE idempotency_key = ?${
+          exec.dialect === 'mysql' ? ' FOR SHARE' : ''
+        }`,
+        [key],
+      );
+      if (!row) {
+        // Only a primary-key collision on a pinned id leaves no row for the
+        // key: MySQL's upsert yields to any unique key, not just this one.
+        // (PostgreSQL's names its conflict target, so it raised instead.)
+        throw new NexusError('CONFLICT', PINNED_OUTBOX_ID_TAKEN);
+      }
+      const entry = mapOutbox(row);
+      return { entry, created: entry.id === meta.id };
     },
 
     findById: async (id) => {
