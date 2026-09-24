@@ -64,6 +64,8 @@
  * cannot read is not a catalog entry, it is a teaser.
  */
 
+import { createHash } from 'node:crypto';
+
 import { stringify as stringifyYaml } from 'yaml';
 
 import {
@@ -199,7 +201,12 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
    * the entry before any other resumes.
    */
   function renderSpec(revisionId: Uuid, rawSpec: string, serverUrl: string): CatalogSpecRendering {
-    const key = `${revisionId}\n${serverUrl}`;
+    // The text digest is defence in depth: revisions are immutable by design,
+    // but a restored or hand-edited row must never be answered from a rendering
+    // of the text it used to hold. Hashing even a 2 MB document costs a few
+    // milliseconds against the hundreds a parse costs.
+    const digest = createHash('sha256').update(rawSpec).digest('base64url');
+    const key = `${revisionId}\n${digest}\n${serverUrl}`;
     const cached = specCache.get(key);
     if (cached !== undefined) return cached;
 
