@@ -6,9 +6,17 @@ import { isNexusError } from '../../../lib/errors.js';
 import { isoInSeconds, newId, nowIso } from '../../../lib/ids.js';
 import { runMigrations, splitSqlStatements, type MigrationFile } from '../../migrate.js';
 import type { NexusStore, UserRecord } from '../../store.js';
-import { createSqliteStore } from './index.js';
+import { createSqliteStore, isGuardedRepo } from './index.js';
 
 const SECRET = 'sqlite-adapter-test-secret-0123456789ab';
+
+/** Every repository property of {@link NexusStore}: its members that are not methods. */
+type RepoKey = Exclude<
+  {
+    [K in keyof NexusStore]: NexusStore[K] extends (...args: never[]) => unknown ? never : K;
+  }[keyof NexusStore],
+  'driver'
+>;
 
 function testConfig() {
   return loadConfig({
@@ -1244,6 +1252,84 @@ describe('sqlite store', () => {
         });
       });
       assert.ok(await store.users.findByEmail(afterwards));
+    });
+
+    it('gates every repository the store exposes', () => {
+      // Exhaustive by type: a repository added to NexusStore without a line here
+      // fails typecheck, and one added without a `guardRepo` call fails below.
+      const repositories: Record<RepoKey, true> = {
+        users: true,
+        organizations: true,
+        sessions: true,
+        applications: true,
+        apis: true,
+        apiSpecs: true,
+        apiPlugins: true,
+        apiViewers: true,
+        accessRequests: true,
+        grants: true,
+        credentials: true,
+        consumers: true,
+        gatewayIdentities: true,
+        threads: true,
+        messages: true,
+        notifications: true,
+        emailOutbox: true,
+        gatewayTeardownJobs: true,
+        auditLogs: true,
+        settings: true,
+        emailTemplates: true,
+        verificationTokens: true,
+        leases: true,
+      };
+      const ungated = (Object.keys(repositories) as RepoKey[]).filter(
+        (name) => !isGuardedRepo(store[name]),
+      );
+      assert.deepEqual(ungated, [], 'every repository runs through the ownership gate');
+
+      // And nothing repository-shaped escapes the list: every plain object the
+      // store carries is a gated repository.
+      const plain = Object.entries(store).filter(
+        ([, value]) =>
+          typeof value === 'object' &&
+          value !== null &&
+          Object.getPrototypeOf(value) === Object.prototype,
+      );
+      assert.deepEqual(
+        plain.filter(([, value]) => !isGuardedRepo(value)).map(([name]) => name),
+        [],
+      );
+      assert.equal(plain.length, Object.keys(repositories).length);
+    });
+
+    it('parks outside calls to applications and API viewers too', async () => {
+      // The two repositories the constructor once left ungated (issue #331).
+      let release = (): void => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let bodyStarted = (): void => {};
+      const started = new Promise<void>((resolve) => {
+        bodyStarted = resolve;
+      });
+      const held = store.transaction(async () => {
+        bodyStarted();
+        await gate;
+      });
+      await started;
+
+      let settled = 0;
+      const calls = [
+        store.applications.findById(newId()),
+        store.apiViewers.listApiIdsByUser(newId()),
+      ].map((call) => call.finally(() => (settled += 1)));
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(settled, 0, 'both calls wait for the open transaction');
+
+      release();
+      await held;
+      await Promise.all(calls);
+      assert.equal(settled, 2);
     });
   });
 

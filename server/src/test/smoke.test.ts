@@ -1882,8 +1882,8 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.deepEqual(await store.grants.updateIfStatus(grant.id, 'revoked', {}), stored);
 
       // A patch that writes the values the row already holds is a *win*, not a
-      // miss — MySQL reports zero *changed* rows for it, so the adapter has to
-      // re-read the predicate rather than trust the affected-row count. The
+      // miss — MySQL would report zero *changed* rows for it, which is why the
+      // adapter pins CLIENT_FOUND_ROWS and counts matched rows instead. The
       // statement still ran, so `updated_at` may have moved; everything the
       // caller decides on must not have.
       const rewritten = await store.grants.updateIfStatus(grant.id, 'revoked', {
@@ -1915,6 +1915,121 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal((await store.grants.findActiveByApiAndUser(api.id, client.id))?.id, regrant.id);
 
       assert.equal(await store.grants.deleteByApi(api.id), 2);
+    });
+
+    it('updateIfStatus in a transaction loses to a decision committed outside it', async (t) => {
+      // Issue #331: a conditional UPDATE that matched nothing was re-checked
+      // with an ordinary SELECT, which under MySQL REPEATABLE READ still sees
+      // the transaction's first snapshot — and so reported the stale row as a
+      // win for a decision another instance had already made.
+      if (!target.peer) return t.skip('one connection: an outside write cannot interleave');
+      const owner = await makeUser({ role: 'provider' });
+      const client = await makeUser();
+      const api = await makeApi(owner.id);
+      const request = await store.accessRequests.create({
+        api_id: api.id,
+        user_id: client.id,
+        justification: 'please',
+        status: 'pending',
+      });
+      const grant = await store.grants.create({
+        api_id: api.id,
+        user_id: client.id,
+        acl_group: `nexus:api:${api.id}:approved`,
+        status: 'active',
+        granted_by: owner.id,
+      });
+
+      const peer = await target.peer();
+      try {
+        let runs = 0;
+        const outcomes = await store.transaction(async (tx) => {
+          runs += 1;
+          // Reading first fixes a REPEATABLE READ snapshot before the outside
+          // decisions commit. (MongoDB instead aborts on the write conflict and
+          // re-runs the body, which then reads the decided rows.)
+          await tx.accessRequests.findById(request.id);
+          await tx.grants.findById(grant.id);
+          if (runs === 1) {
+            assert.ok(
+              await peer.accessRequests.updateIfStatus(request.id, 'pending', {
+                status: 'cancelled',
+              }),
+            );
+            assert.ok(await peer.grants.updateIfStatus(grant.id, 'active', { status: 'revoked' }));
+          }
+          return [
+            await tx.accessRequests.updateIfStatus(request.id, 'pending', {
+              status: 'approved',
+              decided_by: owner.id,
+              decided_at: nowIso(),
+            }),
+            await tx.grants.updateIfStatus(grant.id, 'active', {
+              status: 'revoked',
+              revoked_by: owner.id,
+              revoked_at: nowIso(),
+            }),
+          ];
+        });
+        assert.deepEqual(outcomes, [null, null], 'both writes lost to the committed decisions');
+      } finally {
+        await peer.close();
+      }
+      assert.equal((await store.accessRequests.findById(request.id))?.status, 'cancelled');
+      const stored = await store.grants.findById(grant.id);
+      assert.equal(stored?.status, 'revoked');
+      assert.equal(stored?.revoked_by, null, 'the losing revocation wrote nothing');
+    });
+
+    it('accessRequests: listLatestForUser carries the application and breaks ties by id', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const client = await makeUser();
+      const tied = await makeApi(owner.id);
+      const other = await makeApi(owner.id);
+      const app = await store.applications.create({
+        owner_user_id: client.id,
+        name: `Latest ${newId().slice(0, 8)}`,
+        description: 'Latest-request fixture',
+        status: 'active',
+      });
+
+      // Two requests for one API in the same instant: the id breaks the tie,
+      // identically in every adapter.
+      const at = isoInSeconds(-30);
+      const [lowId, highId] = [newId(), newId()].sort() as [string, string];
+      await store.accessRequests.create({
+        id: highId,
+        api_id: tied.id,
+        user_id: client.id,
+        application_id: app.id,
+        justification: 'for the application',
+        status: 'pending',
+        created_at: at,
+      });
+      await store.accessRequests.create({
+        id: lowId,
+        api_id: tied.id,
+        user_id: client.id,
+        justification: 'for the account',
+        status: 'denied',
+        created_at: at,
+      });
+      const account = await store.accessRequests.create({
+        api_id: other.id,
+        user_id: client.id,
+        justification: 'account only',
+        status: 'pending',
+        created_at: at,
+      });
+
+      const latest = await store.accessRequests.listLatestForUser(client.id, [tied.id, other.id]);
+      const byApi = new Map(latest.map((row) => [row.api_id, row]));
+      assert.equal(latest.length, 2);
+      assert.equal(byApi.get(tied.id)?.id, highId, 'a created_at tie resolves to the higher id');
+      assert.equal(byApi.get(tied.id)?.application_id, app.id, 'the application survives');
+      assert.deepEqual(byApi.get(tied.id), await store.accessRequests.findById(highId));
+      assert.deepEqual(byApi.get(other.id), account);
+      assert.equal(byApi.get(other.id)?.application_id, null);
     });
 
     /* ── consumers and credentials ────────────────────────────────────── */

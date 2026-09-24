@@ -1565,28 +1565,27 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     },
 
     updateIfStatus: async (id, expected, patch) => {
-      // See `users.updateIfMatches` for why "no rows changed" is re-read
-      // rather than reported as a lost race outright.
-      const stillMatches = async (): Promise<AccessRequestRecord | null> => {
+      const set = setParts(accessRequestUpdateColumns(patch));
+      if (!set) {
+        // An empty patch is only a guarded read; it must not touch updated_at.
         const row = await queryOne(
           exec,
-          'SELECT id FROM access_requests WHERE id = ? AND status = ?',
+          'SELECT * FROM access_requests WHERE id = ? AND status = ?',
           [id, expected],
         );
-        return row ? accessRequests.findById(id) : null;
-      };
+        return row ? mapAccessRequest(row) : null;
+      }
 
-      const set = setParts(accessRequestUpdateColumns(patch));
-      if (!set) return stillMatches();
-
-      const changed = await mapSqlConflict('You already have a pending request for this API', () =>
+      const matched = await mapSqlConflict('You already have a pending request for this API', () =>
         execute(
           exec,
           `UPDATE access_requests SET ${set.sql}, updated_at = ? WHERE id = ? AND status = ?`,
           [...set.params, nowIso(), id, expected],
         ),
       );
-      return changed > 0 ? accessRequests.findById(id) : stillMatches();
+      // Zero matched rows is a genuine lost race; see `users.updateIfMatches`
+      // for why it is not re-read with an ordinary SELECT.
+      return matched > 0 ? accessRequests.findById(id) : null;
     },
 
     list: async (filter, options) => {
@@ -1628,13 +1627,12 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
     listLatestForUser: async (userId, apiIds) => {
       if (apiIds.length === 0) return [];
-      // One row per API — the newest request the user made for it. SQLite gets
-      // there with `GROUP BY r.api_id`; the portable spelling is a window
-      // function, supported by PostgreSQL and MySQL 8.
+      // One row per API — the newest request the user made for it, ties on
+      // `created_at` broken by id exactly as the SQLite adapter breaks them.
       const rows = await queryAll(
         exec,
-        `SELECT id, api_id, user_id, justification, status, decided_by, decided_at,
-                decision_note, created_at, updated_at
+        `SELECT id, api_id, user_id, application_id, justification, status, decided_by,
+                decided_at, decision_note, created_at, updated_at
          FROM (
            SELECT r.*,
                   ROW_NUMBER() OVER (
@@ -1723,20 +1721,17 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     },
 
     updateIfStatus: async (id, expected, patch) => {
-      // See `users.updateIfMatches` for why "no rows changed" is re-read
-      // rather than reported as a lost race outright.
-      const stillMatches = async (): Promise<GrantRecord | null> => {
-        const row = await queryOne(exec, 'SELECT id FROM grants WHERE id = ? AND status = ?', [
+      const set = setParts(grantUpdateColumns(patch));
+      if (!set) {
+        // An empty patch is only a guarded read; it must not touch updated_at.
+        const row = await queryOne(exec, 'SELECT * FROM grants WHERE id = ? AND status = ?', [
           id,
           expected,
         ]);
-        return row ? grants.findById(id) : null;
-      };
+        return row ? mapGrant(row) : null;
+      }
 
-      const set = setParts(grantUpdateColumns(patch));
-      if (!set) return stillMatches();
-
-      const changed = await mapSqlConflict(
+      const matched = await mapSqlConflict(
         'An active grant already exists for this API and user',
         () =>
           execute(
@@ -1745,7 +1740,9 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
             [...set.params, nowIso(), id, expected],
           ),
       );
-      return changed > 0 ? grants.findById(id) : stillMatches();
+      // Zero matched rows is a genuine lost race; see `users.updateIfMatches`
+      // for why it is not re-read with an ordinary SELECT.
+      return matched > 0 ? grants.findById(id) : null;
     },
 
     list: async (filter, options) => {
