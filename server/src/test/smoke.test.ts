@@ -600,6 +600,47 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(await store.organizations.delete(renamed.id), false);
     });
 
+    for (const transactional of [false, true]) {
+      it(`deletes clear references, as ON DELETE SET NULL does (transaction=${transactional})`, async () => {
+        // Issue #340: the SQL schemas declare `users.org_id` and
+        // `message_threads.api_id` ON DELETE SET NULL; MongoDB has no foreign
+        // keys, so its adapter has to clear them itself.
+        const org = await store.organizations.create({ name: `Gone-${newId().slice(0, 8)}` });
+        const member = await makeUser({ org_id: org.id });
+        const bystander = await makeUser();
+        const provider = await makeUser({ role: 'provider' });
+        const api = await makeApi(provider.id);
+        const kept = await makeApi(provider.id);
+        const thread = await store.threads.create({
+          subject: `About ${api.slug}`,
+          api_id: api.id,
+          created_by: member.id,
+          participant_a: member.id,
+          participant_b: provider.id,
+        });
+        const other = await store.threads.create({
+          subject: `About ${kept.slug}`,
+          api_id: kept.id,
+          created_by: bystander.id,
+          participant_a: bystander.id,
+          participant_b: provider.id,
+        });
+
+        const remove = async (db: NexusStore): Promise<void> => {
+          assert.equal(await db.apis.delete(api.id), true);
+          assert.equal(await db.organizations.delete(org.id), true);
+        };
+        if (transactional) await store.transaction(remove);
+        else await remove(store);
+
+        // Exactly the reference is cleared: nothing else about either row moves.
+        assert.deepEqual(await store.threads.findById(thread.id), { ...thread, api_id: null });
+        assert.deepEqual(await store.users.findById(member.id), { ...member, org_id: null });
+        assert.deepEqual(await store.threads.findById(other.id), other, 'other threads are kept');
+        assert.deepEqual(await store.users.findById(bystander.id), bystander);
+      });
+    }
+
     /* ── sessions ─────────────────────────────────────────────────────── */
 
     it('sessions: create, hash lookup, sliding expiry and deletion', async () => {

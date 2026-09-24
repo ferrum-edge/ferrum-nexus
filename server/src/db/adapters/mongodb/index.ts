@@ -982,6 +982,11 @@ export const BASELINE_INDEXES: readonly IndexDefinition[] = [
     name: 'ix_access_requests_user',
     key: { user_id: 1, created_at: 1 },
   },
+  {
+    collection: 'access_requests',
+    name: 'ix_access_requests_application',
+    key: { application_id: 1, status: 1 },
+  },
 
   {
     collection: 'grants',
@@ -1028,6 +1033,11 @@ export const BASELINE_INDEXES: readonly IndexDefinition[] = [
     collection: 'credential_metadata',
     name: 'ix_credentials_user_status',
     key: { user_id: 1, status: 1 },
+  },
+  {
+    collection: 'credential_metadata',
+    name: 'ix_credentials_application',
+    key: { application_id: 1, status: 1 },
   },
   {
     collection: 'credential_metadata',
@@ -1642,9 +1652,21 @@ class MongoStore implements NexusStore {
         mapOrganization,
       ),
 
-    delete: async (id) =>
-      (await this.col(COLLECTIONS.organizations).deleteOne({ _id: id }, this.opts)).deletedCount >
-      0,
+    delete: async (id) => {
+      // Stand in for `users.org_id … REFERENCES organizations (id) ON DELETE
+      // SET NULL`: without it a member kept pointing at an organization that no
+      // longer existed on Mongo while the same row on PostgreSQL read `null`.
+      // Through the same session as the delete, so a transaction covers both.
+      await this.col(COLLECTIONS.users).updateMany(
+        { org_id: id } as Filter<NexusDoc>,
+        { $set: { org_id: null } } as UpdateFilter<NexusDoc>,
+        this.opts,
+      );
+      return (
+        (await this.col(COLLECTIONS.organizations).deleteOne({ _id: id }, this.opts)).deletedCount >
+        0
+      );
+    },
   };
 
   /* ── sessions ─────────────────────────────────────────────────────────── */
@@ -1943,8 +1965,18 @@ class MongoStore implements NexusStore {
       return docs.map((doc) => str((doc as Row)._id));
     },
 
-    delete: async (id) =>
-      (await this.col(COLLECTIONS.apis).deleteOne({ _id: id }, this.opts)).deletedCount > 0,
+    delete: async (id) => {
+      // Stand in for `message_threads.api_id … REFERENCES apis (id) ON DELETE
+      // SET NULL`: a conversation about an API outlives it, but must not keep
+      // a dangling id the SQL backends would have cleared. Through the same
+      // session as the delete, so a transaction covers both.
+      await this.col(COLLECTIONS.threads).updateMany(
+        { api_id: id } as Filter<NexusDoc>,
+        { $set: { api_id: null } } as UpdateFilter<NexusDoc>,
+        this.opts,
+      );
+      return (await this.col(COLLECTIONS.apis).deleteOne({ _id: id }, this.opts)).deletedCount > 0;
+    },
   };
 
   /* ── apiSpecs ─────────────────────────────────────────────────────────── */
