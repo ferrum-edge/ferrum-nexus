@@ -395,6 +395,36 @@ describe('provider specification and sandbox credentials', () => {
     expect(screen.queryByText('Specification updated')).not.toBeInTheDocument();
   });
 
+  it('publishes exactly the reviewed document and keeps newer edits (issue #330)', async () => {
+    const comparison = deferred<{ diff: SpecDiff }>();
+    vi.mocked(apisApi.diffSpec).mockImplementationOnce(() => comparison.promise);
+    await openTab('Specification');
+    await screen.findByLabelText(/OpenAPI specification/);
+    const reviewed = RAW_SPEC.replace('1.0.0', '2.0.0');
+    const newer = RAW_SPEC.replace('1.0.0', '3.0.0');
+    changeField(/OpenAPI specification/, reviewed);
+    fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+    await waitFor(() => expect(apisApi.diffSpec).toHaveBeenCalledWith(API.id, { spec: reviewed }));
+
+    // The provider keeps typing while the comparison is still in flight.
+    changeField(/OpenAPI specification/, newer);
+    await act(async () => {
+      comparison.resolve({ diff: EMPTY_DIFF });
+    });
+
+    const dialog = await screen.findByRole('dialog', { name: 'Publish this revision' });
+    expect(within(dialog).getByText(/editor changed after this comparison/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Publish revision' }));
+
+    await screen.findByText('Specification updated');
+    expect(apisApi.updateSpec).toHaveBeenCalledTimes(1);
+    expect(apisApi.updateSpec).toHaveBeenCalledWith(API.id, { spec: reviewed });
+    // The unreviewed edit is neither published nor discarded.
+    expect(screen.getByLabelText(/OpenAPI specification/)).toHaveValue(newer);
+    expect(screen.getByRole('button', { name: 'Discard changes' })).toBeEnabled();
+    expect(screen.getByText('Unsaved changes')).toBeInTheDocument();
+  });
+
   it('lists revision history and rolls one back after reviewing it', async () => {
     const earlier = {
       ...SPEC,
