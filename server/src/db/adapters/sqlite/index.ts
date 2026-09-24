@@ -579,6 +579,25 @@ export function openSqliteDatabase(path: string): Database {
     db.pragma('journal_mode = WAL');
     db.pragma('synchronous = NORMAL');
   }
+  // SQLite's built-in `lower()` folds ASCII only, while the search `q` filter
+  // and MongoDB's derived `name_lower`/`slug_lower` fields use JS
+  // `toLowerCase()`. Overriding it here, before any migration runs, makes the
+  // `lower(name)` / `lower(slug)` / `lower(email)` expression indexes — and the
+  // case-insensitive unique rules `ux_organizations_name`,
+  // `ux_applications_owner_name`, `ux_users_email` and `ux_apis_slug` — agree
+  // with PostgreSQL, MySQL and MongoDB: "émile" finds "Émile", and one owner
+  // cannot keep both "Übersicht" and "übersicht".
+  //
+  // The mapping is deterministic (JS `toLowerCase`) so SQLite accepts it inside
+  // an index expression. An existing file database has its unique indexes built
+  // with the old ASCII `lower`, so it must be recreated (or `REINDEX` the four
+  // `lower(...)` indexes) to pick the new mapping up; the baseline is still
+  // unreleased and development databases are disposable, so no forward
+  // migration or reindex path is required (see docs/operations.md).
+  db.function('lower', { deterministic: true }, (value: unknown): string | null => {
+    if (value === null || value === undefined) return null;
+    return String(value).toLowerCase();
+  });
   return db;
 }
 

@@ -174,6 +174,7 @@ import { assertLeaseKeyLength, SPEC_HISTORY_PRUNE_BATCH } from '../../store.js';
 import {
   createMongoContentionGate,
   isMongoTransactionContentionError,
+  isUnknownTransactionCommitResult,
   MONGO_TRANSACTION_BUDGET_MS,
   transactionContentionError,
 } from '../transaction-retry.js';
@@ -269,6 +270,28 @@ function containsInsensitive(term: string): Filter<NexusDoc> {
 /** Case-insensitive whole-value match — the Mongo spelling of `lower(col) = ?`. */
 function equalsInsensitive(value: string): Filter<NexusDoc> {
   return { $regex: `^${escapeRegex(value)}$`, $options: 'i' } as unknown as Filter<NexusDoc>;
+}
+
+/**
+ * Fold a singular equality and its plural `$in` form onto one field as an
+ * `$and` when both are supplied, so a document must satisfy both — exactly like
+ * the SQL adapters' `col = ? AND col IN (...)`. Assigning one after the other
+ * overwrote the first and silently dropped the singular condition.
+ */
+function combineEqualityAndIn(
+  query: Record<string, unknown>,
+  singular: string | undefined,
+  plural: readonly string[] | undefined,
+  field: string,
+): void {
+  if (singular !== undefined && plural !== undefined) {
+    const existing = Array.isArray(query.$and) ? (query.$and as Record<string, unknown>[]) : [];
+    query.$and = [...existing, { [field]: singular }, { [field]: { $in: plural } }];
+  } else if (singular !== undefined) {
+    query[field] = singular;
+  } else if (plural !== undefined) {
+    query[field] = { $in: plural };
+  }
 }
 
 /** Drop `undefined` entries; returns `null` when nothing would be written. */
@@ -728,8 +751,7 @@ function mapVerificationToken(row: Row): VerificationTokenRecord {
 
 function userFilter(filter: UserFilter): Filter<NexusDoc> {
   const query: Record<string, unknown> = {};
-  if (filter.role !== undefined) query.role = filter.role;
-  if (filter.roles !== undefined) query.role = { $in: filter.roles };
+  combineEqualityAndIn(query, filter.role, filter.roles, 'role');
   if (filter.status !== undefined) query.status = filter.status;
   if (filter.org_id !== undefined) query.org_id = filter.org_id;
   if (filter.ids !== undefined) query._id = { $in: filter.ids };
@@ -810,8 +832,7 @@ function scopeQuery(
 function accessRequestFilter(filter: AccessRequestFilter): Filter<NexusDoc> {
   const query: Record<string, unknown> = {};
   if (filter.user_id !== undefined) query.user_id = filter.user_id;
-  if (filter.api_id !== undefined) query.api_id = filter.api_id;
-  if (filter.api_ids !== undefined) query.api_id = { $in: filter.api_ids };
+  combineEqualityAndIn(query, filter.api_id, filter.api_ids, 'api_id');
   if (filter.status !== undefined) query.status = filter.status;
   scopeQuery(query, filter.application_id);
   return query as Filter<NexusDoc>;
@@ -820,8 +841,7 @@ function accessRequestFilter(filter: AccessRequestFilter): Filter<NexusDoc> {
 function grantFilter(filter: GrantFilter): Filter<NexusDoc> {
   const query: Record<string, unknown> = {};
   if (filter.user_id !== undefined) query.user_id = filter.user_id;
-  if (filter.api_id !== undefined) query.api_id = filter.api_id;
-  if (filter.api_ids !== undefined) query.api_id = { $in: filter.api_ids };
+  combineEqualityAndIn(query, filter.api_id, filter.api_ids, 'api_id');
   if (filter.status !== undefined) query.status = filter.status;
   scopeQuery(query, filter.application_id);
   return query as Filter<NexusDoc>;
@@ -842,8 +862,7 @@ function credentialFilter(filter: CredentialFilter): Filter<NexusDoc> {
 function auditFilter(filter: AuditLogFilter): Filter<NexusDoc> {
   const query: Record<string, unknown> = {};
   if (filter.actor_user_id !== undefined) query.actor_user_id = filter.actor_user_id;
-  if (filter.action !== undefined) query.action = filter.action;
-  if (filter.actions !== undefined) query.action = { $in: filter.actions };
+  combineEqualityAndIn(query, filter.action, filter.actions, 'action');
   if (filter.target_type !== undefined) query.target_type = filter.target_type;
   if (filter.target_id !== undefined) query.target_id = filter.target_id;
   if (filter.from !== undefined || filter.to !== undefined) {
@@ -1455,7 +1474,9 @@ class MongoStore implements NexusStore {
         // up on becomes the same `CONFLICT` the SQL adapters raise.
         if (error instanceof NexusError) throw error;
         if (isMongoTransactionContentionError(error)) {
-          throw transactionContentionError('mongodb', gate.attempts, error);
+          throw transactionContentionError('mongodb', gate.attempts, error, {
+            commitOutcome: isUnknownTransactionCommitResult(error) ? 'unknown' : 'not_applied',
+          });
         }
         throw error;
       } finally {
@@ -2998,7 +3019,14 @@ class MongoStore implements NexusStore {
           updated_at: meta.updated_at,
         } as NexusDoc;
       });
-      await this.col(COLLECTIONS.notifications).insertMany(docs, this.opts);
+      // One session transaction around the whole batch: `insertMany` alone is
+      // ordered but not atomic, so a failing row elsewhere left the rows that
+      // preceded it committed — unlike the SQL adapters, whose `createMany`
+      // runs inside one transaction. A caller already inside a transaction
+      // joins it here instead of opening a second one.
+      await this.inTransaction(async (tx) => {
+        await tx.col(COLLECTIONS.notifications).insertMany(docs, tx.opts);
+      });
       return docs.map((doc) => mapNotification(doc as Row));
     },
 
@@ -3419,7 +3447,7 @@ class MongoStore implements NexusStore {
     },
 
     set: async (key, value, encrypted = false) => {
-      await this.upsertSetting(key, value, encrypted);
+      await this.upsertSetting(this, key, value, encrypted);
       const stored = await this.settings.get(key);
       if (!stored) throw new Error('settings.set: row vanished immediately after upsert');
       return stored;
@@ -3450,9 +3478,15 @@ class MongoStore implements NexusStore {
 
     setMany: async (entries) => {
       if (entries.length === 0) return;
-      for (const entry of entries) {
-        await this.upsertSetting(entry.key, entry.value, entry.encrypted ?? false);
-      }
+      // One session transaction around the whole batch, matching the SQL
+      // adapters' `setMany` and the `one statement batch` contract on
+      // `SettingRepo`: a failing entry must not leave the entries before it
+      // committed. A caller already inside a transaction joins it here.
+      await this.inTransaction(async (tx) => {
+        for (const entry of entries) {
+          await this.upsertSetting(tx, entry.key, entry.value, entry.encrypted ?? false);
+        }
+      });
     },
 
     delete: async (key) =>
@@ -3467,16 +3501,23 @@ class MongoStore implements NexusStore {
     },
   };
 
-  private async upsertSetting(key: string, value: unknown, encrypted: boolean): Promise<void> {
+  private async upsertSetting(
+    store: MongoStore,
+    key: string,
+    value: unknown,
+    encrypted: boolean,
+  ): Promise<void> {
     const at = nowIso();
-    await this.col(COLLECTIONS.settings).updateOne(
-      { _id: key },
-      {
-        $set: { value: normalizeJson(value ?? null), encrypted, updated_at: at },
-        $setOnInsert: { created_at: at },
-      },
-      { ...this.opts, upsert: true },
-    );
+    await store
+      .col(COLLECTIONS.settings)
+      .updateOne(
+        { _id: key },
+        {
+          $set: { value: normalizeJson(value ?? null), encrypted, updated_at: at },
+          $setOnInsert: { created_at: at },
+        },
+        { ...store.opts, upsert: true },
+      );
   }
 
   /* ── emailTemplates ───────────────────────────────────────────────────── */

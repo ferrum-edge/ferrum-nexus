@@ -575,6 +575,22 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `api.auth_plugin_changed` summary. Those revocations run last, after the swap
   is durable, so a swap the gateway refuses leaves every credential exactly as
   it was. The settings form warns and carries the acknowledgement.
+- **Store adapter parity for the case-insensitive matching and retry edges**
+  (#345). SQLite's built-in `lower()` folds ASCII only — unlike PostgreSQL,
+  MySQL and the JS `toLowerCase()` the search term uses — so the adapter now
+  registers a deterministic Unicode `lower` in `openSqliteDatabase`; the
+  `ux_organizations_name` and `ux_applications_owner_name` unique indexes now
+  refuse "Übersicht" alongside "übersicht" and search finds non-ASCII fold
+  matches (an existing file database must be recreated, or those `lower(...)`
+  indexes `REINDEX`ed, under the disposable buildout policy). MongoDB filters
+  now `AND` a singular and its plural (`role`/`roles`, `api_id`/`api_ids`,
+  `action`/`actions`) instead of overwriting one with the other, and
+  `notifications.createMany` / `settings.setMany` run in a session transaction
+  so a failing batch rolls back the entries before it, matching SQL. A MySQL
+  `ER_LOCK_WAIT_TIMEOUT` is no longer retried — the server already waited out
+  `innodb_lock_wait_timeout` — so one request can no longer stall ~250 s, and a
+  MongoDB `UnknownTransactionCommitResult` no longer surfaces a `CONFLICT`
+  claiming "Nothing was saved"; it reports the commit outcome as unknown.
 
 ### Security
 
