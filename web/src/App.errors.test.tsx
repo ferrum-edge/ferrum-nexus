@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ERROR_CODES } from '@ferrum-nexus/shared';
