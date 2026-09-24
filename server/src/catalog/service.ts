@@ -93,6 +93,7 @@ import type {
   UserRecord,
 } from '../db/store.js';
 import { notFound, specInvalid } from '../lib/errors.js';
+import { LruCache } from '../lib/lru-cache.js';
 import { parseOpenApiSpec, type ParsedSpec } from '../publishing/oas.js';
 import { canListApi, canViewApi, resolveReadAccess, type ApiReadAccess } from './read-access.js';
 import { presentApi, type GatewayUrlSource } from '../publishing/present.js';
@@ -134,16 +135,92 @@ export interface CatalogService {
   canView(viewer: UserRecord, api: ApiRecord, access: ApiReadAccess): boolean;
 }
 
+/**
+ * One normalized catalog document: what `GET /api/catalog/:slug/spec` serves
+ * for a revision at one server address. `null` records a stored document the
+ * parser refused, so a corrupt revision is not re-parsed on every request
+ * either.
+ */
+export type CatalogSpecRendering = { raw_spec: string; content_type: string } | null;
+
+/** Most normalized documents {@link createCatalogService} keeps by default. */
+export const CATALOG_SPEC_CACHE_MAX_ENTRIES = 64;
+
+/** Largest total size, in UTF-8 bytes, of the documents it keeps by default. */
+export const CATALOG_SPEC_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+
 /** Dependencies of {@link createCatalogService}. */
 export interface CatalogServiceDeps {
   store: NexusStore;
   /** Resolves the gateway origin each row's `invoke_url` is built from. */
   settings: GatewayUrlSource;
+  /**
+   * Cache of normalized documents, keyed by revision and server address.
+   * Defaults to one bounded by {@link CATALOG_SPEC_CACHE_MAX_ENTRIES} and
+   * {@link CATALOG_SPEC_CACHE_MAX_BYTES}; tests pass their own to observe it.
+   */
+  specCache?: LruCache<CatalogSpecRendering>;
+}
+
+/** The cache {@link createCatalogService} builds when it is not handed one. */
+function defaultSpecCache(): LruCache<CatalogSpecRendering> {
+  return new LruCache<CatalogSpecRendering>({
+    maxEntries: CATALOG_SPEC_CACHE_MAX_ENTRIES,
+    maxBytes: CATALOG_SPEC_CACHE_MAX_BYTES,
+  });
 }
 
 /** Build the catalog service. */
 export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
   const { store, settings } = deps;
+  const specCache = deps.specCache ?? defaultSpecCache();
+
+  /**
+   * Parse, rewrite and re-serialise one revision for one server address.
+   *
+   * A spec that passes validation can be ~2 MB, which costs hundreds of
+   * milliseconds of synchronous parse and stringify — on the event loop, for
+   * every signed-in account that opens the page (issue #343). Revision rows
+   * are immutable — a spec replace or a rollback makes a *different* row
+   * current — and the parser is a pure function of the stored text, so the
+   * output is fully determined by the revision id and the address the
+   * servers are rewritten to. The address is itself derived from the gateway
+   * origin and the API's listen path (namespace and slug), so all three are
+   * in the key by construction: an operator changing the origin, or a slug
+   * change, is a miss rather than a stale document.
+   *
+   * Nothing about the *viewer* is in the key, and nothing needs to be: the
+   * document is the same for everyone allowed to read it, and this is only
+   * ever reached after {@link CatalogService.canView} has said yes. The cache
+   * answers "what does this revision look like", never "may you see it".
+   *
+   * Check, compute and store happen with no `await` in between, so a burst of
+   * requests for one uncached document parses it once: the first one fills
+   * the entry before any other resumes.
+   */
+  function renderSpec(revisionId: Uuid, rawSpec: string, serverUrl: string): CatalogSpecRendering {
+    const key = `${revisionId}\n${serverUrl}`;
+    const cached = specCache.get(key);
+    if (cached !== undefined) return cached;
+
+    let parsed: ParsedSpec;
+    try {
+      parsed = parseOpenApiSpec(rawSpec);
+    } catch {
+      specCache.set(key, null, key.length);
+      return null;
+    }
+    const document = rewriteSpecServers(parsed.document, serverUrl, 'catalog');
+    const rendering = {
+      raw_spec:
+        parsed.contentType === 'application/json'
+          ? JSON.stringify(document, null, 2)
+          : stringifyYaml(document),
+      content_type: parsed.contentType,
+    };
+    specCache.set(key, rendering, key.length + Buffer.byteLength(rendering.raw_spec));
+    return rendering;
+  }
 
   // The rule is evaluated in `read-access.ts`, shared with the access and
   // messaging services, so that every surface that can reveal an API answers
@@ -392,29 +469,23 @@ export function createCatalogService(deps: CatalogServiceDeps): CatalogService {
       const record = await store.apiSpecs.findCurrentByApi(api.id);
       if (!record) throw notFound('Specification for API', slug);
 
-      let parsed: ParsedSpec;
-      try {
-        parsed = parseOpenApiSpec(record.raw_spec);
-      } catch {
-        // Stored legacy or corrupt documents must never fall back to raw output
-        // or expose parser diagnostics containing provider-authored addresses.
+      const presented = presentApi(api, await settings.getGatewayPublicUrl());
+      const rendering = renderSpec(
+        record.id,
+        record.raw_spec,
+        presented.invoke_url ?? presented.listen_path,
+      );
+      // Stored legacy or corrupt documents must never fall back to raw output
+      // or expose parser diagnostics containing provider-authored addresses.
+      if (rendering === null) {
         throw specInvalid('The catalog specification could not be normalized');
       }
-      const presented = presentApi(api, await settings.getGatewayPublicUrl());
-      const document = rewriteSpecServers(
-        parsed.document,
-        presented.invoke_url ?? presented.listen_path,
-        'catalog',
-      );
 
       return {
         api_id: api.id,
         version: record.version,
-        raw_spec:
-          parsed.contentType === 'application/json'
-            ? JSON.stringify(document, null, 2)
-            : stringifyYaml(document),
-        content_type: parsed.contentType,
+        raw_spec: rendering.raw_spec,
+        content_type: rendering.content_type,
         parsed_title: record.parsed_title,
         parsed_version: record.parsed_version,
       };

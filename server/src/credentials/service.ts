@@ -175,6 +175,7 @@ import {
   consumerUsernameForUser,
   roleAtLeast,
   type CredentialMetadata,
+  type CredentialStatus,
   type CredentialType,
   type GatewayTeardownOutcome,
   type IssueCredentialResponse,
@@ -226,8 +227,19 @@ export const CREDENTIAL_TYPES = [
   'jwt',
 ] as const satisfies readonly CredentialType[];
 
-/** Statuses that still occupy a slot in the Edge credentials array. */
-const LIVE_STATUSES = new Set(['active', 'retiring']);
+/**
+ * Statuses that still occupy a slot in the Edge credentials array.
+ *
+ * Also the filter every read of a consumer's rows under its lock passes to
+ * `listByConsumer`: each rotation leaves a `revoked` row behind and nothing
+ * prunes them, so reading the whole history on every issue, rotate and revoke
+ * made each one slower than the last (issue #343).
+ */
+export const LIVE_CREDENTIAL_STATUSES = [
+  'active',
+  'retiring',
+] as const satisfies readonly CredentialStatus[];
+const LIVE_STATUSES = new Set<string>(LIVE_CREDENTIAL_STATUSES);
 
 /** What Edge substitutes for credential material on every ordinary read. */
 const REDACTED_MATERIAL = '[REDACTED]';
@@ -862,7 +874,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * {@link resolveCredentialIndex}). `created_at` plays no part.
    */
   async function liveRows(consumerId: string, type: CredentialType): Promise<CredentialRecord[]> {
-    const rows = await store.credentials.listByConsumer(consumerId, type);
+    const rows = await store.credentials.listByConsumer(consumerId, type, LIVE_CREDENTIAL_STATUSES);
     const live = rows.filter((row) => LIVE_STATUSES.has(row.status));
     return live
       .map((row, position) => ({ row, position }))
@@ -2276,8 +2288,12 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         if (live) await edge.consumers.deleteCredentialType(consumerId, type, actor.id);
         const revokedIds: Uuid[] = [];
         const owners = new Set<Uuid>();
-        for (const row of await store.credentials.listByConsumer(consumerId, type)) {
-          if (!LIVE_STATUSES.has(row.status)) continue;
+        const rows = await store.credentials.listByConsumer(
+          consumerId,
+          type,
+          LIVE_CREDENTIAL_STATUSES,
+        );
+        for (const row of rows) {
           await store.credentials.update(row.id, { status: 'revoked' });
           revokedIds.push(row.id);
           owners.add(row.user_id);
@@ -2562,8 +2578,12 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
   /** Move every live row of one consumer to `revoked`; returns how many moved. */
   async function revokeRowsFor(consumerId: string): Promise<number> {
     let revoked = 0;
-    for (const row of await store.credentials.listByConsumer(consumerId)) {
-      if (row.status === 'revoked') continue;
+    const rows = await store.credentials.listByConsumer(
+      consumerId,
+      undefined,
+      LIVE_CREDENTIAL_STATUSES,
+    );
+    for (const row of rows) {
       await store.credentials.update(row.id, { status: 'revoked' });
       revoked += 1;
     }

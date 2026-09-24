@@ -23,6 +23,7 @@ import {
   consumerUsernameForUser,
   type CreateAccessRequestResponse,
   type CreateApplicationResponse,
+  type GetApplicationResponse,
   type IssueCredentialResponse,
   type ListAccessRequestsResponse,
   type ListApplicationsResponse,
@@ -555,6 +556,63 @@ describe('application-scoped identities', () => {
       url: `/api/applications/${appA}`,
     });
     assert.equal(foreign.statusCode, 404, 'somebody else’s reads as absent, not forbidden');
+  });
+
+  it('counts a whole page with two grouped reads rather than one per row', async (t) => {
+    await grant(owner, apiX, appA);
+    await grant(owner, apiY, appA);
+    await grant(owner, apiX, appB);
+    // A rotation leaves a revoked row behind, which the count must not include.
+    const issued = await harness.authed(owner, {
+      method: 'POST',
+      url: '/api/credentials',
+      payload: { credential_type: 'keyauth', application_id: appB },
+    });
+    assert.equal(issued.statusCode, 201, issued.body);
+    const rotated = await harness.authed(owner, {
+      method: 'POST',
+      url: `/api/credentials/${issued.json<IssueCredentialResponse>().credential.id}/rotate`,
+      payload: {},
+    });
+    assert.equal(rotated.statusCode, 200, rotated.body);
+    const spares = [
+      await createApplication(owner, 'Spare 1'),
+      await createApplication(owner, 'Spare 2'),
+    ];
+
+    const perRow = [
+      t.mock.method(harness.store.grants, 'count'),
+      t.mock.method(harness.store.credentials, 'count'),
+      t.mock.method(harness.store.credentials, 'list'),
+    ];
+    const grouped = [
+      t.mock.method(harness.store.grants, 'countByApplications'),
+      t.mock.method(harness.store.credentials, 'countByApplications'),
+    ];
+    const listed = await harness.authed(owner, { method: 'GET', url: '/api/applications' });
+    assert.equal(listed.statusCode, 200, listed.body);
+    const page = listed.json<ListApplicationsResponse>();
+    assert.equal(page.total, 4);
+    assert.deepEqual(grouped.map((method) => method.mock.callCount()), [1, 1]);
+    assert.deepEqual(perRow.map((method) => method.mock.callCount()), [0, 0, 0]);
+
+    const counts = new Map(
+      page.items.map((item) => [item.id, [item.active_grants, item.active_credentials]]),
+    );
+    assert.deepEqual(counts.get(appA), [2, 0]);
+    assert.deepEqual(counts.get(appB), [1, 1]);
+    for (const spare of spares) assert.deepEqual(counts.get(spare), [0, 0]);
+
+    // The detail read carries the same shape and the same numbers.
+    const detail = await harness.authed(owner, {
+      method: 'GET',
+      url: `/api/applications/${appB}`,
+    });
+    assert.equal(detail.statusCode, 200, detail.body);
+    assert.deepEqual(
+      detail.json<GetApplicationResponse>().application,
+      page.items.find((item) => item.id === appB),
+    );
   });
 
   it('refuses a duplicate name for one owner and allows it across owners', async () => {

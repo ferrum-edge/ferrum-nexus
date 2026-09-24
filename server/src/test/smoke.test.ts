@@ -1070,6 +1070,104 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(await store.applications.findById(app.id), null);
     });
 
+    it('applications: grouped grant and credential counts per application', async () => {
+      const provider = await makeUser({ role: 'provider' });
+      const client = await makeUser({ role: 'client' });
+      const apis = [
+        await makeApi(provider.id),
+        await makeApi(provider.id),
+        await makeApi(provider.id),
+      ];
+      const busy = await store.applications.create({
+        owner_user_id: client.id,
+        name: `Busy ${newId().slice(0, 8)}`,
+        status: 'active',
+      });
+      const idle = await store.applications.create({
+        owner_user_id: client.id,
+        name: `Idle ${newId().slice(0, 8)}`,
+        status: 'active',
+      });
+
+      // `busy` holds two active grants and a revoked one; the account holds one
+      // of its own, which no application's count may include.
+      const grantsOfBusy = await Promise.all(
+        apis.map((api) =>
+          store.grants.create({
+            api_id: api.id,
+            user_id: client.id,
+            application_id: busy.id,
+            acl_group: `nexus:api:${api.id}:approved`,
+            status: 'active',
+            granted_by: provider.id,
+          }),
+        ),
+      );
+      await store.grants.update(grantsOfBusy[2]!.id, { status: 'revoked' });
+      await store.grants.create({
+        api_id: apis[0]!.id,
+        user_id: client.id,
+        acl_group: `nexus:api:${apis[0]!.id}:approved`,
+        status: 'active',
+        granted_by: provider.id,
+      });
+
+      const credential = (applicationId: string | null, status: 'active' | 'revoked') =>
+        store.credentials.create({
+          user_id: client.id,
+          application_id: applicationId,
+          ferrum_consumer_id: `consumer-${applicationId ?? client.id}`,
+          credential_type: 'keyauth',
+          ferrum_credential_id: `keyauth:${newId()}`,
+          fingerprint: `fp-${newId()}`,
+          last4: 'cnt1',
+          status,
+        });
+      await credential(busy.id, 'active');
+      await credential(busy.id, 'revoked');
+      await credential(idle.id, 'revoked');
+      await credential(null, 'active');
+
+      const unknown = newId();
+      const ids = [busy.id, idle.id, unknown];
+      const grants = await store.grants.countByApplications(ids, 'active');
+      assert.deepEqual(
+        Object.fromEntries(grants),
+        { [busy.id]: 2, [idle.id]: 0, [unknown]: 0 },
+        'every id asked for is a key, zero included; account-scoped rows are not counted',
+      );
+      assert.deepEqual(
+        Object.fromEntries(await store.grants.countByApplications([busy.id], 'revoked')),
+        { [busy.id]: 1 },
+      );
+
+      const credentials = await store.credentials.countByApplications(ids, 'active');
+      assert.deepEqual(Object.fromEntries(credentials), {
+        [busy.id]: 1,
+        [idle.id]: 0,
+        [unknown]: 0,
+      });
+      assert.deepEqual(
+        Object.fromEntries(await store.credentials.countByApplications(ids, 'revoked')),
+        { [busy.id]: 1, [idle.id]: 1, [unknown]: 0 },
+      );
+
+      // The grouped read agrees with the per-row count it replaces.
+      for (const id of [busy.id, idle.id]) {
+        assert.equal(
+          grants.get(id),
+          await store.grants.count({ application_id: id, status: 'active' }),
+        );
+        assert.equal(
+          credentials.get(id),
+          await store.credentials.count({ application_id: id, status: 'active' }),
+        );
+      }
+
+      assert.equal((await store.grants.countByApplications([], 'active')).size, 0);
+      assert.equal((await store.credentials.countByApplications([], 'active')).size, 0);
+    });
+
     it('applications: scopes grants, requests, credentials and consumers by identity', async () => {
       const provider = await makeUser({ role: 'provider' });
       const client = await makeUser({ role: 'client' });
@@ -2268,6 +2366,17 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
 
       const retired = await store.credentials.update(first.id, { status: 'retiring' });
       assert.equal(retired?.status, 'retiring');
+
+      // The status filter drops rows without disturbing gateway order: the
+      // live rows come back in ordinal order, `revoked` ones are left out, and
+      // an empty list matches nothing.
+      const liveStatuses = ['active', 'retiring'] as const;
+      const live = await store.credentials.listByConsumer(user.id, 'keyauth', liveStatuses);
+      assert.deepEqual(live.map((row) => row.id), [first.id, second.id]);
+      const revoked = await store.credentials.listByConsumer(user.id, undefined, ['revoked']);
+      assert.deepEqual(revoked.map((row) => row.id), [afterRevoke.id, afterSecondRevoke.id]);
+      assert.deepEqual(await store.credentials.listByConsumer(user.id, 'keyauth', []), []);
+      assert.equal((await store.credentials.listByConsumer(user.id, 'keyauth')).length, 4);
       assert.equal(await store.credentials.count({ user_id: user.id, status: 'active' }), 1);
       assert.equal(
         (await store.credentials.list({ ferrum_consumer_id: user.id, credential_type: 'keyauth' }))

@@ -17,6 +17,7 @@ import {
   type PublishApiResponse,
 } from '@ferrum-nexus/shared';
 
+import { BRANDING_SETTINGS_KEY } from '../admin/settings-service.js';
 import { SAMPLE_SPEC_YAML, buildTestApp, type TestApp, type TestSession } from './helpers.js';
 
 function errorCode(body: string): string {
@@ -527,6 +528,58 @@ describe('API deletion and god mode', () => {
       );
       assert.equal(queued.length, 2);
       assert.ok(queued.every((row) => row.body_text.includes('Rotate your gateway credentials')));
+    });
+
+    it('reads the template and branding once per broadcast, not once per recipient', async () => {
+      const templates = harness.store.emailTemplates;
+      const settings = harness.store.settings;
+      const originalTemplate = templates.get;
+      const originalSetting = settings.get;
+      let templateReads = 0;
+      let brandingReads = 0;
+      templates.get = async (key) => {
+        if (key === 'mass') templateReads += 1;
+        return originalTemplate.call(templates, key);
+      };
+      settings.get = async (key) => {
+        if (key === BRANDING_SETTINGS_KEY) brandingReads += 1;
+        return originalSetting.call(settings, key);
+      };
+      try {
+        const response = await harness.authed(superAdmin, {
+          method: 'POST',
+          url: '/api/admin/god/broadcast',
+          payload: {
+            subject: 'One render pass',
+            body: 'Prepared once for everyone.',
+            audience: {
+              scope: 'explicit',
+              user_ids: [client.user.id, provider.user.id, admin.user.id],
+            },
+            send_email: true,
+          },
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        assert.equal(response.json<GodBroadcastResponse>().emails_enqueued, 3);
+      } finally {
+        templates.get = originalTemplate;
+        settings.get = originalSetting;
+      }
+      assert.equal(templateReads, 1);
+      assert.equal(brandingReads, 1);
+
+      // Each recipient still gets their own rendering.
+      const queued = (await harness.outbox()).filter((row) =>
+        row.subject.includes('One render pass'),
+      );
+      assert.deepEqual(
+        queued.map((row) => row.to_email).sort(),
+        [client.user.email, provider.user.email, admin.user.email].sort(),
+      );
+      for (const row of queued) {
+        assert.ok(row.body_text.includes('Prepared once for everyone.'));
+        assert.equal(row.idempotency_key?.startsWith('god-broadcast:'), true);
+      }
     });
 
     for (const key of [undefined, 'campaign-0001']) {

@@ -228,6 +228,26 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `FERRUM_BASIC_AUTH_HMAC_SECRET` is set. Compose no longer hard-codes the
   Postgres password.
 
+### Performance
+
+- Hot paths that re-parsed, fanned out or over-read (#343).
+  `GET /api/catalog/:slug/spec` caches its normalized document in process per
+  revision and server address (gateway origin + listen path), bounded at 64
+  documents and 32 MiB, after the visibility check; revisions are immutable, so
+  a new revision, rollback or origin change is a different key. The route also
+  gains a 60/minute per-account rate limit, the only one in the catalog. The
+  applications list attaches `active_grants` and `active_credentials` with two
+  grouped counts per page (`grants.countByApplications`,
+  `credentials.countByApplications`, on every store adapter) instead of three
+  queries per row; the response is unchanged. `credentials.listByConsumer`
+  takes an optional status filter, and issue, rotate, revoke, reconcile and
+  teardown read only a consumer's `active`/`retiring` rows under its lock
+  rather than every revoked row rotation has ever left behind. The session
+  hook no longer resolves the cookie for requests outside `/api` — the static
+  assets and the SPA shell — so a page load's scripts, styles and fonts cost no
+  store reads. A god-mode broadcast with email prepares the `mass` template and
+  branding once, as mass email does, instead of once per recipient.
+
 ### Fixed
 
 - Web mutations with local error handling no longer show a second global toast;

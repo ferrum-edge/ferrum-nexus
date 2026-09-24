@@ -274,6 +274,32 @@ describe('credential positions follow the append ordinal', () => {
     });
   }
 
+  it('reads only a consumer’s live rows under its lock, however long its history', async (t) => {
+    const user = await client();
+    let current = (await issue(user, 'keyauth')).credential.id;
+    // Every rotation leaves a revoked row behind, and nothing prunes them.
+    for (let round = 0; round < 3; round += 1) {
+      const response = await rotate(user, current);
+      assert.equal(response.statusCode, 200, response.body);
+      current = response.json<RotateCredentialResponse>().credential.id;
+    }
+
+    const listed = t.mock.method(harness.store.credentials, 'listByConsumer');
+    const rotated = await rotate(user, current);
+    assert.equal(rotated.statusCode, 200, rotated.body);
+    const replacement = rotated.json<RotateCredentialResponse>().credential.id;
+    const issued = await issue(user, 'keyauth');
+    const revoked = await revoke(user, replacement);
+    assert.equal(revoked.statusCode, 200, revoked.body);
+
+    assert.ok(listed.mock.callCount() >= 3, 'rotate, issue and revoke each read the mirror');
+    for (const call of listed.mock.calls) {
+      assert.deepEqual(call.arguments[2], ['active', 'retiring']);
+      for (const row of (await call.result) ?? []) assert.notEqual(row.status, 'revoked');
+    }
+    assert.deepEqual(liveMaterial(user.user.id, 'keyauth'), [materialOf(issued.secret)]);
+  });
+
   describe('rows that predate the ordinal', () => {
     function reconcile(actor: TestSession, payload: Record<string, unknown>) {
       return harness.authed(actor, {

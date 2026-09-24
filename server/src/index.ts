@@ -741,9 +741,17 @@ export async function buildServer(
     { prefix: '/api/admin' },
   );
 
-  await app.register(async (scope) => scope.register(catalogRoutes, { catalog }), {
-    prefix: '/api/catalog',
-  });
+  await app.register(
+    async (scope) => {
+      // `global: false` so only the spec route — the one read that parses a
+      // whole document — carries a limit, bucketed per account.
+      if (config.rateLimitEnabled) {
+        await scope.register(rateLimit, { global: false, keyGenerator: userOrIpKey });
+      }
+      await scope.register(catalogRoutes, { catalog });
+    },
+    { prefix: '/api/catalog' },
+  );
 
   await app.register(
     async (scope) => {

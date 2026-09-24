@@ -1026,6 +1026,18 @@ export interface GrantRepo {
   /** Every active grant on an API — used by god-mode delete and bulk revoke. */
   listActiveByApi(apiId: Uuid): Promise<GrantRecord[]>;
   count(filter: GrantFilter): Promise<number>;
+  /**
+   * Grants in `status` per application, for a whole page of applications in
+   * one grouped query — what the applications list attaches to every row
+   * instead of one count per row (issue #343).
+   *
+   * Every id asked for is a key of the result, with `0` when it has none.
+   * Account-scoped grants (`application_id` `null`) are never counted.
+   */
+  countByApplications(
+    applicationIds: readonly Uuid[],
+    status: GrantStatus,
+  ): Promise<Map<Uuid, number>>;
   /** Cascade helper for API deletion. */
   deleteByApi(apiId: Uuid): Promise<number>;
 }
@@ -1061,10 +1073,30 @@ export interface CredentialRepo {
    * first (every one of them predates every row that has one), then by
    * `edge_ordinal`, then by `created_at` and `id` as a tie-break only the
    * unresolved rows need.
+   *
+   * `statuses` restricts the read to rows in one of those states; omitted, it
+   * returns every row. The credential paths pass the live statuses: rotation
+   * leaves a `revoked` row behind every time and nothing prunes them, so an
+   * unfiltered read under the consumer lock grew with the consumer's whole
+   * history (issue #343). An empty list matches nothing. Filtering does not
+   * change the order of the rows it keeps.
    */
-  listByConsumer(ferrumConsumerId: string, type?: CredentialType): Promise<CredentialRecord[]>;
+  listByConsumer(
+    ferrumConsumerId: string,
+    type?: CredentialType,
+    statuses?: readonly CredentialStatus[],
+  ): Promise<CredentialRecord[]>;
   findByFingerprint(fingerprint: string): Promise<CredentialRecord | null>;
   count(filter: CredentialFilter): Promise<number>;
+  /**
+   * Credentials in `status` per application, in one grouped query; the
+   * counterpart of {@link GrantRepo.countByApplications}, with the same
+   * every-id-present contract.
+   */
+  countByApplications(
+    applicationIds: readonly Uuid[],
+    status: CredentialStatus,
+  ): Promise<Map<Uuid, number>>;
   delete(id: Uuid): Promise<boolean>;
 }
 

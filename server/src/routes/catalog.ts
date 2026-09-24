@@ -35,6 +35,21 @@ const catalogQuery = listQuerySchema.extend({
   owner_user_id: z.string().trim().min(1).max(64).optional(),
 });
 
+/**
+ * Per-account burst limit on `GET /api/catalog/:slug/spec`, enforced by the
+ * `@fastify/rate-limit` instance the composition root registers on this scope
+ * with `global: false` — the only catalog route that carries one.
+ *
+ * Normalizing a document is the one expensive read in the catalog: a spec of
+ * up to `MAX_SPEC_BYTES` is parsed and re-serialised synchronously. The catalog
+ * service caches the result per revision, so repeated reads of one document
+ * are cheap; this bounds the case the cache cannot, one account walking every
+ * API it can open to force misses (issue #343). It is looser than the
+ * publishing `spec/diff` limit because it is a read the SPA makes on every
+ * documentation page view.
+ */
+export const CATALOG_SPEC_RATE_LIMIT = { max: 60, timeWindow: '1 minute' } as const;
+
 const slugParams = z.object({ slug: z.string().trim().min(1).max(120) });
 
 const identityAccessQuery = z.object({
@@ -89,9 +104,13 @@ export const catalogRoutes: FastifyPluginAsync<CatalogRoutesOptions> = async (ap
     return catalog.identityAccess(user, slug, applicationId);
   });
 
-  app.get('/:slug/spec', async (request): Promise<CatalogSpecResponse> => {
-    const { user } = requireAuth(request);
-    const { slug } = parseOrThrow(slugParams, request.params);
-    return catalog.spec(user, slug);
-  });
+  app.get(
+    '/:slug/spec',
+    { config: { rateLimit: { ...CATALOG_SPEC_RATE_LIMIT } } },
+    async (request): Promise<CatalogSpecResponse> => {
+      const { user } = requireAuth(request);
+      const { slug } = parseOrThrow(slugParams, request.params);
+      return catalog.spec(user, slug);
+    },
+  );
 };

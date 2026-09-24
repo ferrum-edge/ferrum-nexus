@@ -1315,6 +1315,31 @@ class MongoStore implements NexusStore {
   }
 
   /**
+   * Documents in `status` per application for a set of application ids, as
+   * one `$group` — the grouped count behind `countByApplications` on both the
+   * grants and the credential repositories. Every id asked for is a key.
+   */
+  private async countByApplication(
+    collection: string,
+    applicationIds: readonly Uuid[],
+    status: string,
+  ): Promise<Map<Uuid, number>> {
+    const counts = new Map<Uuid, number>(applicationIds.map((id) => [id, 0]));
+    if (counts.size === 0) return counts;
+    const rows = await this.col(collection)
+      .aggregate<Row>(
+        [
+          { $match: { status, application_id: { $in: [...counts.keys()] } } },
+          { $group: { _id: '$application_id', count: { $sum: 1 } } },
+        ],
+        this.opts,
+      )
+      .toArray();
+    for (const row of rows) counts.set(String(row._id), num(row.count));
+    return counts;
+  }
+
+  /**
    * One more than the largest `revision_seq` recorded for an API.
    *
    * Called only from inside the create transaction, exactly as the SQL
@@ -2520,6 +2545,9 @@ class MongoStore implements NexusStore {
     count: async (filter) =>
       this.col(COLLECTIONS.grants).countDocuments(grantFilter(filter), this.opts),
 
+    countByApplications: async (applicationIds, status) =>
+      this.countByApplication(COLLECTIONS.grants, applicationIds, status),
+
     deleteByApi: async (apiId) =>
       (await this.col(COLLECTIONS.grants).deleteMany({ api_id: apiId }, this.opts)).deletedCount,
   };
@@ -2590,9 +2618,10 @@ class MongoStore implements NexusStore {
         mapCredential,
       ),
 
-    listByConsumer: async (ferrumConsumerId, type) => {
+    listByConsumer: async (ferrumConsumerId, type, statuses) => {
       const query: Record<string, unknown> = { ferrum_consumer_id: ferrumConsumerId };
       if (type !== undefined) query.credential_type = type;
+      if (statuses !== undefined) query.status = { $in: [...statuses] };
       // Ascending BSON order puts null and missing before every number, so
       // unresolved documents lead, then append order.
       const docs = await this.col(COLLECTIONS.credentials)
@@ -2611,6 +2640,9 @@ class MongoStore implements NexusStore {
 
     count: async (filter) =>
       this.col(COLLECTIONS.credentials).countDocuments(credentialFilter(filter), this.opts),
+
+    countByApplications: async (applicationIds, status) =>
+      this.countByApplication(COLLECTIONS.credentials, applicationIds, status),
 
     delete: async (id) =>
       (await this.col(COLLECTIONS.credentials).deleteOne({ _id: id }, this.opts)).deletedCount > 0,
