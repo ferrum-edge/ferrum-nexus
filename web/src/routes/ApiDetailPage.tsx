@@ -1223,7 +1223,11 @@ function TestConsumerTab({ api }: { api: Api }): ReactElement {
           secret={secret.secret}
           consumerUsername={secret.username}
           title="Save your test credential"
-          onAcknowledge={() => setSecret(null)}
+          onAcknowledge={() => {
+            setSecret(null);
+            // Drop the plaintext from the mutation result too (issue #336).
+            create.reset();
+          }}
         />
       ) : null}
     </>

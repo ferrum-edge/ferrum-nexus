@@ -1,3 +1,4 @@
+import type { QueryClient } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -85,6 +86,16 @@ function openIssue(): void {
   fireEvent.click(screen.getAllByRole('button', { name: 'Issue credential' })[0]!);
 }
 
+/** Everything the mutation cache still holds, for asserting a secret is gone. */
+function mutationCacheText(client: QueryClient): string {
+  return JSON.stringify(
+    client
+      .getMutationCache()
+      .getAll()
+      .map((mutation) => mutation.state),
+  );
+}
+
 function acknowledge(): void {
   const dialog = screen.getByRole('dialog');
   expect(within(dialog).getByRole('button', { name: 'Done' })).toBeDisabled();
@@ -121,6 +132,9 @@ describe('credential management', () => {
     expect(dialog).toBeInTheDocument();
     acknowledge();
     expect(screen.queryByText(secret)).not.toBeInTheDocument();
+    // Acknowledging also drops the plaintext from the mutation cache, where it
+    // would otherwise linger for the default gcTime (issue #336).
+    await waitFor(() => expect(mutationCacheText(client)).not.toContain(secret));
     expect(await screen.findByText('••••0001')).toBeInTheDocument();
     const cached = client.getQueryData(
       queryKeys.credentials.list({ limit: DEFAULT_PAGE_SIZE, offset: 0 }),
@@ -197,7 +211,7 @@ describe('credential management', () => {
   });
 
   it('requires a fresh acknowledgement for rotation', async () => {
-    renderPage(<CredentialsPage />);
+    const { client } = renderPage(<CredentialsPage />);
     await screen.findByText('No credentials yet');
     openIssue();
     changeField('Label', CREDENTIAL.label!);
@@ -218,6 +232,20 @@ describe('credential management', () => {
     acknowledge();
     await screen.findByText('••••0002');
     expect(screen.queryByText('test-only-rotated-key-0002')).not.toBeInTheDocument();
+    await waitFor(() => expect(mutationCacheText(client)).not.toContain('test-only-rotated-key'));
+  });
+
+  it('offers no rotation or revocation for a revoked credential (issue #336)', async () => {
+    credentials = [
+      { ...CREDENTIAL, id: 'credential-revoked', last4: '0009', status: 'revoked' },
+      CREDENTIAL,
+    ];
+    renderPage(<CredentialsPage />);
+    const revoked = (await screen.findByText('••••0009')).closest('tr')!;
+    const active = screen.getByText('••••0001').closest('tr')!;
+    expect(within(revoked).queryByRole('button')).not.toBeInTheDocument();
+    expect(within(active).getByRole('button', { name: 'Rotate' })).toBeInTheDocument();
+    expect(within(active).getByRole('button', { name: 'Revoke' })).toBeInTheDocument();
   });
 
   it('confirms revocation and refreshes the list after success', async () => {
