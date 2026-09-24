@@ -84,7 +84,7 @@ See the README for a two-stack example.
 | `NEXUS_HOST`                                 | `127.0.0.1`                                  | Bind address. Use `0.0.0.0` in a container.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `NEXUS_PORT`                                 | `8787`                                       | 0–65535.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `NEXUS_PUBLIC_URL`                           | `http://127.0.0.1:5173`                      | Public origin of the portal. Used to build verification links, catalog/credential/thread URLs in email. Must be an absolute `http(s)` URL with no credentials, query string or fragment; a trailing slash is stripped.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `NEXUS_TRUSTED_PROXIES`                      | _(unset)_                                    | Which proxies may set `X-Forwarded-For`. Unset trusts none: `request.ip` is the socket address, which is what the auth rate limiter and every audit row key on. Accepts an integer hop count counted from the right of the header (`1`), or a comma-separated allowlist of IPs/CIDR blocks (`10.0.0.0/8,192.168.1.7`; `loopback`, `linklocal` and `uniquelocal` are also accepted). An allowlist reaches Fastify's `trustProxy` unchanged; a hop count is compiled into the equivalent predicate, because Fastify maps a bare number to "trust nothing".                                                                                                                                                                                                                                                                                                                |
+| `NEXUS_TRUSTED_PROXIES`                      | _(unset)_                                    | Which proxies may set `X-Forwarded-For`. Unset trusts none: `request.ip` is the socket address, which is what the auth rate limiter and every audit row key on. Accepts an integer hop count counted from the right of the header (`1`), or a comma-separated allowlist of IPs/CIDR blocks (`10.0.0.0/8,192.168.1.7`; `loopback`, `linklocal` and `uniquelocal` are also accepted, case-insensitively). Every entry is parsed as Fastify will parse it: a real IPv4 or IPv6 address (no zone index), with an optional prefix of 1–32 for IPv4 or 1–128 for IPv6, so `deadbeef` or `10.0.0.1/999` fails configuration naming this variable instead of crashing server startup. An allowlist reaches Fastify's `trustProxy` unchanged; a hop count is compiled into the equivalent predicate, because Fastify maps a bare number to "trust nothing".                      |
 | `NEXUS_TRUST_PROXY`                          | `false`                                      | **Deprecated.** `true` is an alias for `NEXUS_TRUSTED_PROXIES=1`. It no longer affects cookies or HSTS — see `NEXUS_COOKIE_SECURE`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `NEXUS_COOKIE_SECURE`                        | `true` unless `NEXUS_ENV=development`        | Marks `nexus_session` and `nexus_csrf` `Secure` and turns on HSTS. Set `false` only to serve the portal over plaintext `http://`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `NEXUS_LOG_LEVEL`                            | `info`                                       | One of `fatal`, `error`, `warn`, `info`, `debug`, `trace`, `silent`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
@@ -322,6 +322,12 @@ settings **override** these at runtime (see [key rotation](#7-rotating-nexus_sec
 | `NEXUS_SMTP_USER`     | _(unset)_                             |
 | `NEXUS_SMTP_PASSWORD` | _(unset)_                             |
 | `NEXUS_EMAIL_FROM`    | `Ferrum Nexus <no-reply@example.com>` |
+
+`NEXUS_SMTP_PASSWORD` is only ever presented to the environment's own
+connection. Once the stored settings move the host, port, TLS mode or username
+away from `NEXUS_SMTP_*`, the stored settings need a password of their own: with
+none stored — or with one the current `NEXUS_SECRET_KEY` cannot decrypt — no
+password is sent and the server logs why ([security.md §6](security.md#6-settings-encryption)).
 
 `NEXUS_EMAIL_TEMPLATE_ALLOWED_LINK_HOSTS` is an **operator-only environment
 setting**, default empty, with no database or admin UI override. It is a
@@ -1363,7 +1369,8 @@ production for real, rehearse on a copy.
    `orphaned_proxies`, zero `awaiting_restore`.
 2. Sign in as an administrator and open the admin settings: `smtp.password_set`
    and `captcha.secret_set` are `true` where they were before, and a test mail
-   is delivered. That proves `NEXUS_SECRET_KEY` survived.
+   is delivered. That proves `NEXUS_SECRET_KEY` survived — `smtp.password_set`
+   reads `false` for a stored password the current key cannot decrypt.
 3. **An authenticated request goes through.** With the approved canary's key:
 
    ```bash
@@ -1601,13 +1608,16 @@ from the master key — rotation does not affect sign-in with a password.
 
 ### What rotation does and does not affect
 
-`readEncryptedSetting` catches a decryption failure and returns `null`, so a
-row written under the old key reads as _absent_ after a plain key swap — and
+A row written under the old key cannot be decrypted after a plain key swap, and
 that is not harmless:
 
-- SMTP falls back to the `NEXUS_SMTP_*` environment values; without a password
-  there, authenticated relays reject mail and the outbox fills with `failed`
-  rows.
+- SMTP sends **no password**. An unreadable `smtp.password` is not treated as
+  absent: falling back to `NEXUS_SMTP_PASSWORD` would present the environment
+  relay's secret to whatever relay and username are stored (issue #342).
+  Authenticated relays reject the mail, the outbox fills with `failed` rows,
+  the log carries a `warn` line saying the stored SMTP password cannot be
+  decrypted, and `smtp.password_set` reads `false` until a super admin
+  re-enters the password.
 - CAPTCHA **fails closed**: `captcha.verify` throws
   `CAPTCHA_FAILED — "CAPTCHA is enabled but not fully configured"`, so
   registration **and login** stop working. On a CAPTCHA-enabled portal a bare
@@ -2689,6 +2699,19 @@ The cleared row reads as "has no gateway proxy", which is a state the rest of
 the portal already models: the plugin palette refuses to attach to it, and every
 proxy write is skipped. The API's catalog entry, its specification history, its
 grants and its access requests are untouched. The owner is notified.
+
+The flag is decided again at the moment it is written, not taken on trust from
+the pass. The repair may join a pass that was already running, and a restore —
+or an operator rebuilding the proxy by hand — can land after that pass read the
+gateway. So each API is flagged under the same per-API lock
+`restore-gateway` holds, after asking the gateway again whether the proxy is
+gone, and the cleared reference and its audit row commit in one transaction. An
+API whose proxy the gateway serves again is reported with `flagged: false` and
+left deployed; one whose reference a restore has already replaced is reported
+as changed and left alone. Before this (issue #342), a repair acting on a stale
+pass could clear the reference to a proxy a restore had just rebuilt, leaving
+it live on the listen path with no row pointing at it, and the next restore
+answered `409`.
 
 Clearing the reference is **not** the end of the incident. On its own it left
 the API looking like one that simply has no deployment yet — the next pass

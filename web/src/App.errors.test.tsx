@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ERROR_CODES } from '@ferrum-nexus/shared';
@@ -24,18 +24,27 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-function stubApi(authenticated: boolean, status: number, message: string): void {
+function stubApi(
+  authenticated: boolean,
+  status: number,
+  message: string,
+  { keepSession = false }: { keepSession?: boolean } = {},
+): void {
+  let signedIn = authenticated;
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (init?.method !== 'GET') {
+        // A 401 normally means the session is gone, so the follow-up /me probe
+        // fails too; keepSession models a late 401 sent with a rotated cookie.
+        if (status === 401 && !keepSession) signedIn = false;
         const code = status === 401 ? ERROR_CODES.UNAUTHORIZED : ERROR_CODES.VALIDATION_FAILED;
         return Promise.resolve(json({ error: { code, message } }, status));
       }
       if (url === '/api/auth/me') {
         return Promise.resolve(
-          authenticated
+          signedIn
             ? json({
                 user: {
                   id: 'admin',
@@ -76,7 +85,42 @@ afterEach(() => {
 });
 
 describe('App mutation error policy', () => {
-  it('shows a settings PUT 400 in the gateway form and toast', async () => {
+  it('refreshes the auth store after verifying an email', async () => {
+    const user = {
+      id: 'client',
+      display_name: 'Client',
+      email: 'client@example.test',
+      role: 'client',
+      status: 'active',
+      email_verified: false,
+      created_at: '2026-09-08T00:00:00.000Z',
+      last_login_at: null,
+    };
+    let meCalls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === '/api/auth/me') {
+          meCalls += 1;
+          return Promise.resolve(
+            json({ user: { ...user, email_verified: meCalls > 1 }, capabilities: null }),
+          );
+        }
+        if (url === '/api/auth/verify-email') {
+          return Promise.resolve(json({ verified: true, user: { ...user, email_verified: true } }));
+        }
+        if (url === '/api/branding') return Promise.resolve(json(branding));
+        if (url === '/api/auth/captcha') return Promise.resolve(json(branding.captcha));
+        return Promise.resolve(json({ items: [], total: 0, unread_count: 0 }));
+      }),
+    );
+    await openApp('/verify-email?token=verification-token');
+    expect(await screen.findByText('client@example.test')).toBeInTheDocument();
+    await waitFor(() => expect(meCalls).toBe(2));
+  });
+
+  it('shows a settings PUT 400 in the gateway form without a duplicate toast', async () => {
     const message =
       'gateway.public_url must be an absolute http(s) origin with no path, query string or ' +
       'credentials, e.g. https://api.example.com';
@@ -90,8 +134,9 @@ describe('App mutation error policy', () => {
       target: { value: 'api.example.com/gateway' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Save gateway' }));
-    expect(await screen.findByText('Request failed')).toBeInTheDocument();
+    expect(await screen.findByRole('alert')).toHaveTextContent(message);
     expect(within(screen.getByRole('tabpanel')).getByRole('alert')).toHaveTextContent(message);
+    expect(screen.queryByText('Request failed')).not.toBeInTheDocument();
     expect(fetch).toHaveBeenCalledWith(
       '/api/admin/settings',
       expect.objectContaining({ method: 'PUT' }),
@@ -103,7 +148,7 @@ describe('App mutation error policy', () => {
     [413, 'Request body is too large'],
     [415, 'Unsupported media type'],
     [422, 'Invalid request content'],
-  ])('shows a profile PATCH %s with the server message', async (status, message) => {
+  ])('shows a profile PATCH %s inline without a duplicate toast', async (status, message) => {
     stubApi(true, status, message);
     await openApp('/profile');
     const input = await screen.findByLabelText(/^Display name/);
@@ -111,8 +156,9 @@ describe('App mutation error policy', () => {
     const form = input.closest('form');
     expect(form).not.toBeNull();
     fireEvent.submit(form!);
-    expect(await screen.findByText('Request failed')).toBeInTheDocument();
+    expect(await screen.findByRole('alert')).toHaveTextContent(message);
     expect(within(form!).getByRole('alert')).toHaveTextContent(message);
+    expect(screen.queryByText('Request failed')).not.toBeInTheDocument();
     expect(fetch).toHaveBeenCalledWith(
       '/api/users/me',
       expect.objectContaining({ method: 'PATCH' }),
@@ -146,6 +192,23 @@ describe('App mutation error policy', () => {
     const input = await screen.findByLabelText(/^Display name/);
     fireEvent.submit(input.closest('form')!);
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeInTheDocument();
+    expect(screen.queryByText('Request failed')).not.toBeInTheDocument();
+  });
+
+  it('keeps the session when a late unauthorized mutation re-probes successfully', async () => {
+    stubApi(true, 401, 'Session expired', { keepSession: true });
+    await openApp('/profile');
+    const input = await screen.findByLabelText(/^Display name/);
+    const meCalls = (): number =>
+      vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === '/api/auth/me').length;
+    const before = meCalls();
+    fireEvent.submit(input.closest('form')!);
+    await waitFor(() => expect(meCalls()).toBeGreaterThan(before));
+    // Let the re-probe settle so a wrongful teardown would have rendered.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Session expired');
+    expect(screen.getByLabelText(/^Display name/)).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Sign in' })).not.toBeInTheDocument();
     expect(screen.queryByText('Request failed')).not.toBeInTheDocument();
   });
 });

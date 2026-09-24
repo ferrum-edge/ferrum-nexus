@@ -112,6 +112,7 @@ export function useCreateApplication(): UseMutationResult<
 > {
   const invalidate = useApplicationInvalidation();
   return useMutation({
+    meta: { silent: true },
     mutationFn: (body: CreateApplicationRequest) => applicationsApi.create(body),
     onSuccess: invalidate,
   });
@@ -124,6 +125,7 @@ export function useUpdateApplication(): UseMutationResult<
 > {
   const invalidate = useApplicationInvalidation();
   return useMutation({
+    meta: { silent: true },
     mutationFn: ({ id, body }: { id: string; body: UpdateApplicationRequest }) =>
       applicationsApi.update(id, body),
     onSuccess: invalidate,
@@ -138,6 +140,7 @@ export function useDeleteApplication(): UseMutationResult<
 > {
   const invalidate = useApplicationInvalidation();
   return useMutation({
+    meta: { silent: true },
     mutationFn: (id: string) => applicationsApi.remove(id),
     onSuccess: invalidate,
   });

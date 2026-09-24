@@ -230,6 +230,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Web mutations with local error handling no longer show a second global toast;
+  stale 401 responses recheck the session before signing out, and email
+  verification and self-edits refresh the auth store (#346).
 - Open catalog APIs (`requestable: false`) now report `access_state: 'open'`
   instead of `'none'`, so the catalog card and detail page show **Open access**
   rather than **No access** (#267).
@@ -591,6 +594,50 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `innodb_lock_wait_timeout` — so one request can no longer stall ~250 s, and a
   MongoDB `UnknownTransactionCommitResult` no longer surfaces a `CONFLICT`
   claiming "Nothing was saved"; it reports the commit outcome as unknown.
+- **The private-upstream check unwraps IPv6 transition addresses** (#344).
+  It read only the leading hextet of an IPv6 address, so a NAT64
+  (`64:ff9b::a00:1`, i.e. `10.0.0.1`), 6to4 (`2002::/16`) or site-local
+  (`fec0::/10`) literal or AAAA answer passed as public — on a DNS64/NAT64
+  network an AAAA-only name could reach RFC 1918 space through the translator.
+  IPv4-mapped, NAT64 well-known-prefix and 6to4 addresses are now judged as the
+  IPv4 address they carry; `fec0::/10`, the rest of `::/16` (including
+  IPv4-compatible `::a.b.c.d`) and the rest of `64:ff9b::/32` (including
+  local-use `64:ff9b:1::/48`) are refused. An IPv4-mapped _literal_ upstream is
+  now judged the same way as an IPv4-mapped DNS answer already was, so
+  `::ffff:93.184.216.34` is accepted rather than refused.
+- **Authorizing a private API's viewer no longer reveals administrators**
+  (#344). An administrator's address answered `409 CONFLICT` with
+  "Administrators can already read every API", which told any provider which
+  addresses hold the admin role. It now gets the same `400 VALIDATION_FAILED`
+  an unknown address gets, and nothing is written.
+- **Registration hashes the password before refusing a taken address** (#344),
+  so the `409 CONFLICT` for a duplicate costs what a registration costs instead
+  of returning an order of magnitude sooner. That registration reveals whether
+  an address is taken remains an accepted, documented risk (`docs/security.md`).
+- **`NEXUS_TRUSTED_PROXIES` entries are parsed as real addresses** (#348). A
+  character-class check accepted `deadbeef`, `::::` and `10.0.0.1/999`, which
+  Fastify then refused while constructing the server — so a typo passed
+  configuration and crashed startup. Each entry must now be an IPv4 or IPv6
+  address with an optional prefix of 1–32 or 1–128, anything else is a
+  configuration error naming the variable, and the `loopback` / `linklocal` /
+  `uniquelocal` keywords are lower-cased before they reach Fastify, which
+  matches them case-sensitively.
+
+- A password-reset or verification-resend delivery that failed no longer
+  spends the recipient's 10-minute throttle window (#342). The message is now
+  rendered before the throttle claim and queued through the minting
+  transaction, so a template that cannot be rendered claims nothing and an
+  outbox insert that fails rolls back the claim, the token and the audit row
+  with it. Both endpoints still answer the uniform `200 { "ok": true }`, and
+  the next request issues the link.
+- The gateway repair no longer clears the proxy reference of an API a restore
+  has just rebuilt (#342). `POST /api/admin/gateway/repair` now flags an
+  orphaned proxy under the same per-API lock `restore-gateway` holds, asks the
+  gateway again before clearing anything, and writes the cleared reference and
+  its `api.gateway_repair_required` row in one transaction. An API whose proxy
+  is live again is reported with `flagged: false` and left deployed, instead of
+  being marked `repair_required` with its live proxy still holding the listen
+  path and the next restore answering `409`.
 
 ### Security
 
@@ -599,6 +646,11 @@ codebase, once independently — and every finding below was proven with a
 working exploit before being fixed, and is covered by a regression test that
 fails without the fix.
 
+- **CI actions are pinned to commit SHAs** (#351). `actions/checkout`,
+  `actions/setup-node` and `actions/upload-artifact` ran from movable `v4` tags
+  that could be repointed without a reviewed Nexus commit. They are now pinned
+  to the commits those tags resolve to, an `action-pins` CI job rejects any
+  tag-referenced action, and Dependabot proposes grouped action bumps.
 - **A published OpenAPI document can no longer freeze a reader's browser.**
   The catalog viewer parses documents that open with `{` or `[` as JSON — the
   YAML parser accepts JSON but its cost grows quadratically with the width of a
@@ -704,3 +756,12 @@ fails without the fix.
   auth association by overwriting each other's whole-resource `PUT`. The
   single-writer topology in the operations guide is no longer required;
   proxy delete-and-recreate paths remain outside the lease and say so.
+- **The environment SMTP password is never sent to another relay** (#342).
+  A stored `smtp.password` that no longer decrypts — `NEXUS_SECRET_KEY`
+  swapped without `rotate-secret-key` — used to read as absent, so the email
+  service fell back to `NEXUS_SMTP_PASSWORD` and presented it to the _stored_
+  host under the _stored_ username. An unreadable override now fails closed
+  (no password is sent, and a `warn` line without any secret says so), and the
+  environment password is used only while the effective host, port, TLS mode
+  and username are the environment's own. `smtp.password_set` now reports
+  whether a password would actually be presented.

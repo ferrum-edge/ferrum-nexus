@@ -10,6 +10,12 @@
  * address with an account reaches the mint, so a partially failing store
  * answered `500` for a real address and `200` for an unknown one.
  *
+ * Delivery belongs to the same unit (issue #342). The message used to be
+ * rendered and queued after the claim had committed, with its failures logged
+ * and swallowed, so a broken template or a refused outbox insert spent the
+ * window just as a failed mint had. It is now rendered before the claim and
+ * queued through the mint's transaction, and both failures are covered here.
+ *
  * Cross-adapter because the fix moves a write into a transaction that now spans
  * two tables — two *collections* on Mongo, where covering both needs the replica
  * set's multi-document transaction. A standalone Mongo degrades to serialised,
@@ -124,6 +130,44 @@ export function runRecoveryThrottleContract(
       assert.equal(await resetRows(user.user.id), 1);
     });
 
+    it('does not spend the reset window on a message the outbox refused', async () => {
+      const user = await freshUser();
+
+      // The outbox insert. It used to run after the claim and the token had
+      // committed, and its failure was logged and swallowed — so the window was
+      // spent on a link nobody was sent, and every retry for the next ten
+      // minutes was throttled behind the same `200` (issue #342). It now runs
+      // inside the mint's transaction and takes the claim down with it.
+      faults.failNext('emailOutbox', 'enqueue', new Error('injected outbox failure'));
+      const answer = await ask('/api/auth/forgot-password', user.user.email);
+      assert.deepEqual(faults.pending(), [], 'the injected fault fired');
+      assert.equal(await resetMailFor(user.user.email), 0, 'the failed attempt queued nothing');
+      assert.equal(await resetRows(user.user.id), 0, 'and its audit row rolled back too');
+
+      const retried = await ask('/api/auth/forgot-password', user.user.email);
+      assert.equal(retried, answer, 'byte-identical to the failed attempt');
+      assert.equal(await resetMailFor(user.user.email), 1, 'the retry delivered a link');
+      assert.equal(await resetRows(user.user.id), 1);
+    });
+
+    it('does not spend the reset window on a message that could not be rendered', async () => {
+      const user = await freshUser();
+
+      // Template resolution is the first thing rendering reads, and rendering
+      // now happens before anything is claimed: a template the server cannot
+      // produce fails the attempt with the window untouched (issue #342).
+      faults.failNext('emailTemplates', 'get', new Error('injected template failure'));
+      const answer = await ask('/api/auth/forgot-password', user.user.email);
+      assert.deepEqual(faults.pending(), [], 'the injected fault fired');
+      assert.equal(await resetMailFor(user.user.email), 0, 'the failed attempt queued nothing');
+      assert.equal(await resetRows(user.user.id), 0, 'and audited nothing');
+
+      const retried = await ask('/api/auth/forgot-password', user.user.email);
+      assert.equal(retried, answer, 'byte-identical to the failed attempt');
+      assert.equal(await resetMailFor(user.user.email), 1, 'the retry delivered a link');
+      assert.equal(await resetRows(user.user.id), 1);
+    });
+
     it('answers a store fault exactly as it answers an address it has never seen', async () => {
       const user = await freshUser();
 
@@ -161,6 +205,21 @@ export function runRecoveryThrottleContract(
       await ask('/api/auth/resend-verification', user.user.email);
       assert.deepEqual(faults.pending(), [], 'the injected fault fired');
       assert.equal(await resendMailFor(user), before, 'the failed attempt sent nothing');
+
+      await ask('/api/auth/resend-verification', user.user.email);
+      assert.equal(await resendMailFor(user), before + 1, 'the retry delivered a link');
+    });
+
+    it('keeps the resend window unspent when its message cannot be queued', async () => {
+      const user = await freshUser();
+      await harness.store.verificationTokens.deleteForUser(user.user.id, 'email_verification');
+      await harness.store.users.update(user.user.id, { email_verified: false });
+      const before = await resendMailFor(user);
+
+      faults.failNext('emailOutbox', 'enqueue', new Error('injected outbox failure'));
+      await ask('/api/auth/resend-verification', user.user.email);
+      assert.deepEqual(faults.pending(), [], 'the injected fault fired');
+      assert.equal(await resendMailFor(user), before, 'the failed attempt queued nothing');
 
       await ask('/api/auth/resend-verification', user.user.email);
       assert.equal(await resendMailFor(user), before + 1, 'the retry delivered a link');

@@ -86,6 +86,12 @@
  * `orphaned` — and the portal `degraded` — until a restore succeeds. That count
  * comes from the portal's own rows, so it survives a pass that could not reach
  * the gateway at all.
+ *
+ * The flag is written under the same per-API key the restore holds
+ * ({@link apiRestoreLockKey}), after asking the gateway again, and together
+ * with its audit row in one transaction. A repair acting on a pass that a
+ * restore — or an operator — has since overtaken therefore leaves the rebuilt
+ * deployment alone instead of clearing the reference to it (issue #342).
  */
 
 import {
@@ -108,6 +114,7 @@ import { canonicalConsumerLockKey } from '../credentials/consumers.js';
 import type { NexusStore, UserRecord } from '../db/store.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import { edgeUnavailable, forbidden, validationFailed } from '../lib/errors.js';
+import { apiRestoreLockKey } from '../lib/keyed-serializer.js';
 import type { NotificationsService } from '../notifications/service.js';
 
 /** Credential rows whose gateway entry is supposed to still exist. */
@@ -558,6 +565,23 @@ export function createGatewayReconciliationService(
    *
    * No gateway write at all: the proxy is already gone, and rebuilding it is
    * the publishing flow's job, not this endpoint's.
+   *
+   * The orphan it is handed comes from a pass that may predate what is true
+   * now — `repair()` can join a pass already in flight — and a restore or an
+   * operator can have put the deployment back since. Clearing the reference
+   * then would leave a live proxy holding the listen path with no row pointing
+   * at it, and the next restore would `409` against it (issue #342). So the
+   * decision is re-made, not trusted:
+   *
+   * - under {@link apiRestoreLockKey}, the key `publishing.restoreGateway`
+   *   holds from its missing-deployment check to its commit, so a restore is
+   *   either wholly before this or wholly after it;
+   * - with the gateway asked again, inside that key, whether the proxy is
+   *   really gone — a `404` flags, a live proxy is left alone, and anything
+   *   else is an error rather than an orphan;
+   * - and with the row re-read, the reference cleared and the audit row
+   *   written in one transaction, so the flag cannot commit without its record
+   *   or land on a row whose reference has moved.
    */
   async function flagApi(
     actor: UserRecord,
@@ -571,34 +595,62 @@ export function createGatewayReconciliationService(
       flagged: false,
       error: null,
     };
+    const moved = 'The API’s gateway proxy changed while the repair was running';
     try {
-      const api = await store.apis.findById(orphan.api_id);
-      if (!api) return { ...base, error: 'The portal no longer holds a row for this API' };
-      if (api.ferrum_proxy_id !== orphan.ferrum_proxy_id) {
-        return { ...base, error: 'The API’s gateway proxy changed while the repair was running' };
-      }
-      // Both facts in one write. Clearing the reference is what makes the rest
-      // of the portal stop addressing a proxy that is not there; the state is
-      // what keeps "this API is not deployed" true afterwards, so that the next
-      // pass does not read a flagged API as a clean one (issue #284).
-      await store.apis.update(api.id, {
-        ferrum_proxy_id: null,
-        gateway_state: 'repair_required',
+      const outcome = await edge.serializePerKey(apiRestoreLockKey(orphan.api_id), async () => {
+        const current = await store.apis.findById(orphan.api_id);
+        if (!current) return { kind: 'gone' } as const;
+        if (current.ferrum_proxy_id !== orphan.ferrum_proxy_id) return { kind: 'moved' } as const;
+
+        // Asked again, under the key: the pass's `404` may be minutes old. A
+        // transport failure throws, and throws out of the repair of this API
+        // only — an unreachable gateway is never evidence that a proxy is gone.
+        if ((await edge.proxies.get(orphan.ferrum_proxy_id)) !== null) {
+          return { kind: 'present' } as const;
+        }
+
+        // Both facts in one write, and the audit row with them. Clearing the
+        // reference is what makes the rest of the portal stop addressing a
+        // proxy that is not there; the state is what keeps "this API is not
+        // deployed" true afterwards, so that the next pass does not read a
+        // flagged API as a clean one (issue #284).
+        const flagged = await store.transaction(async (tx) => {
+          const api = await tx.apis.findById(orphan.api_id);
+          if (!api || api.ferrum_proxy_id !== orphan.ferrum_proxy_id) return null;
+          const updated = await tx.apis.update(api.id, {
+            ferrum_proxy_id: null,
+            gateway_state: 'repair_required',
+          });
+          if (!updated) return null;
+          await audit.forStore(tx).record(
+            { id: actor.id, role: actor.role },
+            AuditAction.API_GATEWAY_REPAIR_REQUIRED,
+            { type: 'api', id: api.id },
+            {
+              phase: 'orphaned_proxy',
+              namespace,
+              proxy_id: orphan.ferrum_proxy_id,
+              slug: api.slug,
+              spec_enforcement: api.spec_enforcement,
+              ...(reason ? { reason } : {}),
+            },
+            ip,
+          );
+          return api;
+        });
+        if (!flagged) return { kind: 'moved' } as const;
+        return { kind: 'flagged', api: flagged } as const;
       });
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.API_GATEWAY_REPAIR_REQUIRED,
-        { type: 'api', id: api.id },
-        {
-          phase: 'orphaned_proxy',
-          namespace,
-          proxy_id: orphan.ferrum_proxy_id,
-          slug: api.slug,
-          spec_enforcement: api.spec_enforcement,
-          ...(reason ? { reason } : {}),
-        },
-        ip,
-      );
+
+      if (outcome.kind === 'gone') {
+        return { ...base, error: 'The portal no longer holds a row for this API' };
+      }
+      if (outcome.kind === 'moved') return { ...base, error: moved };
+      if (outcome.kind === 'present') {
+        return { ...base, error: 'The gateway serves this API’s proxy again; nothing to repair' };
+      }
+
+      const api = outcome.api;
       log(
         { api_id: api.id, slug: api.slug, proxy_id: orphan.ferrum_proxy_id },
         'Cleared a gateway proxy id the gateway no longer holds; the API needs its ' +

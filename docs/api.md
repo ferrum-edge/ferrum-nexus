@@ -430,6 +430,12 @@ _public_ → `201`
 - Errors: `409 CONFLICT` (email taken), `403 FORBIDDEN` (missing or wrong
   `bootstrap_token` on an empty portal, registration closed, or that role is
   not in `allowed_roles`), `400 CAPTCHA_FAILED`.
+- Unlike the recovery routes below, this one **does** say whether an address
+  is taken — a registration that signs the new account in cannot answer a
+  duplicate the way it answers a success. The `409` comes back only after the
+  password has been hashed, so it takes as long as a registration and says
+  nothing its status does not. [`security.md`](security.md#2-session-security)
+  explains why this is accepted and what bounds it.
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8787/api/auth/register \
@@ -2284,12 +2290,12 @@ the provider still approves it. Every audit row spells this out
 
 The account is notified in the portal, in those terms.
 
-| Status                  | Meaning                                                                                                                                                                                                                                                                                |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `201`                   | authorized. Re-authorizing an account that already is refreshes the note rather than conflicting — the route describes a state                                                                                                                                                         |
-| `400 VALIDATION_FAILED` | no portal account uses that address, or both/neither identifier was sent. An address with no account is **refused rather than stored as a pending invitation**: an authorization is attached to an account, not to an address, and re-pointing an address later would silently move it |
-| `403 FORBIDDEN`         | not the owner and not an admin                                                                                                                                                                                                                                                         |
-| `409 CONFLICT`          | the account is the API's owner, or an administrator — both can already read it                                                                                                                                                                                                         |
+| Status                  | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `201`                   | authorized. Re-authorizing an account that already is refreshes the note rather than conflicting — the route describes a state                                                                                                                                                                                                                                                                                                                                                                                      |
+| `400 VALIDATION_FAILED` | no portal account uses that address or id, it belongs to an administrator, or both/neither identifier was sent. An address with no account is **refused rather than stored as a pending invitation**: an authorization is attached to an account, not to an address, and re-pointing an address later would silently move it. An administrator — who can already read every API — gets exactly the answer an unknown account gets, and nothing is written, so the endpoint does not reveal who holds the admin role |
+| `403 FORBIDDEN`         | not the owner and not an admin                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `409 CONFLICT`          | the account is the API's owner, who can already read it                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
 ### `DELETE /api/apis/:id/viewers/:userId`
 

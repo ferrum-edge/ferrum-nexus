@@ -24,6 +24,11 @@
  *   and {@link AuthService.resendVerification} — answer `ok` to everything and
  *   pay the same scrypt cost whatever they decide, so neither the body, the
  *   status nor the latency says whether an address has an account.
+ * - Registration is the accepted exception: a taken address is refused with
+ *   `409`, because a sign-up that signs the new account straight in cannot
+ *   answer a duplicate the way it answers a success. It hashes the password
+ *   before looking, so the refusal costs what a registration costs and says
+ *   nothing its body does not (`docs/security.md`, "Session security").
  * - Every successful register/login/logout/verify/reset writes an audit row.
  */
 
@@ -225,22 +230,37 @@ export type OnRegistered = (event: {
 }) => Promise<void>;
 
 /**
- * Hook invoked when a fresh single-use link has been minted and must be
- * emailed — a password reset, or a re-sent verification.
+ * Queue the message carrying one minted link, through the mint's own
+ * transaction.
+ *
+ * Returned by a {@link PrepareEmailToken} hook and called inside the
+ * transaction that claims the throttle window and writes the token, with that
+ * transaction's store. `tokenId` is the row id of the token, which is what the
+ * outbox idempotency key is built from, so one minted token can produce at most
+ * one message. Everything it does must go through `tx`: the body may be re-run
+ * on contention, and a rolled-back attempt must leave no message behind.
+ */
+export type QueueEmailToken = (tx: NexusStore, tokenId: string) => Promise<void>;
+
+/**
+ * Hook that prepares the email for a single-use link about to be minted — a
+ * password reset, or a re-sent verification.
  *
  * The service deliberately does not depend on the email service: it mints and
- * audits, the composition root delivers. `tokenId` is the row id of the token,
- * which is what the outbox idempotency key is built from, so one minted token
- * can produce at most one message.
+ * audits, the composition root renders and queues. Delivery is split in two so
+ * it can commit *with* the mint rather than after it (issue #342). This half
+ * runs before anything is claimed and does everything that can fail on its own
+ * — resolving the template and rendering it — so a broken template leaves the
+ * throttle window unspent. The {@link QueueEmailToken} it returns is the outbox
+ * insert, and it runs inside the mint's transaction: an insert that fails rolls
+ * the claim, the token and the audit row back with it.
  */
-export type OnEmailTokenIssued = (event: {
+export type PrepareEmailToken = (event: {
   user: User;
   /** Plaintext token for the link; only its hash is stored. */
   token: string;
-  /** `email_verification_tokens.id` — a stable, non-secret handle for the token. */
-  tokenId: string;
   requestContext: RequestContext;
-}) => Promise<void>;
+}) => Promise<QueueEmailToken>;
 
 /** Authentication operations. */
 export interface AuthService {
@@ -333,10 +353,10 @@ export interface AuthServiceDeps {
   log?: (obj: Record<string, unknown>, message: string) => void;
   /** Optional hook so the email service can enqueue the verification mail. */
   onRegistered?: OnRegistered;
-  /** Optional hook that delivers a re-sent verification link. */
-  onVerificationResend?: OnEmailTokenIssued;
-  /** Optional hook that delivers a password-reset link. */
-  onPasswordResetRequested?: OnEmailTokenIssued;
+  /** Optional hook that renders and queues a re-sent verification link. */
+  prepareVerificationResend?: PrepareEmailToken;
+  /** Optional hook that renders and queues a password-reset link. */
+  preparePasswordReset?: PrepareEmailToken;
 }
 
 /** Strip the password hash: the wire shape of a user. */
@@ -417,10 +437,12 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
    *
    * So a failure is logged and swallowed here, and the caller gets the
    * documented `200 { "ok": true }` either way. Nothing is lost by it: the
-   * claim now rolls back with the mint, so the next attempt — the user
-   * pressing the button again — issues the link the failed one did not. The
-   * route layer never sees these, hence the log line; it is the only record
-   * that the endpoint could not do its work.
+   * claim rolls back with the mint *and with the outbox insert* — the message
+   * is rendered before the claim and queued inside the same transaction — so
+   * the next attempt (the user pressing the button again) issues the link the
+   * failed one did not (issues #137, #342). The route layer never sees
+   * these, hence the log line; it is the only record that the endpoint could
+   * not do its work.
    */
   async function withUniformAnswer(
     purpose: VerificationTokenPurpose,
@@ -609,17 +631,27 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         }
       }
 
-      if (await store.users.findByEmail(email)) {
-        throw conflict('An account with that email address already exists');
-      }
-
       // Hash before the lock and before the transaction. Scrypt takes ~100 ms,
       // and any number of registrations may be in flight here at once; none of
       // them may hold the super-admin lock or a write transaction (on SQLite,
       // the whole connection) for that long.
+      //
+      // And hash before the duplicate check, so a taken address costs the same
+      // scrypt derivation as a free one. The `409` below still names the
+      // address as taken — registration is the one anonymous flow that
+      // accepts that, see `docs/security.md` — but it answers no sooner than a
+      // real registration would, so its latency adds nothing to what its body
+      // already says, and a prober pays the full cost of a sign-up per guess
+      // (issue #344).
+      const passwordHash = await crypto.hashPassword(password);
+
+      if (await store.users.findByEmail(email)) {
+        throw conflict('An account with that email address already exists');
+      }
+
       const draft: RegistrationDraft = {
         email,
-        passwordHash: await crypto.hashPassword(password),
+        passwordHash,
         displayName: input.display_name.trim(),
         role: input.role,
         company: input.company ?? null,
@@ -792,16 +824,26 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
           return;
         }
         const token = crypto.newSessionToken();
+        // Rendered before anything is claimed: a template that cannot be
+        // rendered fails here, with the window still unspent (issue #342).
+        const queueEmail = deps.prepareVerificationResend
+          ? await deps.prepareVerificationResend({
+              user: toPublicUser(record),
+              token,
+              requestContext: context,
+            })
+          : null;
         const issuedAt = nowIso();
         const notBefore = new Date(
           Date.parse(issuedAt) - VERIFICATION_RESEND_THROTTLE_SECONDS * 1000,
         ).toISOString();
-        const row = await store.transaction(async (tx) => {
+        await store.transaction(async (tx) => {
           // The claim is the *first* write of the mint, not a separate one
           // before it. It is still the single conditional write that makes
           // concurrent requests produce exactly one link — but it now commits
-          // with the token or rolls back with it, so a mint that fails leaves
-          // the recipient's ten-minute window unspent (issue #137).
+          // with the token and its message or rolls back with them, so a mint
+          // or a queueing that fails leaves the recipient's ten-minute window
+          // unspent (issues #137, #342).
           if (
             !(await tx.verificationTokens.claimIssue(
               record.id,
@@ -810,7 +852,8 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
               notBefore,
             ))
           ) {
-            return null;
+            // Genuinely throttled: another request holds the window.
+            return;
           }
           // Supersede the link from registration (or an earlier resend): the
           // address should only ever have one live verification token.
@@ -830,19 +873,10 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
               { email },
               context.ip,
             );
-          return created;
+          // Last, and inside: the delivery is part of what the window was
+          // spent on, so it commits or rolls back with the claim.
+          if (queueEmail) await queueEmail(tx, created.id);
         });
-        // Genuinely throttled: another request holds the window.
-        if (row === null) return;
-
-        if (deps.onVerificationResend) {
-          await deps.onVerificationResend({
-            user: toPublicUser(record),
-            token,
-            tokenId: row.id,
-            requestContext: context,
-          });
-        }
       });
     },
 
@@ -863,14 +897,22 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
           return;
         }
         const token = crypto.newSessionToken();
+        // Rendered before the claim, for the reason `resendVerification` gives.
+        const queueEmail = deps.preparePasswordReset
+          ? await deps.preparePasswordReset({
+              user: toPublicUser(record),
+              token,
+              requestContext: context,
+            })
+          : null;
         const issuedAt = nowIso();
         const notBefore = new Date(
           Date.parse(issuedAt) - PASSWORD_RESET_THROTTLE_SECONDS * 1000,
         ).toISOString();
-        const row = await store.transaction(async (tx) => {
+        await store.transaction(async (tx) => {
           // Inside the transaction, for the reason `resendVerification` gives:
           // account recovery must not spend the window on a link that was
-          // never minted (issue #137).
+          // never minted, or never queued (issues #137, #342).
           if (
             !(await tx.verificationTokens.claimIssue(
               record.id,
@@ -879,7 +921,8 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
               notBefore,
             ))
           ) {
-            return null;
+            // Genuinely throttled: another request holds the window.
+            return;
           }
           const created = await tx.verificationTokens.create({
             user_id: record.id,
@@ -899,19 +942,8 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
               { email },
               context.ip,
             );
-          return created;
+          if (queueEmail) await queueEmail(tx, created.id);
         });
-        // Genuinely throttled: another request holds the window.
-        if (row === null) return;
-
-        if (deps.onPasswordResetRequested) {
-          await deps.onPasswordResetRequested({
-            user: toPublicUser(record),
-            token,
-            tokenId: row.id,
-            requestContext: context,
-          });
-        }
       });
     },
 
