@@ -1664,6 +1664,77 @@ describe('publishing', () => {
         assert.equal(harness.edge.pluginForProxy(proxyId, 'rate_limiting')?.enabled, false);
       });
 
+      it('keeps an operator’s switch-off and trigger through a genuine change', async () => {
+        // Issue #328: the replay above never writes, but a real change does,
+        // and a write that carried no resource-level options re-enabled the
+        // config and dropped its trigger — turning a limiter the operator had
+        // parked, or scoped to POSTs, back on for every request.
+        const ids = await tunedByOperator();
+        const trigger = { when: { match: { method: ['POST'] } } };
+        const limiter = harness.edge.pluginForProxy(proxyId, 'rate_limiting');
+        const cors = harness.edge.pluginForProxy(proxyId, 'cors');
+        assert.ok(limiter);
+        assert.ok(cors);
+        limiter.enabled = false;
+        limiter.trigger = trigger;
+        cors.enabled = false;
+
+        const saved = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${apiId}`,
+          payload: {
+            rate_limit: { limit: 500, window_seconds: 60 },
+            cors: { allowed_origins: ['https://ops.example.com'], allow_credentials: false },
+          },
+        });
+        assert.equal(saved.statusCode, 200, saved.body);
+
+        const after = harness.edge.pluginForProxy(proxyId, 'rate_limiting');
+        assert.equal(String(after?.id), ids.limiter);
+        assert.deepEqual(
+          (after?.config as { limits?: unknown }).limits,
+          [{ scope: 'default', window_seconds: 60, max_requests: 500 }],
+          'the provider’s change still lands',
+        );
+        assert.equal(after?.enabled, false, 'the operator’s switch-off survives');
+        assert.deepEqual(after?.trigger, trigger, 'and so does the operator’s trigger');
+        const corsAfter = harness.edge.pluginForProxy(proxyId, 'cors');
+        assert.deepEqual((corsAfter?.config as { allowed_origins?: unknown }).allowed_origins, [
+          'https://ops.example.com',
+        ]);
+        assert.equal(corsAfter?.enabled, false);
+      });
+
+      it('drops the portal’s X-API-Key on a switch away from key_auth', async () => {
+        // Issue #328: `X-API-Key` is a header the portal adds for `key_auth`
+        // itself. Told only about the provider's own extras, the merge read it
+        // as an operator's and carried it forever; a genuine operator header
+        // must still ride along.
+        await tunedByOperator();
+        const cors = harness.edge.pluginForProxy(proxyId, 'cors');
+        assert.ok(cors);
+        cors.config = {
+          ...(cors.config as Record<string, unknown>),
+          allowed_headers: [...CORS_HEADERS, 'x-tenant'],
+        };
+
+        const saved = await harness.authed(provider, {
+          method: 'PATCH',
+          url: `/api/apis/${apiId}`,
+          payload: { auth_plugin: 'basic_auth' },
+        });
+        assert.equal(saved.statusCode, 200, saved.body);
+        assert.equal(saved.json<UpdateApiResponse>().api.auth_plugin, 'basic_auth');
+
+        const headers = (
+          harness.edge.pluginForProxy(proxyId, 'cors')?.config as { allowed_headers?: string[] }
+        ).allowed_headers;
+        assert.deepEqual(headers, [
+          ...CORS_HEADERS.filter((header) => header !== 'X-API-Key'),
+          'x-tenant',
+        ]);
+      });
+
       it('applies a genuine change, audits it, and keeps the operator keys', async () => {
         await tunedByOperator();
 

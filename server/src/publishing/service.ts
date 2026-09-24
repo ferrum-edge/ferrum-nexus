@@ -249,6 +249,7 @@ import {
 import type {
   EdgeCircuitBreakerConfig,
   EdgeConsumer,
+  EdgeCorsConfig,
   EdgePluginConfig,
   EdgePluginSettings,
   EdgeProxy,
@@ -542,7 +543,7 @@ export function corsPluginConfig(
   cors: CorsConfig,
   authPlugin: AuthPluginType,
   methods: HttpMethod[] | null,
-): EdgePluginSettings {
+): EdgeCorsConfig {
   return {
     allowed_origins: [...cors.allowed_origins],
     allow_credentials: cors.allow_credentials,
@@ -1954,7 +1955,20 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // carries, whereas rewriting the config can and did.
           //
           // A genuine change merges over the live config rather than rebuilding
-          // it, so operator keys outside the portal's view survive that too.
+          // it, so operator keys outside the portal's view survive that too —
+          // and so do the operator's resource-level switches: a config they
+          // disabled stays disabled and keeps its trigger, where a write with
+          // no options would re-enable it and run it on every request (#328).
+          //
+          // Telling an operator's CORS header from one the portal wrote needs
+          // the whole list the portal generated last time, not just the
+          // provider's extras: `X-API-Key` is the portal's own addition for
+          // `key_auth`, and read as the operator's it outlived a switch away
+          // from `key_auth` forever (#328).
+          const previousPortalCorsHeaders =
+            api.cors === null
+              ? undefined
+              : corsPluginConfig(api.cors, api.auth_plugin, api.allowed_methods).allowed_headers;
           const reconcilePluginSetting = async <T>(
             gatewayProxyId: string,
             pluginName: string,
@@ -2007,10 +2021,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 : mergeOperatorSettings(
                     live,
                     settingsFor(next),
-                    pluginName === CORS_PLUGIN ? api.cors?.allowed_headers : undefined,
+                    pluginName === CORS_PLUGIN ? previousPortalCorsHeaders : undefined,
                   ),
               actor.id,
               undo,
+              live ? { enabled: live.enabled, trigger: live.trigger ?? null } : undefined,
             );
             return true;
           };
