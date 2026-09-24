@@ -237,6 +237,7 @@ import type {
 } from '../db/store.js';
 import {
   gatewayIdentityLockKey,
+  LIVE_CREDENTIAL_STATUSES,
   type CredentialsService,
   type TeardownGatewayIdentityResult,
 } from '../credentials/service.js';
@@ -3060,8 +3061,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             // gateway; leaving their rows `active` would show the provider
             // keys that cannot authenticate anything. The mirror follows the
             // gateway.
-            for (const row of await store.credentials.listByConsumer(existing.id)) {
-              if (row.status === 'revoked') continue;
+            const rows = await store.credentials.listByConsumer(
+              existing.id,
+              undefined,
+              LIVE_CREDENTIAL_STATUSES,
+            );
+            for (const row of rows) {
               await store.credentials.update(row.id, { status: 'revoked' });
               revokedCredentials += 1;
             }
@@ -3711,8 +3716,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       );
       if (!consumer || checkedConsumers.has(consumer.ferrum_consumer_id)) continue;
       checkedConsumers.add(consumer.ferrum_consumer_id);
-      const rows = await store.credentials.listByConsumer(consumer.ferrum_consumer_id, type);
-      if (rows.some((row) => row.status !== 'revoked')) grantees.add(grant.user_id);
+      const rows = await store.credentials.listByConsumer(
+        consumer.ferrum_consumer_id,
+        type,
+        LIVE_CREDENTIAL_STATUSES,
+      );
+      if (rows.length > 0) grantees.add(grant.user_id);
     }
 
     const apiOwned: CredentialRecord[] = [];
@@ -3721,10 +3730,12 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       testConsumerUsername(api.id),
     );
     if (testIdentity?.ferrum_consumer_id) {
-      const rows = await store.credentials.listByConsumer(testIdentity.ferrum_consumer_id, type);
-      for (const row of rows) {
-        if (row.status !== 'revoked') apiOwned.push(row);
-      }
+      const rows = await store.credentials.listByConsumer(
+        testIdentity.ferrum_consumer_id,
+        type,
+        LIVE_CREDENTIAL_STATUSES,
+      );
+      apiOwned.push(...rows);
     }
 
     return { grantees: [...grantees], apiOwned };

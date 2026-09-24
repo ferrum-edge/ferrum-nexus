@@ -8,7 +8,8 @@
  *    expiration rules. When it slides the row it also re-issues both cookies
  *    with a fresh `Max-Age`, so the browser's expiry tracks the database's.
  *    It never rejects: an anonymous request simply carries `null`, and the
- *    route's own guard decides whether that is acceptable.
+ *    route's own guard decides whether that is acceptable. It runs for `/api`
+ *    requests only — see {@link needsSession}.
  * 2. `onRequest` (after the first) — enforce the double-submit CSRF check on
  *    every mutating `/api` request that carries a session, except the
  *    pre-authentication auth endpoints.
@@ -102,6 +103,29 @@ function headerValue(request: FastifyRequest, name: string): string | undefined 
 }
 
 /**
+ * Whether a request needs its session resolved.
+ *
+ * Only the API does. Every route that reads `request.session` or
+ * `request.currentUser` is registered under `/api` — the guards, the rate-limit
+ * key generator, the CSRF check below — and everything else the server
+ * answers is the static SPA: hashed assets and the `index.html` shell, which is
+ * a fixed file that embeds no auth state (the SPA asks `/api/auth/me`). There
+ * is no websocket or server-sent-events route. Resolving the cookie anyway
+ * cost two store reads, and sometimes a sliding-expiry write, for every
+ * script, stylesheet and font a page load fetched (issue #343).
+ *
+ * The decision uses the route Fastify actually selected, exactly as the CSRF
+ * check does, so no spelling of a path can reach an API handler without a
+ * session lookup: an encoded `/%61pi/...` routes as `/api/...` and is resolved,
+ * and an unmatched `/api/...` still lands on the JSON 404 route and is
+ * resolved too, which is what lets CSRF refuse a mutation there. A route
+ * added outside `/api` that needs the session has to widen this test.
+ */
+export function needsSession(request: FastifyRequest): boolean {
+  return isApiRequest(request);
+}
+
+/**
  * Session resolution + CSRF plugin.
  *
  * Registered with `skip-override` so its request decorators and hooks apply to
@@ -115,6 +139,7 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (app, options) =
   app.decorateRequest('session', null);
 
   app.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!needsSession(request)) return;
     const token = request.cookies[SESSION_COOKIE];
     if (!token) return;
 

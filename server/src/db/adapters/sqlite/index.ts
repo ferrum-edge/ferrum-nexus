@@ -1915,6 +1915,9 @@ class SqliteStore implements NexusStore {
       return queryCount(this.db, `SELECT COUNT(*) AS count FROM grants${where.sql}`, where.params);
     },
 
+    countByApplications: async (applicationIds, status) =>
+      countByApplication(this.db, 'grants', applicationIds, status),
+
     deleteByApi: async (apiId) => execute(this.db, 'DELETE FROM grants WHERE api_id = ?', [apiId]),
   };
 
@@ -2008,10 +2011,11 @@ class SqliteStore implements NexusStore {
       return { items: rows.map(mapCredential), total };
     },
 
-    listByConsumer: async (ferrumConsumerId, type) => {
+    listByConsumer: async (ferrumConsumerId, type, statuses) => {
       const where = new WhereBuilder()
         .always('ferrum_consumer_id = ?', ferrumConsumerId)
         .add(type, 'credential_type = ?', type ?? null)
+        .addIn('status', statuses)
         .build();
       // Unresolved rows (NULL ordinal) first, then append order. The CASE keeps
       // the NULL placement explicit rather than relying on the engine default.
@@ -2039,6 +2043,9 @@ class SqliteStore implements NexusStore {
         where.params,
       );
     },
+
+    countByApplications: async (applicationIds, status) =>
+      countByApplication(this.db, 'credential_metadata', applicationIds, status),
 
     delete: async (id) =>
       execute(this.db, 'DELETE FROM credential_metadata WHERE id = ?', [id]) > 0,
@@ -3180,6 +3187,32 @@ function credentialWhere(filter: CredentialFilter): WhereBuilder {
     .add(filter.status, 'status = ?', filter.status ?? null)
     .add(filter.credential_type, 'credential_type = ?', filter.credential_type ?? null)
     .add(filter.ferrum_consumer_id, 'ferrum_consumer_id = ?', filter.ferrum_consumer_id ?? null);
+}
+
+/**
+ * Rows in `status` per application for a set of application ids, as one
+ * `GROUP BY` — the grouped count behind `countByApplications` on both the
+ * grants and the credential repositories. Every id asked for is a key.
+ */
+function countByApplication(
+  db: Database,
+  table: 'grants' | 'credential_metadata',
+  applicationIds: readonly Uuid[],
+  status: string,
+): Map<Uuid, number> {
+  const counts = new Map<Uuid, number>(applicationIds.map((id) => [id, 0]));
+  if (counts.size === 0) return counts;
+  const where = new WhereBuilder()
+    .always('status = ?', status)
+    .addIn('application_id', [...counts.keys()])
+    .build();
+  const rows = queryAll(
+    db,
+    `SELECT application_id, COUNT(*) AS count FROM ${table}${where.sql} GROUP BY application_id`,
+    where.params,
+  );
+  for (const row of rows) counts.set(text(row.application_id), int(row.count));
+  return counts;
 }
 
 function auditWhere(filter: AuditLogFilter): WhereBuilder {

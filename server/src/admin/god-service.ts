@@ -80,7 +80,12 @@ import {
 } from '../lib/keyed-serializer.js';
 import type { NotificationsService } from '../notifications/service.js';
 import type { PublishingService } from '../publishing/service.js';
-import { escapeHtml, MASS_RAW_HTML_VARS } from '../email/templates.js';
+import {
+  escapeHtml,
+  MASS_RAW_HTML_VARS,
+  type RenderedEmail,
+  type TemplateVars,
+} from '../email/templates.js';
 import type { MassEmailService } from './mass-email-service.js';
 
 /** Width of the rolling per-administrator broadcast budget, in milliseconds. */
@@ -583,6 +588,13 @@ export function createGodService(deps: GodServiceDeps): GodService {
         // and in the audit row alike.
         let delivered = 0;
         let failed = 0;
+        // The template and branding are read once for the whole broadcast, as
+        // the mass-email path does, instead of once per recipient inside
+        // `email.enqueue` (issue #343). Prepared on first use inside the
+        // per-recipient `try`, so a failed read costs that recipient's email
+        // exactly as it did before and is retried for the next one; only a
+        // successful preparation is kept.
+        let render: ((vars?: TemplateVars) => RenderedEmail) | null = null;
         for (const recipient of recipients) {
           try {
             const existing = await store.threads.findExisting(recipient.id, null, null);
@@ -615,18 +627,20 @@ export function createGodService(deps: GodServiceDeps): GodService {
             delivered += 1;
 
             if (input.send_email) {
-              const queued = await email.enqueue({
-                to: recipient.email,
-                templateKey: 'mass',
-                idempotencyKey: `god-broadcast:${batch}:${recipient.id}`,
-                rawHtmlVars: MASS_RAW_HTML_VARS,
-                vars: {
-                  recipient_name: recipient.display_name,
-                  recipient_email: recipient.email,
-                  subject,
-                  body_html: `<p>${escapeHtml(body)}</p>`,
-                  body_text: body,
-                },
+              render ??= await email.prepareRenderer('mass', MASS_RAW_HTML_VARS);
+              const rendered = render({
+                recipient_name: recipient.display_name,
+                recipient_email: recipient.email,
+                subject,
+                body_html: `<p>${escapeHtml(body)}</p>`,
+                body_text: body,
+              });
+              const queued = await store.emailOutbox.enqueue({
+                to_email: recipient.email,
+                subject: rendered.subject,
+                body_html: rendered.html,
+                body_text: rendered.text,
+                idempotency_key: `god-broadcast:${batch}:${recipient.id}`,
               });
               if (queued.created) emails += 1;
             }

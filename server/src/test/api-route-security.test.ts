@@ -186,6 +186,48 @@ describe('API route security over a listening socket', () => {
     }
   });
 
+  it('resolves the session for API routes only, never for the SPA or its assets', async () => {
+    // Static files and the shell carry no auth state, so a page load's
+    // scripts, styles and fonts must not each cost a session read (#343).
+    const sessions = harness.store.sessions;
+    const original = sessions.findByTokenHash;
+    const real = original.bind(sessions);
+    let lookups = 0;
+    sessions.findByTokenHash = async (tokenHash) => {
+      lookups += 1;
+      return real(tokenHash);
+    };
+    try {
+      const headers = { cookie: admin.cookieHeader };
+      const asset = await socketRequest(port, 'GET', '/assets/app-test.js', headers);
+      assert.equal(asset.statusCode, 200);
+      assert.equal(asset.body, ASSET);
+      assert.equal((await socketRequest(port, 'HEAD', '/assets/app-test.js', headers)).body, '');
+      for (const path of ['/', '/dashboard', '/catalog/some-api']) {
+        const shell = await socketRequest(port, 'GET', path, headers);
+        assert.equal(shell.body, SPA, path);
+      }
+      assert.equal((await socketRequest(port, 'GET', '/missing.js', headers)).statusCode, 404);
+      assert.equal(lookups, 0, 'no session lookup outside the API');
+
+      // Every spelling the router resolves to an API route still resolves the
+      // session — including an unmatched one, which CSRF has to be able to see.
+      for (const path of ['/api/auth/me', '/%61pi/auth/me']) {
+        const me = await socketRequest(port, 'GET', path, headers);
+        assert.equal(me.statusCode, 200, me.body);
+        assert.equal((JSON.parse(me.body) as MeResponse).user.id, admin.user.id);
+      }
+      assertError(
+        await socketRequest(port, 'POST', '/api/does-not-exist', headers, {}),
+        403,
+        'CSRF_MISMATCH',
+      );
+      assert.equal(lookups, 3);
+    } finally {
+      sessions.findByTokenHash = original;
+    }
+  });
+
   it('keeps noncanonical asset targets out of explicit static routes', async () => {
     // Nexus registers discovered files, not a static wildcard. These targets
     // must not be normalized into the asset by the plugin or SPA fallback.

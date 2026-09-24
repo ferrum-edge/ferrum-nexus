@@ -1721,6 +1721,15 @@ users holding the link; a `private` API's specification is served only to the
 accounts its detail page is served to, and answers `404` to everyone else. The
 provider's original is available only through `GET /api/apis/:id/spec`.
 
+The normalized text is cached in process, per revision and server address (so
+per gateway origin and listen path), bounded at 64 documents and 32 MiB; a new
+revision, a rollback or a changed gateway origin is a different key, so the
+cache is never stale. It is consulted only after the visibility check above, so
+an account that may not open the API gets the same `404` whether or not the
+document is cached. `429 RATE_LIMITED` past **60 requests per minute** from one
+account (the IP for a request with no session), installed when
+`NEXUS_RATE_LIMIT_ENABLED=true`; it is the only catalog route with a limit.
+
 ---
 
 ## APIs (publishing)

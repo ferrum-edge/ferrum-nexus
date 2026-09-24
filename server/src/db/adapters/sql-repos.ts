@@ -628,6 +628,32 @@ function credentialWhere(filter: CredentialFilter): SqlWhereBuilder {
     .add(filter.ferrum_consumer_id, 'ferrum_consumer_id = ?', filter.ferrum_consumer_id ?? null);
 }
 
+/**
+ * Rows in `status` per application for a set of application ids, as one
+ * `GROUP BY` — the grouped count behind `countByApplications` on both the
+ * grants and the credential repositories. Every id asked for is a key.
+ */
+async function countByApplication(
+  exec: SqlExecutor,
+  table: 'grants' | 'credential_metadata',
+  applicationIds: readonly Uuid[],
+  status: string,
+): Promise<Map<Uuid, number>> {
+  const counts = new Map<Uuid, number>(applicationIds.map((id) => [id, 0]));
+  if (counts.size === 0) return counts;
+  const where = new SqlWhereBuilder()
+    .always('status = ?', status)
+    .addIn('application_id', [...counts.keys()])
+    .build();
+  const rows = await queryAll(
+    exec,
+    `SELECT application_id, COUNT(*) AS cnt FROM ${table}${where.sql} GROUP BY application_id`,
+    where.params,
+  );
+  for (const row of rows) counts.set(text(row.application_id), int(row.cnt));
+  return counts;
+}
+
 function auditWhere(filter: AuditLogFilter): SqlWhereBuilder {
   const builder = new SqlWhereBuilder()
     .add(filter.actor_user_id, 'actor_user_id = ?', filter.actor_user_id ?? null)
@@ -1792,6 +1818,9 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return queryCount(exec, `SELECT COUNT(*) AS cnt FROM grants${where.sql}`, where.params);
     },
 
+    countByApplications: async (applicationIds, status) =>
+      countByApplication(exec, 'grants', applicationIds, status),
+
     deleteByApi: async (apiId) => execute(exec, 'DELETE FROM grants WHERE api_id = ?', [apiId]),
   };
 
@@ -1886,10 +1915,11 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return { items: rows.map(mapCredential), total };
     },
 
-    listByConsumer: async (ferrumConsumerId, type) => {
+    listByConsumer: async (ferrumConsumerId, type, statuses) => {
       const where = new SqlWhereBuilder()
         .always('ferrum_consumer_id = ?', ferrumConsumerId)
         .add(type, 'credential_type = ?', type ?? null)
+        .addIn('status', statuses)
         .build();
       // Unresolved rows (NULL ordinal) first, then append order. The CASE is
       // what makes NULL placement identical on PostgreSQL (NULLs last by
@@ -1919,6 +1949,9 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         where.params,
       );
     },
+
+    countByApplications: async (applicationIds, status) =>
+      countByApplication(exec, 'credential_metadata', applicationIds, status),
 
     delete: async (id) =>
       (await execute(exec, 'DELETE FROM credential_metadata WHERE id = ?', [id])) > 0,

@@ -165,21 +165,32 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
     return application;
   }
 
-  /** Counts the list and detail reads attach, so the UI needs no second call. */
-  async function counts(
-    applicationId: Uuid,
-  ): Promise<{ active_grants: number; active_credentials: number }> {
+  /**
+   * Attach the counts the list and detail reads carry, so the UI needs no
+   * second call.
+   *
+   * Two grouped queries for the whole page, whatever its size. Counting per
+   * row made a 200-item admin page fire several hundred concurrent queries
+   * and could exhaust the connection pool (issue #343).
+   */
+  async function presentMany(records: readonly ApplicationRecord[]): Promise<Application[]> {
+    if (records.length === 0) return [];
+    const ids = records.map((record) => record.id);
     const [grants, credentials] = await Promise.all([
-      store.grants.count({ application_id: applicationId, status: 'active' }),
-      store.credentials
-        .list({ application_id: applicationId, status: 'active' }, { limit: 1, offset: 0 })
-        .then((page) => page.total),
+      store.grants.countByApplications(ids, 'active'),
+      store.credentials.countByApplications(ids, 'active'),
     ]);
-    return { active_grants: grants, active_credentials: credentials };
+    return records.map((record) => ({
+      ...record,
+      active_grants: grants.get(record.id) ?? 0,
+      active_credentials: credentials.get(record.id) ?? 0,
+    }));
   }
 
   async function present(record: ApplicationRecord): Promise<Application> {
-    return { ...record, ...(await counts(record.id)) };
+    const [presented] = await presentMany([record]);
+    if (!presented) throw new Error('applications.present: no row for the record given');
+    return presented;
   }
 
   function normalizeName(raw: string): string {
@@ -205,7 +216,7 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
         },
         { limit: clampPageSize(options?.limit), offset: Math.max(0, options?.offset ?? 0) },
       );
-      return { items: await Promise.all(page.items.map(present)), total: page.total };
+      return { items: await presentMany(page.items), total: page.total };
     },
 
     async get(actor, applicationId): Promise<Application> {
@@ -328,9 +339,10 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
               application_id: application.id,
               status: 'active',
             });
-            const credentials = await store.credentials
-              .list({ application_id: application.id, status: 'active' }, { limit: 1, offset: 0 })
-              .then((page) => page.total);
+            const credentials = await store.credentials.count({
+              application_id: application.id,
+              status: 'active',
+            });
             // The row's cascade takes the grants, requests, credential rows
             // and the consumer mapping with it.
             await store.applications.delete(application.id);

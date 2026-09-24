@@ -136,19 +136,24 @@ routes`, see the [provider guide](guides/provider-guide.md#enforcement-level)),
   password-change re-issue and the sliding-expiry hook, so the flags cannot
   drift between them.
 - **Sliding expiry.** Default idle lifetime 12 hours (`NEXUS_SESSION_TTL`).
-  Any request extends it, but the row is only written when less than half the
-  TTL remains, so an active SPA does not issue one `UPDATE` per request. A
+  Any API request extends it, but the row is only written when less than half
+  the TTL remains, so an active SPA does not issue one `UPDATE` per request. A
   request that does trigger the write also gets both cookies re-issued with a
   fresh full-TTL `Max-Age` and their **existing** values — nothing is rotated,
   only the lifetime moves, so the browser's expiry tracks `sessions.expires_at`
   instead of the wall-clock stamped at sign-in.
 - **Revocation is immediate.** The `onRequest` hook re-reads the user on every
-  request. A session whose account is expired, deleted or no longer `active` is
-  destroyed on the spot — along with **every** session for that user — so the
-  next request from an open tab is a `401`, not a working page. Disabling an
-  account (ordinary or god mode) deletes its sessions explicitly and reports
-  how many — **and strips its gateway identity**, because an issued API key
-  authenticates without any portal session at all. See
+  API request. It skips everything outside `/api` — the static SPA assets and
+  the `index.html` shell, neither of which embeds auth state — so a page load's
+  scripts, styles and fonts cost no session reads; the route Fastify selected,
+  not the raw path, decides, exactly as for CSRF, so an encoded `/%61pi/…`
+  spelling is still resolved. A session whose account is expired, deleted or
+  no longer `active` is destroyed on the spot — along with **every** session
+  for that user — so the next request from an open tab is a `401`, not a
+  working page. Disabling an account (ordinary or god mode) deletes its
+  sessions explicitly and reports how many — **and strips its gateway
+  identity**, because an issued API key authenticates without any portal
+  session at all. See
   [Disabling an account](#disabling-an-account).
 - **Changing your password ends every other session.** `PATCH /api/users/me`
   with a `new_password` deletes every session of the account and issues one
@@ -1037,6 +1042,16 @@ there is no session) rather than the address. See
 **10 requests per minute per account**. That route checks `current_password`
 before a change, so without a ceiling of its own a hijacked session was an
 unthrottled password oracle outside the `/api/auth` budget.
+
+`/api/catalog` takes one the same way, carried only by
+`GET /api/catalog/:slug/spec`: **60 requests per minute per account**. It is the
+one catalog read that parses and re-serialises a whole document of up to
+`MAX_SPEC_BYTES` synchronously. The normalized result is cached per revision
+and server address, so re-reading one document is cheap; the limit bounds what
+the cache cannot — one account walking every API it can open to force misses.
+The cache sits after the visibility check and its key names no viewer, because
+the document is identical for everyone allowed to read it; it never answers
+"may you see this?".
 
 Controlled by `NEXUS_RATE_LIMIT_ENABLED` (default `true`); forced off under
 `NEXUS_ENV=test`. The store is in-memory and therefore **per process** — with
