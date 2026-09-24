@@ -121,26 +121,37 @@ export function createApiViewersService(deps: ApiViewersServiceDeps): ApiViewers
    * The account a provider named, or a refusal that says which half was wrong.
    *
    * Refusing an unknown address is deliberate — see the module docstring — and
-   * the message is the same whether the address has no account or has one that
-   * cannot be authorized, so the endpoint is not a membership oracle for the
-   * portal's user list.
+   * an administrator is refused with that very same answer: status, code and
+   * message are identical whether the address has no account or belongs to an
+   * administrator, who can already read every API and so has nothing to be
+   * authorized for. A distinct "that is an administrator" answer made this
+   * endpoint an oracle for which addresses hold the admin role (issue #344),
+   * so the endpoint is not a membership oracle for the portal's user list or
+   * for its administrators.
    */
   async function resolveTarget(input: AuthorizeViewerInput): Promise<UserRecord> {
     if (input.user_id) {
       const byId = await store.users.findById(input.user_id);
-      if (!byId) throw validationFailed('No portal account matches that user');
+      if (!byId || !authorizable(byId)) {
+        throw validationFailed('No portal account matches that user');
+      }
       return byId;
     }
     const email = (input.email ?? '').trim();
     if (email === '') throw validationFailed('An email address or a user id is required');
     const byEmail = await store.users.findByEmail(email.toLowerCase());
-    if (!byEmail) {
+    if (!byEmail || !authorizable(byEmail)) {
       throw validationFailed(
         'No portal account uses that email address. Ask them to register first, then authorize ' +
           'them — an authorization is attached to an account, not to an address.',
       );
     }
     return byEmail;
+  }
+
+  /** Whether an entry on the list could mean anything: administrators read every API. */
+  function authorizable(user: UserRecord): boolean {
+    return !roleAtLeast(user.role, 'admin');
   }
 
   return {
@@ -165,9 +176,6 @@ export function createApiViewersService(deps: ApiViewersServiceDeps): ApiViewers
       const target = await resolveTarget(input);
       if (target.id === api.owner_user_id) {
         throw conflict('The API owner can already read this API');
-      }
-      if (roleAtLeast(target.role, 'admin')) {
-        throw conflict('Administrators can already read every API');
       }
 
       const note = (input.note ?? '').trim();

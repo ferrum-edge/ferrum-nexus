@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { DEFAULT_MAX_APIS_PER_OWNER, loadConfig, type EnvRecord } from './index.js';
+import Fastify from 'fastify';
+
+import {
+  DEFAULT_MAX_APIS_PER_OWNER,
+  loadConfig,
+  type EnvRecord,
+  type TrustedProxies,
+} from './index.js';
 import { isNexusError } from '../lib/errors.js';
 
 const SECRET = 'a'.repeat(40);
@@ -12,6 +19,16 @@ function baseEnv(overrides: EnvRecord = {}): EnvRecord {
     FERRUM_ADMIN_JWT_SECRET: SECRET,
     ...overrides,
   };
+}
+
+/** The `trustedProxies` a `NEXUS_TRUSTED_PROXIES` value configures. */
+function trustedProxies(value: string): TrustedProxies {
+  return loadConfig(baseEnv({ NEXUS_TRUSTED_PROXIES: value })).trustedProxies;
+}
+
+/** `text` as a regular expression that matches it literally. */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function expectConfigError(env: EnvRecord, needle: string): void {
@@ -324,6 +341,72 @@ describe('loadConfig', () => {
       baseEnv({ NEXUS_TRUSTED_PROXIES: '10.0.0.1,proxy.example.com' }),
       'proxy.example.com',
     );
+  });
+
+  it('accepts IPv4 and IPv6 addresses and CIDR blocks within their family bounds', () => {
+    assert.deepEqual(trustedProxies('10.1.2.3/32, 10.0.0.0/8'), ['10.1.2.3/32', '10.0.0.0/8']);
+    assert.deepEqual(trustedProxies('::1, 2001:db8::/32'), ['::1', '2001:db8::/32']);
+    assert.deepEqual(trustedProxies('fd00::/128'), ['fd00::/128']);
+    assert.deepEqual(trustedProxies('::ffff:1.2.3.4'), ['::ffff:1.2.3.4']);
+    assert.deepEqual(trustedProxies('192.168.0.0/1'), ['192.168.0.0/1']);
+    // `proxy-addr` matches its keywords case-sensitively, so they are
+    // normalised rather than handed to Fastify as typed.
+    assert.deepEqual(trustedProxies('Loopback,UNIQUELOCAL'), ['loopback', 'uniquelocal']);
+  });
+
+  it('rejects a trusted proxy that is not a real IP address (issue #348)', () => {
+    for (const entry of [
+      'deadbeef',
+      '::::',
+      '256.0.0.1',
+      '10.0.0',
+      '1.2.3.4.5',
+      '2001:db8::g',
+      'fe80::1%eth0',
+      'loopback6',
+    ]) {
+      expectConfigError(
+        baseEnv({ NEXUS_TRUSTED_PROXIES: `10.0.0.1, ${entry}` }),
+        `NEXUS_TRUSTED_PROXIES.*\\(rejected: ${escapeRegExp(entry)}\\)`,
+      );
+    }
+  });
+
+  it('rejects a trusted-proxy prefix outside its address family (issue #348)', () => {
+    for (const entry of [
+      '10.0.0.1/999',
+      '10.0.0.0/33',
+      '10.0.0.0/0',
+      '0.0.0.0/0',
+      '2001:db8::/129',
+      '::/0',
+      '10.0.0.0/',
+      '10.0.0.0/8a',
+      '10.0.0.0/-1',
+      '10.0.0.0/8/8',
+      '10.0.0.0/255.0.0.0',
+      '/8',
+    ]) {
+      expectConfigError(
+        baseEnv({ NEXUS_TRUSTED_PROXIES: entry }),
+        `NEXUS_TRUSTED_PROXIES.*\\(rejected: ${escapeRegExp(entry)}\\)`,
+      );
+    }
+  });
+
+  it('accepts only trusted-proxy lists Fastify itself can compile', async () => {
+    // The configuration is the gate: a list it accepts must construct the
+    // server, and the values it now refuses are ones Fastify refuses too.
+    const trusted = trustedProxies(
+      '10.1.2.3/32, 172.16.0.0/12, ::1, 2001:db8::/32, ::ffff:10.0.0.1, Loopback, uniquelocal',
+    );
+    assert.ok(Array.isArray(trusted));
+    const app = Fastify({ trustProxy: trusted });
+    await app.close();
+
+    for (const entry of ['deadbeef', '::::', '10.0.0.1/999', '10.0.0.0/0', 'Loopback']) {
+      assert.throws(() => Fastify({ trustProxy: [entry] }), Error, entry);
+    }
   });
 
   it('defaults cookies to Secure everywhere but development', () => {

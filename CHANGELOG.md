@@ -578,6 +578,34 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `api.auth_plugin_changed` summary. Those revocations run last, after the swap
   is durable, so a swap the gateway refuses leaves every credential exactly as
   it was. The settings form warns and carries the acknowledgement.
+- **The private-upstream check unwraps IPv6 transition addresses** (#344).
+  It read only the leading hextet of an IPv6 address, so a NAT64
+  (`64:ff9b::a00:1`, i.e. `10.0.0.1`), 6to4 (`2002::/16`) or site-local
+  (`fec0::/10`) literal or AAAA answer passed as public — on a DNS64/NAT64
+  network an AAAA-only name could reach RFC 1918 space through the translator.
+  IPv4-mapped, NAT64 well-known-prefix and 6to4 addresses are now judged as the
+  IPv4 address they carry; `fec0::/10`, the rest of `::/16` (including
+  IPv4-compatible `::a.b.c.d`) and the rest of `64:ff9b::/32` (including
+  local-use `64:ff9b:1::/48`) are refused. An IPv4-mapped _literal_ upstream is
+  now judged the same way as an IPv4-mapped DNS answer already was, so
+  `::ffff:93.184.216.34` is accepted rather than refused.
+- **Authorizing a private API's viewer no longer reveals administrators**
+  (#344). An administrator's address answered `409 CONFLICT` with
+  "Administrators can already read every API", which told any provider which
+  addresses hold the admin role. It now gets the same `400 VALIDATION_FAILED`
+  an unknown address gets, and nothing is written.
+- **Registration hashes the password before refusing a taken address** (#344),
+  so the `409 CONFLICT` for a duplicate costs what a registration costs instead
+  of returning an order of magnitude sooner. That registration reveals whether
+  an address is taken remains an accepted, documented risk (`docs/security.md`).
+- **`NEXUS_TRUSTED_PROXIES` entries are parsed as real addresses** (#348). A
+  character-class check accepted `deadbeef`, `::::` and `10.0.0.1/999`, which
+  Fastify then refused while constructing the server — so a typo passed
+  configuration and crashed startup. Each entry must now be an IPv4 or IPv6
+  address with an optional prefix of 1–32 or 1–128, anything else is a
+  configuration error naming the variable, and the `loopback` / `linklocal` /
+  `uniquelocal` keywords are lower-cased before they reach Fastify, which
+  matches them case-sensitively.
 
 ### Security
 
@@ -586,6 +614,11 @@ codebase, once independently — and every finding below was proven with a
 working exploit before being fixed, and is covered by a regression test that
 fails without the fix.
 
+- **CI actions are pinned to commit SHAs** (#351). `actions/checkout`,
+  `actions/setup-node` and `actions/upload-artifact` ran from movable `v4` tags
+  that could be repointed without a reviewed Nexus commit. They are now pinned
+  to the commits those tags resolve to, an `action-pins` CI job rejects any
+  tag-referenced action, and Dependabot proposes grouped action bumps.
 - **A published OpenAPI document can no longer freeze a reader's browser.**
   The catalog viewer parses documents that open with `{` or `[` as JSON — the
   YAML parser accepts JSON but its cost grows quadratically with the width of a

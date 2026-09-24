@@ -748,3 +748,48 @@ describe('bootstrap super_admin election', () => {
     assert.equal(late.user.role, 'client');
   });
 });
+
+describe('registration of a taken address', () => {
+  let harness: TestApp;
+  /** Every password the server hashed, in order. */
+  const hashed: string[] = [];
+
+  before(async () => {
+    const crypto = createCrypto(TEST_SECRET_KEY);
+    harness = await buildTestApp({
+      deps: {
+        crypto: {
+          ...crypto,
+          hashPassword: (password) => {
+            hashed.push(password);
+            return crypto.hashPassword(password);
+          },
+        },
+      },
+    });
+    await harness.registerUser({ email: 'taken@example.test' });
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  it('pays for the password hash before refusing, as a real registration does', async () => {
+    // The refusal used to come back after one indexed SELECT, an order of
+    // magnitude sooner than any registration that succeeded (issue #344).
+    hashed.length = 0;
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      payload: {
+        email: 'Taken@Example.Test',
+        password: 'a-different-password-entirely',
+        display_name: 'Second',
+        role: 'client',
+      },
+    });
+    assert.equal(response.statusCode, 409, response.body);
+    assert.equal(errorCode(response.body), 'CONFLICT');
+    assert.deepEqual(hashed, ['a-different-password-entirely']);
+  });
+});
