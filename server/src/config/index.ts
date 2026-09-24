@@ -14,6 +14,8 @@
  * they are all optional and default to production-safe values.
  */
 
+import { isIP } from 'node:net';
+
 import { z } from 'zod';
 
 import { DEFAULT_FERRUM_NAMESPACE, DEFAULT_SESSION_TTL_SECONDS } from '@ferrum-nexus/shared';
@@ -90,13 +92,45 @@ export const CAPTCHA_ENFORCEMENT_VALUES: readonly CaptchaEnforcement[] = [
   'disabled',
 ] as const;
 
-/** Aliases `proxy-addr` understands in place of a literal CIDR. */
+/**
+ * Aliases `proxy-addr` understands in place of a literal CIDR. It matches them
+ * case-sensitively, so a differently-cased spelling is normalised to these
+ * before it reaches Fastify.
+ */
 const PROXY_KEYWORDS = ['loopback', 'linklocal', 'uniquelocal'] as const;
 
-/** An IPv4/IPv6 address, a CIDR block, or one of the `proxy-addr` keywords. */
-function isTrustedProxyEntry(entry: string): boolean {
-  if ((PROXY_KEYWORDS as readonly string[]).includes(entry.toLowerCase())) return true;
-  return /^[0-9a-fA-F:.]+(\/\d{1,3})?$/.test(entry);
+/**
+ * One `NEXUS_TRUSTED_PROXIES` list entry as Fastify's `trustProxy` will accept
+ * it — a lower-cased `proxy-addr` keyword or the entry unchanged — or `null`
+ * when `proxy-addr` would refuse it.
+ *
+ * `proxy-addr` compiles the list when the server is constructed and throws on
+ * the first entry it cannot parse, so a check looser than its own lets a typo
+ * through configuration and crashes startup instead (issue #348). This one is
+ * the same parse, slightly narrowed:
+ *
+ * - the address before the `/` must be a real IPv4 or IPv6 address (by
+ *   `node:net`, which accepts no zone index and none of the octal, hex or
+ *   shortened IPv4 forms `ipaddr.js` would also take);
+ * - the prefix after it, when present, must be a decimal length from 1 to 32
+ *   for IPv4 and 1 to 128 for IPv6. `proxy-addr` refuses `/0` too, which is
+ *   also what keeps "trust every proxy" inexpressible here (see
+ *   {@link parseTrustedProxies}); its dotted-netmask form is not accepted.
+ */
+function trustedProxyEntry(entry: string): string | null {
+  const keyword = entry.toLowerCase();
+  if ((PROXY_KEYWORDS as readonly string[]).includes(keyword)) return keyword;
+
+  const slash = entry.indexOf('/');
+  const address = slash === -1 ? entry : entry.slice(0, slash);
+  const family = isIP(address);
+  if (family === 0 || address.includes('%')) return null;
+  if (slash === -1) return entry;
+
+  const prefix = entry.slice(slash + 1);
+  if (!/^\d{1,3}$/.test(prefix)) return null;
+  const bits = Number(prefix);
+  return bits >= 1 && bits <= (family === 4 ? 32 : 128) ? entry : null;
 }
 
 /** Persistence configuration. */
@@ -874,17 +908,23 @@ function parseTrustedProxies(
     .split(',')
     .map((entry) => entry.trim())
     .filter((entry) => entry !== '');
-  const invalid = entries.filter((entry) => !isTrustedProxyEntry(entry));
+  const accepted: string[] = [];
+  const invalid: string[] = [];
+  for (const entry of entries) {
+    const normalized = trustedProxyEntry(entry);
+    if (normalized === null) invalid.push(entry);
+    else accepted.push(normalized);
+  }
   if (entries.length === 0 || invalid.length > 0) {
+    const rejected = invalid.length > 0 ? ` (rejected: ${invalid.join(', ')})` : '';
     problems.push(
       'NEXUS_TRUSTED_PROXIES must be an integer hop count or a comma-separated list of ' +
-        `IP addresses, CIDR blocks or ${PROXY_KEYWORDS.join('/')}${
-          invalid.length > 0 ? ` (rejected: ${invalid.join(', ')})` : ''
-        }`,
+        'IP addresses, CIDR blocks (IPv4 prefix 1-32, IPv6 prefix 1-128) or ' +
+        `${PROXY_KEYWORDS.join('/')}${rejected}`,
     );
     return false;
   }
-  return entries;
+  return accepted;
 }
 
 function configError(problems: string[]): NexusError {
