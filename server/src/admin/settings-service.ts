@@ -784,19 +784,25 @@ export function createSettingsService(deps: SettingsServiceDeps): SettingsServic
         }
       }
       validateTemplateLinks(value, config);
-      const template = await store.emailTemplates.upsert(key, value);
-      await audit.record(
-        actor,
-        AuditAction.ADMIN_TEMPLATE_UPDATE,
-        { type: 'email_template', id: key },
-        {
-          key,
-          body_html_sha256: createHash('sha256').update(template.body_html, 'utf8').digest('hex'),
-          body_text_sha256: createHash('sha256').update(template.body_text, 'utf8').digest('hex'),
-        },
-        ip,
-      );
-      return template;
+      // The template and its audit record commit together, like every other
+      // settings write: a failed audit insert must not leave an unaudited
+      // template in force (#334). The body only writes through `tx`, so a
+      // pooled adapter may safely re-run it.
+      return store.transaction(async (tx) => {
+        const template = await tx.emailTemplates.upsert(key, value);
+        await audit.forStore(tx).record(
+          actor,
+          AuditAction.ADMIN_TEMPLATE_UPDATE,
+          { type: 'email_template', id: key },
+          {
+            key,
+            body_html_sha256: createHash('sha256').update(template.body_html, 'utf8').digest('hex'),
+            body_text_sha256: createHash('sha256').update(template.body_text, 'utf8').digest('hex'),
+          },
+          ip,
+        );
+        return template;
+      });
     },
   };
 }

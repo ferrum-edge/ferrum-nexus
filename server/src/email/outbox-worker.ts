@@ -151,7 +151,10 @@ const EMPTY_TICK: Omit<OutboxTickResult, 'released'> = {
 export interface OutboxWorker {
   /** Begin polling. Idempotent. */
   start(): void;
-  /** Stop polling and wait for an in-flight tick. Idempotent. */
+  /**
+   * Stop polling and wait for an in-flight tick, which finishes the delivery it
+   * is on but claims nothing more. Idempotent; `start()` resumes claiming.
+   */
   stop(): Promise<void>;
   /** Run exactly one poll cycle. Exposed for deterministic tests. */
   tick(): Promise<OutboxTickResult>;
@@ -197,6 +200,9 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
 
   let timer: NodeJS.Timeout | null = null;
   let inFlight: Promise<OutboxTickResult> | null = null;
+  // Set by `stop()` so an in-flight batch ends after the delivery it is on
+  // instead of claiming the rest of its batch while shutdown waits (#334).
+  let stopping = false;
 
   async function deliver(
     transport: MailTransport,
@@ -367,6 +373,9 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
       // put the stale threshold at batch size × OUTBOX_SEND_BUDGET_MS. Claiming
       // singly keeps a claim's lifetime equal to one delivery's.
       for (let taken = 0; taken < batchSize; taken += 1) {
+        // A row claimed after `stop()` would hold shutdown for up to another
+        // send budget, or be stranded `sending` if the process exits first.
+        if (stopping) break;
         const [entry] = await store.emailOutbox.claimDue(now().toISOString(), 1);
         if (!entry) break;
         result.claimed += 1;
@@ -417,6 +426,7 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
     isRunning: () => timer !== null,
 
     start(): void {
+      stopping = false;
       if (timer !== null) return;
       // No separate startup sweep: the first tick does one, and so does every
       // tick after it.
@@ -427,6 +437,7 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
     },
 
     async stop(): Promise<void> {
+      stopping = true;
       if (timer !== null) {
         clearInterval(timer);
         timer = null;

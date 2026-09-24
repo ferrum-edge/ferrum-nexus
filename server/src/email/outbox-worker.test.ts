@@ -279,6 +279,69 @@ describe('outbox worker', () => {
     assert.equal(stored?.generation, stolen[0], 'the new owner still owns the row');
   });
 
+  it('stops claiming mid-batch once stop() is called, and start() resumes (#334)', async () => {
+    const ids: string[] = [];
+    for (const n of [1, 2, 3]) {
+      const { entry } = await harness.services.email.enqueue({
+        to: `stopping-${n}@example.test`,
+        templateKey: 'mass',
+        vars: { subject: `Stop ${n}`, body_html: '<p>x</p>', body_text: 'x' },
+        idempotencyKey: `worker:stopping:${n}`,
+      });
+      ids.push(entry.id);
+    }
+
+    // The first delivery hangs until the test lets it go, so `stop()` lands
+    // while the batch is mid-flight.
+    const delivered: string[] = [];
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let sending = (): void => {};
+    const firstSend = new Promise<void>((resolve) => {
+      sending = resolve;
+    });
+    const worker = createOutboxWorker({
+      store: harness.store,
+      transportFactory: async () => ({
+        async send(mail) {
+          if (delivered.length === 0) {
+            sending();
+            await gate;
+          }
+          delivered.push(mail.to);
+        },
+      }),
+    });
+
+    const ticking = worker.tick();
+    await firstSend;
+    const stopped = worker.stop();
+    release();
+    await stopped;
+    const result = await ticking;
+    assert.equal(result.claimed, 1, 'the batch ended after the delivery in flight');
+    assert.equal(result.sent, 1);
+    assert.deepEqual(delivered, ['stopping-1@example.test']);
+    for (const id of ids.slice(1)) {
+      const row = await harness.store.emailOutbox.findById(id);
+      assert.equal(row?.status, 'pending', 'unclaimed rows stay queued for the next worker');
+      assert.equal(row?.attempts, 0);
+    }
+
+    // `start()` clears the flag: its first tick drains what is left.
+    worker.start();
+    try {
+      const resumed = await worker.tick();
+      assert.equal(resumed.claimed, 2);
+      assert.equal(resumed.sent, 2);
+    } finally {
+      await worker.stop();
+    }
+    assert.equal(delivered.length, 3);
+  });
+
   it('claims nothing while SMTP is unconfigured', async () => {
     const { entry } = await harness.services.email.enqueue({
       to: 'waiting@example.test',

@@ -458,6 +458,36 @@ describe('email template destination boundaries', () => {
   });
 });
 
+describe('SMTP test message', () => {
+  let harness: TestApp;
+
+  before(async () => {
+    harness = await buildTestApp();
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  it('escapes the portal name in the HTML body only (#334)', async () => {
+    await harness.store.settings.set(
+      BRANDING_SETTINGS_KEY,
+      { portal_name: '<img src=x onerror=alert(1)> Tom & Co' },
+      false,
+    );
+    const result = await harness.services.email.sendTest('probe@example.test');
+    assert.deepEqual(result, { ok: true, error: null });
+    const mail = harness.mailbox.sent.at(-1) ?? assert.fail('the probe must be sent');
+    assert.equal(
+      mail.html,
+      '<p>This is a test message from &lt;img src=x onerror=alert(1)&gt; Tom &amp; Co. ' +
+        'SMTP is configured correctly.</p>',
+    );
+    assert.equal(mail.subject, '<img src=x onerror=alert(1)> Tom & Co SMTP test');
+    assert.ok(mail.text.startsWith('This is a test message from <img src=x onerror=alert(1)>'));
+  });
+});
+
 /**
  * Plain-text values are text, not destinations (#324). The send-time recheck
  * used to judge escaped display, portal and API names as links, so a colon or

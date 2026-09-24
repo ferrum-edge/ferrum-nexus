@@ -38,6 +38,7 @@ import {
 } from './template-links.js';
 import {
   DEFAULT_EMAIL_TEMPLATES,
+  escapeHtml,
   renderTemplate,
   type EmailTemplateContent,
   type RenderedEmail,
@@ -557,8 +558,9 @@ export function createEmailService(deps: EmailServiceDeps): EmailService {
         await transport.send({
           to,
           subject: `${branding.portal_name} SMTP test`,
+          // The portal name is admin-set text, escaped like any template value (#334).
           html:
-            `<p>This is a test message from ${branding.portal_name}. ` +
+            `<p>This is a test message from ${escapeHtml(branding.portal_name)}. ` +
             'SMTP is configured correctly.</p>',
           text:
             `This is a test message from ${branding.portal_name}. ` +
