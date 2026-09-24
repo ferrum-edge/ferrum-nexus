@@ -24,6 +24,11 @@
  *   and {@link AuthService.resendVerification} — answer `ok` to everything and
  *   pay the same scrypt cost whatever they decide, so neither the body, the
  *   status nor the latency says whether an address has an account.
+ * - Registration is the accepted exception: a taken address is refused with
+ *   `409`, because a sign-up that signs the new account straight in cannot
+ *   answer a duplicate the way it answers a success. It hashes the password
+ *   before looking, so the refusal costs what a registration costs and says
+ *   nothing its body does not (`docs/security.md`, "Session security").
  * - Every successful register/login/logout/verify/reset writes an audit row.
  */
 
@@ -609,17 +614,27 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
         }
       }
 
-      if (await store.users.findByEmail(email)) {
-        throw conflict('An account with that email address already exists');
-      }
-
       // Hash before the lock and before the transaction. Scrypt takes ~100 ms,
       // and any number of registrations may be in flight here at once; none of
       // them may hold the super-admin lock or a write transaction (on SQLite,
       // the whole connection) for that long.
+      //
+      // And hash before the duplicate check, so a taken address costs the same
+      // scrypt derivation as a free one. The `409` below still names the
+      // address as taken — registration is the one anonymous flow that
+      // accepts that, see `docs/security.md` — but it answers no sooner than a
+      // real registration would, so its latency adds nothing to what its body
+      // already says, and a prober pays the full cost of a sign-up per guess
+      // (issue #344).
+      const passwordHash = await crypto.hashPassword(password);
+
+      if (await store.users.findByEmail(email)) {
+        throw conflict('An account with that email address already exists');
+      }
+
       const draft: RegistrationDraft = {
         email,
-        passwordHash: await crypto.hashPassword(password),
+        passwordHash,
         displayName: input.display_name.trim(),
         role: input.role,
         company: input.company ?? null,
