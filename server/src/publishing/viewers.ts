@@ -179,29 +179,36 @@ export function createApiViewersService(deps: ApiViewersServiceDeps): ApiViewers
       }
 
       const note = (input.note ?? '').trim();
-      const saved = await store.apiViewers.upsert({
-        api_id: api.id,
-        user_id: target.id,
-        granted_by: actor.id,
-        note: note === '' ? null : note,
+      // The authorization and its audit row commit or roll back together
+      // (issue #362): a failed audit write used to leave the account able to
+      // read the private documentation, unaudited, behind a `500`.
+      const saved = await store.transaction(async (tx) => {
+        const row = await tx.apiViewers.upsert({
+          api_id: api.id,
+          user_id: target.id,
+          granted_by: actor.id,
+          note: note === '' ? null : note,
+        });
+        await audit.forStore(tx).record(
+          { id: actor.id, role: actor.role },
+          AuditAction.API_VIEWER_AUTHORIZE,
+          { type: 'api', id: api.id },
+          {
+            slug: api.slug,
+            visibility: api.visibility,
+            viewer_user_id: target.id,
+            ...(note === '' ? {} : { note }),
+            // Spelled out on every row, because "we let somebody in" is exactly
+            // the kind of entry a later reader will want to be sure about.
+            grants_invocation: false,
+          },
+          ip,
+        );
+        return row;
       });
 
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.API_VIEWER_AUTHORIZE,
-        { type: 'api', id: api.id },
-        {
-          slug: api.slug,
-          visibility: api.visibility,
-          viewer_user_id: target.id,
-          ...(note === '' ? {} : { note }),
-          // Spelled out on every row, because "we let somebody in" is exactly
-          // the kind of entry a later reader will want to be sure about.
-          grants_invocation: false,
-        },
-        ip,
-      );
-
+      // Outside the transaction, so a body retried for contention never
+      // notifies twice and a rolled-back authorization never notifies at all.
       // Best-effort: the authorization is the thing that happened, and a
       // failed notification must not undo it.
       await notifications
@@ -221,24 +228,29 @@ export function createApiViewersService(deps: ApiViewersServiceDeps): ApiViewers
 
     async revoke(actor, apiId, userId, ip = null): Promise<void> {
       const api = await loadApi(actor, apiId);
-      const existing = await store.apiViewers.find(api.id, userId);
-      if (!existing) throw notFound('API viewer', userId);
-      await store.apiViewers.delete(api.id, userId);
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.API_VIEWER_REVOKE,
-        { type: 'api', id: api.id },
-        {
-          slug: api.slug,
-          visibility: api.visibility,
-          viewer_user_id: userId,
-          // A read authorization and a grant are separate; withdrawing one has
-          // never touched the other, and this row says so rather than leaving
-          // an operator to infer it.
-          revoked_grant: false,
-        },
-        ip,
-      );
+      // The withdrawal and its audit row commit or roll back together (issue
+      // #362), so a failed audit write leaves the authorization in place for
+      // the retry rather than gone without a trace.
+      await store.transaction(async (tx) => {
+        const existing = await tx.apiViewers.find(api.id, userId);
+        if (!existing) throw notFound('API viewer', userId);
+        await tx.apiViewers.delete(api.id, userId);
+        await audit.forStore(tx).record(
+          { id: actor.id, role: actor.role },
+          AuditAction.API_VIEWER_REVOKE,
+          { type: 'api', id: api.id },
+          {
+            slug: api.slug,
+            visibility: api.visibility,
+            viewer_user_id: userId,
+            // A read authorization and a grant are separate; withdrawing one
+            // has never touched the other, and this row says so rather than
+            // leaving an operator to infer it.
+            revoked_grant: false,
+          },
+          ip,
+        );
+      });
     },
   };
 }

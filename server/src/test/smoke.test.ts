@@ -57,6 +57,7 @@ import {
   SUPER_ADMIN_LOCK_CONFLICT_MESSAGE,
 } from '../lib/keyed-serializer.js';
 import { runApplicationDeletionContract } from './application-deletion-contract.js';
+import { runApplicationViewerAuditContract } from './application-viewer-audit-contract.js';
 import { faultInjectingStore } from './fault-injection.js';
 import { testCaptchaTransport } from './helpers.js';
 import { runMessageBudgetContract } from './message-budget-contract.js';
@@ -304,6 +305,7 @@ async function mongoTarget(baseUrl: string): Promise<SmokeTarget> {
  */
 function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): void {
   runApplicationDeletionContract(label, makeStore);
+  runApplicationViewerAuditContract(label, makeStore);
   runMessageBudgetContract(label, makeStore);
   runOutboxFencingContract(label, makeStore);
   runPasswordChangeContract(label, makeStore);
