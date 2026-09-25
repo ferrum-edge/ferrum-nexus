@@ -6,6 +6,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The local acceptance runner now rebuilds Nexus from the current checkout on
+  every default run, follows the checked-in Ferrum Edge digest even when a
+  generated `e2e/.env` is present, and logs the image IDs and Edge repository
+  digest used. Explicit `NEXUS_IMAGE` and `FERRUM_EDGE_IMAGE` overrides remain
+  available, and unsupported suite names or extra arguments fail before
+  environment or Docker side effects. Mocked shell regressions cover these
+  paths (#366, #367).
+
 ### Added
 
 - A released-schema boundary with upgrade and restore guarantees (#286).

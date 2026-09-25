@@ -18,13 +18,24 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 ARTIFACTS="${E2E_ARTIFACTS:-$HERE/artifacts}"
 SUITE="${1:-all}"
+if [[ $# -gt 1 ]]; then
+  printf 'Usage: %s [all|dataplane|browser]\n' "$0" >&2
+  exit 2
+fi
+case "$SUITE" in
+  all|dataplane|browser) ;;
+  *)
+    printf 'Usage: %s [all|dataplane|browser]\n' "$0" >&2
+    exit 2
+    ;;
+esac
 
 # The release candidate and the shipped Compose quickstart use the same Edge
 # digest. An explicit environment override remains available for experiments.
 EDGE_OVERRIDE="${FERRUM_EDGE_IMAGE:-}"
 # shellcheck disable=SC1091
 source "$ROOT/release/compatibility.env"
-FERRUM_EDGE_IMAGE="${EDGE_OVERRIDE:-$FERRUM_EDGE_IMAGE}"
+PINNED_EDGE_IMAGE="$FERRUM_EDGE_IMAGE"
 
 # `docker compose` (v2 plugin) or the standalone `docker-compose`. Anything
 # else is a clear failure rather than a confusing one 40 lines later.
@@ -38,6 +49,7 @@ else
 fi
 
 cd "$HERE"
+IMAGE_OVERRIDE="${NEXUS_IMAGE:-}"
 
 # ── Secrets ────────────────────────────────────────────────────────────────
 #
@@ -46,7 +58,6 @@ cd "$HERE"
 if [[ ! -f .env ]]; then
   echo "==> generating e2e/.env"
   {
-    printf 'FERRUM_EDGE_IMAGE=%s\n' "$FERRUM_EDGE_IMAGE"
     grep -E '^(NEXUS_IMAGE|NEXUS_PORT|FERRUM_PROXY_PORT|FERRUM_ADMIN_PORT|MAILPIT_HTTP_PORT)=' .env.example
     echo "NEXUS_SECRET_KEY=$(openssl rand -hex 32)"
     echo "NEXUS_BOOTSTRAP_TOKEN=$(openssl rand -hex 32)"
@@ -55,23 +66,23 @@ if [[ ! -f .env ]]; then
     echo "FERRUM_BASIC_AUTH_HMAC_SECRET=$(openssl rand -hex 32)"
   } > .env
 fi
-# An image named in the environment wins over the generated file — that is how
-# CI hands in the one it just built.
-IMAGE_OVERRIDE="${NEXUS_IMAGE:-}"
+# Only an image supplied by the caller is treated as a prebuilt image. The
+# value in .env is a convenient tag for the image built from this checkout.
 set -a
 # shellcheck disable=SC1091
 source .env
 set +a
 NEXUS_IMAGE="${IMAGE_OVERRIDE:-${NEXUS_IMAGE:-ferrum-nexus:e2e}}"
 export NEXUS_IMAGE
-FERRUM_EDGE_IMAGE="${EDGE_OVERRIDE:-$FERRUM_EDGE_IMAGE}"
+FERRUM_EDGE_IMAGE="${EDGE_OVERRIDE:-$PINNED_EDGE_IMAGE}"
 export FERRUM_EDGE_IMAGE
 
 # ── The image under test ───────────────────────────────────────────────────
 #
 # The *packaged* portal, not a dev server: the suite's claim is about what an
-# operator deploys. CI builds it once and passes it in through NEXUS_IMAGE.
-if ! docker image inspect "$NEXUS_IMAGE" >/dev/null 2>&1; then
+# operator deploys. The default local path rebuilds this checkout every time;
+# callers such as CI can explicitly supply a prebuilt image through NEXUS_IMAGE.
+if [[ -z "$IMAGE_OVERRIDE" ]]; then
   echo "==> building $NEXUS_IMAGE"
   docker build -t "$NEXUS_IMAGE" -f "$ROOT/docker/Dockerfile" "$ROOT"
 fi
@@ -104,6 +115,15 @@ echo "==> starting the stack"
 # readiness gate anyway — it is bounded, and it names the surface it gave up
 # on, which "compose timed out" does not.
 "${COMPOSE[@]}" up -d --build
+
+NEXUS_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$NEXUS_IMAGE")"
+EDGE_IMAGE_DETAILS="$(
+  docker image inspect \
+    --format '{{.Id}} {{join .RepoDigests ","}}' \
+    "$FERRUM_EDGE_IMAGE"
+)"
+echo "==> Nexus image: $NEXUS_IMAGE ($NEXUS_IMAGE_ID)"
+echo "==> Ferrum Edge image: $FERRUM_EDGE_IMAGE ($EDGE_IMAGE_DETAILS)"
 
 # Fail early and loudly if something never came up at all, rather than letting
 # it surface two minutes later as a readiness timeout.
