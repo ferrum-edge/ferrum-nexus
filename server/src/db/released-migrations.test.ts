@@ -134,7 +134,7 @@ describe('released migrations', () => {
         pendingSeen = true;
       } else {
         assert.ok(!pendingSeen, `${entry.id} is released after an unreleased migration`);
-        assert.match(entry.release, /\S/, `${entry.id} has an empty release`);
+        assert.match(entry.release, /^v\d+\.\d+\.\d+$/, `${entry.id} names a release tag`);
       }
       for (const backend of BACKENDS) {
         assert.match(entry.sha256[backend], /^[0-9a-f]{64}$/, `${entry.id} ${backend} checksum`);

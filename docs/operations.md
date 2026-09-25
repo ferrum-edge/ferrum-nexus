@@ -1,8 +1,8 @@
 # Operations
 
-Deployment reference for Ferrum Nexus (currently in buildout, before its first supported
-release): configuration, databases and upgrades, containers, TLS, backup and restore, key
-rotation, the email outbox, scaling limits, health checks, metrics, and the credential mirror.
+Deployment reference for Ferrum Nexus (first supported release: `v0.1.0`): configuration,
+databases and upgrades, containers, TLS, backup and restore, key rotation, the email outbox,
+scaling limits, health checks, metrics, and the credential mirror.
 
 - Architecture background: [`architecture.md`](architecture.md)
 - Security posture: [`security.md`](security.md)
@@ -707,18 +707,17 @@ production database.
 **The released baseline.** `001_initial` — the three SQL files in
 `server/src/db/migrations/` and the MongoDB step of the same id in
 `server/src/db/adapters/mongodb/index.ts` — is the first released schema
-baseline. It is **to be frozen at the first supported release**: the manifest
-in `server/src/db/released-migrations.ts` lists it with its per-backend
-SHA-256 checksums and `release: null`, and the release step that publishes the
-first supported version sets `release` to that version. No Nexus release has
-been published yet, so **no version currently has a supported upgrade path**;
-until then the [buildout schema policy](#buildout-schema-policy) applies.
+baseline, **frozen in `v0.1.0`**, the first supported release: the manifest in
+`server/src/db/released-migrations.ts` lists it with its per-backend SHA-256
+checksums and `release: 'v0.1.0'`. A database `v0.1.0` created is carried
+forward by later releases through the procedure below; the
+[buildout schema policy](#buildout-schema-policy) never applies to it.
 
 **After a migration is released it never changes.** A database is upgraded by
 applying the migrations its ledger does not record yet, so an edit to one it
 has already applied is an edit that database never sees: fresh and upgraded
-installs would silently diverge. Every schema change after the first supported
-release is therefore a **new forward migration**:
+installs would silently diverge. Every schema change after `v0.1.0` is
+therefore a **new forward migration**:
 
 1. Give it the next id (`002_description`, …). It must sort after every
    released id — the runner applies migrations in id order.
@@ -742,9 +741,8 @@ released migration's file (or MongoDB snapshot) no longer matches its recorded
 checksum, when a released migration is deleted or renamed, when a new migration
 sorts before a released one, when the four backends disagree on the migration
 ids, or when a released MongoDB step's indexes drift from its snapshot. The
-failure message says which of those happened and what to do instead. While the
-baseline is still pending release, an intended edit to it updates its checksums
-in the same change.
+failure message says which of those happened and what to do instead. A
+released migration's checksums are never updated to make that test pass.
 
 **Upgrade coverage.** `server/src/test/baseline-upgrade.test.ts` builds a
 database exactly as the released migrations leave it, seeds it with raw
@@ -840,29 +838,26 @@ destroys data and never applies to a production database or to a database a
 supported release created; for those, see
 [Schema versioning and upgrades](#schema-versioning-and-upgrades).
 
-Until the first supported release, the entire SQL schema lives in
-`001_initial.sql`, `001_initial.pg.sql`, and `001_initial.mysql.sql` under
-`server/src/db/migrations/`, and MongoDB creates its initial indexes in
-`server/src/db/adapters/mongodb/index.ts` under the same `001_initial` id. Edit
-these baselines directly; do not add incremental migrations, legacy data
-backfills, or mixed-version upgrade procedures during buildout. Each edit also
-updates the baseline's checksums in `server/src/db/released-migrations.ts` (and,
-for a MongoDB index change, `server/src/db/released/001_initial.mongodb.json`)
-in the same change — CI fails with the value to use otherwise.
+Before `v0.1.0`, the entire SQL schema lived in `001_initial.sql`,
+`001_initial.pg.sql`, and `001_initial.mysql.sql` under
+`server/src/db/migrations/`, with MongoDB's initial indexes in
+`server/src/db/adapters/mongodb/index.ts` under the same `001_initial` id, and
+those baselines were edited in place. `v0.1.0` froze them; a schema change is
+now a forward migration, never an edit to `001_initial`.
 
-**Recreate disposable development databases after a schema change.** Stop all Nexus
-instances and workers first. For SQLite, remove the configured development database
-and its `-wal` and `-shm` sidecars. For PostgreSQL, MySQL, or MongoDB, drop and recreate
-only the dedicated development database. Then run the schema command or start Nexus
+**Recreate a disposable development database** that predates `v0.1.0`, or one you
+want to start over. Stop all Nexus instances and workers first. For SQLite, remove
+the configured development database and its `-wal` and `-shm` sidecars. For PostgreSQL,
+MySQL, or MongoDB, drop and recreate only the dedicated development database. Then run the schema command or start Nexus
 and register the initial administrator again. Never delete only `schema_migrations`:
 replaying `CREATE TABLE IF NOT EXISTS` does not update an older table definition.
 The application does not reset databases automatically.
 
-This baseline replaces the former 001–017 history. Old buildout databases must be
-recreated even if their ledger already contains `001_initial`. Once the first
-supported release freezes the baseline, schema changes become forward migrations
-([Schema versioning and upgrades](#schema-versioning-and-upgrades)), and this reset
-procedure no longer applies to any database a release created.
+This baseline replaces the former 001–017 history. Buildout databases created
+before `v0.1.0` must be recreated even if their ledger already contains
+`001_initial`: an earlier edit of the baseline may not match the one `v0.1.0`
+froze. Databases `v0.1.0` or a later release created are upgraded
+([Schema versioning and upgrades](#schema-versioning-and-upgrades)), never reset.
 
 ### Initializing the schema
 
@@ -957,8 +952,8 @@ MySQL DDL commits independently of the schema ledger. The initial schema uses on
 inline, so a retry can finish an interrupted initialization of the same baseline.
 A database-specific advisory lock serializes initializers across instances. The
 runner records `001_initial` only after every table succeeds; there is no per-step
-journal or legacy ALTER/backfill recovery. If the baseline itself changed, recreate
-the development database according to the buildout policy above. The runner refuses
+journal or legacy ALTER/backfill recovery. A pre-`v0.1.0` buildout database whose
+baseline differs is recreated according to the buildout policy above. The runner refuses
 any statement other than `CREATE TABLE IF NOT EXISTS`, so the first forward MySQL
 migration needs a replay-safe strategy added to it first
 ([Schema versioning and upgrades](#schema-versioning-and-upgrades)).
@@ -1116,8 +1111,9 @@ selects a published Edge image by digest; do not use a moving `latest` tag.
 > **Which Edge release is this portal actually known to work against?** The
 > acceptance suite ([`e2e/`](../e2e/README.md)) runs the packaged image against
 > one pinned release on every CI run and asserts through the gateway's
-> data-plane listener. The digest in `release/compatibility.env` is the release
-> candidate tested with this checkout. Other Edge versions are unverified.
+> data-plane listener. The digest in `release/compatibility.env` — Ferrum Edge
+> `v0.9.7` for Nexus `v0.1.0` — is the release tested with this checkout. Other
+> Edge versions are unverified.
 
 Portal on `http://127.0.0.1:8787`, gateway proxy listener on
 `http://127.0.0.1:8000`. Points worth understanding before adapting it:
@@ -1144,7 +1140,7 @@ Portal on `http://127.0.0.1:8787`, gateway proxy listener on
   `NEXUS_DB_URL`, so there is one value to rotate and none hard-coded.
 - A `ferrum-edge-init` one-shot container `chown`s the `ferrumdata` volume to
   `65532:65532` before the gateway starts, and the gateway `depends_on` it with
-  `condition: service_completed_successfully`. Edge v0.9.5 pre-creates `/data`
+  `condition: service_completed_successfully`. Edge v0.9.7 pre-creates `/data`
   for that UID; the init also repairs a volume left root-owned by an older
   image.
 - `FERRUM_BASIC_AUTH_HMAC_SECRET` must be set **before** anyone publishes a
@@ -1230,7 +1226,7 @@ audit history.
    back up Edge's configuration database with its own database tooling, or
    export it with Edge's Admin API `GET /backup` (restored with
    `POST /restore?confirm=true`; see Edge's
-   [backup and restore reference](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.5/docs/admin_backup_restore.md)).
+   [backup and restore reference](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.7/docs/admin_backup_restore.md)).
 4. **The Edge secrets**, above all `FERRUM_BASIC_AUTH_HMAC_SECRET`: Edge stores
    basic-auth credentials only as an HMAC under it, so a restore under a
    different value refuses every basic-auth client. Edge's documentation is
@@ -1284,13 +1280,13 @@ issued or rotated in that window as needing re-issue
   confirm it works, and only then upgrade through the
   [production upgrade procedure](#production-upgrade-procedure). Never restore
   into an older release ([downgrades are not supported](#schema-versioning-and-upgrades)).
-  Pre-release buildout databases have no supported restore into a released
+  Pre-`v0.1.0` buildout databases have no supported restore into a released
   version.
 - **Ferrum Edge:** restore Edge state into the Edge release that wrote it, or
   one Edge documents as compatible with it. Each Nexus change is validated in CI
-  against the single Edge release pinned by digest in `e2e/.env.example`
-  (currently Ferrum Edge `v0.9.5`); a supported Nexus release names the Edge
-  release it was validated against in its release notes.
+  against the single Edge release pinned by digest in `release/compatibility.env`
+  (Ferrum Edge `v0.9.7` for Nexus `v0.1.0`); a supported Nexus release names the
+  Edge release it was validated against in its release notes.
 - **Same driver.** A backup restores into the database engine that produced it;
   moving between drivers is a data migration, not a restore.
 

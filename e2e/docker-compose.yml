@@ -4,7 +4,7 @@
 # Everything here is **pinned by digest**. A suite whose job is to prove that
 # the portal's access decisions match what a real gateway permits cannot float
 # its gateway version: a green run has to name the Edge build it was green
-# against, and `:v0.9.5` can be re-tagged where a digest cannot.
+# against, and `:v0.9.7` can be re-tagged where a digest cannot.
 #
 # Nothing is published on a routable address. Each port is bound to loopback so
 # a developer running this on a laptop is not exposing an unbootstrapped portal
@@ -77,7 +77,7 @@ services:
       ferrum-edge-init:
         condition: service_completed_successfully
 
-  # Edge v0.9.5 pre-creates /data for UID 65532. This one-shot chown also
+  # Edge v0.9.7 pre-creates /data for UID 65532. This one-shot chown also
   # repairs older root-owned volumes; it is a no-op on later starts.
   #
   # The backup-and-restore case also runs one-off copies of this container to
