@@ -8,6 +8,13 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- The local acceptance runner now rebuilds Nexus from the current checkout on
+  every default run, follows the checked-in Ferrum Edge digest even when a
+  generated `e2e/.env` is present, and logs the image IDs and Edge repository
+  digest used. Explicit `NEXUS_IMAGE` and `FERRUM_EDGE_IMAGE` overrides remain
+  available, and unsupported suite names or extra arguments fail before
+  environment or Docker side effects. Mocked shell regressions cover these
+  paths (#366, #367).
 - Application create/update and private-API viewer authorize/revoke now write
   their audit rows in the same store transaction as the change they describe
   (#362). Previously the row was committed first and the audit written after,
