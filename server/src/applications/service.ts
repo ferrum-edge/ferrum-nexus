@@ -260,13 +260,15 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
           // gateway for every application anybody ever tried out. It is
           // provisioned by the first approval or the first credential, exactly
           // as an account's is.
-          await audit.forStore(tx).record(
-            { id: actor.id, role: actor.role },
-            AuditAction.APPLICATION_CREATE,
-            { type: 'application', id: row.id },
-            { name: row.name },
-            ip,
-          );
+          await audit
+            .forStore(tx)
+            .record(
+              { id: actor.id, role: actor.role },
+              AuditAction.APPLICATION_CREATE,
+              { type: 'application', id: row.id },
+              { name: row.name },
+              ip,
+            );
           return row;
         });
       });
