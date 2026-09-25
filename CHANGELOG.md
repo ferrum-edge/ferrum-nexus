@@ -6,6 +6,39 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Application deletion is atomic, race-free and quota-preserving (#363,
+  #364, #365).**
+  - The rolling access-request budget
+    (`NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY`) counts the requester's
+    `access.request` audit rows instead of `access_requests` rows, and that
+    audit row is now written in the request's own transaction. Deleting an
+    application cascades its requests away, so create application → request →
+    delete → repeat used to hand the account its allowance back every time
+    (#363). A deleted application's requests, like cancelled ones, now stay
+    charged until they leave the 24-hour window, and a creation that rolls back
+    charges nothing. `AccessRequestRepo.countByUserSince` is removed.
+  - On MongoDB, deleting an application runs its per-collection cascade
+    (grants, access requests, credentials, consumer mapping, then the
+    application) in one session transaction, joining the caller's when there
+    is one; it used to be five loose writes, so a failure part-way left some
+    collections emptied and the application standing (#364).
+    `ApplicationsService.remove` counts and deletes in one transaction on every
+    backend, so the `revoked_grants` / `revoked_credentials` it reports are
+    exactly what went, and a retry after the gateway consumer was already
+    removed finishes the rows without recreating anything on the gateway.
+  - Filing an access request for an application holds the identity's
+    provisioning name key — the one its deletion holds — re-reads the
+    application (exists, owned, `active`) inside it, and keeps it until the
+    request has committed and the provider has been notified. A delete that
+    finished after the route resolved the application used to leave MongoDB
+    holding a pending request for an application that no longer existed, and
+    the SQL backends failing a foreign key (#365); that request now gets
+    `404 NOT_FOUND` with no charge, no `access.request` row and no provider
+    notice, and a request that won the key is removed by the delete that
+    follows it.
+
 ## [0.1.0] - 2026-09-25
 
 The first supported release, paired with Ferrum Edge `v0.9.7`. See
@@ -272,36 +305,6 @@ installation and known limitations.
 
 ### Fixed
 
-- **Application deletion is atomic, race-free and quota-preserving (#363,
-  #364, #365).**
-  - The rolling access-request budget
-    (`NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY`) counts the requester's
-    `access.request` audit rows instead of `access_requests` rows, and that
-    audit row is now written in the request's own transaction. Deleting an
-    application cascades its requests away, so create application → request →
-    delete → repeat used to hand the account its allowance back every time
-    (#363). A deleted application's requests, like cancelled ones, now stay
-    charged until they leave the 24-hour window, and a creation that rolls back
-    charges nothing. `AccessRequestRepo.countByUserSince` is removed.
-  - On MongoDB, deleting an application runs its per-collection cascade
-    (grants, access requests, credentials, consumer mapping, then the
-    application) in one session transaction, joining the caller's when there
-    is one; it used to be five loose writes, so a failure part-way left some
-    collections emptied and the application standing (#364).
-    `ApplicationsService.remove` counts and deletes in one transaction on every
-    backend, so the `revoked_grants` / `revoked_credentials` it reports are
-    exactly what went, and a retry after the gateway consumer was already
-    removed finishes the rows without recreating anything on the gateway.
-  - Filing an access request for an application holds the identity's
-    provisioning name key — the one its deletion holds — re-reads the
-    application (exists, owned, `active`) inside it, and keeps it until the
-    request has committed and the provider has been notified. A delete that
-    finished after the route resolved the application used to leave MongoDB
-    holding a pending request for an application that no longer existed, and
-    the SQL backends failing a foreign key (#365); that request now gets
-    `404 NOT_FOUND` with no charge, no `access.request` row and no provider
-    notice, and a request that won the key is removed by the delete that
-    follows it.
 - Web mutations with local error handling no longer show a second global toast;
   stale 401 responses recheck the session before signing out, and email
   verification and self-edits refresh the auth store (#346).
