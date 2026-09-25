@@ -68,8 +68,8 @@ echo "Installing $(git rev-parse HEAD) ($(git describe --tags --always))"
 commands=$(awk '
   /<!-- compose-quickstart:start -->/ { inside = 1; count++; next }
   /<!-- compose-quickstart:end -->/ { inside = 0; next }
-  inside && /^```/ { next }
-  inside { print }
+  inside && /^```/ { fence = !fence; next }
+  inside && fence { print }
   END { if (count != 1 || inside) exit 1 }
 ' README.md) || fail 'README.md must hold exactly one compose-quickstart block'
 if [[ "$(printf '%s\n' "$commands" | tail -n 1)" != 'docker compose up -d' ]]; then

@@ -25,8 +25,8 @@ fi
 if ! commands=$(awk '
   /<!-- compose-quickstart:start -->/ { inside = 1; count++; next }
   /<!-- compose-quickstart:end -->/ { inside = 0; next }
-  inside && /^```/ { next }
-  inside { print }
+  inside && /^```/ { fence = !fence; next }
+  inside && fence { print }
   END { if (count != 1 || inside) exit 1 }
 ' README.md); then
   echo 'error: README.md must hold exactly one compose-quickstart marker pair' >&2
