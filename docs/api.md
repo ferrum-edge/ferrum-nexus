@@ -2303,7 +2303,15 @@ credential or approval provisions its consumer under — and provisioning
 re-checks the application under the same key, so a delete racing a first issue
 never leaves a consumer the portal does not track. With no consumer mapping, the
 consumer is looked for at the id Nexus derives from `nexus-app-<id>` and deleted
-only when it still carries that username.
+only when it still carries that username. Filing an access request for the
+application holds the same key until the request commits, so a request either
+lands first and is removed by the cascade, or finds the application gone
+(`404`).
+
+The local delete — the counts in the response and the row with its cascade — is
+one transaction on every backend, MongoDB included, so a failure part-way
+leaves every row in place. A retry after the consumer was already deleted
+finishes the rows without recreating anything on the gateway.
 
 Its credentials stop working immediately. The reversible option is `PATCH` with
 `status: "disabled"`.
@@ -2705,10 +2713,19 @@ Body: `api_id` (uuid), `justification` (1–2000 chars).
 **Rate-limited** to 10 requests per minute per account when
 `NEXUS_RATE_LIMIT_ENABLED=true` (always off under `NEXUS_ENV=test`). Independently,
 one account may create `NEXUS_MAX_ACCESS_REQUESTS_PER_USER_PER_DAY` access
-requests (default 20, `0` = unlimited) in a rolling 24 hours; **cancelled rows
-count**, so create→cancel→create cannot reopen the allowance. Exceeding either
-bound is `429` (`RATE_LIMITED` or `QUOTA_EXCEEDED` with
+requests (default 20, `0` = unlimited) in a rolling 24 hours. The budget counts
+the account's `access.request` audit rows, written in the same transaction as
+the request, so **cancelled requests, and requests of a since-deleted
+application, still count** until they age out: neither create→cancel→create nor
+create application→request→delete reopens the allowance. Exceeding either bound
+is `429` (`RATE_LIMITED` or `QUOTA_EXCEEDED` with
 `details: { limit, window, setting }`).
+
+With `application_id`, the application is re-checked (exists, yours, `active`)
+under the key its deletion holds, and that key is held until the request has
+committed: a request racing the application's deletion answers `404 NOT_FOUND`
+— charging nothing and notifying nobody — or is removed by the deletion that
+follows it.
 
 Errors, all `409 CONFLICT`: you own this API; the API is retired; the API does
 not accept access requests (`requestable: false`); you already have access; you

@@ -86,6 +86,7 @@
 import {
   MAX_JUSTIFICATION_LENGTH,
   aclGroupForApi,
+  consumerUsernameForApplication,
   roleAtLeast,
   type AccessRequest,
   type ApplicationSummary,
@@ -125,6 +126,7 @@ import { nowIso } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
 import { presentApiSummary, type GatewayUrlSource } from '../publishing/present.js';
 import {
+  canonicalConsumerLockKey,
   withGroup,
   withoutGroup,
   type ConsumerProvisioner,
@@ -155,7 +157,11 @@ export interface AccessService {
    * the account itself, an id is one of the account's applications. The caller
    * must already have resolved it — the route does, through
    * `ApplicationsService.resolveForActor`, which is what checks ownership and
-   * that the application is active.
+   * that the application is active. That answer is only a snapshot, so an
+   * application-scoped request re-reads the application under its
+   * provisioning name key — the key `ApplicationsService.remove` holds for the
+   * whole deletion — and keeps the key until the request has committed
+   * (issue #365).
    */
   request(
     user: UserRecord,
@@ -715,11 +721,29 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     }
   }
 
+  /**
+   * Refuse the request when the account has spent its rolling daily budget.
+   *
+   * The charge is the requester's own `access.request` audit rows, not the
+   * `access_requests` rows. A request row does not outlive its identity:
+   * deleting an application cascades its requests away, so a budget counted
+   * from them was refunded by create application → request → delete →
+   * repeat (issue #363). Audit rows are append-only and nothing cascades
+   * them, so a cancelled request, and one whose application is gone, stay
+   * charged until their timestamp leaves the window — and the charge carries
+   * no more of the request than the audit trail already records. `request`
+   * writes that row in the same transaction as the request itself, so a
+   * creation that rolls back charges nothing.
+   */
   async function assertWithinBudget(tx: NexusStore, requesterUserId: Uuid): Promise<void> {
     const limit = config.maxAccessRequestsPerUserPerDay;
     if (limit <= 0) return;
     const since = new Date(Date.now() - ACCESS_REQUEST_BUDGET_WINDOW_MS).toISOString();
-    const used = await tx.accessRequests.countByUserSince(requesterUserId, since);
+    const used = await audit.forStore(tx).count({
+      actor_user_id: requesterUserId,
+      action: AuditAction.ACCESS_REQUEST,
+      from: since,
+    });
     if (used < limit) return;
     throw new NexusError(
       'QUOTA_EXCEEDED',
@@ -790,41 +814,80 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         );
       }
 
-      const created = await spendBudget(user.id, () =>
-        store.transaction(async (tx) => {
-          await assertWithinBudget(tx, user.id);
-          if (await tx.accessRequests.findPendingByApiAndUser(api.id, user.id, applicationId)) {
-            throw conflict('You already have a pending request for this API');
+      const admit = async (): Promise<AccessRequestRecord> => {
+        // Re-read under the application's key. The route resolved it before
+        // this section was entered, and a delete that finished in between
+        // left MongoDB — which has no foreign key — holding a pending request
+        // for an application that no longer existed (issue #365). Refused
+        // here, before the budget or the audit trail is touched.
+        if (applicationId !== null) {
+          const application = await store.applications.findById(applicationId);
+          if (!application || application.owner_user_id !== user.id) {
+            throw notFound('Application', applicationId);
           }
-          return tx.accessRequests.create({
-            api_id: api.id,
-            user_id: user.id,
-            application_id: applicationId,
-            justification: trimmed,
-            status: 'pending',
-          });
-        }),
-      );
+          if (application.status !== 'active') {
+            throw conflict('This application is disabled', { application_id: applicationId });
+          }
+        }
 
-      await audit.record(
-        { id: user.id, role: user.role },
-        AuditAction.ACCESS_REQUEST,
-        { type: 'access_request', id: created.id },
-        { api_id: api.id, api_slug: api.slug },
-        ip,
-      );
+        const row = await spendBudget(user.id, () =>
+          store.transaction(async (tx) => {
+            await assertWithinBudget(tx, user.id);
+            if (await tx.accessRequests.findPendingByApiAndUser(api.id, user.id, applicationId)) {
+              throw conflict('You already have a pending request for this API');
+            }
+            const inserted = await tx.accessRequests.create({
+              api_id: api.id,
+              user_id: user.id,
+              application_id: applicationId,
+              justification: trimmed,
+              status: 'pending',
+            });
+            // In the transaction: this row is the budget's charge, so it must
+            // commit exactly when the request does (issue #363).
+            await audit
+              .forStore(tx)
+              .record(
+                { id: user.id, role: user.role },
+                AuditAction.ACCESS_REQUEST,
+                { type: 'access_request', id: inserted.id },
+                { api_id: api.id, api_slug: api.slug },
+                ip,
+              );
+            return inserted;
+          }),
+        );
 
-      await notifications
-        .notify(
-          api.owner_user_id,
-          'access_request_created',
-          `Access requested: ${api.name}`,
-          `${user.display_name} requested access to ${api.name}.`,
-          // The provider's review inbox is a tab on the API's own page; there
-          // is no `/provider/*` route in the SPA and the old link 404'd.
-          `/apis/${api.id}`,
-        )
-        .catch(() => undefined);
+        // Still inside the key, so a provider is never told about a request
+        // for an identity whose deletion had already begun.
+        await notifications
+          .notify(
+            api.owner_user_id,
+            'access_request_created',
+            `Access requested: ${api.name}`,
+            `${user.display_name} requested access to ${api.name}.`,
+            // The provider's review inbox is a tab on the API's own page; there
+            // is no `/provider/*` route in the SPA and the old link 404'd.
+            `/apis/${api.id}`,
+          )
+          .catch(() => undefined);
+        return row;
+      };
+
+      // An application-scoped request holds the identity's provisioning name
+      // key — the one `ApplicationsService.remove` holds for the whole of a
+      // deletion — from the re-read above until the request has committed.
+      // Whichever goes second sees the other's work: a delete that follows
+      // cascades the request away, and a request that follows finds no
+      // application. The budget key is taken inside it, never the reverse.
+      // The account's own identity cannot be deleted, so it needs no key.
+      const created =
+        applicationId === null
+          ? await admit()
+          : await edge.serializePerKey(
+              canonicalConsumerLockKey(namespace, consumerUsernameForApplication(applicationId)),
+              admit,
+            );
 
       const [decorated] = await decorateRequests([created]);
       return decorated ?? created;

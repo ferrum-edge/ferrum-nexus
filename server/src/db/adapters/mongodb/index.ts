@@ -1870,23 +1870,24 @@ class MongoStore implements NexusStore {
       // not on PostgreSQL — the kind of divergence the cross-adapter suite
       // exists to catch, and it caught this one.
       //
-      // Before the row, not after: a cascade that ran second would leave the
-      // scoped rows orphaned if it failed, with nothing left to find them by.
-      for (const collection of [
-        COLLECTIONS.grants,
-        COLLECTIONS.accessRequests,
-        COLLECTIONS.credentials,
-        COLLECTIONS.consumers,
-      ]) {
-        await this.col(collection).deleteMany(
-          { application_id: id } as Filter<NexusDoc>,
-          this.opts,
-        );
-      }
-      return (
-        (await this.col(COLLECTIONS.applications).deleteOne({ _id: id }, this.opts)).deletedCount >
-        0
-      );
+      // One transaction, joining the caller's when there is one: SQL's cascade
+      // is atomic with the parent delete, and five loose writes were not — a
+      // failure part-way left some collections emptied and the application
+      // still standing (issue #364). A standalone deployment that opted in
+      // with `NEXUS_DB_ALLOW_STANDALONE` runs them in order without that
+      // guarantee, which is why the children still go before the row.
+      return this.inTransaction(async (tx) => {
+        for (const collection of [
+          COLLECTIONS.grants,
+          COLLECTIONS.accessRequests,
+          COLLECTIONS.credentials,
+          COLLECTIONS.consumers,
+        ]) {
+          await tx.col(collection).deleteMany({ application_id: id } as Filter<NexusDoc>, tx.opts);
+        }
+        const deleted = await tx.col(COLLECTIONS.applications).deleteOne({ _id: id }, tx.opts);
+        return deleted.deletedCount > 0;
+      });
     },
   };
 
@@ -2434,12 +2435,6 @@ class MongoStore implements NexusStore {
 
     count: async (filter) =>
       this.col(COLLECTIONS.accessRequests).countDocuments(accessRequestFilter(filter), this.opts),
-
-    countByUserSince: async (userId, sinceIso) =>
-      this.col(COLLECTIONS.accessRequests).countDocuments(
-        { user_id: userId, created_at: { $gte: sinceIso } },
-        this.opts,
-      ),
 
     deleteByApi: async (apiId) =>
       (await this.col(COLLECTIONS.accessRequests).deleteMany({ api_id: apiId }, this.opts))

@@ -42,7 +42,11 @@
  * find — the same ordering every teardown in this codebase uses. The whole
  * delete holds the identity's provisioning name key, the one a first approval
  * or credential provisions the consumer under, so the two can never interleave
- * into a consumer that outlives its application (issue #341).
+ * into a consumer that outlives its application (issue #341). Filing an access
+ * request for the application holds the same key through its commit, so a
+ * request either lands before the delete and is cascaded with it, or finds the
+ * application gone (issue #365). The local cascade is one transaction on every
+ * adapter, MongoDB included (issue #364).
  */
 
 import {
@@ -351,20 +355,29 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
             }
           }
 
-          const drop = async (): Promise<{ grants: number; credentials: number }> => {
-            const grants = await store.grants.count({
-              application_id: application.id,
-              status: 'active',
+          // One transaction: the counts describe exactly what the delete took,
+          // and the delete is all-or-nothing on every adapter. The SQL
+          // backends' cascade is one statement already; MongoDB's is one
+          // `deleteMany` per scoped collection, which a failure part-way used
+          // to leave half-applied (issue #364). The adapter's own delete is
+          // transactional too, and joins this one. Nothing in the body leaves
+          // the store, so a contention retry re-runs it safely; the gateway
+          // delete stays outside, before it.
+          const drop = (): Promise<{ grants: number; credentials: number }> =>
+            store.transaction(async (tx) => {
+              const grants = await tx.grants.count({
+                application_id: application.id,
+                status: 'active',
+              });
+              const credentials = await tx.credentials.count({
+                application_id: application.id,
+                status: 'active',
+              });
+              // The row's cascade takes the grants, requests, credential rows
+              // and the consumer mapping with it.
+              await tx.applications.delete(application.id);
+              return { grants, credentials };
             });
-            const credentials = await store.credentials.count({
-              application_id: application.id,
-              status: 'active',
-            });
-            // The row's cascade takes the grants, requests, credential rows
-            // and the consumer mapping with it.
-            await store.applications.delete(application.id);
-            return { grants, credentials };
-          };
 
           // Gateway first. A row deleted before its consumer leaves a live
           // identity — with its ACL groups and its credential material — that

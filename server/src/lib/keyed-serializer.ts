@@ -108,7 +108,15 @@ export function messageBudgetLockKey(senderUserId: string): string {
  *
  * Same shape as {@link messageBudgetLockKey}: count durable rows, then insert
  * one, ordered by a lease so two instances cannot both read `used = limit - 1`.
- * Cancelled requests still count — otherwise create→cancel→create is a free loop.
+ * The rows counted are the requester's `access.request` audit rows, which
+ * neither a cancellation nor an application delete removes — otherwise
+ * create→cancel→create, or create application→request→delete, is a free loop
+ * (issue #363).
+ *
+ * An application-scoped request takes it **inside** the application's
+ * provisioning name key (`canonicalConsumerLockKey`), which it holds until the
+ * request commits so an application delete cannot interleave (issue #365).
+ * Nothing takes a gateway key inside this one, so there is no inversion.
  */
 export function accessRequestBudgetLockKey(userId: string): string {
   return `access-requests:budget:${userId}`;
