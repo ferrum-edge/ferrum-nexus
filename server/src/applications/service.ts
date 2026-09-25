@@ -234,8 +234,8 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
       // inside it (issue #362). A failed audit write used to leave the
       // application stored, counted against the quota and unaudited, behind a
       // `500` whose retry then collided with its own name.
-      const created = await edge.serializePerKey(`application-owner:${actor.id}`, () =>
-        store.transaction(async (tx) => {
+      const created = await edge.serializePerKey(`application-owner:${actor.id}`, async () => {
+        return store.transaction(async (tx) => {
           if (limit > 0) {
             const current = await tx.applications.count({ owner_user_id: actor.id });
             if (current >= limit) {
@@ -268,8 +268,8 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
             ip,
           );
           return row;
-        }),
-      );
+        });
+      });
       return present(created);
     },
 
