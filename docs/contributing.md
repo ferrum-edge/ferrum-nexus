@@ -147,12 +147,12 @@ Run it locally for anything that changes what Nexus writes to Edge, the
 authentication or credential contract, or the container image.
 
 The Edge release is pinned **by digest** in one place,
-`release/compatibility.env`. The CI workflow does not repeat it: `run.sh`
-generates `e2e/.env` from that record when none exists, and CI always starts
-from a clean checkout. Moving to a newer Edge is therefore a one-line edit,
-and the diff says which release the guarantee now covers. A local `e2e/.env`
-is generated once and then kept, so after the pin moves, delete it (or edit
-its `FERRUM_EDGE_IMAGE`) to test the new release locally. See
+`release/compatibility.env`. The runner reads that pin on every run, regardless
+of whether its generated `e2e/.env` already exists. Export
+`FERRUM_EDGE_IMAGE` for an intentional override. Moving to a newer Edge is
+therefore a one-line edit, and the diff says which release the guarantee now
+covers. The default local run rebuilds Nexus from the current checkout;
+explicitly set `NEXUS_IMAGE` to use a prebuilt image, as CI does. See
 [e2e/README.md](../e2e/README.md) for what each half asserts and why.
 
 ## Adding things

@@ -24,12 +24,16 @@ E2E_KEEP=1 ./e2e/run.sh   # leave the stack up afterwards
 ```
 
 It needs Docker with `docker compose` (or `docker-compose`), and about 3 GB of
-free image space. The first run builds the portal image and pulls Edge; later
-runs reuse both.
+free image space. The default local path rebuilds the portal from the current
+checkout on every run, using Docker's build cache, and Compose reuses or pulls
+the pinned Edge image as needed. CI can pass `NEXUS_IMAGE` to use the image it
+already built.
 
 `run.sh` generates `e2e/.env` with fresh per-run secrets if there is not one
 already. Nothing in this directory ships a working secret: a compose file with
-one in it is a secret that ends up in somebody's real deployment.
+one in it is a secret that ends up in somebody's real deployment. The runner
+accepts only `all`, `dataplane`, or `browser` as its optional argument and
+rejects extra arguments before creating the environment or starting Docker.
 
 Every run starts from empty volumes. `run.sh` bootstraps the portal once —
 registering the first account with the bootstrap token and turning email
@@ -44,13 +48,11 @@ stack left up with `E2E_KEEP=1` works.
 "the portal agrees with a real gateway" has to name the gateway build it agreed
 with, and a tag can be re-pointed where a digest cannot. The
 [compatibility record](../release/compatibility.env) is the only place it is
-written; `run.sh` copies it into `e2e/.env` when none exists, and CI starts
-from a clean checkout. Moving to a newer Edge is a deliberate one-line edit
-there, and the diff says which release the guarantee now covers.
-
-A local `e2e/.env` is generated once and then kept, so it does not follow a
-later change to the pin: delete it (or update its `FERRUM_EDGE_IMAGE`) after
-pulling a new one.
+written. The runner uses that pin on every run, even when a generated `.env`
+already exists. An exported `FERRUM_EDGE_IMAGE` takes precedence for an
+intentional override. Moving to a newer Edge is a deliberate one-line edit
+there, and the diff says which release the guarantee now covers. Each run logs
+the Nexus image ID and the Edge image ID and repository digest actually used.
 
 ## The two halves
 

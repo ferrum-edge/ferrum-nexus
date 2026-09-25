@@ -190,6 +190,8 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: e2e/package-lock.json
+      - name: Test the acceptance runner
+        run: bash e2e/test-run.sh
       - name: Build the production image
         run: docker build -t ferrum-nexus:e2e -f docker/Dockerfile .
       - name: Install the suite's dependencies
