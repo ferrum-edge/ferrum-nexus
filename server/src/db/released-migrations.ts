@@ -21,9 +21,10 @@
  * 1. After `release` is set, the entry and its artifacts are immutable. A
  *    schema change after that point is a **new forward migration** with a
  *    higher id — never an edit, rename, reorder or deletion of a listed one.
- * 2. Until then (`release: null`, the buildout baseline), `001_initial` is still
- *    edited in place, and each edit updates its checksums here in the same
- *    change. The test prints the value it computed.
+ * 2. Until then (`release: null`), an entry's artifacts may still change, and
+ *    each edit updates its checksums here in the same change. The test prints
+ *    the value it computed. `001_initial` was edited this way during buildout
+ *    and frozen by `v0.1.0`.
  * 3. The release step that ships a schema sets `release` on every entry it
  *    ships and adds an entry for each new migration. It never edits a
  *    checksum of an entry that already has a `release`.
@@ -49,10 +50,9 @@ export interface ReleasedMigration {
 export const RELEASED_MIGRATIONS: readonly ReleasedMigration[] = [
   {
     id: '001_initial',
-    // RELEASE STEP: to be frozen at the first supported release. Set this to
-    // that release's version when it is published, and do not change the
-    // checksums below in the same edit.
-    release: null,
+    // Frozen: the baseline the first supported release shipped. Never edit
+    // these checksums; a schema change is a new forward migration.
+    release: 'v0.1.0',
     sha256: {
       sqlite: 'd9d9e14105fdbf22b2b167dac1b72949dc4f8bd5758c7ec5d66ca209a86efe0f',
       pg: '00fb94f713a187b44160e4728180b251e95584d0dd8db2f577533216cdf872c1',

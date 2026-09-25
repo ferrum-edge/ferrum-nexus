@@ -3,10 +3,11 @@
 A complete walkthrough: from an empty machine to a client calling a published
 API through the gateway with a credential the portal issued.
 
-**Buildout:** there is no supported release yet, and schema changes may require a
-fresh development database — see the [development reset](operations.md#buildout-schema-policy).
-Production deployments follow [schema versioning and upgrades](operations.md#schema-versioning-and-upgrades)
-instead.
+**Release:** this walkthrough targets Ferrum Nexus `v0.1.0` with Ferrum Edge
+`v0.9.7`, the supported pair in the [release notes](release-notes.md). Deployments
+that keep their data follow [schema versioning and upgrades](operations.md#schema-versioning-and-upgrades);
+a development database created before `v0.1.0` needs the
+[development reset](operations.md#buildout-schema-policy).
 
 You will play three roles in sequence — the operator who runs the stack, a
 **provider** who publishes an API, and a **client** who requests access and
@@ -67,15 +68,14 @@ for the same fresh-volume behaviour.
 
 Clone Nexus first so this walkthrough and the
 [Compose example](operations.md#compose) use the same published Edge image
-from the [compatibility record](../release/compatibility.env). For a released
-deployment, check out the Nexus tag named in the release notes before sourcing
-the record (for example, `git checkout --detach <published-Nexus-tag>` after
-cloning). The first Nexus tag has not been published yet; until then this is a
-buildout walkthrough from the current checkout.
+from the [compatibility record](../release/compatibility.env). Check out the
+supported Nexus release tag before sourcing the record, so the portal you build
+and the gateway image it names are the pair the release was validated with:
 
 ```bash
 git clone https://github.com/ferrum-edge/ferrum-nexus.git
 cd ferrum-nexus
+git checkout --detach v0.1.0
 set -a
 . ./release/compatibility.env
 set +a

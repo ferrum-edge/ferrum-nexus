@@ -230,6 +230,9 @@ describe('Edge response contracts over HTTP sockets', () => {
     const { client, reply, requests } = await fixture(t);
     // Every page full and a total no scan reaches: the walk stops at its page
     // cap with configs unread, which must not be reported as the whole list.
+    // The configs belong to other proxies, as a gateway older than the
+    // `proxy_id` filter answers (it ignores the parameter); only proxy-1's
+    // config may come back.
     const page = Array.from({ length: 1000 }, (_, index) => ({
       ...plugin,
       id: `plugin-${index}`,
@@ -262,6 +265,43 @@ describe('Edge response contracts over HTTP sockets', () => {
       attached.map((config) => config.id),
       ['plugin-0'],
     );
+  });
+
+  it('pages one proxy’s configs through the gateway’s proxy_id filter', async (t) => {
+    const { client, reply, requests } = await fixture(t);
+    // Edge v0.9.7 filters on `proxy_id` and totals the filtered set, so the
+    // walk pages that set — 2,500 configs, three pages — not the namespace.
+    const filtered = Array.from({ length: 2500 }, (_, index) => ({
+      ...plugin,
+      id: `plugin-${index}`,
+      proxy_id: 'proxy/1 &x',
+    }));
+    reply.respond = (url) => {
+      const offset = Number(url.searchParams.get('offset'));
+      const limit = Number(url.searchParams.get('limit'));
+      return JSON.stringify({
+        data: filtered.slice(offset, offset + limit),
+        pagination: { offset, limit, total: filtered.length },
+      });
+    };
+    const before = requests.length;
+    const attached = await client.pluginConfigs.listByProxy('proxy/1 &x');
+    assert.equal(attached.length, 2500);
+    assert.deepEqual(
+      attached.map((config) => config.id),
+      filtered.map((config) => config.id),
+    );
+
+    const sent = requests.slice(before).map((line) => {
+      const url = new URL(line.slice(line.indexOf(' ') + 1), 'http://edge.test');
+      assert.equal(url.pathname, '/plugins/config');
+      return Object.fromEntries(url.searchParams);
+    });
+    assert.deepEqual(sent, [
+      { proxy_id: 'proxy/1 &x', limit: '1000', offset: '0' },
+      { proxy_id: 'proxy/1 &x', limit: '1000', offset: '1000' },
+      { proxy_id: 'proxy/1 &x', limit: '1000', offset: '2000' },
+    ]);
   });
 
   it('accepts 204 deletes and requires bodies for credential-index deletes', async (t) => {

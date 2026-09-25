@@ -253,10 +253,11 @@ export interface FerrumAdminClient {
     /**
      * Every plugin config attached to one proxy.
      *
-     * `GET /plugins/config` has **no `proxy_id` filter** and clamps `limit` to
-     * Edge's `MAX_PAGE_SIZE` of 1000, so this walks every page and filters
-     * client-side. A single-page read silently truncated on any gateway
-     * carrying more than 1000 plugin configs in the namespace.
+     * Reads `GET /plugins/config?proxy_id=…` (Edge v0.9.7+), which filters on
+     * the gateway and counts `pagination.total` over the filtered set. Edge
+     * still clamps `limit` to its `MAX_PAGE_SIZE` of 1000, so this walks every
+     * page of that set: a single-page read would silently truncate a proxy
+     * carrying more than 1000 configs.
      */
     listByProxy(proxyId: string): Promise<EdgePluginConfig[]>;
     get(id: string): Promise<EdgePluginConfig | null>;
@@ -400,7 +401,10 @@ export function derivedConsumerId(namespace: string, username: string): string {
  */
 const EDGE_MAX_PAGE_SIZE = 1000;
 
-/** Page cap for the plugin-config scan: 50 × 1000 rows in one namespace. */
+/**
+ * Page cap for a plugin-config scan: 50 × 1000 rows — one proxy's configs for
+ * `listByProxy`, the whole namespace for the metrics-config lookup.
+ */
 const MAX_PLUGIN_CONFIG_SCAN_PAGES = 50;
 
 /** Longest Edge validation text echoed back to the caller. */
@@ -1322,17 +1326,21 @@ export function createFerrumAdminClient(
    * Resolves `true` when the walk ended on its own terms — `visit` stopped it,
    * or the last page was read — and `false` when the page cap cut it short
    * with pages unread, so a caller can tell "not there" from "not looked".
+   *
+   * `filter` rides on every page request; Edge pages (and totals) the filtered
+   * set, so the walk covers it exactly as it would an unfiltered list.
    */
   async function scanPages<T>(
     path: string,
     pageSize: number,
     maxPages: number,
     visit: (items: T[]) => boolean,
+    filter: Record<string, string> = {},
   ): Promise<boolean> {
     for (let page = 0; page < maxPages; page += 1) {
       const offset = page * pageSize;
       const result = await callRequired<EdgePage<T>>('GET', path, {
-        query: { limit: pageSize, offset },
+        query: { ...filter, limit: pageSize, offset },
       });
       // Both scan sizes are within Edge's documented cap. A different size
       // would make the next offset skip rows and could falsely imply absence.
@@ -1651,11 +1659,15 @@ export function createFerrumAdminClient(
           EDGE_MAX_PAGE_SIZE,
           MAX_PLUGIN_CONFIG_SCAN_PAGES,
           (items) => {
+            // The gateway already filtered; the check only keeps a gateway
+            // older than the filter (which ignores the parameter and pages
+            // the whole namespace) from attributing another proxy's configs.
             for (const config of items) {
               if (config.proxy_id === proxyId) attached.push(config);
             }
             return true;
           },
+          { proxy_id: proxyId },
         );
         // A partial list is not "everything on this proxy": callers act on
         // what is missing from it — create a config that seems absent, or

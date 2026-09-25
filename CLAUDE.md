@@ -8,19 +8,17 @@ Ferrum Nexus is a **Backend-for-Frontend (BFF)** sitting in front of [Ferrum Edg
 
 The browser **never** talks to the Ferrum Edge Admin API directly. Every gateway mutation flows through the Nexus server (`server/`), which enforces RBAC + audit logging before forwarding.
 
-## Buildout status
+## Release status
 
-Ferrum Nexus is in active buildout and has no users or production data to preserve.
-Breaking changes are acceptable during this phase. Keep database changes in the
-single `001_initial` schema for each SQL dialect and the MongoDB initial index
-setup; do not add incremental migrations, legacy backfills, or upgrade paths.
-Recreate disposable development databases after schema changes. Every baseline edit
-also updates its checksums in `server/src/db/released-migrations.ts` (and, for a Mongo
-index change, the snapshot in `server/src/db/released/`) — `released-migrations.test.ts`
-fails otherwise and prints the value. The first supported release sets that entry's
-`release` and freezes it: after that, schema changes are new forward migrations with a
-higher id in every backend, never edits to a released one (docs/operations.md, "Schema
-versioning and upgrades").
+`v0.1.0` is the first supported release, paired with Ferrum Edge `v0.9.7`
+(`release/compatibility.env`, `docs/release-notes.md`). It froze the `001_initial`
+schema baseline: `server/src/db/released-migrations.ts` lists it with
+`release: 'v0.1.0'`, and `released-migrations.test.ts` fails on any edit to it (or to
+its MongoDB snapshot in `server/src/db/released/`). A schema change is now a new
+forward migration with a higher id in every backend — never an edit to a released one
+— and ships with an upgrade path for retained data (docs/operations.md, "Schema
+versioning and upgrades"). Only disposable development databases created before
+`v0.1.0` are recreated rather than upgraded.
 
 ## Workspace layout
 
@@ -92,7 +90,7 @@ Backend tests boot the full Fastify app against in-memory SQLite plus a mock Fer
 ## Where to start when…
 
 - **Adding a route**: register it in the appropriate file under `server/src/routes/`, wire any new services into `server/src/index.ts` (COMPOSITION sections), add DTOs to `shared/src/api-contract.ts`, and add the call in `web/src/lib/api.ts`.
-- **Adding a DB column / table**: edit `server/src/db/migrations/001_initial.sql`, `001_initial.pg.sql`, and `001_initial.mysql.sql` in place (Mongo indexes are defined in its adapter) and update the baseline checksums in `server/src/db/released-migrations.ts` while the baseline is unreleased — after the first supported release, add a forward migration instead — then update `NexusStore`, implement in sqlite + sql-repos + mongodb, extend the smoke suite and the upgrade fixture in `server/src/test/baseline-upgrade.test.ts`.
+- **Adding a DB column / table**: `001_initial` is frozen, so add a forward migration with the next id — `NNN_description.sql`, `.pg.sql` and `.mysql.sql` under `server/src/db/migrations/` plus a `MONGO_MIGRATIONS` step — and list it in `server/src/db/released-migrations.ts` when it ships; then update `NexusStore`, implement in sqlite + sql-repos + mongodb, extend the smoke suite and the upgrade fixture in `server/src/test/baseline-upgrade.test.ts`.
 - **Touching the Ferrum Edge integration**: only through `server/src/ferrum-admin/`; extend the mock in `server/src/test/mock-ferrum-edge.ts` to match.
 - **Adding an audit event**: extend the `AuditAction` catalog in [server/src/audit/service.ts](server/src/audit/service.ts) and the table in [docs/security.md](docs/security.md).
 

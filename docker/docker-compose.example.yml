@@ -74,7 +74,7 @@ services:
       retries: 10
     restart: unless-stopped
 
-  # Edge v0.9.5 runs as UID 65532 and pre-creates /data with that ownership.
+  # Edge v0.9.7 runs as UID 65532 and pre-creates /data with that ownership.
   # This one-shot container also repairs older root-owned named volumes before
   # SQLite opens its database; it is a no-op on later starts.
   ferrum-edge-init:
