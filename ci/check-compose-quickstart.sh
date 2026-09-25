@@ -20,15 +20,33 @@ if grep -Eq '^FERRUM_EDGE_IMAGE=' e2e/.env.example; then
   exit 1
 fi
 
-commands=$(awk '
+# The verbatim quickstart gate (ci/verbatim-quickstart-gate.sh) runs this
+# marked block and nothing else, so the markers must be there, exactly once.
+if ! commands=$(awk '
   /<!-- compose-quickstart:start -->/ { inside = 1; count++; next }
   /<!-- compose-quickstart:end -->/ { inside = 0; next }
   inside && /^```/ { next }
   inside { print }
   END { if (count != 1 || inside) exit 1 }
-' README.md)
+' README.md); then
+  echo 'error: README.md must hold exactly one compose-quickstart marker pair' >&2
+  exit 1
+fi
 if [[ "$(printf '%s\n' "$commands" | tail -n 1)" != 'docker compose up -d' ]]; then
   echo 'error: README full-stack block must end with docker compose up -d' >&2
+  exit 1
+fi
+
+# Every other copy of the install is the README block, character for character,
+# so the gate's green run covers them too.
+for file in docs/operations.md docs/release-notes.md; do
+  if [[ "$(cat "$file")" != *"$commands"* ]]; then
+    echo "error: $file does not repeat the README full-stack block verbatim" >&2
+    exit 1
+  fi
+done
+if [[ "$(sed -n 's/^#   //p' docker/docker-compose.example.yml)" != "$commands" ]]; then
+  echo 'error: the Compose example header does not repeat the README full-stack block' >&2
   exit 1
 fi
 

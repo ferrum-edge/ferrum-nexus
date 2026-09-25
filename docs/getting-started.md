@@ -16,6 +16,16 @@ calls it. Allow about twenty minutes.
 Everything here uses `curl` against the real routes, so you can follow along
 without the SPA; the corresponding UI steps are noted as you go.
 
+> **Started the [Compose stack](../README.md#docker) instead?** Skip steps 2
+> and 3 — it is your gateway and portal, on the same ports — and step 5's echo
+> server. Two things differ from here on. The Compose portal generates its
+> bootstrap token, so step 4's `bootstrap_token` is the one
+> `docker compose logs nexus` prints. And it publishes only public upstreams
+> (it does not set `NEXUS_ALLOW_PRIVATE_UPSTREAMS`), so step 5's
+> `servers[0].url` must be a public HTTPS backend. Every release's
+> [verbatim quickstart gate](release-notes.md#release-step) follows exactly
+> this path.
+
 ---
 
 ## 1. Prerequisites

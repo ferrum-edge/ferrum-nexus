@@ -6,6 +6,24 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The verbatim quickstart gate (#287), closing out the `v0.1.0` release
+  criteria of #286 and #287. `.github/workflows/quickstart-gate.yml` checks out
+  a release in a clean hosted runner — on every `v*` tag push, on demand with a
+  `ref` that defaults to the latest published release, and on pull requests
+  that touch the install surface — runs the README's marked full-stack block
+  exactly as written, waits a bounded time for healthy services, and follows
+  the getting-started walkthrough to a `200` through the gateway on `:8000`
+  with an issued key, a `401` without it and a `403` after revocation, then
+  tears the stack down. The `quickstart-config` job now also fails when the
+  README's markers are missing or duplicated, or when the Compose example,
+  `docs/operations.md` or `docs/release-notes.md` stop repeating the block
+  verbatim. The getting-started walkthrough says how to follow it on the
+  Compose stack, whose portal logs a generated bootstrap token and publishes
+  only public upstreams, and the release notes' release step requires the
+  gate's green run.
+
 ## [0.1.0] - 2026-09-25
 
 The first supported release, paired with Ferrum Edge `v0.9.7`. See

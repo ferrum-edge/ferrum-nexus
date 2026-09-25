@@ -128,6 +128,17 @@ This file is published as the GitHub release notes for tag `v0.1.0`.
    to pass on the merge commit.
 2. Create tag `v0.1.0` at that commit and publish a GitHub release for it with
    these notes.
-3. From a clean shell, follow [Install](#install) verbatim against the
-   published tag, then complete the getting-started walkthrough through an
-   authenticated request via the gateway.
+3. Require a green run of the **verbatim quickstart gate** for the tag
+   (`.github/workflows/quickstart-gate.yml`, run by the tag push). In a clean
+   hosted runner it checks out the tag, runs the README's full-stack block —
+   the lines between the `compose-quickstart` markers, exactly as written —
+   waits a bounded time for PostgreSQL, Nexus and the gateway to be healthy,
+   then follows the [getting-started walkthrough](getting-started.md) on that
+   stack: the founding registration with the logged bootstrap token, a
+   published `key_auth` API, an approved access request, an issued key, a
+   `200` through the gateway on `:8000` carrying the expected body, a `401`
+   without the key and a `403` after revocation. Any other outcome fails the
+   run, and the stack is torn down either way. Run it again for any release
+   from **Actions → Verbatim quickstart gate → Run workflow**; `ref` defaults
+   to the latest published release. `v0.1.0` was tagged before the gate
+   existed, so its run is started that way.
