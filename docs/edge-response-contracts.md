@@ -33,8 +33,10 @@ projections in `src/config/types.rs`.
   Edge's OpenAPI exposes only offset/limit on `GET /consumers`; its parser
   ignores unknown keys. The mock deliberately rejects unsupported filters to
   catch accidental dependence on filtering while retaining real pagination.
-- `pluginConfigs.listByProxy`: valid plugin pages filtered by proxy. Empty
-  results require valid pages; the existing 50-page scan cap is unchanged.
+- `pluginConfigs.listByProxy`: valid pages of `GET /plugins/config?proxy_id=`
+  (Edge v0.9.7), which pages and totals the filtered set; every page is read.
+  Empty results require valid pages; the existing 50-page scan cap is
+  unchanged. The mock honours `proxy_id` and rejects any other filter.
 - `apiSpecs.findByProxy`: 200 with typed `items`, coherent flat counters and
   matching `proxy_id`. Only a valid empty filtered page returns `null`; Edge
   uses `items`, not `data`.

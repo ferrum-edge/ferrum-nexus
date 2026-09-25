@@ -260,6 +260,48 @@ describe('ferrum admin client', () => {
     assert.equal((await client.pluginConfigs.listByProxy('proxy-1')).length, 0);
   });
 
+  it('asks the gateway for one proxy’s configs instead of paging the namespace', async () => {
+    for (const id of ['proxy-a', 'proxy-b']) {
+      await client.proxies.create({
+        id,
+        listen_path: `/nexus/${id}`,
+        backend_scheme: 'https',
+        backend_host: `${id}.internal`,
+        backend_port: 443,
+        strip_listen_path: true,
+      });
+      await client.pluginConfigs.create({
+        plugin_name: 'key_auth',
+        scope: 'proxy',
+        proxy_id: id,
+        enabled: true,
+        config: { key_location: 'header:X-API-Key', hide_credentials: true },
+      });
+    }
+    await client.pluginConfigs.create({
+      plugin_name: 'prometheus_metrics',
+      scope: 'global',
+      enabled: true,
+      config: {},
+    });
+
+    const before = edge.requests.length;
+    const attached = await client.pluginConfigs.listByProxy('proxy-a');
+    assert.deepEqual(
+      attached.map((config) => config.proxy_id),
+      ['proxy-a'],
+    );
+    const reads = edge.requests.slice(before);
+    assert.equal(reads.length, 1, 'one filtered page covers the proxy');
+    assert.equal(reads[0]?.path, '/plugins/config');
+    assert.deepEqual(reads[0]?.query, { proxy_id: 'proxy-a', limit: '1000', offset: '0' });
+
+    // An unknown proxy is an empty page, as on Edge, and the unfiltered list
+    // still returns every config in the namespace.
+    assert.deepEqual(await client.pluginConfigs.listByProxy('proxy-missing'), []);
+    assert.equal((await client.pluginConfigs.list()).pagination.total, 3);
+  });
+
   it('refuses incomplete HTTP proxy snapshots before replacing security associations', async (t) => {
     const proxyId = 'association-snapshot';
     const proxyPath = `/proxies/${proxyId}`;

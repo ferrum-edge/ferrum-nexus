@@ -302,14 +302,10 @@ supply three primitives (`ensureMigrationsTable`, `listApplied`,
 prefix plus description (`001_initial`) is the id, shared across dialects, so
 the same logical migration can never be applied twice on one database.
 
-During buildout there is only `001_initial`: edit its three SQL variants and the
-MongoDB initial index definitions directly. There are no incremental upgrades or
-data backfills. Recreate development databases after schema changes; the application
-has no users or production data to preserve. `db/released-migrations.ts` records
-each released migration's per-backend checksum, and the first supported release
-freezes `001_initial` there; from then on schema changes are forward migrations
-and CI rejects an edit to a released one
-([operations](operations.md#schema-versioning-and-upgrades)). The server build copies SQL assets to
+`001_initial` is the baseline `v0.1.0` froze. `db/released-migrations.ts`
+records each released migration's per-backend checksum; a schema change is a new
+forward migration with a higher id in every backend, and CI rejects an edit to a
+released one ([operations](operations.md#schema-versioning-and-upgrades)). The server build copies SQL assets to
 `server/dist/db/migrations/`; both source and compiled runners load the directory
 beside their own module, without searching another source tree.
 

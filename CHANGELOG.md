@@ -16,6 +16,12 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   environment or Docker side effects. Mocked shell regressions cover these
   paths (#366, #367).
 
+## [0.1.0] - 2026-09-25
+
+The first supported release, paired with Ferrum Edge `v0.9.7`. See
+[`docs/release-notes.md`](docs/release-notes.md) for the supported combination,
+installation and known limitations.
+
 ### Added
 
 - A released-schema boundary with upgrade and restore guarantees (#286).
@@ -23,11 +29,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   SHA-256 checksum per backend (the MongoDB step through a committed index
   snapshot), and `released-migrations.test.ts` fails CI when a released
   migration is edited, renamed, deleted or preceded by a new one, or when the
-  backends disagree on migration ids. `001_initial` is listed as the baseline
-  **to be frozen at the first supported release**; until then its checksums are
-  updated with each buildout edit. A baseline-shaped fixture (accounts, API
-  ids and slugs, provider ownership, specification history, grants, credential
-  metadata, gateway mappings, plain and encrypted settings) is upgraded to the
+  backends disagree on migration ids. `001_initial` is the baseline this
+  release freezes. A baseline-shaped fixture (accounts, API ids and slugs,
+  provider ownership, specification history, grants, credential metadata,
+  gateway mappings, plain and encrypted settings) is upgraded to the
   current schema and re-migrated as a no-op on SQLite in every run and on
   PostgreSQL, MySQL and MongoDB in `store-contracts`. `docs/operations.md`
   separates the development reset from the production upgrade procedure and
@@ -185,6 +190,23 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Changed
 
+- **The `001_initial` schema baseline is frozen** (#286). The released-migration
+  manifest records it with `release: 'v0.1.0'`, so CI now rejects any edit to
+  it on every backend; a schema change is a new forward migration that upgrades
+  a `v0.1.0` database in place. Only disposable databases from pre-release
+  buildout checkouts are recreated.
+- **Ferrum Edge `v0.9.7` is the supported gateway** (#287).
+  `release/compatibility.env` pins
+  `ferrumedge/ferrum-edge:v0.9.7@sha256:4c9530e09443649526dc4fbbec0720ba7b47ceb91b0dd5cb06db85430908874a`
+  (the multi-architecture index) and names `NEXUS_RELEASE_TAG=v0.1.0`; the
+  README quickstart, the Compose example, the getting-started walkthrough and
+  the `acceptance` job all read it.
+- Reading one proxy's plugin configs uses Edge `v0.9.7`'s
+  `GET /plugins/config?proxy_id=…` filter instead of paging every plugin config
+  in the namespace and filtering in the portal. The filtered set is still paged
+  to its end, so a proxy with more than 1000 configs is read completely, and a
+  gateway older than the filter (which ignores it) still gets a correct answer.
+  The mock gateway honours the filter and refuses any other list parameter.
 - Portal redesign. A design-system foundation (`web/src/styles/globals.css`,
   `web/src/components/ui/`) now carries every page: sidebar tokens with an
   active-rail indicator and a signed-in card, a translucent header that shows the
