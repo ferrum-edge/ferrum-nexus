@@ -16,7 +16,7 @@ new_fixture() {
   mkdir -p "$FIXTURE/e2e" "$FIXTURE/release" "$FIXTURE/docker" "$FIXTURE/bin"
   cp "$SOURCE/run.sh" "$FIXTURE/e2e/run.sh"
   cp "$SOURCE/.env.example" "$FIXTURE/e2e/.env.example"
-  touch "$FIXTURE/e2e/node_modules"
+  mkdir -p "$FIXTURE/e2e/node_modules"
   touch "$FIXTURE/docker/Dockerfile"
   cat > "$FIXTURE/release/compatibility.env" <<'EOF'
 FERRUM_EDGE_IMAGE=example/edge:pin-one@sha256:111
@@ -46,13 +46,21 @@ EOF
 #!/usr/bin/env bash
 printf 'npx %s\n' "$*" >> "$E2E_TRACE"
 EOF
-  chmod +x "$FIXTURE/bin/docker" "$FIXTURE/bin/openssl" "$FIXTURE/bin/npx"
+  cat > "$FIXTURE/bin/npm" <<'EOF'
+#!/usr/bin/env bash
+printf 'npm %s\n' "$*" >> "$E2E_TRACE"
+EOF
+  chmod +x "$FIXTURE/bin/docker" "$FIXTURE/bin/openssl" "$FIXTURE/bin/npx" "$FIXTURE/bin/npm"
   : > "$FIXTURE/trace"
 }
 
 run_fixture() {
   local status=0
   (cd "$FIXTURE/e2e" && PATH="$FIXTURE/bin:$PATH" E2E_TRACE="$FIXTURE/trace" "$@") > "$FIXTURE/output" 2>&1 || status=$?
+  if [[ "$status" != 0 ]]; then
+    echo "run_fixture $* exited $status; output:" >&2
+    cat "$FIXTURE/output" >&2
+  fi
   return "$status"
 }
 
@@ -61,7 +69,9 @@ contains() {
 }
 
 not_contains() {
-  grep -Fq -- "$2" "$1" && fail "unexpected '$2' in $1"
+  if grep -Fq -- "$2" "$1"; then
+    fail "unexpected '$2' in $1"
+  fi
 }
 
 # Fresh run and repeat run both rebuild the current checkout and use the pin.
