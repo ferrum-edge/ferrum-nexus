@@ -2528,7 +2528,20 @@ export function createMockFerrumEdge(options: MockFerrumEdgeOptions): MockFerrum
     const id = segments[2];
     if (id === undefined) {
       if (method === 'GET') {
-        const items = [...pluginConfigs.values()].filter((item) => item.namespace === namespace);
+        // Edge v0.9.7's only list filter (#5726): an exact `proxy_id` match,
+        // paged and totalled over the filtered set. An unknown proxy is an
+        // empty page, not a 404. Other keys are refused so a test cannot pass
+        // on a filter the gateway does not have.
+        for (const field of query.keys()) {
+          if (field !== 'offset' && field !== 'limit' && field !== 'proxy_id') {
+            return fail(res, 400, `unknown query parameter: ${field}`);
+          }
+        }
+        const proxyId = query.get('proxy_id');
+        if (proxyId === '') return fail(res, 400, 'proxy_id must be non-empty');
+        const items = [...pluginConfigs.values()].filter(
+          (item) => item.namespace === namespace && (proxyId === null || item.proxy_id === proxyId),
+        );
         return send(res, 200, paginate(items, query));
       }
       if (method === 'POST') {

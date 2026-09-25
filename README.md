@@ -26,20 +26,18 @@ and per-user authorization before forwarding to Edge.
 
 ## Development status
 
-Ferrum Nexus is in active buildout and has not published a supported release yet.
-Breaking changes are expected until it does.
+`v0.1.0` is the first supported Ferrum Nexus release, paired with Ferrum Edge
+`v0.9.7` — see the [release notes](docs/release-notes.md) for the supported
+combination and its known limitations.
 
-- **Development databases.** Schema changes are still folded into one `001_initial`
-  baseline per backend. When it changes, recreate your disposable development
-  database — see the [development reset](docs/operations.md#buildout-schema-policy).
-  Never apply that reset to a database you need to keep.
-- **Production upgrades.** The first supported release freezes that baseline. From
-  then on, schema changes ship as forward migrations that upgrade a released
-  database in place, CI rejects edits to released migrations, and upgrades never
-  require a reset — see
+- **Production upgrades.** `v0.1.0` froze the `001_initial` schema baseline. Schema
+  changes now ship as forward migrations that upgrade a released database in place,
+  CI rejects edits to released migrations, and upgrades never require a reset — see
   [schema versioning and upgrades](docs/operations.md#schema-versioning-and-upgrades)
-  and [backup and restore](docs/operations.md#5-backup-and-restore). No version has a
-  supported upgrade path before that release.
+  and [backup and restore](docs/operations.md#5-backup-and-restore).
+- **Development databases.** A disposable database created before `v0.1.0` must be
+  recreated — see the [development reset](docs/operations.md#buildout-schema-policy).
+  Never apply that reset to a database you need to keep.
 
 ## Features
 
@@ -236,10 +234,10 @@ The bootstrap token is printed to the container log
 
 For a full stack alongside Postgres and a Ferrum Edge instance, use the
 [compatibility record](release/compatibility.env) from this checkout. It selects
-the published Edge v0.9.5 image by digest, the same image selected by CI. The
-Nexus image is built from this checkout; once a Nexus version tag is published,
-check out that tag before running these commands. See the
-[draft release notes](docs/release-notes.md) for the release boundary.
+the published Edge v0.9.7 image by digest, the same image selected by CI. The
+Nexus image is built from this checkout, so for the supported release check out
+its tag first (`git checkout --detach v0.1.0`). See the
+[release notes](docs/release-notes.md) for the supported pair.
 
 The four secrets and the Edge image are required. Keep the secrets stable for
 the life of the stack; save them in a secret manager rather than generating new
@@ -263,9 +261,8 @@ docker compose up -d
 
 The portal is at <http://127.0.0.1:8787>. `docker compose logs nexus` shows
 the first-run bootstrap token. For retained data, TLS, backup and restore, and
-the supported single-active-writer model, read
-[operations](docs/operations.md). This checkout is still a buildout snapshot;
-the release tag and production upgrade contract are pending. Follow the
+the supported single-active-writer model, read [operations](docs/operations.md),
+including its production upgrade procedure. Follow the
 [getting-started walkthrough](docs/getting-started.md) to register, publish an
 API, and make an authenticated request through Edge.
 

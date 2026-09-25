@@ -2,17 +2,14 @@
 
 Thanks for helping improve Ferrum Nexus!
 
-## Buildout policy
+## Schema policy
 
-Ferrum Nexus is in active buildout and has no users or production data to preserve.
-Breaking changes are acceptable during this phase. Keep database changes in the
-single `001_initial` schema for each SQL dialect and the MongoDB initial index
-setup; do not add incremental migrations, legacy backfills, or upgrade paths.
-Recreate disposable development databases after schema changes, and update the
-baseline's checksums in `server/src/db/released-migrations.ts` in the same change (CI
-reports the value to use). The first supported release freezes that baseline; from then
-on a schema change is a new forward migration, never an edit to a released one — see
+`v0.1.0`, the first supported release, froze the `001_initial` schema baseline. A
+schema change is now a new forward migration with a higher id in every backend, never
+an edit to a released one — CI rejects that — and it must upgrade a retained database
+in place. See
 [schema versioning and upgrades](docs/operations.md#schema-versioning-and-upgrades).
+Recreate a disposable development database created before `v0.1.0`.
 
 ## Prerequisites
 
