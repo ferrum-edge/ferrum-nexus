@@ -119,7 +119,7 @@ echo "==> starting the stack"
 NEXUS_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$NEXUS_IMAGE")"
 EDGE_IMAGE_DETAILS="$(
   docker image inspect \
-    --format '{{.Id}} {{join .RepoDigests ","}}' \
+    --format '{{.Id}} {{range $i, $d := .RepoDigests}}{{if $i}},{{end}}{{$d}}{{end}}' \
     "$FERRUM_EDGE_IMAGE"
 )"
 echo "==> Nexus image: $NEXUS_IMAGE ($NEXUS_IMAGE_ID)"

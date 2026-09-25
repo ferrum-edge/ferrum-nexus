@@ -31,7 +31,7 @@ if [[ "$1" == compose && "$2" == ps ]]; then
   exit 0
 fi
 if [[ "$1" == image && "$2" == inspect ]]; then
-  if [[ "$*" == *'{{.Id}} {{join .RepoDigests ","}}'* ]]; then
+  if [[ "$*" == *'{{.Id}} {{range $i, $d := .RepoDigests}}'* ]]; then
     printf 'sha256:edge-image example/edge@sha256:111\n'
   else
     printf 'sha256:nexus-image\n'
