@@ -229,37 +229,46 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
       // consumer, and an unbounded number of them is an unbounded number of
       // Edge resources one account can create.
       const limit = config.maxApplicationsPerOwner;
-      const created = await edge.serializePerKey(`application-owner:${actor.id}`, async () => {
-        if (limit > 0) {
-          const current = await store.applications.count({ owner_user_id: actor.id });
-          if (current >= limit) {
-            throw quotaExceeded('You have reached the maximum number of applications', {
-              limit,
-              current,
-              setting: 'NEXUS_MAX_APPLICATIONS_PER_OWNER',
-            });
+      // The owner lease stays outside the transaction — it is a cross-instance
+      // lock, not a database write — and the row and its audit commit together
+      // inside it (issue #362). A failed audit write used to leave the
+      // application stored, counted against the quota and unaudited, behind a
+      // `500` whose retry then collided with its own name.
+      const created = await edge.serializePerKey(`application-owner:${actor.id}`, () =>
+        store.transaction(async (tx) => {
+          if (limit > 0) {
+            const current = await tx.applications.count({ owner_user_id: actor.id });
+            if (current >= limit) {
+              throw quotaExceeded('You have reached the maximum number of applications', {
+                limit,
+                current,
+                setting: 'NEXUS_MAX_APPLICATIONS_PER_OWNER',
+              });
+            }
           }
-        }
 
-        return store.applications.create({
-          owner_user_id: actor.id,
-          name,
-          description: input.description?.trim() || null,
-          status: 'active',
-        });
-      });
+          const row = await tx.applications.create({
+            owner_user_id: actor.id,
+            name,
+            description: input.description?.trim() || null,
+            status: 'active',
+          });
 
-      // The gateway identity is *not* created here. An application with no
-      // approved APIs and no credentials has nothing for a consumer to carry,
-      // and creating one eagerly would put an empty identity on the gateway
-      // for every application anybody ever tried out. It is provisioned by the
-      // first approval or the first credential, exactly as an account's is.
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.APPLICATION_CREATE,
-        { type: 'application', id: created.id },
-        { name: created.name },
-        ip,
+          // The gateway identity is *not* created here. An application with no
+          // approved APIs and no credentials has nothing for a consumer to
+          // carry, and creating one eagerly would put an empty identity on the
+          // gateway for every application anybody ever tried out. It is
+          // provisioned by the first approval or the first credential, exactly
+          // as an account's is.
+          await audit.forStore(tx).record(
+            { id: actor.id, role: actor.role },
+            AuditAction.APPLICATION_CREATE,
+            { type: 'application', id: row.id },
+            { name: row.name },
+            ip,
+          );
+          return row;
+        }),
       );
       return present(created);
     },
@@ -274,22 +283,28 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
       if (patch.status !== undefined) changes.status = patch.status;
       if (Object.keys(changes).length === 0) return present(application);
 
-      const updated = (await store.applications.update(application.id, changes)) ?? application;
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.APPLICATION_UPDATE,
-        { type: 'application', id: application.id },
-        {
-          name: updated.name,
-          ...(changes.status !== undefined ? { status: changes.status } : {}),
-          // Disabling stops the application acquiring *new* access and new
-          // credentials. It deliberately revokes nothing: an integration that
-          // must stop working is deleted, or has its grants revoked, and an
-          // operator reading this row should not have to guess which happened.
-          ...(changes.status === 'disabled' ? { revoked_existing_access: false } : {}),
-        },
-        ip,
-      );
+      // The patch and its audit row commit or roll back together (issue #362):
+      // a failed audit write must not leave a renamed or disabled application
+      // behind a `500`.
+      const updated = await store.transaction(async (tx) => {
+        const row = (await tx.applications.update(application.id, changes)) ?? application;
+        await audit.forStore(tx).record(
+          { id: actor.id, role: actor.role },
+          AuditAction.APPLICATION_UPDATE,
+          { type: 'application', id: application.id },
+          {
+            name: row.name,
+            ...(changes.status !== undefined ? { status: changes.status } : {}),
+            // Disabling stops the application acquiring *new* access and new
+            // credentials. It deliberately revokes nothing: an integration that
+            // must stop working is deleted, or has its grants revoked, and an
+            // operator reading this row should not have to guess which happened.
+            ...(changes.status === 'disabled' ? { revoked_existing_access: false } : {}),
+          },
+          ip,
+        );
+        return row;
+      });
       return present(updated);
     },
 

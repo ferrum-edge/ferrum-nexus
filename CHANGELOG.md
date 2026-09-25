@@ -250,6 +250,17 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Application create/update and private-API viewer authorize/revoke now write
+  their audit rows in the same store transaction as the change they describe
+  (#362). Previously the row was committed first and the audit written after,
+  so a failed audit insert left an unaudited application (counted against the
+  owner's quota and blocking a same-name retry), an unaudited rename or disable,
+  a viewer who could read the private documentation with no authorization row,
+  or a withdrawn authorization with no revocation row — all behind a `500`.
+  Application creation keeps its owner quota lease outside the transaction and
+  both the insert and its audit inside it; the viewer notification is still sent
+  only after the authorization commits. Covered on every adapter by the new
+  application and viewer audit store contract.
 - Web mutations with local error handling no longer show a second global toast;
   stale 401 responses recheck the session before signing out, and email
   verification and self-edits refresh the auth store (#346).
