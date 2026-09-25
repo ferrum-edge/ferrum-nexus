@@ -845,13 +845,15 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
             });
             // In the transaction: this row is the budget's charge, so it must
             // commit exactly when the request does (issue #363).
-            await audit.forStore(tx).record(
-              { id: user.id, role: user.role },
-              AuditAction.ACCESS_REQUEST,
-              { type: 'access_request', id: inserted.id },
-              { api_id: api.id, api_slug: api.slug },
-              ip,
-            );
+            await audit
+              .forStore(tx)
+              .record(
+                { id: user.id, role: user.role },
+                AuditAction.ACCESS_REQUEST,
+                { type: 'access_request', id: inserted.id },
+                { api_id: api.id, api_slug: api.slug },
+                ip,
+              );
             return inserted;
           }),
         );

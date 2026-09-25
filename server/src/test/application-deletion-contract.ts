@@ -301,9 +301,7 @@ export function runApplicationDeletionContract(
     it('refuses a request whose application was deleted after the route resolved it', async () => {
       const client = await harness.registerUser();
       const applicationId = await createApplication(client);
-      const notices = (
-        await target.store.notifications.list({ user_id: provider.user.id })
-      ).total;
+      const notices = (await target.store.notifications.list({ user_id: provider.user.id })).total;
 
       // Hold the request between the route's resolution and the access
       // service, and delete the application there.
