@@ -1214,8 +1214,10 @@ describe('publishing', () => {
     });
 
     it('finds this API’s plugins on a gateway holding more than one page of them', async () => {
-      // `GET /plugins/config` has no proxy_id filter and Edge clamps `limit` to
-      // 1000, so a single-page read silently truncated on any busy gateway.
+      // Edge clamps `limit` to 1000, so a single-page read silently truncated
+      // on any busy gateway. The `proxy_id` filter keeps another proxy's
+      // configs out of this API's pages, but a proxy holding more than 1000
+      // configs still has to be paged.
       const noiseProxyId = 'pagination-noise-proxy';
       harness.edge.proxies.set(`nexus/${noiseProxyId}`, {
         id: noiseProxyId,
@@ -1247,16 +1249,27 @@ describe('publishing', () => {
       const proxyId = response.json<PublishApiResponse>().api.ferrum_proxy_id;
       assert.ok(proxyId);
 
+      const listed = () =>
+        harness.edge.requests.filter(
+          (entry) => entry.method === 'GET' && entry.path === '/plugins/config',
+        );
+      const before = listed().length;
       const attached = await harness.edgeClient.pluginConfigs.listByProxy(proxyId);
       assert.deepEqual(
         attached.map((config) => config.plugin_name).sort(),
         ['access_control', 'key_auth'],
-        'the scan must page past the 1000-row clamp instead of truncating',
+        'the filtered read finds this API’s configs behind 1200 of another proxy’s',
+      );
+      const reads = listed().slice(before);
+      assert.deepEqual(
+        reads.map((entry) => entry.query),
+        [{ proxy_id: proxyId, limit: '1000', offset: '0' }],
+        'the gateway filters, so one page covers this API',
       );
       assert.equal(
         (await harness.edgeClient.pluginConfigs.listByProxy(noiseProxyId)).length,
         1_200,
-        'every page of the noisy proxy’s configs is visited too',
+        'the scan must page past the 1000-row clamp instead of truncating',
       );
     });
   });
