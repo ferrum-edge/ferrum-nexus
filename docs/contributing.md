@@ -155,6 +155,21 @@ covers. The default local run rebuilds Nexus from the current checkout;
 explicitly set `NEXUS_IMAGE` to use a prebuilt image, as CI does. See
 [e2e/README.md](../e2e/README.md) for what each half asserts and why.
 
+## The verbatim quickstart gate
+
+The acceptance suite runs its own stack. What a user runs is the README's
+full-stack block, so that block has a gate of its own:
+`.github/workflows/quickstart-gate.yml` checks out a release in a clean hosted
+runner, runs the lines between the README's `compose-quickstart` markers
+exactly as written, and follows the getting-started walkthrough to an
+authenticated request through the gateway
+([release step](release-notes.md#release-step)). It runs on every `v*` tag
+push, on demand for any ref, and on pull requests that touch `README.md`,
+`docker/`, `release/` or the gate itself. The `quickstart-config` job keeps
+the markers honest on every pull request: exactly one marked block, ending in
+`docker compose up -d`, repeated verbatim by the Compose example,
+[operations](operations.md#compose) and the release notes.
+
 ## Adding things
 
 | Task                 | Steps                                                                                                                                                                                                                                                                                                                            |

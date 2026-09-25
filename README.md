@@ -241,7 +241,9 @@ its tag first (`git checkout --detach v0.1.0`). See the
 
 The four secrets and the Edge image are required. Keep the secrets stable for
 the life of the stack; save them in a secret manager rather than generating new
-ones when restarting it. Run from the repository root:
+ones when restarting it. Run from the repository root (every release tag's
+[verbatim quickstart gate](docs/release-notes.md#release-step) runs this block
+exactly as written, in a clean runner, through to an authenticated request):
 
 <!-- compose-quickstart:start -->
 

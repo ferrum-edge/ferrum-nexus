@@ -1,0 +1,99 @@
+name: Verbatim quickstart gate
+
+# The release gate for the README's full-stack install (issue #287): in a clean
+# hosted runner, check out a release, run the README's Compose block exactly as
+# written, wait for healthy services, and follow docs/getting-started.md to an
+# authenticated request through the gateway's :8000 listener. The procedure is
+# in docs/release-notes.md, "Release step".
+#
+# Pull requests that touch the install surface run it against their own head,
+# so a README or Compose change that breaks the documented install is caught
+# before it is tagged.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Tag or commit to install (`latest` is the latest published release)
+        required: true
+        default: latest
+  pull_request:
+    paths:
+      - README.md
+      - docker/**
+      - release/**
+      - ci/verbatim-quickstart-gate.sh
+      - .github/workflows/quickstart-gate.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quickstart-gate-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  quickstart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Resolve the release to install
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          INPUT_REF: ${{ inputs.ref }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          case "$EVENT" in
+            workflow_dispatch)
+              ref=$INPUT_REF
+              if [ "$ref" = latest ]; then
+                ref=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+              fi
+              ;;
+            push) ref=$TAG ;;
+            pull_request) ref=$PR_HEAD ;;
+            *)
+              echo "::error::unsupported event $EVENT"
+              exit 1
+              ;;
+          esac
+          if [ -z "$ref" ]; then
+            echo '::error::no release to install'
+            exit 1
+          fi
+          echo "Installing $ref"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      # The gate itself comes from the workflow's own commit, so a tag cut
+      # before the gate existed can still be checked.
+      - name: Check out the gate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: gate
+          persist-credentials: false
+
+      # What a user clones: a pristine tree at the release, in a directory
+      # named like the repository, with no credentials left behind.
+      - name: Check out the release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.target.outputs.ref }}
+          path: ferrum-nexus
+          persist-credentials: false
+
+      - name: Run the README install verbatim and call the gateway
+        run: env -i PATH="$PATH" HOME="$HOME" bash gate/ci/verbatim-quickstart-gate.sh ferrum-nexus
+
+      # The gate tears its stack down itself; this also catches a run that was
+      # cancelled or timed out before its own teardown could.
+      - name: Tear down
+        if: always()
+        run: |
+          docker ps -aq --filter label=com.docker.compose.project | xargs -r docker rm -f
+          docker volume ls -q --filter label=com.docker.compose.project | xargs -r docker volume rm
+          docker network ls -q --filter label=com.docker.compose.project | xargs -r docker network rm
