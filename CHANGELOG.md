@@ -26,6 +26,17 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- The catalog's **Call this API** panel now follows the selected identity
+  (#374). On an API that needs approval it appears only for an identity that
+  holds an active grant, and its example, Consumer and JWT `sub` use that
+  identity's consumer — `nexus-app-<id>` for an application — instead of always
+  the account's, which could be unapproved. The access card's badge reflects the
+  selected identity rather than the account-wide state, and an API without
+  approval lets the caller choose which identity the example calls as.
+- The catalog's copyable HTTP Basic example now authenticates (#375): it uses
+  `curl --user 'nexus-user-<id>:<your password>'`, which curl encodes into the
+  `Authorization: Basic` header, instead of a literal `base64(...)` header, and
+  the shown and copied text are the same shell-quoted command.
 - Approval, application deletion and API deletion now refresh dependent grant,
   credential, request, catalog and application count caches (#379).
 - **Application deletion is atomic, race-free and quota-preserving (#363,
