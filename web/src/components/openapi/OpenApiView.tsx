@@ -45,6 +45,9 @@ const METHOD_PILL = 'w-[4.25rem] shrink-0 justify-center tracking-[0.08em] upper
 const COLUMN_LABEL =
   'py-1.5 text-left text-[0.7rem] font-semibold tracking-[0.08em] whitespace-nowrap text-fg-subtle uppercase';
 
+/** Prevent a reused component description from expanding into unbounded page text. */
+const MAX_ENTRY_DESCRIPTION_CHARS = 1_000;
+
 function statusTone(status: string): BadgeTone {
   if (status.startsWith('2')) return 'success';
   if (status.startsWith('3')) return 'info';
@@ -78,7 +81,9 @@ function UnresolvedReference({ entry }: { entry: UnresolvedSpecEntry }): ReactEl
  * there is one, the referenced object's own otherwise.
  */
 function entryDescription(entry: ResolvedSpecEntry): string | null {
-  return entry.overrides.description ?? asString(entry.node.description);
+  const description = entry.overrides.description ?? asString(entry.node.description);
+  if (!description || description.length <= MAX_ENTRY_DESCRIPTION_CHARS) return description;
+  return `${description.slice(0, MAX_ENTRY_DESCRIPTION_CHARS)}…`;
 }
 
 /**
