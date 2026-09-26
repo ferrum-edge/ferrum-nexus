@@ -95,13 +95,17 @@ function byId(
 }
 
 /** Everything an application mutation has to clear. */
-function useApplicationInvalidation(): () => void {
+function useApplicationInvalidation(includeGrantDependents = false): () => void {
   const queryClient = useQueryClient();
   return () => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.applications.all });
     void queryClient.invalidateQueries({ queryKey: queryKeys.credentials.all });
     void queryClient.invalidateQueries({ queryKey: queryKeys.accessRequests.all });
     void queryClient.invalidateQueries({ queryKey: queryKeys.grants.all });
+    if (includeGrantDependents) {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.catalog.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.apis.all });
+    }
   };
 }
 
@@ -138,7 +142,7 @@ export function useDeleteApplication(): UseMutationResult<
   Error,
   string
 > {
-  const invalidate = useApplicationInvalidation();
+  const invalidate = useApplicationInvalidation(true);
   return useMutation({
     meta: { silent: true },
     mutationFn: (id: string) => applicationsApi.remove(id),

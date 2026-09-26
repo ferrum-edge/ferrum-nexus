@@ -26,6 +26,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Approval, application deletion and API deletion now refresh dependent grant,
+  credential, request, catalog and application count caches (#379).
 - **Application deletion is atomic, race-free and quota-preserving (#363,
   #364, #365).**
   - The rolling access-request budget

@@ -30,13 +30,16 @@ export function useAccessRequests(
   });
 }
 
-function useInvalidateAccess(): () => void {
+function useInvalidateAccess(includeApplicationCounts = false): () => void {
   const queryClient = useQueryClient();
   return () => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.accessRequests.all });
     void queryClient.invalidateQueries({ queryKey: queryKeys.grants.all });
     void queryClient.invalidateQueries({ queryKey: queryKeys.catalog.all });
     void queryClient.invalidateQueries({ queryKey: queryKeys.apis.all });
+    if (includeApplicationCounts) {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.applications.all });
+    }
   };
 }
 
@@ -72,7 +75,7 @@ export function useApproveAccessRequest(): UseMutationResult<
   Error,
   { id: string; body?: DecideAccessRequestRequest }
 > {
-  const invalidate = useInvalidateAccess();
+  const invalidate = useInvalidateAccess(true);
   return useMutation({
     mutationFn: ({ id, body }: { id: string; body?: DecideAccessRequestRequest }) =>
       accessRequestsApi.approve(id, body ?? {}),

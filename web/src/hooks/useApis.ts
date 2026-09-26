@@ -332,6 +332,10 @@ export function useDeleteApi(): UseMutationResult<DeleteApiResponse, Error, stri
         predicate: (query) => !isQueryForApi(query, id),
       });
       void queryClient.invalidateQueries({ queryKey: queryKeys.catalog.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.grants.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.accessRequests.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.applications.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.credentials.all });
     },
   });
 }
