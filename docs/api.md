@@ -3106,7 +3106,10 @@ before the gateway delete, and the move to `revoked` with the
 `credential.revoke` row. If that last transaction fails, the row is left
 `retiring` over an entry that is gone, which is the state a lost gateway
 acknowledgement leaves too, and repeating the request completes the revocation
-and records it.
+and records it. A delete that fails while the gateway array proves it never
+applied puts the row back to `active` instead, with a
+`credential.revoke_rollback` row completing the start — as it does for a
+rotation at the cap — and the request can simply be repeated.
 
 ---
 

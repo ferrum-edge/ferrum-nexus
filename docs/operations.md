@@ -2728,6 +2728,29 @@ For each orphaned account it:
    repeat repairs it whole rather than finding it `present`;
 5. notifies the account holder.
 
+**A repair that loses its lease.** Steps 1–4 run under the account's
+cross-instance leases ([§8](#8-scaling)), and step 4's transaction is fenced: a
+repair that stalls past the lease TTL after step 2 has that transaction refused
+at commit. The consumer it recreated is then **kept**, not deleted — another
+instance holds the keys by then and may already be issuing onto it — and the
+repair logs _“A consumer repair lost its lease after recreating the consumer”_,
+takes the keys again and completes itself: finding the consumer it recreated
+still in place, it revokes exactly the credential rows that were live before the
+recreation (a row written since, for an entry another instance appended to the
+new consumer, is left alone) and writes the `gateway.consumer_repair` row with
+`resumed: true`. Only if that second attempt fails too does the account's entry
+in the response carry an error, with the log line _“A consumer repair that lost
+its lease could not be completed”_ naming the consumer and its
+`stale_credential_ids`. That is the one state a repeat repair cannot clear: the
+consumer exists under the id the portal stores, so later passes report it
+healthy and a repair answers that there is nothing to do, while its old
+credential rows stay `active` against entries the gateway does not hold. A
+process crash or restart between the refused pass and its retry leaves the same
+state without the second log line — at most the first names the consumer, with
+a count of its stale rows. The remedy is the same: clear it by reconciling each affected credential type on that consumer
+([§12, "Reconciling one"](#reconciling-one)), which empties the type on the
+gateway and revokes its rows; the account holder then issues new credentials.
+
 **Credentials cannot be recovered and are not replaced.** They are show-once by
 design: Nexus stores a SHA-256 fingerprint and the last four characters, never
 the secret, and Edge never discloses an entry on read. Minting replacements here

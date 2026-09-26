@@ -322,6 +322,24 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   disabled or unassociated config is not counted. A non-matching config beside a
   recognised candidate is now also named under `unowned_same_name_configs` when
   the role is first recorded.
+- A gateway consumer repair whose relink the lease fence refused no longer
+  leaves the consumer it recreated reading as `present` over credential rows
+  that are still `active`: it keeps that consumer, logs the refusal, takes the
+  keys again and completes the repair — revoking only the rows that were live
+  before the recreation and writing `gateway.consumer_repair` with
+  `resumed: true` — and a second refusal gets its own log line naming the rows
+  to reconcile (`docs/operations.md` §13). A revocation or at-cap rotation whose
+  gateway delete provably never applied now completes its
+  `credential.revoke_start` with a new `credential.revoke_rollback` row,
+  committed with the row's move back to `active`, and `docs/security.md` no
+  longer describes that case as a start with no completion; a withdrawal the
+  lease fence refuses leaves the row `retiring` rather than moving it back
+  outside the fence, and any other retry moves it only while it is still
+  `retiring`, so a key another instance revoked meanwhile stays revoked. A
+  revocation rollback whose transaction committed but lost its acknowledgement
+  is recognised by its pre-minted row id and no longer restores the grant or
+  writes `access.revoke_rollback` a second time. A crash between a refused
+  repair pass and its retry is documented as leaving the same state (#402).
 - Conversation list previews now fetch the newest message for the whole page in
   one adapter query, preserving the `(created_at, id)` ordering and empty-thread
   previews. A 200-thread page used to issue 200 separate message lookups (#394).
