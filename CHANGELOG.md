@@ -39,6 +39,39 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   the shown and copied text are the same shell-quoted command.
 - Approval, application deletion and API deletion now refresh dependent grant,
   credential, request, catalog and application count caches (#379).
+- **OpenAPI documentation follows parameter inheritance and reusable
+  components (#377, #378).**
+  - An operation parameter now replaces the path-level parameter with the
+    same `name` and `in` instead of rendering beside it, so an override no
+    longer shows two contradictory rows; parameters that share only a name
+    across locations stay distinct. The revision comparison applies the same
+    rule, shared from `@ferrum-nexus/shared`, and compares parameters in a
+    canonical order, so removing an overridden path-level definition, moving
+    one between levels or reordering them no longer reports a `parameters`
+    change. A parameter whose reference cannot be followed is never merged
+    away.
+  - Parameters, request bodies and responses written as local `$ref`s to
+    `components` now render the object they name — a required header shows as
+    required, and a referenced body or response shows its description and
+    schema. Chains are followed up to a fixed hop limit with a cycle guard,
+    JSON-pointer escapes and percent-encoding are honoured, and only a
+    document's own members are followed. External, dangling, circular or
+    overlong references render as an explicit unresolved marker instead of an
+    empty or optional row, and any reference the viewer displays is cut to 200
+    characters. From OpenAPI 3.1 on, a `description` or `summary`
+    next to a `$ref` overrides the referenced one, as the specification allows.
+  - References are followed through one memoised resolver per document, in
+    the viewer, the revision comparison and publish-time validation alike: each
+    distinct `$ref` is walked once however many parameters use it, JSON
+    pointers longer than the nesting limit are refused, and a 3.1 sibling
+    override no longer copies the referenced object. The publish-time render
+    ceiling now charges a `$ref`'d parameter, request body or response for the
+    object it names, each distinct object once however many places reference
+    it, so a document is newly refused with `too_much_to_render` only when the
+    components its operations reference, counted once each, take it past the
+    ceiling. The count enumerates each object once and stops at the first
+    charge past the ceiling. An empty `parameters` list and a missing one no
+    longer read as a change.
 - **Application deletion is atomic, race-free and quota-preserving (#363,
   #364, #365).**
   - The rolling access-request budget

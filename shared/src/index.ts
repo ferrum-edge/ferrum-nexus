@@ -13,3 +13,4 @@ export * from './entities.js';
 export * from './plugins.js';
 export * from './publishing.js';
 export * from './api-contract.js';
+export * from './openapi.js';

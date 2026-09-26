@@ -1903,6 +1903,10 @@ schema nodes (including reusable `components.schemas`), the parameter entries
 and the media types across the document and refuses more than **100,000** of
 them together with `400 SPEC_INVALID` and
 `details: { reason: "too_much_to_render", schema_nodes, parameters, media_types, units, limit }`.
+A parameter, request body or response written as a local `$ref` is charged for
+the object it names, each distinct object once however many places reference it;
+the count stops at the first charge past the ceiling, so the reported totals are
+those reached by then.
 The viewer bounds what it renders as well, and truncates a branch it cannot
 afford rather than freezing the tab.
 The derived upstream URL, after server-variable expansion, must fit the same
@@ -2450,8 +2454,14 @@ its type, with every path and method identical — that shows up as
 `potentially_breaking` therefore means _this comparison found nothing_, not
 that the change is backward compatible, and the UI says so alongside the
 counts. Path-item-level `parameters` are folded into each operation before
-comparison, so moving a shared parameter onto an operation is correctly no
-change at all.
+comparison using OpenAPI's inheritance rule — an operation parameter replaces
+the path-level one with the same `name` and `in` — and compared in a canonical
+order, so moving a shared parameter onto an operation, reordering parameters,
+or removing a path-level definition an operation already overrides is
+correctly no change at all, and so is replacing an empty `parameters` list with
+none. A `$ref`'d parameter is followed only to learn that identity; one whose
+reference cannot be followed is kept as written and never treated as
+overridden. The documentation viewer applies the same rule.
 
 ### `POST /api/apis/:id/revisions/:revisionId/rollback`
 

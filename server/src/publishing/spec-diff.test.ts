@@ -81,6 +81,148 @@ describe('specification change review', () => {
     assert.equal(diff(before, after).changed, false);
   });
 
+  it('ignores a path-level parameter that an operation overrides', () => {
+    const operation = {
+      parameters: [{ name: 'limit', in: 'query', required: false, schema: { type: 'integer' } }],
+      responses: { '200': { description: 'ok' } },
+    };
+    const before = document({
+      '/items': {
+        parameters: [{ name: 'limit', in: 'query', required: true, schema: { type: 'integer' } }],
+        get: operation,
+      },
+    });
+    const after = document({ '/items': { get: structuredClone(operation) } });
+    assert.equal(diff(before, after).changed, false);
+  });
+
+  it('reports a changed override, and an override that shadows a different definition', () => {
+    const inherited = { name: 'limit', in: 'query', required: true, schema: { type: 'integer' } };
+    const before = document({ '/items': { parameters: [inherited], get: {} } });
+
+    // The operation now overrides the inherited `limit` with a different default.
+    const overridden = document({
+      '/items': {
+        parameters: [inherited],
+        get: { parameters: [{ ...inherited, schema: { type: 'integer', default: 10 } }] },
+      },
+    });
+    assert.deepEqual(diff(before, overridden).changed_operations, [
+      { method: 'GET', path: '/items', changes: ['parameters'] },
+    ]);
+
+    // Overriding with an identical definition changes nothing that applies.
+    const redundant = document({
+      '/items': { parameters: [inherited], get: { parameters: [{ ...inherited }] } },
+    });
+    assert.equal(diff(before, redundant).changed, false);
+  });
+
+  it('keeps same-named parameters in different locations apart', () => {
+    const before = document({
+      '/items/{id}': {
+        parameters: [{ name: 'id', in: 'path', required: true }],
+        get: { parameters: [{ name: 'id', in: 'query' }] },
+      },
+    });
+    // Dropping the path-level `id` is a real change: the query `id` never
+    // overrode it.
+    const after = document({
+      '/items/{id}': { get: { parameters: [{ name: 'id', in: 'query' }] } },
+    });
+    assert.deepEqual(diff(before, after).changed_operations, [
+      { method: 'GET', path: '/items/{id}', changes: ['parameters'] },
+    ]);
+  });
+
+  it('does not read a reordering or a move between levels as a change', () => {
+    const id = { name: 'id', in: 'path', required: true };
+    const limit = { name: 'limit', in: 'query' };
+    const trace = { name: 'X-Trace', in: 'header' };
+    const before = document({
+      '/items/{id}': { parameters: [id, trace], get: { parameters: [limit] } },
+    });
+    const after = document({ '/items/{id}': { get: { parameters: [limit, trace, id] } } });
+    assert.equal(diff(before, after).changed, false);
+  });
+
+  it('identifies a referenced parameter by the object it names', () => {
+    const components = {
+      components: { parameters: { Tenant: { name: 'tenant_id', in: 'header', required: true } } },
+    };
+    const inline = { name: 'tenant_id', in: 'header', required: false };
+    const before = document(
+      {
+        '/items': {
+          parameters: [{ $ref: '#/components/parameters/Tenant' }],
+          get: { parameters: [inline] },
+        },
+      },
+      undefined,
+      components,
+    );
+    const after = document({ '/items': { get: { parameters: [inline] } } }, undefined, components);
+    assert.equal(diff(before, after).changed, false);
+  });
+
+  it('never equates a parameter whose reference cannot be followed', () => {
+    const limit = { name: 'limit', in: 'query' };
+    const before = document({
+      '/items': {
+        parameters: [{ $ref: '#/components/parameters/Missing' }],
+        get: { parameters: [limit] },
+      },
+    });
+    const after = document({ '/items': { get: { parameters: [limit] } } });
+    assert.deepEqual(diff(before, after).changed_operations, [
+      { method: 'GET', path: '/items', changes: ['parameters'] },
+    ]);
+  });
+
+  it('reads an empty parameter list and no list at all as the same thing', () => {
+    const before = document({ '/items': { get: { parameters: [] } } });
+    const after = document({ '/items': { get: {} } });
+    assert.equal(diff(before, after).changed, false);
+    assert.equal(diff(after, before).changed, false);
+    const inherited = document({ '/items': { parameters: [], get: { parameters: [] } } });
+    assert.equal(diff(inherited, after).changed, false);
+  });
+
+  it('follows each distinct reference once, however many parameters share it', () => {
+    // A chain of 30 references buried ~150 levels deep, and tens of thousands
+    // of parameters that all point into it: without memoisation every one of
+    // them re-walks every long pointer of the chain.
+    const chainLength = 30;
+    const segments = Array.from({ length: 150 }, (_, index) => `n${index}`);
+    const base = `#/${segments.join('/')}`;
+    const chain: Record<string, unknown> = {};
+    for (let index = 0; index < chainLength; index += 1) {
+      chain[`L${index}`] = { $ref: `${base}/L${index + 1}` };
+    }
+    chain[`L${chainLength}`] = { name: 'tenant_id', in: 'header' };
+    let buried: Record<string, unknown> = chain;
+    for (const segment of [...segments].reverse()) buried = { [segment]: buried };
+
+    const parameters = Array.from({ length: 20_000 }, (_, index) => ({
+      $ref: `${base}/L${index % chainLength}`,
+    }));
+    const spec = document(
+      { '/items': { parameters, get: { parameters }, post: { parameters } } },
+      undefined,
+      buried,
+    );
+    const resolveStats = { pointerLookups: 0, pointerSegments: 0 };
+    const result = diffSpecDocuments(
+      { document: spec, summary: null },
+      { document: structuredClone(spec), summary: null },
+      { resolveStats },
+    );
+    assert.equal(result.changed, false);
+    // One walk per distinct reference string, per document.
+    assert.equal(resolveStats.pointerLookups, 2 * (chainLength + 1));
+    assert.equal(resolveStats.pointerSegments, 2 * (chainLength + 1) * (segments.length + 1));
+  });
+
   it('reports info and servers changes without inventing operation changes', () => {
     const before = document(
       { '/invoices': { get: {} } },

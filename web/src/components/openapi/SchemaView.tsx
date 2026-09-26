@@ -5,6 +5,7 @@ import {
   asArray,
   asRecord,
   asString,
+  displayedRef,
   refName,
   resolveRef,
   UNRESOLVED_REF,
@@ -207,7 +208,7 @@ function renderNode(
     if (resolved === UNRESOLVED_REF) {
       return (
         <SchemaRow name={name} required={required} depth={depth}>
-          <Badge tone="danger">unresolved $ref {ref}</Badge>
+          <Badge tone="danger">unresolved $ref {displayedRef(ref)}</Badge>
         </SchemaRow>
       );
     }
