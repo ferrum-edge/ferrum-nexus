@@ -72,8 +72,8 @@ function authRecipe(authPlugin: AuthPluginType, consumer: string): AuthRecipe {
         credential: 'basicauth',
         note: (
           <>
-            The username is the consumer username <code className="font-mono">{consumer}</code>,
-            not your email. <code className="font-mono">--user</code> base64-encodes{' '}
+            The username is the consumer username <code className="font-mono">{consumer}</code>, not
+            your email. <code className="font-mono">--user</code> base64-encodes{' '}
             <code className="font-mono">username:password</code> into the{' '}
             <code className="font-mono">Authorization: Basic</code> header for you.
           </>
