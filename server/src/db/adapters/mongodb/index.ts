@@ -3082,6 +3082,22 @@ class MongoStore implements NexusStore {
       return row ? mapMessage(row) : null;
     },
 
+    findLatestByThreads: async (threadIds) => {
+      if (threadIds.length === 0) return [];
+      const docs = await this.col(COLLECTIONS.messages)
+        .aggregate(
+          [
+            { $match: { thread_id: { $in: threadIds } } },
+            { $sort: { thread_id: 1, created_at: -1, _id: -1 } },
+            { $group: { _id: '$thread_id', latest: { $first: '$$ROOT' } } },
+            { $replaceRoot: { newRoot: '$latest' } },
+          ],
+          this.opts,
+        )
+        .toArray();
+      return docs.map((doc) => mapMessage(doc as Row));
+    },
+
     countByThread: async (threadId) =>
       this.col(COLLECTIONS.messages).countDocuments({ thread_id: threadId }, this.opts),
 

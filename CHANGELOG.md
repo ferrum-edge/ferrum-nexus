@@ -309,6 +309,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   rollback whose transaction committed but lost its acknowledgement is
   recognised by its pre-minted row id and no longer restores the grant or
   writes `access.revoke_rollback` a second time (#402).
+- Conversation list previews now fetch the newest message for the whole page in
+  one adapter query, preserving the `(created_at, id)` ordering and empty-thread
+  previews. A 200-thread page used to issue 200 separate message lookups (#394).
 
 ## [0.1.0] - 2026-09-25
 
