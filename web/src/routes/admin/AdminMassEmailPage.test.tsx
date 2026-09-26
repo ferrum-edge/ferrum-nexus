@@ -128,6 +128,48 @@ describe('mass email campaign IDs', () => {
   });
 });
 
+describe('mass email HTML fallback', () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+  });
+
+  it('escapes plain text before adding line-break markup and preserves the text alternative', async () => {
+    const send = vi.spyOn(adminApi, 'massEmail').mockResolvedValue({
+      enqueued: 1,
+      recipients: 1,
+      batch_id: 'batch-1',
+    });
+    const bodyText = 'Use <api_key> literally.\nKeep &copy; and &amp; as written.';
+    renderComposer();
+    fireEvent.change(screen.getByLabelText(/^Plain-text body/), { target: { value: bodyText } });
+
+    await submit();
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(send.mock.calls[0]?.[0]).toMatchObject({
+      body_text: bodyText,
+      body_html:
+        '<p>Use &lt;api_key&gt; literally.<br />Keep &amp;copy; and &amp;amp; as written.</p>',
+    });
+  });
+
+  it('keeps explicitly entered HTML raw', async () => {
+    const send = vi.spyOn(adminApi, 'massEmail').mockResolvedValue({
+      enqueued: 1,
+      recipients: 1,
+      batch_id: 'batch-1',
+    });
+    const bodyHtml = '<p>Use <strong>custom HTML</strong>.</p>';
+    renderComposer();
+    fireEvent.change(screen.getByLabelText(/^HTML body/), { target: { value: bodyHtml } });
+
+    await submit();
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(send.mock.calls[0]?.[0].body_html).toBe(bodyHtml);
+  });
+});
+
 /**
  * The audience the composer can express.
  *

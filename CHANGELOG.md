@@ -357,6 +357,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   retried as one transaction that writes the move and its
   `credential.revoke_rollback` row together, falling back to the move alone only
   if that fails too (#409).
+- The mass-email composer now escapes the plain-text fallback before adding
+  paragraph and line-break markup, preserving literal placeholders and entities
+  in the HTML version while leaving the plain-text alternative and supplied
+  HTML unchanged (#410).
 - `docs/security.md` now names every case where a `credential.revoke_start` has
   no completion after a withdrawal: its retry and move-alone fallback both
   failed (the row stays `retiring`), the fallback's best-effort
