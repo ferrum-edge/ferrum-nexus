@@ -357,6 +357,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   retried as one transaction that writes the move and its
   `credential.revoke_rollback` row together, falling back to the move alone only
   if that fails too (#409).
+- `docs/security.md` now names every case where a `credential.revoke_start` has
+  no completion after a withdrawal: its retry and move-alone fallback both
+  failed (the row stays `retiring`), the fallback's best-effort
+  `credential.revoke_rollback` row was lost (the row is `active`), or a move
+  applied without its audit row on MongoDB without transactions. A withdrawal
+  the lease fence refuses is documented as ending with the row still
+  `retiring`, and a test now shows the fence alone keeps such a row there
+  (#413).
 
 ## [0.1.0] - 2026-09-25
 

@@ -1215,15 +1215,15 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       cause: input.cause instanceof Error ? input.cause.message : String(input.cause),
       ...(credential.user_id === actor.id ? {} : { owner_user_id: credential.user_id }),
     };
-    // The move back and its audit row, in one transaction under `id`. Returns
-    // whether the row was still `retiring`: anything else was settled by
-    // someone else, and there is nothing to withdraw or record.
-    const withdraw = (id: Uuid): Promise<boolean> =>
+    // The move back and its audit row, in one transaction under `id`. A row
+    // no longer `retiring` was settled by someone else, and there is nothing
+    // to withdraw or record.
+    const withdraw = (id: Uuid): Promise<void> =>
       store.transaction(async (tx) => {
         const moved = await tx.credentials.updateIfStatus(credential.id, 'retiring', {
           status: 'active',
         });
-        if (!moved) return false;
+        if (!moved) return;
         await audit
           .forStore(tx)
           .record(
@@ -1234,7 +1234,6 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             ip,
             { id },
           );
-        return true;
       });
     const rowId = newId();
     try {
