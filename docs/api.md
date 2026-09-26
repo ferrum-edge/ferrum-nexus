@@ -2060,15 +2060,17 @@ route. Every field optional; nothing supplied returns the row unchanged.
 | `confirm_access_disruption`      | acknowledgement, not a setting: it only means anything alongside an `auth_plugin` change, and only as `true`. See that row                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 → `{ "api": Api, "outgoing_auth_configs_remaining"?: string[] }`. The second
-field appears only after an `auth_plugin` change that left configs of the
-outgoing plugin attached to the proxy — an operator's, which the portal never
-replaces or deletes. They still accept the outgoing flavour's credentials on
-this API, so the change did not invalidate those here; the ids name the Edge
+field appears only after an `auth_plugin` change that left enabled configs of
+the outgoing plugin associated with the proxy — an operator's, which the portal
+never replaces or deletes (a disabled or unassociated one is not listed). They
+still accept the outgoing flavour's credentials on this API, so the change did not invalidate those here; the ids name the Edge
 plugin configs to remove. Errors: `400 SPEC_INVALID` (bad or, by default, private
 `upstream_url` — see `POST /api/apis`; or `details.reason = "no_operations"`
 when `routes` is asked for and the current revision declares nothing to allow),
 `409 ACCESS_DISRUPTION_CONFIRMATION_REQUIRED` (an `auth_plugin` change that
-would lock grantees out of the API, without `confirm_access_disruption: true`),
+would take grantees' credentials off the portal's authentication for the API,
+without `confirm_access_disruption: true`; `details.outgoing_auth_configs_remaining`
+names any config outside the portal that would go on accepting them),
 `409 CONFLICT` (a gateway setting — `upstream_url`, `auth_plugin`, `requestable`,
 `rate_limit`, `cors`, `allowed_methods`, `timeouts`, `circuit_breaker` or
 `spec_enforcement` — on an API with no gateway deployment; `details.fields`
@@ -2119,12 +2121,15 @@ then change the setting.
 > `api.auth_plugin_changed` row summarises both halves.
 >
 > An operator's own config of the outgoing plugin on the proxy is not the
-> portal's to delete, so it stays attached and keeps accepting those
-> credentials here. When one does, the change is not reported as invalidating
-> them: the `api.update` row records `existing_credentials_invalidated: false`
-> with the configs under `outgoing_auth_configs_remaining`, the response carries
-> the same list, and grantees are told a gateway configuration outside the
-> portal still accepts their existing credentials for now.
+> portal's to delete, so it stays attached and, while enabled and associated
+> with the proxy, keeps accepting those credentials here. When one does, the
+> change is not reported as invalidating them: the refusal still asks for
+> confirmation but names the configs under
+> `details.outgoing_auth_configs_remaining` instead of claiming a lockout, the
+> `api.update` row records `existing_credentials_invalidated: false` with the
+> configs under `outgoing_auth_configs_remaining`, the response carries the same
+> list, and grantees are told a gateway configuration outside the portal still
+> accepts their existing credentials for now.
 >
 > The refusal counts grantees, so an API published with `requestable: false`
 > gates nobody, has no enumerable callers, and is never refused: its holders get

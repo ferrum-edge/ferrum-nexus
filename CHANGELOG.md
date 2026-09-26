@@ -265,9 +265,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   be written (or the lease fence refuses the combined write), recording the row
   best-effort afterwards, and a consumer repair that cannot commit deletes the
   consumer it recreated, so a repeat repairs it rather than finding it present.
-  The revision and restore rows still recorded after the commit are tracked
-  in #400. The god-mode sweep's `access.revoke` rows now commit
-  with each grant's claim, so a gateway refusal is reported in
+  The god-mode sweep's `access.revoke` rows now commit with each grant's claim,
+  so a gateway refusal is reported in
   `god.disable_user_complete`'s `failed_grants` rather than on the row, and the
   `audit` failure stage is gone. A repeated application, API or plugin removal
   that finds the gateway side already collected copies what the earlier
@@ -309,15 +308,18 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   saying whether the gateway was put back (`restored`); a restore keeps
   recording `api.gateway_restore_failed`. All three completion actions are now
   classified `transactional` and the two start rows `intent`.
-- An `auth_plugin` change that leaves a config of the outgoing plugin attached
-  — an operator's, which the portal never deletes, on a recorded API or beside
-  the portal's recognised config on an unrecorded one — no longer reports the
-  outgoing credentials as invalidated (#397). The `api.update` row records
-  `existing_credentials_invalidated: false` and lists the configs under
-  `outgoing_auth_configs_remaining` (also on `api.auth_plugin_changed` and in
-  the `PATCH /api/apis/:id` response), and grantees are told a gateway
-  configuration outside the portal still accepts their existing credentials
-  instead of being told they stopped working. A non-matching config beside a
+- An `auth_plugin` change that leaves an enabled config of the outgoing plugin
+  associated with the proxy — an operator's, which the portal never deletes, on
+  a recorded API or beside the portal's recognised config on an unrecorded one —
+  no longer reports the outgoing credentials as invalidated (#397). The
+  `api.update` row records `existing_credentials_invalidated: false` and lists
+  the configs under `outgoing_auth_configs_remaining` (also on
+  `api.auth_plugin_changed` and in the `PATCH /api/apis/:id` response), and
+  grantees are told a gateway configuration outside the portal still accepts
+  their existing credentials instead of being told they stopped working. The
+  `409 ACCESS_DISRUPTION_CONFIRMATION_REQUIRED` refusal carries the same list in
+  its `details` and no longer claims the grantees would be locked out; a
+  disabled or unassociated config is not counted. A non-matching config beside a
   recognised candidate is now also named under `unowned_same_name_configs` when
   the role is first recorded.
 

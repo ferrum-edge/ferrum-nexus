@@ -1077,6 +1077,31 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
   }
 
   /**
+   * The configs of the outgoing auth flavour that go on accepting its
+   * credentials on the proxy once the portal's own is swapped out.
+   *
+   * `listByProxy` returns every config scoped to the proxy, but only an
+   * enabled one the proxy's `plugins[]` names actually runs, so a disabled or
+   * unassociated leftover is not reported as still admitting anyone.
+   */
+  async function outgoingAuthConfigsRemaining(
+    proxyId: string,
+    outgoing: AuthPluginType,
+    plugins: EdgePluginConfig[],
+    portalOwned: EdgePluginConfig | undefined,
+  ): Promise<string[]> {
+    const candidates = plugins.filter(
+      (plugin) =>
+        plugin.plugin_name === outgoing && plugin.enabled && plugin.id !== portalOwned?.id,
+    );
+    if (candidates.length === 0) return [];
+    const proxy = await edge.proxies.get(proxyId);
+    if (!proxy) throw notFound('Proxy', proxyId);
+    const running = new Set(associatedIds(proxy));
+    return candidates.filter((plugin) => running.has(plugin.id)).map((plugin) => plugin.id);
+  }
+
+  /**
    * The `PATCH` fields that only take effect through the gateway.
    *
    * Every one of them is applied by a write to the API's proxy or its plugin
@@ -2010,7 +2035,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       assertGatewaySettingsWritable(initial, patch);
       // The read, gateway mutations, rollback, and catalog write are one
       // canonical proxy operation. Helpers inside must not reacquire the key.
-      const apply = async (): Promise<Api> => {
+      const apply = async (): Promise<UpdateApiResponse> => {
         const {
           associateLocked: associate,
           disassociateLocked: disassociate,
@@ -2026,8 +2051,6 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         const changed: string[] = [];
         const details: Record<string, unknown> = {};
         let gatewayMutated = false;
-        /** Configs of the outgoing auth flavour an auth swap left attached. */
-        let outgoingAuthRemaining: string[] = [];
 
         if (patch.name !== undefined) {
           const name = patch.name.trim();
@@ -2184,12 +2207,22 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         const impact: AuthSwapImpact = swappedAuthPlugin
           ? await authSwapImpact(api)
           : { grantees: [], apiOwned: [] };
+        // Configs of the outgoing auth flavour the swap leaves running: an
+        // operator's, or one an unrecorded API's recognition settled as theirs.
+        // Read here, before the refusal, so the refusal and the swap report the
+        // same list.
+        const outgoingAuthRemaining =
+          swappedAuthPlugin && proxyId
+            ? await outgoingAuthConfigsRemaining(proxyId, api.auth_plugin, plugins, owned.live.auth)
+            : [];
         if (
           swappedAuthPlugin &&
           impact.grantees.length > 0 &&
           patch.confirm_access_disruption !== true
         ) {
           const count = impact.grantees.length;
+          const accounts = `${count} account${count === 1 ? '' : 's'} holding access`;
+          const holds = count === 1 ? 'it holds' : 'they hold';
           const refusal: AccessDisruptionDetails = {
             field: 'auth_plugin',
             current_auth_plugin: api.auth_plugin,
@@ -2197,12 +2230,25 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             credential_type: CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin],
             affected_grantees: count,
             confirm_field: 'confirm_access_disruption',
+            ...(outgoingAuthRemaining.length > 0
+              ? { outgoing_auth_configs_remaining: outgoingAuthRemaining }
+              : {}),
           };
+          // While a config of the outgoing flavour the portal does not own is
+          // still running on the proxy, those credentials keep working here
+          // until the gateway operator removes it, so this is no lockout.
+          const effect =
+            outgoingAuthRemaining.length > 0
+              ? `would leave ${accounts} depending on a gateway configuration outside the ` +
+                `portal (${outgoingAuthRemaining.join(', ')}): ${holds} a ` +
+                `${refusal.credential_type} credential, which the portal's authentication for ` +
+                'this API will no longer accept and that configuration accepts only until it is ' +
+                'removed.'
+              : `would lock ${accounts} out of it: ${holds} a ${refusal.credential_type} ` +
+                'credential, which this API will no longer accept.';
           throw accessDisruptionConfirmationRequired(
             `Changing this API's authentication from ${api.auth_plugin} to ${swappedAuthPlugin} ` +
-              `would lock ${count} account${count === 1 ? '' : 's'} holding access out of it: ` +
-              `${count === 1 ? 'it holds' : 'they hold'} a ${refusal.credential_type} ` +
-              'credential, which this API will no longer accept. Resend with ' +
+              `${effect} Resend with ` +
               '"confirm_access_disruption": true to make the change anyway — those accounts keep ' +
               'their credentials, which go on serving every other API of that kind, and are told ' +
               'to issue one of the new kind for this API.',
@@ -2314,13 +2360,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             changed.push('auth_plugin');
             // Credentials of the previous flavour are kept on the consumer (they may
             // still authenticate other APIs) but they no longer satisfy *this* API
-            // — unless another config of that flavour is still attached: an
-            // operator's, or one an unrecorded API's recognition settled as theirs.
-            // That config goes on accepting them here, so the row names it rather
-            // than claiming the credentials stopped working.
-            const outgoing = (plugin: EdgePluginConfig): boolean =>
-              plugin.plugin_name === api.auth_plugin && plugin.id !== previous?.id;
-            outgoingAuthRemaining = plugins.filter(outgoing).map((plugin) => plugin.id);
+            // — unless another config of that flavour is still running on it
+            // (`outgoingAuthRemaining`). That config goes on accepting them here,
+            // so the row names it rather than claiming the credentials stopped
+            // working.
             details.previous_auth_plugin = api.auth_plugin;
             details.previous_credential_type = CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin];
             details.existing_credentials_invalidated = outgoingAuthRemaining.length === 0;
@@ -2834,8 +2877,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             previous_auth_plugin: api.auth_plugin,
             auth_plugin: updated.auth_plugin,
             previous_credential_type: CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin],
-            // Accounts cut off from this API until they re-issue. Their
-            // credentials were deliberately left alone.
+            // Accounts told to re-issue for this API: cut off from it unless
+            // `outgoing_auth_configs_remaining` names a config that still
+            // accepts their credential. Their credentials were deliberately
+            // left alone.
             affected_grantees: impact.grantees.length,
             affected_grantee_ids: impact.grantees,
             api_owned_credentials: apiOwned.length,

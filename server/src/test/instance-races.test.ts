@@ -338,18 +338,20 @@ describe('a routes spec revision racing a runtime PATCH', () => {
     const { apiId, proxyId } = await publishRoutesApi('https://v1.example.com:8443/v1');
 
     // The store goes down after the gateway has already been moved, which is
-    // the one seam the compensation exists for. The revision's start row
-    // commits first, in a transaction of its own before the gateway write.
+    // the one seam the compensation exists for. Both instances share the
+    // store, so the outage is keyed to the gateway rather than to call order:
+    // every transaction opened before Edge has seen the revision's
+    // `PUT /api-specs` — its start row among them — goes through, and only
+    // the first one opened after it fails. The PATCH is waiting on the proxy
+    // lease the revision holds, so that one is the revision's own.
     const real = one.store.transaction.bind(one.store);
-    let started = false;
+    const specPuts = (): number => one.edge.callsTo('PUT', '/api-specs/').length;
+    const putsBefore = specPuts();
     one.store.transaction = async <T>(
       fn: (tx: NexusStore) => Promise<T>,
       options?: TransactionOptions,
     ): Promise<T> => {
-      if (!started) {
-        started = true;
-        return real(fn, options);
-      }
+      if (specPuts() === putsBefore) return real(fn, options);
       one.store.transaction = real;
       throw new Error('database is gone');
     };
@@ -383,6 +385,18 @@ describe('a routes spec revision racing a runtime PATCH', () => {
       (await one.store.apis.findById(apiId))?.upstream_url,
       'https://v1.example.com:8443/v1',
     );
+
+    // The attempt left exactly one start row and one outcome row saying the
+    // gateway was put back, both the revision's own.
+    const started = (await one.auditRows('api.spec_revision_start')).filter(
+      (row) => row.target_id === apiId,
+    );
+    assert.equal(started.length, 1, 'one start row for the attempt');
+    const outcomes = (await one.auditRows('api.spec_revision_failed')).filter(
+      (row) => row.target_id === apiId,
+    );
+    assert.equal(outcomes.length, 1, 'one outcome row for the attempt');
+    assert.equal(outcomes[0]?.details.restored, true);
 
     // …and the compensation did not take the concurrent PATCH down with it.
     assert.deepEqual(proxy.allowed_methods, ['GET']);

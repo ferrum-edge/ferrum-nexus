@@ -389,6 +389,63 @@ describe('auth_plugin swaps and the access they disrupt', () => {
     assert.doesNotMatch(announced.body, /you need to issue one of the new kind/);
   });
 
+  /** Put a key_auth config the portal does not own on the proxy, as an operator would. */
+  function seedOperatorKeyAuth(
+    proxyId: string,
+    id: string,
+    { enabled = true, associate = true }: { enabled?: boolean; associate?: boolean } = {},
+  ): void {
+    harness.edge.pluginConfigs.set(`nexus/${id}`, {
+      id,
+      namespace: 'nexus',
+      plugin_name: 'key_auth',
+      scope: 'proxy',
+      proxy_id: proxyId,
+      enabled,
+      config: { key_location: 'header:X-Ops-Key' },
+    });
+    if (!associate) return;
+    const proxy = harness.edge.proxies.get(`nexus/${proxyId}`);
+    assert.ok(proxy);
+    const associated: unknown[] = Array.isArray(proxy.plugins) ? proxy.plugins : [];
+    proxy.plugins = [...associated, { plugin_config_id: id }];
+  }
+
+  it('does not claim a lockout while an operator config still accepts the credential', async () => {
+    const api = await publish('swap-refused-operator');
+    const client = await newClient();
+    await grant(api.id, client);
+    await issue(client, 'keyauth');
+    seedOperatorKeyAuth(api.proxyId, 'op-refusal-key-auth');
+
+    const response = await patchApi(api.id, { auth_plugin: 'basic_auth' });
+    assert.equal(response.statusCode, 409, response.body);
+    const error = errorBody(response.body);
+    assert.equal(error.code, 'ACCESS_DISRUPTION_CONFIRMATION_REQUIRED');
+    assert.deepEqual(
+      (error.details as AccessDisruptionDetails).outgoing_auth_configs_remaining,
+      ['op-refusal-key-auth'],
+    );
+    assert.doesNotMatch(error.message, /lock/, error.message);
+    assert.match(error.message, /outside the portal \(op-refusal-key-auth\)/, error.message);
+    assert.match(error.message, /confirm_access_disruption/);
+    assert.equal((await harness.store.apis.findById(api.id))?.auth_plugin, 'key_auth');
+  });
+
+  it('reports no outgoing config left when the only one is disabled or unassociated', async () => {
+    const api = await publish('swap-operator-idle');
+    seedOperatorKeyAuth(api.proxyId, 'op-disabled-key-auth', { enabled: false });
+    seedOperatorKeyAuth(api.proxyId, 'op-detached-key-auth', { associate: false });
+
+    const response = await patchApi(api.id, { auth_plugin: 'basic_auth' });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal('outgoing_auth_configs_remaining' in response.json<UpdateApiResponse>(), false);
+    const update = (await harness.auditRows('api.update')).find((row) => row.target_id === api.id);
+    assert.ok(update);
+    assert.equal(update.details.existing_credentials_invalidated, true);
+    assert.equal('outgoing_auth_configs_remaining' in update.details, false);
+  });
+
   it('counts a grant held by an application, on that application’s consumer', async () => {
     // Issue #327: each application is its own consumer, with its own
     // credentials. A reading that only ever looked at the *account's* consumer

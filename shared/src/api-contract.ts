@@ -530,8 +530,8 @@ export interface UpdateApiRequest {
 export interface UpdateApiResponse {
   api: Api;
   /**
-   * Present only after an `auth_plugin` change that left configs of the
-   * outgoing plugin attached to the proxy — an operator's, which the portal
+   * Present only after an `auth_plugin` change that left enabled configs of
+   * the outgoing plugin associated with the proxy — an operator's, which the portal
    * never replaces or deletes. Those configs still accept the outgoing
    * flavour's credentials on this API, so the change did not invalidate them
    * here; the Edge plugin config ids say which ones to remove.
@@ -558,6 +558,14 @@ export interface AccessDisruptionDetails {
   affected_grantees: number;
   /** Body field to resend as `true` to carry the change out anyway. */
   confirm_field: 'confirm_access_disruption';
+  /**
+   * Present only when enabled configs of the outgoing plugin that the portal
+   * does not own are attached to the proxy: they go on accepting
+   * `credential_type` here after the change, until the gateway operator
+   * removes them, so the change does not lock those accounts out yet. The
+   * same list {@link UpdateApiResponse.outgoing_auth_configs_remaining} names.
+   */
+  outgoing_auth_configs_remaining?: string[];
 }
 
 /** `DELETE /api/apis/:id` — removes the Edge proxy and its plugins. */
