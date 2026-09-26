@@ -1955,6 +1955,33 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       return credentials.findById(id);
     },
 
+    updateIfStatus: async (id, expected, patch) => {
+      const set = setParts({
+        label: patch.label,
+        status: patch.status,
+        ferrum_credential_id: patch.ferrum_credential_id,
+        rotated_from_id: patch.rotated_from_id,
+      });
+      if (!set) {
+        // An empty patch is only a guarded read; it must not touch updated_at.
+        const row = await queryOne(
+          exec,
+          'SELECT * FROM credential_metadata WHERE id = ? AND status = ?',
+          [id, expected],
+        );
+        return row ? mapCredential(row) : null;
+      }
+
+      const matched = await execute(
+        exec,
+        `UPDATE credential_metadata SET ${set.sql}, updated_at = ? WHERE id = ? AND status = ?`,
+        [...set.params, nowIso(), id, expected],
+      );
+      // Zero matched rows is a genuine lost race; see `users.updateIfMatches`
+      // for why it is not re-read with an ordinary SELECT.
+      return matched > 0 ? credentials.findById(id) : null;
+    },
+
     list: async (filter, options) => {
       const where = credentialWhere(filter).build();
       const { limit, offset } = page(options);

@@ -2054,6 +2054,29 @@ class SqliteStore implements NexusStore {
       return this.credentials.findById(id);
     },
 
+    updateIfStatus: async (id, expected, patch) => {
+      const set = setParts({
+        label: patch.label,
+        status: patch.status,
+        ferrum_credential_id: patch.ferrum_credential_id,
+        rotated_from_id: patch.rotated_from_id,
+      });
+      if (!set) {
+        const row = queryOne(
+          this.db,
+          'SELECT * FROM credential_metadata WHERE id = ? AND status = ?',
+          [id, expected],
+        );
+        return row ? mapCredential(row) : null;
+      }
+      const changed = execute(
+        this.db,
+        `UPDATE credential_metadata SET ${set.sql}, updated_at = ? WHERE id = ? AND status = ?`,
+        [...set.params, nowIso(), id, expected],
+      );
+      return changed > 0 ? this.credentials.findById(id) : null;
+    },
+
     list: async (filter, options) => {
       const where = credentialWhere(filter).build();
       const { limit, offset } = page(options);
