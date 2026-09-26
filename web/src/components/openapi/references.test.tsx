@@ -418,6 +418,26 @@ describe('reusable component references', () => {
     expect(screen.queryByText('component description')).not.toBeInTheDocument();
   });
 
+  it('bounds repeated referenced response descriptions', () => {
+    const description = 'x'.repeat(100_000);
+    const responses = Object.fromEntries(
+      Array.from({ length: 100 }, (_, index) => [
+        String(200 + index),
+        { $ref: '#/components/responses/Wide' },
+      ]),
+    );
+    const text = JSON.stringify(
+      jsonSpec({ '/items': { get: { responses } } }, { responses: { Wide: { description } } }),
+    );
+
+    render(<OpenApiView text={text} />);
+    fireEvent.click(screen.getByRole('button', { expanded: false }));
+
+    const renderedDescriptions = screen.getAllByText(/^x+…$/);
+    expect(renderedDescriptions).toHaveLength(100);
+    expect(renderedDescriptions.every((node) => node.textContent?.length === 1_001)).toBe(true);
+  });
+
   it('shortens a long unresolved reference in the placeholder', () => {
     const ref = `#/components/parameters/${'x'.repeat(5_000)}`;
     const spec = jsonSpec({ '/items': { get: { parameters: [{ $ref: ref }], responses: OK } } });
