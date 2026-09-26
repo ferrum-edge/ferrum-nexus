@@ -21,8 +21,11 @@
  *
  * Every posted message writes an audit row **in the same transaction as the
  * message**, notifies the counterparty in-app, and enqueues a
- * `message_received` email. Notification/email failures are never allowed to
- * fail the send — the message is already durable by then. The audit row is not
+ * `message_received` email. Notification/email failures — including failing to
+ * work out who should be notified, and failing to re-read the thread for the
+ * response — are never allowed to fail the send: the message is already durable
+ * by then, and reporting it as failed invites a retry that stores a second copy.
+ * They are logged instead. The audit row is not
  * in that category: a message the log has no record of is a message that should
  * not have been sent, so it rolls back with everything else.
  *
@@ -298,13 +301,34 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
     return admins.filter((admin) => admin.id !== senderId);
   }
 
-  /** Fan out the in-app notification and the queued email for one message. */
+  /**
+   * Fan out the in-app notification and the queued email for one message.
+   *
+   * Runs after the message has committed, so it never throws: every failure in
+   * here — recipient discovery included — is logged and swallowed.
+   */
   async function announce(
     thread: ThreadRecord,
     sender: UserRecord,
     message: MessageRecord,
   ): Promise<void> {
-    const recipients = await recipientsFor(thread, sender.id);
+    let recipients: UserRecord[];
+    try {
+      recipients = await recipientsFor(thread, sender.id);
+    } catch (error) {
+      // Reading the recipients is part of the courtesy fan-out, not the send:
+      // letting it reject reported a committed message as unsent, and the
+      // sender's natural retry stored it twice.
+      deps.log?.(
+        {
+          thread_id: thread.id,
+          message_id: message.id,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Could not resolve who to notify of a new message',
+      );
+      return;
+    }
     const body = preview(message.body);
     // One bucket per {@link COALESCE_WINDOW_MS}; the outbox's unique
     // `idempotency_key` turns every later message in the same bucket into a
@@ -583,7 +607,22 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
 
       await announce(thread, input.actor, message);
 
-      const [decorated] = await decorate([{ ...thread, last_message_at: at }]);
+      // The response's participants, API summary and preview are a fresh read,
+      // and the message is durable whether or not it succeeds: a failure falls
+      // back to the bare thread rather than reporting the send as failed.
+      let decorated: MessageThread | undefined;
+      try {
+        [decorated] = await decorate([{ ...thread, last_message_at: at }]);
+      } catch (error) {
+        deps.log?.(
+          {
+            thread_id: thread.id,
+            message_id: message.id,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'Could not decorate a newly posted thread',
+        );
+      }
       return {
         thread: decorated ?? { ...thread, last_message_at: at },
         message: { ...message, sender: toUserSummary(input.actor) },

@@ -26,6 +26,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Opening a thread or replying no longer answers `500` for a message that was
+  already stored and audited when working out who to notify fails (#393).
+  Recipient discovery — the other seat of a direct thread, the owner of a
+  platform thread, or the admins behind one — and the re-read that decorates a
+  new thread for the response now sit inside the same best-effort boundary as
+  the in-app notification and the queued email: the failure is logged and the
+  send answers `201` with the durable message, so the sender's retry no longer
+  stores a second copy. Message and audit failures stay fatal and atomic.
+
 - The publish-time render ceiling now charges every response entry, including
   one that declares no `content` or names an already-charged `$ref`, and
   `too_much_to_render` details report the new `responses` count alongside
