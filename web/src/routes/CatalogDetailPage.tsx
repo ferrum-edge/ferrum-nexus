@@ -399,8 +399,8 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
             api.status === 'retired'
               ? 'This API is retired and is no longer accepting new access requests.'
               : api.requestable
-              ? 'This API is protected by an access-control policy. Access is approved per identity — your account, or one of your applications — and an approval adds only that identity’s gateway consumer to its ACL group.'
-              : 'This API does not require an access request — issue a credential and start calling it.'
+                ? 'This API is protected by an access-control policy. Access is approved per identity — your account, or one of your applications — and an approval adds only that identity’s gateway consumer to its ACL group.'
+                : 'This API does not require an access request — issue a credential and start calling it.'
           }
         />
         <CardBody>
