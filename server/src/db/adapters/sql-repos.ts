@@ -2406,14 +2406,15 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
       const placeholders = threadIds.map(() => '?').join(', ');
       const rows = await queryAll(
         exec,
-        `SELECT m.* FROM messages AS m
-         WHERE m.thread_id IN (${placeholders})
-           AND NOT EXISTS (
-             SELECT 1 FROM messages AS n
-             WHERE n.thread_id = m.thread_id
-               AND (n.created_at > m.created_at
-                 OR (n.created_at = m.created_at AND n.id > m.id))
-           )`,
+        `SELECT ranked.* FROM (
+           SELECT m.*,
+             ROW_NUMBER() OVER (
+               PARTITION BY m.thread_id ORDER BY m.created_at DESC, m.id DESC
+             ) AS nexus_rank
+           FROM messages AS m
+           WHERE m.thread_id IN (${placeholders})
+         ) AS ranked
+         WHERE ranked.nexus_rank = 1`,
         threadIds,
       );
       return rows.map(mapMessage);
