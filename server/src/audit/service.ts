@@ -107,6 +107,18 @@ export const AuditAction = {
   /** A palette plugin was detached from an API's proxy and deleted. */
   API_PLUGIN_REMOVE: 'api.plugin_remove',
   /**
+   * A palette `set` or `remove` that reached the gateway and then failed;
+   * records whether its compensation put the gateway back.
+   *
+   * Every undo step is registered before the write it undoes, so a write Edge
+   * applied and never acknowledged is compensated too. `restored: true` means
+   * every step replayed and the gateway again matches the portal's unchanged
+   * row; `restored: false` means one did not, `step_errors` says why, and
+   * `plugin_config_id` names the config that may still carry the attempted
+   * change. `operation` is `set` or `remove`; config values are never logged.
+   */
+  API_PLUGIN_ROLLBACK: 'api.plugin_rollback',
+  /**
    * A `spec_enforcement` conversion could neither finish nor put the original
    * proxy back, so the API has no gateway object at all.
    *
@@ -411,6 +423,7 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.API_PLUGIN_SET]: TRANSACTIONAL,
   [AuditAction.API_PLUGIN_REMOVE_START]: INTENT,
   [AuditAction.API_PLUGIN_REMOVE]: TRANSACTIONAL,
+  [AuditAction.API_PLUGIN_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
   [AuditAction.API_GATEWAY_REPAIR_REQUIRED]: postCommit(
     `${COMPENSATION_TRAIL} The reconciliation flag, which is a change of its own, records ` +
       'it in its transaction.',

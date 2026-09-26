@@ -54,7 +54,7 @@ const HOOK_NAMES = new Set(['recordWithDelete', 'recordWithRevoke', 'recordWithR
  * the record rather than the change.
  */
 const MUTATING_METHOD =
-  /^(create|update|upsert|delete|insert|claim|bind|set|mark|enqueue|release|renew|reschedule|prune|touch|acquire)/;
+  /^(create|update|upsert|replace|delete|insert|claim|bind|set|mark|enqueue|release|renew|reschedule|prune|touch|acquire)/;
 
 const CLASS_BY_KEY = new Map<string, AuditCommitClass>(
   Object.entries(AuditAction).map(([key, value]) => [key, AUDIT_COMMIT_CLASSES[value]] as const),

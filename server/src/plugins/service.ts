@@ -44,6 +44,19 @@
  * which for `request_termination` would mean an API stuck returning 503 with
  * nothing in the UI to turn it off.
  *
+ * Every undo step is registered **before** the gateway write it undoes (see
+ * `edge-plugins.ts`), because a write Edge applied and could not acknowledge
+ * rejects exactly like one it refused: an `ip_restriction` switched off on the
+ * gateway while the request failed and the row still said "on" is the shape
+ * registering afterwards left behind. A new config's id is minted here for the
+ * same reason, so the record below can name it even when its create was never
+ * acknowledged.
+ *
+ * A failed request that reached the gateway always leaves an
+ * {@link AuditAction.API_PLUGIN_ROLLBACK} row: `restored: true` when every
+ * undo step replayed, `restored: false` — with the step errors — when the
+ * gateway may still be running something the portal does not describe.
+ *
  * ## `enabled: false` is not "removed"
  *
  * The config stays on the gateway **and stays associated**; only its `enabled`
@@ -88,6 +101,7 @@ import type {
   EdgePluginTrigger,
 } from '../ferrum-admin/types.js';
 import { conflict, notFound, validationFailed } from '../lib/errors.js';
+import { newId } from '../lib/ids.js';
 import { createEdgePluginBinder } from '../publishing/edge-plugins.js';
 import type { PublishingService } from '../publishing/service.js';
 
@@ -238,6 +252,73 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
     return named.find((plugin) => plugin.id === row.ferrum_plugin_config_id);
   }
 
+  /**
+   * Replay a failed palette write's undo stack, newest first, and record what
+   * that achieved.
+   *
+   * Best-effort by contract: the request is already failing, and an undo step
+   * must not replace the failure the caller needs to see with its own. What
+   * makes that swallow safe is that it is never silent — the outcome lands in
+   * an {@link AuditAction.API_PLUGIN_ROLLBACK} row whichever way it went. An
+   * empty stack means no gateway write was attempted, so there is nothing to
+   * put back and nothing to record.
+   */
+  async function unwind(input: {
+    actor: UserRecord;
+    target: { apiId: Uuid; proxyId: string };
+    operation: 'set' | 'remove';
+    pluginName: string;
+    pluginConfigId: string | null;
+    undo: (() => Promise<void>)[];
+    error: unknown;
+    ip: string | null;
+  }): Promise<void> {
+    if (input.undo.length === 0) return;
+    const stepErrors: string[] = [];
+    for (const step of [...input.undo].reverse()) {
+      await step().catch((undoError: unknown) => {
+        stepErrors.push(errorMessage(undoError));
+        deps.log?.(
+          {
+            api_id: input.target.apiId,
+            proxy_id: input.target.proxyId,
+            plugin_name: input.pluginName,
+            error: errorMessage(undoError),
+          },
+          'a palette plugin compensation step failed; the gateway may not match the portal',
+        );
+      });
+    }
+    await audit
+      .record(
+        { id: input.actor.id, role: input.actor.role },
+        AuditAction.API_PLUGIN_ROLLBACK,
+        { type: 'api', id: input.target.apiId },
+        {
+          operation: input.operation,
+          plugin_name: input.pluginName,
+          plugin_config_id: input.pluginConfigId,
+          proxy_id: input.target.proxyId,
+          restored: stepErrors.length === 0,
+          ...(stepErrors.length === 0 ? {} : { step_errors: stepErrors }),
+          error: errorMessage(input.error),
+        },
+        input.ip,
+      )
+      .catch((auditError: unknown) => {
+        deps.log?.(
+          {
+            api_id: input.target.apiId,
+            proxy_id: input.target.proxyId,
+            plugin_name: input.pluginName,
+            restored: stepErrors.length === 0,
+            error: errorMessage(auditError),
+          },
+          'a failed palette plugin change could not be recorded in the audit log',
+        );
+      });
+  }
+
   return {
     descriptorFor,
 
@@ -299,6 +380,9 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
           }
         }
         const undo: (() => Promise<void>)[] = [];
+        // The config this save writes: the owned one, or a new one whose id
+        // is fixed before its create is dispatched.
+        const pluginConfigId = existing?.id ?? newId();
         try {
           const written = await binder.reconcileOptionalPlugin(
             target.proxyId,
@@ -307,7 +391,7 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
             paletteGatewaySettings(descriptor.name, input.config, config.edge.rateLimit),
             actor.id,
             undo,
-            { enabled: input.enabled, trigger, priorityOverride },
+            { enabled: input.enabled, trigger, priorityOverride, id: pluginConfigId },
           );
           // Written last but inside the compensated block, like every other
           // gateway-then-store sequence in the portal — and with its audit
@@ -347,26 +431,16 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
             return upserted;
           });
         } catch (error) {
-          // Best-effort by contract: the request is already failing and an
-          // undo step must not replace the failure the caller needs to see
-          // with its own. Every step here replays a plugin write or an
-          // association, so the gateway stays describable whichever way one
-          // goes — but a swallowed failure is a divergence between the
-          // `api_plugins` row and the proxy that nothing else will revisit,
-          // so it is logged.
-          for (const step of undo.reverse()) {
-            await step().catch((undoError: unknown) => {
-              deps.log?.(
-                {
-                  api_id: target.apiId,
-                  proxy_id: target.proxyId,
-                  plugin_name: pluginName,
-                  error: errorMessage(undoError),
-                },
-                'a palette plugin compensation step failed; the gateway may not match the portal',
-              );
-            });
-          }
+          await unwind({
+            actor,
+            target,
+            operation: 'set',
+            pluginName,
+            pluginConfigId,
+            undo,
+            error,
+            ip,
+          });
           throw error;
         }
       });
@@ -390,10 +464,9 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
         const removedConfigId = existing?.id ?? null;
 
         // The attempt is recorded before the gateway is touched, as a
-        // deletion's is: the config delete below is not something a failed
-        // record can take back, so a failure to record the removal that
-        // follows still leaves a row naming who started it — and a failure to
-        // record *this* stops the removal before anything has changed.
+        // deletion's is: should the removal below then fail and its undo not
+        // put the config back, a row still names who started it — and a
+        // failure to record *this* stops the removal before anything changed.
         const startedId = await store.transaction(async (tx) => {
           const started = await audit.forStore(tx).record(
             { id: actor.id, role: actor.role },
@@ -409,9 +482,9 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
           return started.id;
         });
 
-        if (existing) {
-          const undo: (() => Promise<void>)[] = [];
-          try {
+        const undo: (() => Promise<void>)[] = [];
+        try {
+          if (existing) {
             await binder.reconcileOptionalPlugin(
               target.proxyId,
               existing,
@@ -420,70 +493,64 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
               actor.id,
               undo,
             );
-          } catch (error) {
-            // The same best-effort contract as `set` above, swallowed for the
-            // same reason and logged for the same one.
-            for (const step of undo.reverse()) {
-              await step().catch((undoError: unknown) => {
-                deps.log?.(
-                  {
-                    api_id: target.apiId,
-                    proxy_id: target.proxyId,
-                    plugin_name: pluginName,
-                    error: errorMessage(undoError),
-                  },
-                  'a palette plugin compensation step failed; the gateway may not match the portal',
-                );
-              });
-            }
-            throw error;
           }
-        }
-
-        // The row and its audit record commit together. Written after the
-        // commit, a failed insert left the plugin gone and unaudited behind a
-        // `500`. Now the row survives for the removal to be repeated — not
-        // undone: a config put back would carry a new id the row does not
-        // record, and so would no longer be the portal's to remove. The repeat
-        // finds the config already gone and recognises its own earlier
-        // attempt by the start row naming the config this row owned.
-        await store.transaction(async (tx) => {
-          let removed: Record<string, unknown> = {
-            was_attached: removedConfigId !== null,
-            plugin_config_id: removedConfigId,
-          };
-          if (removedConfigId === null && row.ferrum_plugin_config_id !== null) {
-            const attempts = await tx.auditLogs.list(
-              {
-                action: AuditAction.API_PLUGIN_REMOVE_START,
-                target_type: 'api',
-                target_id: target.apiId,
-              },
-              { limit: MAX_PAGE_SIZE },
-            );
-            const earlier = attempts.items.some(
-              (entry) =>
-                entry.id !== startedId &&
-                entry.details.plugin_name === pluginName &&
-                entry.details.plugin_config_id === row.ferrum_plugin_config_id,
-            );
-            if (earlier) {
-              removed = {
-                was_attached: true,
-                plugin_config_id: row.ferrum_plugin_config_id,
-                resumed: true,
-              };
+          // The row and its audit record commit together. Written after the
+          // commit, a failed insert left the plugin gone and unaudited behind
+          // a `500`; now the row survives and the catch below puts the config
+          // back under the id the row records, so the removal can simply be
+          // repeated. Should that undo fail, the repeat finds the config
+          // already gone and recognises its own earlier attempt by the start
+          // row naming the config this row owned.
+          await store.transaction(async (tx) => {
+            let removed: Record<string, unknown> = {
+              was_attached: removedConfigId !== null,
+              plugin_config_id: removedConfigId,
+            };
+            if (removedConfigId === null && row.ferrum_plugin_config_id !== null) {
+              const attempts = await tx.auditLogs.list(
+                {
+                  action: AuditAction.API_PLUGIN_REMOVE_START,
+                  target_type: 'api',
+                  target_id: target.apiId,
+                },
+                { limit: MAX_PAGE_SIZE },
+              );
+              const earlier = attempts.items.some(
+                (entry) =>
+                  entry.id !== startedId &&
+                  entry.details.plugin_name === pluginName &&
+                  entry.details.plugin_config_id === row.ferrum_plugin_config_id,
+              );
+              if (earlier) {
+                removed = {
+                  was_attached: true,
+                  plugin_config_id: row.ferrum_plugin_config_id,
+                  resumed: true,
+                };
+              }
             }
-          }
-          await tx.apiPlugins.delete(target.apiId, pluginName);
-          await audit.forStore(tx).record(
-            { id: actor.id, role: actor.role },
-            AuditAction.API_PLUGIN_REMOVE,
-            { type: 'api', id: target.apiId },
-            { plugin_name: pluginName, label: descriptor.label, ...removed },
+            await tx.apiPlugins.delete(target.apiId, pluginName);
+            await audit.forStore(tx).record(
+              { id: actor.id, role: actor.role },
+              AuditAction.API_PLUGIN_REMOVE,
+              { type: 'api', id: target.apiId },
+              { plugin_name: pluginName, label: descriptor.label, ...removed },
+              ip,
+            );
+          });
+        } catch (error) {
+          await unwind({
+            actor,
+            target,
+            operation: 'remove',
+            pluginName,
+            pluginConfigId: removedConfigId,
+            undo,
+            error,
             ip,
-          );
-        });
+          });
+          throw error;
+        }
       });
     },
   };

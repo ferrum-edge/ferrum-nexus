@@ -26,6 +26,19 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- The publish-time render ceiling now charges every response entry, including
+  one that declares no `content` or names an already-charged `$ref`, and
+  `too_much_to_render` details report the new `responses` count alongside
+  `schema_nodes`, `parameters` and `media_types` (#390). Previously a
+  `responses` map of empty entries cost nothing, so one repeated by YAML aliases
+  across many operations could keep the upload check busy for about a second
+  without reaching the ceiling; the count now stops at the ceiling instead.
+- A message reply draft now belongs to its conversation (#391). Opening another
+  conversation shows that conversation's own draft instead of carrying the text
+  across, and a reply that finishes sending clears the composer only if it
+  still holds the text that was sent, so edits made while the reply was in
+  flight — or a draft in another conversation — are kept. A failed send keeps
+  the draft.
 - Retired APIs in the catalog are labeled as retired and no longer show a new
   access-request form. Existing identity grants remain visible, and pending
   requests can still be withdrawn (#376).
@@ -42,6 +55,46 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   the shown and copied text are the same shell-quoted command.
 - Approval, application deletion and API deletion now refresh dependent grant,
   credential, request, catalog and application count caches (#379).
+- **API settings change only the gateway plugin configs the portal created,
+  and a plugin-config write whose acknowledgement is lost is compensated.**
+  - `PATCH /api/apis/:id` used to find the API's `rate_limiting`, `cors`,
+    `access_control` and auth configs by plugin name, so a provider's quota,
+    CORS, `requestable` or `auth_plugin` change could rewrite or delete a
+    config of the same name that a gateway operator had attached to the proxy.
+    Nexus now records the Edge config id of every first-class config it
+    creates (forward migration `002_api_gateway_plugins`, new store repository
+    `apiGatewayPlugins`) and acts on those ids alone; an operator's config is
+    left exactly as it is, and the portal creates its own beside it when it
+    owns none. Every role is recorded, with a `NULL` config id where the
+    portal owns no config, so the record is complete from the first change.
+    An API published before the upgrade has its configs recognised role by
+    role, by the values the portal wrote rather than by name — an auth config
+    only while it is exactly the empty config the portal writes. A change to a
+    setting whose proxy carries two such candidates, or to `auth_plugin`,
+    `requestable` or `cors` when the proxy's only auth, `access_control` or
+    `cors` configs no longer match the API's settings, is refused with
+    `409 CONFLICT` naming the plugin — for an auth swap, because the outgoing
+    config left attached would keep accepting the credentials the portal tells
+    grantees to replace. A hand-edited limiter is left to the operator, the
+    portal's own is created beside it, and the `api.update` row names it under
+    `unowned_same_name_configs`, as it does the same-name configs of a role the
+    API does not use. `002_api_gateway_plugins` is listed in the
+    released-migration manifest as pending (`release: null`), so CI checks its
+    artifacts until the release that ships it freezes them.
+  - A `PUT /plugins/config/{id}` Edge applied but never acknowledged used to
+    leave the change live — a palette security plugin disabled or an
+    allow-list replaced, a first-class quota raised — while the request failed
+    and the portal kept showing the old setting. The compensating write, which
+    restores the whole live resource including `enabled` and `trigger`, is now
+    registered before the `PUT`; new configs are created under an id minted
+    before the `POST`, so an unacknowledged create is withdrawn too; and a
+    removed config that has to be put back is recreated under its own id.
+  - A palette `set` or `remove` that reached the gateway and then failed now
+    writes an `api.plugin_rollback` audit row recording whether the gateway was
+    restored (`restored`), and when it was not, the step errors and the config
+    to inspect. `docs/security.md` now states that compensation is held in
+    memory: a process that dies between Edge applying a change and the undo
+    running leaves no record, and recovery is operational.
 - **OpenAPI documentation follows parameter inheritance and reusable
   components (#377, #378).**
   - An operation parameter now replaces the path-level parameter with the
@@ -171,11 +224,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   and unaudited behind a `500`; where the gateway was written first it is
   compensated like any failed row write — an approval's ACL group comes back
   off, an issued key or a new API's proxy is withdrawn, a plugin change is
-  undone, a test consumer is taken back down. Gateway work that cannot be undone
-  commits a new intent row first: `api.plugin_remove_start` before a palette
-  plugin's config is deleted, and `credential.revoke_start` with a
-  credential's move to `retiring`; a failed completion leaves the row for the
-  repeat, which records it. The god-mode sweep's `access.revoke` rows now commit
+  undone, a test consumer is taken back down. Gateway work that cannot be undone,
+  or only best-effort, commits a new intent row first: `api.plugin_remove_start`
+  before a palette plugin's config is deleted, and `credential.revoke_start`
+  with a credential's move to `retiring`; a failed completion leaves the row
+  for the repeat, which records it. The god-mode sweep's `access.revoke` rows now commit
   with each grant's claim, so a gateway refusal is reported in
   `god.disable_user_complete`'s `failed_grants` rather than on the row, and the
   `audit` failure stage is gone. A repeated application, API or plugin removal

@@ -660,7 +660,7 @@ export function runPrivilegedAuditContract(
       assert.equal(await countAudit(AuditAction.API_PLUGIN_REMOVE, api.id), 0);
     });
 
-    it('keeps the plugin row for the retry when its removal cannot be recorded', async () => {
+    it('puts the config back when a plugin removal cannot be recorded', async () => {
       const api = await publish();
       const proxyId = await proxyOf(api.id);
       assert.equal((await setCompression(api.id)).statusCode, 200);
@@ -674,14 +674,43 @@ export function runPrivilegedAuditContract(
       assert.equal(failed.statusCode, 500, failed.body);
       assert.deepEqual(faults.pending(), [], 'the intended failure was reached');
       assert.ok(await target.store.apiPlugins.find(api.id, 'compression'), 'the row survives');
-      assert.equal(harness.edge.pluginForProxy(proxyId, 'compression'), undefined);
+      assert.equal(
+        harness.edge.pluginForProxy(proxyId, 'compression')?.id,
+        owned,
+        'the config is back under the id the row records',
+      );
       assert.equal(await countAudit(AuditAction.API_PLUGIN_REMOVE_START, api.id), 1);
       assert.equal(await countAudit(AuditAction.API_PLUGIN_REMOVE, api.id), 0);
 
       const retried = await removeCompression(api.id);
       assert.equal(retried.statusCode, 200, retried.body);
       assert.equal(await target.store.apiPlugins.find(api.id, 'compression'), null);
+      assert.equal(harness.edge.pluginForProxy(proxyId, 'compression'), undefined);
       assert.equal(await countAudit(AuditAction.API_PLUGIN_REMOVE, api.id), 1);
+      const details = await detailsOf(AuditAction.API_PLUGIN_REMOVE, api.id);
+      assert.equal(details.was_attached, true);
+      assert.equal(details.plugin_config_id, owned);
+    });
+
+    it('names the config an earlier removal deleted when its undo could not restore it', async () => {
+      const api = await publish();
+      const proxyId = await proxyOf(api.id);
+      assert.equal((await setCompression(api.id)).statusCode, 200);
+      const plugin = await target.store.apiPlugins.find(api.id, 'compression');
+      const owned = plugin?.ferrum_plugin_config_id;
+      assert.ok(owned);
+      faults.failAfter('auditLogs', 'create', 1);
+      // …and the gateway refuses the recreate that would have undone it.
+      harness.edge.queueFailure(500, { error: 'refused' }, '/plugins/config', 'POST');
+      const failed = await removeCompression(api.id);
+      assert.equal(failed.statusCode, 500, failed.body);
+      assert.deepEqual(faults.pending(), [], 'the intended failure was reached');
+      assert.ok(await target.store.apiPlugins.find(api.id, 'compression'), 'the row survives');
+      assert.equal(harness.edge.pluginForProxy(proxyId, 'compression'), undefined);
+
+      const retried = await removeCompression(api.id);
+      assert.equal(retried.statusCode, 200, retried.body);
+      assert.equal(await target.store.apiPlugins.find(api.id, 'compression'), null);
       // The repeat found the config already gone, and still names it.
       const details = await detailsOf(AuditAction.API_PLUGIN_REMOVE, api.id);
       assert.equal(details.was_attached, true);

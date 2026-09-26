@@ -27,10 +27,11 @@
  *   per operation.
  * - the document costs no more than {@link MAX_SPEC_RENDER_UNITS} to *render*.
  *   Paths and operations are the wrong unit for that: the documentation viewer
- *   walks one row per schema node, per parameter and per media type, and a
- *   single declared operation can carry any number of all three. A document is
- *   provider-authored and is read back by every signed-in viewer of the catalog
- *   entry, so this counts what the viewer walks and refuses past the ceiling.
+ *   walks one row per schema node, per parameter and per media type and one
+ *   card per response, and a single declared operation can carry any number of
+ *   all four. A document is provider-authored and is read back by every
+ *   signed-in viewer of the catalog entry, so this counts what the viewer walks
+ *   and refuses past the ceiling.
  *
  * Everything else (schema correctness, `$ref` resolution, operation shape) is
  * left alone: an over-strict portal would reject specs the gateway is perfectly
@@ -670,11 +671,12 @@ function countNodes(root: unknown, memo: WeakMap<object, number>): number {
   return rootTotal;
 }
 
-/** The three things the documentation viewer walks, counted separately. */
+/** The four things the documentation viewer walks, counted separately. */
 interface RenderUnits {
   schemaNodes: number;
   parameters: number;
   mediaTypes: number;
+  responses: number;
 }
 
 /**
@@ -698,12 +700,15 @@ interface ContentCost {
  * Counted over the parts the viewer actually walks — reusable schemas, and the
  * parameters, request bodies and responses of every declared operation — rather
  * than over the document as a whole, so the number in the error means something
- * the provider can act on.
+ * the provider can act on. Every response entry costs one unit, as it costs the
+ * viewer a card, whether or not it declares any `content`: an entry that cost
+ * nothing could be repeated without bound, and a YAML alias repeats the whole
+ * `responses` map at every operation that names it.
  *
  * A parameter, request body or response written as a `$ref` is followed the way
  * the viewer follows it — one memoised resolver for the document — and each
  * distinct object so named is charged once, at its first reference; every later
- * reference to it costs only its own parameter entry, if it is one. Path-item
+ * reference to it costs only its own parameter or response entry. Path-item
  * parameters are charged once per path item, and schema `$ref`s are not
  * expanded. Those repetitions are what the viewer's own page budget absorbs;
  * charging them here would refuse documents that merely reuse their components.
@@ -722,25 +727,32 @@ export function assertRenderCost(
   const contentCosts = new WeakMap<object, ContentCost>();
   const chargedParameters = new WeakSet<object>();
   const chargedContent = new WeakSet<object>();
-  const units: RenderUnits = { schemaNodes: 0, parameters: 0, mediaTypes: 0 };
+  const units: RenderUnits = { schemaNodes: 0, parameters: 0, mediaTypes: 0, responses: 0 };
   const resolver = createOpenApiRefResolver(document);
 
-  const charge = (schemaNodes: number, parameters: number, mediaTypes: number): void => {
+  const charge = (
+    schemaNodes: number,
+    parameters: number,
+    mediaTypes: number,
+    responses = 0,
+  ): void => {
     units.schemaNodes += schemaNodes;
     units.parameters += parameters;
     units.mediaTypes += mediaTypes;
-    const total = units.schemaNodes + units.parameters + units.mediaTypes;
+    units.responses += responses;
+    const total = units.schemaNodes + units.parameters + units.mediaTypes + units.responses;
     if (total <= MAX_SPEC_RENDER_UNITS) return;
     throw specInvalid(
-      `The document declares ${units.schemaNodes} schema nodes, ${units.parameters} parameters ` +
-        `and ${units.mediaTypes} media types, more than the ${MAX_SPEC_RENDER_UNITS} the ` +
-        'documentation viewer can render',
+      `The document declares ${units.schemaNodes} schema nodes, ${units.parameters} parameters, ` +
+        `${units.mediaTypes} media types and ${units.responses} responses, more than the ` +
+        `${MAX_SPEC_RENDER_UNITS} the documentation viewer can render`,
       {
         field: 'paths',
         reason: 'too_much_to_render',
         schema_nodes: units.schemaNodes,
         parameters: units.parameters,
         media_types: units.mediaTypes,
+        responses: units.responses,
         units: total,
         limit: MAX_SPEC_RENDER_UNITS,
       },
@@ -807,7 +819,12 @@ export function assertRenderCost(
       addParameters(operation.parameters);
       addContent(operation.requestBody);
       if (!isRecord(operation.responses)) continue;
-      for (const response of Object.values(operation.responses)) addContent(response);
+      // Charged per entry before its content, so a map of entries that declare
+      // nothing still reaches the ceiling and stops the loop there.
+      for (const response of Object.values(operation.responses)) {
+        charge(0, 0, 0, 1);
+        addContent(response);
+      }
     }
   }
 }

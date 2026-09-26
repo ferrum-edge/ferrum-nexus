@@ -1904,10 +1904,11 @@ A document must also stay inside what the built-in documentation viewer can
 render. Bytes, paths and operations do not bound that: one declared operation
 can carry any number of parameters, media types and schema nodes, and every
 signed-in viewer of the catalog entry walks them. Nexus therefore counts the
-schema nodes (including reusable `components.schemas`), the parameter entries
-and the media types across the document and refuses more than **100,000** of
-them together with `400 SPEC_INVALID` and
-`details: { reason: "too_much_to_render", schema_nodes, parameters, media_types, units, limit }`.
+schema nodes (including reusable `components.schemas`), the parameter entries,
+the media types and the response entries across the document and refuses more
+than **100,000** of them together with `400 SPEC_INVALID` and
+`details: { reason: "too_much_to_render", schema_nodes, parameters, media_types, responses, units, limit }`.
+Every response entry counts, including one that declares no `content`.
 A parameter, request body or response written as a local `$ref` is charged for
 the object it names, each distinct object once however many places reference it;
 the count stops at the first charge past the ceiling, so the reported totals are
@@ -2066,7 +2067,22 @@ would lock grantees out of the API, without `confirm_access_disruption: true`),
 `409 CONFLICT` (a gateway setting — `upstream_url`, `auth_plugin`, `requestable`,
 `rate_limit`, `cors`, `allowed_methods`, `timeouts`, `circuit_breaker` or
 `spec_enforcement` — on an API with no gateway deployment; `details.fields`
-names them), `502 EDGE_ERROR`.
+names them; or a change to `auth_plugin`, `requestable`, `rate_limit` or `cors`
+on an API published before plugin ownership was recorded, whose proxy carries
+two configs the portal could have created for that setting, or — for
+`auth_plugin`, `requestable` and `cors` — only an auth, `access_control` or
+`cors` config that no longer matches the API's settings (for auth, one with any
+setting of its own, which a swap would leave accepting the outgoing
+credentials); `details.plugin_names` names the plugins and, in the second case,
+`details.plugin_config_ids` the configs), `502 EDGE_ERROR`.
+
+**Only the plugin configs the portal created are touched.** Nexus records the
+Edge config id of the auth, `access_control`, `rate_limiting` and `cors` configs
+it creates, and `auth_plugin`, `requestable`, `rate_limit` and `cors` act on
+those alone. A config of the same plugin name that a gateway operator attached
+to the proxy is never rewritten, re-associated or deleted: setting `rate_limit`
+beside an operator's limiter creates the portal's own config next to it (both
+apply), and `null` removes only the portal's.
 
 **An API the gateway no longer serves takes catalog edits only.** While
 `ferrum_proxy_id` is `null` (after a reconciliation repair, or a restore that
@@ -2720,11 +2736,11 @@ row still goes.
 
 An `api.plugin_remove_start` audit row is committed before the gateway is
 touched, and the row delete commits with its `api.plugin_remove` row. If that
-last transaction fails, the row stays for the removal to be repeated — the
-config is not put back, because one recreated on the gateway would carry an id
-the row does not record — and the repeat, finding the config already gone,
-recognises its own earlier attempt by that start row and records
-`was_attached: true` with `resumed: true`.
+last transaction fails, the row stays and the config is put back under the id
+the row records (`api.plugin_rollback`), so the removal can simply be repeated.
+Should that undo fail as well, the repeat finds the config already gone,
+recognises its own earlier attempt by the start row naming the config, and
+records `was_attached: true` with `resumed: true`.
 
 Deleting the API removes every palette row with it; the gateway objects need no
 separate step, because they are proxy-scoped and the proxy delete cascades them.

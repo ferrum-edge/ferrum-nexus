@@ -1,0 +1,13 @@
+{
+  "id": "002_api_gateway_plugins",
+  "backend": "mongodb",
+  "description": "Frozen snapshot of API_GATEWAY_PLUGIN_INDEXES in server/src/db/adapters/mongodb/index.ts",
+  "indexes": [
+    {
+      "collection": "api_gateway_plugins",
+      "name": "ux_api_gateway_plugins_api_role",
+      "key": { "api_id": 1, "role": 1 },
+      "unique": true
+    }
+  ]
+}
