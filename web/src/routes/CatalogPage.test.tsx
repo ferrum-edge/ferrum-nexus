@@ -342,7 +342,8 @@ describe('catalog access', () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/Explain your use case/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Request access' })).not.toBeInTheDocument();
-    expect(screen.getByText('Retired')).toBeInTheDocument();
+    const accessLabel = screen.getByText('Access');
+    expect(within(accessLabel.parentElement!).getByText('Retired')).toBeInTheDocument();
   });
 
   it('keeps withdrawal available for a pending request on a retired API', async () => {
