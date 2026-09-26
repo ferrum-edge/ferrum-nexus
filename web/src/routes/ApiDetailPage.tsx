@@ -450,7 +450,7 @@ function SettingsTab({ api }: { api: Api }): ReactElement {
                   <div className="flex flex-col gap-3 md:col-span-2">
                     <FormNotice tone="warning">{AUTH_SWAP_WARNING}</FormNotice>
                     <Checkbox
-                      label="Invalidate portal-issued old-method credentials (operator configs remain active)"
+                      label="Invalidate portal-issued old-method credentials here and notify their holders"
                       checked={confirmDisruption}
                       onChange={(event) => setConfirmDisruption(event.target.checked)}
                     />
