@@ -1899,10 +1899,11 @@ A document must also stay inside what the built-in documentation viewer can
 render. Bytes, paths and operations do not bound that: one declared operation
 can carry any number of parameters, media types and schema nodes, and every
 signed-in viewer of the catalog entry walks them. Nexus therefore counts the
-schema nodes (including reusable `components.schemas`), the parameter entries
-and the media types across the document and refuses more than **100,000** of
-them together with `400 SPEC_INVALID` and
-`details: { reason: "too_much_to_render", schema_nodes, parameters, media_types, units, limit }`.
+schema nodes (including reusable `components.schemas`), the parameter entries,
+the media types and the response entries across the document and refuses more
+than **100,000** of them together with `400 SPEC_INVALID` and
+`details: { reason: "too_much_to_render", schema_nodes, parameters, media_types, responses, units, limit }`.
+Every response entry counts, including one that declares no `content`.
 A parameter, request body or response written as a local `$ref` is charged for
 the object it names, each distinct object once however many places reference it;
 the count stops at the first charge past the ceiling, so the reported totals are
