@@ -269,14 +269,23 @@ export function createGodService(deps: GodServiceDeps): GodService {
         }
       }
 
-      const result = await publishing.remove(actor, api.id, ip);
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.GOD_DELETE_API,
-        { type: 'api', id: api.id },
-        { reason: why, slug: api.slug, owner_user_id: api.owner_user_id, revoked_grants: revoked },
-        ip,
-      );
+      // The god-mode row commits in the transaction that removes the API and
+      // records `api.delete`, so the reason is never missing from a delete that
+      // happened, nor present for one that rolled back.
+      const result = await publishing.remove(actor, api.id, ip, async (tx) => {
+        await audit.forStore(tx).record(
+          { id: actor.id, role: actor.role },
+          AuditAction.GOD_DELETE_API,
+          { type: 'api', id: api.id },
+          {
+            reason: why,
+            slug: api.slug,
+            owner_user_id: api.owner_user_id,
+            revoked_grants: revoked,
+          },
+          ip,
+        );
+      });
 
       return {
         deleted_api_id: api.id,
@@ -320,7 +329,16 @@ export function createGodService(deps: GodServiceDeps): GodService {
       // one instance in line behind an ordinary demotion on another. The lease
       // is taken outside the transaction — see `users/service.ts`.
       const guardsLastSuperAdmin = target.role === 'super_admin' && target.status === 'active';
-      const transition = async (): Promise<{ row: UserRecord; job: GatewayTeardownJobRecord }> =>
+      // The disable, its session cut-off, its queued revocation and both of
+      // its audit rows commit together. Recorded after the commit, a failed
+      // insert left the account disabled with no row naming who did it or why;
+      // now it leaves the account exactly as it was. What the steps after the
+      // commit achieved is the separate `god.disable_user_complete` row.
+      const transition = async (): Promise<{
+        row: UserRecord;
+        job: GatewayTeardownJobRecord;
+        terminated: number;
+      }> =>
         store.transaction(async (tx) => {
           const current = await tx.users.findById(target.id);
           if (!current) throw notFound('User', userId);
@@ -344,9 +362,37 @@ export function createGodService(deps: GodServiceDeps): GodService {
               'That account changed while you were disabling it — reload and try again',
             );
           }
-          // Both writes roll back on any failure, including a lost predicate.
+          // Every write rolls back on any failure, including a lost predicate.
           const job = await tx.gatewayTeardownJobs.upsertPending(target.id, actor.id, nowIso());
-          return { row, job };
+          // A disabled account keeps no usable browser session.
+          const terminated = await tx.sessions.deleteForUser(target.id);
+          await audit.forStore(tx).record(
+            { id: actor.id, role: actor.role },
+            AuditAction.USER_DISABLE,
+            { type: 'user', id: target.id },
+            {
+              changed_fields: target.status === 'disabled' ? [] : ['status'],
+              from_status: target.status,
+              to_status: 'disabled',
+              terminated_sessions: terminated,
+              gateway_teardown: 'queued',
+            },
+            ip,
+          );
+          await audit.forStore(tx).record(
+            { id: actor.id, role: actor.role },
+            AuditAction.GOD_DISABLE_USER,
+            { type: 'user', id: target.id },
+            {
+              reason: why,
+              previous_status: target.status,
+              terminated_sessions: terminated,
+              revoke_grants: revokeGrants,
+              gateway_teardown: 'queued',
+            },
+            ip,
+          );
+          return { row, job, terminated };
         });
 
       // And, exactly as there, under the account's lifecycle key — the one a
@@ -359,11 +405,13 @@ export function createGodService(deps: GodServiceDeps): GodService {
         ? await locks(SUPER_ADMIN_LOCK_KEY, lifecycle)
         : await lifecycle();
       const updated = outcome.row;
+      const terminated = outcome.terminated;
 
-      // The disable has committed, so it is audited whatever fails from here
-      // on: a throw that skipped the audit rows below left a disabled account
-      // with no record of who disabled it or why. A failed step is named in
-      // both rows' details, and its error is raised once they are written.
+      // The disable has committed and is audited, so every step from here on
+      // runs whatever the one before it did: a throw that skipped them left a
+      // disabled account with grants or a gateway identity nobody went back
+      // for. A failed step is named in the completion row, and its error is
+      // raised once that row is written.
       const failedSteps: string[] = [];
       let failure: unknown = null;
       const fail = (step: string, error: unknown): void => {
@@ -403,8 +451,8 @@ export function createGodService(deps: GodServiceDeps): GodService {
       const revoked = sweep.revoked;
       // A sweep that could not revoke every grant is not a success, and is
       // never reported as one (issue #341): the step is named in
-      // `failed_steps`, the grants in the audit rows, and the request answers
-      // with the error once they are written. A grant stopped after its claim
+      // `failed_steps`, the grants in the completion row, and the request
+      // answers with the error once it is written. A grant stopped after its claim
       // stays `revoked` in the portal, so neither a retry nor a later
       // re-enable replays it: the teardown below strips its group, and should
       // that fail as well, a re-enable rebuilds the account's approval groups
@@ -435,11 +483,8 @@ export function createGodService(deps: GodServiceDeps): GodService {
         ? { failed_grant_revocations: failedGrants.length, failed_grants: failedGrants }
         : {};
 
-      // A disabled account keeps no usable browser session — and no working
-      // gateway identity, which a session cookie has nothing to do with.
-      const terminated = await attempt('terminate_sessions', 0, () =>
-        store.sessions.deleteForUser(target.id),
-      );
+      // No working gateway identity either, which a session cookie has nothing
+      // to do with.
       const teardown = await runGatewayTeardown({
         credentials,
         store,
@@ -448,39 +493,31 @@ export function createGodService(deps: GodServiceDeps): GodService {
         job: outcome.job,
         ...(deps.log ? { log: deps.log } : {}),
       });
+      if (teardown.outcome !== 'pending') {
+        await audit.record(
+          { id: actor.id, role: actor.role },
+          AuditAction.USER_GATEWAY_TEARDOWN_COMPLETE,
+          { type: 'user', id: target.id },
+          { inline: true, ...teardown.details },
+          ip,
+        );
+      }
 
       await audit.record(
         { id: actor.id, role: actor.role },
-        AuditAction.USER_DISABLE,
-        { type: 'user', id: target.id },
-        {
-          changed_fields: target.status === 'disabled' ? [] : ['status'],
-          from_status: target.status,
-          to_status: 'disabled',
-          terminated_sessions: terminated,
-          ...teardown.details,
-          ...sweepDetails,
-          ...(failedSteps.length ? { failed_steps: failedSteps } : {}),
-        },
-        ip,
-      );
-
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.GOD_DISABLE_USER,
+        AuditAction.GOD_DISABLE_USER_COMPLETE,
         { type: 'user', id: target.id },
         {
           reason: why,
           revoked_grants: revoked,
           terminated_sessions: terminated,
-          previous_status: target.status,
           ...teardown.details,
           ...sweepDetails,
           ...(failedSteps.length ? { failed_steps: failedSteps } : {}),
         },
         ip,
       );
-      // Audited above; the caller still learns the disable did not finish, and
+      // Recorded above; the caller still learns the disable did not finish, and
       // repeating it re-runs every step against the already-disabled account.
       if (failedSteps.length) throw failure;
 

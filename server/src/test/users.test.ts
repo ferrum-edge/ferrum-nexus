@@ -218,12 +218,19 @@ describe('users and organizations', () => {
     const row = await harness.store.credentials.findById(credentialId);
     assert.equal(row?.status, 'revoked', 'the mirrored metadata follows the gateway');
 
+    // The disable is recorded with the transition, the revocation queued; the
+    // immediate attempt that landed is recorded as its outcome.
     const audited = (await harness.auditRows('user.disable')).find(
       (entry) => entry.target_id === target.user.id,
     );
-    const details = audited?.details as { gateway_teardown?: string; revoked_credentials?: number };
-    assert.equal(details?.gateway_teardown, 'ok');
-    assert.equal(details?.revoked_credentials, 1);
+    assert.equal(audited?.details.gateway_teardown, 'queued');
+    const completed = (await harness.auditRows('user.gateway_teardown_complete')).find(
+      (entry) => entry.target_id === target.user.id,
+    );
+    assert.equal(completed?.actor_user_id, admin.user.id);
+    assert.equal(completed?.details.inline, true);
+    assert.equal(completed?.details.gateway_teardown, 'ok');
+    assert.equal(completed?.details.revoked_credentials, 1);
   });
 
   it('leaves the gateway teardown pending when the gateway refuses it', async () => {
@@ -252,7 +259,12 @@ describe('users and organizations', () => {
     const audited = (await harness.auditRows('user.disable')).find(
       (entry) => entry.target_id === target.user.id,
     );
-    assert.equal((audited?.details as { gateway_teardown?: string }).gateway_teardown, 'pending');
+    assert.equal((audited?.details as { gateway_teardown?: string }).gateway_teardown, 'queued');
+    // Nothing claims the revocation landed: the worker records that when it does.
+    const completed = (await harness.auditRows('user.gateway_teardown_complete')).filter(
+      (entry) => entry.target_id === target.user.id,
+    );
+    assert.equal(completed.length, 0);
 
     const job = await harness.store.gatewayTeardownJobs.findByUser(target.user.id);
     assert.equal(job?.status, 'pending', 'the revocation survives as durable work');
