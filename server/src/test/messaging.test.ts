@@ -405,7 +405,9 @@ describe('messaging list previews', () => {
       assert.equal(latest ? latest.body.replace(/\s+/g, ' ').trim() : null, text);
     }
 
-    async function previewsFor(session: TestSession): Promise<Map<string, string | null>> {
+    async function previewsFor(
+      session: TestSession,
+    ): Promise<Map<string, string | null | undefined>> {
       const response = await harness.authed(session, {
         method: 'GET',
         url: '/api/threads?limit=200',
