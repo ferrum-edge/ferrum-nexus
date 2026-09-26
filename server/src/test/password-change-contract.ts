@@ -3,15 +3,21 @@ import { after, before, describe, it } from 'node:test';
 
 import type { ApiErrorBody } from '@ferrum-nexus/shared';
 
-import type { IssuedSession, RequestContext } from '../auth/service.js';
+import {
+  type IssuedSession,
+  type RequestContext,
+  SIGN_IN_LEASE_LOST_MESSAGE,
+} from '../auth/service.js';
 import type {
   NexusStore,
+  TransactionOptions,
   UserRecord,
   VerificationTokenPurpose,
   VerificationTokenRecord,
 } from '../db/store.js';
 import { isNexusError } from '../lib/errors.js';
 import { isoInSeconds } from '../lib/ids.js';
+import { heldLeaseFences } from '../lib/lease-fence.js';
 import { buildTestApp, TEST_PASSWORD, type TestApp, type TestSession } from './helpers.js';
 
 const CHANGED_PASSWORD = 'changed-password-for-the-owner';
@@ -333,6 +339,54 @@ export function runPasswordChangeContract(
       await assertPassword(session, CHANGED_PASSWORD);
       assert.equal(await harness.store.sessions.deleteForUser(user.id), 0);
       await harness.loginUser(session.user.email, CHANGED_PASSWORD);
+    });
+
+    it('tells a sign-in whose lease changed hands that no session was created', async (t) => {
+      const session = await harness.registerUser();
+      const key = `users:password:${session.user.id}`;
+      await harness.store.sessions.deleteForUser(session.user.id);
+      const originalTransaction = harness.store.transaction.bind(harness.store);
+      let tookOver = false;
+      t.mock.method(
+        harness.store,
+        'transaction',
+        async <T>(fn: (tx: NexusStore) => Promise<T>, options?: TransactionOptions): Promise<T> => {
+          // The stall (issue #384): the sign-in's lease lapses and is swept,
+          // and a password change on another instance takes the key before the
+          // session commits. Only the sign-in's own transaction, and once.
+          if (!tookOver && heldLeaseFences().some((fence) => fence.key === key)) {
+            tookOver = true;
+            await harness.store.leases.deleteExpired('9999-01-01T00:00:00.000Z');
+            const now = new Date().toISOString();
+            assert.equal(
+              await harness.store.leases.acquire(key, 'competing-change', isoInSeconds(60), now),
+              true,
+            );
+          }
+          return originalTransaction(fn, options);
+        },
+      );
+
+      const refused = await harness.app.inject({
+        method: 'POST',
+        url: '/api/auth/login',
+        payload: { email: session.user.email, password: TEST_PASSWORD },
+      });
+      assert.ok(tookOver, 'the sign-in reached its session transaction');
+      assert.equal(refused.statusCode, 409, refused.body);
+      const body = refused.json<ApiErrorBody>();
+      assert.equal(body.error.code, 'CONFLICT');
+      assert.equal(body.error.message, SIGN_IN_LEASE_LOST_MESSAGE);
+      assert.equal(
+        await harness.store.leases.release(key, 'competing-change'),
+        true,
+        "the stale sign-in left the new holder's lease alone",
+      );
+
+      // The message is the truth: no session was created, and signing in
+      // again, once nothing else holds the key, succeeds.
+      assert.equal(await harness.store.sessions.deleteForUser(session.user.id), 0);
+      await harness.loginUser(session.user.email);
     });
 
     for (const reset of [false, true]) {

@@ -646,7 +646,12 @@ listed here are each written as a fenced transaction under their key:
 - a password change's replacement session;
 - a gateway identity's owner check and its registration, the consumer id bound
   to that registration, and its removal once the identity is torn down;
-- a consumer mapping recorded after the Edge consumer is provisioned;
+- the compensation of an abandoned test-consumer creation, which points the
+  registration back at its incumbent or removes it — a stale attempt refused
+  there keeps the registration a newer attempt by the same account has
+  claimed;
+- a consumer mapping recorded after the Edge consumer is provisioned, and the
+  mapping removed when an account teardown deletes a consumer it holds rows on;
 - the credential rows revoked when a consumer is torn down or replaced;
 - a gateway restore's repair flag and its audit row, and the flag it clears
   when the proxy turns out to be live;
@@ -660,9 +665,38 @@ to sign in with the new one, because retrying would present the old one.
 Anything else is told to retry.
 
 A write made under a key but outside any transaction is ordered by the lease
-alone and is **not** fenced. An example is the credential row recorded after an
-Edge append. A new lease-guarded write belongs in a transaction taken after the
-key.
+alone and is **not** fenced. These are the ones that remain, and why each is
+acceptable:
+
+- **The credential mirror under a consumer key** — the row created after an
+  Edge append and the rotation's delete of it when the rotation unwinds, the
+  `retiring` and `revoked` transitions of a revocation or rotation (and their
+  restoration to `active` when the gateway proves the entry is still there),
+  and the revocations of `POST /api/admin/credentials/reconcile`. Each records
+  a gateway write made immediately before it, which the fence cannot stop: a
+  refused mirror write would leave rows describing an array Edge no longer
+  has, which is worse than recording what the stale holder did. Drift that
+  does arise is what `settleLostRetirement` and the reconcile endpoint settle,
+  and the single-gateway-writer rule is what keeps it from arising.
+- **An API's rows under its `proxy:<id>` key** — the `PATCH` row save and the
+  first-class ownership record when they are not written together, and a
+  palette plugin's `api_plugins` upsert or delete. The same reasoning: each
+  records the plugin config or proxy the section just wrote to Edge, keyed by
+  the id that write used, so a refusal would only disconnect the portal from
+  a gateway change that stands.
+- **An approval's decision claim and its release** — `access_requests` moved
+  to `approved` before the gateway is touched, and back to `pending` when the
+  approval unwinds. Both are compare-and-set on the request's status, so a
+  stale holder's claim loses to any decision that committed first, and the
+  grant itself is written in a fenced transaction.
+- **Compensation records** — the `repair_required` state and the
+  `api.gateway_repair_required` / `api.gateway_restore_failed` audit rows a
+  failed restore, conversion or `PATCH` leaves behind. They describe what did
+  happen on the gateway, are best-effort by contract, and refusing them would
+  only hide a proxy that needs attention.
+
+A new lease-guarded write belongs in a transaction taken after the key; one
+that cannot be belongs on this list, with its reason.
 
 The fence cannot fence **Ferrum Edge**. Edge's whole-resource `PUT`s carry no
 concurrency token, so a stale holder's gateway write still lands, and the

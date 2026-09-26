@@ -28,7 +28,7 @@ import {
 import { gatewayIdentityLockKey } from '../credentials/service.js';
 import type { NexusStore, TransactionOptions } from '../db/store.js';
 import { derivedConsumerId } from '../ferrum-admin/client.js';
-import { isoInSeconds, nowIso } from '../lib/ids.js';
+import { isoInSeconds, newId, nowIso } from '../lib/ids.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
 function errorCode(body: string): string {
@@ -802,6 +802,101 @@ describe('test consumer lifecycle', () => {
     );
     assert.equal(audited.length, 1);
     assert.equal(audited[0]?.details.test_consumer_id, consumerId);
+  });
+
+  it('keeps a newer claim when a stale replacement abandons (issue #384)', async () => {
+    const api = await publish();
+    const username = `nexus-test-${api.id}`;
+    const key = gatewayIdentityLockKey(username);
+    assert.equal((await createTestConsumer(api.id)).statusCode, 201);
+
+    // The replacement stalls just before it records the id it is about to
+    // create under, for longer than the lease TTL: its lease is swept, and the
+    // same account's replacement on another instance takes the name key,
+    // claims the registration and binds its own consumer. Resumed, the stale
+    // bind is refused — and the compensation that refusal leads into must not
+    // remove the registration the newer attempt now depends on.
+    const credentials = harness.services.credentials;
+    const bind = credentials.bindGatewayIdentity;
+    const newer = newId();
+    let stalled = false;
+    credentials.bindGatewayIdentity = async (identity, consumerId) => {
+      if (!stalled) {
+        stalled = true;
+        await harness.store.leases.deleteExpired('9999-01-01T00:00:00.000Z');
+        assert.equal(
+          await harness.store.leases.acquire(key, 'other-instance', isoInSeconds(600), nowIso()),
+          true,
+        );
+        const claimed = await harness.store.gatewayIdentities.claim({
+          user_id: provider.user.id,
+          namespace: 'nexus',
+          ferrum_username: username,
+          ferrum_consumer_id: null,
+        });
+        await harness.store.gatewayIdentities.bindConsumer(claimed.id, newer);
+      }
+      return bind.call(credentials, identity, consumerId);
+    };
+    const refused = await createTestConsumer(api.id).finally(() => {
+      credentials.bindGatewayIdentity = bind;
+    });
+    assert.ok(stalled, 'the replacement reached its bind');
+    assert.equal(
+      await harness.store.leases.release(key, 'other-instance'),
+      true,
+      "the stale replacement left the new holder's lease alone",
+    );
+
+    assert.equal(refused.statusCode, 409, refused.body);
+    assert.equal(errorCode(refused.body), 'CONFLICT');
+    const kept = await registrationFor(username);
+    assert.equal(kept?.user_id, provider.user.id);
+    assert.equal(
+      kept?.ferrum_consumer_id,
+      newer,
+      "the newer attempt's registration survives the stale compensation",
+    );
+
+    const removed = await deleteApi(api.id);
+    assert.equal(removed.statusCode, 200, removed.body);
+    assert.equal(await registrationFor(username), null);
+  });
+
+  it('does not report a refused registration removal as done (issue #384)', async () => {
+    const api = await publish();
+    const username = `nexus-test-${api.id}`;
+    const key = gatewayIdentityLockKey(username);
+    assert.equal((await createTestConsumer(api.id)).statusCode, 201);
+    const consumerId = harness.edge.consumerByUsername(username)?.id;
+    assert.ok(consumerId);
+
+    // The follow-up commits, then the teardown stalls past the TTL before it
+    // consumes the registration, and another instance takes the name key: the
+    // removal is refused and only logged, since the follow-up is durable.
+    const result = await harness.services.credentials.teardownGatewayIdentity(
+      username,
+      provider.user.id,
+      {
+        whileHeld: async () => {
+          await harness.store.leases.deleteExpired('9999-01-01T00:00:00.000Z');
+          assert.equal(
+            await harness.store.leases.acquire(key, 'other-instance', isoInSeconds(600), nowIso()),
+            true,
+          );
+        },
+      },
+    );
+    assert.equal(await harness.store.leases.release(key, 'other-instance'), true);
+
+    assert.equal(result.consumer_id, consumerId);
+    assert.equal(result.registration_removed, false, 'a kept registration is not reported removed');
+    assert.equal((await registrationFor(username))?.ferrum_consumer_id, consumerId);
+
+    // The API deletion still finds it, and consumes it.
+    const removed = await deleteApi(api.id);
+    assert.equal(removed.statusCode, 200, removed.body);
+    assert.equal(await registrationFor(username), null);
   });
 
   it('answers 404 to a deletion that finds the row already removed', async () => {

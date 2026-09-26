@@ -36,9 +36,11 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   drop the API's rows after another instance had built a test consumer for it.
   The lease-guarded writes that were not yet transactional now are: a sign-in's
   password re-check and its session, a password change's replacement session, a
-  gateway identity's owner check, registration, consumer binding and removal, a
-  consumer mapping recorded after provisioning, the credential rows revoked by a
-  consumer teardown, a gateway restore's repair flag, and a god-mode broadcast's
+  gateway identity's owner check, registration, consumer binding and removal
+  (including the compensation of an abandoned test-consumer creation, which no
+  longer removes a registration a newer attempt has claimed), a consumer
+  mapping recorded after provisioning or removed by an account teardown, the
+  credential rows revoked by a consumer teardown, a gateway restore's repair flag, and a god-mode broadcast's
   daily count and the audit row it charges. A refused sign-in is told to sign
   in again, and a password change whose new password had already committed is
   told so and to sign in with it, rather than to retry. No schema change: the

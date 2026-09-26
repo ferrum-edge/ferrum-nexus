@@ -658,7 +658,11 @@ export interface TeardownGatewayIdentityResult {
   consumer_id: string | null;
   /** How many `credential_metadata` rows moved to `revoked`. */
   revoked_credentials: number;
-  /** Whether a `gateway_identities` registration was consumed. */
+  /**
+   * Whether a `gateway_identities` registration was consumed. `whileHeld` sees
+   * it before the removal runs, as "there was one to consume"; the returned
+   * result says `false` when the removal was refused and only logged.
+   */
   registration_removed: boolean;
 }
 
@@ -1645,11 +1649,16 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         replaced.ferrum_consumer_id !== null &&
         replaced.user_id === identity.user_id
       ) {
-        await store.gatewayIdentities
-          .bindConsumer(identity.id, replaced.ferrum_consumer_id)
+        // Fenced by the caller's name key (#384): a replacement that stalled
+        // past the TTL must not point the registration back at its incumbent
+        // behind a newer holder's claim.
+        const incumbent = replaced.ferrum_consumer_id;
+        await store
+          .transaction((tx) => tx.gatewayIdentities.bindConsumer(identity.id, incumbent))
           .catch(() => {
             // Even unbound, the retained registration makes teardown fall back
-            // to the bounded username lookup instead of losing the identity.
+            // to the bounded username lookup instead of losing the identity —
+            // and a refusal leaves the newer holder's registration as it was.
           });
         return false;
       }
@@ -1705,12 +1714,23 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       }
       // Only ever the registration that is still this owner's: the row keeps
       // its id across owners, so the owner is what says whether it is ours.
-      const current = await store.gatewayIdentities
-        .findByUsername(namespace, identity.ferrum_username)
-        .catch(() => null);
-      if (current && current.user_id === identity.user_id) {
-        await store.gatewayIdentities.delete(current.id).catch(() => undefined);
-      }
+      // Owner equality cannot tell this attempt from a newer one by the same
+      // account on another instance, which is what the fence is for: the
+      // check and the delete share one transaction under the caller's name
+      // key, so a compensation that stalled past the TTL — a fence refusal is
+      // often what brought it here — keeps the registration the newer holder
+      // has since claimed rather than untracking its consumer (#384).
+      await store
+        .transaction(async (tx) => {
+          const current = await tx.gatewayIdentities.findByUsername(
+            namespace,
+            identity.ferrum_username,
+          );
+          if (current && current.user_id === identity.user_id) {
+            await tx.gatewayIdentities.delete(current.id);
+          }
+        })
+        .catch(() => undefined);
       return created !== null;
     },
 
@@ -1852,10 +1872,14 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           // than being stripped and left as an empty identity.
           if (live) await edge.consumers.delete(foreignId, subject);
           const count = await revokeRowsFor(foreignId);
-          const cached = await store.consumers.findByFerrumId(foreignId);
           // Only ever a mapping that belongs to *this* account: the tracking row
-          // of somebody else's consumer is not this teardown's to delete.
-          if (cached && cached.user_id === userId) await store.consumers.delete(cached.id);
+          // of somebody else's consumer is not this teardown's to delete. The
+          // check and the delete share one transaction, so the consumer key's
+          // fence covers them (#384).
+          await store.transaction(async (tx) => {
+            const cached = await tx.consumers.findByFerrumId(foreignId);
+            if (cached && cached.user_id === userId) await tx.consumers.delete(cached.id);
+          });
           return count;
         });
         deleted.push(foreignId);
@@ -2647,24 +2671,31 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // stale teardown cannot remove a registration a newer holder has since
       // claimed (#384). A refusal takes the logged path below like any other
       // failure once a follow-up has committed.
+      // A removal that is only logged is reported as not having happened: the
+      // registration is still there, and the caller must not say otherwise.
       if (current) {
         const removal = store.transaction((tx) => tx.gatewayIdentities.delete(current.id));
-        await removal.catch((error: unknown) => {
-          if (
-            !options?.whileHeld ||
-            (result.consumer_id === null && !result.registration_removed)
-          ) {
-            throw error;
-          }
-          deps.log?.(
-            {
-              consumer_username: username,
-              consumer_id: result.consumer_id,
-              error: error instanceof Error ? error.message : String(error),
-            },
-            'a torn-down gateway identity kept its registration; the owner account teardown will remove it',
-          );
-        });
+        const removed = await removal.then(
+          () => true,
+          (error: unknown) => {
+            if (
+              !options?.whileHeld ||
+              (result.consumer_id === null && !result.registration_removed)
+            ) {
+              throw error;
+            }
+            deps.log?.(
+              {
+                consumer_username: username,
+                consumer_id: result.consumer_id,
+                error: error instanceof Error ? error.message : String(error),
+              },
+              'a torn-down gateway identity kept its registration; the owner account teardown will remove it',
+            );
+            return false;
+          },
+        );
+        if (!removed) return { ...result, registration_removed: false };
       }
       return result;
     });
