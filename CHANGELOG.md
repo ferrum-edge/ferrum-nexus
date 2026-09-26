@@ -26,6 +26,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Approval, application deletion and API deletion now refresh dependent grant,
+  credential, request, catalog and application count caches (#379).
 - **OpenAPI documentation follows parameter inheritance and reusable
   components (#377, #378).**
   - An operation parameter now replaces the path-level parameter with the
@@ -46,7 +48,6 @@ All notable changes to Ferrum Nexus are documented here. The format follows
     overlong references render as an explicit unresolved marker instead of an
     empty or optional row. From OpenAPI 3.1 on, a `description` or `summary`
     next to a `$ref` overrides the referenced one, as the specification allows.
-
 - **Application deletion is atomic, race-free and quota-preserving (#363,
   #364, #365).**
   - The rolling access-request budget
