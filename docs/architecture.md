@@ -257,7 +257,7 @@ One collection per logical table, same names as the SQL migrations
 `gateway_identities`, `credential_metadata`, `message_threads`, `messages`,
 `notifications`, `email_outbox`, `gateway_teardown_jobs`, `audit_logs`, `app_settings`,
 `email_templates`, `email_verification_tokens`, `email_token_issue_claims`,
-`edge_leases`, `organizations`, `sessions`). Four documented physical
+`edge_leases`, `organizations`, `sessions`, `api_gateway_plugins`). Four documented physical
 differences:
 
 1. `_id` holds the string UUID; the mappers are the only place `_id` and `id`
@@ -504,10 +504,26 @@ decides what to install in `plugin_cache.rs`
 by an association write on the proxy and every removal is preceded by a
 disassociation, both through `mutateProxy` (§5.2).
 
-Nexus stores the proxy id on the `apis` row but **not** the plugin config ids —
-they are looked up with `GET /plugins/config` filtered by `proxy_id` whenever
-they need changing, which keeps the schema free of ids whose lifecycle Nexus
-does not own and reconciles automatically if an operator recreates one by hand.
+Nexus stores the proxy id on the `apis` row and the id of every first-class
+plugin config it created — the auth plugin, `access_control`, `rate_limiting`
+and `cors` — in `api_gateway_plugins`, one row per `(api_id, role)`. Those
+recorded ids, never plugin names, decide which config a settings change may
+replace, repair or delete. Edge lets a proxy carry several configs of one
+plugin name, and an operator's own limiter, CORS policy or gate on a portal
+proxy is not the portal's to rewrite: setting a quota beside an operator's
+`rate_limiting` config creates the portal's own config next to it (both run,
+so the stricter limit wins), and clearing the quota deletes only the portal's.
+A recorded id that is no longer on the proxy means an operator removed that
+config; the next change creates a fresh one rather than adopting whatever
+else carries the name.
+
+An API published before `002_api_gateway_plugins` has no rows. Its configs are
+recognised once, conservatively: a config counts as the portal's only when the
+API currently uses that role and the config still carries what the portal
+wrote — its ACL group, its quota, its CORS origins. Two candidates for one role
+are ambiguous, and a `PATCH` that would touch that role is refused with
+`409 CONFLICT` until an operator removes the duplicate; the first successful
+change records the recognised ids, after which the record alone governs.
 
 ### 5.4 One consumer per identity per namespace
 
@@ -823,6 +839,9 @@ change merges the portal's keys over the live config rather than rebuilding it,
 so the operator's keys survive that too; the merge is safe here precisely
 because these two configs are built from a fixed key set, which is why palette
 plugins (whose optional fields a provider must be able to clear) do not use it.
+All of this applies to the config the portal **owns** in that role (§5.3); an
+operator's config of the same name is never read into the merge, rewritten or
+re-associated.
 
 The single association write is what turns a stored plugin config into one the
 gateway runs. It happens while the proxy is still on its staging path, so the
@@ -955,6 +974,20 @@ no row would be an API stuck answering 503 with nothing in the UI to switch it
 off. API deletion drops the rows in the same transaction as the specs and
 grants; the gateway objects need no step of their own, because the proxy delete
 already cascades them.
+
+Every undo step is registered **before** the gateway write it undoes. A
+`PUT /plugins/config/{id}` or `POST /plugins/config` that Edge applied but could
+not acknowledge rejects exactly like one it refused, so compensation registered
+after the call returned never ran: a security plugin switched off on the
+gateway stayed off while the request failed and the row still said "on". The
+replace's undo is the whole live resource — config, `enabled`, `trigger` and
+the operator-owned fields — and a new config is created under an id minted
+beforehand, so its undo can name it even when the create is never answered. A
+removed config that has to be put back is recreated under its own id, so the
+row still owns it. Any failed `set` or `remove` that reached the gateway writes
+an `api.plugin_rollback` audit row saying whether the compensation restored the
+gateway (`restored: true`) or not (`restored: false`, with the step errors and
+the config id to inspect).
 
 The auth family (`hmac_auth`, `jwks_auth`, `oauth2_introspection`, `mtls_auth`)
 and `spec_expose` are out of the palette: the first four change the credential

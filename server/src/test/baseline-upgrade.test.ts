@@ -13,11 +13,10 @@
  * `NEXUS_SECRET_KEY`. Migrating again — in the same process and after a
  * restart — must change nothing, ledger included.
  *
- * While the baseline is the only migration, the upgrade applies nothing new
- * and this proves the ledger protocol and the fixture's round trip. The first
- * forward migration makes it the real upgrade test with no change here: the
- * released prefix is read from the manifest, and the current schema is
- * whatever `store.migrate()` builds.
+ * The released prefix is read from the manifest and the current schema is
+ * whatever `store.migrate()` builds, so every forward migration — the first is
+ * `002_api_gateway_plugins` — is applied here on top of a populated baseline
+ * with no change to the harness.
  *
  * - **sqlite** always runs, against a temporary file.
  * - **postgres / mysql / mongodb** run when `NEXUS_TEST_POSTGRES_URL`,
@@ -679,6 +678,11 @@ async function assertPortalInvariants(store: NexusStore): Promise<void> {
     [ID.invoices, ID.ledger].sort(),
   );
   assert.equal((await store.apiSpecs.findCurrentByApi(ID.invoices))?.id, ID.specV2);
+  // An API the baseline published has no first-class plugin ownership record:
+  // `002_api_gateway_plugins` starts it empty, which is what has the publishing
+  // service recognise that API's gateway configs once instead of trusting a
+  // plugin name.
+  assert.deepEqual(await store.apiGatewayPlugins.listByApi(ID.invoices), []);
 
   // Access: the active grants are the ones Edge's ACL groups are replayed from;
   // the revoked one must not come back.
@@ -996,6 +1000,14 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
           );
           preserved = await assertFixturePreserved(store, fixture);
           await assertPortalInvariants(store);
+
+          // The forward migration's table is usable on the upgraded database.
+          await store.apiGatewayPlugins.replace(ID.ledger, { auth: 'edge-auth-ledger' });
+          assert.deepEqual(
+            (await store.apiGatewayPlugins.listByApi(ID.ledger)).map((row) => row.role),
+            ['auth'],
+          );
+          assert.equal(await store.apiGatewayPlugins.deleteByApi(ID.ledger), 1);
 
           // Re-running in the same process changes nothing.
           await store.migrate();

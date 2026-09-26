@@ -225,15 +225,18 @@ import {
 
 import { AuditAction, type AuditService } from '../audit/service.js';
 import type { EdgeRateLimitSyncConfig, NexusConfig } from '../config/index.js';
-import type {
-  ApiFilter,
-  ApiRecord,
-  ApiSpecRecord,
-  CredentialRecord,
-  GrantRecord,
-  ListOptions,
-  NexusStore,
-  UserRecord,
+import {
+  API_GATEWAY_PLUGIN_ROLES,
+  type ApiFilter,
+  type ApiGatewayPluginIds,
+  type ApiGatewayPluginRole,
+  type ApiRecord,
+  type ApiSpecRecord,
+  type CredentialRecord,
+  type GrantRecord,
+  type ListOptions,
+  type NexusStore,
+  type UserRecord,
 } from '../db/store.js';
 import {
   gatewayIdentityLockKey,
@@ -856,8 +859,131 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     return binder.listByProxy(api.ferrum_proxy_id);
   }
 
-  function findPlugin(plugins: EdgePluginConfig[], name: string): EdgePluginConfig | undefined {
-    return binder.find(plugins, name);
+  /**
+   * Which of a proxy's plugin configs are the portal's own first-class ones.
+   *
+   * **Ownership is a recorded id, never a plugin name.** Edge lets a proxy
+   * carry several configs of one name, and an operator is entitled to put a
+   * limiter, a CORS policy or an extra auth gate of their own on a portal
+   * proxy. Finding "the" `rate_limiting` config by name made the provider's
+   * quota setting rewrite whichever one Edge listed first — an operator's
+   * 1-request-a-minute brake became the provider's 500 — and let clearing it,
+   * swapping `auth_plugin` or dropping `requestable` delete a config the
+   * portal never created. So `api_gateway_plugins` records the id of every
+   * first-class config Nexus creates, and only that config is ever replaced,
+   * repaired or deleted; a recorded id that is no longer on the proxy means an
+   * operator removed it, and the next change creates a fresh one beside
+   * whatever else is there.
+   *
+   * An API with **no** record predates it (`002_api_gateway_plugins`). Its
+   * configs are recognised once, conservatively: a config counts as the
+   * portal's only when the API currently uses that role *and* the config
+   * carries what the portal wrote for it — its ACL group, its quota, its CORS
+   * origins — so an operator's differently-tuned config is never adopted. Two
+   * such candidates for one role are `ambiguous`: `update` refuses to touch
+   * that role rather than guess, and does not record the rest until it can.
+   * The first successful change records the recognised ids, and the API is
+   * governed by its record from then on.
+   */
+  interface FirstClassOwnership {
+    /** The recorded ids — or, for an unrecorded API, the recognised ones. */
+    ids: ApiGatewayPluginIds;
+    /** The owned config on the proxy for each role, when it is still there. */
+    live: Partial<Record<ApiGatewayPluginRole, EdgePluginConfig>>;
+    /** `false` for an API published before ownership was recorded. */
+    recorded: boolean;
+    /** Roles an unrecorded API carries more than one candidate config for. */
+    ambiguous: ApiGatewayPluginRole[];
+  }
+
+  /** The plugin name a first-class role runs under on this API. */
+  function firstClassPluginName(
+    api: Pick<ApiRecord, 'auth_plugin'>,
+    role: ApiGatewayPluginRole,
+  ): string {
+    if (role === 'auth') return api.auth_plugin;
+    if (role === 'access_control') return ACCESS_CONTROL_PLUGIN;
+    if (role === 'rate_limit') return RATE_LIMIT_PLUGIN;
+    return CORS_PLUGIN;
+  }
+
+  /** Whether the API's own settings call for a config in this role. */
+  function firstClassRoleInUse(api: ApiRecord, role: ApiGatewayPluginRole): boolean {
+    if (role === 'auth') return true;
+    if (role === 'access_control') return api.requestable;
+    if (role === 'rate_limit') return api.rate_limit !== null;
+    return api.cors !== null;
+  }
+
+  /**
+   * Whether an unrecorded API's config carries what the portal wrote for this
+   * role. Only the portal-owned keys are compared, so a config whose extra
+   * keys an operator tuned is still recognised; one whose portal keys differ
+   * is somebody else's.
+   */
+  function recognisedAsPortals(
+    api: ApiRecord,
+    role: ApiGatewayPluginRole,
+    plugin: EdgePluginConfig,
+  ): boolean {
+    const settings = plugin.config ?? {};
+    if (role === 'auth') return true;
+    if (role === 'access_control') {
+      return isDeepStrictEqual(settings.allowed_groups, [aclGroupForApi(api.id)]);
+    }
+    if (role === 'rate_limit') {
+      if (api.rate_limit === null) return false;
+      const expected: Record<string, unknown> = {
+        ...rateLimitConfig(api.rate_limit, config.edge.rateLimit),
+      };
+      return (
+        settings.limit_by === expected.limit_by &&
+        isDeepStrictEqual(settings.limits, expected.limits)
+      );
+    }
+    if (api.cors === null) return false;
+    return (
+      isDeepStrictEqual(settings.allowed_origins, api.cors.allowed_origins) &&
+      settings.allow_credentials === api.cors.allow_credentials
+    );
+  }
+
+  /** See {@link FirstClassOwnership}. */
+  async function firstClassOwnership(
+    api: ApiRecord,
+    plugins: EdgePluginConfig[],
+  ): Promise<FirstClassOwnership> {
+    const ids: ApiGatewayPluginIds = {};
+    const live: FirstClassOwnership['live'] = {};
+    const rows = await store.apiGatewayPlugins.listByApi(api.id);
+    if (rows.length > 0) {
+      for (const row of rows) {
+        ids[row.role] = row.ferrum_plugin_config_id;
+        const found = plugins.find((plugin) => plugin.id === row.ferrum_plugin_config_id);
+        if (found && found.plugin_name === firstClassPluginName(api, row.role)) {
+          live[row.role] = found;
+        }
+      }
+      return { ids, live, recorded: true, ambiguous: [] };
+    }
+    const ambiguous: ApiGatewayPluginRole[] = [];
+    for (const role of API_GATEWAY_PLUGIN_ROLES) {
+      if (!firstClassRoleInUse(api, role)) continue;
+      const name = firstClassPluginName(api, role);
+      const candidates = plugins.filter(
+        (plugin) => plugin.plugin_name === name && recognisedAsPortals(api, role, plugin),
+      );
+      if (candidates.length > 1) {
+        ambiguous.push(role);
+        continue;
+      }
+      const [candidate] = candidates;
+      if (candidate) {
+        ids[role] = candidate.id;
+        live[role] = candidate;
+      }
+    }
+    return { ids, live, recorded: false, ambiguous };
   }
 
   function associatedIds(proxy: EdgeProxy): string[] {
@@ -1528,6 +1654,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             created.proxyId = ref.id;
           }
           const proxy = { id: gatewayProxyId };
+          // The ids recorded below as the portal's own first-class configs —
+          // the only ones a later settings change may replace or delete.
+          const owned: ApiGatewayPluginIds = {};
 
           const auth = await attach(
             proxy.id,
@@ -1536,6 +1665,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             owner.id,
           );
           created.pluginIds.push(auth.id);
+          owned.auth = auth.id;
 
           if (input.requestable) {
             const acl = await attach(
@@ -1545,6 +1675,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               owner.id,
             );
             created.pluginIds.push(acl.id);
+            owned.access_control = acl.id;
           }
           if (input.rate_limit) {
             const limiter = await attach(
@@ -1554,6 +1685,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               owner.id,
             );
             created.pluginIds.push(limiter.id);
+            owned.rate_limit = limiter.id;
           }
           if (cors) {
             const corsPlugin = await attach(
@@ -1563,6 +1695,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               owner.id,
             );
             created.pluginIds.push(corsPlugin.id);
+            owned.cors = corsPlugin.id;
           }
 
           // None of the above is live yet. A proxy-scoped plugin config only runs
@@ -1614,6 +1747,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               status: 'published',
               visibility: input.visibility,
             });
+            await tx.apiGatewayPlugins.replace(row.id, owned);
             const revision = await tx.apiSpecs.create({
               api_id: row.id,
               version,
@@ -1783,6 +1917,67 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           );
         }
 
+        // ── Which first-class configs are the portal's to change ──────────
+        //
+        // By recorded id, never by plugin name — see `firstClassOwnership`.
+        // An unrecorded API whose configs cannot be told apart from an
+        // operator's is refused here, before the undo stack exists and before
+        // a single gateway write, rather than resolved by guessing: a guess
+        // is how an operator's own limiter used to be rewritten.
+        //
+        // "Touch" means a write below will change that config. The SPA submits
+        // the whole settings block on every save, so a replayed quota or CORS
+        // policy is not a touch — and a replay only ever repairs the
+        // association of a config the portal owns, which an ambiguous role
+        // does not have.
+        const owned = await firstClassOwnership(api, plugins);
+        const touched = new Set<ApiGatewayPluginRole>();
+        if (proxyId) {
+          if (patch.auth_plugin !== undefined && patch.auth_plugin !== api.auth_plugin) {
+            touched.add('auth');
+          }
+          if (patch.requestable !== undefined && patch.requestable !== api.requestable) {
+            touched.add('access_control');
+          }
+          if (
+            patch.rate_limit !== undefined &&
+            !isDeepStrictEqual(patch.rate_limit, api.rate_limit)
+          ) {
+            touched.add('rate_limit');
+          }
+          const nextCors = patch.cors === undefined ? api.cors : patch.cors;
+          const nextMethods =
+            patch.allowed_methods === undefined ? api.allowed_methods : patch.allowed_methods;
+          if (
+            (patch.cors !== undefined ||
+              patch.auth_plugin !== undefined ||
+              patch.allowed_methods !== undefined) &&
+            (!isDeepStrictEqual(nextCors, api.cors) ||
+              (nextCors !== null &&
+                ((patch.auth_plugin ?? api.auth_plugin) !== api.auth_plugin ||
+                  !isDeepStrictEqual(nextMethods, api.allowed_methods))))
+          ) {
+            touched.add('cors');
+          }
+        }
+        const unattributable = owned.ambiguous.filter((role) => touched.has(role));
+        if (unattributable.length > 0) {
+          throw conflict(
+            'This API predates gateway plugin ownership records and its proxy carries more ' +
+              'than one configuration the portal could have created for ' +
+              `${unattributable.map((role) => firstClassPluginName(api, role)).join(', ')}; ` +
+              'ask the gateway operator to remove the duplicate, then retry',
+            {
+              api_id: api.id,
+              plugin_names: unattributable.map((role) => firstClassPluginName(api, role)),
+            },
+          );
+        }
+        // What `api_gateway_plugins` says once this PATCH lands. Starts from
+        // what it says now — or, for an unrecorded API, from what was
+        // recognised — and moves with every first-class config written below.
+        const nextOwned: ApiGatewayPluginIds = { ...owned.ids };
+
         // ── The auth swap's blast radius, measured before anything moves ──
         //
         // Edge runs exactly one flavour of authentication for this proxy, so
@@ -1895,7 +2090,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           }
 
           if (patch.auth_plugin !== undefined && patch.auth_plugin !== api.auth_plugin && proxyId) {
-            const previous = findPlugin(plugins, api.auth_plugin);
+            // Only the auth config the portal owns is swapped out. Another
+            // config of the same flavour on the proxy is an operator's, and
+            // stays exactly as it is.
+            const previous = owned.live.auth;
             // Attach *and associate* the replacement before detaching the
             // incumbent. For the moment both are live the proxy accepts either
             // credential (auth plugins run in priority order until one succeeds,
@@ -1904,16 +2102,23 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             // authentication plugin the gateway actually runs. Associating is
             // part of that — a config the proxy does not name is not "attached"
             // in any sense the gateway cares about.
+            //
+            // The id is minted and the undo registered before the create is
+            // dispatched: a create Edge applied and never acknowledged would
+            // otherwise leave an unrecorded config nothing could name.
+            const replacementId = newId();
+            pushUndo(
+              'the replacement authentication plugin',
+              undoAttach(proxyId, replacementId, actor.id),
+            );
             const attached = await attach(
               proxyId,
               patch.auth_plugin,
               authPluginConfig(patch.auth_plugin),
               actor.id,
+              { id: replacementId },
             );
-            pushUndo(
-              'the replacement authentication plugin',
-              undoAttach(proxyId, attached.id, actor.id),
-            );
+            nextOwned.auth = attached.id;
             await associate(proxyId, [attached.id], actor.id);
             if (previous) {
               pushUndo(
@@ -1933,22 +2138,30 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           }
 
           if (patch.requestable !== undefined && patch.requestable !== api.requestable && proxyId) {
-            const acl = findPlugin(plugins, ACCESS_CONTROL_PLUGIN);
+            // The portal's own gate only: an operator's `access_control`
+            // config on the same proxy is neither adopted nor removed.
+            const acl = owned.live.access_control;
             if (patch.requestable && !acl) {
+              const aclId = newId();
+              pushUndo('the access control plugin', undoAttach(proxyId, aclId, actor.id));
               const attached = await attach(
                 proxyId,
                 ACCESS_CONTROL_PLUGIN,
                 accessControlConfig(api.id),
                 actor.id,
+                { id: aclId },
               );
-              pushUndo('the access control plugin', undoAttach(proxyId, attached.id, actor.id));
+              nextOwned.access_control = attached.id;
               await associate(proxyId, [attached.id], actor.id);
-            } else if (!patch.requestable && acl) {
+            } else if (!patch.requestable) {
               // Dropping the gate opens the API to every authenticated consumer;
               // existing grants stay on the consumers and become inert.
-              pushUndo('the access control plugin', undoRemoval(proxyId, acl, actor.id));
-              await disassociate(proxyId, [acl.id], actor.id);
-              await edge.pluginConfigs.delete(acl.id, actor.id);
+              if (acl) {
+                pushUndo('the access control plugin', undoRemoval(proxyId, acl, actor.id));
+                await disassociate(proxyId, [acl.id], actor.id);
+                await edge.pluginConfigs.delete(acl.id, actor.id);
+              }
+              delete nextOwned.access_control;
             }
             update.requestable = patch.requestable;
             changed.push('requestable');
@@ -1987,15 +2200,23 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             api.cors === null
               ? undefined
               : corsPluginConfig(api.cors, api.auth_plugin, api.allowed_methods).allowed_headers;
+          //
+          // And only the config the portal **owns** in that role is touched.
+          // Setting a quota on an API whose proxy already runs an operator's
+          // `rate_limiting` config creates the portal's own beside it rather
+          // than rewriting the operator's; clearing it deletes only the
+          // portal's. Both then apply, which is Edge's composition rule for
+          // two configs of one plugin, and the stricter limit wins.
           const reconcilePluginSetting = async <T>(
             gatewayProxyId: string,
-            pluginName: string,
+            role: 'rate_limit' | 'cors',
             next: T | null,
             current: T | null,
             settingsFor: (value: T) => EdgePluginSettings,
             derivedChanged = false,
           ): Promise<boolean> => {
-            const live = findPlugin(plugins, pluginName);
+            const pluginName = firstClassPluginName(api, role);
+            const live = owned.live[role];
             if (isDeepStrictEqual(next, current) && !derivedChanged) {
               if (next !== null && live) {
                 // `associateLocked` would do the same idempotent
@@ -2030,7 +2251,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               }
               return false;
             }
-            await reconcileOptionalPlugin(
+            const written = await reconcileOptionalPlugin(
               gatewayProxyId,
               live,
               pluginName,
@@ -2039,19 +2260,21 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 : mergeOperatorSettings(
                     live,
                     settingsFor(next),
-                    pluginName === CORS_PLUGIN ? previousPortalCorsHeaders : undefined,
+                    role === 'cors' ? previousPortalCorsHeaders : undefined,
                   ),
               actor.id,
               undo,
               live ? { enabled: live.enabled, trigger: live.trigger ?? null } : undefined,
             );
+            if (written) nextOwned[role] = written.id;
+            else delete nextOwned[role];
             return true;
           };
 
           if (patch.rate_limit !== undefined && proxyId) {
             const written = await reconcilePluginSetting(
               proxyId,
-              RATE_LIMIT_PLUGIN,
+              'rate_limit',
               patch.rate_limit,
               api.rate_limit,
               (value) => rateLimitConfig(value, config.edge.rateLimit),
@@ -2074,7 +2297,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               patch.allowed_methods === undefined ? api.allowed_methods : patch.allowed_methods;
             await reconcilePluginSetting(
               proxyId,
-              CORS_PLUGIN,
+              'cors',
               nextCors,
               api.cors,
               (value) => corsPluginConfig(value, nextAuth, nextMethods),
@@ -2244,17 +2467,31 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             }
           }
 
+          // The ownership record moves with the row, in one transaction and
+          // still inside the compensated block: a config this PATCH created
+          // that the record does not name would be one no later change could
+          // touch. An unrecorded API's recognised ids are recorded here too,
+          // once every role it uses could be attributed.
+          const recordOwnership =
+            proxyId !== null &&
+            (owned.recorded
+              ? !isDeepStrictEqual(nextOwned, owned.ids)
+              : owned.ambiguous.length === 0);
           if (changed.length === 0) {
             // Reconciliation can repair live gateway drift without changing the
             // Nexus row. That is still a state-changing operation and must retain
             // the caller attribution in the audit trail.
             if (!gatewayMutated) return presentApi(api, await settings.getGatewayPublicUrl());
             details.gateway_reconciled = true;
+            if (recordOwnership) await store.apiGatewayPlugins.replace(api.id, nextOwned);
             updated = api;
           } else {
-            const persisted = await store.apis.update(api.id, update);
-            if (!persisted) throw notFound('API', apiId);
-            updated = persisted;
+            updated = await store.transaction(async (tx) => {
+              const persisted = await tx.apis.update(api.id, update);
+              if (!persisted) throw notFound('API', apiId);
+              if (recordOwnership) await tx.apiGatewayPlugins.replace(api.id, nextOwned);
+              return persisted;
+            });
           }
         } catch (error) {
           // Compensation is best-effort by contract: the PATCH is already
@@ -2595,6 +2832,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             created.proxyId = ref.id;
           }
 
+          // A new proxy means new first-class configs, and these ids replace
+          // whatever the API's record named on the proxy that was lost.
+          const owned: ApiGatewayPluginIds = {};
           const auth = await attach(
             gatewayProxyId,
             api.auth_plugin,
@@ -2602,6 +2842,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             actor.id,
           );
           created.pluginIds.push(auth.id);
+          owned.auth = auth.id;
 
           // The access control the API's grants depend on. The ACL group is
           // derived from the API id, which the restore preserves, so every
@@ -2616,6 +2857,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               actor.id,
             );
             created.pluginIds.push(acl.id);
+            owned.access_control = acl.id;
           }
           if (api.rate_limit) {
             const limiter = await attach(
@@ -2625,6 +2867,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               actor.id,
             );
             created.pluginIds.push(limiter.id);
+            owned.rate_limit = limiter.id;
           }
           if (api.cors) {
             const corsPlugin = await attach(
@@ -2634,6 +2877,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               actor.id,
             );
             created.pluginIds.push(corsPlugin.id);
+            owned.cors = corsPlugin.id;
           }
           for (const row of palette) {
             const written = await attach(
@@ -2695,6 +2939,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               gateway_state: 'deployed',
             });
             if (!updated) throw notFound('API', api.id);
+            await tx.apiGatewayPlugins.replace(api.id, owned);
             for (const entry of palette) {
               const configId = paletteConfigIds.get(entry.plugin_name);
               if (configId === undefined) continue;
@@ -2902,6 +3147,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           await tx.grants.deleteByApi(api.id);
           await tx.accessRequests.deleteByApi(api.id);
           await tx.apiPlugins.deleteByApi(api.id);
+          await tx.apiGatewayPlugins.deleteByApi(api.id);
           await tx.apiViewers.deleteByApi(api.id);
           await tx.apiSpecs.deleteByApi(api.id);
           await tx.apis.delete(api.id);

@@ -1781,6 +1781,75 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       );
     });
 
+    /* ── api gateway plugins ──────────────────────────────────────────── */
+
+    it('apiGatewayPlugins: replaces the whole record per API and keeps created_at', async () => {
+      const owner = await makeUser({ role: 'provider' });
+      const api = await makeApi(owner.id);
+      const other = await makeApi(owner.id);
+
+      // No rows at all is how an API published before the record reads.
+      assert.deepEqual(await store.apiGatewayPlugins.listByApi(api.id), []);
+
+      await store.apiGatewayPlugins.replace(api.id, {
+        cors: 'edge-cors-1',
+        auth: 'edge-auth-1',
+        rate_limit: 'edge-limit-1',
+      });
+      await store.apiGatewayPlugins.replace(other.id, { auth: 'edge-auth-other' });
+      const first = await store.apiGatewayPlugins.listByApi(api.id);
+      // Role order, whatever order the map was written in.
+      assert.deepEqual(first.map((row) => [row.role, row.ferrum_plugin_config_id]), [
+        ['auth', 'edge-auth-1'],
+        ['rate_limit', 'edge-limit-1'],
+        ['cors', 'edge-cors-1'],
+      ]);
+      for (const row of first) assert.equal(row.api_id, api.id);
+
+      // A role the map omits is removed, a repointed one keeps its created_at,
+      // and a new one is added — atomically.
+      await store.apiGatewayPlugins.replace(api.id, {
+        auth: 'edge-auth-2',
+        access_control: 'edge-acl-1',
+        rate_limit: 'edge-limit-1',
+      });
+      const second = await store.apiGatewayPlugins.listByApi(api.id);
+      assert.deepEqual(second.map((row) => [row.role, row.ferrum_plugin_config_id]), [
+        ['auth', 'edge-auth-2'],
+        ['access_control', 'edge-acl-1'],
+        ['rate_limit', 'edge-limit-1'],
+      ]);
+      assert.equal(
+        second.find((row) => row.role === 'auth')?.created_at,
+        first.find((row) => row.role === 'auth')?.created_at,
+        'created_at survives a repoint',
+      );
+
+      // Inside a transaction too, and rolled back with it.
+      await assert.rejects(
+        store.transaction(async (tx) => {
+          await tx.apiGatewayPlugins.replace(api.id, { auth: 'edge-auth-rolled-back' });
+          throw new Error('abandon');
+        }),
+        /abandon/,
+      );
+      const afterRollback = await store.apiGatewayPlugins.listByApi(api.id);
+      assert.deepEqual(afterRollback.map((row) => row.ferrum_plugin_config_id), [
+        'edge-auth-2',
+        'edge-acl-1',
+        'edge-limit-1',
+      ]);
+
+      assert.equal(await store.apiGatewayPlugins.deleteByApi(api.id), 3);
+      assert.equal(await store.apiGatewayPlugins.deleteByApi(api.id), 0);
+      assert.deepEqual(await store.apiGatewayPlugins.listByApi(api.id), []);
+      assert.deepEqual(
+        (await store.apiGatewayPlugins.listByApi(other.id)).map((row) => row.role),
+        ['auth'],
+        'the other API keeps its own record',
+      );
+    });
+
     /* ── access requests ──────────────────────────────────────────────── */
 
     it('accessRequests: one pending request per api/user pair', async () => {

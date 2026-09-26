@@ -10,7 +10,7 @@ describe('buildout schema baseline', () => {
       const files = loadMigrations(dialect);
       assert.deepEqual(
         files.map((file) => file.id),
-        ['001_initial'],
+        ['001_initial', '002_api_gateway_plugins'],
       );
       const statements = splitSqlStatements(files[0]!.sql);
       assert.ok(statements.length > 0);
@@ -85,6 +85,54 @@ describe('buildout schema baseline', () => {
         /UNIQUE constraint failed/,
       );
       assert.deepEqual(db.pragma('foreign_key_check'), []);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('adds the first-class plugin ownership table as a replayable forward migration', () => {
+    for (const dialect of ['sqlite', 'pg', 'mysql'] as const) {
+      const forward = loadMigrations(dialect).find((file) => file.id === '002_api_gateway_plugins');
+      assert.ok(forward, `${dialect} ships 002_api_gateway_plugins`);
+      // The MySQL runner applies nothing but replayable CREATE TABLEs.
+      const statements = splitSqlStatements(forward.sql);
+      assert.deepEqual(
+        statements.map((statement) => /^CREATE TABLE IF NOT EXISTS (\w+)/.exec(statement)?.[1]),
+        ['api_gateway_plugins'],
+      );
+    }
+
+    const db = openSqliteDatabase(':memory:');
+    try {
+      for (const file of loadMigrations('sqlite')) db.exec(file.sql);
+      db.exec(`
+        INSERT INTO users (id, email, password_hash, display_name, role, created_at, updated_at)
+          VALUES ('u', 'user@example.test', 'unused', 'User', 'provider', 'now', 'now');
+        INSERT INTO apis (id, name, slug, owner_user_id, namespace, version, auth_plugin,
+                          created_at, updated_at)
+          VALUES ('a', 'API', 'api', 'u', 'ferrum', '1.0.0', 'key_auth', 'now', 'now');
+        INSERT INTO api_gateway_plugins (api_id, role, ferrum_plugin_config_id, created_at, updated_at)
+          VALUES ('a', 'rate_limit', 'config', 'now', 'now');
+      `);
+      assert.throws(
+        () =>
+          db.exec(`
+        INSERT INTO api_gateway_plugins (api_id, role, ferrum_plugin_config_id, created_at, updated_at)
+          VALUES ('a', 'rate_limit', 'other', 'now', 'now')
+      `),
+        /UNIQUE constraint failed|PRIMARY KEY/,
+      );
+      assert.throws(
+        () =>
+          db.exec(`
+        INSERT INTO api_gateway_plugins (api_id, role, ferrum_plugin_config_id, created_at, updated_at)
+          VALUES ('a', 'palette', 'other', 'now', 'now')
+      `),
+        /CHECK constraint failed/,
+      );
+      // Deleting the API takes its ownership record with it.
+      db.exec("DELETE FROM apis WHERE id = 'a'");
+      assert.deepEqual(db.prepare('SELECT COUNT(*) AS n FROM api_gateway_plugins').get(), { n: 0 });
     } finally {
       db.close();
     }

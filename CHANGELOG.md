@@ -26,6 +26,32 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- **API settings change only the gateway plugin configs the portal created,
+  and a plugin-config write whose acknowledgement is lost is compensated.**
+  - `PATCH /api/apis/:id` used to find the API's `rate_limiting`, `cors`,
+    `access_control` and auth configs by plugin name, so a provider's quota,
+    CORS, `requestable` or `auth_plugin` change could rewrite or delete a
+    config of the same name that a gateway operator had attached to the proxy.
+    Nexus now records the Edge config id of every first-class config it
+    creates (forward migration `002_api_gateway_plugins`, new store repository
+    `apiGatewayPlugins`) and acts on those ids alone; an operator's config is
+    left exactly as it is, and the portal creates its own beside it when it
+    owns none. An API published before the upgrade has its configs recognised
+    once, by the values the portal wrote rather than by name, and a change to a
+    setting whose proxy carries two such candidates is refused with
+    `409 CONFLICT` naming the plugin.
+  - A `PUT /plugins/config/{id}` Edge applied but never acknowledged used to
+    leave the change live — a palette security plugin disabled or an
+    allow-list replaced, a first-class quota raised — while the request failed
+    and the portal kept showing the old setting. The compensating write, which
+    restores the whole live resource including `enabled` and `trigger`, is now
+    registered before the `PUT`; new configs are created under an id minted
+    before the `POST`, so an unacknowledged create is withdrawn too; and a
+    removed config that has to be put back is recreated under its own id.
+  - A palette `set` or `remove` that reached the gateway and then failed now
+    writes an `api.plugin_rollback` audit row recording whether the gateway was
+    restored (`restored`), and when it was not, the step errors and the config
+    to inspect.
 - **Application deletion is atomic, race-free and quota-preserving (#363,
   #364, #365).**
   - The rolling access-request budget

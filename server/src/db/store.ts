@@ -251,6 +251,36 @@ export interface ApiPluginRecord extends ApiPlugin {
   ferrum_plugin_config_id: string | null;
 }
 
+/**
+ * The four gateway plugin configs Nexus derives from an API's own settings
+ * rather than from the palette: the auth plugin (`auth_plugin`), the ACL gate
+ * (`requestable`), the quota (`rate_limit`) and the browser policy (`cors`).
+ */
+export const API_GATEWAY_PLUGIN_ROLES = ['auth', 'access_control', 'rate_limit', 'cors'] as const;
+
+/** One of {@link API_GATEWAY_PLUGIN_ROLES}. */
+export type ApiGatewayPluginRole = (typeof API_GATEWAY_PLUGIN_ROLES)[number];
+
+/** The config id Nexus created for each role an API currently uses. */
+export type ApiGatewayPluginIds = Partial<Record<ApiGatewayPluginRole, string>>;
+
+/**
+ * An `api_gateway_plugins` row — the portal's **ownership** claim on one of an
+ * API's first-class gateway plugin configs.
+ *
+ * The same rule as {@link ApiPluginRecord.ferrum_plugin_config_id}: Edge lets a
+ * proxy carry several configs of one plugin name, so a name is not an identity
+ * and an operator's own `rate_limiting` or `cors` config on a portal proxy is
+ * not the portal's to replace or delete. Only the config id recorded here is.
+ */
+export interface ApiGatewayPluginRecord {
+  api_id: Uuid;
+  role: ApiGatewayPluginRole;
+  ferrum_plugin_config_id: string;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
+}
+
 /** An `access_requests` row (without the denormalised joins the API adds). */
 export type AccessRequestRecord = Omit<AccessRequest, 'api' | 'requester' | 'application'>;
 
@@ -929,6 +959,27 @@ export interface UpsertApiPluginInput {
   ferrum_plugin_config_id: string | null;
 }
 
+/**
+ * The first-class gateway plugin configs Nexus created for each API.
+ *
+ * An API with **no** rows was published before the portal recorded these —
+ * every API recorded since carries at least its `auth` row — and is the only
+ * case in which the publishing service may recognise a config it did not
+ * record; see `publishing/service.ts`.
+ */
+export interface ApiGatewayPluginRepo {
+  /** Every recorded role for one API, in role order. */
+  listByApi(apiId: Uuid): Promise<ApiGatewayPluginRecord[]>;
+  /**
+   * Make `ids` the API's complete record, atomically: a role it names is
+   * inserted or repointed, a role it omits is removed. `created_at` survives a
+   * repoint.
+   */
+  replace(apiId: Uuid, ids: ApiGatewayPluginIds): Promise<void>;
+  /** Cascade helper for API deletion. Returns the number of rows removed. */
+  deleteByApi(apiId: Uuid): Promise<number>;
+}
+
 /** Client requests for access to a requestable API. */
 export interface AccessRequestRepo {
   create(input: CreateInput<AccessRequestRecord>): Promise<AccessRequestRecord>;
@@ -1566,6 +1617,7 @@ export interface NexusStore {
   readonly apis: ApiRepo;
   readonly apiSpecs: ApiSpecRepo;
   readonly apiPlugins: ApiPluginRepo;
+  readonly apiGatewayPlugins: ApiGatewayPluginRepo;
   readonly apiViewers: ApiViewerRepo;
   readonly accessRequests: AccessRequestRepo;
   readonly grants: GrantRepo;
