@@ -1801,11 +1801,14 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       await store.apiGatewayPlugins.replace(other.id, { auth: 'edge-auth-other' });
       const first = await store.apiGatewayPlugins.listByApi(api.id);
       // Role order, whatever order the map was written in.
-      assert.deepEqual(first.map((row) => [row.role, row.ferrum_plugin_config_id]), [
-        ['auth', 'edge-auth-1'],
-        ['rate_limit', 'edge-limit-1'],
-        ['cors', 'edge-cors-1'],
-      ]);
+      assert.deepEqual(
+        first.map((row) => [row.role, row.ferrum_plugin_config_id]),
+        [
+          ['auth', 'edge-auth-1'],
+          ['rate_limit', 'edge-limit-1'],
+          ['cors', 'edge-cors-1'],
+        ],
+      );
       for (const row of first) assert.equal(row.api_id, api.id);
 
       // A role the map omits is removed, a repointed one keeps its created_at,
@@ -1818,11 +1821,14 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         rate_limit: null,
       });
       const second = await store.apiGatewayPlugins.listByApi(api.id);
-      assert.deepEqual(second.map((row) => [row.role, row.ferrum_plugin_config_id]), [
-        ['auth', 'edge-auth-2'],
-        ['access_control', 'edge-acl-1'],
-        ['rate_limit', null],
-      ]);
+      assert.deepEqual(
+        second.map((row) => [row.role, row.ferrum_plugin_config_id]),
+        [
+          ['auth', 'edge-auth-2'],
+          ['access_control', 'edge-acl-1'],
+          ['rate_limit', null],
+        ],
+      );
       assert.equal(
         second.find((row) => row.role === 'auth')?.created_at,
         first.find((row) => row.role === 'auth')?.created_at,
@@ -1843,11 +1849,10 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         /abandon/,
       );
       const afterRollback = await store.apiGatewayPlugins.listByApi(api.id);
-      assert.deepEqual(afterRollback.map((row) => row.ferrum_plugin_config_id), [
-        'edge-auth-2',
-        'edge-acl-1',
-        null,
-      ]);
+      assert.deepEqual(
+        afterRollback.map((row) => row.ferrum_plugin_config_id),
+        ['edge-auth-2', 'edge-acl-1', null],
+      );
 
       assert.equal(await store.apiGatewayPlugins.deleteByApi(api.id), 3);
       assert.equal(await store.apiGatewayPlugins.deleteByApi(api.id), 0);

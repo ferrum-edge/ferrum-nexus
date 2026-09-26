@@ -241,9 +241,10 @@ describe('first-class plugin ownership', () => {
     assert.equal(cleared.statusCode, 200, cleared.body);
     assertUntouched(proxyId, operator);
     assert.equal(stored(owned), undefined);
-    assert.deepEqual(configsNamed(proxyId, 'rate_limiting').map((plugin) => String(plugin.id)), [
-      'op-limit-after',
-    ]);
+    assert.deepEqual(
+      configsNamed(proxyId, 'rate_limiting').map((plugin) => String(plugin.id)),
+      ['op-limit-after'],
+    );
   });
 
   it('never adopts an operator limiter after its own was removed by hand', async () => {
