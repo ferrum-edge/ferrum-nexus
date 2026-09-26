@@ -2738,7 +2738,10 @@ takes the keys again and completes itself: finding the consumer it recreated
 still in place, it revokes exactly the credential rows that were live before the
 recreation (a row written since, for an entry another instance appended to the
 new consumer, is left alone) and writes the `gateway.consumer_repair` row with
-`resumed: true`. Only if that second attempt fails too does the account's entry
+`resumed: true`. If another instance's repair of the same account already
+revoked every one of those rows and recorded its own `gateway.consumer_repair`
+row since this repair began, the resumed pass writes no second row and the
+account's entry reports that there is nothing to repair. Only if that second attempt fails too does the account's entry
 in the response carry an error, with the log line _“A consumer repair that lost
 its lease could not be completed”_ naming the consumer and its
 `stale_credential_ids`. That is the one state a repeat repair cannot clear: the

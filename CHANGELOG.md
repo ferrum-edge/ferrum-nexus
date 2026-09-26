@@ -343,6 +343,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - Conversation list previews now fetch the newest message for the whole page in
   one adapter query, preserving the `(created_at, id)` ordering and empty-thread
   previews. A 200-thread page used to issue 200 separate message lookups (#394).
+- A consumer repair that resumes after its lease lapsed no longer writes a
+  second `gateway.consumer_repair` row when another instance's repair already
+  revoked every stale credential row and recorded the repair since this one
+  began: the resumed pass reports the consumer `present` instead (#408).
 
 ## [0.1.0] - 2026-09-25
 

@@ -15,6 +15,9 @@
  *    `access.revoke_rollback` row.
  * 4. The fence-refusal branches themselves: the restore retried alone after
  *    the fence refused it, and the consumer kept during a repair.
+ * 5. Follow-ups (issue #408): a resumed repair that another instance already
+ *    completed and recorded is not recorded twice, and a lost acknowledgement
+ *    whose audit row cannot be read back takes the documented fallback.
  */
 
 import assert from 'node:assert/strict';
@@ -320,6 +323,88 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
     assert.equal((await repairRows(session.user.id)).length, 0);
   });
 
+  /**
+   * Once the repair recreates the consumer, and before its relink reaches the
+   * commit, hand `consumerId`'s key to another instance and let `other` act as
+   * that instance did.
+   */
+  function stallAfterRecreating(consumerId: string, other: () => Promise<void>): () => boolean {
+    const consumers = harness.edgeClient.consumers;
+    const ensure = consumers.ensure.bind(consumers);
+    let stalled = false;
+    consumers.ensure = async (body, subject) => {
+      const result = await ensure(body, subject);
+      if (result.created && !stalled) {
+        stalled = true;
+        await takeOver(consumerId);
+        await other();
+      }
+      return result;
+    };
+    restorePatches.push(() => {
+      consumers.ensure = ensure;
+    });
+    return () => stalled;
+  }
+
+  it('does not record a repair twice when another instance completed it first', async () => {
+    const { session, credentialId, consumerId } = await orphanedClient();
+    const username = consumerUsernameForUser(session.user.id);
+    const entries = releaseOnSecondPass(consumerId);
+
+    // A second repair of the same account started while this one held the
+    // keys, found the consumer this one recreated once the lease lapsed, and
+    // committed the revocation and its own repair row first.
+    const stalled = stallAfterRecreating(consumerId, async () => {
+      await harness.store.credentials.update(credentialId, { status: 'revoked' });
+      await harness.store.auditLogs.create({
+        actor_user_id: superAdmin.user.id,
+        actor_role: 'super_admin',
+        action: AuditAction.GATEWAY_CONSUMER_REPAIR,
+        target_type: 'user',
+        target_id: session.user.id,
+        details: { consumer_id: consumerId, revoked_credential_ids: [credentialId] },
+        ip: null,
+      });
+    });
+
+    const repaired = await repairAccount(session.user.id);
+    assert.ok(stalled(), 'the repair lost its lease after recreating the consumer');
+    assert.equal(entries(), 2, 'the repair took the keys a second time');
+
+    assert.equal(repaired.error, 'The gateway consumer already exists; nothing to repair');
+    assert.equal(repaired.ferrum_consumer_id, consumerId);
+    assert.equal(repaired.credentials_requiring_reissue, 0);
+    assert.equal(harness.edge.consumerByUsername(username)?.id, consumerId, 'the consumer is kept');
+    assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'revoked');
+
+    const rows = await repairRows(session.user.id);
+    assert.equal(rows.length, 1, 'the other instance’s row is the only record of the repair');
+    assert.equal(rows[0]?.details.resumed, undefined);
+  });
+
+  it('still records a resumed repair whose rows were revoked without one', async () => {
+    const { session, credentialId, consumerId } = await orphanedClient();
+    const entries = releaseOnSecondPass(consumerId);
+
+    // The stale row was revoked in the meantime, but nothing recorded a repair.
+    const stalled = stallAfterRecreating(consumerId, async () => {
+      await harness.store.credentials.update(credentialId, { status: 'revoked' });
+    });
+
+    const repaired = await repairAccount(session.user.id);
+    assert.ok(stalled(), 'the repair lost its lease after recreating the consumer');
+    assert.equal(entries(), 2, 'the repair took the keys a second time');
+
+    assert.equal(repaired.error, null);
+    assert.equal(repaired.ferrum_consumer_id, consumerId);
+    assert.equal(repaired.credentials_requiring_reissue, 0);
+    const rows = await repairRows(session.user.id);
+    assert.equal(rows.length, 1, 'the repair is recorded once');
+    assert.equal(rows[0]?.details.resumed, true);
+    assert.deepEqual(rows[0]?.details.revoked_credential_ids, []);
+  });
+
   /* ── 3 and 4: a revocation rollback ───────────────────────────────────── */
 
   /** A client approved for a fresh API, with the grant and the API's proxy. */
@@ -454,6 +539,49 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
       'the committed rollback is not recorded a second time',
     );
     assert.ok(logged('though its acknowledgement was lost'));
+  });
+
+  it('falls back to a second rollback row when the committed row cannot be read', async () => {
+    const { session, apiId, grantId } = await grantee();
+    refuseNextConsumerWrite(session.user.id);
+    const dropped = loseAcknowledgementOf(AuditAction.ACCESS_REVOKE_ROLLBACK, grantId);
+
+    // The read that would find the committed rollback row fails as well.
+    const auditLogs = harness.store.auditLogs;
+    const list = auditLogs.list.bind(auditLogs);
+    let unreadable = false;
+    auditLogs.list = async (filter, options) => {
+      if (dropped() && !unreadable && filter.target_id === grantId) {
+        unreadable = true;
+        throw new Error('the audit log could not be read');
+      }
+      return list(filter, options);
+    };
+    restorePatches.push(() => {
+      auditLogs.list = list;
+    });
+
+    const failed = await revoke(grantId);
+    assert.equal(failed.statusCode, 502, failed.body);
+    assert.ok(dropped(), 'the rollback committed and its acknowledgement was lost');
+    assert.ok(unreadable, 'the lookup for the committed row failed');
+    assert.ok(logged('retrying alone'), 'the fallback is taken');
+
+    // The grant went back once, with the group still on the consumer.
+    assert.deepEqual(groupsOf(session.user.id), [aclGroupForApi(apiId)]);
+    assert.equal((await harness.store.grants.findById(grantId))?.status, 'active');
+    assert.equal(await countAudit(AuditAction.ACCESS_REVOKE, grantId), 1);
+    // The documented cost of the fallback: the rollback is recorded twice,
+    // and both rows say the grant is back.
+    const rows = (await harness.auditRows(AuditAction.ACCESS_REVOKE_ROLLBACK)).filter(
+      (row) => row.target_id === grantId,
+    );
+    assert.equal(rows.length, 2);
+    assert.ok(rows.every((row) => row.details.grant_restored === true));
+
+    const retried = await revoke(grantId);
+    assert.equal(retried.statusCode, 200, retried.body);
+    assert.equal((await harness.store.grants.findById(grantId))?.status, 'revoked');
   });
 
   /* ── 2: a retirement whose delete provably never applied ──────────────── */

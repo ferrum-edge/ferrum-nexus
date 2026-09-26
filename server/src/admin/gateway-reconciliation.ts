@@ -114,6 +114,7 @@ import { canonicalConsumerLockKey } from '../credentials/consumers.js';
 import type { NexusStore, UserRecord } from '../db/store.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import { edgeUnavailable, forbidden, validationFailed } from '../lib/errors.js';
+import { nowIso } from '../lib/ids.js';
 import { apiRestoreLockKey } from '../lib/keyed-serializer.js';
 import { isLeaseLost } from '../lib/lease-fence.js';
 import type { NotificationsService } from '../notifications/service.js';
@@ -488,6 +489,10 @@ export function createGatewayReconciliationService(
    * consumer and writing the `gateway.consumer_repair` row with
    * `resumed: true`. A row written since, for an entry another instance
    * appended to the recreated consumer, is not among them and stays live.
+   * When the instance that took the keys found that consumer and completed
+   * the repair itself — every stale row already revoked, and its own
+   * `gateway.consumer_repair` row committed since this repair began — the
+   * resumed pass reads `present` instead of recording the repair twice.
    * Only a second refusal leaves the rows `active`, and says so in its own
    * log line (`docs/operations.md` §13, "The repair").
    */
@@ -506,6 +511,9 @@ export function createGatewayReconciliationService(
       restored_groups: 0,
       error: null,
     };
+    // Before the first pass takes any key: a repair row written since then is
+    // one a resumed pass must not write again.
+    const startedAt = nowIso();
     try {
       const groups = await approvedGroups(orphan.user_id, orphan.application_id);
 
@@ -554,7 +562,7 @@ export function createGatewayReconciliationService(
                 // re-read, so one revoked or moved since is left alone — and
                 // the row that records the repair commits with them.
                 const staleIds = kept.staleCredentialIds;
-                const revoked = await store.transaction(async (tx) => {
+                const revoked = await store.transaction(async (tx): Promise<Uuid[] | null> => {
                   const ids: Uuid[] = [];
                   for (const id of staleIds) {
                     const credential = await tx.credentials.findById(id);
@@ -568,6 +576,25 @@ export function createGatewayReconciliationService(
                     await tx.credentials.update(id, { status: 'revoked' });
                     ids.push(id);
                   }
+                  // Nothing left to revoke, and a repair of this consumer
+                  // recorded since this one began: the instance that took the
+                  // keys found the consumer this repair recreated, relinked
+                  // it and revoked the same rows. That is one repair, already
+                  // recorded, not a second to record again.
+                  if (ids.length === 0) {
+                    const since = await tx.auditLogs.list(
+                      {
+                        action: AuditAction.GATEWAY_CONSUMER_REPAIR,
+                        target_type: 'user',
+                        target_id: orphan.user_id,
+                        from: startedAt,
+                      },
+                      { limit: MAX_PAGE_SIZE },
+                    );
+                    if (since.items.some((entry) => entry.details.consumer_id === staleId)) {
+                      return null;
+                    }
+                  }
                   await audit
                     .forStore(tx)
                     .record(
@@ -579,6 +606,7 @@ export function createGatewayReconciliationService(
                     );
                   return ids;
                 });
+                if (revoked === null) return { kind: 'present', consumerId: staleId };
                 return { kind: 'repaired', consumerId: staleId, revoked };
               }
 
