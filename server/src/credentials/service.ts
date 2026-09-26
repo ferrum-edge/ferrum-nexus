@@ -628,14 +628,31 @@ export interface TeardownGatewayIdentityOptions {
    * a creation that had loaded the API a moment earlier could take the key in
    * the gap, find the row still there, and build a consumer for an API that
    * was about to stop existing — one no later teardown would ever look for.
-   * The callback must not take this identity's name key itself.
+   *
+   * The callback runs inside the name key, so it may only take what is
+   * ordered **after** it: consumer-id keys, the {@link userLifecycleLockKey}
+   * lifecycle keys, and store transactions. Never this identity's name key
+   * again, which would deadlock, and never a proxy lease — the API deletion
+   * already holds its lease *around* the teardown, and any other lease taken
+   * in here would invert that order.
+   *
+   * The registration is consumed only once the callback succeeded. When it
+   * throws, the gateway teardown has already happened and cannot be undone,
+   * so what it did is logged and the registration is kept, still bound to the
+   * consumer that is now gone: that is what lets a retry report the identity
+   * as collected rather than as never having existed.
    */
   whileHeld?: () => Promise<void>;
 }
 
 /** What one {@link CredentialsService.teardownGatewayIdentity} attempt collected. */
 export interface TeardownGatewayIdentityResult {
-  /** The Edge consumer that was deleted, or `null` when there was none. */
+  /**
+   * The Edge consumer that was deleted, or `null` when there was none. A
+   * registration still bound to a consumer that is already gone reports that
+   * consumer too — it is the identity this teardown collected, typically one
+   * whose earlier teardown succeeded and whose `whileHeld` did not.
+   */
   consumer_id: string | null;
   /** How many `credential_metadata` rows moved to `revoked`. */
   revoked_credentials: number;
@@ -2579,16 +2596,54 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         // rows still describe it cannot authenticate anything.
         revoked += await revokeRowsFor(current.ferrum_consumer_id);
       }
-      // Consumed: a retry must not come back to an identity that is done.
-      if (current) await store.gatewayIdentities.delete(current.id);
-      // Still under the key, so nothing that queued for it can observe the
-      // gap between this teardown and the caller's follow-up (issue #373).
-      await options?.whileHeld?.();
-      return {
-        consumer_id: live?.id ?? null,
+      const result: TeardownGatewayIdentityResult = {
+        consumer_id: live?.id ?? current?.ferrum_consumer_id ?? null,
         revoked_credentials: revoked,
         registration_removed: current !== null,
       };
+      // Still under the key, so nothing that queued for it can observe the
+      // gap between this teardown and the caller's follow-up (issue #373).
+      // Before the registration is consumed: if the follow-up fails, the
+      // registration is what a retry finds the collected consumer by.
+      if (options?.whileHeld) {
+        try {
+          await options.whileHeld();
+        } catch (error) {
+          // The consumer is gone and its rows are revoked; nothing will undo
+          // that. The caller's request fails regardless, so this line is the
+          // only record of what this attempt did take down.
+          deps.log?.(
+            {
+              consumer_username: username,
+              consumer_id: result.consumer_id,
+              revoked_credentials: result.revoked_credentials,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            'a gateway identity was torn down but the work that follows it under its key failed; its registration was kept for the retry',
+          );
+          throw error;
+        }
+      }
+      // Consumed: a retry must not come back to an identity that is done.
+      // After a follow-up, the consumer is gone and the caller's own work has
+      // committed, so a registration that cannot be removed is logged rather
+      // than failing a request whose effect is already durable — a leftover
+      // row naming a consumer that no longer exists is what any later
+      // teardown resolves to "nothing there" and removes.
+      if (current) {
+        await store.gatewayIdentities.delete(current.id).catch((error: unknown) => {
+          if (!options?.whileHeld) throw error;
+          deps.log?.(
+            {
+              consumer_username: username,
+              consumer_id: result.consumer_id,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            'a torn-down gateway identity kept its registration; a later teardown will remove it',
+          );
+        });
+      }
+      return result;
     });
   }
 

@@ -2916,7 +2916,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 await tx.apiPlugins.deleteByApi(api.id);
                 await tx.apiViewers.deleteByApi(api.id);
                 await tx.apiSpecs.deleteByApi(api.id);
-                await tx.apis.delete(api.id);
+                // Nothing matched: a concurrent deletion got here first — the
+                // lease above does not serialise an API with no proxy, and an
+                // expired one serialises nothing. Only one of them may answer
+                // `200` and write `api.delete`.
+                if (!(await tx.apis.delete(api.id))) throw notFound('API', apiId);
               });
             },
           },
@@ -3022,11 +3026,16 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // just before a deletion that has since torn this identity down and
         // dropped the row — both under this same key (issue #373). Building on
         // that snapshot would leave a consumer and a registration for an API
-        // that no longer exists, with nothing left to collect them. Read here,
-        // the answer holds until the key is released: a deletion that starts
-        // now waits for this creation and then takes the consumer down with
-        // the API. Re-authorised too, and every field below comes from this
-        // read rather than the stale one.
+        // that no longer exists, with nothing left to collect them. Re-
+        // authorised too, and every field below comes from this read rather
+        // than the stale one.
+        //
+        // What the key pins is the row's **existence** and nothing more: a
+        // deletion that starts now waits for this creation and then takes the
+        // consumer down with the API. Its other fields are not. `update()`
+        // writes the row under the proxy lease, not this key, so an
+        // `auth_plugin` swap can commit while the credential below is being
+        // issued — which is why the issue is followed by a re-check of it.
         const current = await loadApi(apiId);
         assertCanAdminister(actor, current);
 
@@ -3141,6 +3150,33 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             label: label ?? `Test consumer for ${current.slug}`,
             ip,
           });
+
+          // The flavour again, now the credential exists. An `auth_plugin` swap
+          // that committed while it was being issued computed the API's own
+          // credentials before this one was there to find, so it left a key of
+          // the old flavour that no longer opens the proxy — and handing it
+          // back as though it did would be the one thing worse than failing.
+          // It is revoked, the catch below takes the consumer down, and the
+          // caller retries against the flavour the API has now. A swap that
+          // commits after this read is outside what this check can see.
+          const latest = await loadApi(apiId);
+          if (latest.auth_plugin !== current.auth_plugin) {
+            await credentials.revokeInvalidated(
+              { id: actor.id, role: actor.role },
+              issued.credential.id,
+              {
+                reason: 'auth_plugin_change',
+                api_id: current.id,
+                previous_auth_plugin: current.auth_plugin,
+                auth_plugin: latest.auth_plugin,
+              },
+              ip,
+            );
+            throw conflict(
+              'The authentication plugin changed while the test consumer was being created; retry',
+              { previous_auth_plugin: current.auth_plugin, auth_plugin: latest.auth_plugin },
+            );
+          }
 
           return { consumer, issued, replacedExisting: existing !== null, revokedCredentials };
         } catch (error) {

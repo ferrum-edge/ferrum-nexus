@@ -26,6 +26,7 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { gatewayIdentityLockKey } from '../credentials/service.js';
+import type { NexusStore, TransactionOptions } from '../db/store.js';
 import { derivedConsumerId } from '../ferrum-admin/client.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
@@ -426,6 +427,9 @@ describe('test consumer lifecycle', () => {
       assert.equal(created.statusCode, 404, created.body);
       assert.equal(errorCode(created.body), 'NOT_FOUND');
     } finally {
+      // Whatever failed above, nothing may stay parked into `harness.close()`.
+      entered.release();
+      resume.release();
       harness.edgeClient.serializePerKey = serialize;
     }
 
@@ -484,6 +488,9 @@ describe('test consumer lifecycle', () => {
       assert.equal(created.statusCode, 404, created.body);
       assert.equal(errorCode(created.body), 'NOT_FOUND');
     } finally {
+      inside.release();
+      queued.release();
+      resume.release();
       harness.store.grants.listActiveByApi = realListGrants;
       harness.edgeClient.serializePerKey = serialize;
     }
@@ -491,6 +498,11 @@ describe('test consumer lifecycle', () => {
     assert.equal(await harness.store.apis.findById(api.id), null);
     assert.equal(harness.edge.consumerByUsername(username), undefined);
     assert.equal(await registrationFor(username), null);
+    assert.equal(
+      (await harness.auditRows('test_consumer.create')).find((row) => row.target_id === api.id),
+      undefined,
+      'nothing is audited as created',
+    );
   });
 
   it('collects a creation that was still in flight when the deletion began', async () => {
@@ -506,9 +518,12 @@ describe('test consumer lifecycle', () => {
     const resume = barrier();
     const realCreateRow = harness.store.credentials.create;
     const createRow = realCreateRow.bind(harness.store.credentials);
+    // Only the test consumer's own row: an unrelated credential write that
+    // happened to land meanwhile must not trip the barrier.
+    const testConsumerId = derivedConsumerId('nexus', username);
     let parked = false;
     harness.store.credentials.create = async (input) => {
-      if (!parked) {
+      if (!parked && input.ferrum_consumer_id === testConsumerId) {
         parked = true;
         inside.release();
         await resume.promise;
@@ -537,6 +552,9 @@ describe('test consumer lifecycle', () => {
       assert.equal(removed.statusCode, 200, removed.body);
       credentialId = created.json<CreateTestConsumerResponse>().credential.id;
     } finally {
+      inside.release();
+      queued.release();
+      resume.release();
       harness.store.credentials.create = realCreateRow;
       harness.edgeClient.serializePerKey = serialize;
     }
@@ -577,5 +595,177 @@ describe('test consumer lifecycle', () => {
     } else {
       assert.ok(await harness.store.apis.findById(api.id), 'the API is still there to delete');
     }
+  });
+
+  it('revokes a credential of the old flavour when auth_plugin changes mid-creation', async () => {
+    const api = await publish();
+    const username = `nexus-test-${api.id}`;
+    const testConsumerId = derivedConsumerId('nexus', username);
+
+    // The name key pins the API's existence, not its fields: `update()` writes
+    // the row under the proxy lease. Commit an `auth_plugin` swap while the
+    // creation is issuing its `keyauth` credential, exactly where a PATCH
+    // that had computed its impact a moment earlier would have landed.
+    const realCreateRow = harness.store.credentials.create;
+    const createRow = realCreateRow.bind(harness.store.credentials);
+    let swapped = false;
+    harness.store.credentials.create = async (input) => {
+      if (!swapped && input.ferrum_consumer_id === testConsumerId) {
+        swapped = true;
+        await harness.store.apis.update(api.id, { auth_plugin: 'basic_auth' });
+      }
+      return createRow(input);
+    };
+    const refused = await createTestConsumer(api.id).finally(() => {
+      harness.store.credentials.create = realCreateRow;
+    });
+    assert.ok(swapped, 'the swap landed mid-issue');
+    assert.equal(refused.statusCode, 409, refused.body);
+    assert.equal(errorCode(refused.body), 'CONFLICT');
+
+    // The key of the old flavour was never handed out, and nothing of it is
+    // left live on either side.
+    const rows = await harness.store.credentials.listByConsumer(testConsumerId);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.credential_type, 'keyauth');
+    assert.equal(rows[0]?.status, 'revoked', 'the issued credential was revoked');
+    const revokedAudit = (await harness.auditRows('credential.revoke')).find(
+      (row) => row.target_id === rows[0]?.id,
+    );
+    assert.ok(revokedAudit, 'and its revocation is audited');
+    assert.equal(revokedAudit.details.reason, 'auth_plugin_change');
+    assert.equal(harness.edge.consumerByUsername(username), undefined, 'the consumer is gone');
+    assert.equal(await registrationFor(username), null, 'and so is its registration');
+    assert.equal(
+      (await harness.auditRows('test_consumer.create')).find((row) => row.target_id === api.id),
+      undefined,
+      'nothing is audited as created',
+    );
+
+    // A retry issues against the flavour the API has now.
+    const retried = await createTestConsumer(api.id);
+    assert.equal(retried.statusCode, 201, retried.body);
+    assert.equal(
+      retried.json<CreateTestConsumerResponse>().credential.credential_type,
+      'basicauth',
+    );
+  });
+
+  it('records the collected test consumer on a retry after the row delete failed', async () => {
+    const api = await publish();
+    const username = `nexus-test-${api.id}`;
+
+    const created = await createTestConsumer(api.id);
+    assert.equal(created.statusCode, 201, created.body);
+    const credentialId = created.json<CreateTestConsumerResponse>().credential.id;
+    const consumerId = harness.edge.consumerByUsername(username)?.id;
+    assert.ok(consumerId);
+
+    // The teardown succeeds; the row-delete transaction that follows it under
+    // the name key fails once. Armed by the grant read that immediately
+    // precedes it, so no earlier transaction can take the failure instead.
+    const realListGrants = harness.store.grants.listActiveByApi;
+    const listGrants = realListGrants.bind(harness.store.grants);
+    const realTransaction = harness.store.transaction;
+    const transaction = realTransaction.bind(harness.store);
+    let armed = false;
+    let failed = false;
+    harness.store.grants.listActiveByApi = async (apiId) => {
+      if (apiId === api.id && !failed) armed = true;
+      return listGrants(apiId);
+    };
+    harness.store.transaction = async <T>(
+      fn: (tx: NexusStore) => Promise<T>,
+      options?: TransactionOptions,
+    ): Promise<T> => {
+      if (armed && !failed) {
+        armed = false;
+        failed = true;
+        throw new Error('database is gone');
+      }
+      return transaction(fn, options);
+    };
+    const refused = await deleteApi(api.id).finally(() => {
+      harness.store.grants.listActiveByApi = realListGrants;
+      harness.store.transaction = realTransaction;
+    });
+    assert.ok(failed, 'the row delete was the transaction that failed');
+    assert.ok(refused.statusCode >= 500, refused.body);
+    assert.ok(await harness.store.apis.findById(api.id), 'the API survives for the retry');
+    assert.equal(harness.edge.consumerByUsername(username), undefined, 'the teardown held');
+    assert.equal(
+      (await registrationFor(username))?.ferrum_consumer_id,
+      consumerId,
+      'the registration is kept, still naming the collected consumer',
+    );
+    assert.equal(
+      (await harness.auditRows('api.delete')).find((row) => row.target_id === api.id),
+      undefined,
+      'and nothing is audited as a completed delete',
+    );
+
+    const retried = await deleteApi(api.id);
+    assert.equal(retried.statusCode, 200, retried.body);
+    assert.equal(await harness.store.apis.findById(api.id), null);
+    assert.equal(harness.edge.consumerByUsername(username), undefined);
+    assert.equal(await registrationFor(username), null, 'nothing is left behind');
+    assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'revoked');
+    const audited = (await harness.auditRows('api.delete')).filter(
+      (row) => row.target_id === api.id,
+    );
+    assert.equal(audited.length, 1);
+    assert.equal(
+      audited[0]?.details.test_consumer_id,
+      consumerId,
+      'the retry still records the test consumer as collected',
+    );
+  });
+
+  it('answers 404 to a deletion that finds the row already removed', async () => {
+    const api = await publish();
+
+    // Park the deletion just before its row-delete transaction and remove the
+    // row underneath it, as a concurrent deletion that won would have. Only
+    // the winner may answer `200` and write `api.delete`.
+    const inside = barrier();
+    const resume = barrier();
+    const realListGrants = harness.store.grants.listActiveByApi;
+    const listGrants = realListGrants.bind(harness.store.grants);
+    let parked = false;
+    harness.store.grants.listActiveByApi = async (apiId) => {
+      if (apiId === api.id && !parked) {
+        parked = true;
+        inside.release();
+        await resume.promise;
+      }
+      return listGrants(apiId);
+    };
+    try {
+      const removing = deleteApi(api.id);
+      await inside.promise;
+      await harness.store.transaction(async (tx) => {
+        await tx.grants.deleteByApi(api.id);
+        await tx.accessRequests.deleteByApi(api.id);
+        await tx.apiPlugins.deleteByApi(api.id);
+        await tx.apiViewers.deleteByApi(api.id);
+        await tx.apiSpecs.deleteByApi(api.id);
+        assert.equal(await tx.apis.delete(api.id), true);
+      });
+      resume.release();
+
+      const removed = await removing;
+      assert.equal(removed.statusCode, 404, removed.body);
+      assert.equal(errorCode(removed.body), 'NOT_FOUND');
+    } finally {
+      inside.release();
+      resume.release();
+      harness.store.grants.listActiveByApi = realListGrants;
+    }
+
+    assert.equal(
+      (await harness.auditRows('api.delete')).find((row) => row.target_id === api.id),
+      undefined,
+      'the losing deletion writes no audit row',
+    );
   });
 });

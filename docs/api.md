@@ -2124,13 +2124,19 @@ after an API that is about to stop existing. Then the grants, requests, spec
 revisions and the API row are deleted in one store transaction — still under
 the identity's name key, which test-consumer creation takes and then re-reads the
 API inside, so a creation either finished before the teardown and was collected
-by it or starts after the rows are gone and answers `404`. Only then is the
+by it or starts after the rows are gone and answers `404`. A deletion that
+finds the API row already removed by a concurrent one answers `404` rather than
+a second `200`. If the row delete fails after the teardown, the request fails,
+the API stays in the catalog, and a retry names the already-collected
+consumer in its audit row. Only then is the
 ACL group stripped from every grantee's consumer — the group is inert the moment
 the proxy is gone — and grantees get a notification.
 
 A test consumer that is already gone — or an API that never had one — is not an
-error, and the `api.delete` audit row then names no `test_consumer_id` at all
-rather than claiming a teardown that was never needed. A teardown the gateway
+error. With nothing registered and nothing on the gateway, the `api.delete`
+audit row names no `test_consumer_id` at all rather than claiming a teardown
+that was never needed; a registration still bound to a consumer that is already
+gone names that consumer, since the registration is what was collected. A teardown the gateway
 refuses fails the request with `502 EDGE_ERROR`, leaving the API in the catalog
 so the delete can be retried; the identity stays registered, which is what makes
 it findable.
@@ -2561,7 +2567,11 @@ portal records about a credential is keyed on the consumer id.
 Deleting the API deletes this consumer with it; see `DELETE /api/apis/:id`.
 The API is re-read once the creation holds the identity's lock, so a creation
 racing a deletion either completes first and is collected by it, or answers
-`404 NOT_FOUND` with nothing created.
+`404 NOT_FOUND` with nothing created. The lock does not pin the API's
+`auth_plugin`, which an update may change while the credential is being issued;
+the API is re-read after the issue, and when the flavour moved the new
+credential is revoked, the consumer is removed and the request answers
+`409 CONFLICT`, to be retried against the API's current plugin.
 
 ---
 

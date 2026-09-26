@@ -85,6 +85,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   before releasing it: a creation either completes first and is swept by the
   deletion, or answers `404 NOT_FOUND` having created nothing. Deterministic
   race tests cover both orderings and the gap between teardown and row delete.
+  A creation whose API had its `auth_plugin` swapped while the credential was
+  being issued now revokes that credential and answers `409 CONFLICT` for the
+  client to retry, instead of returning a key of the old flavour. A deletion
+  whose row delete fails after the teardown logs what the teardown collected
+  and keeps the identity's registration, so the retried `DELETE` still records
+  the collected `test_consumer_id` in its `api.delete` audit row; and two
+  concurrent deletions of one API can no longer both answer `200` and both
+  write `api.delete` — the one that finds the row already gone answers `404`.
 
 ## [0.1.0] - 2026-09-25
 
