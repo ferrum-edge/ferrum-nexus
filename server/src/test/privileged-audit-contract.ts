@@ -837,6 +837,202 @@ export function runPrivilegedAuditContract(
       assert.equal(await countAudit(AuditAction.API_UPDATE, api.id), 1);
     });
 
+    /* ── Live deployments: spec revisions and gateway restores ────────────── */
+
+    /** A `routes` API, whose every spec revision rewrites the live proxy. */
+    async function publishRoutes(): Promise<{ id: string; slug: string; proxyId: string }> {
+      slugs += 1;
+      const slug = `audited-revision-${slugs}`;
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: {
+          name: `Audited ${slug}`,
+          slug,
+          spec: SAMPLE_SPEC_YAML,
+          auth_plugin: 'key_auth',
+          requestable: true,
+          visibility: 'public',
+          spec_enforcement: 'routes',
+        },
+      });
+      assert.equal(response.statusCode, 201, response.body);
+      const id = response.json<PublishApiResponse>().api.id;
+      return { id, slug, proxyId: await proxyOf(id) };
+    }
+
+    function revise(apiId: string, version: string) {
+      return harness.authed(provider, {
+        method: 'PUT',
+        url: `/api/apis/${apiId}/spec`,
+        payload: { spec: SAMPLE_SPEC_YAML.replace('version: 2.4.0', `version: ${version}`) },
+      });
+    }
+
+    function servedVersion(proxyId: string): unknown {
+      const info = harness.edge.apiSpecForProxy(proxyId)?.document.info;
+      return (info as Record<string, unknown> | undefined)?.version;
+    }
+
+    it('rewrites no proxy when a spec revision cannot record its start', async () => {
+      const api = await publishRoutes();
+      const current = await target.store.apiSpecs.findCurrentByApi(api.id);
+      const writes = harness.edge.callsTo('PUT', '/api-specs').length;
+      faults.failNext('auditLogs', 'create');
+      const failed = await revise(api.id, '3.0.0');
+      assert.equal(failed.statusCode, 500, failed.body);
+      assert.deepEqual(faults.pending(), [], 'the intended failure was reached');
+      assert.equal(harness.edge.callsTo('PUT', '/api-specs').length, writes, 'no gateway write');
+      assert.equal(servedVersion(api.proxyId), '2.4.0');
+      assert.equal((await target.store.apiSpecs.findCurrentByApi(api.id))?.id, current?.id);
+      assert.equal(await countAudit(AuditAction.API_SPEC_REVISION_START, api.id), 0);
+      assert.equal(await countAudit(AuditAction.API_SPEC_REVISION_FAILED, api.id), 0);
+      assert.equal(await countAudit(AuditAction.API_SPEC_UPDATE, api.id), 0);
+    });
+
+    it('puts the served document back when a spec revision cannot be recorded', async () => {
+      const api = await publishRoutes();
+      const current = await target.store.apiSpecs.findCurrentByApi(api.id);
+      // The start row goes in and the gateway is rewritten; the completion row
+      // then fails, and takes the revision back with it.
+      faults.failAfter('auditLogs', 'create', 1);
+      const failed = await revise(api.id, '3.0.0');
+      assert.equal(failed.statusCode, 500, failed.body);
+      assert.deepEqual(faults.pending(), [], 'the intended failure was reached');
+      assert.equal(servedVersion(api.proxyId), '2.4.0', 'the compensation re-imported it');
+      assert.equal((await target.store.apiSpecs.findCurrentByApi(api.id))?.id, current?.id);
+      assert.equal(await countAudit(AuditAction.API_SPEC_REVISION_START, api.id), 1);
+      assert.equal(await countAudit(AuditAction.API_SPEC_UPDATE, api.id), 0);
+      const outcome = await detailsOf(AuditAction.API_SPEC_REVISION_FAILED, api.id);
+      assert.equal(outcome.operation, 'update');
+      assert.equal(outcome.restored, true);
+      assert.equal(outcome.proxy_id, api.proxyId);
+
+      const retried = await revise(api.id, '3.0.0');
+      assert.equal(retried.statusCode, 200, retried.body);
+      assert.equal(servedVersion(api.proxyId), '3.0.0');
+      assert.equal(await countAudit(AuditAction.API_SPEC_REVISION_START, api.id), 2);
+      assert.equal(await countAudit(AuditAction.API_SPEC_UPDATE, api.id), 1);
+    });
+
+    it('puts the served document back when a spec rollback cannot be recorded', async () => {
+      const api = await publishRoutes();
+      const original = await target.store.apiSpecs.findCurrentByApi(api.id);
+      assert.ok(original);
+      assert.equal((await revise(api.id, '3.0.0')).statusCode, 200);
+      const revised = await target.store.apiSpecs.findCurrentByApi(api.id);
+      const rollback = () =>
+        harness.authed(provider, {
+          method: 'POST',
+          url: `/api/apis/${api.id}/revisions/${original.id}/rollback`,
+          payload: {},
+        });
+      faults.failAfter('auditLogs', 'create', 1);
+      const failed = await rollback();
+      assert.equal(failed.statusCode, 500, failed.body);
+      assert.deepEqual(faults.pending(), [], 'the intended failure was reached');
+      assert.equal(servedVersion(api.proxyId), '3.0.0');
+      assert.equal((await target.store.apiSpecs.findCurrentByApi(api.id))?.id, revised?.id);
+      assert.equal(await countAudit(AuditAction.API_SPEC_ROLLBACK, api.id), 0);
+      const outcome = await detailsOf(AuditAction.API_SPEC_REVISION_FAILED, api.id);
+      assert.equal(outcome.operation, 'rollback');
+      assert.equal(outcome.restored_from_spec_id, original.id);
+      assert.equal(outcome.restored, true);
+
+      const retried = await rollback();
+      assert.equal(retried.statusCode, 200, retried.body);
+      assert.equal(servedVersion(api.proxyId), '2.4.0');
+      assert.equal(await countAudit(AuditAction.API_SPEC_ROLLBACK, api.id), 1);
+    });
+
+    /**
+     * Take the API's proxy off the gateway and flag the row the way a
+     * reconciliation repair leaves it: no proxy reference, `repair_required`.
+     */
+    async function strandDeployment(apiId: string): Promise<void> {
+      const proxyId = await proxyOf(apiId);
+      harness.edge.proxies.delete(`nexus/${proxyId}`);
+      for (const [key, spec] of harness.edge.apiSpecs) {
+        if (spec.proxy_id === proxyId) harness.edge.apiSpecs.delete(key);
+      }
+      await target.store.apis.update(apiId, {
+        ferrum_proxy_id: null,
+        gateway_state: 'repair_required',
+      });
+    }
+
+    function restoreGateway(apiId: string) {
+      return harness.authed(provider, {
+        method: 'POST',
+        url: `/api/apis/${apiId}/restore-gateway`,
+        payload: {},
+      });
+    }
+
+    function proxiesNamed(slug: string): number {
+      const name = `nexus-${slug}`;
+      return [...harness.edge.proxies.values()].filter((proxy) => proxy.name === name).length;
+    }
+
+    it('builds no proxy when a restore cannot record its start', async () => {
+      const api = await publish();
+      await strandDeployment(api.id);
+      faults.failNext('auditLogs', 'create');
+      const failed = await restoreGateway(api.id);
+      assert.equal(failed.statusCode, 500, failed.body);
+      assert.deepEqual(faults.pending(), [], 'the intended failure was reached');
+      assert.equal(proxiesNamed(api.slug), 0, 'the gateway was never touched');
+      const row = await target.store.apis.findById(api.id);
+      assert.equal(row?.ferrum_proxy_id, null);
+      assert.equal(row?.gateway_state, 'repair_required');
+      assert.equal(await countAudit(AuditAction.API_GATEWAY_RESTORE_START, api.id), 0);
+      assert.equal(await countAudit(AuditAction.API_GATEWAY_RESTORE, api.id), 0);
+    });
+
+    it('withdraws the rebuilt proxy when a restore cannot be recorded', async () => {
+      const api = await publish();
+      await strandDeployment(api.id);
+      // The start row goes in and the proxy goes live; the completion row
+      // then fails, and takes the adoption back with it.
+      faults.failAfter('auditLogs', 'create', 1);
+      const failed = await restoreGateway(api.id);
+      assert.equal(failed.statusCode, 500, failed.body);
+      assert.deepEqual(faults.pending(), [], 'the intended failure was reached');
+      assert.equal(proxiesNamed(api.slug), 0, 'the compensation withdrew it');
+      assert.equal(harness.edge.proxyServing(`/nexus/${api.slug}`), undefined);
+      const row = await target.store.apis.findById(api.id);
+      assert.equal(row?.ferrum_proxy_id, null);
+      assert.equal(row?.gateway_state, 'repair_required');
+      const start = await detailsOf(AuditAction.API_GATEWAY_RESTORE_START, api.id);
+      assert.equal(await countAudit(AuditAction.API_GATEWAY_RESTORE, api.id), 0);
+      const outcome = await detailsOf(AuditAction.API_GATEWAY_RESTORE_FAILED, api.id);
+      assert.equal(outcome.withdrawn, true);
+      assert.equal(outcome.proxy_id, start.proxy_id);
+
+      const retried = await restoreGateway(api.id);
+      assert.equal(retried.statusCode, 200, retried.body);
+      assert.equal(proxiesNamed(api.slug), 1);
+      assert.equal((await target.store.apis.findById(api.id))?.gateway_state, 'deployed');
+      assert.equal(await countAudit(AuditAction.API_GATEWAY_RESTORE, api.id), 1);
+    });
+
+    it('keeps a stale repair flag when clearing it cannot be recorded', async () => {
+      const api = await publish();
+      await target.store.apis.update(api.id, { gateway_state: 'repair_required' });
+      faults.failNext('auditLogs', 'create');
+      const failed = await restoreGateway(api.id);
+      assert.equal(failed.statusCode, 500, failed.body);
+      assert.deepEqual(faults.pending(), [], 'the intended failure was reached');
+      assert.equal((await target.store.apis.findById(api.id))?.gateway_state, 'repair_required');
+      assert.equal(await countAudit(AuditAction.API_GATEWAY_RESTORE, api.id), 0);
+
+      const retried = await restoreGateway(api.id);
+      assert.equal(retried.statusCode, 200, retried.body);
+      assert.equal((await target.store.apis.findById(api.id))?.gateway_state, 'deployed');
+      const details = await detailsOf(AuditAction.API_GATEWAY_RESTORE, api.id);
+      assert.equal(details.rebuilt, false);
+    });
+
     it('tears a new test consumer back down when its creation cannot be recorded', async () => {
       const api = await publish();
       const username = testConsumerUsername(api.id);

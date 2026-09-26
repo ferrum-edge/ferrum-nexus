@@ -221,6 +221,7 @@ import {
   type SpecDiff,
   type SpecEnforcementLevel,
   type UpdateApiRequest,
+  type UpdateApiResponse,
   type Uuid,
 } from '@ferrum-nexus/shared';
 
@@ -357,7 +358,12 @@ export interface PublishingService {
   /** Validate the spec, build the Edge objects, then persist the rows. */
   publish(owner: UserRecord, input: PublishApiInput, ip?: string | null): Promise<PublishResult>;
   /** Change safe runtime settings; reconciles the Edge plugin configs. */
-  update(actor: UserRecord, apiId: Uuid, patch: UpdateApiInput, ip?: string | null): Promise<Api>;
+  update(
+    actor: UserRecord,
+    apiId: Uuid,
+    patch: UpdateApiInput,
+    ip?: string | null,
+  ): Promise<UpdateApiResponse>;
   /** Store a new spec revision and make it current. */
   updateSpec(
     actor: UserRecord,
@@ -923,11 +929,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
      */
     unrecognised: Partial<Record<ApiGatewayPluginRole, string[]>>;
     /**
-     * Same-name configs on the proxy for every unrecorded role this reading
-     * attributes as owning none of them: the {@link unrecognised} ones, and
-     * every config named for a role the API does not use. The first change
-     * that records the role settles them as an operator's, so its audit row
-     * names them.
+     * Same-name configs on the proxy that an unrecorded role this reading
+     * attributes is settled beside: the {@link unrecognised} ones, every config
+     * named for a role the API does not use, and the non-candidates next to a
+     * recognised candidate. The first change that records the role settles
+     * them as an operator's, so its audit row names them.
      */
     unowned: Partial<Record<ApiGatewayPluginRole, string[]>>;
   }
@@ -1050,6 +1056,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       if (candidate) {
         ids[role] = candidate.id;
         live[role] = candidate;
+        // A tuned config beside the recognised one is an operator's from the
+        // moment the role is recorded, exactly like an unrecognised limiter.
+        const others = sameName.filter((plugin) => plugin.id !== candidate.id);
+        if (others.length > 0) unowned[role] = others.map((plugin) => plugin.id);
         continue;
       }
       if (sameName.length > 0) {
@@ -1064,6 +1074,33 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
 
   function associatedIds(proxy: EdgeProxy): string[] {
     return (proxy.plugins ?? []).map((entry) => entry.plugin_config_id);
+  }
+
+  /**
+   * The configs of the outgoing auth flavour that go on accepting its
+   * credentials on the proxy once the portal's own is swapped out.
+   *
+   * `listByProxy` returns every config scoped to the proxy, but only an
+   * enabled one the proxy's `plugins[]` names actually runs, so a disabled or
+   * unassociated leftover is not reported as still admitting anyone. Configs
+   * scoped by `trigger` or `api_spec_id` are counted conservatively as still
+   * accepting credentials because their runtime scope cannot be ruled out here.
+   */
+  async function outgoingAuthConfigsRemaining(
+    proxyId: string,
+    outgoing: AuthPluginType,
+    plugins: EdgePluginConfig[],
+    portalOwned: EdgePluginConfig | undefined,
+  ): Promise<string[]> {
+    const candidates = plugins.filter(
+      (plugin) =>
+        plugin.plugin_name === outgoing && plugin.enabled && plugin.id !== portalOwned?.id,
+    );
+    if (candidates.length === 0) return [];
+    const proxy = await edge.proxies.get(proxyId);
+    if (!proxy) throw notFound('Proxy', proxyId);
+    const running = new Set(associatedIds(proxy));
+    return candidates.filter((plugin) => running.has(plugin.id)).map((plugin) => plugin.id);
   }
 
   /**
@@ -1362,6 +1399,13 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     // If the catalog changes while waiting, derive it again under the lease.
     let backend = proxyId ? await followedUpstream(api, previous, parsed) : null;
 
+    /** What the start and failure rows name the revision by. */
+    const revisionIdentity = (): Record<string, unknown> => ({
+      operation: restoredFrom ? 'rollback' : 'update',
+      version: nextVersion,
+      ...(restoredFrom ? { restored_from_spec_id: restoredFrom.id } : {}),
+    });
+
     /**
      * Move the gateway, then persist the revision, compensating the gateway
      * if the persistence fails.
@@ -1393,6 +1437,31 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       }
       assertRoutesEnforceable(api.spec_enforcement, parsed.paths);
       assertRoutesSubmittable(api.spec_enforcement, parsed.document);
+      // A revision that rewrites a live proxy commits its intent first, in a
+      // transaction of its own under the lease (so the fence covers it): the
+      // completion row below commits with the revision, but a gateway write
+      // that landed and could then be neither recorded nor compensated must
+      // still leave a row naming who started it. A revision that writes
+      // nothing to the gateway — no proxy, or a `docs_only` document that
+      // does not move the backend — is atomic without one.
+      const writesGateway =
+        proxyId !== null && (api.spec_enforcement === 'routes' || backend !== null);
+      if (writesGateway) {
+        await store.transaction(async (tx) => {
+          await audit.forStore(tx).record(
+            { id: actor.id, role: actor.role },
+            AuditAction.API_SPEC_REVISION_START,
+            { type: 'api', id: api.id },
+            {
+              ...revisionIdentity(),
+              proxy_id: proxyId,
+              spec_enforcement: api.spec_enforcement,
+              backend: backend ? formatUpstreamUrl(backend) : null,
+            },
+            ip,
+          );
+        });
+      }
       const undo: (() => Promise<void>)[] = [];
       try {
         if (proxyId) {
@@ -1496,6 +1565,35 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             Object.keys(changes).length === 0
               ? api
               : ((await tx.apis.update(api.id, changes)) ?? api);
+          // The completion row commits with the revision: a failed insert rolls
+          // the revision back, and the catch below compensates the gateway
+          // exactly as for any other failed row write.
+          await audit.forStore(tx).record(
+            { id: actor.id, role: actor.role },
+            // One publishing path, two names for it. A rollback is a revision
+            // like any other on the gateway, and an operator reading the log
+            // still has to be able to tell "the provider uploaded a document"
+            // from "the provider put an earlier one back".
+            restoredFrom ? AuditAction.API_SPEC_ROLLBACK : AuditAction.API_SPEC_UPDATE,
+            { type: 'api', id: api.id },
+            {
+              spec_id: revision.id,
+              version: nextVersion,
+              spec_paths: parsed.pathCount,
+              spec_operations: parsed.operationCount,
+              spec_enforcement: api.spec_enforcement,
+              backend_updated: backendUpdated,
+              pruned_revisions: pruned,
+              ...(restoredFrom
+                ? {
+                    restored_from_spec_id: restoredFrom.id,
+                    restored_from_version: restoredFrom.version,
+                    restored_from_created_at: restoredFrom.created_at,
+                  }
+                : {}),
+            },
+            ip,
+          );
           return { spec: revision, api: row };
         });
       } catch (error) {
@@ -1530,6 +1628,31 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             ip,
           });
         }
+        if (writesGateway) {
+          // The outcome of the attempt the start row announced. Best-effort by
+          // the same contract as the compensation above: the caller must see
+          // the original failure, not an audit failure.
+          await audit
+            .record(
+              { id: actor.id, role: actor.role },
+              AuditAction.API_SPEC_REVISION_FAILED,
+              { type: 'api', id: api.id },
+              {
+                ...revisionIdentity(),
+                proxy_id: proxyId,
+                restored: failures.length === 0,
+                ...(failures.length > 0
+                  ? {
+                      steps: failures.map((failure) => failure.step),
+                      step_errors: failures.map((failure) => failure.error),
+                    }
+                  : {}),
+                error: errorMessage(error),
+              },
+              ip,
+            )
+            .catch(() => undefined);
+        }
         // A compensated failure leaves the row where it was, so the audit
         // details must not claim a move that has just been rewound.
         backendUpdated = false;
@@ -1540,39 +1663,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     };
 
     const persisted = proxyId ? await binder.withProxy(proxyId, apply) : await apply();
-    const spec = persisted.spec;
-    const updated = persisted.api;
-
-    await audit.record(
-      { id: actor.id, role: actor.role },
-      // One publishing path, two names for it. A rollback is a revision like
-      // any other on the gateway, and an operator reading the log still has
-      // to be able to tell "the provider uploaded a document" from "the
-      // provider put an earlier one back".
-      restoredFrom ? AuditAction.API_SPEC_ROLLBACK : AuditAction.API_SPEC_UPDATE,
-      { type: 'api', id: api.id },
-      {
-        spec_id: spec.id,
-        version: nextVersion,
-        spec_paths: parsed.pathCount,
-        spec_operations: parsed.operationCount,
-        spec_enforcement: api.spec_enforcement,
-        backend_updated: backendUpdated,
-        pruned_revisions: pruned,
-        ...(restoredFrom
-          ? {
-              restored_from_spec_id: restoredFrom.id,
-              restored_from_version: restoredFrom.version,
-              restored_from_created_at: restoredFrom.created_at,
-            }
-          : {}),
-      },
-      ip,
-    );
 
     return {
-      api: presentApi(updated, await settings.getGatewayPublicUrl()),
-      spec: specSummary(spec),
+      api: presentApi(persisted.api, await settings.getGatewayPublicUrl()),
+      spec: specSummary(persisted.spec),
     };
   }
 
@@ -1937,13 +2031,13 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       };
     },
 
-    async update(actor, apiId, patch, ip = null): Promise<Api> {
+    async update(actor, apiId, patch, ip = null): Promise<UpdateApiResponse> {
       const initial = await loadApi(apiId);
       assertCanAdminister(actor, initial);
       assertGatewaySettingsWritable(initial, patch);
       // The read, gateway mutations, rollback, and catalog write are one
       // canonical proxy operation. Helpers inside must not reacquire the key.
-      const apply = async (): Promise<Api> => {
+      const apply = async (): Promise<UpdateApiResponse> => {
         const {
           associateLocked: associate,
           disassociateLocked: disassociate,
@@ -2070,7 +2164,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         }
         // A policy the portal cannot recognise as its own, where a second one
         // beside it would make the setting the provider sees diverge from the
-        // one the gateway enforces — see `REFUSED_WHEN_UNRECOGNISED`.
+        // one the gateway enforces — see `REFUSED_WHEN_UNRECOGNISED`. `auth` is
+        // in that list but never reaches this branch: the auth-specific refusal
+        // above already threw for every touched, unrecognised auth role.
         const unrecognisedTouched = REFUSED_WHEN_UNRECOGNISED.filter(
           (role) => touched.has(role) && owned.unrecognised[role] !== undefined,
         );
@@ -2113,12 +2209,28 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         const impact: AuthSwapImpact = swappedAuthPlugin
           ? await authSwapImpact(api)
           : { grantees: [], apiOwned: [] };
+        // Configs of the outgoing auth flavour the swap leaves running: an
+        // operator's, or one an unrecorded API's recognition settled as theirs.
+        // Read here, before the refusal, so the refusal and the swap report the
+        // same list.
+        const outgoingAuthRemaining =
+          swappedAuthPlugin && proxyId
+            ? await outgoingAuthConfigsRemaining(proxyId, api.auth_plugin, plugins, owned.live.auth)
+            : [];
         if (
           swappedAuthPlugin &&
           impact.grantees.length > 0 &&
           patch.confirm_access_disruption !== true
         ) {
           const count = impact.grantees.length;
+          const accounts = `${count} account${count === 1 ? '' : 's'} holding access`;
+          const holds = count === 1 ? 'it holds' : 'they hold';
+          const gatewayConfig =
+            outgoingAuthRemaining.length === 1 ? 'gateway configuration' : 'gateway configurations';
+          const gatewayAcceptance =
+            outgoingAuthRemaining.length === 1
+              ? 'that configuration accepts only until it is removed.'
+              : 'those configurations accept only until they are removed.';
           const refusal: AccessDisruptionDetails = {
             field: 'auth_plugin',
             current_auth_plugin: api.auth_plugin,
@@ -2126,12 +2238,24 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             credential_type: CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin],
             affected_grantees: count,
             confirm_field: 'confirm_access_disruption',
+            ...(outgoingAuthRemaining.length > 0
+              ? { outgoing_auth_configs_remaining: outgoingAuthRemaining }
+              : {}),
           };
+          // While a config of the outgoing flavour the portal does not own is
+          // still running on the proxy, those credentials keep working here
+          // until the gateway operator removes it, so this is no lockout.
+          const effect =
+            outgoingAuthRemaining.length > 0
+              ? `would leave ${accounts} depending on ${gatewayConfig} outside the ` +
+                `portal (${outgoingAuthRemaining.join(', ')}): ${holds} a ` +
+                `${refusal.credential_type} credential, which the portal's authentication for ` +
+                `this API will no longer accept; ${gatewayAcceptance}`
+              : `would lock ${accounts} out of it: ${holds} a ${refusal.credential_type} ` +
+                'credential, which this API will no longer accept.';
           throw accessDisruptionConfirmationRequired(
             `Changing this API's authentication from ${api.auth_plugin} to ${swappedAuthPlugin} ` +
-              `would lock ${count} account${count === 1 ? '' : 's'} holding access out of it: ` +
-              `${count === 1 ? 'it holds' : 'they hold'} a ${refusal.credential_type} ` +
-              'credential, which this API will no longer accept. Resend with ' +
+              `${effect} Resend with ` +
               '"confirm_access_disruption": true to make the change anyway — those accounts keep ' +
               'their credentials, which go on serving every other API of that kind, and are told ' +
               'to issue one of the new kind for this API.',
@@ -2242,10 +2366,17 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             update.auth_plugin = patch.auth_plugin;
             changed.push('auth_plugin');
             // Credentials of the previous flavour are kept on the consumer (they may
-            // still authenticate other APIs) but they no longer satisfy *this* API.
+            // still authenticate other APIs) but they no longer satisfy *this* API
+            // — unless another config of that flavour is still running on it
+            // (`outgoingAuthRemaining`). That config goes on accepting them here,
+            // so the row names it rather than claiming the credentials stopped
+            // working.
             details.previous_auth_plugin = api.auth_plugin;
             details.previous_credential_type = CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin];
-            details.existing_credentials_invalidated = true;
+            details.existing_credentials_invalidated = outgoingAuthRemaining.length === 0;
+            if (outgoingAuthRemaining.length > 0) {
+              details.outgoing_auth_configs_remaining = outgoingAuthRemaining;
+            }
           }
 
           if (patch.requestable !== undefined && patch.requestable !== api.requestable && proxyId) {
@@ -2603,7 +2734,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             // Reconciliation can repair live gateway drift without changing the
             // Nexus row. That is still a state-changing operation and must retain
             // the caller attribution in the audit trail.
-            if (!gatewayMutated) return presentApi(api, await settings.getGatewayPublicUrl());
+            if (!gatewayMutated) {
+              return { api: presentApi(api, await settings.getGatewayPublicUrl()) };
+            }
             details.gateway_reconciled = true;
           }
           // The row, the ownership record and the audit record commit
@@ -2751,14 +2884,19 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             previous_auth_plugin: api.auth_plugin,
             auth_plugin: updated.auth_plugin,
             previous_credential_type: CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin],
-            // Accounts cut off from this API until they re-issue. Their
-            // credentials were deliberately left alone.
+            // Accounts told to re-issue for this API: cut off from it unless
+            // `outgoing_auth_configs_remaining` names a config that still
+            // accepts their credential. Their credentials were deliberately
+            // left alone.
             affected_grantees: impact.grantees.length,
             affected_grantee_ids: impact.grantees,
             api_owned_credentials: apiOwned.length,
             revoked_api_credentials: revoked.length,
             failed: unrevoked.map((entry) => entry.credential_id),
             failure_errors: unrevoked.map((entry) => entry.error),
+            ...(outgoingAuthRemaining.length > 0
+              ? { outgoing_auth_configs_remaining: outgoingAuthRemaining }
+              : {}),
           };
           if (unrevoked.length > 0) {
             deps.log?.(
@@ -2783,9 +2921,25 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             `This API now requires a ${CREDENTIAL_TYPE_FOR_PLUGIN[updated.auth_plugin]} credential (${updated.auth_plugin}). Your existing credentials are still valid for your other APIs, but you need to issue one of the new kind from your credentials page to keep calling this one.`,
             '/credentials',
           );
+        } else if (swapped && outgoingAuthRemaining.length > 0) {
+          // Not "your credentials stopped working here": a config of the
+          // outgoing flavour the portal does not own is still attached and still
+          // accepts them, for as long as the gateway operator leaves it there.
+          await notifyGrantees(
+            api.id,
+            'system',
+            `${updated.name} changed its authentication method`,
+            `This API's portal-managed authentication now uses a ${CREDENTIAL_TYPE_FOR_PLUGIN[updated.auth_plugin]} credential (${updated.auth_plugin}). A gateway configuration outside the portal still accepts ${CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin]} credentials here for now, but issue one of the new kind from your credentials page to keep calling this API once it is removed.`,
+            '/credentials',
+          );
         }
 
-        return presentApi(updated, await settings.getGatewayPublicUrl());
+        return {
+          api: presentApi(updated, await settings.getGatewayPublicUrl()),
+          ...(outgoingAuthRemaining.length > 0
+            ? { outgoing_auth_configs_remaining: outgoingAuthRemaining }
+            : {}),
+        };
       };
       return initial.ferrum_proxy_id ? binder.withProxy(initial.ferrum_proxy_id, apply) : apply();
     },
@@ -2852,6 +3006,26 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // namespace would take every write below and serve none of them.
       assertNamespaceRoutable();
 
+      /** The `api.gateway_restore` row, for either way a restore clears. */
+      const restoreDetails = (
+        row: ApiRecord,
+        spec: ApiSpecRecord,
+        proxyId: string,
+        rebuilt: boolean,
+      ): Record<string, unknown> => ({
+        slug: row.slug,
+        listen_path: listenPathFor(namespace, row.slug),
+        proxy_id: proxyId,
+        spec_id: spec.id,
+        spec_enforcement: row.spec_enforcement,
+        auth_plugin: row.auth_plugin,
+        requestable: row.requestable,
+        // `false` is the other way this clears: the stored proxy was live after
+        // all, so only the stale flag was dropped. One row either way — the two
+        // paths differ in what they did, not in whether they happened.
+        rebuilt,
+      });
+
       // Serialised per API, not per proxy: there is no proxy to hold a lease on
       // — that is the whole condition — so this is the only thing standing
       // between two restores of the same API and two live proxies claiming one
@@ -2889,11 +3063,22 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             // say so by clearing the condition rather than by rebuilding on
             // top of a proxy that is already serving.
             if (api.gateway_state === 'repair_required') {
-              // In a transaction so the restore key's fence covers it (#384).
-              const cleared = await store.transaction((tx) =>
-                tx.apis.update(api.id, { gateway_state: 'deployed' }),
-              );
-              return { api: cleared ?? api, spec: current, proxyId: recorded, rebuilt: false };
+              // In a transaction so the restore key's fence covers it (#384),
+              // and so the row commits or rolls back with the flag it clears.
+              const cleared = await store.transaction(async (tx) => {
+                const row = (await tx.apis.update(api.id, { gateway_state: 'deployed' })) ?? api;
+                await audit
+                  .forStore(tx)
+                  .record(
+                    { id: actor.id, role: actor.role },
+                    AuditAction.API_GATEWAY_RESTORE,
+                    { type: 'api', id: row.id },
+                    restoreDetails(row, current, recorded, false),
+                    ip,
+                  );
+                return row;
+              });
+              return { api: cleared, spec: current, proxyId: recorded, rebuilt: false };
             }
             throw conflict('This API already has a gateway proxy; there is nothing to restore', {
               api_id: api.id,
@@ -2968,16 +3153,40 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         // not hold, so the next palette save would find no config it owns.
         const palette = await store.apiPlugins.listByApi(api.id);
 
+        // Pre-minted and recorded before the call is awaited, for the reason
+        // `publish()` documents at length: a create Edge applied but could not
+        // acknowledge must still leave the compensation a target — and the
+        // intent row below a proxy to name.
+        const proxyId = newId();
+
+        // Committed before the first gateway call, under the restore key (so
+        // the fence covers it). The completion row commits with the adoption
+        // below, but a proxy that went live and could then be neither recorded
+        // nor withdrawn must still leave a row naming who built it; a failure to
+        // record this stops the restore before the gateway is touched.
+        await store.transaction(async (tx) => {
+          await audit.forStore(tx).record(
+            { id: actor.id, role: actor.role },
+            AuditAction.API_GATEWAY_RESTORE_START,
+            { type: 'api', id: api.id },
+            {
+              slug: api.slug,
+              listen_path: listenPath,
+              proxy_id: proxyId,
+              spec_id: current.id,
+              spec_enforcement: api.spec_enforcement,
+              auth_plugin: api.auth_plugin,
+            },
+            ip,
+          );
+        });
+
         const created: { proxyId?: string; specId?: string; pluginIds: string[] } = {
           pluginIds: [],
         };
         /** `api_plugins.plugin_name` → the config id the rebuild gave it. */
         const paletteConfigIds = new Map<string, string>();
         try {
-          // Pre-minted and recorded before the call is awaited, for the reason
-          // `publish()` documents at length: a create Edge applied but could
-          // not acknowledge must still leave the compensation a target.
-          const proxyId = newId();
           created.proxyId = proxyId;
           let gatewayProxyId = proxyId;
           if (api.spec_enforcement === 'routes') {
@@ -3115,6 +3324,19 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 ferrum_plugin_config_id: configId,
               });
             }
+            // The completion row commits with the adoption: a failed insert
+            // rolls it back, and the catch below withdraws the proxy exactly as
+            // for any other failed row write. The API was already undeployed,
+            // so that costs no traffic — it stays `repair_required` for a retry.
+            await audit
+              .forStore(tx)
+              .record(
+                { id: actor.id, role: actor.role },
+                AuditAction.API_GATEWAY_RESTORE,
+                { type: 'api', id: updated.id },
+                restoreDetails(updated, current, gatewayProxyId, true),
+                ip,
+              );
             return updated;
           });
           return { api: row, spec: current, proxyId: gatewayProxyId, rebuilt: true };
@@ -3176,30 +3398,6 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           throw error;
         }
       });
-
-      // Outside the compensated block: both sides now agree, and tearing a
-      // live API back down because an audit write failed would trade a
-      // missing row for an outage (see `AUDIT_COMMIT_CLASSES`; moving this row
-      // into its transaction is tracked in #400).
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.API_GATEWAY_RESTORE,
-        { type: 'api', id: restored.api.id },
-        {
-          slug: restored.api.slug,
-          listen_path: listenPathFor(namespace, restored.api.slug),
-          proxy_id: restored.proxyId,
-          spec_id: restored.spec.id,
-          spec_enforcement: restored.api.spec_enforcement,
-          auth_plugin: restored.api.auth_plugin,
-          requestable: restored.api.requestable,
-          // `false` is the other way this clears: the stored proxy was live
-          // after all, so only the stale flag was dropped. One row either way —
-          // the two paths differ in what they did, not in whether they happened.
-          rebuilt: restored.rebuilt,
-        },
-        ip,
-      );
 
       return {
         api: presentApi(restored.api, await settings.getGatewayPublicUrl()),

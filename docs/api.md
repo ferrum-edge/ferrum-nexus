@@ -2059,11 +2059,19 @@ route. Every field optional; nothing supplied returns the row unchanged.
 | `spec_enforcement`               | **rebuilds the proxy.** `routes` recreates it through the API-spec importer from the API's **current** spec revision; `docs_only` recreates it as a plain proxy. Omitting the field leaves the level alone. See the note below — the API is briefly unreachable                                                                                                                                                                                                                                                                                                                  |
 | `confirm_access_disruption`      | acknowledgement, not a setting: it only means anything alongside an `auth_plugin` change, and only as `true`. See that row                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
-→ `{ "api": Api }`. Errors: `400 SPEC_INVALID` (bad or, by default, private
-`upstream_url` — see `POST /api/apis`; or `details.reason = "no_operations"`
-when `routes` is asked for and the current revision declares nothing to allow),
+→ `{ "api": Api, "outgoing_auth_configs_remaining"?: string[] }`. The second
+field appears only after an `auth_plugin` change that left enabled configs of
+the outgoing plugin associated with the proxy — an operator's, which the portal
+never replaces or deletes (a disabled or unassociated one is not listed). They
+still accept the outgoing flavour's credentials on this API, so the change did
+not invalidate those here; the ids name the Edge plugin configs to remove.
+Errors: `400 SPEC_INVALID` (bad or, by default, private `upstream_url` — see
+`POST /api/apis`; or `details.reason = "no_operations"` when `routes` is asked
+for and the current revision declares nothing to allow),
 `409 ACCESS_DISRUPTION_CONFIRMATION_REQUIRED` (an `auth_plugin` change that
-would lock grantees out of the API, without `confirm_access_disruption: true`),
+would take grantees' credentials off the portal's authentication for the API,
+without `confirm_access_disruption: true`; `details.outgoing_auth_configs_remaining`
+names any config outside the portal that would go on accepting them),
 `409 CONFLICT` (a gateway setting — `upstream_url`, `auth_plugin`, `requestable`,
 `rate_limit`, `cors`, `allowed_methods`, `timeouts`, `circuit_breaker` or
 `spec_enforcement` — on an API with no gateway deployment; `details.fields`
@@ -2112,6 +2120,17 @@ then change the setting.
 > has made them useless, and they are revoked — each with its own
 > `credential.revoke` row — whether or not the change needed confirming. One
 > `api.auth_plugin_changed` row summarises both halves.
+>
+> An operator's own config of the outgoing plugin on the proxy is not the
+> portal's to delete, so it stays attached and, while enabled and associated
+> with the proxy, keeps accepting those credentials here. When one does, the
+> change is not reported as invalidating them: the refusal still asks for
+> confirmation but names the configs under
+> `details.outgoing_auth_configs_remaining` instead of claiming a lockout, the
+> `api.update` row records `existing_credentials_invalidated: false` with the
+> configs under `outgoing_auth_configs_remaining`, the response carries the same
+> list, and grantees are told a gateway configuration outside the portal still
+> accepts their existing credentials for now.
 >
 > The refusal counts grantees, so an API published with `requestable: false`
 > gates nobody, has no enumerable callers, and is never refused: its holders get
@@ -2234,6 +2253,15 @@ separate proxy write would only be overwritten by it. The same compensation
 applies: the gateway moves first, and if the revision cannot be persisted the
 previous document is put back. Plugin configs Nexus owns are untouched by the
 re-submission, so the API is never unauthenticated across it.
+
+The `api.spec_update` audit row commits in the transaction that makes the
+revision current, so a failed insert rolls the revision back and compensates
+the gateway like any other failed write. A revision that rewrites a live proxy
+— every `routes` revision, and a `docs_only` one that moves the backend — first
+commits an `api.spec_revision_start` row under the proxy lease; if that insert
+fails, nothing is written to the gateway. A revision that fails after its start
+row records `api.spec_revision_failed`, with `restored` saying whether the
+compensation put the gateway back.
 
 `400 SPEC_INVALID` with `details.reason = "no_operations"` when the new document
 declares nothing to allow — switch the enforcement level back to `docs_only`
@@ -2521,7 +2549,9 @@ document re-submitted to Edge, which regenerates the operation table from it.
 
 Audited as `api.spec_rollback` rather than `api.spec_update`, with
 `restored_from_spec_id`, `restored_from_version` and `restored_from_created_at`
-naming the revision that was put back.
+naming the revision that was put back. The row commits with the new revision,
+and the start and failure rows are the same `api.spec_revision_start` and
+`api.spec_revision_failed` a revision writes, with `operation: "rollback"`.
 
 ### `POST /api/apis/:id/restore-gateway`
 
@@ -2569,10 +2599,14 @@ restore.
 | `409 CONFLICT`   | the API already has a live gateway proxy, or has no stored specification revision to redeploy, or another restore of the same API is in flight, or the API's deployment settings or current specification changed while the proxy was being built (the build is withdrawn; restore again) |
 | `502 EDGE_ERROR` | the gateway could not be reached or refused a write. **Nothing is inferred from this** — an unreachable gateway is never read as a deleted proxy, and the row is left exactly as it was                                                                                                   |
 
-A restore that reaches the gateway and then fails deletes what it created,
-records `api.gateway_restore_failed` (with `stranded_proxy_id` when the
-compensating delete could not be confirmed), and leaves the API
-`repair_required` with no proxy reference. Retrying starts from the same place.
+A restore commits an `api.gateway_restore_start` row, naming the proxy id it is
+about to create, before the first gateway call — if that insert fails, nothing
+is built — and its `api.gateway_restore` row in the transaction that records the
+new proxy id. A restore that reaches the gateway and then fails, including when
+that row cannot be written, deletes what it created, records
+`api.gateway_restore_failed` (with `stranded_proxy_id` when the compensating
+delete could not be confirmed), and leaves the API `repair_required` with no
+proxy reference. Retrying starts from the same place.
 
 Concurrent restores of one API are serialized; the loser gets `409 CONFLICT`
 rather than building a second proxy for the same listen path.

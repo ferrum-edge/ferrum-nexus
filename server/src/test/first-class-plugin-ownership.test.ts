@@ -134,6 +134,13 @@ describe('first-class plugin ownership', () => {
     return entries;
   }
 
+  /** The `details` of this API's newest `api.update` row. */
+  async function lastUpdate(apiId: string): Promise<Record<string, unknown>> {
+    const row = (await harness.auditRows('api.update')).find((entry) => entry.target_id === apiId);
+    assert.ok(row, 'expected an api.update row');
+    return row.details;
+  }
+
   /** Take a config off the proxy and out of the gateway, as an operator would. */
   function removeByHand(proxyId: string, id: string): void {
     harness.edge.pluginConfigs.delete(`nexus/${id}`);
@@ -346,6 +353,25 @@ describe('first-class plugin ownership', () => {
     assert.ok(replacement);
     assert.equal(stored(replacement)?.plugin_name, 'jwt_auth');
     assert.ok(effectiveIds(proxyId).includes(replacement));
+
+    // The operator's key_auth still accepts key-auth credentials here, so the
+    // swap reports it rather than claiming those credentials stopped working.
+    assert.deepEqual(swapped.json<UpdateApiResponse>().outgoing_auth_configs_remaining, [
+      'op-key-auth',
+    ]);
+    const update = await lastUpdate(id);
+    assert.equal(update.existing_credentials_invalidated, false);
+    assert.deepEqual(update.outgoing_auth_configs_remaining, ['op-key-auth']);
+  });
+
+  it('reports full invalidation only when no outgoing auth config is left', async () => {
+    const { id } = await publish();
+    const swapped = await patch(id, { auth_plugin: 'jwt_auth' });
+    assert.equal(swapped.statusCode, 200, swapped.body);
+    assert.equal('outgoing_auth_configs_remaining' in swapped.json<UpdateApiResponse>(), false);
+    const update = await lastUpdate(id);
+    assert.equal(update.existing_credentials_invalidated, true);
+    assert.equal('outgoing_auth_configs_remaining' in update, false);
   });
 
   it('forgets an API’s record when the API is deleted', async () => {
@@ -509,6 +535,31 @@ describe('first-class plugin ownership', () => {
       assert.ok(replacement);
       assert.equal(stored(replacement)?.plugin_name, 'jwt_auth');
       assert.ok(effectiveIds(proxyId).includes(replacement));
+    });
+
+    it('swaps its own auth config out beside a tuned one, and reports the tuned one', async () => {
+      const { id, proxyId } = await publish();
+      const portal = String(configsNamed(proxyId, 'key_auth')[0]?.id);
+      await forgetRecord(id);
+      // Beside the portal's recognisable `{}` config, an operator's tuned one.
+      const operator = seedOperatorConfig(proxyId, 'key_auth', 'op-beside-key-auth', {
+        key_location: 'header:X-Ops-Key',
+      });
+
+      const swapped = await patch(id, { auth_plugin: 'jwt_auth' });
+      assert.equal(swapped.statusCode, 200, swapped.body);
+      assert.equal(stored(portal), undefined, 'the recognised portal config is swapped out');
+      assertUntouched(proxyId, operator);
+      assert.deepEqual(swapped.json<UpdateApiResponse>().outgoing_auth_configs_remaining, [
+        'op-beside-key-auth',
+      ]);
+      const update = await lastUpdate(id);
+      assert.equal(update.existing_credentials_invalidated, false);
+      assert.deepEqual(update.outgoing_auth_configs_remaining, ['op-beside-key-auth']);
+      // Settled as the operator's when the role was recorded, and named so.
+      assert.deepEqual(await unownedIn(id), [
+        { plugin_name: 'key_auth', plugin_config_id: 'op-beside-key-auth' },
+      ]);
     });
 
     it('names same-name configs of a role the API does not use when it records it', async () => {

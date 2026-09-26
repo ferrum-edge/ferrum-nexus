@@ -265,9 +265,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   be written (or the lease fence refuses the combined write), recording the row
   best-effort afterwards, and a consumer repair that cannot commit deletes the
   consumer it recreated, so a repeat repairs it rather than finding it present.
-  The revision and restore rows still recorded after the commit are tracked
-  in #400. The god-mode sweep's `access.revoke` rows now commit
-  with each grant's claim, so a gateway refusal is reported in
+  The god-mode sweep's `access.revoke` rows now commit with each grant's claim,
+  so a gateway refusal is reported in
   `god.disable_user_complete`'s `failed_grants` rather than on the row, and the
   `audit` failure stage is gone. A repeated application, API or plugin removal
   that finds the gateway side already collected copies what the earlier
@@ -295,6 +294,34 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   selection and the draft has not changed since it started, so typing, choosing
   another file, the page replacing the draft or the editor closing all drop an
   earlier pending read. Choosing the same file again still reloads it.
+- Spec updates, spec rollbacks and gateway restores now write their
+  `api.spec_update`, `api.spec_rollback` and `api.gateway_restore` rows in the
+  transaction that makes the change (#400). A failed insert rolls the revision
+  or the proxy adoption back and the gateway change is compensated, instead of
+  leaving a live deployment unaudited. Because that compensation is
+  best-effort, a revision that rewrites a live proxy first commits a new
+  `api.spec_revision_start` intent row under the proxy lease, and a restore a
+  new `api.gateway_restore_start` row (naming the proxy id it is about to
+  create) under its restore key, before the first gateway write; a failure to
+  record either stops the operation before the gateway is touched. A revision
+  that fails after its start row records a new `api.spec_revision_failed` row
+  saying whether the gateway was put back (`restored`); a restore keeps
+  recording `api.gateway_restore_failed`. All three completion actions are now
+  classified `transactional` and the two start rows `intent`.
+- An `auth_plugin` change that leaves an enabled config of the outgoing plugin
+  associated with the proxy — an operator's, which the portal never deletes, on
+  a recorded API or beside the portal's recognised config on an unrecorded one —
+  no longer reports the outgoing credentials as invalidated (#397). The
+  `api.update` row records `existing_credentials_invalidated: false` and lists
+  the configs under `outgoing_auth_configs_remaining` (also on
+  `api.auth_plugin_changed` and in the `PATCH /api/apis/:id` response), and
+  grantees are told a gateway configuration outside the portal still accepts
+  their existing credentials instead of being told they stopped working. The
+  `409 ACCESS_DISRUPTION_CONFIRMATION_REQUIRED` refusal carries the same list in
+  its `details` and no longer claims the grantees would be locked out; a
+  disabled or unassociated config is not counted. A non-matching config beside a
+  recognised candidate is now also named under `unowned_same_name_configs` when
+  the role is first recorded.
 - A gateway consumer repair whose relink the lease fence refused no longer
   leaves the consumer it recreated reading as `present` over credential rows
   that are still `active`: it keeps that consumer, logs the refusal, takes the

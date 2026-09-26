@@ -337,6 +337,114 @@ describe('auth_plugin swaps and the access they disrupt', () => {
     assert.equal(announced.link, '/credentials');
   });
 
+  it('does not tell grantees their credentials stopped working while one still opens it', async () => {
+    const api = await publish('swap-operator-auth');
+    const client = await newClient();
+    await grant(api.id, client);
+    await issue(client, 'keyauth');
+    // An operator's own key_auth config on the proxy, which the portal neither
+    // owns nor removes: it goes on accepting the grantee's key after the swap.
+    const operatorId = 'op-remaining-key-auth';
+    harness.edge.pluginConfigs.set(`nexus/${operatorId}`, {
+      id: operatorId,
+      namespace: 'nexus',
+      plugin_name: 'key_auth',
+      scope: 'proxy',
+      proxy_id: api.proxyId,
+      enabled: true,
+      config: { key_location: 'header:X-Ops-Key' },
+    });
+    const proxy = harness.edge.proxies.get(`nexus/${api.proxyId}`);
+    assert.ok(proxy);
+    const associated: unknown[] = Array.isArray(proxy.plugins) ? proxy.plugins : [];
+    proxy.plugins = [...associated, { plugin_config_id: operatorId }];
+
+    const response = await patchApi(api.id, {
+      auth_plugin: 'basic_auth',
+      confirm_access_disruption: true,
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.deepEqual(response.json<UpdateApiResponse>().outgoing_auth_configs_remaining, [
+      operatorId,
+    ]);
+    assert.ok(harness.edge.pluginConfigs.get(`nexus/${operatorId}`), 'the operator config stays');
+
+    const update = (await harness.auditRows('api.update')).find((row) => row.target_id === api.id);
+    assert.ok(update);
+    assert.equal(update.details.existing_credentials_invalidated, false);
+    assert.deepEqual(update.details.outgoing_auth_configs_remaining, [operatorId]);
+    const [summary] = await summaryRows(api.id);
+    assert.ok(summary);
+    assert.deepEqual(summary.details.outgoing_auth_configs_remaining, [operatorId]);
+
+    const notifications = await harness.authed(client, {
+      method: 'GET',
+      url: '/api/notifications?type=system',
+    });
+    assert.equal(notifications.statusCode, 200, notifications.body);
+    const listed = notifications.json<ListNotificationsResponse>().items;
+    const announced = listed.find((item) => item.title.includes('authentication method'));
+    assert.ok(announced, 'the grantee is still told about the change');
+    assert.match(announced.body, /still accepts keyauth credentials here/);
+    assert.doesNotMatch(announced.body, /you need to issue one of the new kind/);
+  });
+
+  /** Put a key_auth config the portal does not own on the proxy, as an operator would. */
+  function seedOperatorKeyAuth(
+    proxyId: string,
+    id: string,
+    { enabled = true, associate = true }: { enabled?: boolean; associate?: boolean } = {},
+  ): void {
+    harness.edge.pluginConfigs.set(`nexus/${id}`, {
+      id,
+      namespace: 'nexus',
+      plugin_name: 'key_auth',
+      scope: 'proxy',
+      proxy_id: proxyId,
+      enabled,
+      config: { key_location: 'header:X-Ops-Key' },
+    });
+    if (!associate) return;
+    const proxy = harness.edge.proxies.get(`nexus/${proxyId}`);
+    assert.ok(proxy);
+    const associated: unknown[] = Array.isArray(proxy.plugins) ? proxy.plugins : [];
+    proxy.plugins = [...associated, { plugin_config_id: id }];
+  }
+
+  it('does not claim a lockout while an operator config still accepts the credential', async () => {
+    const api = await publish('swap-refused-operator');
+    const client = await newClient();
+    await grant(api.id, client);
+    await issue(client, 'keyauth');
+    seedOperatorKeyAuth(api.proxyId, 'op-refusal-key-auth');
+
+    const response = await patchApi(api.id, { auth_plugin: 'basic_auth' });
+    assert.equal(response.statusCode, 409, response.body);
+    const error = errorBody(response.body);
+    assert.equal(error.code, 'ACCESS_DISRUPTION_CONFIRMATION_REQUIRED');
+    assert.deepEqual((error.details as AccessDisruptionDetails).outgoing_auth_configs_remaining, [
+      'op-refusal-key-auth',
+    ]);
+    assert.doesNotMatch(error.message, /lock/, error.message);
+    assert.match(error.message, /outside the portal \(op-refusal-key-auth\)/, error.message);
+    assert.match(error.message, /confirm_access_disruption/);
+    assert.equal((await harness.store.apis.findById(api.id))?.auth_plugin, 'key_auth');
+  });
+
+  it('reports no outgoing config left when the only one is disabled or unassociated', async () => {
+    const api = await publish('swap-operator-idle');
+    seedOperatorKeyAuth(api.proxyId, 'op-disabled-key-auth', { enabled: false });
+    seedOperatorKeyAuth(api.proxyId, 'op-detached-key-auth', { associate: false });
+
+    const response = await patchApi(api.id, { auth_plugin: 'basic_auth' });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal('outgoing_auth_configs_remaining' in response.json<UpdateApiResponse>(), false);
+    const update = (await harness.auditRows('api.update')).find((row) => row.target_id === api.id);
+    assert.ok(update);
+    assert.equal(update.details.existing_credentials_invalidated, true);
+    assert.equal('outgoing_auth_configs_remaining' in update.details, false);
+  });
+
   it('counts a grant held by an application, on that application’s consumer', async () => {
     // Issue #327: each application is its own consumer, with its own
     // credentials. A reading that only ever looked at the *account's* consumer

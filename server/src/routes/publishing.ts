@@ -449,7 +449,7 @@ export const publishingRoutes: FastifyPluginAsync<PublishingRoutesOptions> = asy
         ...patch,
         cors: patch.cors === undefined ? undefined : corsOrNull(patch.cors),
       };
-      return { api: await publishing.update(user, id, body, clientIp(request)) };
+      return publishing.update(user, id, body, clientIp(request));
     },
   );
 

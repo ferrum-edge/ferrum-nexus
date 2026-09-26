@@ -663,6 +663,9 @@ describe('audit commit classes', () => {
       AuditAction.CREDENTIAL_ROTATE,
       AuditAction.TEST_CONSUMER_CREATE,
       AuditAction.GATEWAY_CONSUMER_REPAIR,
+      AuditAction.API_SPEC_UPDATE,
+      AuditAction.API_SPEC_ROLLBACK,
+      AuditAction.API_GATEWAY_RESTORE,
     ];
     for (const action of required) {
       assert.equal(AUDIT_COMMIT_CLASSES[action].kind, 'transactional', action);
@@ -672,6 +675,8 @@ describe('audit commit classes', () => {
       AuditAction.API_DELETE_START,
       AuditAction.API_PLUGIN_REMOVE_START,
       AuditAction.CREDENTIAL_REVOKE_START,
+      AuditAction.API_SPEC_REVISION_START,
+      AuditAction.API_GATEWAY_RESTORE_START,
     ];
     for (const action of intents) assert.equal(AUDIT_COMMIT_CLASSES[action].kind, 'intent', action);
   });

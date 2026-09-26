@@ -258,8 +258,11 @@ describe('provider API workspace', () => {
     await openTab('Settings');
     changeField('Authentication', 'basic_auth');
     expect(screen.getByText(/Everyone holding access with a credential/)).toBeInTheDocument();
-    expect(screen.getByLabelText(/Cut off everyone using the old method/)).not.toBeChecked();
-    fireEvent.click(screen.getByLabelText(/Cut off everyone using the old method/));
+    const acknowledgement = screen.getByLabelText(
+      /Invalidate portal-issued old-method credentials/,
+    );
+    expect(acknowledgement).not.toBeChecked();
+    fireEvent.click(acknowledgement);
     save();
     await screen.findByText('API settings saved');
     expect(apisApi.update).toHaveBeenCalledWith(
@@ -267,7 +270,9 @@ describe('provider API workspace', () => {
       expect.objectContaining({ auth_plugin: 'basic_auth', confirm_access_disruption: true }),
     );
     await waitFor(() => {
-      const acknowledgement = screen.queryByLabelText(/Cut off everyone using the old method/);
+      const acknowledgement = screen.queryByLabelText(
+        /Invalidate portal-issued old-method credentials/,
+      );
       expect(acknowledgement).not.toBeInTheDocument();
     });
   });
