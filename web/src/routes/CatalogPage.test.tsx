@@ -319,6 +319,19 @@ describe('catalog access', () => {
     expect(screen.queryByText('No access')).not.toBeInTheDocument();
   });
 
+  it('keeps call instructions available when an open API is retired', async () => {
+    detail = {
+      ...detail,
+      api: catalogEntry({ status: 'retired', requestable: false, access_state: 'open' }),
+    };
+    await openDetail('Access');
+    expect(screen.getByText(/No approval needed/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Calling as')).toBeInTheDocument();
+    expect(screen.getByText('Call this API')).toBeInTheDocument();
+    expect(exampleRequest()).toContain("-H 'X-API-Key: <your key>'");
+    expect(screen.queryByLabelText('Access for')).not.toBeInTheDocument();
+  });
+
   it('shows the last denial and permits a new request', async () => {
     detail = {
       ...detail,
