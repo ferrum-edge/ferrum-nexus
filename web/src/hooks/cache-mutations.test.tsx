@@ -3,10 +3,19 @@ import { act, cleanup, renderHook } from '@testing-library/react';
 import type { GodDisableUserResponse } from '@ferrum-nexus/shared';
 import type { ReactElement, ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { API, CREDENTIAL, GRANT } from '../../test/fixtures';
-import { apisApi, credentialsApi, godApi, grantsApi } from '../lib/api';
+import { API, CREDENTIAL, GRANT, REQUEST } from '../../test/fixtures';
+import {
+  accessRequestsApi,
+  apisApi,
+  applicationsApi,
+  credentialsApi,
+  godApi,
+  grantsApi,
+} from '../lib/api';
 import { queryKeys } from './keys';
 import { useDeleteApi } from './useApis';
+import { useApproveAccessRequest } from './useAccessRequests';
+import { useDeleteApplication } from './useApplications';
 import { useDeleteCredential, useIssueCredential, useRotateCredential } from './useCredentials';
 import { useGodDisableUser, useGodRevokeGrant } from './useGodMode';
 import { useRevokeGrant } from './useGrants';
@@ -52,6 +61,14 @@ beforeEach(() => {
   });
   vi.spyOn(credentialsApi, 'remove').mockResolvedValue({ ok: true });
   vi.spyOn(apisApi, 'remove').mockResolvedValue({ ok: true });
+  vi.spyOn(applicationsApi, 'remove').mockResolvedValue({
+    revoked_grants: 0,
+    revoked_credentials: 0,
+  });
+  vi.spyOn(accessRequestsApi, 'approve').mockResolvedValue({
+    access_request: REQUEST,
+    grant: GRANT,
+  });
   vi.spyOn(godApi, 'revokeGrant').mockResolvedValue({ grant: { ...GRANT, status: 'revoked' } });
   // Only the invalidations are under test, so the response body is a stub.
   vi.spyOn(godApi, 'disableUser').mockResolvedValue({} as GodDisableUserResponse);
@@ -64,6 +81,14 @@ afterEach(() => {
 });
 
 describe('grant and credential mutations', () => {
+  it('refreshes application counts after approving a request', async () => {
+    const { result } = renderHook(useApproveAccessRequest, { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync({ id: 'request-1' });
+    });
+    expectStale('applications', 'requests', 'grants', 'catalog', 'apis');
+  });
+
   it('refreshes the API workspace counts after revoking a grant', async () => {
     const { result } = renderHook(useRevokeGrant, { wrapper });
     await act(async () => {
@@ -133,6 +158,24 @@ function useCredentialHooks() {
 }
 
 describe('deleting an API', () => {
+  it('refreshes every dependent cache after deleting an API', async () => {
+    const { result } = renderHook(useDeleteApi, { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync(API.id);
+    });
+    expectStale('apis', 'catalog', 'grants', 'requests', 'applications', 'credentials');
+
+    const fetchGrants = vi.fn(async () => ({ items: [], total: 0 }));
+    await expect(
+      client.fetchQuery({
+        queryKey: cacheKeys.grants,
+        queryFn: fetchGrants,
+        staleTime: 30_000,
+      }),
+    ).resolves.toEqual({ items: [], total: 0 });
+    expect(fetchGrants).toHaveBeenCalledOnce();
+  });
+
   it('forgets the deleted API without refetching it and refreshes the rest', async () => {
     const detail = vi.fn(async () => ({ id: API.id }));
     client.setQueryData(queryKeys.apis.spec(API.id), { raw_spec: '{}' });
@@ -159,10 +202,20 @@ describe('deleting an API', () => {
     expect(detail).toHaveBeenCalledTimes(1);
     // Lists, other APIs and the catalog are refreshed as before.
     expect(client.getQueryState(queryKeys.apis.list({}))?.isInvalidated).toBe(true);
-    expectStale('apis', 'catalog');
+    expectStale('apis', 'catalog', 'grants', 'requests', 'applications', 'credentials');
 
     // Once the page unmounts, the deleted API leaves the cache entirely.
     unmount();
     expect(client.getQueryState(queryKeys.apis.detail(API.id))).toBeUndefined();
+  });
+});
+
+describe('deleting an application', () => {
+  it('refreshes API counts and the catalog after its grants are removed', async () => {
+    const { result } = renderHook(useDeleteApplication, { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync('application-1');
+    });
+    expectStale('applications', 'credentials', 'requests', 'grants', 'catalog', 'apis');
   });
 });
