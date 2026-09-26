@@ -2745,6 +2745,97 @@ describe('publishing', () => {
   });
 
   describe('test consumers', () => {
+    it('revokes a test credential issued while an auth swap is saving its API row', async () => {
+      harness.edge.reset();
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'testcon-swap-race' }),
+      });
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const saveApi = harness.store.apis.update.bind(harness.store.apis);
+      let interleaved = false;
+      harness.store.apis.update = async (...args) => {
+        if (!interleaved) {
+          interleaved = true;
+          const issued = await harness.authed(provider, {
+            method: 'POST',
+            url: `/api/apis/${apiId}/test-consumer`,
+            payload: {},
+          });
+          assert.equal(issued.statusCode, 201, issued.body);
+        }
+        return saveApi(...args);
+      };
+
+      const swapped = await harness.authed(provider, {
+        method: 'PATCH',
+        url: `/api/apis/${apiId}`,
+        payload: { auth_plugin: 'jwt_auth' },
+      });
+      harness.store.apis.update = saveApi;
+      assert.equal(swapped.statusCode, 200, swapped.body);
+
+      const registered = await harness.store.gatewayIdentities.findByUsername(
+        'nexus',
+        `nexus-test-${apiId}`,
+      );
+      assert.ok(registered?.ferrum_consumer_id);
+      const rows = await harness.store.credentials.listByConsumer(registered.ferrum_consumer_id);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]?.status, 'revoked');
+    });
+
+    it('retires the issued row when conflict revocation fails but consumer deletion succeeds', async () => {
+      harness.edge.reset();
+      const published = await harness.authed(provider, {
+        method: 'POST',
+        url: '/api/apis',
+        payload: publishPayload({ slug: 'testcon-swap-revoke-failure' }),
+      });
+      const apiId = published.json<PublishApiResponse>().api.id;
+      const issue = harness.services.credentials.issueForConsumer.bind(
+        harness.services.credentials,
+      );
+      const realRevoke = harness.services.credentials.revokeInvalidated.bind(
+        harness.services.credentials,
+      );
+      let credentialId: string | null = null;
+      let failFirstRevoke = true;
+      harness.services.credentials.issueForConsumer = async (...args) => {
+        const result = await issue(...args);
+        credentialId = result.credential.id;
+        const api = await harness.store.apis.findById(apiId);
+        assert.ok(api);
+        await harness.store.apis.update(apiId, { auth_plugin: 'basic_auth' });
+        return result;
+      };
+      harness.services.credentials.revokeInvalidated = async (...args) => {
+        if (failFirstRevoke) {
+          failFirstRevoke = false;
+          throw new Error('Edge refused credential removal');
+        }
+        return realRevoke(...args);
+      };
+
+      const response = await harness.authed(provider, {
+        method: 'POST',
+        url: `/api/apis/${apiId}/test-consumer`,
+        payload: {},
+      });
+      harness.services.credentials.issueForConsumer = issue;
+      harness.services.credentials.revokeInvalidated = realRevoke;
+      assert.equal(response.statusCode, 409, response.body);
+      assert.ok(credentialId);
+      assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'revoked');
+      assert.equal(harness.edge.consumerByUsername(`nexus-test-${apiId}`), undefined);
+      assert.ok(
+        (await harness.auditRows('credential.revoke')).some(
+          (row) => row.target_id === credentialId,
+        ),
+      );
+    });
+
     it('creates a consumer in the API’s ACL group with a show-once credential', async () => {
       harness.edge.reset();
       const published = await harness.authed(provider, {

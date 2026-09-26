@@ -599,7 +599,18 @@ leaves the API in the catalog for the delete to be retried against, rather than
 answering `200` over a stranded identity). A consumer that is already gone is
 not an error. The teardown takes the identity's own name key, which is the key
 `POST /api/apis/:id/test-consumer` holds for the whole of its work, so a
-deletion racing a creation waits for it and then undoes it.
+deletion racing a creation waits for it and then undoes it. The portal rows are
+dropped before that key is released, and a creation re-reads the API as the
+first thing it does inside the key, so the other order cannot leak either: a
+creation that loaded the API just before a deletion answers `404` without
+creating anything, rather than building a consumer for an API that is already
+gone. The key pins the API's existence, not its `auth_plugin`: a creation
+re-reads the API after issuing its credential and, if an update swapped the
+plugin meanwhile, revokes that credential and answers `409` rather than hand
+back a key of the old flavour. When the row delete fails after the teardown,
+the teardown's result (consumer id and revoked count, no material) is logged
+and the registration is kept until the rows are gone, so the retried deletion's
+`api.delete` row still names the collected consumer.
 
 Every gateway step for one identity runs inside a critical section keyed on
 _that_ consumer's Ferrum id — an in-process queue plus an `edge_leases` row —
