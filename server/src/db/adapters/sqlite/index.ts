@@ -2462,6 +2462,24 @@ class SqliteStore implements NexusStore {
       return row ? mapMessage(row) : null;
     },
 
+    findLatestByThreads: async (threadIds) => {
+      if (threadIds.length === 0) return [];
+      const placeholders = threadIds.map(() => '?').join(', ');
+      const rows = queryAll(
+        this.db,
+        `SELECT m.* FROM messages AS m
+         WHERE m.thread_id IN (${placeholders})
+           AND NOT EXISTS (
+             SELECT 1 FROM messages AS n
+             WHERE n.thread_id = m.thread_id
+               AND (n.created_at > m.created_at
+                 OR (n.created_at = m.created_at AND n.id > m.id))
+           )`,
+        threadIds,
+      );
+      return rows.map(mapMessage);
+    },
+
     countByThread: async (threadId) =>
       queryCount(this.db, 'SELECT COUNT(*) AS count FROM messages WHERE thread_id = ?', [threadId]),
 

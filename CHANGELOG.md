@@ -322,6 +322,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   disabled or unassociated config is not counted. A non-matching config beside a
   recognised candidate is now also named under `unowned_same_name_configs` when
   the role is first recorded.
+- Conversation list previews now fetch the newest message for the whole page in
+  one adapter query, preserving the `(created_at, id)` ordering and empty-thread
+  previews. A 200-thread page used to issue 200 separate message lookups (#394).
 
 ## [0.1.0] - 2026-09-25
 

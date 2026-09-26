@@ -422,10 +422,9 @@ describe('auth_plugin swaps and the access they disrupt', () => {
     assert.equal(response.statusCode, 409, response.body);
     const error = errorBody(response.body);
     assert.equal(error.code, 'ACCESS_DISRUPTION_CONFIRMATION_REQUIRED');
-    assert.deepEqual(
-      (error.details as AccessDisruptionDetails).outgoing_auth_configs_remaining,
-      ['op-refusal-key-auth'],
-    );
+    assert.deepEqual((error.details as AccessDisruptionDetails).outgoing_auth_configs_remaining, [
+      'op-refusal-key-auth',
+    ]);
     assert.doesNotMatch(error.message, /lock/, error.message);
     assert.match(error.message, /outside the portal \(op-refusal-key-auth\)/, error.message);
     assert.match(error.message, /confirm_access_disruption/);

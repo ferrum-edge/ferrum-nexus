@@ -1082,7 +1082,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    *
    * `listByProxy` returns every config scoped to the proxy, but only an
    * enabled one the proxy's `plugins[]` names actually runs, so a disabled or
-   * unassociated leftover is not reported as still admitting anyone.
+   * unassociated leftover is not reported as still admitting anyone. Configs
+   * scoped by `trigger` or `api_spec_id` are counted conservatively as still
+   * accepting credentials because their runtime scope cannot be ruled out here.
    */
   async function outgoingAuthConfigsRemaining(
     proxyId: string,
@@ -2223,6 +2225,14 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           const count = impact.grantees.length;
           const accounts = `${count} account${count === 1 ? '' : 's'} holding access`;
           const holds = count === 1 ? 'it holds' : 'they hold';
+          const gatewayConfig =
+            outgoingAuthRemaining.length === 1
+              ? 'gateway configuration'
+              : 'gateway configurations';
+          const gatewayAcceptance =
+            outgoingAuthRemaining.length === 1
+              ? 'that configuration accepts only until it is removed.'
+              : 'those configurations accept only until they are removed.';
           const refusal: AccessDisruptionDetails = {
             field: 'auth_plugin',
             current_auth_plugin: api.auth_plugin,
@@ -2239,11 +2249,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // until the gateway operator removes it, so this is no lockout.
           const effect =
             outgoingAuthRemaining.length > 0
-              ? `would leave ${accounts} depending on a gateway configuration outside the ` +
+              ? `would leave ${accounts} depending on ${gatewayConfig} outside the ` +
                 `portal (${outgoingAuthRemaining.join(', ')}): ${holds} a ` +
                 `${refusal.credential_type} credential, which the portal's authentication for ` +
-                'this API will no longer accept and that configuration accepts only until it is ' +
-                'removed.'
+                `this API will no longer accept; ${gatewayAcceptance}`
               : `would lock ${accounts} out of it: ${holds} a ${refusal.credential_type} ` +
                 'credential, which this API will no longer accept.';
           throw accessDisruptionConfirmationRequired(
@@ -3060,13 +3069,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               // and so the row commits or rolls back with the flag it clears.
               const cleared = await store.transaction(async (tx) => {
                 const row = (await tx.apis.update(api.id, { gateway_state: 'deployed' })) ?? api;
-                await audit.forStore(tx).record(
-                  { id: actor.id, role: actor.role },
-                  AuditAction.API_GATEWAY_RESTORE,
-                  { type: 'api', id: row.id },
-                  restoreDetails(row, current, recorded, false),
-                  ip,
-                );
+                await audit
+                  .forStore(tx)
+                  .record(
+                    { id: actor.id, role: actor.role },
+                    AuditAction.API_GATEWAY_RESTORE,
+                    { type: 'api', id: row.id },
+                    restoreDetails(row, current, recorded, false),
+                    ip,
+                  );
                 return row;
               });
               return { api: cleared, spec: current, proxyId: recorded, rebuilt: false };
@@ -3319,13 +3330,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             // rolls it back, and the catch below withdraws the proxy exactly as
             // for any other failed row write. The API was already undeployed,
             // so that costs no traffic — it stays `repair_required` for a retry.
-            await audit.forStore(tx).record(
-              { id: actor.id, role: actor.role },
-              AuditAction.API_GATEWAY_RESTORE,
-              { type: 'api', id: updated.id },
-              restoreDetails(updated, current, gatewayProxyId, true),
-              ip,
-            );
+            await audit
+              .forStore(tx)
+              .record(
+                { id: actor.id, role: actor.role },
+                AuditAction.API_GATEWAY_RESTORE,
+                { type: 'api', id: updated.id },
+                restoreDetails(updated, current, gatewayProxyId, true),
+                ip,
+              );
             return updated;
           });
           return { api: row, spec: current, proxyId: gatewayProxyId, rebuilt: true };

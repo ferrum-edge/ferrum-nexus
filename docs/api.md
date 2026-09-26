@@ -2063,10 +2063,11 @@ route. Every field optional; nothing supplied returns the row unchanged.
 field appears only after an `auth_plugin` change that left enabled configs of
 the outgoing plugin associated with the proxy — an operator's, which the portal
 never replaces or deletes (a disabled or unassociated one is not listed). They
-still accept the outgoing flavour's credentials on this API, so the change did not invalidate those here; the ids name the Edge
-plugin configs to remove. Errors: `400 SPEC_INVALID` (bad or, by default, private
-`upstream_url` — see `POST /api/apis`; or `details.reason = "no_operations"`
-when `routes` is asked for and the current revision declares nothing to allow),
+still accept the outgoing flavour's credentials on this API, so the change did
+not invalidate those here; the ids name the Edge plugin configs to remove.
+Errors: `400 SPEC_INVALID` (bad or, by default, private `upstream_url` — see
+`POST /api/apis`; or `details.reason = "no_operations"` when `routes` is asked
+for and the current revision declares nothing to allow),
 `409 ACCESS_DISRUPTION_CONFIRMATION_REQUIRED` (an `auth_plugin` change that
 would take grantees' credentials off the portal's authentication for the API,
 without `confirm_access_disruption: true`; `details.outgoing_auth_configs_remaining`

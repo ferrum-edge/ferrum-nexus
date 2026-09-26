@@ -1261,6 +1261,8 @@ export interface MessageRepo {
   listByThread(threadId: Uuid, options?: MessageListOptions): Promise<Paginated<MessageRecord>>;
   /** Newest message of a thread, for list previews. */
   findLatestByThread(threadId: Uuid): Promise<MessageRecord | null>;
+  /** Newest message of each supplied thread, ordered by `(created_at, id)` descending. */
+  findLatestByThreads(threadIds: Uuid[]): Promise<MessageRecord[]>;
   countByThread(threadId: Uuid): Promise<number>;
   /**
    * How many messages `senderUserId` has posted since `sinceIso`, across every
