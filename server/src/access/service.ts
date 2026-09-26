@@ -98,7 +98,7 @@ import {
   type Uuid,
 } from '@ferrum-nexus/shared';
 
-import { AuditAction, type AuditService } from '../audit/service.js';
+import { AuditAction, auditRowCommitted, type AuditService } from '../audit/service.js';
 import { canViewApi, resolveReadAccess } from '../catalog/read-access.js';
 import type { NexusConfig } from '../config/index.js';
 import type {
@@ -122,7 +122,7 @@ import {
   validationFailed,
 } from '../lib/errors.js';
 import { accessRequestBudgetLockKey, type KeyedSerializer } from '../lib/keyed-serializer.js';
-import { nowIso } from '../lib/ids.js';
+import { newId, nowIso } from '../lib/ids.js';
 import type { NotificationsService } from '../notifications/service.js';
 import { presentApiSummary, type GatewayUrlSource } from '../publishing/present.js';
 import {
@@ -560,7 +560,9 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
 
     // The `access.revoke` row committed with the claim, so the grant going
     // back and the row that says so commit together: a restored grant is
-    // never left reading as revoked in the trail.
+    // never left reading as revoked in the trail. The row's id is minted here
+    // so that a failure below can tell whether it committed after all.
+    const rollbackId = newId();
     try {
       await store.transaction(async (tx) => {
         details.grant_restored = await restoreRevoked(tx, grant, request);
@@ -572,55 +574,73 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
             { type: 'grant', id: grant.id },
             details,
             ip,
+            { id: rollbackId },
           );
       });
     } catch (error) {
-      // Nothing went back with it. Whatever failed — the rollback row's
-      // insert, or the lease fence refusing a revocation that stalled past its
-      // TTL — the restore must not go down with it: a grant left `revoked`
-      // while its group is still on the consumer is working access the portal
-      // shows as withdrawn, with nothing to repair it, whereas a missing
-      // rollback row is only a gap in the trail. So the restore is retried on
-      // its own, as bare compare-and-sets outside any transaction and so
-      // outside the fence: the grant goes back only from `revoked`, and never
-      // over an active grant a newer approval committed for the same identity
-      // (the partial unique index refuses that).
-      deps.log?.(
-        {
-          grant_id: grant.id,
-          error: error instanceof Error ? error.message : String(error),
-        },
-        'Could not return a failed revocation to active with its rollback row; retrying alone',
-      );
-      try {
-        details.grant_restored = await restoreRevoked(store, grant, request);
-      } catch (retryError) {
-        details.grant_restored = false;
+      // Read back by the id minted above; unreadable, it answers `false` and
+      // the restore is retried, which is safe because it is a compare-and-set.
+      if (await auditRowCommitted(store, { type: 'grant', id: grant.id }, rollbackId)) {
+        // The transaction committed and only its acknowledgement was lost:
+        // the grant is back and its row says so. Restoring again would act
+        // on whatever has happened to the grant since — a new revocation's
+        // claim — and a second row would record one rollback twice.
         deps.log?.(
           {
             grant_id: grant.id,
-            error: retryError instanceof Error ? retryError.message : String(retryError),
+            error: error instanceof Error ? error.message : String(error),
           },
-          'Could not return a failed revocation to active',
+          'A failed revocation was returned to active, though its acknowledgement was lost',
         );
+      } else {
+        // Nothing went back with it. Whatever failed — the rollback row's
+        // insert, or the lease fence refusing a revocation that stalled past its
+        // TTL — the restore must not go down with it: a grant left `revoked`
+        // while its group is still on the consumer is working access the portal
+        // shows as withdrawn, with nothing to repair it, whereas a missing
+        // rollback row is only a gap in the trail. So the restore is retried on
+        // its own, as bare compare-and-sets outside any transaction and so
+        // outside the fence: the grant goes back only from `revoked`, and never
+        // over an active grant a newer approval committed for the same identity
+        // (the partial unique index refuses that).
+        deps.log?.(
+          {
+            grant_id: grant.id,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'Could not return a failed revocation to active with its rollback row; retrying alone',
+        );
+        try {
+          details.grant_restored = await restoreRevoked(store, grant, request);
+        } catch (retryError) {
+          details.grant_restored = false;
+          deps.log?.(
+            {
+              grant_id: grant.id,
+              error: retryError instanceof Error ? retryError.message : String(retryError),
+            },
+            'Could not return a failed revocation to active',
+          );
+        }
+        // Had the lookup above failed, a combined write whose acknowledgement
+        // was lost may have committed after all, in which case the retry finds
+        // the grant already back.
+        if (details.grant_restored === false) {
+          const current = await store.grants.findById(grant.id).catch(() => null);
+          details.grant_restored = current?.status === 'active';
+        }
+        // Best-effort from here: the caller re-throws the gateway failure, and
+        // this row is the trail of whichever way the restore went.
+        await audit
+          .record(
+            { id: actor.id, role: actor.role },
+            AuditAction.ACCESS_REVOKE_ROLLBACK,
+            { type: 'grant', id: grant.id },
+            details,
+            ip,
+          )
+          .catch(() => undefined);
       }
-      // A combined write whose acknowledgement was lost may have committed
-      // after all, in which case the retry finds the grant already back.
-      if (details.grant_restored === false) {
-        const current = await store.grants.findById(grant.id).catch(() => null);
-        details.grant_restored = current?.status === 'active';
-      }
-      // Best-effort from here: the caller re-throws the gateway failure, and
-      // this row is the trail of whichever way the restore went.
-      await audit
-        .record(
-          { id: actor.id, role: actor.role },
-          AuditAction.ACCESS_REVOKE_ROLLBACK,
-          { type: 'grant', id: grant.id },
-          details,
-          ip,
-        )
-        .catch(() => undefined);
     }
 
     deps.log?.(details, 'Rolled back a revocation the gateway would not accept');

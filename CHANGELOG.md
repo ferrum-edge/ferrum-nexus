@@ -283,6 +283,20 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   a transactional record in a callback that writes nothing else, aliased
   imports of the audit module, and a transaction hook bound, passed or
   destructured under another name.
+- A gateway consumer repair whose relink the lease fence refused no longer
+  leaves the consumer it recreated reading as `present` over credential rows
+  that are still `active`: it keeps that consumer, logs the refusal, takes the
+  keys again and completes the repair — revoking only the rows that were live
+  before the recreation and writing `gateway.consumer_repair` with
+  `resumed: true` — and a second refusal gets its own log line naming the rows
+  to reconcile (`docs/operations.md` §13). A revocation or at-cap rotation whose
+  gateway delete provably never applied now completes its
+  `credential.revoke_start` with a new `credential.revoke_rollback` row,
+  committed with the row's move back to `active`, and `docs/security.md` no
+  longer describes that case as a start with no completion. A revocation
+  rollback whose transaction committed but lost its acknowledgement is
+  recognised by its pre-minted row id and no longer restores the grant or
+  writes `access.revoke_rollback` a second time (#402).
 
 ## [0.1.0] - 2026-09-25
 

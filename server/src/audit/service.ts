@@ -6,7 +6,13 @@
  * appending to that catalog **and** to the table in `docs/security.md`.
  */
 
-import type { AuditLog, Paginated, Role, Uuid } from '@ferrum-nexus/shared';
+import {
+  MAX_PAGE_SIZE,
+  type AuditLog,
+  type Paginated,
+  type Role,
+  type Uuid,
+} from '@ferrum-nexus/shared';
 
 import type { AuditLogFilter, AuditLogRecord, ListOptions, NexusStore } from '../db/store.js';
 
@@ -247,6 +253,14 @@ export const AuditAction = {
   CREDENTIAL_REVOKE_START: 'credential.revoke_start',
   CREDENTIAL_REVOKE: 'credential.revoke',
   /**
+   * The completion of a {@link CREDENTIAL_REVOKE_START} whose gateway delete
+   * provably never applied — the array still held every entry — so the row
+   * went back to `active` instead of on to `revoked`. Committed with that
+   * move; written on its own, best-effort, when the move has to be retried
+   * alone.
+   */
+  CREDENTIAL_REVOKE_ROLLBACK: 'credential.revoke_rollback',
+  /**
    * A retirement Edge applied but the portal never recorded, settled by a
    * later call on the same consumer and type.
    *
@@ -458,6 +472,7 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.CREDENTIAL_ROTATE]: TRANSACTIONAL,
   [AuditAction.CREDENTIAL_REVOKE_START]: INTENT,
   [AuditAction.CREDENTIAL_REVOKE]: TRANSACTIONAL,
+  [AuditAction.CREDENTIAL_REVOKE_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
   [AuditAction.CREDENTIAL_SETTLE]: TRANSACTIONAL,
   [AuditAction.CREDENTIAL_APPEND_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
   [AuditAction.CREDENTIAL_RECONCILE]: TRANSACTIONAL,
@@ -531,6 +546,16 @@ export interface AuditTarget {
   id: string | null;
 }
 
+/** How {@link AuditService.record} writes its row. */
+export interface AuditRecordOptions {
+  /**
+   * The row's id, minted by the caller — so that one whose transaction's
+   * acknowledgement was lost can still tell whether the row committed, and
+   * not write it twice.
+   */
+  id?: Uuid;
+}
+
 /** Audit recording and querying. */
 export interface AuditService {
   /**
@@ -543,6 +568,7 @@ export interface AuditService {
     target: AuditTarget,
     details?: Record<string, unknown>,
     ip?: string | null,
+    options?: AuditRecordOptions,
   ): Promise<AuditLogRecord>;
   /** Newest-first page with actor/action/target/time filters. */
   list(filter: AuditLogFilter, options?: ListOptions): Promise<Paginated<AuditLog>>;
@@ -558,6 +584,31 @@ export interface AuditService {
    * there is no reason to call this.
    */
   forStore(store: NexusStore): AuditService;
+}
+
+/**
+ * Whether the row `rowId` against `target` committed — `rowId` being an id
+ * the caller minted through {@link AuditRecordOptions.id} for a transaction
+ * whose acknowledgement was then lost. `false` when that cannot be read, so a
+ * caller falls back to what it would do had nothing committed.
+ *
+ * Searched among the target's newest rows, which is where a row written
+ * moments ago is.
+ */
+export async function auditRowCommitted(
+  store: NexusStore,
+  target: { type: string; id: string },
+  rowId: Uuid,
+): Promise<boolean> {
+  try {
+    const rows = await store.auditLogs.list(
+      { target_type: target.type, target_id: target.id },
+      { limit: MAX_PAGE_SIZE },
+    );
+    return rows.items.some((row) => row.id === rowId);
+  } catch {
+    return false;
+  }
 }
 
 /** Anonymous actor, for events that happen before a session exists. */
@@ -585,8 +636,9 @@ function normalizeFilter(filter: AuditLogFilter): AuditLogFilter {
 /** Build the audit service. */
 export function createAuditService(store: NexusStore): AuditService {
   const service: AuditService = {
-    async record(actor, action, target, details = {}, ip = null) {
+    async record(actor, action, target, details = {}, ip = null, options = {}) {
       return store.auditLogs.create({
+        ...(options.id !== undefined ? { id: options.id } : {}),
         actor_user_id: actor.id,
         actor_role: actor.role,
         action,

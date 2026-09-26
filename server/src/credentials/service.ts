@@ -187,7 +187,7 @@ import {
   type Uuid,
 } from '@ferrum-nexus/shared';
 
-import { AuditAction, type AuditService } from '../audit/service.js';
+import { AuditAction, auditRowCommitted, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type {
   CreateInput,
@@ -216,7 +216,7 @@ import {
   userDisabled,
   validationFailed,
 } from '../lib/errors.js';
-import { nowIso } from '../lib/ids.js';
+import { newId, nowIso } from '../lib/ids.js';
 import { userLifecycleLockKey, type KeyedSerializer } from '../lib/keyed-serializer.js';
 import type { NotificationsService } from '../notifications/service.js';
 import type { ConsumerProvisioner } from './consumers.js';
@@ -1178,6 +1178,66 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
   }
 
   /**
+   * Put a retirement whose delete {@link deleteDidNotApply} proved never
+   * applied back to `active`, and record that.
+   *
+   * The `credential.revoke_start` row committed before the delete names who
+   * started a retirement; this is its completion when the answer is "nothing
+   * was removed", committed with the move back so the trail never reads as a
+   * start with no end. Should that transaction fail, the move is retried on
+   * its own — a `retiring` row over a live entry is the hazard, a missing row
+   * only a gap — and the row follows best-effort, unless the transaction is
+   * found to have committed after all and only its acknowledgement was lost.
+   * Never throws: the caller is carrying the gateway's error.
+   */
+  async function withdrawRetirement(input: {
+    credential: CredentialRecord;
+    operation: 'revoke' | 'rotate';
+    actor: { id: Uuid; role: Role };
+    cause: unknown;
+    ip: string | null;
+  }): Promise<void> {
+    const { credential, actor, ip } = input;
+    const target = { type: 'credential', id: credential.id };
+    const details = {
+      credential_type: credential.credential_type,
+      consumer_id: credential.ferrum_consumer_id,
+      last4: credential.last4,
+      operation: input.operation,
+      cause: input.cause instanceof Error ? input.cause.message : String(input.cause),
+      ...(credential.user_id === actor.id ? {} : { owner_user_id: credential.user_id }),
+    };
+    const rowId = newId();
+    try {
+      await store.transaction(async (tx) => {
+        await tx.credentials.update(credential.id, { status: 'active' });
+        await audit
+          .forStore(tx)
+          .record(
+            { id: actor.id, role: actor.role },
+            AuditAction.CREDENTIAL_REVOKE_ROLLBACK,
+            target,
+            details,
+            ip,
+            { id: rowId },
+          );
+      });
+    } catch {
+      if (await auditRowCommitted(store, target, rowId)) return;
+      await store.credentials.update(credential.id, { status: 'active' }).catch(() => undefined);
+      await audit
+        .record(
+          { id: actor.id, role: actor.role },
+          AuditAction.CREDENTIAL_REVOKE_ROLLBACK,
+          target,
+          details,
+          ip,
+        )
+        .catch(() => undefined);
+    }
+  }
+
+  /**
    * Record an append that had to be undone, and whether it actually went.
    *
    * Best effort by construction: it runs on a path that is already failing,
@@ -1385,9 +1445,13 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             // An outcome that cannot be proved stays `retiring`, which is
             // the safe reading.
             if (await deleteDidNotApply(consumerId, type, length)) {
-              await store.credentials
-                .update(current.id, { status: 'active' })
-                .catch(() => undefined);
+              await withdrawRetirement({
+                credential: current,
+                operation: 'revoke',
+                actor,
+                cause: error,
+                ip,
+              });
             }
             throw error;
           }
@@ -2175,9 +2239,13 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             // been attempted yet — so the account is left exactly as the
             // rotation found it, cap slot included.
             if (await deleteDidNotApply(consumerId, type, length)) {
-              await store.credentials
-                .update(current.id, { status: 'active' })
-                .catch(() => undefined);
+              await withdrawRetirement({
+                credential: current,
+                operation: 'rotate',
+                actor: { id: user.id, role: user.role },
+                cause: error,
+                ip,
+              });
             }
             throw error;
           }

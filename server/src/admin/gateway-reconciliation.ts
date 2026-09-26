@@ -172,6 +172,35 @@ export interface GatewayReconciliationServiceDeps {
   log?: (obj: Record<string, unknown>, message: string) => void;
 }
 
+/**
+ * A consumer a repair recreated and then kept, because the lease fence refused
+ * the relink that would have recorded it: another instance held the keys by
+ * then, and may already have been issuing onto it.
+ */
+interface KeptConsumer {
+  kind: 'kept';
+  consumerId: string;
+  /**
+   * The credential rows that were live before the consumer was recreated.
+   * They name entries of the consumer that was lost, so they are stale
+   * whatever happened after the recreation — unlike a row another instance
+   * wrote for an entry it appended to the recreated consumer since.
+   */
+  staleCredentialIds: Uuid[];
+  /** The fence's refusal. */
+  error: unknown;
+}
+
+/** What one pass of the consumer repair's critical section found or did. */
+type ConsumerRepairOutcome =
+  | { kind: 'gone' }
+  | { kind: 'present'; consumerId: string }
+  | { kind: 'repaired'; consumerId: string; revoked: Uuid[] }
+  | KeptConsumer;
+
+/** A repair outcome with nothing left to finish. */
+type SettledRepairOutcome = Exclude<ConsumerRepairOutcome, KeptConsumer>;
+
 /** A thrown value as a string, for a log line or an audit detail. */
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -422,6 +451,21 @@ export function createGatewayReconciliationService(
     }
   }
 
+  /** Ids of the credential rows whose gateway entry `consumerId` should still hold. */
+  async function liveCredentialIds(db: NexusStore, consumerId: string): Promise<Uuid[]> {
+    const ids: Uuid[] = [];
+    for (let offset = 0; ; offset += MAX_PAGE_SIZE) {
+      const page = await db.credentials.list(
+        { ferrum_consumer_id: consumerId },
+        { limit: MAX_PAGE_SIZE, offset },
+      );
+      for (const credential of page.items) {
+        if (LIVE_CREDENTIAL_STATUSES.has(credential.status)) ids.push(credential.id);
+      }
+      if (page.items.length === 0 || offset + page.items.length >= page.total) return ids;
+    }
+  }
+
   /**
    * Recreate one account's gateway consumer and re-link the portal row.
    *
@@ -429,6 +473,23 @@ export function createGatewayReconciliationService(
    * consumer-id key used by every ordinary mutation. Keeping that lock order
    * makes recreation race-free with both provisioning and credential/ACL
    * changes while the portal still exposes the stale id.
+   *
+   * ## A relink the lease fence refuses
+   *
+   * A repair that stalls past the lease TTL after recreating the consumer has
+   * its relink refused at commit, and the consumer it recreated is kept rather
+   * than deleted: another instance holds the keys by then and may already be
+   * issuing onto it. Kept under the id the portal already stores, that
+   * consumer reads as `present` to every later pass, so no later repair would
+   * ever revoke the rows that name entries of the consumer that was lost. So
+   * the repair does not stop there: it logs the refusal, takes the keys
+   * again, and — finding the consumer it kept — completes the repair,
+   * revoking exactly the rows that were live *before* it recreated the
+   * consumer and writing the `gateway.consumer_repair` row with
+   * `resumed: true`. A row written since, for an entry another instance
+   * appended to the recreated consumer, is not among them and stays live.
+   * Only a second refusal leaves the rows `active`, and says so in its own
+   * log line (`docs/operations.md` §13, "The repair").
    */
   async function repairConsumer(
     actor: UserRecord,
@@ -447,108 +508,203 @@ export function createGatewayReconciliationService(
     };
     try {
       const groups = await approvedGroups(orphan.user_id, orphan.application_id);
-      const outcome = await edge.serializePerKey(
-        canonicalConsumerLockKey(namespace, orphan.ferrum_username),
-        async () => {
-          // Re-read inside the critical section: another repair, or an ordinary
-          // provisioning call, may have rebuilt this consumer already.
-          const row = await store.consumers.findByUserAndNamespace(
-            orphan.user_id,
-            namespace,
-            orphan.application_id,
-          );
-          if (!row) return { kind: 'gone' } as const;
-          const staleId = row.ferrum_consumer_id;
-          return edge.serializePerKey(staleId, async () => {
-            if ((await edge.consumers.get(staleId)) !== null) {
-              return { kind: 'present', consumerId: staleId } as const;
-            }
 
-            const { consumer, created } = await edge.consumers.ensure(
-              {
-                username: row.ferrum_username,
-                // The id the username names: the application for an
-                // application identity, the account for its own consumer.
-                custom_id: orphan.application_id ?? orphan.user_id,
-                acl_groups: groups,
-              },
-              actor.id,
+      /** The `gateway.consumer_repair` row's details. */
+      const repairDetails = (
+        consumerId: string,
+        revoked: Uuid[],
+        resumed: boolean,
+      ): Record<string, unknown> => ({
+        namespace,
+        previous_consumer_id: orphan.ferrum_consumer_id,
+        consumer_id: consumerId,
+        ferrum_username: orphan.ferrum_username,
+        restored_groups: groups.length,
+        revoked_credentials: revoked.length,
+        revoked_credential_ids: revoked,
+        ...(resumed ? { resumed: true } : {}),
+        ...(reason ? { reason } : {}),
+      });
+
+      /**
+       * One pass of the critical section. `kept` is the consumer an earlier
+       * pass of this same repair recreated and had to keep, or `null`.
+       */
+      const attempt = async (kept: KeptConsumer | null): Promise<ConsumerRepairOutcome> => {
+        return edge.serializePerKey(
+          canonicalConsumerLockKey(namespace, orphan.ferrum_username),
+          async (): Promise<ConsumerRepairOutcome> => {
+            // Re-read inside the critical section: another repair, or an ordinary
+            // provisioning call, may have rebuilt this consumer already.
+            const row = await store.consumers.findByUserAndNamespace(
+              orphan.user_id,
+              namespace,
+              orphan.application_id,
             );
-
-            // Gateway first, then the portal — and both store writes together, so
-            // a relink can never commit without the revocations that make the
-            // credential mirror agree with the empty consumer it now points at.
-            // The audit row commits with them: recorded afterwards, a failed
-            // insert left the relink and the revocations applied and
-            // unaudited behind a failed repair, and a repeat found the
-            // consumer present and nothing to record.
-            const relink = store.transaction(async (tx) => {
-              if (consumer.id !== staleId) {
-                await tx.consumers.update(row.id, { ferrum_consumer_id: consumer.id });
-              }
-              const ids: Uuid[] = [];
-              for (let offset = 0; ; offset += MAX_PAGE_SIZE) {
-                const page = await tx.credentials.list(
-                  { ferrum_consumer_id: staleId },
-                  { limit: MAX_PAGE_SIZE, offset },
-                );
-                for (const credential of page.items) {
-                  if (!LIVE_CREDENTIAL_STATUSES.has(credential.status)) continue;
-                  await tx.credentials.update(credential.id, { status: 'revoked' });
-                  ids.push(credential.id);
+            if (!row) return { kind: 'gone' };
+            const staleId = row.ferrum_consumer_id;
+            return edge.serializePerKey(staleId, async (): Promise<ConsumerRepairOutcome> => {
+              if ((await edge.consumers.get(staleId)) !== null) {
+                if (kept === null || kept.consumerId !== staleId) {
+                  return { kind: 'present', consumerId: staleId };
                 }
-                if (page.items.length === 0 || offset + page.items.length >= page.total) break;
-              }
-              await audit.forStore(tx).record(
-                { id: actor.id, role: actor.role },
-                AuditAction.GATEWAY_CONSUMER_REPAIR,
-                { type: 'user', id: orphan.user_id },
-                {
-                  namespace,
-                  previous_consumer_id: orphan.ferrum_consumer_id,
-                  consumer_id: consumer.id,
-                  ferrum_username: orphan.ferrum_username,
-                  restored_groups: groups.length,
-                  revoked_credentials: ids.length,
-                  revoked_credential_ids: ids,
-                  ...(reason ? { reason } : {}),
-                },
-                ip,
-              );
-              return ids;
-            });
-            const revoked = await relink.catch(async (error: unknown) => {
-              // Nothing of the portal half committed, so the consumer this
-              // attempt recreated must not outlive it. Recreated under the
-              // same derived id, it is exactly what a repeat reads as
-              // `present` — nothing to repair — while the credential rows
-              // stay `active` against an empty consumer and the repair goes
-              // unaudited. Taking it back down leaves the orphan the next pass
-              // reports, and a repeat repairs it whole. Only a consumer this
-              // attempt created, and not when the lease fence refused the
-              // commit: another instance holds the keys by then, and may
-              // already be issuing onto the consumer it found.
-              if (created && !isLeaseLost(error)) {
-                await edge.consumers.delete(consumer.id, actor.id).catch((undoError: unknown) => {
-                  log(
-                    {
-                      user_id: orphan.user_id,
-                      namespace,
-                      consumer_id: consumer.id,
-                      error: errorMessage(undoError),
-                    },
-                    'A failed consumer repair could not delete the consumer it recreated; its ' +
-                      'credential rows still name keys the gateway does not hold',
-                  );
+                // The consumer this repair recreated, still standing: finish
+                // what the refused relink would have recorded. Only the rows
+                // that were live before the recreation are revoked — each
+                // re-read, so one revoked or moved since is left alone — and
+                // the row that records the repair commits with them.
+                const staleIds = kept.staleCredentialIds;
+                const revoked = await store.transaction(async (tx) => {
+                  const ids: Uuid[] = [];
+                  for (const id of staleIds) {
+                    const credential = await tx.credentials.findById(id);
+                    if (
+                      !credential ||
+                      credential.ferrum_consumer_id !== staleId ||
+                      !LIVE_CREDENTIAL_STATUSES.has(credential.status)
+                    ) {
+                      continue;
+                    }
+                    await tx.credentials.update(id, { status: 'revoked' });
+                    ids.push(id);
+                  }
+                  await audit
+                    .forStore(tx)
+                    .record(
+                      { id: actor.id, role: actor.role },
+                      AuditAction.GATEWAY_CONSUMER_REPAIR,
+                      { type: 'user', id: orphan.user_id },
+                      repairDetails(staleId, ids, true),
+                      ip,
+                    );
+                  return ids;
                 });
+                return { kind: 'repaired', consumerId: staleId, revoked };
               }
-              throw error;
-            });
 
-            return { kind: 'repaired', consumerId: consumer.id, revoked } as const;
-          });
-        },
-      );
+              // Read before the consumer exists again: these rows can only
+              // name entries of the one that was lost. Under both keys, so no
+              // row for this id is written between here and the relink.
+              const stale = await liveCredentialIds(store, staleId);
+
+              const { consumer, created } = await edge.consumers.ensure(
+                {
+                  username: row.ferrum_username,
+                  // The id the username names: the application for an
+                  // application identity, the account for its own consumer.
+                  custom_id: orphan.application_id ?? orphan.user_id,
+                  acl_groups: groups,
+                },
+                actor.id,
+              );
+
+              // Gateway first, then the portal — and both store writes together,
+              // so a relink can never commit without the revocations that make
+              // the credential mirror agree with the empty consumer it now
+              // points at. The audit row commits with them: recorded
+              // afterwards, a failed insert left the relink and the
+              // revocations applied and unaudited behind a failed repair, and a
+              // repeat found the consumer present and nothing to record.
+              let revoked: Uuid[];
+              try {
+                revoked = await store.transaction(async (tx) => {
+                  if (consumer.id !== staleId) {
+                    await tx.consumers.update(row.id, { ferrum_consumer_id: consumer.id });
+                  }
+                  const ids = await liveCredentialIds(tx, staleId);
+                  for (const id of ids) await tx.credentials.update(id, { status: 'revoked' });
+                  await audit
+                    .forStore(tx)
+                    .record(
+                      { id: actor.id, role: actor.role },
+                      AuditAction.GATEWAY_CONSUMER_REPAIR,
+                      { type: 'user', id: orphan.user_id },
+                      repairDetails(consumer.id, ids, false),
+                      ip,
+                    );
+                  return ids;
+                });
+              } catch (error) {
+                // Refused by the lease fence: another instance holds the keys
+                // now, and may already be issuing onto the consumer it found,
+                // so the consumer is kept — and handed back for this repair to
+                // complete once it holds the keys again.
+                if (created && isLeaseLost(error)) {
+                  return {
+                    kind: 'kept',
+                    consumerId: consumer.id,
+                    staleCredentialIds: stale,
+                    error,
+                  };
+                }
+                // Nothing of the portal half committed, so the consumer this
+                // attempt recreated must not outlive it. Recreated under the
+                // same derived id, it is exactly what a repeat reads as
+                // `present` — nothing to repair — while the credential rows
+                // stay `active` against an empty consumer and the repair goes
+                // unaudited. Taking it back down leaves the orphan the next
+                // pass reports, and a repeat repairs it whole. Only a consumer
+                // this attempt created.
+                if (created) {
+                  try {
+                    await edge.consumers.delete(consumer.id, actor.id);
+                  } catch (undoError) {
+                    log(
+                      {
+                        user_id: orphan.user_id,
+                        namespace,
+                        consumer_id: consumer.id,
+                        error: errorMessage(undoError),
+                      },
+                      'A failed consumer repair could not delete the consumer it recreated; ' +
+                        'its credential rows still name keys the gateway does not hold',
+                    );
+                  }
+                }
+                throw error;
+              }
+              return { kind: 'repaired', consumerId: consumer.id, revoked };
+            });
+          },
+        );
+      };
+
+      /** Take the keys again and finish what `kept` left, or say that it could not be. */
+      const complete = async (kept: KeptConsumer): Promise<SettledRepairOutcome> => {
+        log(
+          {
+            user_id: orphan.user_id,
+            namespace,
+            consumer_id: kept.consumerId,
+            stale_credentials: kept.staleCredentialIds.length,
+            error: errorMessage(kept.error),
+          },
+          'A consumer repair lost its lease after recreating the consumer; the consumer is ' +
+            'kept, and the repair is completed under fresh keys',
+        );
+        try {
+          const retried = await attempt(kept);
+          if (retried.kind === 'kept') throw retried.error;
+          return retried;
+        } catch (error) {
+          log(
+            {
+              user_id: orphan.user_id,
+              namespace,
+              consumer_id: kept.consumerId,
+              stale_credential_ids: kept.staleCredentialIds,
+              error: errorMessage(error),
+            },
+            'A consumer repair that lost its lease could not be completed: the consumer it ' +
+              'recreated is kept, and its stale credential rows are still active and name keys ' +
+              'the gateway does not hold; reconcile its credentials',
+          );
+          throw error;
+        }
+      };
+
+      const first = await attempt(null);
+      const outcome = first.kind === 'kept' ? await complete(first) : first;
 
       if (outcome.kind === 'gone') {
         return { ...base, error: 'The portal no longer holds a consumer row for this account' };
