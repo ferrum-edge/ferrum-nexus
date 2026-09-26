@@ -322,7 +322,7 @@ describe('first gateway identity versus disable', () => {
     await assertNothingLive(provider, api.id);
     assert.equal((await harness.store.credentials.findById(personalId))?.status, 'revoked');
 
-    const audited = (await harness.auditRows('user.disable')).find(
+    const audited = (await harness.auditRows('user.gateway_teardown_complete')).find(
       (row) => row.target_id === provider.user.id,
     );
     assert.equal(audited?.details.revoked_credentials, 2, 'both identities were revoked');
@@ -528,7 +528,7 @@ describe('first gateway identity versus disable', () => {
     assert.equal(disabled.status, 200, disabled.body);
     assert.equal(disabled.teardown, 'ok');
     await assertNothingLive(provider, api.id);
-    const audited = (await harness.auditRows('user.disable')).find(
+    const audited = (await harness.auditRows('user.gateway_teardown_complete')).find(
       (row) => row.target_id === provider.user.id,
     );
     assert.deepEqual(audited?.details.deleted_consumers, [theirs.id]);

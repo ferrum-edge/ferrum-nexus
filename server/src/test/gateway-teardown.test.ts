@@ -269,7 +269,11 @@ describe('gateway teardown jobs', () => {
     const godRow = (await harness.auditRows('god.disable_user')).find(
       (row) => row.target_id === target.user.id,
     );
-    assert.equal(godRow?.details.gateway_teardown, 'pending');
+    assert.equal(godRow?.details.gateway_teardown, 'queued');
+    const outcome = (await harness.auditRows('god.disable_user_complete')).find(
+      (row) => row.target_id === target.user.id,
+    );
+    assert.equal(outcome?.details.gateway_teardown, 'pending');
     assert.equal(
       (await harness.store.gatewayTeardownJobs.findByUser(target.user.id))?.status,
       'pending',
@@ -344,11 +348,19 @@ describe('gateway teardown jobs', () => {
     assert.deepEqual(harness.edge.consumerByUsername(username)?.credentials, {});
     assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'revoked');
 
+    // The retry is recorded with the re-queue, before the gateway is touched,
+    // and what it achieved is the completion row the worker would have written.
     const audited = (await harness.auditRows('user.gateway_teardown_retry')).find(
       (row) => row.target_id === target.user.id,
     );
-    assert.equal(audited?.details.gateway_teardown, 'ok');
+    assert.equal(audited?.details.gateway_teardown, 'queued');
     assert.equal(audited?.actor_user_id, admin.user.id);
+    const completed = (await harness.auditRows('user.gateway_teardown_complete')).find(
+      (row) => row.target_id === target.user.id,
+    );
+    assert.equal(completed?.details.gateway_teardown, 'ok');
+    assert.equal(completed?.details.inline, true);
+    assert.equal(completed?.actor_user_id, admin.user.id);
 
     // An active account has nothing to revoke, so the retry is refused rather
     // than quietly stripping a working consumer.

@@ -1179,7 +1179,8 @@ disable(tx) ──> gateway_teardown_jobs(pending) ──claim──> sending �
   is disabled. Re-enabling an account deletes its job, and the worker drops any
   job whose account is no longer disabled.
 - Success writes a `user.gateway_teardown_complete` audit row with the system as
-  actor. `POST /api/users/:id/gateway-teardown/retry` is the operator handle.
+  actor. An admin request whose own immediate attempt landed writes the same
+  row, as that admin and with `details.inline: true`. `POST /api/users/:id/gateway-teardown/retry` is the operator handle.
 
 See [`security.md`](security.md#disabling-an-account) for why the disable is
 allowed to commit ahead of the revocation at all.
