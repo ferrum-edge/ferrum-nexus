@@ -63,7 +63,7 @@ import { StartThreadDialog } from '../components/messaging/StartThreadDialog';
 import { PluginsTab } from '../components/plugins/PluginsTab';
 import { ApiViewersTab } from '../components/publishing/ApiViewersTab';
 import { SpecDiffView } from '../components/publishing/SpecDiffView';
-import { SpecEditor, isSpecValid } from '../components/publishing/SpecEditor';
+import { SpecEditor, specProblem } from '../components/publishing/SpecEditor';
 import { SpecHistory } from '../components/publishing/SpecHistory';
 import { FormNotice } from '../components/auth/AuthShell';
 import { Badge, type BadgeTone } from '../components/ui/Badge';
@@ -690,8 +690,9 @@ function SpecTab({ api }: { api: Api }): ReactElement {
             onClick={() => {
               setError(null);
               const spec = value;
-              if (!isSpecValid(spec)) {
-                setError('The OpenAPI document could not be parsed.');
+              const problem = specProblem(spec);
+              if (problem) {
+                setError(problem);
                 return;
               }
               reviewDiff.mutate(

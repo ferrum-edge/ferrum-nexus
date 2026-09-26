@@ -15,6 +15,7 @@
  */
 
 import {
+  MAX_SPEC_BYTES,
   createOpenApiRefResolver,
   keyOpenApiParameters,
   mergeOpenApiParameters,
@@ -27,6 +28,7 @@ import {
   type OpenApiRefResolver,
 } from '@ferrum-nexus/shared';
 import { parse as parseYaml } from 'yaml';
+import { formatBytes } from '../../lib/format';
 
 /** A `$ref` that could not be resolved locally. */
 export const UNRESOLVED_REF = Symbol('unresolved-ref');
@@ -308,6 +310,17 @@ function reason(error: unknown): string {
 }
 
 /**
+ * UTF-8 byte length of `text`, the unit the server's `MAX_SPEC_BYTES` counts.
+ *
+ * UTF-8 never takes fewer bytes than UTF-16 code units, so a string longer
+ * than `limit` code units is reported as `limit + 1` without being encoded.
+ */
+export function specByteLength(text: string, limit = Number.POSITIVE_INFINITY): number {
+  if (text.length > limit) return limit + 1;
+  return new TextEncoder().encode(text).length;
+}
+
+/**
  * Parse an OpenAPI document supplied as JSON or YAML text.
  *
  * JSON first — see the module docblock for why the distinction is not merely
@@ -315,6 +328,13 @@ function reason(error: unknown): string {
  * come back as `{ ok: false, error }`.
  */
 export function parseSpecText(text: string): SpecParseResult {
+  // A document the portal cannot accept is not worth a synchronous parse.
+  if (specByteLength(text, MAX_SPEC_BYTES) > MAX_SPEC_BYTES) {
+    return {
+      ok: false,
+      error: `The specification is larger than the ${formatBytes(MAX_SPEC_BYTES)} limit.`,
+    };
+  }
   const trimmed = text.trim();
   if (trimmed.length === 0) return { ok: false, error: 'The specification is empty.' };
 
