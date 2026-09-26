@@ -14,6 +14,14 @@
  * the same documents the server would reject, refused here for the same reason.
  */
 
+import {
+  keyOpenApiParameters,
+  mergeOpenApiParameters,
+  openApiRefSiblingsApply,
+  resolveOpenApiObject,
+  resolveOpenApiPointer,
+  type OpenApiRefFailure,
+} from '@ferrum-nexus/shared';
 import { parse as parseYaml } from 'yaml';
 
 /** A `$ref` that could not be resolved locally. */
@@ -54,6 +62,20 @@ export const HTTP_METHODS = [
 /** One HTTP method an operation can use. */
 export type HttpMethod = (typeof HTTP_METHODS)[number];
 
+/**
+ * A parameter, request body or response after its Reference Objects have been
+ * followed. An entry that could not be followed stays explicit, so the renderer
+ * can say so instead of showing an empty — or, for a parameter, optional — row.
+ */
+export type SpecEntry = { resolved: true; node: SpecNode } | UnresolvedSpecEntry;
+
+/** A Reference Object that could not be followed, and why. */
+export interface UnresolvedSpecEntry {
+  resolved: false;
+  ref: string;
+  reason: OpenApiRefFailure;
+}
+
 /** A single operation, flattened from `paths[path][method]`. */
 export interface SpecOperation {
   /** Stable id used as a React key and anchor. */
@@ -65,11 +87,14 @@ export interface SpecOperation {
   operationId: string | null;
   deprecated: boolean;
   tags: string[];
-  /** Path-level parameters merged ahead of operation-level ones. */
-  parameters: SpecNode[];
-  requestBody: SpecNode | null;
+  /**
+   * The effective parameters: path-level ones the operation does not override
+   * by `(in, name)`, then the operation's own.
+   */
+  parameters: SpecEntry[];
+  requestBody: SpecEntry | null;
   /** `[statusCode, responseObject]` pairs in declaration order. */
-  responses: Array<[string, SpecNode]>;
+  responses: Array<[string, SpecEntry]>;
 }
 
 /** Operations grouped under one tag. */
@@ -127,34 +152,80 @@ function readTagDescriptions(doc: SpecNode): Map<string, string> {
   return descriptions;
 }
 
-function readOperations(doc: SpecNode): SpecOperation[] {
+/**
+ * Follows the Reference Objects of one document. Every lookup shares one pointer
+ * cache, so a document that references the same component from thousands of
+ * operations walks each pointer once; chains are bounded by the shared hop limit
+ * and cycle guard.
+ */
+interface EntryResolver {
+  pointerCache: Map<string, unknown>;
+  resolve(node: SpecNode): SpecEntry;
+}
+
+function createEntryResolver(doc: SpecNode, specVersion: string | null): EntryResolver {
+  const pointerCache = new Map<string, unknown>();
+  const siblingsApply = openApiRefSiblingsApply(specVersion);
+  return {
+    pointerCache,
+    resolve(node) {
+      const result = resolveOpenApiObject(doc, node, { siblingsApply, pointerCache });
+      return result.ok
+        ? { resolved: true, node: result.value }
+        : { resolved: false, ref: result.ref, reason: result.reason };
+    },
+  };
+}
+
+/** The object members of a `parameters` list; anything else was never a parameter. */
+function parameterNodes(value: unknown): SpecNode[] {
+  const nodes: SpecNode[] = [];
+  for (const entry of asArray(value) ?? []) {
+    const record = asRecord(entry);
+    if (record) nodes.push(record);
+  }
+  return nodes;
+}
+
+function readOperations(doc: SpecNode, specVersion: string | null): SpecOperation[] {
   const paths = asRecord(doc.paths);
   if (!paths) return [];
   const operations: SpecOperation[] = [];
+  const resolver = createEntryResolver(doc, specVersion);
 
   for (const [path, pathValue] of Object.entries(paths)) {
     const pathItem = asRecord(pathValue);
     if (!pathItem) continue;
-    const sharedParameters = (asArray(pathItem.parameters) ?? [])
-      .map(asRecord)
-      .filter((entry): entry is SpecNode => entry !== null);
+    const sharedParameters = keyOpenApiParameters(
+      doc,
+      parameterNodes(pathItem.parameters),
+      true,
+      resolver.pointerCache,
+    );
 
     for (const method of HTTP_METHODS) {
       const operation = asRecord(pathItem[method]);
       if (!operation) continue;
 
-      const ownParameters = (asArray(operation.parameters) ?? [])
-        .map(asRecord)
-        .filter((entry): entry is SpecNode => entry !== null);
+      const ownParameters = keyOpenApiParameters(
+        doc,
+        parameterNodes(operation.parameters),
+        false,
+        resolver.pointerCache,
+      );
+      const merged = mergeOpenApiParameters(sharedParameters, ownParameters);
+      // Every entry is one of the objects `parameterNodes` kept.
+      const parameters = merged.map((entry) => resolver.resolve(entry.parameter as SpecNode));
 
-      const responses: Array<[string, SpecNode]> = [];
+      const responses: Array<[string, SpecEntry]> = [];
       const responsesNode = asRecord(operation.responses);
       if (responsesNode) {
         for (const [status, value] of Object.entries(responsesNode)) {
           const record = asRecord(value);
-          if (record) responses.push([status, record]);
+          if (record) responses.push([status, resolver.resolve(record)]);
         }
       }
+      const requestBody = asRecord(operation.requestBody);
 
       const tags = [
         ...new Set(
@@ -173,8 +244,8 @@ function readOperations(doc: SpecNode): SpecOperation[] {
         operationId: asString(operation.operationId),
         deprecated: operation.deprecated === true,
         tags,
-        parameters: [...sharedParameters, ...ownParameters],
-        requestBody: asRecord(operation.requestBody),
+        parameters,
+        requestBody: requestBody ? resolver.resolve(requestBody) : null,
         responses,
       });
     }
@@ -269,7 +340,7 @@ export function parseSpecText(text: string): SpecParseResult {
     };
   }
 
-  const operations = readOperations(doc);
+  const operations = readOperations(doc, specVersion);
   const components = asRecord(doc.components);
   const schemas = components ? asRecord(components.schemas) : null;
 
@@ -294,19 +365,11 @@ export function parseSpecText(text: string): SpecParseResult {
  *
  * External references (anything not starting with `#/`) and dangling pointers
  * return {@link UNRESOLVED_REF} so the caller can render a placeholder instead
- * of pretending the schema is empty.
+ * of pretending the schema is empty. Only own members are followed.
  */
 export function resolveRef(doc: SpecNode, ref: string): SpecNode | typeof UNRESOLVED_REF {
   if (!ref.startsWith('#/')) return UNRESOLVED_REF;
-  let current: unknown = doc;
-  for (const rawSegment of ref.slice(2).split('/')) {
-    const segment = rawSegment.replace(/~1/g, '/').replace(/~0/g, '~');
-    const record = asRecord(current);
-    if (!record || !(segment in record)) return UNRESOLVED_REF;
-    current = record[segment];
-  }
-  const resolved = asRecord(current);
-  return resolved ?? UNRESOLVED_REF;
+  return asRecord(resolveOpenApiPointer(doc, ref)) ?? UNRESOLVED_REF;
 }
 
 /** Short display name for a `$ref` (`#/components/schemas/Pet` → `Pet`). */

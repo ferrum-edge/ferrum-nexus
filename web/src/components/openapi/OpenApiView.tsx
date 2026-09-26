@@ -1,3 +1,4 @@
+import type { OpenApiRefFailure } from '@ferrum-nexus/shared';
 import { useMemo, useState, type ReactElement } from 'react';
 import { cn } from '../../lib/cn';
 import { Badge, type BadgeTone } from '../ui/Badge';
@@ -17,9 +18,11 @@ import {
   parseSpecText,
   type HttpMethod,
   type ParsedSpec,
+  type SpecEntry,
   type SpecNode,
   type SpecOperation,
   type SpecTagGroup,
+  type UnresolvedSpecEntry,
 } from './parse';
 
 const METHOD_TONES: Readonly<Record<HttpMethod, BadgeTone>> = {
@@ -48,6 +51,26 @@ function statusTone(status: string): BadgeTone {
   return 'neutral';
 }
 
+const UNRESOLVED_REASONS: Readonly<Record<OpenApiRefFailure, string>> = {
+  external: 'external references are not followed',
+  missing: 'nothing exists at this location in the document',
+  cycle: 'the reference chain is circular',
+  depth: 'the reference chain is too long',
+};
+
+/**
+ * The placeholder for a parameter, request body or response whose `$ref` could
+ * not be followed — explicit, so a required input never reads as absent.
+ */
+function UnresolvedReference({ entry }: { entry: UnresolvedSpecEntry }): ReactElement {
+  return (
+    <span className="flex flex-wrap items-center gap-2">
+      <Badge tone="danger">unresolved $ref {entry.ref}</Badge>
+      <span className="text-xs text-fg-subtle">{UNRESOLVED_REASONS[entry.reason]}</span>
+    </span>
+  );
+}
+
 /**
  * The parameter table for one operation.
  *
@@ -56,13 +79,13 @@ function statusTone(status: string): BadgeTone {
  * caller's own render.
  */
 function renderParameterTable(
-  parameters: SpecNode[],
+  parameters: SpecEntry[],
   doc: SpecNode,
   budget: RenderBudget,
 ): ReactElement {
   const rows: ReactElement[] = [];
   let index = 0;
-  for (const parameter of parameters) {
+  for (const entry of parameters) {
     // The row itself costs DOM whether or not it carries a schema, so it is
     // charged before it is built and the rest are abandoned once it cannot be.
     if (!chargeNode(budget)) {
@@ -75,6 +98,18 @@ function renderParameterTable(
       );
       break;
     }
+    if (!entry.resolved) {
+      rows.push(
+        <tr key={`unresolved-${index}`} className="border-b border-border last:border-b-0">
+          <td colSpan={4} className="py-2">
+            <UnresolvedReference entry={entry} />
+          </td>
+        </tr>,
+      );
+      index += 1;
+      continue;
+    }
+    const parameter = entry.node;
     rows.push(
       <tr
         key={`${asString(parameter.name) ?? 'param'}-${index}`}
@@ -249,12 +284,7 @@ function OperationCard({
                   <h4 className="mb-1.5 text-[0.7rem] font-semibold tracking-[0.08em] text-fg-subtle uppercase">
                     Request body
                   </h4>
-                  {asString(operation.requestBody.description) ? (
-                    <p className="mb-2 text-sm text-fg-muted">
-                      {asString(operation.requestBody.description)}
-                    </p>
-                  ) : null}
-                  {renderContentSchemas(operation.requestBody.content, doc, budget)}
+                  {renderRequestBody(operation.requestBody, doc, budget)}
                 </section>
               ) : null}
 
@@ -276,6 +306,22 @@ function OperationCard({
   );
 }
 
+/** A request body's required flag, description and content; see renderParameterTable. */
+function renderRequestBody(entry: SpecEntry, doc: SpecNode, budget: RenderBudget): ReactElement {
+  if (!entry.resolved) return <UnresolvedReference entry={entry} />;
+  const body = entry.node;
+  const description = asString(body.description);
+  return (
+    <>
+      {body.required === true ? (
+        <p className="mb-1 text-xs font-medium text-danger">required</p>
+      ) : null}
+      {description ? <p className="mb-2 text-sm text-fg-muted">{description}</p> : null}
+      {renderContentSchemas(body.content, doc, budget)}
+    </>
+  );
+}
+
 /**
  * Response entries, bounded by the card's budget.
  *
@@ -284,23 +330,27 @@ function OperationCard({
  * charged and the remainder abandoned once the allowance is gone.
  */
 function renderResponses(
-  responses: ReadonlyArray<[string, SpecNode]>,
+  responses: ReadonlyArray<[string, SpecEntry]>,
   doc: SpecNode,
   budget: RenderBudget,
 ): ReactElement[] {
   const rendered: ReactElement[] = [];
-  for (const [status, response] of responses) {
+  for (const [status, entry] of responses) {
     if (!chargeNode(budget)) {
       rendered.push(<TruncationNotice key="__truncated" />);
       break;
     }
     rendered.push(
       <div key={status} className="rounded-md border border-border bg-surface p-3">
-        <div className="mb-1.5 flex items-center gap-2">
+        <div className="mb-1.5 flex flex-wrap items-center gap-2">
           <Badge tone={statusTone(status)}>{status}</Badge>
-          <span className="text-sm text-fg-muted">{asString(response.description) ?? ''}</span>
+          {entry.resolved ? (
+            <span className="text-sm text-fg-muted">{asString(entry.node.description) ?? ''}</span>
+          ) : (
+            <UnresolvedReference entry={entry} />
+          )}
         </div>
-        {renderContentSchemas(response.content, doc, budget)}
+        {entry.resolved ? renderContentSchemas(entry.node.content, doc, budget) : null}
       </div>,
     );
   }

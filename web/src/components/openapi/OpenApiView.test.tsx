@@ -222,7 +222,8 @@ paths:
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const operation = result.spec.groups[0]?.operations[0];
-    expect(operation?.parameters.map((parameter) => parameter.name)).toEqual(['id', 'verbose']);
+    const names = operation?.parameters.map((entry) => (entry.resolved ? entry.node.name : null));
+    expect(names).toEqual(['id', 'verbose']);
   });
 
   it('resolves local refs and flags unresolvable ones', () => {

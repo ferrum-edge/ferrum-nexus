@@ -2430,8 +2430,13 @@ its type, with every path and method identical — that shows up as
 `potentially_breaking` therefore means _this comparison found nothing_, not
 that the change is backward compatible, and the UI says so alongside the
 counts. Path-item-level `parameters` are folded into each operation before
-comparison, so moving a shared parameter onto an operation is correctly no
-change at all.
+comparison using OpenAPI's inheritance rule — an operation parameter replaces
+the path-level one with the same `name` and `in` — and compared in a canonical
+order, so moving a shared parameter onto an operation, reordering parameters,
+or removing a path-level definition an operation already overrides is
+correctly no change at all. A `$ref`'d parameter is followed only to learn that
+identity; one whose reference cannot be followed is kept as written and never
+treated as overridden. The documentation viewer applies the same rule.
 
 ### `POST /api/apis/:id/revisions/:revisionId/rollback`
 
