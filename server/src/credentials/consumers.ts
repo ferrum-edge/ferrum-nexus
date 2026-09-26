@@ -236,13 +236,20 @@ export function createConsumerProvisioner(deps: ConsumerProvisionerDeps): Consum
           user.id,
         );
 
-        return store.consumers.create({
-          user_id: user.id,
-          application_id: applicationId,
-          namespace,
-          ferrum_consumer_id: consumer.id,
-          ferrum_username: consumer.username,
-        });
+        // A transaction of one statement, so the name key's fence covers it:
+        // a provisioner that stalled past the TTL while another instance took
+        // the key over is refused rather than recording a mapping behind that
+        // instance's back (issue #384) — and the consumer it left behind is
+        // the empty one at the derived id described above.
+        return store.transaction((tx) =>
+          tx.consumers.create({
+            user_id: user.id,
+            application_id: applicationId,
+            namespace,
+            ferrum_consumer_id: consumer.id,
+            ferrum_username: consumer.username,
+          }),
+        );
       });
     },
 

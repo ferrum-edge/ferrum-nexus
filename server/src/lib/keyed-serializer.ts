@@ -24,6 +24,7 @@ import { randomUUID } from 'node:crypto';
 
 import type { LeaseRepo } from '../db/store.js';
 import { conflict } from './errors.js';
+import { holdingLease } from './lease-fence.js';
 
 /** Runs work serially per key; independent keys still run concurrently. */
 export type KeyedSerializer = <T>(key: string, fn: () => Promise<T>) => Promise<T>;
@@ -176,8 +177,6 @@ export interface KeyedSerializerOptions {
    * shape the client's own unit tests use.
    */
   leases?: LeaseRepo;
-  /** Identity written into the lease row. Defaults to a per-process random id. */
-  owner?: string;
   /** Lease lifetime. Defaults to {@link LEASE_TTL_MS}. */
   ttlMs?: number;
   /** How long to wait for a contended lease. Defaults to {@link LEASE_WAIT_MS}. */
@@ -222,6 +221,16 @@ function sleep(ms: number): Promise<void> {
  * A caller that cannot get the lease within `waitMs` gets a `CONFLICT`, not a
  * silent overwrite.
  *
+ * **Each acquisition is its own fencing token.** The lease row's `owner` is a
+ * fresh random id per acquisition, never a per-process one, and the section
+ * runs with that token recorded in `lib/lease-fence.ts`. Every
+ * `store.transaction` it opens verifies the token still holds the key as the
+ * last step of its body, so a holder that stalled past the TTL while another
+ * instance took the key over cannot commit anything — its transaction fails
+ * with `CONFLICT` and rolls back (issue #384). An invariant a lease guards is
+ * therefore only as strong as the transaction its writes share: a write made
+ * outside one is ordered by the lease alone.
+ *
  * **Never take one of these inside a store transaction.** The lease repository
  * issues statements of its own, and on the SQLite adapter — one connection,
  * bodies drained by a promise queue — that deadlocks. Measured on the adapter:
@@ -236,21 +245,25 @@ function sleep(ms: number): Promise<void> {
 export function createKeyedSerializer(options: KeyedSerializerOptions = {}): KeyedSerializer {
   const queues = new Map<string, Promise<unknown>>();
   const leases = options.leases;
-  const owner = options.owner ?? randomUUID();
   const ttlMs = options.ttlMs ?? LEASE_TTL_MS;
   const waitMs = options.waitMs ?? LEASE_WAIT_MS;
   const pollMs = options.pollMs ?? LEASE_POLL_MS;
   const conflictMessage = options.conflictMessage ?? LEASE_CONFLICT_MESSAGE;
 
-  /** Block until this process owns `key`, or `waitMs` has passed. */
-  async function takeLease(key: string, repo: LeaseRepo): Promise<void> {
+  /**
+   * Block until this section owns `key` under `token`, or `waitMs` has passed.
+   *
+   * One token for every attempt of one acquisition: a refused attempt wrote
+   * nothing, so there is no earlier claim for a later one to be confused with.
+   */
+  async function takeLease(key: string, token: string, repo: LeaseRepo): Promise<void> {
     const deadline = Date.now() + waitMs;
     for (;;) {
       const now = Date.now();
       if (
         await repo.acquire(
           key,
-          owner,
+          token,
           new Date(now + ttlMs).toISOString(),
           new Date(now).toISOString(),
         )
@@ -269,14 +282,18 @@ export function createKeyedSerializer(options: KeyedSerializerOptions = {}): Key
 
   /** Run `fn` while holding the database lease for `key`. */
   async function underLease<T>(key: string, repo: LeaseRepo, fn: () => Promise<T>): Promise<T> {
-    await takeLease(key, repo);
+    // A fresh token per acquisition, so the row names this section rather than
+    // this process: a stalled section whose key was taken over and handed back
+    // to another section of the same process is still refused by the fence.
+    const token = randomUUID();
+    await takeLease(key, token, repo);
     // A long section (a teardown walking every credential type, say) must not
     // let its own lease lapse under a waiter. Renewing at half the TTL leaves a
     // full half-TTL of slack for a slow round trip.
     const renewal = setInterval(
       () => {
         void repo
-          .renew(key, owner, new Date(Date.now() + ttlMs).toISOString())
+          .renew(key, token, new Date(Date.now() + ttlMs).toISOString())
           .catch(() => undefined);
       },
       Math.max(1, Math.floor(ttlMs / 2)),
@@ -286,12 +303,12 @@ export function createKeyedSerializer(options: KeyedSerializerOptions = {}): Key
     // must not be what holds a shutting-down process open.
     renewal.unref?.();
     try {
-      return await fn();
+      return await holdingLease(key, token, fn);
     } finally {
       clearInterval(renewal);
       // Best effort: a lease we failed to delete simply expires. Never let a
       // release failure mask the outcome of the critical section.
-      await repo.release(key, owner).catch(() => undefined);
+      await repo.release(key, token).catch(() => undefined);
     }
   }
 

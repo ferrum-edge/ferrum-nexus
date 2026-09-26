@@ -189,8 +189,17 @@ export function createGodService(deps: GodServiceDeps): GodService {
    * touched, and the delivery outcome is a separate `god.broadcast_complete`
    * row — so an operator reading the number can see precisely which rows it
    * refers to.
+   *
+   * `auditor` is the transaction-scoped audit service of the transaction that
+   * writes that row, so the count and the insert commit together — and under
+   * the broadcast key's fence, which is what keeps an instance that stalled
+   * past the lease TTL from counting stale history and then committing.
    */
-  async function assertBroadcastWithinBounds(actorId: Uuid, audience: number): Promise<void> {
+  async function assertBroadcastWithinBounds(
+    auditor: AuditService,
+    actorId: Uuid,
+    audience: number,
+  ): Promise<void> {
     const recipientLimit = deps.config.maxBroadcastRecipients;
     if (recipientLimit > 0 && audience > recipientLimit) {
       throw quotaExceeded(
@@ -207,7 +216,7 @@ export function createGodService(deps: GodServiceDeps): GodService {
     const dailyLimit = deps.config.maxBroadcastsPerDay;
     if (dailyLimit <= 0) return;
     const since = new Date(Date.now() - BROADCAST_BUDGET_WINDOW_MS).toISOString();
-    const used = await audit.count({
+    const used = await auditor.count({
       actor_user_id: actorId,
       action: AuditAction.GOD_BROADCAST,
       from: since,
@@ -578,8 +587,6 @@ export function createGodService(deps: GodServiceDeps): GodService {
       // proceed. The key is taken outside every transaction — the lease
       // repository issues statements of its own.
       return broadcastLocks(broadcastLockKey(actor.id), async (): Promise<GodBroadcastResponse> => {
-        await assertBroadcastWithinBounds(actor.id, recipients.length);
-
         // The countable row goes in **before** the first recipient side effect,
         // because it is what `assertBroadcastWithinBounds` counts. Written
         // afterwards, an audit failure meant the announcement had already
@@ -587,8 +594,11 @@ export function createGodService(deps: GodServiceDeps): GodService {
         // daily ceiling and absent from the trail — the caller's `500` then
         // invited a retry that broadcast a second time. One row per *attempt*,
         // whatever the attempt goes on to do; the outcome is a second action.
+        // Counted in the same transaction, so the check and the charge are one
+        // fenced step.
         await store.transaction(async (tx) => {
           const scoped = audit.forStore(tx);
+          await assertBroadcastWithinBounds(scoped, actor.id, recipients.length);
           await scoped.record(
             { id: actor.id, role: actor.role },
             AuditAction.GOD_BROADCAST,

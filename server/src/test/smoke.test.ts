@@ -48,7 +48,7 @@ import {
 } from '../auth/service.js';
 import { loadConfig } from '../config/index.js';
 import { createStore } from '../db/index.js';
-import type { EnqueueEmailInput, NexusStore, UserRecord } from '../db/store.js';
+import type { EnqueueEmailInput, LeaseRepo, NexusStore, UserRecord } from '../db/store.js';
 import { createCrypto } from '../lib/crypto.js';
 import { isNexusError } from '../lib/errors.js';
 import { isoInSeconds, newId, nowIso } from '../lib/ids.js';
@@ -100,6 +100,29 @@ function authServiceOver(store: NexusStore): AuthService {
       conflictMessage: SUPER_ADMIN_LOCK_CONFLICT_MESSAGE,
     }),
   });
+}
+
+/**
+ * A lease table that remembers the token each acquisition wrote and never
+ * renews: the stalled holder the fence exists for (issue #384), and the token
+ * a test needs to lapse that holder's row the way the TTL would.
+ */
+function stallingLeases(inner: LeaseRepo): { repo: LeaseRepo; tokens: Map<string, string> } {
+  const tokens = new Map<string, string>();
+  return {
+    tokens,
+    repo: {
+      acquire: async (key, owner, expiresAt, now) => {
+        const acquired = await inner.acquire(key, owner, expiresAt, now);
+        if (acquired) tokens.set(key, owner);
+        return acquired;
+      },
+      release: (key, owner) => inner.release(key, owner),
+      renew: async () => false,
+      verify: (key, owner) => inner.verify(key, owner),
+      deleteExpired: (now) => inner.deleteExpired(now),
+    },
+  };
 }
 
 /** A registration that asks for `client` and carries the operator's token. */
@@ -3872,6 +3895,130 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         ),
       );
       assert.equal(results.filter(Boolean).length, 1);
+    });
+
+    it('leases: verify names the current holder and nothing else', async () => {
+      const key = `fence-${newId()}`;
+      assert.equal(await store.leases.verify(key, 'token-a'), false, 'no row, no holder');
+
+      assert.equal(await store.leases.acquire(key, 'token-a', isoInSeconds(600), nowIso()), true);
+      assert.equal(await store.leases.verify(key, 'token-a'), true);
+      assert.equal(await store.leases.verify(key, 'token-b'), false);
+
+      // Lapsed but never taken over: nobody can have acted under the key
+      // without replacing the token, so the lapsed holder still holds it.
+      assert.equal(await store.leases.renew(key, 'token-a', '2020-01-01T00:00:00.000Z'), true);
+      assert.equal(await store.leases.verify(key, 'token-a'), true);
+
+      assert.equal(await store.leases.acquire(key, 'token-b', isoInSeconds(600), nowIso()), true);
+      assert.equal(await store.leases.verify(key, 'token-a'), false, 'a replaced token is out');
+      assert.equal(await store.leases.verify(key, 'token-b'), true);
+
+      // Twice in one transaction: the second check re-stamps a row the first
+      // one just stamped, and must still count it (MySQL's FOUND_ROWS, and a
+      // MongoDB update that would otherwise be a no-op).
+      const twice = await store.transaction(async (tx) => {
+        const first = await tx.leases.verify(key, 'token-b');
+        return first && (await tx.leases.verify(key, 'token-b'));
+      });
+      assert.equal(twice, true);
+
+      assert.equal(await store.leases.release(key, 'token-b'), true);
+      assert.equal(await store.leases.verify(key, 'token-b'), false, 'a released lease is gone');
+    });
+
+    it('leases: a transaction whose lease was taken over rolls back (issue #384)', async () => {
+      const key = `fence-${newId()}`;
+      const { repo, tokens } = stallingLeases(store.leases);
+      const serialize = createKeyedSerializer({ leases: repo, waitMs: 0 });
+      const writeUser = (email: string): Promise<void> =>
+        store.transaction(async (tx) => {
+          await tx.users.create({
+            email,
+            password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+            display_name: 'Fenced',
+            role: 'client',
+            status: 'active',
+            email_verified: false,
+          });
+        });
+
+      const kept = `fence-kept-${newId()}@example.test`;
+      await serialize(key, () => writeUser(kept));
+      assert.ok(await store.users.findByEmail(kept), 'a current holder commits');
+
+      const stale = `fence-stale-${newId()}@example.test`;
+      await assert.rejects(
+        () =>
+          serialize(key, async () => {
+            const token = tokens.get(key);
+            assert.ok(token);
+            // The stall: the lease lapses and another instance takes the key.
+            assert.equal(await store.leases.renew(key, token, '2020-01-01T00:00:00.000Z'), true);
+            assert.equal(
+              await store.leases.acquire(key, 'other-instance', isoInSeconds(600), nowIso()),
+              true,
+            );
+            await writeUser(stale);
+          }),
+        (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
+      );
+      assert.equal(await store.users.findByEmail(stale), null, 'the stale write rolled back');
+      assert.equal(
+        await store.leases.release(key, 'other-instance'),
+        true,
+        'the new owner still holds the key',
+      );
+    });
+
+    it('leases: a takeover that lands mid-transaction is refused and rolls back', async () => {
+      const key = `fence-${newId()}`;
+      const { repo, tokens } = stallingLeases(store.leases);
+      const serialize = createKeyedSerializer({ leases: repo, waitMs: 0 });
+      const user = (email: string): Parameters<NexusStore['users']['create']>[0] => ({
+        email,
+        password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+        display_name: 'Fenced',
+        role: 'client',
+        status: 'active',
+        email_verified: false,
+      });
+      const first = `fence-mid-a-${newId()}@example.test`;
+      const second = `fence-mid-b-${newId()}@example.test`;
+      let tookOver = false;
+
+      await assert.rejects(
+        () =>
+          serialize(key, () =>
+            store.transaction(async (tx) => {
+              await tx.users.create(user(first));
+              // The takeover lands after the body has written and before it
+              // commits. On the pooled adapters it commits on a connection of
+              // its own; SQLite has one connection, so there it runs inside
+              // this transaction — the only interleaving that adapter allows.
+              // Once only, since a pooled adapter may re-run the body.
+              if (!tookOver) {
+                tookOver = true;
+                const token = tokens.get(key);
+                assert.ok(token);
+                const lapsed = '2020-01-01T00:00:00.000Z';
+                assert.equal(await store.leases.renew(key, token, lapsed), true);
+                assert.equal(
+                  await store.leases.acquire(key, 'other-instance', isoInSeconds(600), nowIso()),
+                  true,
+                );
+              }
+              await tx.users.create(user(second));
+            }),
+          ),
+        (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
+      );
+      assert.ok(tookOver, 'the takeover landed inside the body');
+      assert.equal(await store.users.findByEmail(first), null, 'the write before it rolled back');
+      assert.equal(await store.users.findByEmail(second), null, 'the write after it rolled back');
+      // Still held on the pooled adapters; on SQLite the takeover rolled back
+      // with the transaction it ran in.
+      await store.leases.release(key, 'other-instance');
     });
 
     it('leases: refuses an over-long key instead of truncating it', async () => {

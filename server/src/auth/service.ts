@@ -66,6 +66,7 @@ import {
 } from '../lib/errors.js';
 import { isoInSeconds, nowIso } from '../lib/ids.js';
 import { SUPER_ADMIN_LOCK_KEY, type KeyedSerializer } from '../lib/keyed-serializer.js';
+import { rewordLeaseLost } from '../lib/lease-fence.js';
 import type { CaptchaService } from './captcha.js';
 import { createPasswordChangeSerializer } from './password-change.js';
 
@@ -84,6 +85,14 @@ export const REGISTRATION_SETTINGS_KEY = 'registration';
  * overwritten when the portal is bootstrapped again.
  */
 export const SUPER_ADMIN_CLAIM_KEY = 'bootstrap.super_admin_claimed';
+
+/**
+ * `CONFLICT` text for a sign-in whose password-change lease changed hands
+ * before its session could commit (issue #384): nothing was issued, and the
+ * password it presented may no longer be the account's.
+ */
+export const SIGN_IN_LEASE_LOST_MESSAGE =
+  'Signing in took too long and no session was created — please sign in again';
 
 /** Stored registration policy, with the defaults applied when unset. */
 export interface RegistrationPolicy {
@@ -302,8 +311,13 @@ export interface AuthService {
    * which it was.
    */
   resetPassword(token: string, newPassword: string, context: RequestContext): Promise<void>;
-  /** Issue a fresh session for a user (used by login and post-registration). */
-  issueSession(user: UserRecord, context: RequestContext): Promise<IssuedSession>;
+  /**
+   * Issue a fresh session for a user (used by login and post-registration).
+   *
+   * `db` is the store the row is written through — a transaction-scoped one
+   * when the issuance must commit, or roll back, with a surrounding change.
+   */
+  issueSession(user: UserRecord, context: RequestContext, db?: NexusStore): Promise<IssuedSession>;
   /** Current registration policy, with defaults applied. */
   getRegistrationPolicy(): Promise<RegistrationPolicy>;
   /** Revision of committed bootstrap changes on this instance. */
@@ -575,11 +589,15 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
     return persistRegistration(tx, draft, !seatTaken);
   }
 
-  async function issueSession(user: UserRecord, context: RequestContext): Promise<IssuedSession> {
+  async function issueSession(
+    user: UserRecord,
+    context: RequestContext,
+    db: NexusStore = store,
+  ): Promise<IssuedSession> {
     const token = crypto.newSessionToken();
     const csrfToken = crypto.newSessionToken();
     const expiresAt = isoInSeconds(config.sessionTtlSeconds);
-    const session = await store.sessions.create({
+    const session = await db.sessions.create({
       token_hash: crypto.hashToken(token),
       user_id: user.id,
       csrf_token: csrfToken,
@@ -716,19 +734,27 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
       // password the account no longer has (issue #325). Both changers hold
       // this lease from their transaction through their own issuance, so a
       // re-read inside it sees either the old hash with no change pending, or
-      // the new one.
+      // the new one. The re-read and the insert share one transaction, which
+      // is what the lease's fence guards: a sign-in that stalled past the TTL
+      // while a change took the lease over rolls back rather than minting a
+      // session from the replaced password (issue #384), and is told so in
+      // words about signing in rather than about a change.
       const at = nowIso();
-      const issued = await serializePasswordChange(record.id, async () => {
-        const current = await store.users.findById(record.id);
-        // The same answer a wrong password gets: from the caller's side, the
-        // password it presented is no longer the account's.
-        if (!current || current.password_hash !== record.password_hash) {
-          throw unauthorized('Email address or password is incorrect');
-        }
-        if (current.status !== 'active') throw userDisabled();
-        await store.users.touchLastLogin(record.id, at);
-        return issueSession(current, context);
-      });
+      const issued = await rewordLeaseLost(SIGN_IN_LEASE_LOST_MESSAGE, () =>
+        serializePasswordChange(record.id, () =>
+          store.transaction(async (tx) => {
+            const current = await tx.users.findById(record.id);
+            // The same answer a wrong password gets: from the caller's side, the
+            // password it presented is no longer the account's.
+            if (!current || current.password_hash !== record.password_hash) {
+              throw unauthorized('Email address or password is incorrect');
+            }
+            if (current.status !== 'active') throw userDisabled();
+            await tx.users.touchLastLogin(record.id, at);
+            return issueSession(current, context, tx);
+          }),
+        ),
+      );
 
       await audit.record(
         { id: record.id, role: record.role },

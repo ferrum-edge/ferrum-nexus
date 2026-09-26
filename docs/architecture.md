@@ -416,10 +416,15 @@ stale state. `createKeyedSerializer` therefore also takes a lease from
 releases it in a `finally`. One row per resource, an owner id and an expiry:
 60-second TTL renewed at half of it, a 30-second wait for a contended key, and a
 `409 CONFLICT` telling the user to retry if that wait runs out. A crashed holder
-blocks the key only until its lease expires. Because Edge has no fencing token,
-a paused holder can resume after expiry and still issue a stale write; the
-supported deployment therefore has only one active gateway-writing instance.
-See [`operations.md`](operations.md#8-scaling) for the operational picture.
+blocks the key only until its lease expires. Each acquisition writes a fresh
+owner token, and every `store.transaction` opened inside the section verifies it
+before committing (`lib/lease-fence.ts`), so a paused holder that resumes after
+another instance took the key cannot commit database writes. Because Edge has no
+fencing token, that holder can still issue a stale gateway write; the supported
+deployment therefore has only one active gateway-writing instance. See
+[`operations.md`](operations.md#8-scaling) for the operational picture and
+[`security.md`](security.md#cross-instance-locks-are-fenced-at-commit) for the
+fence.
 
 Keys must be canonical for the lock to mean anything: a consumer is always keyed
 by its **Ferrum consumer id**, a proxy always by `proxy:<id>`. Two wrappers key
