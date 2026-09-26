@@ -3067,13 +3067,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               // and so the row commits or rolls back with the flag it clears.
               const cleared = await store.transaction(async (tx) => {
                 const row = (await tx.apis.update(api.id, { gateway_state: 'deployed' })) ?? api;
-                await audit.forStore(tx).record(
-                  { id: actor.id, role: actor.role },
-                  AuditAction.API_GATEWAY_RESTORE,
-                  { type: 'api', id: row.id },
-                  restoreDetails(row, current, recorded, false),
-                  ip,
-                );
+                await audit
+                  .forStore(tx)
+                  .record(
+                    { id: actor.id, role: actor.role },
+                    AuditAction.API_GATEWAY_RESTORE,
+                    { type: 'api', id: row.id },
+                    restoreDetails(row, current, recorded, false),
+                    ip,
+                  );
                 return row;
               });
               return { api: cleared, spec: current, proxyId: recorded, rebuilt: false };
@@ -3326,13 +3328,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             // rolls it back, and the catch below withdraws the proxy exactly as
             // for any other failed row write. The API was already undeployed,
             // so that costs no traffic — it stays `repair_required` for a retry.
-            await audit.forStore(tx).record(
-              { id: actor.id, role: actor.role },
-              AuditAction.API_GATEWAY_RESTORE,
-              { type: 'api', id: updated.id },
-              restoreDetails(updated, current, gatewayProxyId, true),
-              ip,
-            );
+            await audit
+              .forStore(tx)
+              .record(
+                { id: actor.id, role: actor.role },
+                AuditAction.API_GATEWAY_RESTORE,
+                { type: 'api', id: updated.id },
+                restoreDetails(updated, current, gatewayProxyId, true),
+                ip,
+              );
             return updated;
           });
           return { api: row, spec: current, proxyId: gatewayProxyId, rebuilt: true };
