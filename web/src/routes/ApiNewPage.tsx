@@ -31,7 +31,7 @@ import {
   parseTimeoutDraft,
   type TimeoutDraft,
 } from '../components/publishing/AdvancedProxySettings';
-import { SpecEditor, isSpecValid } from '../components/publishing/SpecEditor';
+import { SpecEditor, specProblem } from '../components/publishing/SpecEditor';
 import { SpecEnforcementSelect } from '../components/publishing/SpecEnforcementSelect';
 import { Button } from '../components/ui/Button';
 import { Card, CardBody, CardHeader, PageHeader } from '../components/ui/Card';
@@ -159,8 +159,9 @@ function PublishForm(): ReactElement {
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
     setError(null);
-    if (!isSpecValid(spec)) {
-      setError('The OpenAPI document could not be parsed. Fix it before publishing.');
+    const problem = specProblem(spec);
+    if (problem) {
+      setError(`${problem} Fix it before publishing.`);
       return;
     }
     if (slugError || upstreamError || !isValidApiSlug(effectiveSlug)) return;
