@@ -94,8 +94,13 @@ for (const initialStatus of ['active', 'disabled'] as const) {
             payload: { role, status },
           });
           assert.equal(response.statusCode, 200, response.body);
+          // The transition rows only: a disable's immediate gateway revocation
+          // is recorded separately, as the outcome of the queued work.
           const rows = (await h.auditRows()).filter(
-            (row) => row.target_id === client.user.id && row.action.startsWith('user.'),
+            (row) =>
+              row.target_id === client.user.id &&
+              row.action.startsWith('user.') &&
+              row.action !== 'user.gateway_teardown_complete',
           );
           const expected = [];
           if (roleChanged) expected.push('user.role_change');

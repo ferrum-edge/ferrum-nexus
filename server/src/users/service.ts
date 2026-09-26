@@ -385,7 +385,20 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
             { status: 'disabled' },
           );
           if (!matched) throw conflict('That account changed while retrying its revocation');
-          return tx.gatewayTeardownJobs.upsertPending(target.id, actor.id, nowIso());
+          const queued = await tx.gatewayTeardownJobs.upsertPending(target.id, actor.id, nowIso());
+          // Committed with the re-queue and before the gateway is touched, so a
+          // failed insert re-queues nothing and an attempt never runs unrecorded.
+          await audit.forStore(tx).record(
+            { id: actor.id, role: actor.role },
+            AuditAction.USER_GATEWAY_TEARDOWN_RETRY,
+            { type: 'user', id: target.id },
+            {
+              attempts: queued.attempts,
+              gateway_teardown: 'queued',
+            },
+            ip,
+          );
+          return queued;
         }),
       );
       const attempt = await runGatewayTeardown({
@@ -397,13 +410,17 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
         ...(deps.log ? { log: deps.log } : {}),
       });
 
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.USER_GATEWAY_TEARDOWN_RETRY,
-        { type: 'user', id: target.id },
-        { attempts: job.attempts, ...attempt.details },
-        ip,
-      );
+      // The outcome, once the gateway has answered. A failed attempt leaves the
+      // job pending, and the worker writes this row when it finally lands.
+      if (attempt.outcome !== 'pending') {
+        await audit.record(
+          { id: actor.id, role: actor.role },
+          AuditAction.USER_GATEWAY_TEARDOWN_COMPLETE,
+          { type: 'user', id: target.id },
+          { inline: true, ...attempt.details },
+          ip,
+        );
+      }
 
       return {
         gateway_teardown: attempt.outcome,
@@ -481,20 +498,22 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
         if (patch.status === 'active') {
           // That repeat writes to Edge — it puts the ACL groups of every active
           // grant back on the account's consumers — so it is a state change like any
-          // other and leaves an audit row, recorded before the gateway is
+          // other and leaves an audit row, committed before the gateway is
           // touched exactly as the first enable's is (issue #337).
-          await audit.record(
-            { id: actor.id, role: actor.role },
-            AuditAction.USER_ENABLE,
-            { type: 'user', id: target.id },
-            {
-              changed_fields: [],
-              from_status: target.status,
-              to_status: target.status,
-              gateway_restore_retry: true,
-            },
-            ip,
-          );
+          await store.transaction(async (tx) => {
+            await audit.forStore(tx).record(
+              { id: actor.id, role: actor.role },
+              AuditAction.USER_ENABLE,
+              { type: 'user', id: target.id },
+              {
+                changed_fields: [],
+                from_status: target.status,
+                to_status: target.status,
+                gateway_restore_retry: true,
+              },
+              ip,
+            );
+          });
           await credentials.restoreGatewayAccess(target.id, actor.id);
         }
         return { user: toPublicUser(target) };
@@ -522,6 +541,13 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
         target.role === 'super_admin' &&
         ((roleChanged && target.status === 'active') || update.status === 'disabled');
 
+      // The audit rows commit in the same transaction as the transition they
+      // describe. Written after the commit, a failed insert left a promotion,
+      // demotion, disable or enable applied and unaudited behind a `500`, and
+      // repeating the request found nothing left to change and wrote nothing
+      // either. A disable's revocation is recorded as queued here — the job
+      // row is in this transaction too — and its outcome afterwards, once the
+      // gateway has answered.
       const transition = async (): Promise<{
         row: UserRecord | null;
         job: GatewayTeardownJobRecord | null;
@@ -539,14 +565,68 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
           // The revocation the disable owes is committed *with* the disable, so
           // the two can never disagree: there is no window in which the account
           // is off and nothing remembers that its gateway credentials are live.
+          // A disabled account must not keep a usable browser session either.
+          let job: GatewayTeardownJobRecord | null = null;
+          let terminatedSessions = 0;
           if (update.status === 'disabled') {
-            const job = await tx.gatewayTeardownJobs.upsertPending(target.id, actor.id, nowIso());
-            return { row, job };
+            job = await tx.gatewayTeardownJobs.upsertPending(target.id, actor.id, nowIso());
+            terminatedSessions = await tx.sessions.deleteForUser(target.id);
           }
           // Re-enabling cancels any queued revocation — a retry must never strip
           // the credentials of an account that is live again.
           if (update.status === 'active') await tx.gatewayTeardownJobs.deleteByUser(target.id);
-          return { row, job: null };
+
+          const details = {
+            changed_fields: changed,
+            ...(roleChanged ? { from_role: target.role, to_role: update.role } : {}),
+            ...(statusChanged ? { from_status: target.status, to_status: update.status } : {}),
+            ...(terminatedSessions > 0 ? { terminated_sessions: terminatedSessions } : {}),
+            ...(job ? { gateway_teardown: 'queued' } : {}),
+          };
+          if (roleChanged) {
+            await audit
+              .forStore(tx)
+              .record(
+                { id: actor.id, role: actor.role },
+                AuditAction.USER_ROLE_CHANGE,
+                { type: 'user', id: target.id },
+                details,
+                ip,
+              );
+          }
+          if (update.status === 'disabled') {
+            await audit
+              .forStore(tx)
+              .record(
+                { id: actor.id, role: actor.role },
+                AuditAction.USER_DISABLE,
+                { type: 'user', id: target.id },
+                details,
+                ip,
+              );
+          } else if (update.status === 'active') {
+            await audit
+              .forStore(tx)
+              .record(
+                { id: actor.id, role: actor.role },
+                AuditAction.USER_ENABLE,
+                { type: 'user', id: target.id },
+                details,
+                ip,
+              );
+          }
+          if (!roleChanged && !statusChanged) {
+            await audit
+              .forStore(tx)
+              .record(
+                { id: actor.id, role: actor.role },
+                AuditAction.USER_UPDATE,
+                { type: 'user', id: target.id },
+                details,
+                ip,
+              );
+          }
+          return { row, job };
         });
 
       // A status flip is also taken under the account's own lifecycle key, the
@@ -566,12 +646,12 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
         throw conflict('That account changed while you were editing it — reload and try again');
       }
 
-      // A disabled account must not keep a usable browser session — nor a
-      // working gateway identity, which outlives the session entirely.
-      let terminatedSessions = 0;
+      // No working gateway identity either, which outlives the session
+      // entirely. The disable and its audit rows have committed; what the
+      // immediate attempt achieved is its own row, and an attempt that failed
+      // leaves the job pending for the worker, which records the completion.
       let teardown: GatewayTeardownAttempt | null = null;
       if (update.status === 'disabled') {
-        terminatedSessions = await store.sessions.deleteForUser(target.id);
         teardown = await runGatewayTeardown({
           credentials,
           store,
@@ -580,30 +660,15 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
           job: result.job,
           ...(deps.log ? { log: deps.log } : {}),
         });
-      }
-
-      const actions = [];
-      if (roleChanged) actions.push(AuditAction.USER_ROLE_CHANGE);
-      if (statusChanged) {
-        actions.push(
-          update.status === 'disabled' ? AuditAction.USER_DISABLE : AuditAction.USER_ENABLE,
-        );
-      }
-      if (actions.length === 0) actions.push(AuditAction.USER_UPDATE);
-      for (const action of actions) {
-        await audit.record(
-          { id: actor.id, role: actor.role },
-          action,
-          { type: 'user', id: target.id },
-          {
-            changed_fields: changed,
-            ...(roleChanged ? { from_role: target.role, to_role: update.role } : {}),
-            ...(statusChanged ? { from_status: target.status, to_status: update.status } : {}),
-            ...(terminatedSessions > 0 ? { terminated_sessions: terminatedSessions } : {}),
-            ...(teardown?.details ?? {}),
-          },
-          ip,
-        );
+        if (teardown.outcome !== 'pending') {
+          await audit.record(
+            { id: actor.id, role: actor.role },
+            AuditAction.USER_GATEWAY_TEARDOWN_COMPLETE,
+            { type: 'user', id: target.id },
+            { inline: true, ...teardown.details },
+            ip,
+          );
+        }
       }
 
       // Outside the lifecycle lock: consumer mutations have their own key,

@@ -363,6 +363,12 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
           // transactional too, and joins this one. Nothing in the body leaves
           // the store, so a contention retry re-runs it safely; the gateway
           // delete stays outside, before it.
+          //
+          // The `application.delete` row is in the same transaction. Written
+          // after it, a failed insert left the application gone and unaudited
+          // behind a `500`; now it leaves the application in place for the
+          // delete to be retried, and that retry finds the consumer already
+          // gone and simply drops the rows.
           const drop = (): Promise<{ grants: number; credentials: number }> =>
             store.transaction(async (tx) => {
               const grants = await tx.grants.count({
@@ -376,8 +382,39 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
               // The row's cascade takes the grants, requests, credential rows
               // and the consumer mapping with it.
               await tx.applications.delete(application.id);
+              await audit.forStore(tx).record(
+                { id: actor.id, role: actor.role },
+                AuditAction.APPLICATION_DELETE,
+                { type: 'application', id: application.id },
+                {
+                  name: application.name,
+                  consumer_id: consumerId,
+                  revoked_grants: grants,
+                  revoked_credentials: credentials,
+                  ...(unmapped ? { unmapped_consumer: true } : {}),
+                },
+                ip,
+              );
               return { grants, credentials };
             });
+
+          // The attempt is recorded before the gateway is touched: the
+          // consumer delete cannot be rolled back, so a failure to record the
+          // delete that follows it must still leave a row naming who started
+          // it — and a failure to record *this* stops before anything changed.
+          await store.transaction(async (tx) => {
+            await audit.forStore(tx).record(
+              { id: actor.id, role: actor.role },
+              AuditAction.APPLICATION_DELETE_START,
+              { type: 'application', id: application.id },
+              {
+                name: application.name,
+                consumer_id: consumerId,
+                ...(unmapped ? { unmapped_consumer: true } : {}),
+              },
+              ip,
+            );
+          });
 
           // Gateway first. A row deleted before its consumer leaves a live
           // identity — with its ACL groups and its credential material — that
@@ -387,31 +424,16 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
           // appended before the consumer went (and went with it) or finds
           // the consumer, or the application, gone.
           const target = consumerId;
-          if (target === null) return { application, consumerId, unmapped, ...(await drop()) };
-          const tally = await edge.serializePerKey(target, async () => {
+          if (target === null) return drop();
+          return edge.serializePerKey(target, async () => {
             const live = await edge.consumers.get(target);
             if (live) await edge.consumers.delete(target, actor.id);
             return drop();
           });
-          return { application, consumerId: target, unmapped, ...tally };
         },
       );
 
-      const { application, consumerId, unmapped, grants, credentials } = outcome;
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.APPLICATION_DELETE,
-        { type: 'application', id: application.id },
-        {
-          name: application.name,
-          consumer_id: consumerId,
-          revoked_grants: grants,
-          revoked_credentials: credentials,
-          ...(unmapped ? { unmapped_consumer: true } : {}),
-        },
-        ip,
-      );
-      return { revoked_grants: grants, revoked_credentials: credentials };
+      return { revoked_grants: outcome.grants, revoked_credentials: outcome.credentials };
     },
 
     async resolveForActor(actor, applicationId): Promise<ApplicationRecord | null> {
