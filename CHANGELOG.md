@@ -305,10 +305,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   gateway delete provably never applied now completes its
   `credential.revoke_start` with a new `credential.revoke_rollback` row,
   committed with the row's move back to `active`, and `docs/security.md` no
-  longer describes that case as a start with no completion. A revocation
-  rollback whose transaction committed but lost its acknowledgement is
-  recognised by its pre-minted row id and no longer restores the grant or
-  writes `access.revoke_rollback` a second time (#402).
+  longer describes that case as a start with no completion; a withdrawal the
+  lease fence refuses leaves the row `retiring` rather than moving it back
+  outside the fence, and any other retry moves it only while it is still
+  `retiring`, so a key another instance revoked meanwhile stays revoked. A
+  revocation rollback whose transaction committed but lost its acknowledgement
+  is recognised by its pre-minted row id and no longer restores the grant or
+  writes `access.revoke_rollback` a second time. A crash between a refused
+  repair pass and its retry is documented as leaving the same state (#402).
 - Conversation list previews now fetch the newest message for the whole page in
   one adapter query, preserving the `(created_at, id)` ordering and empty-thread
   previews. A 200-thread page used to issue 200 separate message lookups (#394).

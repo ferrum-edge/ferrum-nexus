@@ -2740,8 +2740,10 @@ its lease could not be completed”_ naming the consumer and its
 `stale_credential_ids`. That is the one state a repeat repair cannot clear: the
 consumer exists under the id the portal stores, so later passes report it
 healthy and a repair answers that there is nothing to do, while its old
-credential rows stay `active` against entries the gateway does not hold. Clear
-it by reconciling each affected credential type on that consumer
+credential rows stay `active` against entries the gateway does not hold. A
+process crash or restart between the refused pass and its retry leaves the same
+state without the second log line — at most the first names the consumer, with
+a count of its stale rows. The remedy is the same: clear it by reconciling each affected credential type on that consumer
 ([§12, "Reconciling one"](#reconciling-one)), which empties the type on the
 gateway and revokes its rows; the account holder then issues new credentials.
 

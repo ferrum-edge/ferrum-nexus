@@ -682,17 +682,23 @@ export function createGatewayReconciliationService(
           'A consumer repair lost its lease after recreating the consumer; the consumer is ' +
             'kept, and the repair is completed under fresh keys',
         );
+        // The rows still live when this gives up: a retry that was refused as
+        // well names its own, which may differ from the first pass's.
+        let left = kept;
         try {
           const retried = await attempt(kept);
-          if (retried.kind === 'kept') throw retried.error;
+          if (retried.kind === 'kept') {
+            left = retried;
+            throw retried.error;
+          }
           return retried;
         } catch (error) {
           log(
             {
               user_id: orphan.user_id,
               namespace,
-              consumer_id: kept.consumerId,
-              stale_credential_ids: kept.staleCredentialIds,
+              consumer_id: left.consumerId,
+              stale_credential_ids: left.staleCredentialIds,
               error: errorMessage(error),
             },
             'A consumer repair that lost its lease could not be completed: the consumer it ' +

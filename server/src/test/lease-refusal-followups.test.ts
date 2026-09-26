@@ -482,6 +482,52 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
     assert.equal(rows[0]?.details.last4, first.credential.last4);
   });
 
+  it('keeps a key another instance revoked when the fence refuses the withdrawal', async () => {
+    const session = await client();
+    const first = await issueKey(session);
+    const credentialId = first.credential.id;
+    const consumerId = first.credential.ferrum_consumer_id;
+    harness.edge.queueFailure(503, { error: 'down' }, '/credentials/keyauth/', 'DELETE');
+
+    // The revocation reads the array that proves its delete never applied,
+    // then stalls past the TTL; another instance takes the consumer key and
+    // completes the revocation before the withdrawal reaches its commit.
+    const consumers = harness.edgeClient.consumers;
+    const get = consumers.get.bind(consumers);
+    let stalled = false;
+    consumers.get = async (id) => {
+      const live = await get(id);
+      if (!stalled && harness.edge.callsTo('DELETE', '/credentials/keyauth/').length > 0) {
+        stalled = true;
+        await takeOver(consumerId);
+        await harness.store.credentials.update(credentialId, { status: 'revoked' });
+      }
+      return live;
+    };
+    restorePatches.push(() => {
+      consumers.get = get;
+    });
+
+    const failed = await harness.authed(session, {
+      method: 'DELETE',
+      url: `/api/credentials/${credentialId}`,
+    });
+    assert.ok(stalled, 'the revocation reached the gateway');
+    assert.equal(failed.statusCode, 502, failed.body);
+    assert.equal(
+      await harness.store.leases.release(consumerId, OTHER_INSTANCE),
+      true,
+      "the stale withdrawal left the new holder's lease alone",
+    );
+
+    assert.equal(
+      (await harness.store.credentials.findById(credentialId))?.status,
+      'revoked',
+      'the refused withdrawal does not bring a revoked key back',
+    );
+    assert.equal(await countAudit(AuditAction.CREDENTIAL_REVOKE_ROLLBACK, credentialId), 0);
+  });
+
   it('records a withdrawn retirement that lost its acknowledgement exactly once', async () => {
     const session = await client();
     const first = await issueKey(session);

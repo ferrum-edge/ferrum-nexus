@@ -217,6 +217,7 @@ import {
   validationFailed,
 } from '../lib/errors.js';
 import { newId, nowIso } from '../lib/ids.js';
+import { isLeaseLost } from '../lib/lease-fence.js';
 import { userLifecycleLockKey, type KeyedSerializer } from '../lib/keyed-serializer.js';
 import type { NotificationsService } from '../notifications/service.js';
 import type { ConsumerProvisioner } from './consumers.js';
@@ -1184,10 +1185,13 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * The `credential.revoke_start` row committed before the delete names who
    * started a retirement; this is its completion when the answer is "nothing
    * was removed", committed with the move back so the trail never reads as a
-   * start with no end. Should that transaction fail, the move is retried on
-   * its own — a `retiring` row over a live entry is the hazard, a missing row
-   * only a gap — and the row follows best-effort, unless the transaction is
-   * found to have committed after all and only its acknowledgement was lost.
+   * start with no end. Should the lease fence refuse that transaction, the
+   * row is left `retiring`: another instance may already have settled it, and
+   * a retiring row is the safe reading of an unproved outcome. Should it fail
+   * any other way, the move is retried on its own — only while the row is
+   * still `retiring` — and the audit row follows best-effort, unless the
+   * transaction is found to have committed after all and only its
+   * acknowledgement was lost.
    * Never throws: the caller is carrying the gateway's error.
    */
   async function withdrawRetirement(input: {
@@ -1222,9 +1226,24 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             { id: rowId },
           );
       });
-    } catch {
+    } catch (error) {
+      // A refusal from the lease fence means another instance may hold the
+      // key and may already have finished this revocation: moving the row
+      // back now could flip a key it revoked to `active`. Nothing committed,
+      // so the row stays `retiring`, the safe reading of an unproved outcome.
+      if (isLeaseLost(error)) return;
       if (await auditRowCommitted(store, target, rowId)) return;
-      await store.credentials.update(credential.id, { status: 'active' }).catch(() => undefined);
+      // Any other failure is retried as the move alone, and only over a row
+      // that is still `retiring` — anything else was settled by someone else.
+      const moved = await store
+        .transaction(async (tx) => {
+          const fresh = await tx.credentials.findById(credential.id);
+          if (fresh?.status !== 'retiring') return false;
+          await tx.credentials.update(credential.id, { status: 'active' });
+          return true;
+        })
+        .catch(() => false);
+      if (!moved) return;
       await audit
         .record(
           { id: actor.id, role: actor.role },
