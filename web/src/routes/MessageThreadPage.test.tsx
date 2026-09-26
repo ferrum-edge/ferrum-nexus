@@ -10,8 +10,13 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import type { Message, MessagePage, MessageThreadDetail } from '@ferrum-nexus/shared';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import type {
+  Message,
+  MessagePage,
+  MessageThreadDetail,
+  SendMessageResponse,
+} from '@ferrum-nexus/shared';
 import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -297,6 +302,7 @@ describe('MessageThreadPage', () => {
     route.threadId = 'thread-1';
     vi.mocked(threadsApi.get).mockReset();
     vi.mocked(threadsApi.messages).mockReset();
+    vi.mocked(threadsApi.sendMessage).mockReset();
   });
 
   afterEach(() => {
@@ -394,5 +400,136 @@ describe('MessageThreadPage', () => {
     expect(screen.queryByText('body m12')).not.toBeInTheDocument();
     expect(screen.queryByText('body m20')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Load older messages' })).not.toBeInTheDocument();
+  });
+
+  describe('reply drafts', () => {
+    const replyBox = (): HTMLTextAreaElement => screen.getByLabelText('Reply');
+    const sendButton = (): HTMLElement => screen.getByRole('button', { name: 'Send reply' });
+    // Let a settled send run its completion before asserting on what it left behind.
+    const settle = (): Promise<void> =>
+      act(async () => {
+        await new Promise((done) => setTimeout(done, 0));
+      });
+
+    function deferredSend(): { resolve: () => void; reject: (error: Error) => void } {
+      let done: (response: SendMessageResponse) => void = () => undefined;
+      let fail: (error: Error) => void = () => undefined;
+      const response = new Promise<SendMessageResponse>((resolve, reject) => {
+        done = resolve;
+        fail = reject;
+      });
+      vi.mocked(threadsApi.sendMessage).mockReturnValueOnce(response);
+      return {
+        resolve: () => done({ message: message('sent', at(30)) }),
+        reject: (error) => fail(error),
+      };
+    }
+
+    function serveTwoThreads(): void {
+      const first = message('first', at(1));
+      const second = { ...message('second', at(1)), thread_id: 'thread-2' };
+      vi.mocked(threadsApi.get).mockImplementation(async (id) =>
+        id === 'thread-1'
+          ? threadDetail(pageMessages([first], 5))
+          : { ...threadDetail(pageMessages([second], 5)), id: 'thread-2', subject: 'Billing' },
+      );
+    }
+
+    async function openThread(threadId: string, rerenderThread: () => void): Promise<void> {
+      route.threadId = threadId;
+      rerenderThread();
+      await screen.findByText(threadId === 'thread-1' ? 'body first' : 'body second');
+    }
+
+    it('clears the draft once the reply it holds is sent', async () => {
+      serveTwoThreads();
+      const pending = deferredSend();
+      renderThread();
+      await screen.findByText('body first');
+
+      fireEvent.change(replyBox(), { target: { value: 'First reply' } });
+      fireEvent.click(sendButton());
+      await waitFor(() => expect(threadsApi.sendMessage).toHaveBeenCalledTimes(1));
+
+      pending.resolve();
+      await waitFor(() => expect(replyBox()).toHaveValue(''));
+    });
+
+    it('keeps text edited while an earlier reply is in flight', async () => {
+      serveTwoThreads();
+      const pending = deferredSend();
+      renderThread();
+      await screen.findByText('body first');
+
+      fireEvent.change(replyBox(), { target: { value: 'First reply' } });
+      fireEvent.click(sendButton());
+      await waitFor(() => expect(threadsApi.sendMessage).toHaveBeenCalledTimes(1));
+      fireEvent.change(replyBox(), { target: { value: 'New unsent draft' } });
+
+      pending.resolve();
+      await waitFor(() => expect(sendButton()).not.toHaveAttribute('aria-busy'));
+      await settle();
+      expect(threadsApi.sendMessage).toHaveBeenCalledWith('thread-1', { body: 'First reply' });
+      expect(replyBox()).toHaveValue('New unsent draft');
+    });
+
+    it('keeps the draft when the send fails', async () => {
+      serveTwoThreads();
+      const pending = deferredSend();
+      renderThread();
+      await screen.findByText('body first');
+
+      fireEvent.change(replyBox(), { target: { value: 'First reply' } });
+      fireEvent.click(sendButton());
+      await waitFor(() => expect(threadsApi.sendMessage).toHaveBeenCalledTimes(1));
+
+      pending.reject(new Error('offline'));
+      await waitFor(() => expect(sendButton()).not.toHaveAttribute('aria-busy'));
+      await settle();
+      expect(replyBox()).toHaveValue('First reply');
+    });
+
+    it('scopes an unsent draft to its conversation', async () => {
+      serveTwoThreads();
+      const { rerenderThread } = renderThread();
+      await screen.findByText('body first');
+
+      fireEvent.change(replyBox(), { target: { value: 'Private draft intended for Alice' } });
+
+      await openThread('thread-2', rerenderThread);
+      expect(replyBox()).toHaveValue('');
+      expect(sendButton()).toBeDisabled();
+
+      await openThread('thread-1', rerenderThread);
+      expect(replyBox()).toHaveValue('Private draft intended for Alice');
+    });
+
+    it('lets a send completing after navigation clear only its own draft', async () => {
+      serveTwoThreads();
+      const pending = deferredSend();
+      const { rerenderThread } = renderThread();
+      await screen.findByText('body first');
+
+      fireEvent.change(replyBox(), { target: { value: 'Reply for thread one' } });
+      fireEvent.click(sendButton());
+      await waitFor(() => expect(threadsApi.sendMessage).toHaveBeenCalledTimes(1));
+
+      await openThread('thread-2', rerenderThread);
+      expect(replyBox()).toHaveValue('');
+      fireEvent.change(replyBox(), { target: { value: 'Draft for thread two' } });
+      // The other conversation's in-flight reply does not hold this composer busy.
+      expect(sendButton()).not.toHaveAttribute('aria-busy');
+      expect(sendButton()).toBeEnabled();
+
+      pending.resolve();
+      await settle();
+      expect(replyBox()).toHaveValue('Draft for thread two');
+
+      await openThread('thread-1', rerenderThread);
+      await waitFor(() => expect(replyBox()).toHaveValue(''));
+
+      await openThread('thread-2', rerenderThread);
+      expect(replyBox()).toHaveValue('Draft for thread two');
+    });
   });
 });
