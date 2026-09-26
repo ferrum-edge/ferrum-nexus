@@ -1143,19 +1143,24 @@ number of cards, not the work behind one card.
 Two bounds, at the two places the cost appears:
 
 - **At publish.** Nexus counts what the viewer walks — the nodes of every
-  `components.schemas` entry, and the parameter entries, media types and inline
-  schema nodes of every declared operation — and refuses more than
-  `MAX_SPEC_RENDER_UNITS` (100,000) of them with `400 SPEC_INVALID` and
-  `details.reason = "too_much_to_render"`. A parameter, request body or response
-  written as a `$ref` is charged for the object it names, and each distinct
-  object once: at its first reference, however many places name it, with every
-  later reference costing only its own parameter entry. Path-item parameters are
-  counted once per path item rather than once per operation that inherits them,
-  and a schema `$ref` is charged where its target is declared, not expanded at
-  each use; those repetitions are what the render-time budget below absorbs.
-  Counting is linear in the document: each `content` map and schema is
-  enumerated once however often it is referenced or aliased, and the count stops
-  at the first charge past the ceiling, reporting the totals reached by then.
+  `components.schemas` entry, and the parameter entries, response entries,
+  media types and inline schema nodes of every declared operation — and refuses
+  more than `MAX_SPEC_RENDER_UNITS` (100,000) of them with `400 SPEC_INVALID`
+  and `details.reason = "too_much_to_render"`. A parameter, request body or
+  response written as a `$ref` is charged for the object it names, and each
+  distinct object once: at its first reference, however many places name it,
+  with every later reference costing only its own parameter or response entry.
+  Every response entry is charged, whether or not it declares `content`, as the
+  viewer charges each one a card. Path-item parameters are counted once per path
+  item rather than once per operation that inherits them, and a schema `$ref` is
+  charged where its target is declared, not expanded at each use; those
+  repetitions are what the render-time budget below absorbs. Each `content` map
+  and schema is enumerated once however often it is referenced or aliased; a
+  `parameters` list or `responses` map that a YAML alias repeats is walked at
+  every occurrence, but each of its entries costs a unit, so that walk is
+  bounded by the ceiling rather than by the size of the document. The count
+  stops at the first charge past the ceiling, reporting the totals reached by
+  then.
   One declared operation can carry thousands of parameters and dozens of media
   types per body; counting paths and operations sees none of that.
 - **While following references.** Parameter, request-body and response

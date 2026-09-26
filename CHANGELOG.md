@@ -26,6 +26,13 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- The publish-time render ceiling now charges every response entry, including
+  one that declares no `content` or names an already-charged `$ref`, and
+  `too_much_to_render` details report the new `responses` count alongside
+  `schema_nodes`, `parameters` and `media_types` (#390). Previously a
+  `responses` map of empty entries cost nothing, so one repeated by YAML aliases
+  across many operations could keep the upload check busy for about a second
+  without reaching the ceiling; the count now stops at the ceiling instead.
 - Retired APIs in the catalog are labeled as retired and no longer show a new
   access-request form. Existing identity grants remain visible, and pending
   requests can still be withdrawn (#376).
