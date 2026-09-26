@@ -294,9 +294,13 @@ Requests go to the **gateway's proxy listener**, not to the portal.
 
 **The catalog tells you the address.** Open the API, and the **Call this API**
 panel on the _Access_ tab shows the full **invoke URL** with a copy button,
-along with the exact header to send. The same URL appears next to each of your
-granted APIs on the **Credentials** page. Append the operation path from the
-OpenAPI document to it:
+along with a copyable `curl` example for the identity you select — your account
+or one of your applications. On an API that needs approval the panel appears
+only for an identity that holds the grant, and its consumer (`nexus-user-<id>`
+or `nexus-app-<id>`) is the Basic username or JWT `sub` in the example, so use a
+credential issued to that same identity. The same URL appears next to each of
+your granted APIs on the **Credentials** page. Append the operation path from
+the OpenAPI document to it:
 
 ```
 <invoke URL>/<the path from the OpenAPI document>
@@ -320,8 +324,11 @@ curl -sS https://gateway.example.com/nexus/billing/invoices \
 
 ### HTTP Basic (`basicauth`)
 
-The username is your **consumer username**, `nexus-user-<your id>` — exactly
-the value the issue dialog showed you.
+The username is the credential's **consumer username** — `nexus-user-<your id>`
+for your account, `nexus-app-<application id>` for an application — exactly the
+value the issue dialog showed you. `-u` has curl base64-encode
+`username:password` into the `Authorization: Basic` header; quote the pair so
+the shell leaves punctuation in the password alone.
 
 ```bash
 curl -sS https://gateway.example.com/nexus/billing/invoices \

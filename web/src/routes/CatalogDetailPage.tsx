@@ -3,8 +3,12 @@ import { useState, type ReactElement, type ReactNode } from 'react';
 import {
   AUTH_PLUGIN_LABELS,
   MAX_JUSTIFICATION_LENGTH,
+  consumerUsernameForApplication,
+  consumerUsernameForUser,
+  type CatalogAccessState,
   type CatalogApi,
   type CatalogDetailResponse,
+  type CatalogIdentityAccessResponse,
 } from '@ferrum-nexus/shared';
 import { formatDateTime } from '../lib/format';
 import { useCatalogApi, useCatalogIdentityAccess, useCatalogSpec } from '../hooks/useCatalog';
@@ -332,8 +336,21 @@ function IdentityAccess({
   );
 }
 
+/**
+ * The selected identity's own standing, for the badge on the access card. The
+ * detail's `access_state` is account-wide — "granted" when any one identity
+ * is — so it would label an unapproved account as granted (issue #374).
+ */
+function identityState(access: CatalogIdentityAccessResponse): CatalogAccessState {
+  if (access.grant?.status === 'active') return 'granted';
+  if (access.request?.status === 'pending') return 'pending';
+  if (access.request?.status === 'denied') return 'denied';
+  return 'none';
+}
+
 function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElement {
-  const { api, my_grant: myGrant } = detail;
+  const { api } = detail;
+  const { user } = useAuth();
   // Which identity the access is for. `ACCOUNT_IDENTITY` is the account
   // itself, the default and what every request made before applications
   // existed is (issue #289). The selector stays available whatever any
@@ -341,11 +358,29 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
   // never hides the form for another (issue #314).
   const [identity, setIdentity] = useState<string>(ACCOUNT_IDENTITY);
   const [identityName, setIdentityName] = useState('My account');
+  const applicationId = identity === ACCOUNT_IDENTITY ? null : identity;
+  // The same query `IdentityAccess` reads, so it is shared rather than fetched
+  // twice. An API that needs no approval has no per-identity grant to read.
+  const access = useCatalogIdentityAccess(
+    api.slug,
+    applicationId,
+    api.requestable && api.access_state !== 'owner',
+  );
 
-  // Only shown once the caller could actually make the call through one of
-  // their identities: an approved grant, or an API that needs no approval.
-  // `my_grant` is account-wide on purpose here.
-  const canCall = (myGrant !== null && myGrant.status === 'active') || !api.requestable;
+  // The example calls as the selected identity, because only that identity's
+  // consumer carries an approval made for it: an application's grant does not
+  // reach the account's credentials, nor the account's an application's
+  // (issue #374). An API that needs no approval may be called with a credential
+  // of any identity, so the selector there picks which one the example uses.
+  const consumer =
+    applicationId !== null
+      ? consumerUsernameForApplication(applicationId)
+      : user
+        ? consumerUsernameForUser(user.id)
+        : 'nexus-user-<your id>';
+  const holder =
+    applicationId === null ? 'your account' : (access.data?.application?.name ?? identityName);
+  const canCall = !api.requestable || access.data?.grant?.status === 'active';
 
   if (api.access_state === 'owner') {
     return (
@@ -374,7 +409,13 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
         <CardHeader
           title="Your access"
           icon="grant"
-          actions={<StatusPill status={api.access_state} />}
+          actions={
+            !api.requestable ? (
+              <StatusPill status={api.access_state} />
+            ) : access.data ? (
+              <StatusPill status={identityState(access.data)} />
+            ) : undefined
+          }
           description={
             api.requestable
               ? 'This API is protected by an access-control policy. Access is approved per identity — your account, or one of your applications — and an approval adds only that identity’s gateway consumer to its ACL group.'
@@ -383,10 +424,22 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
         />
         <CardBody>
           {!api.requestable ? (
-            <p className="text-sm text-fg-muted">
-              No approval needed. Issue a credential from the credentials page to start calling this
-              API.
-            </p>
+            <div className="flex flex-col gap-4">
+              <p className="text-sm text-fg-muted">
+                No approval needed. Issue a credential from the credentials page to start calling
+                this API.
+              </p>
+              <IdentityPicker
+                label="Calling as"
+                value={identity}
+                selectedLabel={identityName}
+                onValueChange={(value, name) => {
+                  setIdentity(value);
+                  setIdentityName(name);
+                }}
+                hint="A credential issued to your account or to any of your applications can call this API. The example below uses the identity you choose."
+              />
+            </div>
           ) : (
             <div className="flex flex-col gap-4">
               <IdentityPicker
@@ -421,6 +474,8 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
           invokeUrl={api.invoke_url}
           listenPath={api.listen_path}
           authPlugin={api.auth_plugin}
+          consumer={consumer}
+          holder={holder}
         />
       ) : null}
     </div>

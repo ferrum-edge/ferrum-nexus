@@ -1,10 +1,5 @@
 import { useCallback, useEffect, useState, type ReactElement, type ReactNode } from 'react';
-import {
-  AUTH_PLUGIN_LABELS,
-  consumerUsernameForUser,
-  type AuthPluginType,
-} from '@ferrum-nexus/shared';
-import { useAuth } from '../../stores/auth';
+import { AUTH_PLUGIN_LABELS, type AuthPluginType } from '@ferrum-nexus/shared';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
 import { Card, CardBody, CardHeader } from '../ui/Card';
@@ -17,19 +12,39 @@ export interface CallApiPanelProps {
   /** `/<namespace>/<slug>` — always known, even without an origin. */
   listenPath: string;
   authPlugin: AuthPluginType;
+  /**
+   * Gateway consumer username of the identity the example calls as:
+   * `nexus-user-<id>` for the account, `nexus-app-<id>` for an application.
+   * It must be the identity that holds the access — an application's grant is
+   * on that application's consumer only (issue #374).
+   */
+  consumer: string;
+  /** Who that consumer is, in prose: "your account" or the application's name. */
+  holder: string;
 }
 
 /**
- * The header a client sends, per auth plugin.
+ * Quote one argument for a POSIX shell.
+ *
+ * Single quotes keep everything literal; an embedded `'` closes the quote,
+ * adds an escaped one and reopens it.
+ */
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * How a client authenticates, per auth plugin.
  *
  * Mirrors the table in `docs/guides/client-guide.md`. Both Basic and JWT are
- * keyed on the **consumer** username (`nexus-user-<id>`), not the portal email:
- * a basic-auth credential on Edge has no username field of its own, and the
- * `jwt_auth` plugin identifies the caller by the `sub` claim.
+ * keyed on the **consumer** username (`nexus-user-<id>` or `nexus-app-<id>`),
+ * not the portal email: a basic-auth credential on Edge has no username field
+ * of its own, and the `jwt_auth` plugin identifies the caller by the `sub`
+ * claim.
  */
 interface AuthRecipe {
-  /** The full header line pasted into the example request. */
-  header: string;
+  /** The `curl` arguments that authenticate the example request. */
+  curlAuth: string;
   /** Header name on its own, for the guidance list. */
   name: string;
   /** Credential type to issue on the credentials page. */
@@ -42,26 +57,31 @@ function authRecipe(authPlugin: AuthPluginType, consumer: string): AuthRecipe {
   switch (authPlugin) {
     case 'key_auth':
       return {
-        header: 'X-API-Key: <your key>',
+        curlAuth: `-H ${shellQuote('X-API-Key: <your key>')}`,
         name: 'X-API-Key',
         credential: 'keyauth',
         note: 'Send the key exactly as it was shown when you issued the credential.',
       };
     case 'basic_auth':
+      // `--user` makes curl build `Authorization: Basic <base64(user:password)>`
+      // itself; a literal `base64(...)` in a header would be sent as-is and
+      // never authenticate (issue #375).
       return {
-        header: `Authorization: Basic base64(${consumer}:<your password>)`,
+        curlAuth: `--user ${shellQuote(`${consumer}:<your password>`)}`,
         name: 'Authorization',
         credential: 'basicauth',
         note: (
           <>
-            The username is your consumer username <code className="font-mono">{consumer}</code>,
-            not your email.
+            The username is the consumer username <code className="font-mono">{consumer}</code>,
+            not your email. <code className="font-mono">--user</code> base64-encodes{' '}
+            <code className="font-mono">username:password</code> into the{' '}
+            <code className="font-mono">Authorization: Basic</code> header for you.
           </>
         ),
       };
     case 'jwt_auth':
       return {
-        header: 'Authorization: Bearer <token you sign>',
+        curlAuth: `-H ${shellQuote('Authorization: Bearer <token you sign>')}`,
         name: 'Authorization',
         credential: 'jwt',
         note: (
@@ -73,6 +93,18 @@ function authRecipe(authPlugin: AuthPluginType, consumer: string): AuthRecipe {
         ),
       };
   }
+}
+
+/**
+ * The copyable example request: the same text is shown and copied, so what a
+ * caller reads is exactly what runs.
+ */
+export function exampleRequest(
+  target: string,
+  authPlugin: AuthPluginType,
+  consumer: string,
+): string {
+  return `curl ${shellQuote(target)} \\\n  ${authRecipe(authPlugin, consumer).curlAuth}`;
 }
 
 /** Copy-to-clipboard affordance for the whole example request. */
@@ -133,12 +165,12 @@ export function CallApiPanel({
   invokeUrl,
   listenPath,
   authPlugin,
+  consumer,
+  holder,
 }: CallApiPanelProps): ReactElement {
-  const { user } = useAuth();
-  const consumer = user ? consumerUsernameForUser(user.id) : 'nexus-user-<your id>';
   const recipe = authRecipe(authPlugin, consumer);
   const target = invokeUrl ?? `<gateway address>${listenPath}`;
-  const snippet = `curl ${target} \\\n  -H "${recipe.header}"`;
+  const snippet = exampleRequest(target, authPlugin, consumer);
 
   return (
     <Card>
@@ -157,12 +189,7 @@ export function CallApiPanel({
             <CopySnippetButton value={snippet} />
           </div>
           <pre className="overflow-x-auto rounded-md border border-border bg-inset p-3 font-mono text-xs leading-relaxed text-fg">
-            <code>
-              <span className="text-fg-subtle">curl</span> {target} \{'\n'}
-              {'  '}
-              <span className="text-fg-subtle">-H</span> &quot;
-              <span className="text-accent">{recipe.header}</span>&quot;
-            </code>
+            <code>{snippet}</code>
           </pre>
         </div>
 
@@ -195,10 +222,10 @@ export function CallApiPanel({
           </Guidance>
           <Guidance term="Credential">
             Issue a <strong className="font-medium text-fg">{recipe.credential}</strong> credential
-            from the credentials page.
+            to {holder} from the credentials page.
           </Guidance>
           <Guidance term="Consumer">
-            <code className="font-mono text-xs text-fg">{consumer}</code>
+            <code className="font-mono text-xs text-fg">{consumer}</code> — {holder}
           </Guidance>
           <Guidance term="Notes">{recipe.note}</Guidance>
         </dl>
