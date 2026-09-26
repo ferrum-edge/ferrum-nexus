@@ -97,6 +97,13 @@ export const AuditAction = {
   API_DELETE: 'api.delete',
   /** A palette plugin was created or replaced on an API's proxy. */
   API_PLUGIN_SET: 'api.plugin_set',
+  /**
+   * A palette plugin removal is about to delete the plugin's gateway config.
+   * The counterpart of {@link API_DELETE_START}: committed before the gateway
+   * is touched, with {@link API_PLUGIN_REMOVE} written in the transaction that
+   * drops the `api_plugins` row.
+   */
+  API_PLUGIN_REMOVE_START: 'api.plugin_remove_start',
   /** A palette plugin was detached from an API's proxy and deleted. */
   API_PLUGIN_REMOVE: 'api.plugin_remove',
   /**
@@ -218,6 +225,14 @@ export const AuditAction = {
   /* credentials */
   CREDENTIAL_ISSUE: 'credential.issue',
   CREDENTIAL_ROTATE: 'credential.rotate',
+  /**
+   * A revocation is about to delete one credential entry from the gateway.
+   * Committed with the row's move to `retiring`, before the delete, so a
+   * revocation whose completion could not be recorded still leaves a row
+   * naming who started it; {@link CREDENTIAL_REVOKE} follows in the
+   * transaction that marks the row `revoked`.
+   */
+  CREDENTIAL_REVOKE_START: 'credential.revoke_start',
   CREDENTIAL_REVOKE: 'credential.revoke',
   /**
    * A retirement Edge applied but the portal never recorded, settled by a
@@ -296,40 +311,200 @@ export type AuditActionName = (typeof AuditAction)[keyof typeof AuditAction];
 export const ALL_AUDIT_ACTIONS = Object.values(AuditAction) as readonly AuditActionName[];
 
 /**
- * Actions that must be written through `audit.forStore(tx)` inside the
- * `store.transaction` that performs the change they describe.
+ * How an audit row commits relative to the change it describes.
  *
- * Privileged account transitions and destructive deletions, plus the intent
- * rows committed before a deletion's gateway work. Recorded after the commit, a
- * failed audit insert left the change applied and unaudited behind a `500` —
- * and a repeat of the same request then found nothing left to change and wrote
- * nothing either. In the transaction, a failed insert rolls the change back
- * with it.
- *
- * `transactional-audit.test.ts` scans the server source and fails when one of
- * these is recorded any other way, so a new call site cannot quietly slip back
- * to the post-commit shape. Outcome rows written after a gateway call
- * ({@link AuditAction.USER_GATEWAY_TEARDOWN_COMPLETE},
- * {@link AuditAction.GOD_DISABLE_USER_COMPLETE}) are deliberately absent: the
- * change they report is already recorded by one of these.
+ * - `transactional` — written through `audit.forStore(tx)` inside the
+ *   `store.transaction` that makes the change, so a failed insert rolls the
+ *   change back with it instead of leaving it applied and unaudited behind a
+ *   `500` (and a repeat of the request then finding nothing left to do and
+ *   recording nothing either). `rowOnly`, when present, says why some call
+ *   site legitimately commits the row without a store write of its own.
+ * - `intent` — written through `audit.forStore(tx)` in a transaction of its
+ *   own, committed **before** gateway work that cannot be rolled back, so a
+ *   failure to record what followed still leaves a row naming who started it,
+ *   and a failure to record *this* stops the operation before anything
+ *   changed.
+ * - `post_commit` — written after the fact, deliberately; `reason` says why.
  */
-export const TRANSACTIONAL_AUDIT_ACTIONS: readonly AuditActionName[] = [
-  AuditAction.USER_UPDATE,
-  AuditAction.USER_ROLE_CHANGE,
-  AuditAction.USER_DISABLE,
-  AuditAction.USER_ENABLE,
-  AuditAction.USER_GATEWAY_TEARDOWN_RETRY,
-  AuditAction.GOD_DISABLE_USER,
-  AuditAction.APPLICATION_CREATE,
-  AuditAction.APPLICATION_UPDATE,
-  AuditAction.APPLICATION_DELETE_START,
-  AuditAction.APPLICATION_DELETE,
-  AuditAction.API_VIEWER_AUTHORIZE,
-  AuditAction.API_VIEWER_REVOKE,
-  AuditAction.API_DELETE_START,
-  AuditAction.API_DELETE,
-  AuditAction.GOD_DELETE_API,
-];
+export type AuditCommitClass =
+  | { readonly kind: 'transactional'; readonly rowOnly?: string }
+  | { readonly kind: 'intent' }
+  | { readonly kind: 'post_commit'; readonly reason: string };
+
+const TRANSACTIONAL: AuditCommitClass = { kind: 'transactional' };
+const INTENT: AuditCommitClass = { kind: 'intent' };
+
+function rowOnly(reason: string): AuditCommitClass {
+  return { kind: 'transactional', rowOnly: reason };
+}
+
+function postCommit(reason: string): AuditCommitClass {
+  return { kind: 'post_commit', reason };
+}
+
+/** Why a compensation trail is written best-effort, after the fact. */
+const COMPENSATION_TRAIL =
+  'A compensation trail, written while the failure it describes is already being raised: ' +
+  'it is best-effort so that the original error, not an audit failure, reaches the caller.';
+
+/** Why a revision or restore row still follows the commit. */
+const LIVE_DEPLOYMENT_FOLLOW_UP =
+  'Not yet moved into its transaction: the deployment is written under the proxy lease ' +
+  'inside its own compensated block, and the row follows once both sides agree. A failed ' +
+  'insert leaves the change live and unaudited; tracked as a follow-up to #389.';
+
+/**
+ * Every audit action, classified. Deny by default: the mapped type makes an
+ * unclassified action a compile error, and `transactional-audit.test.ts` scans
+ * the server source and fails when a `transactional` or `intent` action is
+ * recorded any other way — outside a transaction callback, through the root
+ * service, without an `await`, behind a `.catch` or a `try` that swallows the
+ * failure, or (for `transactional`) in a callback that writes nothing else.
+ */
+export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommitClass } = {
+  [AuditAction.GATEWAY_METRICS_ENABLE]: postCommit(
+    'Startup writes one namespace-global config to the gateway and nothing to the portal ' +
+      'store, so there is no local change for the row to commit with; the write is logged ' +
+      'before the row is attempted.',
+  ),
+  [AuditAction.GATEWAY_RECONCILE]: postCommit(
+    'Read-only: the pass changes nothing, so there is no change to commit or roll back with.',
+  ),
+  [AuditAction.GATEWAY_CONSUMER_REPAIR]: TRANSACTIONAL,
+  [AuditAction.AUTH_REGISTER]: TRANSACTIONAL,
+  [AuditAction.AUTH_LOGIN]: postCommit(
+    'An authentication event, not a change of authority: the session it opens is the ' +
+      "caller's own, proven by their password, and a missing row grants nothing.",
+  ),
+  [AuditAction.AUTH_LOGOUT]: postCommit(
+    "Ends the caller's own session, which only ever removes access.",
+  ),
+  [AuditAction.AUTH_VERIFY_EMAIL]: TRANSACTIONAL,
+  [AuditAction.AUTH_VERIFICATION_RESEND]: TRANSACTIONAL,
+  [AuditAction.AUTH_PASSWORD_RESET_REQUEST]: TRANSACTIONAL,
+  [AuditAction.AUTH_PASSWORD_RESET]: TRANSACTIONAL,
+  [AuditAction.USER_UPDATE]: TRANSACTIONAL,
+  [AuditAction.USER_ROLE_CHANGE]: TRANSACTIONAL,
+  [AuditAction.USER_DISABLE]: TRANSACTIONAL,
+  [AuditAction.USER_ENABLE]: rowOnly(
+    'Re-enabling an account that is already active changes no row: it only re-runs the ' +
+      'gateway restore, so its row commits on its own before the gateway is touched.',
+  ),
+  [AuditAction.USER_GATEWAY_TEARDOWN_COMPLETE]: postCommit(
+    'The outcome of gateway work that runs after a committed disable and cannot be rolled ' +
+      'back; the disable itself is recorded in its transaction.',
+  ),
+  [AuditAction.USER_GATEWAY_TEARDOWN_RETRY]: TRANSACTIONAL,
+  [AuditAction.ORG_CREATE]: TRANSACTIONAL,
+  [AuditAction.ORG_UPDATE]: TRANSACTIONAL,
+  [AuditAction.API_PUBLISH]: TRANSACTIONAL,
+  [AuditAction.API_UPDATE]: rowOnly(
+    'A patch that changed no portal field but repaired gateway drift has no row to write; ' +
+      'its record commits alone inside the compensated block, so a failed insert undoes the ' +
+      'repair.',
+  ),
+  [AuditAction.API_SPEC_UPDATE]: postCommit(LIVE_DEPLOYMENT_FOLLOW_UP),
+  [AuditAction.API_SPEC_ROLLBACK]: postCommit(LIVE_DEPLOYMENT_FOLLOW_UP),
+  [AuditAction.API_RETIRE]: TRANSACTIONAL,
+  [AuditAction.API_DELETE_START]: INTENT,
+  [AuditAction.API_DELETE]: TRANSACTIONAL,
+  [AuditAction.API_PLUGIN_SET]: TRANSACTIONAL,
+  [AuditAction.API_PLUGIN_REMOVE_START]: INTENT,
+  [AuditAction.API_PLUGIN_REMOVE]: TRANSACTIONAL,
+  [AuditAction.API_GATEWAY_REPAIR_REQUIRED]: postCommit(
+    `${COMPENSATION_TRAIL} The reconciliation flag, which is a change of its own, records ` +
+      'it in its transaction.',
+  ),
+  [AuditAction.APPLICATION_CREATE]: TRANSACTIONAL,
+  [AuditAction.APPLICATION_UPDATE]: TRANSACTIONAL,
+  [AuditAction.APPLICATION_DELETE]: TRANSACTIONAL,
+  [AuditAction.APPLICATION_DELETE_START]: INTENT,
+  [AuditAction.API_VIEWER_AUTHORIZE]: TRANSACTIONAL,
+  [AuditAction.API_VIEWER_REVOKE]: TRANSACTIONAL,
+  [AuditAction.API_GATEWAY_RESTORE]: postCommit(LIVE_DEPLOYMENT_FOLLOW_UP),
+  [AuditAction.API_GATEWAY_RESTORE_FAILED]: postCommit(COMPENSATION_TRAIL),
+  [AuditAction.API_PUBLISH_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
+  [AuditAction.API_AUTH_PLUGIN_CHANGED]: postCommit(
+    'A summary of the best-effort revocations that follow a committed auth_plugin swap. The ' +
+      'swap is recorded by api.update in its transaction, and each revocation by its own ' +
+      'credential.revoke.',
+  ),
+  [AuditAction.TEST_CONSUMER_CREATE]: rowOnly(
+    "The creation's writes are spread over the gateway and the store under one " +
+      'compensation; the row commits alone at the end of that block, so a failed insert ' +
+      'takes the new consumer back down.',
+  ),
+  [AuditAction.ACCESS_REQUEST]: TRANSACTIONAL,
+  [AuditAction.ACCESS_CANCEL]: TRANSACTIONAL,
+  [AuditAction.ACCESS_APPROVE]: TRANSACTIONAL,
+  [AuditAction.ACCESS_APPROVE_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
+  [AuditAction.ACCESS_DENY]: TRANSACTIONAL,
+  [AuditAction.ACCESS_REVOKE]: TRANSACTIONAL,
+  [AuditAction.ACCESS_REVOKE_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
+  [AuditAction.CREDENTIAL_ISSUE]: TRANSACTIONAL,
+  [AuditAction.CREDENTIAL_ROTATE]: TRANSACTIONAL,
+  [AuditAction.CREDENTIAL_REVOKE_START]: INTENT,
+  [AuditAction.CREDENTIAL_REVOKE]: TRANSACTIONAL,
+  [AuditAction.CREDENTIAL_SETTLE]: TRANSACTIONAL,
+  [AuditAction.CREDENTIAL_APPEND_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
+  [AuditAction.CREDENTIAL_RECONCILE]: TRANSACTIONAL,
+  [AuditAction.MESSAGE_THREAD_CREATE]: TRANSACTIONAL,
+  [AuditAction.MESSAGE_SEND]: TRANSACTIONAL,
+  [AuditAction.NOTIFICATION_READ]: postCommit(
+    "Marks the caller's own notifications read; no authority, access or shared state changes.",
+  ),
+  [AuditAction.ADMIN_SETTINGS_UPDATE]: TRANSACTIONAL,
+  [AuditAction.ADMIN_TEMPLATE_UPDATE]: TRANSACTIONAL,
+  [AuditAction.ADMIN_MASS_EMAIL]: TRANSACTIONAL,
+  [AuditAction.ADMIN_SMTP_TEST]: postCommit(
+    'Sends one test message straight through SMTP and changes no stored state.',
+  ),
+  [AuditAction.GOD_REVOKE_GRANT]: TRANSACTIONAL,
+  [AuditAction.GOD_DELETE_API]: TRANSACTIONAL,
+  [AuditAction.GOD_DISABLE_USER]: TRANSACTIONAL,
+  [AuditAction.GOD_DISABLE_USER_COMPLETE]: postCommit(
+    'The outcome of the steps that run after a committed god-mode disable; the disable ' +
+      'itself is recorded in its transaction.',
+  ),
+  [AuditAction.GOD_BROADCAST]: INTENT,
+  [AuditAction.GOD_BROADCAST_COMPLETE]: postCommit(
+    'The outcome of a fan-out whose attempt god.broadcast already recorded; failing the ' +
+      'request after delivery would invite a second broadcast.',
+  ),
+};
+
+/**
+ * Actions that must be written through `audit.forStore(tx)` inside a
+ * `store.transaction` — every `transactional` and `intent` entry of
+ * {@link AUDIT_COMMIT_CLASSES}.
+ */
+export const TRANSACTIONAL_AUDIT_ACTIONS: readonly AuditActionName[] = ALL_AUDIT_ACTIONS.filter(
+  (action) => AUDIT_COMMIT_CLASSES[action].kind !== 'post_commit',
+);
+
+/**
+ * The details of the earliest earlier attempt of an operation that commits an
+ * `intent` row per attempt, among those that recorded `key` — `rows` being that
+ * action's rows for one target, newest first, as the store lists them, and
+ * `currentId` this attempt's own row.
+ *
+ * A deletion whose gateway teardown landed but whose completion could not be
+ * recorded is repeated, and the repeat finds the gateway identity already gone.
+ * This is what lets its completion row still say what was collected: the
+ * earliest attempt saw the identity before any teardown touched it.
+ */
+export function earliestPriorAttempt(
+  rows: readonly AuditLogRecord[],
+  currentId: string,
+  key: string,
+): Record<string, unknown> | null {
+  let earliest: Record<string, unknown> | null = null;
+  for (const row of rows) {
+    const value = row.details[key];
+    if (row.id !== currentId && value !== null && value !== undefined) earliest = row.details;
+  }
+  return earliest;
+}
 
 /** Who performed the action. `null` for anonymous events (failed logins, registration). */
 export interface AuditActor {

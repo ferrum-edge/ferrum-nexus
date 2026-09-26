@@ -190,6 +190,7 @@ import {
 import { AuditAction, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
 import type {
+  CreateInput,
   CredentialFilter,
   CredentialRecord,
   GatewayIdentityRecord,
@@ -367,9 +368,17 @@ export interface IssueForConsumerInput {
    * Caller IP for the audit rows this path may write — a settlement, or an
    * append that had to be taken back. Both are ordinary audited events and
    * belong in the log with the address that caused them, exactly as the
-   * `credential.issue` row the caller writes afterwards does.
+   * caller's own row does.
    */
   ip?: string | null;
+  /**
+   * Record the caller's audit row in the transaction that writes the
+   * credential row, so the two commit together. A failed insert rolls the row
+   * back and the append is withdrawn from the gateway exactly as a failed row
+   * write is — the secret is not being returned to anybody, so a live entry
+   * left behind would be a credential nobody holds and nothing records.
+   */
+  recordWithRow?: (tx: NexusStore, credential: CredentialRecord) => Promise<void>;
 }
 
 /** The key {@link CredentialsService.restoreGatewayAccess} uses for the account's own identity. */
@@ -660,6 +669,13 @@ export interface TeardownGatewayIdentityResult {
   revoked_credentials: number;
   /** Whether a `gateway_identities` registration was consumed. */
   registration_removed: boolean;
+  /**
+   * Whether **this** attempt found the consumer live and deleted it. `false`
+   * with a `consumer_id` means an earlier attempt already took it down — its
+   * credential rows were revoked then, so `revoked_credentials` no longer
+   * counts them.
+   */
+  consumer_deleted: boolean;
 }
 
 /** Dependencies of {@link createCredentialsService}. */
@@ -1333,8 +1349,21 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         // as a completed revoke rather than a whole-type delete.
         if (position !== 'not-live') {
           // The intent before the act, so a lost acknowledgement leaves a row
-          // the next call can settle instead of a mirror one row too long.
-          await store.credentials.update(current.id, { status: 'retiring' });
+          // the next call can settle instead of a mirror one row too long —
+          // and recorded with it, because the delete cannot be rolled back:
+          // a revocation whose completion could not be recorded still leaves
+          // a row naming who started it, and one whose start could not be
+          // recorded stops here with nothing changed.
+          await store.transaction(async (tx) => {
+            await tx.credentials.update(current.id, { status: 'retiring' });
+            await audit.forStore(tx).record(
+              { id: actor.id, role: actor.role },
+              AuditAction.CREDENTIAL_REVOKE_START,
+              { type: 'credential', id: target.id },
+              { credential_type: type, consumer_id: consumerId, last4: target.last4, ...details },
+              ip,
+            );
+          });
           try {
             await removeAt(consumerId, type, position, actor.id);
           } catch (error) {
@@ -1355,22 +1384,27 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           }
         }
       }
-      await store.credentials.update(current.id, { status: 'revoked' });
+      // The row and its audit record commit together. Written after the
+      // commit, a failed insert left the credential revoked and unaudited
+      // behind a `500`, and a repeat found nothing left to revoke. Now the
+      // row stays `retiring` over an entry that is gone, which the repeat
+      // settles before it records the revocation.
+      await store.transaction(async (tx) => {
+        await tx.credentials.update(current.id, { status: 'revoked' });
+        await audit.forStore(tx).record(
+          { id: actor.id, role: actor.role },
+          AuditAction.CREDENTIAL_REVOKE,
+          { type: 'credential', id: target.id },
+          { credential_type: type, consumer_id: consumerId, last4: target.last4, ...details },
+          ip,
+        );
+      });
       return true;
     });
 
     // A no-op revoke of an already-retired credential stays silent: it wrote
     // nothing, so there is nothing to audit.
-    if (!removed) return false;
-
-    await audit.record(
-      { id: actor.id, role: actor.role },
-      AuditAction.CREDENTIAL_REVOKE,
-      { type: 'credential', id: target.id },
-      { credential_type: type, consumer_id: consumerId, last4: target.last4, ...details },
-      ip,
-    );
-    return true;
+    return removed;
   }
 
   async function loadOwned(user: UserRecord, credentialId: Uuid): Promise<CredentialRecord> {
@@ -1429,6 +1463,8 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     /** Which operation to name in that audit row. */
     operation?: 'issue' | 'rotate';
     ip?: string | null;
+    /** See {@link IssueForConsumerInput.recordWithRow}. */
+    recordWithRow?: (tx: NexusStore, credential: CredentialRecord) => Promise<void>;
   }): Promise<{ credential: CredentialRecord; secret: ShowOnceSecret }> {
     const generated = generateCredential(input.type, input.consumerUsername);
     const fingerprint = crypto.fingerprint(generated.material);
@@ -1456,24 +1492,34 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       }
       throw error;
     }
+    const row: CreateInput<CredentialRecord> = {
+      user_id: input.ownerId,
+      application_id: input.applicationId ?? null,
+      ferrum_consumer_id: input.consumerId,
+      credential_type: input.type,
+      // Edge assigns credential entries no id of their own; the addressable
+      // resource is the per-type collection, and position is tracked by
+      // `edge_ordinal`, which the store assigns here as the next value for
+      // this consumer and type — under the consumer lease the caller holds,
+      // which is what makes it the entry's true append position.
+      ferrum_credential_id: `${input.consumerId}/credentials/${input.type}`,
+      fingerprint,
+      last4: last4(generated.material),
+      label: input.label,
+      status: 'active',
+      rotated_from_id: input.rotatedFromId ?? null,
+    };
+    const recordWithRow = input.recordWithRow;
     try {
-      const credential = await store.credentials.create({
-        user_id: input.ownerId,
-        application_id: input.applicationId ?? null,
-        ferrum_consumer_id: input.consumerId,
-        credential_type: input.type,
-        // Edge assigns credential entries no id of their own; the addressable
-        // resource is the per-type collection, and position is tracked by
-        // `edge_ordinal`, which the store assigns here as the next value for
-        // this consumer and type — under the consumer lease the caller holds,
-        // which is what makes it the entry's true append position.
-        ferrum_credential_id: `${input.consumerId}/credentials/${input.type}`,
-        fingerprint,
-        last4: last4(generated.material),
-        label: input.label,
-        status: 'active',
-        rotated_from_id: input.rotatedFromId ?? null,
-      });
+      // The caller's audit row, when it has one, commits with the row: a
+      // failed insert is a failed mirror write, and is compensated as one.
+      const credential = recordWithRow
+        ? await store.transaction(async (tx) => {
+            const created = await tx.credentials.create(row);
+            await recordWithRow(tx, created);
+            return created;
+          })
+        : await store.credentials.create(row);
       return { credential, secret: generated.secret };
     } catch (error) {
       if (input.appendIndex !== undefined) {
@@ -1572,6 +1618,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         appendIndex: length,
         operation: 'issue',
         ip: input.ip ?? null,
+        ...(input.recordWithRow ? { recordWithRow: input.recordWithRow } : {}),
       });
     });
   }
@@ -1930,6 +1977,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       const applicationId = input.application_id ?? null;
       const consumer = await provisioner.ensureConsumer(user, applicationId);
 
+      // The row and its audit record commit together: recorded after the
+      // commit, a failed insert left a live credential nobody was handed and
+      // nothing recorded behind a `500`. Now it rolls the row back and the
+      // append is withdrawn with it.
       const { credential, secret } = await issueForConsumer({
         user,
         applicationId,
@@ -1938,20 +1989,21 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         credentialType: input.credential_type,
         label: input.label ?? null,
         ip,
-      });
-
-      await audit.record(
-        { id: user.id, role: user.role },
-        AuditAction.CREDENTIAL_ISSUE,
-        { type: 'credential', id: credential.id },
-        {
-          credential_type: credential.credential_type,
-          consumer_id: consumer.ferrum_consumer_id,
-          application_id: applicationId,
-          last4: credential.last4,
+        recordWithRow: async (tx, created) => {
+          await audit.forStore(tx).record(
+            { id: user.id, role: user.role },
+            AuditAction.CREDENTIAL_ISSUE,
+            { type: 'credential', id: created.id },
+            {
+              credential_type: created.credential_type,
+              consumer_id: consumer.ferrum_consumer_id,
+              application_id: applicationId,
+              last4: created.last4,
+            },
+            ip,
+          );
         },
-        ip,
-      );
+      });
 
       return { credential, consumer_username: consumer.ferrum_username, secret };
     },
@@ -1963,6 +2015,15 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       }
       const type = target.credential_type;
       const consumerId = target.ferrum_consumer_id;
+      const rotation = {
+        credential_type: type,
+        consumer_id: consumerId,
+        rotated_from: target.id,
+        previous_last4: target.last4,
+        // Only when they differ: an admin acting on somebody else's
+        // credential is the case worth being able to find in the log.
+        ...(target.user_id === user.id ? {} : { owner_user_id: target.user_id }),
+      };
 
       const result = await edge.serializePerKey(consumerId, async () => {
         // Re-read the row *inside* the queue. The copy loaded for the ownership
@@ -2084,6 +2145,22 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           actorRole: user.role,
           operation: 'rotate',
           ip,
+          // At the cap the old entry is already gone, so the replacement's row
+          // is the last write of the rotation and its audit row commits with
+          // it. Append-first records it with the retirement below instead.
+          ...(appendFirst
+            ? {}
+            : {
+                recordWithRow: async (tx: NexusStore, replacement: CredentialRecord) => {
+                  await audit.forStore(tx).record(
+                    { id: user.id, role: user.role },
+                    AuditAction.CREDENTIAL_ROTATE,
+                    { type: 'credential', id: replacement.id },
+                    rotation,
+                    ip,
+                  );
+                },
+              }),
         }).catch((error: unknown) => {
           if (appendFirst) throw error;
           // At the cap the old secret is already gone and cannot be recreated —
@@ -2188,8 +2265,19 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             throw error;
           }
           try {
-            previous =
-              (await store.credentials.update(current.id, { status: 'revoked' })) ?? current;
+            // The retirement and the rotation's audit row commit together, so
+            // a failed insert is handled exactly as a failed retirement is.
+            previous = await store.transaction(async (tx) => {
+              const retired = await tx.credentials.update(current.id, { status: 'revoked' });
+              await audit.forStore(tx).record(
+                { id: user.id, role: user.role },
+                AuditAction.CREDENTIAL_ROTATE,
+                { type: 'credential', id: created.credential.id },
+                rotation,
+                ip,
+              );
+              return retired ?? current;
+            });
           } catch (error) {
             // The delete is confirmed: the previous entry is gone, the row
             // stays `retiring` and the next call on this pair settles it.
@@ -2222,22 +2310,6 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         // is, not where an account credential would be (#329).
         return { created, previous, consumerUsername: consumer.username };
       });
-
-      await audit.record(
-        { id: user.id, role: user.role },
-        AuditAction.CREDENTIAL_ROTATE,
-        { type: 'credential', id: result.created.credential.id },
-        {
-          credential_type: type,
-          consumer_id: consumerId,
-          rotated_from: target.id,
-          previous_last4: target.last4,
-          // Only when they differ: an admin acting on somebody else's
-          // credential is the case worth being able to find in the log.
-          ...(target.user_id === user.id ? {} : { owner_user_id: target.user_id }),
-        },
-        ip,
-      );
 
       const owner = target.user_id === user.id ? user : await store.users.findById(target.user_id);
       if (owner) {
@@ -2320,36 +2392,42 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         // The whole-type delete is idempotent, so a type Edge no longer holds
         // — or never shows, as with `basicauth` on every read — costs one 204.
         if (live) await edge.consumers.deleteCredentialType(consumerId, type, actor.id);
-        const revokedIds: Uuid[] = [];
-        const owners = new Set<Uuid>();
-        const rows = await store.credentials.listByConsumer(
-          consumerId,
-          type,
-          LIVE_CREDENTIAL_STATUSES,
-        );
-        for (const row of rows) {
-          await store.credentials.update(row.id, { status: 'revoked' });
-          revokedIds.push(row.id);
-          owners.add(row.user_id);
-        }
-        return { gatewayCleared: live !== null, revokedIds, owners: [...owners] };
+        const gatewayCleared = live !== null;
+        // The rows and the audit record commit together. Written after the
+        // commit, a failed insert left the type emptied and unaudited behind a
+        // `500`; now the rows stay live for the repeat, whose whole-type delete
+        // is idempotent, to revoke and record.
+        return store.transaction(async (tx) => {
+          const revokedIds: Uuid[] = [];
+          const owners = new Set<Uuid>();
+          const rows = await tx.credentials.listByConsumer(
+            consumerId,
+            type,
+            LIVE_CREDENTIAL_STATUSES,
+          );
+          for (const row of rows) {
+            await tx.credentials.update(row.id, { status: 'revoked' });
+            revokedIds.push(row.id);
+            owners.add(row.user_id);
+          }
+          await audit.forStore(tx).record(
+            { id: actor.id, role: actor.role },
+            AuditAction.CREDENTIAL_RECONCILE,
+            { type: 'consumer', id: consumerId },
+            {
+              credential_type: type,
+              consumer_id: consumerId,
+              gateway_cleared: gatewayCleared,
+              revoked_credentials: revokedIds.length,
+              revoked_credential_ids: revokedIds,
+              owner_user_ids: [...owners],
+              ...(input.reason ? { reason: input.reason } : {}),
+            },
+            ip,
+          );
+          return { gatewayCleared, revokedIds, owners: [...owners] };
+        });
       });
-
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.CREDENTIAL_RECONCILE,
-        { type: 'consumer', id: consumerId },
-        {
-          credential_type: type,
-          consumer_id: consumerId,
-          gateway_cleared: result.gatewayCleared,
-          revoked_credentials: result.revokedIds.length,
-          revoked_credential_ids: result.revokedIds,
-          owner_user_ids: result.owners,
-          ...(input.reason ? { reason: input.reason } : {}),
-        },
-        ip,
-      );
 
       // A courtesy, like every notification: the account holder has to learn
       // that their credentials stopped working and why.
@@ -2550,7 +2628,12 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // previous owner's rows on the old consumer.
       const current = await store.gatewayIdentities.findByUsername(namespace, username);
       if (owner !== undefined && (!current || current.user_id !== owner)) {
-        return { consumer_id: null, revoked_credentials: 0, registration_removed: false };
+        return {
+          consumer_id: null,
+          revoked_credentials: 0,
+          registration_removed: false,
+          consumer_deleted: false,
+        };
       }
 
       // By id once the registration is bound: one read, on a gateway of any
@@ -2603,6 +2686,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         consumer_id: live?.id ?? current?.ferrum_consumer_id ?? null,
         revoked_credentials: revoked,
         registration_removed: current !== null,
+        consumer_deleted: live !== null,
       };
       // Still under the key, so nothing that queued for it can observe the
       // gap between this teardown and the caller's follow-up (issue #373).

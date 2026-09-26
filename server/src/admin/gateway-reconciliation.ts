@@ -477,6 +477,10 @@ export function createGatewayReconciliationService(
             // Gateway first, then the portal — and both store writes together, so
             // a relink can never commit without the revocations that make the
             // credential mirror agree with the empty consumer it now points at.
+            // The audit row commits with them: recorded afterwards, a failed
+            // insert left the relink and the revocations applied and
+            // unaudited behind a failed repair, and a repeat found the
+            // consumer present and nothing to record.
             const revoked = await store.transaction(async (tx) => {
               if (consumer.id !== staleId) {
                 await tx.consumers.update(row.id, { ferrum_consumer_id: consumer.id });
@@ -494,6 +498,22 @@ export function createGatewayReconciliationService(
                 }
                 if (page.items.length === 0 || offset + page.items.length >= page.total) break;
               }
+              await audit.forStore(tx).record(
+                { id: actor.id, role: actor.role },
+                AuditAction.GATEWAY_CONSUMER_REPAIR,
+                { type: 'user', id: orphan.user_id },
+                {
+                  namespace,
+                  previous_consumer_id: orphan.ferrum_consumer_id,
+                  consumer_id: consumer.id,
+                  ferrum_username: orphan.ferrum_username,
+                  restored_groups: groups.length,
+                  revoked_credentials: ids.length,
+                  revoked_credential_ids: ids,
+                  ...(reason ? { reason } : {}),
+                },
+                ip,
+              );
               return ids;
             });
 
@@ -519,22 +539,6 @@ export function createGatewayReconciliationService(
         credentials_requiring_reissue: outcome.revoked.length,
         restored_groups: groups.length,
       };
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.GATEWAY_CONSUMER_REPAIR,
-        { type: 'user', id: orphan.user_id },
-        {
-          namespace,
-          previous_consumer_id: orphan.ferrum_consumer_id,
-          consumer_id: outcome.consumerId,
-          ferrum_username: orphan.ferrum_username,
-          restored_groups: groups.length,
-          revoked_credentials: outcome.revoked.length,
-          revoked_credential_ids: outcome.revoked,
-          ...(reason ? { reason } : {}),
-        },
-        ip,
-      );
       if (outcome.revoked.length > 0) {
         // A courtesy, like every notification: the account holder has to learn
         // that their keys stopped working, and that new ones are theirs to mint.

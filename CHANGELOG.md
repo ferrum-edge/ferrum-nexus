@@ -162,6 +162,34 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   in `TRANSACTIONAL_AUDIT_ACTIONS`; a source scan fails the build when one is
   recorded outside its transaction, and a new store contract fails each audit
   insert on every adapter and asserts that nothing committed.
+- Access approvals, denials, cancellations and revocations (ordinary,
+  god-mode and the god-mode grant sweep), credential issues, rotations,
+  revocations and reconciles, publishes, API edits and retirements, palette
+  plugin changes, test-consumer creations, gateway consumer repairs and
+  organization changes now also write their audit rows in the transaction that
+  makes the change (#389). A failed insert no longer leaves the change applied
+  and unaudited behind a `500`; where the gateway was written first it is
+  compensated like any failed row write — an approval's ACL group comes back
+  off, an issued key or a new API's proxy is withdrawn, a plugin change is
+  undone, a test consumer is taken back down. Gateway work that cannot be undone
+  commits a new intent row first: `api.plugin_remove_start` before a palette
+  plugin's config is deleted, and `credential.revoke_start` with a
+  credential's move to `retiring`; a failed completion leaves the row for the
+  repeat, which records it. The god-mode sweep's `access.revoke` rows now commit
+  with each grant's claim, so a gateway refusal is reported in
+  `god.disable_user_complete`'s `failed_grants` rather than on the row, and the
+  `audit` failure stage is gone. A repeated application, API or plugin removal
+  that finds the gateway side already collected copies what the earlier
+  attempt's start row recorded — `consumer_id`, `test_consumer_*`,
+  `plugin_config_id` — and adds `resumed: true`. A god-mode disable whose inline
+  `user.gateway_teardown_complete` row cannot be written now still writes
+  `god.disable_user_complete`, naming `record_gateway_teardown` in
+  `failed_steps`. Every audit action is now classified as `transactional`,
+  `intent` or `post_commit` (with its reason) in `AUDIT_COMMIT_CLASSES`, and the
+  source scan is deny-by-default: an unclassified action does not compile, and
+  it also fails a record that is not directly awaited, is `.catch`ed or sits in
+  a swallowing `try`, a transactional record in a callback that writes nothing
+  else, and aliased imports of the audit module.
 
 ## [0.1.0] - 2026-09-25
 

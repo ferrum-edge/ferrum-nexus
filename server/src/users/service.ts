@@ -712,18 +712,21 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
     async createOrganization(actor, input, ip = null): Promise<Organization> {
       const name = input.name.trim();
       if (name === '') throw validationFailed('An organization name is required');
-      const organization = await store.organizations.create({
-        name,
-        description: input.description ?? null,
+      // The organization and its audit row commit or roll back together.
+      return store.transaction(async (tx) => {
+        const organization = await tx.organizations.create({
+          name,
+          description: input.description ?? null,
+        });
+        await audit.forStore(tx).record(
+          { id: actor.id, role: actor.role },
+          AuditAction.ORG_CREATE,
+          { type: 'organization', id: organization.id },
+          { name },
+          ip,
+        );
+        return organization;
       });
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.ORG_CREATE,
-        { type: 'organization', id: organization.id },
-        { name },
-        ip,
-      );
-      return organization;
     },
 
     async updateOrganization(actor, id, patch, ip = null): Promise<Organization> {
@@ -746,16 +749,19 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
       }
       if (changed.length === 0) return existing;
 
-      const updated = await store.organizations.update(id, update);
-      if (!updated) throw notFound('Organization', id);
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.ORG_UPDATE,
-        { type: 'organization', id },
-        { changed_fields: changed },
-        ip,
-      );
-      return updated;
+      // The patch and its audit row commit or roll back together.
+      return store.transaction(async (tx) => {
+        const updated = await tx.organizations.update(id, update);
+        if (!updated) throw notFound('Organization', id);
+        await audit.forStore(tx).record(
+          { id: actor.id, role: actor.role },
+          AuditAction.ORG_UPDATE,
+          { type: 'organization', id },
+          { changed_fields: changed },
+          ip,
+        );
+        return updated;
+      });
     },
   };
 }

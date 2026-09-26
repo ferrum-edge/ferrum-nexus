@@ -186,12 +186,19 @@ export interface AccessService {
     note?: string | null,
     ip?: string | null,
   ): Promise<AccessRequest>;
-  /** Withdraw a live grant: the ACL group is removed from the consumer. */
+  /**
+   * Withdraw a live grant: the ACL group is removed from the consumer.
+   *
+   * `recordWithRevoke` writes further audit rows — god mode's own — in the
+   * transaction that claims the grant and records `access.revoke`, so they
+   * commit or roll back with the revocation.
+   */
   revoke(
     actor: UserRecord,
     grantId: Uuid,
     reason?: string | null,
     ip?: string | null,
+    recordWithRevoke?: (tx: NexusStore, grant: GrantRecord) => Promise<void>,
   ): Promise<Grant>;
   /** Requests the caller may see: their own, their APIs', or all for an admin. */
   listRequests(
@@ -237,11 +244,11 @@ export interface BulkRevocationFailure {
    * `lookup`: the grant is `revoked` in the portal, but reading which consumer
    * to take its group off failed in the store, so the group may still be on
    * it. `gateway`: the grant is `revoked` in the portal but the gateway
-   * refused the ACL removal, so its group may still be on the consumer.
-   * `audit`: revoked on both sides, but its `access.revoke` row could not be
-   * written.
+   * refused the ACL removal, so its group may still be on the consumer. The
+   * `access.revoke` row commits with the claim, so a grant whose row could
+   * not be written was never claimed and stops at `claim`.
    */
-  stage: 'claim' | 'lookup' | 'gateway' | 'audit';
+  stage: 'claim' | 'lookup' | 'gateway';
   error: string;
 }
 
@@ -524,8 +531,11 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       cause: cause instanceof Error ? cause.message : String(cause),
     };
 
+    // The `access.revoke` row committed with the claim, so the grant going
+    // back and the row that says so commit together: a restored grant is
+    // never left reading as revoked in the trail.
     try {
-      const restored = await store.transaction(async (tx) => {
+      await store.transaction(async (tx) => {
         const back = await tx.grants.updateIfStatus(grant.id, 'revoked', {
           status: 'active',
           revoked_by: null,
@@ -539,10 +549,19 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
             decision_note: request.decision_note,
           });
         }
-        return back;
+        details.grant_restored = back !== null;
+        await audit.forStore(tx).record(
+          { id: actor.id, role: actor.role },
+          AuditAction.ACCESS_REVOKE_ROLLBACK,
+          { type: 'grant', id: grant.id },
+          details,
+          ip,
+        );
       });
-      details.grant_restored = restored !== null;
     } catch (error) {
+      // Nothing went back — the grant is still `revoked` while its group may
+      // be live. Best-effort from here: the caller re-throws the gateway
+      // failure, and this row is the trail of the unrestored grant.
       details.grant_restored = false;
       deps.log?.(
         {
@@ -551,17 +570,16 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         },
         'Could not return a failed revocation to active',
       );
+      await audit
+        .record(
+          { id: actor.id, role: actor.role },
+          AuditAction.ACCESS_REVOKE_ROLLBACK,
+          { type: 'grant', id: grant.id },
+          details,
+          ip,
+        )
+        .catch(() => undefined);
     }
-
-    await audit
-      .record(
-        { id: actor.id, role: actor.role },
-        AuditAction.ACCESS_REVOKE_ROLLBACK,
-        { type: 'grant', id: grant.id },
-        details,
-        ip,
-      )
-      .catch(() => undefined);
 
     deps.log?.(details, 'Rolled back a revocation the gateway would not accept');
   }
@@ -904,21 +922,26 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
 
       // Compare-and-set: an approval may have decided this request between the
       // read above and here, and it will already have provisioned the gateway.
-      // The loser records nothing.
-      const updated = await store.accessRequests.updateIfStatus(request.id, 'pending', {
-        status: 'cancelled',
-        decided_by: user.id,
-        decided_at: nowIso(),
+      // The loser records nothing; the winner records the cancellation in the
+      // same transaction.
+      const decidedAt = nowIso();
+      const updated = await store.transaction(async (tx) => {
+        const moved = await tx.accessRequests.updateIfStatus(request.id, 'pending', {
+          status: 'cancelled',
+          decided_by: user.id,
+          decided_at: decidedAt,
+        });
+        if (!moved) return null;
+        await audit.forStore(tx).record(
+          { id: user.id, role: user.role },
+          AuditAction.ACCESS_CANCEL,
+          { type: 'access_request', id: request.id },
+          { api_id: request.api_id },
+          ip,
+        );
+        return moved;
       });
       if (!updated) throw await decisionConflict(request.id);
-
-      await audit.record(
-        { id: user.id, role: user.role },
-        AuditAction.ACCESS_CANCEL,
-        { type: 'access_request', id: request.id },
-        { api_id: request.api_id },
-        ip,
-      );
 
       const [decorated] = await decorateRequests([updated]);
       return decorated ?? updated;
@@ -1018,7 +1041,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
                       });
                     }
                   }
-                  return tx.grants.create({
+                  const created = await tx.grants.create({
                     api_id: api.id,
                     application_id: request.application_id,
                     user_id: requester.id,
@@ -1027,6 +1050,25 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
                     status: 'active',
                     granted_by: actor.id,
                   });
+                  // The grant and its audit row commit together. Recorded
+                  // after the commit, a failed insert left working access
+                  // granted and unaudited behind a `500`; now it rolls the
+                  // grant back and the catch below takes the group back off
+                  // and returns the request to pending for a retry.
+                  await audit.forStore(tx).record(
+                    { id: actor.id, role: actor.role },
+                    AuditAction.ACCESS_APPROVE,
+                    { type: 'access_request', id: request.id },
+                    {
+                      api_id: api.id,
+                      api_slug: api.slug,
+                      user_id: requester.id,
+                      grant_id: created.id,
+                      acl_group: created.acl_group,
+                    },
+                    ip,
+                  );
+                  return created;
                 });
               },
             });
@@ -1054,20 +1096,6 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         }
         const grant = committed.grant;
         if (!grant) throw new NexusError('INTERNAL', 'The approval recorded no grant');
-
-        await audit.record(
-          { id: actor.id, role: actor.role },
-          AuditAction.ACCESS_APPROVE,
-          { type: 'access_request', id: request.id },
-          {
-            api_id: api.id,
-            api_slug: api.slug,
-            user_id: requester.id,
-            grant_id: grant.id,
-            acl_group: grant.acl_group,
-          },
-          ip,
-        );
 
         await announce(
           requester,
@@ -1109,22 +1137,27 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       }
 
       // Compare-and-set, for the same reason `cancel` uses one: the requester
-      // may have withdrawn the request since it was read.
-      const updated = await store.accessRequests.updateIfStatus(request.id, 'pending', {
-        status: 'denied',
-        decided_by: actor.id,
-        decided_at: nowIso(),
-        decision_note: note ?? null,
+      // may have withdrawn the request since it was read. The decision and its
+      // audit row commit together.
+      const decidedAt = nowIso();
+      const updated = await store.transaction(async (tx) => {
+        const moved = await tx.accessRequests.updateIfStatus(request.id, 'pending', {
+          status: 'denied',
+          decided_by: actor.id,
+          decided_at: decidedAt,
+          decision_note: note ?? null,
+        });
+        if (!moved) return null;
+        await audit.forStore(tx).record(
+          { id: actor.id, role: actor.role },
+          AuditAction.ACCESS_DENY,
+          { type: 'access_request', id: request.id },
+          { api_id: api.id, api_slug: api.slug, user_id: requester.id, has_note: note !== null },
+          ip,
+        );
+        return moved;
       });
       if (!updated) throw await decisionConflict(request.id);
-
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.ACCESS_DENY,
-        { type: 'access_request', id: request.id },
-        { api_id: api.id, api_slug: api.slug, user_id: requester.id, has_note: note !== null },
-        ip,
-      );
 
       await announce(
         requester,
@@ -1149,7 +1182,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       return decorated ?? updated;
     },
 
-    async revoke(actor, grantId, reason = null, ip = null): Promise<Grant> {
+    async revoke(actor, grantId, reason = null, ip = null, recordWithRevoke): Promise<Grant> {
       const initial = await store.grants.findById(grantId);
       if (!initial) throw notFound('Grant', grantId);
       const initialApi = await store.apis.findById(initial.api_id);
@@ -1209,6 +1242,26 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           // history reads "approved, then revoked" rather than staying
           // approved.
           movedRequest = await moveRequestToRevoked(tx, grant, actor.id, revokedAt, reason);
+          // The revocation is recorded with the claim that makes it. Written
+          // after the gateway step, a failed insert left the grant revoked and
+          // unaudited behind a `500`, and a repeat found it already revoked
+          // and recorded nothing. Should the gateway then refuse the removal,
+          // `unwindRevocation` puts the grant back and records that too.
+          await audit.forStore(tx).record(
+            { id: actor.id, role: actor.role },
+            AuditAction.ACCESS_REVOKE,
+            { type: 'grant', id: grant.id },
+            {
+              api_id: api.id,
+              api_slug: api.slug,
+              user_id: grant.user_id,
+              application_id: grant.application_id,
+              acl_group: grant.acl_group,
+              reason: reason ?? null,
+            },
+            ip,
+          );
+          await recordWithRevoke?.(tx, result);
           return result;
         });
         if (!updated) throw await revocationConflict(grant.id);
@@ -1223,21 +1276,6 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           await unwindRevocation({ actor, grant, request: movedRequest, cause: error, ip });
           throw error;
         }
-
-        await audit.record(
-          { id: actor.id, role: actor.role },
-          AuditAction.ACCESS_REVOKE,
-          { type: 'grant', id: grant.id },
-          {
-            api_id: api.id,
-            api_slug: api.slug,
-            user_id: grant.user_id,
-            application_id: grant.application_id,
-            acl_group: grant.acl_group,
-            reason: reason ?? null,
-          },
-          ip,
-        );
 
         // Inside the lease, as an approval announces inside it: a revocation
         // and a quick re-approval of the same API are ordered by the lease,
@@ -1314,6 +1352,12 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         // it lost is revoked either way. Aborting the loop over somebody
         // else's success would leave the rest of the account's access up.
         // It is not counted, because this call did not revoke it.
+        //
+        // The `access.revoke` row commits with the claim, as a targeted
+        // revocation's does: a grant whose row cannot be written is not
+        // claimed, and stays active for a repeat of the sweep. What the
+        // gateway then did with it is reported in `failed`, which god mode's
+        // completion row carries grant by grant.
         const revokedAt = nowIso();
         let claimed: GrantRecord | null;
         try {
@@ -1325,6 +1369,20 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
             });
             if (!result) return null;
             await moveRequestToRevoked(tx, grant, actor.id, revokedAt, reason);
+            await audit.forStore(tx).record(
+              { id: actor.id, role: actor.role },
+              AuditAction.ACCESS_REVOKE,
+              { type: 'grant', id: grant.id },
+              {
+                api_id: grant.api_id,
+                user_id: userId,
+                application_id: grant.application_id,
+                acl_group: grant.acl_group,
+                reason,
+                bulk: true,
+              },
+              ip,
+            );
             return result;
           });
         } catch (error) {
@@ -1384,28 +1442,6 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           }
         }
 
-        try {
-          await audit.record(
-            { id: actor.id, role: actor.role },
-            AuditAction.ACCESS_REVOKE,
-            { type: 'grant', id: grant.id },
-            {
-              api_id: grant.api_id,
-              user_id: userId,
-              application_id: grant.application_id,
-              acl_group: grant.acl_group,
-              reason,
-              bulk: true,
-              // The portal withdrew it; the gateway had not yet followed.
-              ...(cause !== null ? { acl_group_removed: false, cause } : {}),
-            },
-            ip,
-          );
-        } catch (error) {
-          // A grant already reported at an earlier stage is not listed twice.
-          if (cause === null) fail(grant, 'audit', error);
-          continue;
-        }
         if (cause === null) revoked += 1;
       }
       return { revoked, failed };
