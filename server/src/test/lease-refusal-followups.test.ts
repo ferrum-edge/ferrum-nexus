@@ -21,6 +21,8 @@
  * 6. A withdrawn retirement is conditional on the row still being `retiring`,
  *    and one whose transaction failed for any other reason is retried as one
  *    transaction that moves the row and records it together (issue #409).
+ *    The fence alone keeps a refused withdrawal's row `retiring`, and the
+ *    retry that commits is the one that moved and recorded it (issue #413).
  */
 
 import assert from 'node:assert/strict';
@@ -43,6 +45,14 @@ import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from '
 
 /** The owner another portal instance takes a lapsed lease under. */
 const OTHER_INSTANCE = 'other-instance';
+
+/** What one committed transaction did to the credential a withdrawal targets. */
+interface WithdrawalCommit {
+  /** Its conditional move found the row `retiring` and put it back. */
+  moved: boolean;
+  /** It wrote a `credential.revoke_rollback` row for the credential. */
+  recorded: boolean;
+}
 
 describe('lease refusals and lost acknowledgements after the audit move (#402)', () => {
   let harness: TestApp;
@@ -140,25 +150,43 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
 
   /**
    * Count every conditional withdrawal of `credentialId` a transaction body
-   * attempts. With `failFirst`, the first transaction that would commit a
+   * attempts, and note what each committed transaction that attempted one did.
+   * With `failFirst`, the first transaction that would commit a
    * `credential.revoke_rollback` row for it fails before its commit instead,
    * with an error that is not a lease refusal.
    */
-  function watchWithdrawals(credentialId: string, failFirst = false): () => number {
+  function watchWithdrawals(
+    credentialId: string,
+    failFirst = false,
+  ): { attempts: () => number; committed: () => WithdrawalCommit[] } {
     const store = harness.store;
     const realTransaction = store.transaction.bind(store);
     let attempts = 0;
     let failed = !failFirst;
+    const committed: WithdrawalCommit[] = [];
+    const rollbacksIn = (tx: NexusStore): Promise<number> =>
+      tx.auditLogs.count({
+        action: AuditAction.CREDENTIAL_REVOKE_ROLLBACK,
+        target_id: credentialId,
+      });
     store.transaction = async <T>(
       fn: (tx: NexusStore) => Promise<T>,
       options?: TransactionOptions,
-    ): Promise<T> =>
-      realTransaction(async (tx) => {
+    ): Promise<T> => {
+      // The body may be re-run; only its last run is the one that committed.
+      const runs: WithdrawalCommit[] = [];
+      const result = await realTransaction(async (tx) => {
+        const run: WithdrawalCommit = { moved: false, recorded: false };
+        const attemptsBefore = attempts;
         const credentials: CredentialRepo = {
           ...tx.credentials,
-          updateIfStatus: (id, expected, patch) => {
-            if (id === credentialId) attempts += 1;
-            return tx.credentials.updateIfStatus(id, expected, patch);
+          updateIfStatus: async (id, expected, patch) => {
+            const row = await tx.credentials.updateIfStatus(id, expected, patch);
+            if (id === credentialId) {
+              attempts += 1;
+              if (row !== null) run.moved = true;
+            }
+            return row;
           },
         };
         const spied = new Proxy(tx, {
@@ -168,21 +196,25 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
             return typeof value === 'function' ? value.bind(target) : value;
           },
         });
-        const result = await fn(spied);
-        const rollbacks = await tx.auditLogs.count({
-          action: AuditAction.CREDENTIAL_REVOKE_ROLLBACK,
-          target_id: credentialId,
-        });
-        if (!failed && rollbacks > 0) {
+        const before = await rollbacksIn(tx);
+        const bodyResult = await fn(spied);
+        const after = await rollbacksIn(tx);
+        run.recorded = after > before;
+        if (!failed && after > 0) {
           failed = true;
           throw new Error('the connection dropped before the commit');
         }
-        return result;
+        if (attempts > attemptsBefore) runs.push(run);
+        return bodyResult;
       }, options);
+      const last = runs.at(-1);
+      if (last) committed.push(last);
+      return result;
+    };
     restorePatches.push(() => {
       store.transaction = realTransaction;
     });
-    return () => attempts;
+    return { attempts: () => attempts, committed: () => committed };
   }
 
   /* ── 1 and 4: a consumer repair the lease fence refused ───────────────── */
@@ -804,7 +836,7 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
     const first = await issueKey(session);
     const credentialId = first.credential.id;
     harness.edge.queueFailure(503, { error: 'down' }, '/credentials/keyauth/', 'DELETE');
-    const attempts = watchWithdrawals(credentialId, true);
+    const { attempts, committed } = watchWithdrawals(credentialId, true);
 
     const failed = await harness.authed(session, {
       method: 'DELETE',
@@ -817,6 +849,11 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
       2,
       'the failed transaction and one retry that moved the row and recorded it together',
     );
+    assert.deepEqual(
+      committed(),
+      [{ moved: true, recorded: true }],
+      'the one committed withdrawal moved the row and wrote its rollback row together',
+    );
     assert.equal(await countAudit(AuditAction.CREDENTIAL_REVOKE_START, credentialId), 1);
     assert.equal(
       await countAudit(AuditAction.CREDENTIAL_REVOKE_ROLLBACK, credentialId),
@@ -825,16 +862,19 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
     );
   });
 
-  it('keeps a key another instance revoked when the fence refuses the withdrawal', async () => {
-    const session = await client();
-    const first = await issueKey(session);
-    const credentialId = first.credential.id;
-    const consumerId = first.credential.ferrum_consumer_id;
+  /**
+   * Revoke `credentialId` with a delete that provably never applies, and let
+   * the revocation stall past the TTL once it has read the array that proves
+   * it: another instance takes the consumer key, runs `meanwhile`, and still
+   * holds the key when the withdrawal reaches its commit.
+   */
+  async function revokeWithFencedWithdrawal(
+    session: TestSession,
+    credentialId: string,
+    consumerId: string,
+    meanwhile: () => Promise<void>,
+  ): Promise<{ attempts: number; committed: WithdrawalCommit[] }> {
     harness.edge.queueFailure(503, { error: 'down' }, '/credentials/keyauth/', 'DELETE');
-
-    // The revocation reads the array that proves its delete never applied,
-    // then stalls past the TTL; another instance takes the consumer key and
-    // completes the revocation before the withdrawal reaches its commit.
     const consumers = harness.edgeClient.consumers;
     const get = consumers.get.bind(consumers);
     let stalled = false;
@@ -843,14 +883,14 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
       if (!stalled && harness.edge.callsTo('DELETE', '/credentials/keyauth/').length > 0) {
         stalled = true;
         await takeOver(consumerId);
-        await harness.store.credentials.update(credentialId, { status: 'revoked' });
+        await meanwhile();
       }
       return live;
     };
     restorePatches.push(() => {
       consumers.get = get;
     });
-    const attempts = watchWithdrawals(credentialId);
+    const { attempts, committed } = watchWithdrawals(credentialId);
 
     const failed = await harness.authed(session, {
       method: 'DELETE',
@@ -859,21 +899,71 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
     assert.ok(stalled, 'the revocation reached the gateway');
     assert.equal(failed.statusCode, 502, failed.body);
     assert.equal(
-      attempts(),
-      1,
-      'the refusal ends the withdrawal at once; no retry is attempted under a lost lease',
-    );
-    assert.equal(
       await harness.store.leases.release(consumerId, OTHER_INSTANCE),
       true,
       "the stale withdrawal left the new holder's lease alone",
     );
+    return { attempts: attempts(), committed: committed() };
+  }
 
+  it('keeps a key another instance revoked when the fence refuses the withdrawal', async () => {
+    const session = await client();
+    const first = await issueKey(session);
+    const credentialId = first.credential.id;
+    const consumerId = first.credential.ferrum_consumer_id;
+
+    // The other instance completes the revocation before the withdrawal commits.
+    const { attempts, committed } = await revokeWithFencedWithdrawal(
+      session,
+      credentialId,
+      consumerId,
+      async () => {
+        await harness.store.credentials.update(credentialId, { status: 'revoked' });
+      },
+    );
+    assert.equal(
+      attempts,
+      1,
+      'the refusal ends the withdrawal at once; no retry is attempted under a lost lease',
+    );
+    assert.deepEqual(committed, []);
     assert.equal(
       (await harness.store.credentials.findById(credentialId))?.status,
       'revoked',
       'the refused withdrawal does not bring a revoked key back',
     );
+    assert.equal(await countAudit(AuditAction.CREDENTIAL_REVOKE_ROLLBACK, credentialId), 0);
+  });
+
+  it('leaves a retiring key retiring when the fence refuses the withdrawal', async () => {
+    const session = await client();
+    const first = await issueKey(session);
+    const credentialId = first.credential.id;
+    const consumerId = first.credential.ferrum_consumer_id;
+
+    // The other instance takes the key but leaves the row `retiring`, so the
+    // status condition alone would let the move back through: only the fence
+    // stops it.
+    const { attempts, committed } = await revokeWithFencedWithdrawal(
+      session,
+      credentialId,
+      consumerId,
+      async () => {
+        assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'retiring');
+      },
+    );
+    assert.equal(
+      attempts,
+      1,
+      'the refusal ends the withdrawal at once; no retry is attempted under a lost lease',
+    );
+    assert.deepEqual(committed, [], 'the refused withdrawal committed nothing');
+    assert.equal(
+      (await harness.store.credentials.findById(credentialId))?.status,
+      'retiring',
+      'the fence, not the status condition, kept the row retiring',
+    );
+    assert.equal(await countAudit(AuditAction.CREDENTIAL_REVOKE_START, credentialId), 1);
     assert.equal(await countAudit(AuditAction.CREDENTIAL_REVOKE_ROLLBACK, credentialId), 0);
   });
 

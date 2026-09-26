@@ -361,6 +361,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   paragraph and line-break markup, preserving literal placeholders and entities
   in the HTML version while leaving the plain-text alternative and supplied
   HTML unchanged (#410).
+- `docs/security.md` now names every case where a `credential.revoke_start` has
+  no completion after a withdrawal: its retry and move-alone fallback both
+  failed (the row stays `retiring`), the fallback's best-effort
+  `credential.revoke_rollback` row was lost (the row is `active`), or a move
+  applied without its audit row on MongoDB without transactions. A withdrawal
+  the lease fence refuses is documented as ending with the row still
+  `retiring`, and a test now shows the fence alone keeps such a row there
+  (#413).
 
 ## [0.1.0] - 2026-09-25
 
