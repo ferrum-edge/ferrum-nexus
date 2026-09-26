@@ -2313,9 +2313,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin],
               LIVE_CREDENTIAL_STATUSES,
             );
-            apiOwnedAfterSave = [
-              ...new Map([...apiOwnedAfterSave, ...newlyIssued].map((row) => [row.id, row])).values(),
-            ];
+            const merged = new Map(apiOwnedAfterSave.map((row) => [row.id, row]));
+            for (const row of newlyIssued) merged.set(row.id, row);
+            apiOwnedAfterSave = [...merged.values()];
           }
         }
 
@@ -3183,17 +3183,33 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // commits after this read is outside what this check can see.
           const latest = await loadApi(apiId);
           if (latest.auth_plugin !== current.auth_plugin) {
-            await credentials.revokeInvalidated(
-              { id: actor.id, role: actor.role },
-              issued.credential.id,
-              {
-                reason: 'auth_plugin_change',
-                api_id: current.id,
-                previous_auth_plugin: current.auth_plugin,
-                auth_plugin: latest.auth_plugin,
-              },
-              ip,
-            );
+            // Best-effort, and never at the cost of the conflict below: a
+            // revocation that throws must not turn a retryable `409` into a
+            // `500`. The catch beneath deletes the consumer and retires every
+            // live row it finds, so a failure here is made good by the same
+            // compensation the conflict always runs.
+            try {
+              await credentials.revokeInvalidated(
+                { id: actor.id, role: actor.role },
+                issued.credential.id,
+                {
+                  reason: 'auth_plugin_change',
+                  api_id: current.id,
+                  previous_auth_plugin: current.auth_plugin,
+                  auth_plugin: latest.auth_plugin,
+                },
+                ip,
+              );
+            } catch (revokeError) {
+              deps.log?.(
+                {
+                  api_id: current.id,
+                  credential_id: issued.credential.id,
+                  error: errorMessage(revokeError),
+                },
+                'a test credential invalidated by an auth-plugin swap could not be revoked; the conflict teardown retries it',
+              );
+            }
             throw conflict(
               'The authentication plugin changed while the test consumer was being created; retry',
               { previous_auth_plugin: current.auth_plugin, auth_plugin: latest.auth_plugin },
