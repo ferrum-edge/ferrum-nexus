@@ -94,6 +94,9 @@ The job never gates a merge — it exists so coverage regressions are visible.
 - Add or update tests for anything you change.
 - Update `CHANGELOG.md` under `[Unreleased]` for user-visible changes.
 - New audit events must be added to the catalog in `docs/security.md`.
+- New audit events must be classified in `AUDIT_COMMIT_CLASSES`
+  (`server/src/audit/service.ts`); a `transactional` or `intent` event is
+  recorded through `audit.forStore(tx)` inside the store transaction.
 
 ## License
 

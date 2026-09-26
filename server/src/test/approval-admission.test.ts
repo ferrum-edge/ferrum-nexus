@@ -3,6 +3,7 @@ import { it } from 'node:test';
 
 import { aclGroupForApi, consumerUsernameForUser } from '@ferrum-nexus/shared';
 
+import type { NexusStore, TransactionOptions } from '../db/store.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp } from './helpers.js';
 
 function barrier() {
@@ -91,13 +92,22 @@ for (const first of ['retire', 'approve']) {
         return serialize(candidate, work);
       };
       if (first === 'retire') {
-        const update = h.store.apis.update.bind(h.store.apis);
-        h.store.apis.update = async (...args) => {
-          if (args[0] === s.apiId) {
+        // Parked under the proxy lease, just before the transaction that
+        // writes the retirement and its audit row. Not inside it: on SQLite an
+        // open transaction queues every other store call, the approval's
+        // first read included, so it could never reach the lease to wait.
+        const transaction = h.store.transaction.bind(h.store);
+        let parked = false;
+        h.store.transaction = async <T>(
+          fn: (tx: NexusStore) => Promise<T>,
+          options?: TransactionOptions,
+        ): Promise<T> => {
+          if (!parked) {
+            parked = true;
             entered.release();
             await release.promise;
           }
-          return update(...args);
+          return transaction(fn, options);
         };
       } else {
         const claim = h.store.accessRequests.updateIfStatus.bind(h.store.accessRequests);

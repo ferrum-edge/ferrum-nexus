@@ -43,7 +43,10 @@ Three rules define the boundary, and every change has to keep all three true:
 2. **Every gateway mutation is authorised and recorded first.** A request
    arrives → the session is resolved → CSRF is checked → the route's role guard
    runs → the service checks row-level ownership → the Edge call is made → an
-   `audit_logs` row is written. Skipping any step is a bug, not a shortcut.
+   `audit_logs` row is written. Skipping any step is a bug, not a shortcut. The
+   row commits in the store transaction that records the change — or, before
+   gateway work that cannot be undone, as an intent row of its own — as
+   `AUDIT_COMMIT_CLASSES` in `audit/service.ts` classifies every action.
 3. **Upstream text crosses to a browser in exactly one case.** Edge's flat
    `{"error": "..."}` bodies can carry operator-facing configuration detail, so
    `ferrum-admin/client.ts` logs every one of them and answers a generic
@@ -91,7 +94,7 @@ docs/      this tree
 | `ferrum-admin/`                                | The **only** module that knows the Edge HTTP shape: `client.ts`, `jwt.ts`, `types.ts`.                                                          |
 | `middleware/auth-plugin.ts`                    | Session resolution, sliding expiry, CSRF double-submit, RBAC guards.                                                                            |
 | `middleware/error-handler.ts`                  | The single place an exception becomes an HTTP response.                                                                                         |
-| `audit/service.ts`                             | The only writer of `audit_logs`, plus the `AuditAction` catalog.                                                                                |
+| `audit/service.ts`                             | The only writer of `audit_logs`, plus the `AuditAction` catalog and how each action commits.                                                    |
 | `auth/`                                        | `service.ts` (register/login/logout/verify), `captcha.ts`.                                                                                      |
 | `users/service.ts`                             | Profile self-service, admin user management, organizations.                                                                                     |
 | `catalog/service.ts`                           | Browse and read permissions; `canList` vs `canView`.                                                                                            |

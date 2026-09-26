@@ -115,6 +115,7 @@ import type { NexusStore, UserRecord } from '../db/store.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import { edgeUnavailable, forbidden, validationFailed } from '../lib/errors.js';
 import { apiRestoreLockKey } from '../lib/keyed-serializer.js';
+import { isLeaseLost } from '../lib/lease-fence.js';
 import type { NotificationsService } from '../notifications/service.js';
 
 /** Credential rows whose gateway entry is supposed to still exist. */
@@ -463,7 +464,7 @@ export function createGatewayReconciliationService(
               return { kind: 'present', consumerId: staleId } as const;
             }
 
-            const { consumer } = await edge.consumers.ensure(
+            const { consumer, created } = await edge.consumers.ensure(
               {
                 username: row.ferrum_username,
                 // The id the username names: the application for an
@@ -477,7 +478,11 @@ export function createGatewayReconciliationService(
             // Gateway first, then the portal — and both store writes together, so
             // a relink can never commit without the revocations that make the
             // credential mirror agree with the empty consumer it now points at.
-            const revoked = await store.transaction(async (tx) => {
+            // The audit row commits with them: recorded afterwards, a failed
+            // insert left the relink and the revocations applied and
+            // unaudited behind a failed repair, and a repeat found the
+            // consumer present and nothing to record.
+            const relink = store.transaction(async (tx) => {
               if (consumer.id !== staleId) {
                 await tx.consumers.update(row.id, { ferrum_consumer_id: consumer.id });
               }
@@ -494,7 +499,50 @@ export function createGatewayReconciliationService(
                 }
                 if (page.items.length === 0 || offset + page.items.length >= page.total) break;
               }
+              await audit.forStore(tx).record(
+                { id: actor.id, role: actor.role },
+                AuditAction.GATEWAY_CONSUMER_REPAIR,
+                { type: 'user', id: orphan.user_id },
+                {
+                  namespace,
+                  previous_consumer_id: orphan.ferrum_consumer_id,
+                  consumer_id: consumer.id,
+                  ferrum_username: orphan.ferrum_username,
+                  restored_groups: groups.length,
+                  revoked_credentials: ids.length,
+                  revoked_credential_ids: ids,
+                  ...(reason ? { reason } : {}),
+                },
+                ip,
+              );
               return ids;
+            });
+            const revoked = await relink.catch(async (error: unknown) => {
+              // Nothing of the portal half committed, so the consumer this
+              // attempt recreated must not outlive it. Recreated under the
+              // same derived id, it is exactly what a repeat reads as
+              // `present` — nothing to repair — while the credential rows
+              // stay `active` against an empty consumer and the repair goes
+              // unaudited. Taking it back down leaves the orphan the next pass
+              // reports, and a repeat repairs it whole. Only a consumer this
+              // attempt created, and not when the lease fence refused the
+              // commit: another instance holds the keys by then, and may
+              // already be issuing onto the consumer it found.
+              if (created && !isLeaseLost(error)) {
+                await edge.consumers.delete(consumer.id, actor.id).catch((undoError: unknown) => {
+                  log(
+                    {
+                      user_id: orphan.user_id,
+                      namespace,
+                      consumer_id: consumer.id,
+                      error: errorMessage(undoError),
+                    },
+                    'A failed consumer repair could not delete the consumer it recreated; its ' +
+                      'credential rows still name keys the gateway does not hold',
+                  );
+                });
+              }
+              throw error;
             });
 
             return { kind: 'repaired', consumerId: consumer.id, revoked } as const;
@@ -519,22 +567,6 @@ export function createGatewayReconciliationService(
         credentials_requiring_reissue: outcome.revoked.length,
         restored_groups: groups.length,
       };
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.GATEWAY_CONSUMER_REPAIR,
-        { type: 'user', id: orphan.user_id },
-        {
-          namespace,
-          previous_consumer_id: orphan.ferrum_consumer_id,
-          consumer_id: outcome.consumerId,
-          ferrum_username: orphan.ferrum_username,
-          restored_groups: groups.length,
-          revoked_credentials: outcome.revoked.length,
-          revoked_credential_ids: outcome.revoked,
-          ...(reason ? { reason } : {}),
-        },
-        ip,
-      );
       if (outcome.revoked.length > 0) {
         // A courtesy, like every notification: the account holder has to learn
         // that their keys stopped working, and that new ones are theirs to mint.

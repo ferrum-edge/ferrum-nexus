@@ -538,15 +538,23 @@ describe('credential and access ownership (issue #341)', () => {
       assert.equal((await harness.store.accessRequests.findById(requestId))?.status, 'revoked');
       const rollbacks = await harness.auditRows('access.revoke_rollback');
       assert.ok(!rollbacks.some((row) => row.target_id === grant.id), 'nothing was unwound');
+      // The revocation is recorded with the claim that made it, so its row
+      // stands whatever the gateway did next …
       const revokeRow = await auditFor('access.revoke', grant.id);
       assert.equal(revokeRow.bulk, true);
-      assert.equal(revokeRow.acl_group_removed, false);
+      assert.equal(revokeRow.acl_group_removed, undefined);
 
-      // … the disable is not reported as a success …
+      // … the disable is not reported as a success, and its completion row
+      // names the grant the gateway would not let go of …
       const outcome = await auditFor('god.disable_user_complete', owner.user.id);
       assert.deepEqual(outcome.failed_steps, ['revoke_grants']);
       assert.equal(outcome.failed_grant_revocations, 1);
       assert.equal(outcome.revoked_grants, 0);
+      const failedGrants = outcome.failed_grants as { grant_id: string; stage: string }[];
+      assert.deepEqual(
+        failedGrants.map((entry) => [entry.grant_id, entry.stage]),
+        [[grant.id, 'gateway']],
+      );
 
       // … the teardown that followed took the group off anyway …
       assert.deepEqual(groupsOf(owner.user.id), []);

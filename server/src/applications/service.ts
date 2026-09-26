@@ -61,7 +61,7 @@ import {
   type Uuid,
 } from '@ferrum-nexus/shared';
 
-import { AuditAction, type AuditService } from '../audit/service.js';
+import { AuditAction, earliestPriorAttempt, type AuditService } from '../audit/service.js';
 import type { NexusConfig } from '../config/index.js';
 import { canonicalConsumerLockKey, type ConsumerProvisioner } from '../credentials/consumers.js';
 import type { ApplicationRecord, ListOptions, NexusStore, UserRecord } from '../db/store.js';
@@ -369,7 +369,7 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
           // behind a `500`; now it leaves the application in place for the
           // delete to be retried, and that retry finds the consumer already
           // gone and simply drops the rows.
-          const drop = (): Promise<{ grants: number; credentials: number }> =>
+          const drop = (startedId: string): Promise<{ grants: number; credentials: number }> =>
             store.transaction(async (tx) => {
               const grants = await tx.grants.count({
                 application_id: application.id,
@@ -382,6 +382,29 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
               // The row's cascade takes the grants, requests, credential rows
               // and the consumer mapping with it.
               await tx.applications.delete(application.id);
+              // A consumer that could only be found by its derived id, and was
+              // taken down by an earlier attempt whose delete then failed to
+              // record, cannot be found at all by this one. That attempt's
+              // start row still names it.
+              let resumed: Record<string, unknown> = {};
+              if (consumerId === null) {
+                const attempts = await tx.auditLogs.list(
+                  {
+                    action: AuditAction.APPLICATION_DELETE_START,
+                    target_type: 'application',
+                    target_id: application.id,
+                  },
+                  { limit: MAX_PAGE_SIZE },
+                );
+                const earlier = earliestPriorAttempt(attempts.items, startedId, 'consumer_id');
+                if (earlier) {
+                  resumed = {
+                    consumer_id: earlier.consumer_id,
+                    ...(earlier.unmapped_consumer === true ? { unmapped_consumer: true } : {}),
+                    resumed: true,
+                  };
+                }
+              }
               await audit.forStore(tx).record(
                 { id: actor.id, role: actor.role },
                 AuditAction.APPLICATION_DELETE,
@@ -392,6 +415,7 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
                   revoked_grants: grants,
                   revoked_credentials: credentials,
                   ...(unmapped ? { unmapped_consumer: true } : {}),
+                  ...resumed,
                 },
                 ip,
               );
@@ -402,8 +426,8 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
           // consumer delete cannot be rolled back, so a failure to record the
           // delete that follows it must still leave a row naming who started
           // it — and a failure to record *this* stops before anything changed.
-          await store.transaction(async (tx) => {
-            await audit.forStore(tx).record(
+          const startedId = await store.transaction(async (tx) => {
+            const started = await audit.forStore(tx).record(
               { id: actor.id, role: actor.role },
               AuditAction.APPLICATION_DELETE_START,
               { type: 'application', id: application.id },
@@ -414,6 +438,7 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
               },
               ip,
             );
+            return started.id;
           });
 
           // Gateway first. A row deleted before its consumer leaves a live
@@ -424,11 +449,11 @@ export function createApplicationsService(deps: ApplicationsServiceDeps): Applic
           // appended before the consumer went (and went with it) or finds
           // the consumer, or the application, gone.
           const target = consumerId;
-          if (target === null) return drop();
+          if (target === null) return drop(startedId);
           return edge.serializePerKey(target, async () => {
             const live = await edge.consumers.get(target);
             if (live) await edge.consumers.delete(target, actor.id);
-            return drop();
+            return drop(startedId);
           });
         },
       );

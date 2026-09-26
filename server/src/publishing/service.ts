@@ -198,6 +198,7 @@ import {
   DEFAULT_BACKEND_READ_TIMEOUT_MS,
   DEFAULT_BACKEND_WRITE_TIMEOUT_MS,
   DEFAULT_SPEC_ENFORCEMENT,
+  MAX_PAGE_SIZE,
   RATE_LIMIT_PLUGIN,
   aclGroupForApi,
   listenPathFor,
@@ -223,7 +224,7 @@ import {
   type Uuid,
 } from '@ferrum-nexus/shared';
 
-import { AuditAction, type AuditService } from '../audit/service.js';
+import { AuditAction, earliestPriorAttempt, type AuditService } from '../audit/service.js';
 import type { EdgeRateLimitSyncConfig, NexusConfig } from '../config/index.js';
 import {
   API_GATEWAY_PLUGIN_ROLES,
@@ -1798,7 +1799,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // The Nexus rows are written *inside* the compensated block: a store
           // failure here would otherwise leave a live, untracked proxy on the
           // gateway that nothing in the portal knows how to reach or delete. One
-          // transaction so the API and its first spec revision commit together.
+          // transaction so the API, its first spec revision and the audit row
+          // commit together — a failed insert is a failed row write, and takes
+          // the proxy back down with the rest rather than leaving a published
+          // API with no record of who published it. Nothing depends on the API
+          // yet, so there is no live traffic for that rollback to disturb.
           return await store.transaction(async (tx) => {
             const row = await tx.apis.create({
               id: apiId,
@@ -1833,6 +1838,29 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               is_current: true,
               created_by: owner.id,
             });
+            await audit.forStore(tx).record(
+              { id: owner.id, role: owner.role },
+              AuditAction.API_PUBLISH,
+              { type: 'api', id: row.id },
+              {
+                slug,
+                listen_path: listenPath,
+                proxy_id: row.ferrum_proxy_id,
+                auth_plugin: input.auth_plugin,
+                requestable: input.requestable,
+                visibility: input.visibility,
+                rate_limit: input.rate_limit ?? null,
+                cors,
+                allowed_methods: methods,
+                timeouts,
+                circuit_breaker: circuitBreaker,
+                spec_enforcement: specEnforcement,
+                upstream: `${upstream.scheme}://${upstream.host}:${upstream.port}`,
+                spec_paths: parsed.pathCount,
+                spec_operations: parsed.operationCount,
+              },
+              ip,
+            );
             return { api: row, spec: revision };
           });
         } catch (error) {
@@ -1902,33 +1930,6 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       });
 
       const { api, spec } = persisted;
-
-      // The audit row is deliberately outside the compensated block: both sides
-      // now agree, and tearing a live API back down because the log write
-      // failed would trade a missing audit row for an outage.
-      await audit.record(
-        { id: owner.id, role: owner.role },
-        AuditAction.API_PUBLISH,
-        { type: 'api', id: api.id },
-        {
-          slug,
-          listen_path: listenPath,
-          proxy_id: api.ferrum_proxy_id,
-          auth_plugin: input.auth_plugin,
-          requestable: input.requestable,
-          visibility: input.visibility,
-          rate_limit: input.rate_limit ?? null,
-          cors,
-          allowed_methods: methods,
-          timeouts,
-          circuit_breaker: circuitBreaker,
-          spec_enforcement: specEnforcement,
-          upstream: `${upstream.scheme}://${upstream.host}:${upstream.port}`,
-          spec_paths: parsed.pathCount,
-          spec_operations: parsed.operationCount,
-        },
-        ip,
-      );
 
       return {
         api: presentApi(api, await settings.getGatewayPublicUrl()),
@@ -2604,23 +2605,34 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             // the caller attribution in the audit trail.
             if (!gatewayMutated) return presentApi(api, await settings.getGatewayPublicUrl());
             details.gateway_reconciled = true;
-            if (recordOwnership) await store.apiGatewayPlugins.replace(api.id, nextOwned);
-            updated = api;
-          } else if (recordOwnership) {
-            updated = await store.transaction(async (tx) => {
+          }
+          // The row, the ownership record and the audit record commit
+          // together, still inside the compensated block. Recorded after it, a
+          // failed insert left the change applied on both sides and unaudited
+          // behind a `500`, and a repeat found nothing left to change; now it
+          // is handled like a failed row write — the row rolls back and the
+          // undo below puts the gateway back. A drift repair with no row to
+          // write commits its record alone, and a failed insert undoes the
+          // repair the same way.
+          updated = await store.transaction(async (tx) => {
+            let row = api;
+            if (changed.length > 0) {
               const persisted = await tx.apis.update(api.id, update);
               if (!persisted) throw notFound('API', apiId);
-              await tx.apiGatewayPlugins.replace(api.id, nextOwned);
-              return persisted;
-            });
-          } else {
-            // Nothing to record, so no transaction: the row save alone is one
-            // statement, and holding `BEGIN` across it would park every other
-            // request's store call behind this PATCH for no atomicity gained.
-            const persisted = await store.apis.update(api.id, update);
-            if (!persisted) throw notFound('API', apiId);
-            updated = persisted;
-          }
+              row = persisted;
+            }
+            if (recordOwnership) await tx.apiGatewayPlugins.replace(api.id, nextOwned);
+            await audit
+              .forStore(tx)
+              .record(
+                { id: actor.id, role: actor.role },
+                update.status === 'retired' ? AuditAction.API_RETIRE : AuditAction.API_UPDATE,
+                { type: 'api', id: api.id },
+                { changed_fields: changed, ...details },
+                ip,
+              );
+            return row;
+          });
         } catch (error) {
           // Compensation is best-effort by contract: the PATCH is already
           // failing, and an undo step that throws must not replace the failure
@@ -2684,14 +2696,6 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             apiOwnedAfterSave = [...merged.values()];
           }
         }
-
-        await audit.record(
-          { id: actor.id, role: actor.role },
-          update.status === 'retired' ? AuditAction.API_RETIRE : AuditAction.API_UPDATE,
-          { type: 'api', id: api.id },
-          { changed_fields: changed, ...details },
-          ip,
-        );
 
         // ── What the swap actually cost, settled after it landed ──────────
         //
@@ -3173,9 +3177,10 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         }
       });
 
-      // Outside the compensated block by the same rule the publish uses: both
-      // sides now agree, and tearing a live API back down because an audit
-      // write failed would trade a missing row for an outage.
+      // Outside the compensated block: both sides now agree, and tearing a
+      // live API back down because an audit write failed would trade a
+      // missing row for an outage (see `AUDIT_COMMIT_CLASSES`; moving this row
+      // into its transaction is tracked in #400).
       await audit.record(
         { id: actor.id, role: actor.role },
         AuditAction.API_GATEWAY_RESTORE,
@@ -3246,17 +3251,39 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         //    that follows it must still leave a row naming who started it —
         //    and a failure to record *this* stops the delete before anything
         //    has changed.
-        await store.transaction(async (tx) => {
-          await audit.forStore(tx).record(
+        //
+        //    It names the test identity as it stands before the teardown, so a
+        //    repeat whose attempt found it already collected can still say
+        //    what was taken down (see `earliestPriorAttempt`).
+        const registration = await store.gatewayIdentities.findByUsername(
+          edge.namespace,
+          testConsumerUsername(api.id),
+        );
+        const heldConsumerId = registration?.ferrum_consumer_id ?? null;
+        let heldCredentials = 0;
+        if (heldConsumerId !== null) {
+          const held = await store.credentials.listByConsumer(
+            heldConsumerId,
+            undefined,
+            LIVE_CREDENTIAL_STATUSES,
+          );
+          heldCredentials = held.length;
+        }
+        const startedId = await store.transaction(async (tx) => {
+          const started = await audit.forStore(tx).record(
             { id: actor.id, role: actor.role },
             AuditAction.API_DELETE_START,
             { type: 'api', id: api.id },
             {
               slug: api.slug,
               proxy_id: api.ferrum_proxy_id,
+              ...(heldConsumerId === null
+                ? {}
+                : { test_consumer_id: heldConsumerId, test_consumer_credentials: heldCredentials }),
             },
             ip,
           );
+          return started.id;
         });
 
         // 1. Take the API off the gateway first: once the proxy is gone nobody
@@ -3345,6 +3372,30 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               // expired one serialises nothing. Only one of them may answer
               // `200` and write `api.delete`.
               if (!(await tx.apis.delete(api.id))) throw notFound('API', apiId);
+              // A teardown that found the consumer already gone follows an
+              // earlier attempt that took it down and then failed to record
+              // the delete — its credential rows were revoked back then, so
+              // this attempt counts none of them. The earliest attempt's start
+              // row says what the identity held before any of it.
+              let resumed: Record<string, unknown> = {};
+              if (!testConsumer.consumer_deleted) {
+                const attempts = await tx.auditLogs.list(
+                  { action: AuditAction.API_DELETE_START, target_type: 'api', target_id: api.id },
+                  { limit: MAX_PAGE_SIZE },
+                );
+                const earlier = earliestPriorAttempt(attempts.items, startedId, 'test_consumer_id');
+                if (earlier) {
+                  const held = earlier.test_consumer_credentials;
+                  resumed = {
+                    test_consumer_id: testConsumer.consumer_id ?? earlier.test_consumer_id,
+                    test_consumer_revoked_credentials: Math.max(
+                      testConsumer.revoked_credentials,
+                      typeof held === 'number' ? held : 0,
+                    ),
+                    resumed: true,
+                  };
+                }
+              }
               await audit.forStore(tx).record(
                 { id: actor.id, role: actor.role },
                 AuditAction.API_DELETE,
@@ -3362,6 +3413,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                         test_consumer_revoked_credentials: testConsumer.revoked_credentials,
                       }
                     : {}),
+                  ...resumed,
                 },
                 ip,
               );
@@ -3621,7 +3673,28 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             );
           }
 
-          return { consumer, issued, replacedExisting: existing !== null, revokedCredentials };
+          // Recorded last and still inside the compensated block. Written after
+          // it, a failed insert left a live test consumer — holding a key whose
+          // show-once secret nobody was handed — with no record of who created
+          // it; now it runs the catch below, which takes the consumer back down
+          // and revokes its credential, and the caller simply retries.
+          await store.transaction(async (tx) => {
+            await audit.forStore(tx).record(
+              { id: actor.id, role: actor.role },
+              AuditAction.TEST_CONSUMER_CREATE,
+              { type: 'api', id: current.id },
+              {
+                consumer_username: username,
+                consumer_id: consumer.id,
+                credential_type: issued.credential.credential_type,
+                replaced: existing !== null,
+                revoked_credentials: revokedCredentials,
+              },
+              ip,
+            );
+          });
+
+          return { consumer, issued };
         } catch (error) {
           // The append was refused — the owner was disabled after the claim —
           // or the gateway failed, before or after the replacement was
@@ -3687,20 +3760,6 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           throw error;
         }
       });
-
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.TEST_CONSUMER_CREATE,
-        { type: 'api', id: api.id },
-        {
-          consumer_username: username,
-          consumer_id: replaced.consumer.id,
-          credential_type: replaced.issued.credential.credential_type,
-          replaced: replaced.replacedExisting,
-          revoked_credentials: replaced.revokedCredentials,
-        },
-        ip,
-      );
 
       return {
         credential: replaced.issued.credential,

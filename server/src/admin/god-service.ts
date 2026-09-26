@@ -241,15 +241,20 @@ export function createGodService(deps: GodServiceDeps): GodService {
       const why = requireReason(reason);
       // `access.revoke` allows any admin, so the super_admin passes its check
       // and the gateway-side group removal + ordinary audit row happen there.
-      const grant = await access.revoke(actor, grantId, why, ip);
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.GOD_REVOKE_GRANT,
-        { type: 'grant', id: grant.id },
-        { reason: why, api_id: grant.api_id, user_id: grant.user_id },
-        ip,
-      );
-      return grant;
+      // The god-mode row commits in the transaction that claims the grant and
+      // records `access.revoke`, so the reason is never missing from a
+      // revocation that happened, nor present for one that did not.
+      return access.revoke(actor, grantId, why, ip, async (tx, revoked) => {
+        await audit
+          .forStore(tx)
+          .record(
+            { id: actor.id, role: actor.role },
+            AuditAction.GOD_REVOKE_GRANT,
+            { type: 'grant', id: revoked.id },
+            { reason: why, api_id: revoked.api_id, user_id: revoked.user_id },
+            ip,
+          );
+      });
     },
 
     async deleteApi(actor, apiId, reason, revokeGrants, ip = null): Promise<GodDeleteApiResponse> {
@@ -502,13 +507,18 @@ export function createGodService(deps: GodServiceDeps): GodService {
         job: outcome.job,
         ...(deps.log ? { log: deps.log } : {}),
       });
+      // A failure to record the teardown's own outcome is one more failed
+      // step, named in the completion row below — it must not cost that row,
+      // which is the only record of the sweep.
       if (teardown.outcome !== 'pending') {
-        await audit.record(
-          { id: actor.id, role: actor.role },
-          AuditAction.USER_GATEWAY_TEARDOWN_COMPLETE,
-          { type: 'user', id: target.id },
-          { inline: true, ...teardown.details },
-          ip,
+        await attempt<unknown>('record_gateway_teardown', undefined, () =>
+          audit.record(
+            { id: actor.id, role: actor.role },
+            AuditAction.USER_GATEWAY_TEARDOWN_COMPLETE,
+            { type: 'user', id: target.id },
+            { inline: true, ...teardown.details },
+            ip,
+          ),
         );
       }
 

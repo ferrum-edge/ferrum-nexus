@@ -1500,8 +1500,13 @@ fully revoked, `god.disable_user_complete` records
 `failed_steps: ["revoke_grants"]` and the grants that failed, and the request
 answers with the error — `502 EDGE_ERROR` when a gateway step failed — whose
 `details.failed_grants` lists each one's `grant_id`, `api_id`,
-`application_id` and the `stage` it stopped at (`claim`, `lookup`, `gateway`,
-`audit`). A grant stopped at `lookup` or `gateway` stays `revoked` in the
+`application_id` and the `stage` it stopped at (`claim`, `lookup` or
+`gateway`). Each grant's `access.revoke` row commits with its claim, so a grant
+whose row cannot be written is never claimed and stops at `claim`, still active
+for a repeat of the disable. When the inline gateway revocation succeeded but
+its `user.gateway_teardown_complete` row could not be written,
+`god.disable_user_complete` is still written, with `record_gateway_teardown` in
+`failed_steps`, and the request answers with that error. A grant stopped at `lookup` or `gateway` stays `revoked` in the
 portal, so a later re-enable does not restore it; the account teardown in the
 same request strips its ACL group, and when that fails too it stays queued for
 the teardown worker. Should the account be re-enabled before the worker gets
@@ -2170,7 +2175,11 @@ The gateway teardown and the row delete run under the API's per-proxy lease. An
 `api.delete_start` audit row is committed before the first gateway call, and the
 `api.delete` row commits in the same transaction as the row delete, once the
 teardown has held; if that transaction fails, the API stays in the catalog for
-the delete to be retried, and the gateway steps are safe to repeat. A
+the delete to be retried, and the gateway steps are safe to repeat. The start
+row names the test identity as it stood before the teardown
+(`test_consumer_id`, `test_consumer_credentials`); a retry that finds that
+identity already collected copies them into its `api.delete` row, with
+`resumed: true`, rather than reporting nothing revoked. A
 `spec_enforcement` conversion is a delete-and-recreate, so an unserialised teardown could commit in
 the middle of one and leave the conversion's rebuild serving an API with no
 portal record — reachable, un-removable, and holding the slug against every
@@ -2351,7 +2360,10 @@ included, so a failure part-way leaves every row in place. An
 `application.delete_start` audit row is committed before the consumer is
 touched, so a delete that took the consumer down and then failed to record its
 completion still names who started it. A retry after the consumer was already
-deleted finishes the rows without recreating anything on the gateway.
+deleted finishes the rows without recreating anything on the gateway; when that
+consumer could only be found by its derived id, the retry's `application.delete`
+row copies `consumer_id` and `unmapped_consumer` from the earlier attempt's
+start row, with `resumed: true`.
 
 Its credentials stop working immediately. The reversible option is `PATCH` with
 `status: "disabled"`.
@@ -2694,9 +2706,10 @@ attached plugin.
 The gateway side is a proxy-scoped plugin config plus its entry in the proxy's
 `plugins[]` — the same mechanism as `rate_limiting` and `cors`. A replace keeps
 the config id, so the association is never touched and there is no window in
-which the plugin is missing. The `api_plugins` row is written last but inside
-the same compensated block, so a store failure rolls the gateway back rather
-than leaving a plugin running that the portal has no row for.
+which the plugin is missing. The `api_plugins` row and its `api.plugin_set` audit
+row are written last, in one transaction, inside the same compensated block, so
+a store or audit failure rolls the gateway back rather than leaving a plugin
+running that the portal has no row — or no record — for.
 
 The save touches **only the config the portal created**, identified by the id
 recorded on the row. Ferrum Edge allows several configs of one plugin name on a
@@ -2720,6 +2733,14 @@ Disassociates the config from the proxy, deletes it, then removes the row —
 created is deleted; another config of the same plugin name is an operator's and
 stays. A gateway config an operator already removed by hand is tolerated: the
 row still goes.
+
+An `api.plugin_remove_start` audit row is committed before the gateway is
+touched, and the row delete commits with its `api.plugin_remove` row. If that
+last transaction fails, the row stays and the config is put back under the id
+the row records (`api.plugin_rollback`), so the removal can simply be repeated.
+Should that undo fail as well, the repeat finds the config already gone,
+recognises its own earlier attempt by the start row naming the config, and
+records `was_attached: true` with `resumed: true`.
 
 Deleting the API removes every palette row with it; the gateway objects need no
 separate step, because they are proxy-scoped and the proxy delete cascades them.
@@ -2996,9 +3017,12 @@ callers using the old secret start receiving 401 as soon as gateway
 configuration propagates. **When the account is already at the per-type cap
 there is no room to append**, so the old entry is deleted first — and marked
 `revoked` the moment Edge confirms it — leaving a brief window with no working
-credential of that type. If the append then fails, the response says so plainly
-(`502 EDGE_ERROR`, _the previous credential was removed … issue a new
-credential_); everything still live stays revocable.
+credential of that type. That delete cannot be undone, so its move to `retiring`
+commits with a `credential.revoke_start` audit row (`operation: "rotate"`)
+before it is attempted, as a revocation's does; if that row cannot be written
+the rotation stops with nothing changed. If the append then fails, the response
+says so plainly (`502 EDGE_ERROR`, _the previous credential was removed … issue
+a new credential_); everything still live stays revocable.
 
 For a caller-visible cutover, issue a new credential, deploy it, then revoke
 the old one — provided the account is below `FERRUM_MAX_CREDENTIALS_PER_TYPE`.
@@ -3042,6 +3066,13 @@ matches the portal's view, which is refused rather than guessed at.
 _session_, owner (or an admin) → `{ "ok": true }`. Deletes the entry from Edge
 and marks the row `revoked`. Idempotent: a credential already `revoked` returns
 success without touching the gateway.
+
+The row's move to `retiring` commits with a `credential.revoke_start` audit row
+before the gateway delete, and the move to `revoked` with the
+`credential.revoke` row. If that last transaction fails, the row is left
+`retiring` over an entry that is gone, which is the state a lost gateway
+acknowledgement leaves too, and repeating the request completes the revocation
+and records it.
 
 ---
 
