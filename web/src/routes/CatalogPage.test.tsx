@@ -342,7 +342,7 @@ describe('catalog access', () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/Explain your use case/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Request access' })).not.toBeInTheDocument();
-    const accessLabel = screen.getByText('Access');
+    const accessLabel = screen.getByText('Access', { selector: 'span' });
     expect(within(accessLabel.parentElement!).getByText('Retired')).toBeInTheDocument();
   });
 
