@@ -265,6 +265,9 @@ describe('credential durability across a lost gateway write', () => {
     assert.equal(await statusOf(first.credential.id), 'active', 'the intent was withdrawn');
     assert.equal(liveKeys(user.user.id).length, 2, 'nothing was deleted');
     assert.equal((await rowsFor('credential.settle', consumerId)).length, 0);
+    const withdrawn = await rowsFor('credential.revoke_rollback', consumerId);
+    assert.equal(withdrawn.length, 1, 'the retirement’s start row is completed (#402)');
+    assert.equal(withdrawn[0]?.details.operation, 'revoke');
 
     // Which leaves an ordinary retry rather than a consumer to reconcile.
     const retried = await revoke(user, first.credential.id);
@@ -290,6 +293,11 @@ describe('credential durability across a lost gateway write', () => {
     assert.deepEqual(liveKeys(user.user.id), [String(first.secret.key), String(second.secret.key)]);
     assert.equal((await rowsFor('credential.rotate', consumerId)).length, 0);
     assert.equal((await rowsFor('credential.settle', consumerId)).length, 0);
+    // The retirement's start row is completed rather than left open (#402).
+    const withdrawn = await rowsFor('credential.revoke_rollback', consumerId);
+    assert.equal(withdrawn.length, 1);
+    assert.equal(withdrawn[0]?.target_id, first.credential.id);
+    assert.equal(withdrawn[0]?.details.operation, 'rotate');
 
     // The cap slot is still this credential's own, so the retry is an ordinary
     // rotation instead of a 409 against a row nobody can use.
