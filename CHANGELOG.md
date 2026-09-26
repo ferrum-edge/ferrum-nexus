@@ -33,6 +33,12 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `responses` map of empty entries cost nothing, so one repeated by YAML aliases
   across many operations could keep the upload check busy for about a second
   without reaching the ceiling; the count now stops at the ceiling instead.
+- A message reply draft now belongs to its conversation (#391). Opening another
+  conversation shows that conversation's own draft instead of carrying the text
+  across, and a reply that finishes sending clears the composer only if it
+  still holds the text that was sent, so edits made while the reply was in
+  flight — or a draft in another conversation — are kept. A failed send keeps
+  the draft.
 - Retired APIs in the catalog are labeled as retired and no longer show a new
   access-request form. Existing identity grants remain visible, and pending
   requests can still be withdrawn (#376).

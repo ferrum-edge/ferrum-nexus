@@ -121,7 +121,10 @@ export function MessageThreadPage(): ReactElement {
   const send = useSendMessage();
   const loadOlder = useOlderMessages();
   const { user } = useAuth();
-  const [body, setBody] = useState('');
+  // Reply drafts are kept per conversation so an unsent draft never follows the
+  // reader into another thread, and is still there when they come back.
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const body = drafts[threadId] ?? '';
 
   // Everything fetched so far, and where the next older window starts.
   const [history, setHistory] = useState(() => ({
@@ -173,8 +176,27 @@ export function MessageThreadPage(): ReactElement {
     event.preventDefault();
     const trimmed = body.trim();
     if (!trimmed) return;
-    send.mutate({ id: thread.id, body: { body: trimmed } }, { onSuccess: () => setBody('') });
+    const draftThreadId = threadId;
+    const sentDraft = body;
+    // `mutateAsync` settles for every send, not only the latest one, so a reply
+    // still in flight when another thread sends is cleared too. A completion
+    // clears only the draft it submitted: text edited while it was in flight, or
+    // a draft in another conversation, survives. A failure keeps the draft.
+    void send.mutateAsync({ id: thread.id, body: { body: trimmed } }).then(
+      () =>
+        setDrafts((current) => {
+          if (current[draftThreadId] !== sentDraft) return current;
+          const next = { ...current };
+          delete next[draftThreadId];
+          return next;
+        }),
+      () => undefined,
+    );
   };
+
+  const setBody = (value: string): void =>
+    setDrafts((current) => ({ ...current, [threadId]: value }));
+  const sendingHere = send.isPending && send.variables?.id === thread.id;
 
   const nextBefore = loadOlderCursor(cursors);
 
@@ -303,7 +325,7 @@ export function MessageThreadPage(): ReactElement {
             <Button
               type="submit"
               variant="primary"
-              loading={send.isPending}
+              loading={sendingHere}
               disabled={body.trim().length === 0}
             >
               <Icon name="send" className="h-4 w-4" />
