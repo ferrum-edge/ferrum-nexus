@@ -4,7 +4,7 @@
  *
  * Extracted from `publishing/service.ts` so the palette service
  * (`plugins/service.ts`) drives the gateway through the *same* code rather than
- * a second, subtly different copy. Two things make that non-negotiable:
+ * a second, subtly different copy. Four things make that non-negotiable:
  *
  * 1. **`PUT /proxies/{id}` is a whole-resource replace with no concurrency
  *    token.** Every write therefore has to be a GET-merge-PUT serialised on the
@@ -22,19 +22,26 @@
  *    later behaves the same way. {@link operatorOwnedFields} carries those across and `writeBody`
  *    merges the portal's fields over them, which makes the rule structural
  *    rather than a checklist (issue #159).
+ * 4. **A rejected write is not proof the write did not happen.** A `PUT` or a
+ *    `POST` Edge applied and could not acknowledge rejects exactly like one it
+ *    refused, so every undo step here is registered **before** the write it
+ *    undoes, and a create is dispatched under an id minted beforehand so that
+ *    undo has a target. Replaying an undo for a write that never landed costs
+ *    one idempotent call.
  *
- * The first-class configs (`rate_limiting`, `cors`, the auth plugin, the ACL
- * gate) are still found by `proxy_id` + `plugin_name`, so an operator who
- * recreates one by hand reconciles automatically. Palette plugins are not:
- * `api_plugins.ferrum_plugin_config_id` records the config Nexus created,
- * because a proxy may legitimately carry a second config of the same name that
- * an operator made and the portal must never replace or delete (issue #153).
+ * Nothing here finds a config by `plugin_name`. A proxy may legitimately carry
+ * a second config of the same name that an operator made, and the portal must
+ * never replace or delete it — so every caller passes the resource it owns,
+ * which it identifies by a recorded id: `api_plugins.ferrum_plugin_config_id`
+ * for a palette plugin (issue #153), `api_gateway_plugins` for the first-class
+ * auth, `access_control`, `rate_limiting` and `cors` configs.
  *
  * @see Edge `docs/admin_api.md`, "Proxies" and "Plugin Configs"; per-plugin
  *   `config` keys in Edge `docs/plugins.md`
  */
 
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
+import { newId } from '../lib/ids.js';
 import type {
   EdgePluginAssociation,
   EdgePluginConfig,
@@ -183,14 +190,19 @@ export interface EdgePluginOptions {
   trigger?: EdgePluginTrigger | null;
   /** Default execution order; a live operator override takes precedence. */
   priorityOverride?: number;
+  /**
+   * The id to create the config under — **creates only**; a replace addresses
+   * the resource it was handed. Minted by the caller so the undo for a create
+   * can be registered before the `POST` is dispatched: a create Edge applied
+   * and could not acknowledge otherwise leaves a config nothing can name.
+   */
+  id?: string;
 }
 
 /** Everything a caller needs to move plugin configs on and off a proxy. */
 export interface EdgePluginBinder {
   /** Every plugin config scoped to a proxy, or `[]` when there is no proxy. */
   listByProxy(proxyId: string | null | undefined): Promise<EdgePluginConfig[]>;
-  /** The first config for `pluginName` in a list from {@link listByProxy}. */
-  find(plugins: EdgePluginConfig[], pluginName: string): EdgePluginConfig | undefined;
   /**
    * Run `fn` holding the **canonical** `proxy:<id>` lease.
    *
@@ -324,10 +336,6 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
       return edge.pluginConfigs.listByProxy(proxyId);
     },
 
-    find(plugins, pluginName) {
-      return plugins.find((plugin) => plugin.plugin_name === pluginName);
-    },
-
     /**
      * `PUT /proxies/{id}` is a whole-resource replace with no concurrency
      * token, so `change` receives the document the gateway just returned and
@@ -369,7 +377,10 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
 
     async attach(proxyId, pluginName, pluginConfig, subject, options, live) {
       return edge.pluginConfigs.create(
-        writeBody(proxyId, pluginName, pluginConfig, options, live),
+        {
+          ...writeBody(proxyId, pluginName, pluginConfig, options, live),
+          ...(options?.id === undefined ? {} : { id: options.id }),
+        },
         subject,
       );
     },
@@ -476,6 +487,11 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
      * same plugin behind. `enabled` and `trigger` are carried back too: a
      * restore that quietly re-enabled a switched-off plugin, or dropped its
      * trigger, would widen what the gateway runs.
+     *
+     * A config the delete did remove is recreated under **its own id**, the
+     * way `restorePlugins` does. The portal identifies the configs it owns by
+     * recorded id, so a copy under a fresh one would be a config the record no
+     * longer names — one no later change could replace or remove.
      */
     undoRemoval(proxyId, config, subject) {
       return () => binder.withProxy(proxyId, binder.undoRemovalLocked(proxyId, config, subject));
@@ -492,7 +508,7 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
                 config.plugin_name,
                 config.config,
                 subject,
-                { enabled: config.enabled, trigger: config.trigger ?? null },
+                { enabled: config.enabled, trigger: config.trigger ?? null, id: config.id },
                 config,
               )
             ).id;
@@ -552,18 +568,22 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
 
       if (existing) {
         // `existing` is the live resource, so both the write and the undo carry
-        // the operator's fields rather than resetting them.
-        const replaced = await edge.pluginConfigs.replace(
-          existing.id,
-          writeBody(proxyId, pluginName, pluginSettings, options, existing),
-          subject,
-        );
+        // the operator's fields rather than resetting them — and the undo puts
+        // back its `enabled` and `trigger` too, so a switched-off security
+        // plugin is not quietly switched back on, nor a gated one widened.
+        //
+        // Register before PUT: a lost response can still mean it landed. An
+        // `ip_restriction` disabled on the gateway while the request reports
+        // failure — and the portal still says it is enforced — is exactly the
+        // divergence registering afterwards used to leave behind. Replaying
+        // this for a `PUT` that never landed rewrites the resource as it
+        // already is.
         undo.push(async () => {
           await edge.pluginConfigs.replace(
             existing.id,
             writeBody(
               proxyId,
-              pluginName,
+              existing.plugin_name,
               existing.config,
               { enabled: existing.enabled, trigger: existing.trigger ?? null },
               existing,
@@ -571,6 +591,11 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
             subject,
           );
         });
+        const replaced = await edge.pluginConfigs.replace(
+          existing.id,
+          writeBody(proxyId, pluginName, pluginSettings, options, existing),
+          subject,
+        );
         await binder.mutateProxyLocked(
           proxyId,
           (proxy) => {
@@ -585,8 +610,16 @@ export function createEdgePluginBinder(edge: FerrumAdminClient): EdgePluginBinde
         return replaced;
       }
 
-      const attached = await binder.attach(proxyId, pluginName, pluginSettings, subject, options);
-      undo.push(binder.undoAttachLocked(proxyId, attached.id, subject));
+      // Minted here and registered before the `POST`, for the same reason: a
+      // create whose acknowledgement is lost still has an undo that can name
+      // it. Detaching an id the proxy does not list is a no-op and deleting a
+      // missing config tolerates the 404, so the undo is safe either way.
+      const id = options?.id ?? newId();
+      undo.push(binder.undoAttachLocked(proxyId, id, subject));
+      const attached = await binder.attach(proxyId, pluginName, pluginSettings, subject, {
+        ...options,
+        id,
+      });
       await binder.associateLocked(proxyId, [attached.id], subject);
       return attached;
     },

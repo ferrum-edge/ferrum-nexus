@@ -1265,6 +1265,7 @@ describe('sqlite store', () => {
         apis: true,
         apiSpecs: true,
         apiPlugins: true,
+        apiGatewayPlugins: true,
         apiViewers: true,
         accessRequests: true,
         grants: true,

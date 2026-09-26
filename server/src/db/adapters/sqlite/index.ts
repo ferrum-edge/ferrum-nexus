@@ -100,6 +100,9 @@ import type {
   AccessRequestRecord,
   AccessRequestRepo,
   ApiFilter,
+  ApiGatewayPluginRecord,
+  ApiGatewayPluginRepo,
+  ApiGatewayPluginRole,
   ApiPluginRecord,
   ApiViewerRecord,
   ApiViewerRepo,
@@ -158,7 +161,11 @@ import type {
   VerificationTokenRecord,
   VerificationTokenRepo,
 } from '../../store.js';
-import { assertLeaseKeyLength, SPEC_HISTORY_PRUNE_BATCH } from '../../store.js';
+import {
+  API_GATEWAY_PLUGIN_ROLES,
+  assertLeaseKeyLength,
+  SPEC_HISTORY_PRUNE_BATCH,
+} from '../../store.js';
 import {
   bool,
   encodeBool,
@@ -356,6 +363,16 @@ function mapApiPlugin(row: Row): ApiPluginRecord {
     enabled: bool(row.enabled),
     config: json<Record<string, unknown>>(row.config_json, {}),
     trigger: json<ApiPluginTrigger | null>(row.trigger_json, null),
+    ferrum_plugin_config_id: textOrNull(row.ferrum_plugin_config_id),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapApiGatewayPlugin(row: Row): ApiGatewayPluginRecord {
+  return {
+    api_id: text(row.api_id),
+    role: text(row.role) as ApiGatewayPluginRole,
     ferrum_plugin_config_id: textOrNull(row.ferrum_plugin_config_id),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
@@ -736,6 +753,7 @@ class SqliteStore implements NexusStore {
     this.apis = guardRepo(this.apis, mediate);
     this.apiSpecs = guardRepo(this.apiSpecs, mediate);
     this.apiPlugins = guardRepo(this.apiPlugins, mediate);
+    this.apiGatewayPlugins = guardRepo(this.apiGatewayPlugins, mediate);
     this.apiViewers = guardRepo(this.apiViewers, mediate);
     this.accessRequests = guardRepo(this.accessRequests, mediate);
     this.grants = guardRepo(this.grants, mediate);
@@ -1574,6 +1592,51 @@ class SqliteStore implements NexusStore {
 
     deleteByApi: async (apiId) =>
       execute(this.db, 'DELETE FROM api_plugins WHERE api_id = ?', [apiId]),
+  };
+
+  /* ── apiGatewayPlugins ────────────────────────────────────────────────── */
+
+  readonly apiGatewayPlugins: ApiGatewayPluginRepo = {
+    listByApi: async (apiId) => {
+      const rows = queryAll(this.db, 'SELECT * FROM api_gateway_plugins WHERE api_id = ?', [
+        apiId,
+      ]).map(mapApiGatewayPlugin);
+      return API_GATEWAY_PLUGIN_ROLES.flatMap((role) => rows.filter((row) => row.role === role));
+    },
+
+    replace: async (apiId, ids) => {
+      const at = nowIso();
+      const roles = API_GATEWAY_PLUGIN_ROLES.filter((role) => ids[role] !== undefined);
+      // One statement set in one transaction, so a reader never sees half of
+      // an API's record — the half that would read as "not the portal's".
+      const write = this.db.transaction(() => {
+        execute(
+          this.db,
+          roles.length === 0
+            ? 'DELETE FROM api_gateway_plugins WHERE api_id = ?'
+            : `DELETE FROM api_gateway_plugins WHERE api_id = ? AND role NOT IN (${roles
+                .map(() => '?')
+                .join(', ')})`,
+          [apiId, ...roles],
+        );
+        for (const role of roles) {
+          execute(
+            this.db,
+            `INSERT INTO api_gateway_plugins
+               (api_id, role, ferrum_plugin_config_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (api_id, role) DO UPDATE SET
+               ferrum_plugin_config_id = excluded.ferrum_plugin_config_id,
+               updated_at = excluded.updated_at`,
+            [apiId, role, ids[role] ?? null, at, at],
+          );
+        }
+      });
+      write();
+    },
+
+    deleteByApi: async (apiId) =>
+      execute(this.db, 'DELETE FROM api_gateway_plugins WHERE api_id = ?', [apiId]),
   };
 
   /* ── apiViewers ───────────────────────────────────────────────────────── */
