@@ -592,17 +592,24 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           },
           'A failed revocation was returned to active, though its acknowledgement was lost',
         );
+      } else if (isNexusError(error) && error.code === 'CONFLICT') {
+        // Do not retry the restore through the root store. A lease fence can
+        // refuse this transaction because another holder has since performed
+        // an administrative teardown; an unfenced retry could then resurrect
+        // the grant after that teardown skipped the already-revoked row.
+        deps.log?.(
+          {
+            grant_id: grant.id,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'Could not return a failed revocation to active with its rollback row',
+        );
       } else {
-        // Nothing went back with it. Whatever failed — the rollback row's
-        // insert, or the lease fence refusing a revocation that stalled past its
-        // TTL — the restore must not go down with it: a grant left `revoked`
-        // while its group is still on the consumer is working access the portal
-        // shows as withdrawn, with nothing to repair it, whereas a missing
-        // rollback row is only a gap in the trail. So the restore is retried on
-        // its own, as bare compare-and-sets outside any transaction and so
-        // outside the fence: the grant goes back only from `revoked`, and never
-        // over an active grant a newer approval committed for the same identity
-        // (the partial unique index refuses that).
+        // A non-fencing failure (for example, the rollback audit insert) can
+        // still leave working gateway access hidden behind a revoked row. The
+        // lease remains ours, so restore the row while competing mutations are
+        // excluded, even though this best-effort fallback cannot be atomic
+        // with its audit record.
         deps.log?.(
           {
             grant_id: grant.id,
