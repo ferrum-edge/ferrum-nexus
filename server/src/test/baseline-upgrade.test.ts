@@ -13,8 +13,9 @@
  * `NEXUS_SECRET_KEY`. Migrating again — in the same process and after a
  * restart — must change nothing, ledger included.
  *
- * The released prefix is read from the manifest and the current schema is
- * whatever `store.migrate()` builds, so every forward migration — the first is
+ * The released prefix is read from the manifest — the entries a release has
+ * shipped, not the pending ones — and the current schema is whatever
+ * `store.migrate()` builds, so every forward migration — the first is
  * `002_api_gateway_plugins` — is applied here on top of a populated baseline
  * with no change to the harness.
  *
@@ -64,7 +65,9 @@ const FIXTURE_PASSWORD = 'correct-horse-battery-staple';
 /** The plaintext behind the encrypted `smtp.password` row. */
 const SMTP_PASSWORD = 'fixture-smtp-password';
 
-const RELEASED_IDS = RELEASED_MIGRATIONS.map((entry) => entry.id);
+/** Migrations a release shipped; a pending (`release: null`) entry is applied on upgrade. */
+const SHIPPED_MIGRATIONS = RELEASED_MIGRATIONS.filter((entry) => entry.release !== null);
+const RELEASED_IDS = SHIPPED_MIGRATIONS.map((entry) => entry.id);
 
 /* ── The fixture ────────────────────────────────────────────────────────── */
 
@@ -1001,13 +1004,23 @@ function runUpgradeSuite(label: string, makeTarget: () => Promise<UpgradeTarget>
           preserved = await assertFixturePreserved(store, fixture);
           await assertPortalInvariants(store);
 
-          // The forward migration's table is usable on the upgraded database.
-          await store.apiGatewayPlugins.replace(ID.ledger, { auth: 'edge-auth-ledger' });
+          // The forward migration's table is usable on the upgraded database,
+          // including a role recorded as owning no config.
+          await store.apiGatewayPlugins.replace(ID.ledger, {
+            auth: 'edge-auth-ledger',
+            cors: null,
+          });
           assert.deepEqual(
-            (await store.apiGatewayPlugins.listByApi(ID.ledger)).map((row) => row.role),
-            ['auth'],
+            (await store.apiGatewayPlugins.listByApi(ID.ledger)).map((row) => [
+              row.role,
+              row.ferrum_plugin_config_id,
+            ]),
+            [
+              ['auth', 'edge-auth-ledger'],
+              ['cors', null],
+            ],
           );
-          assert.equal(await store.apiGatewayPlugins.deleteByApi(ID.ledger), 1);
+          assert.equal(await store.apiGatewayPlugins.deleteByApi(ID.ledger), 2);
 
           // Re-running in the same process changes nothing.
           await store.migrate();

@@ -80,6 +80,17 @@ describe('a plugin-config write whose acknowledgement is lost', () => {
     });
   }
 
+  /** `PATCH /api/apis/:id` as the owning provider. */
+  async function patchApi(apiId: string, payload: Record<string, unknown>) {
+    return harness.authed(provider, { method: 'PATCH', url: `/api/apis/${apiId}`, payload });
+  }
+
+  /** The config id the API's ownership record names for `role`, or `null`. */
+  async function ownedId(apiId: string, role: string): Promise<string | null> {
+    const rows = await harness.store.apiGatewayPlugins.listByApi(apiId);
+    return rows.find((row) => row.role === role)?.ferrum_plugin_config_id ?? null;
+  }
+
   /** The `details` of every row of `action` recorded against this API. */
   async function rowsFor(action: string, apiId: string): Promise<Record<string, unknown>[]> {
     const rows = await harness.auditRows(action);
@@ -298,7 +309,122 @@ describe('a plugin-config write whose acknowledgement is lost', () => {
 
     assert.deepEqual(configsNamed(proxyId, 'rate_limiting'), []);
     assert.equal((await harness.store.apis.findById(id))?.rate_limit, null);
-    const recorded = await harness.store.apiGatewayPlugins.listByApi(id);
-    assert.equal(recorded.find((row) => row.role === 'rate_limit'), undefined);
+    assert.equal(await ownedId(id, 'rate_limit'), null);
+  });
+
+  it('puts the CORS policy back when a change landed unacknowledged', async () => {
+    const cors = { allowed_origins: ['https://app.example.com'], allow_credentials: false };
+    const { id, proxyId } = await publish({ cors });
+    const owned = await ownedId(id, 'cors');
+    assert.ok(owned);
+    const before = structuredClone(stored(owned));
+
+    harness.edge.queueLostAck(503, { error: 'timeout' }, `/plugins/config/${owned}`, 'PUT');
+    const failed = await patchApi(id, {
+      cors: { allowed_origins: ['https://evil.example.com'], allow_credentials: true },
+    });
+    assert.equal(failed.statusCode, 502, failed.body);
+
+    assert.deepEqual(stored(owned)?.config, before?.config);
+    assert.ok(effectiveIds(proxyId).includes(owned));
+    assert.deepEqual((await harness.store.apis.findById(id))?.cors?.allowed_origins, [
+      'https://app.example.com',
+    ]);
+    assert.deepEqual(await rowsFor('api.update', id), []);
+  });
+
+  it('removes a new CORS policy whose create landed unacknowledged', async () => {
+    const { id, proxyId } = await publish();
+
+    harness.edge.queueLostAck(503, { error: 'timeout' }, '/plugins/config', 'POST');
+    const failed = await patchApi(id, {
+      cors: { allowed_origins: ['https://app.example.com'], allow_credentials: false },
+    });
+    assert.equal(failed.statusCode, 502, failed.body);
+
+    assert.deepEqual(configsNamed(proxyId, 'cors'), []);
+    assert.equal((await harness.store.apis.findById(id))?.cors, null);
+    assert.equal(await ownedId(id, 'cors'), null);
+  });
+
+  it('removes a new ACL gate whose create landed unacknowledged', async () => {
+    const { id, proxyId } = await publish();
+
+    harness.edge.queueLostAck(503, { error: 'timeout' }, '/plugins/config', 'POST');
+    const failed = await patchApi(id, { requestable: true });
+    assert.equal(failed.statusCode, 502, failed.body);
+
+    assert.deepEqual(configsNamed(proxyId, 'access_control'), []);
+    assert.equal((await harness.store.apis.findById(id))?.requestable, false);
+    assert.equal(await ownedId(id, 'access_control'), null);
+  });
+
+  it('puts the ACL gate back under its own id after an unacknowledged delete', async () => {
+    const { id, proxyId } = await publish({ requestable: true });
+    const owned = await ownedId(id, 'access_control');
+    assert.ok(owned);
+    const before = structuredClone(stored(owned));
+
+    harness.edge.queueLostAck(503, { error: 'timeout' }, `/plugins/config/${owned}`, 'DELETE');
+    const failed = await patchApi(id, { requestable: false });
+    assert.equal(failed.statusCode, 502, failed.body);
+
+    // The gate is enforced again, under the id the record still names.
+    assert.deepEqual(stored(owned)?.config, before?.config);
+    assert.ok(effectiveIds(proxyId).includes(owned));
+    assert.equal((await harness.store.apis.findById(id))?.requestable, true);
+    assert.equal(await ownedId(id, 'access_control'), owned);
+  });
+
+  it('removes the replacement auth plugin whose create landed unacknowledged', async () => {
+    const { id, proxyId } = await publish();
+    const owned = await ownedId(id, 'auth');
+    assert.ok(owned);
+
+    harness.edge.queueLostAck(503, { error: 'timeout' }, '/plugins/config', 'POST');
+    const failed = await patchApi(id, { auth_plugin: 'jwt_auth' });
+    assert.equal(failed.statusCode, 502, failed.body);
+
+    // Only the original authentication runs, and the record still names it.
+    assert.deepEqual(configsNamed(proxyId, 'jwt_auth'), []);
+    assert.equal(stored(owned)?.plugin_name, 'key_auth');
+    assert.ok(effectiveIds(proxyId).includes(owned));
+    assert.equal((await harness.store.apis.findById(id))?.auth_plugin, 'key_auth');
+    assert.equal(await ownedId(id, 'auth'), owned);
+  });
+
+  it('records a repair when a settings compensation cannot finish', async () => {
+    const { id } = await publish({ rate_limit: { limit: 100, window_seconds: 60 } });
+    const owned = await ownedId(id, 'rate_limit');
+    assert.ok(owned);
+
+    // The quota change lands and is not acknowledged; the `PUT` that would
+    // put it back is refused.
+    harness.edge.queueLostAck(503, { error: 'timeout' }, `/plugins/config/${owned}`, 'PUT');
+    harness.edge.queueFailure(
+      503,
+      { error: 'gateway unavailable' },
+      `/plugins/config/${owned}`,
+      'PUT',
+      1,
+    );
+    const failed = await patchApi(id, { rate_limit: { limit: 5_000, window_seconds: 60 } });
+    assert.equal(failed.statusCode, 502, failed.body);
+
+    // The gateway kept the change, the portal did not, and the audit trail
+    // says so.
+    assert.deepEqual((stored(owned)?.config as { limits?: unknown }).limits, [
+      { scope: 'default', window_seconds: 60, max_requests: 5_000 },
+    ]);
+    assert.deepEqual((await harness.store.apis.findById(id))?.rate_limit, {
+      limit: 100,
+      window_seconds: 60,
+    });
+    assert.deepEqual(await rowsFor('api.update', id), []);
+    const repairs = await rowsFor('api.gateway_repair_required', id);
+    assert.equal(repairs.length, 1);
+    assert.equal(repairs[0]?.phase, 'compensation');
+    const stepErrors = repairs[0]?.step_errors;
+    assert.ok(Array.isArray(stepErrors) && stepErrors.length > 0);
   });
 });

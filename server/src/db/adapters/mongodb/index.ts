@@ -557,7 +557,7 @@ function mapApiGatewayPlugin(row: Row): ApiGatewayPluginRecord {
   return {
     api_id: str(row.api_id),
     role: str(row.role) as ApiGatewayPluginRole,
-    ferrum_plugin_config_id: str(row.ferrum_plugin_config_id),
+    ferrum_plugin_config_id: strOrNull(row.ferrum_plugin_config_id),
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
   };

@@ -261,8 +261,18 @@ export const API_GATEWAY_PLUGIN_ROLES = ['auth', 'access_control', 'rate_limit',
 /** One of {@link API_GATEWAY_PLUGIN_ROLES}. */
 export type ApiGatewayPluginRole = (typeof API_GATEWAY_PLUGIN_ROLES)[number];
 
-/** The config id Nexus created for each role an API currently uses. */
-export type ApiGatewayPluginIds = Partial<Record<ApiGatewayPluginRole, string>>;
+/**
+ * An API's ownership record, role by role: the config id Nexus created for a
+ * role, `null` when the record says the portal owns **no** config in it, and
+ * no key at all when the role is not recorded yet.
+ *
+ * `null` and absent are different claims. `null` is settled — the API does
+ * not use the role, or its config was removed — and a later change creates a
+ * fresh config beside whatever else the proxy carries. Absent is only ever an
+ * API published before the record existed, whose configs for that role the
+ * publishing service may still recognise.
+ */
+export type ApiGatewayPluginIds = Partial<Record<ApiGatewayPluginRole, string | null>>;
 
 /**
  * An `api_gateway_plugins` row — the portal's **ownership** claim on one of an
@@ -276,7 +286,8 @@ export type ApiGatewayPluginIds = Partial<Record<ApiGatewayPluginRole, string>>;
 export interface ApiGatewayPluginRecord {
   api_id: Uuid;
   role: ApiGatewayPluginRole;
-  ferrum_plugin_config_id: string;
+  /** `null`: the role is recorded and the portal owns no config in it. */
+  ferrum_plugin_config_id: string | null;
   created_at: IsoTimestamp;
   updated_at: IsoTimestamp;
 }
@@ -962,18 +973,19 @@ export interface UpsertApiPluginInput {
 /**
  * The first-class gateway plugin configs Nexus created for each API.
  *
- * An API with **no** rows was published before the portal recorded these —
- * every API recorded since carries at least its `auth` row — and is the only
- * case in which the publishing service may recognise a config it did not
- * record; see `publishing/service.ts`.
+ * Every API published since the record existed has a row for each role —
+ * `null` where it owns no config. A role with **no** row belongs to an API
+ * published before that, and is the only case in which the publishing service
+ * may recognise a config it did not record; see `publishing/service.ts`.
  */
 export interface ApiGatewayPluginRepo {
   /** Every recorded role for one API, in role order. */
   listByApi(apiId: Uuid): Promise<ApiGatewayPluginRecord[]>;
   /**
    * Make `ids` the API's complete record, atomically: a role it names is
-   * inserted or repointed, a role it omits is removed. `created_at` survives a
-   * repoint.
+   * inserted or repointed (a `null` recording that the portal owns no config
+   * in it), a role it omits is removed — left unrecorded. `created_at`
+   * survives a repoint.
    */
   replace(apiId: Uuid, ids: ApiGatewayPluginIds): Promise<void>;
   /** Cascade helper for API deletion. Returns the number of rows removed. */

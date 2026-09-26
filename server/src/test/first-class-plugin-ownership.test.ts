@@ -10,8 +10,9 @@
  * went in, whether it is listed before or after the portal's own config.
  *
  * The last block covers APIs published before the ownership record existed:
- * their configs are recognised once, conservatively, and anything ambiguous is
- * refused rather than guessed at.
+ * their configs are recognised once, conservatively, and anything ambiguous —
+ * or, for CORS and the ACL gate, a policy that no longer matches the API's
+ * settings — is refused rather than guessed at.
  */
 
 import assert from 'node:assert/strict';
@@ -106,10 +107,47 @@ describe('first-class plugin ownership', () => {
     return harness.edge.pluginsForProxy(proxyId).filter((plugin) => plugin.plugin_name === name);
   }
 
-  /** What `api_gateway_plugins` records for the API. */
-  async function ownedIds(apiId: string): Promise<ApiGatewayPluginIds> {
+  /**
+   * `api_gateway_plugins` for the API as a map: a recorded role maps to its
+   * config id, or to `null` when the portal owns no config in it; an
+   * unrecorded role is absent.
+   */
+  async function recordOf(apiId: string): Promise<ApiGatewayPluginIds> {
     const rows = await harness.store.apiGatewayPlugins.listByApi(apiId);
     return Object.fromEntries(rows.map((row) => [row.role, row.ferrum_plugin_config_id]));
+  }
+
+  /** The config ids the portal owns for the API — the record without its `null`s. */
+  async function ownedIds(apiId: string): Promise<ApiGatewayPluginIds> {
+    const record = await recordOf(apiId);
+    return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== null));
+  }
+
+  /** Every `unowned_same_name_configs` entry on this API's `api.update` rows. */
+  async function unownedIn(apiId: string): Promise<unknown[]> {
+    const entries: unknown[] = [];
+    for (const row of await harness.auditRows('api.update')) {
+      if (row.target_id !== apiId) continue;
+      const unowned = row.details.unowned_same_name_configs;
+      if (Array.isArray(unowned)) entries.push(...unowned);
+    }
+    return entries;
+  }
+
+  /** Take a config off the proxy and out of the gateway, as an operator would. */
+  function removeByHand(proxyId: string, id: string): void {
+    harness.edge.pluginConfigs.delete(`nexus/${id}`);
+    const proxy = harness.edge.proxies.get(`nexus/${proxyId}`);
+    assert.ok(proxy, 'expected the published proxy');
+    proxy.plugins = associatedIds(proxyId)
+      .filter((value) => value !== id)
+      .map((plugin_config_id) => ({ plugin_config_id }));
+  }
+
+  /** The `details` of a refusal. */
+  function refusalDetails(body: string): Record<string, unknown> {
+    const parsed = JSON.parse(body) as ApiErrorBody;
+    return (parsed.error.details ?? {}) as Record<string, unknown>;
   }
 
   /**
@@ -393,6 +431,241 @@ describe('first-class plugin ownership', () => {
       assert.equal(renamed.statusCode, 200, renamed.body);
       assert.equal(harness.edge.callsTo('PUT', '/plugins/config').length, writesBefore);
       assertUntouched(proxyId, operator);
+      // That save records every role it could attribute and leaves the
+      // ambiguous one unrecorded, so it is recognised again next time.
+      const record = await recordOf(id);
+      assert.ok(record.auth, 'the recognised auth config is recorded');
+      assert.equal(record.cors, null, 'a role the API does not use is recorded as owning none');
+      assert.equal('rate_limit' in record, false, 'the ambiguous role stays unrecorded');
+    });
+
+    it('refuses to guess between two auth configs that both look like its own', async () => {
+      const { id, proxyId } = await publish();
+      const portal = configsNamed(proxyId, 'key_auth')[0];
+      assert.ok(portal);
+      const portalSnapshot = structuredClone(portal);
+      await forgetRecord(id);
+      const operator = seedOperatorConfig(proxyId, 'key_auth', 'op-lookalike-auth', {});
+      const createsBefore = harness.edge.callsTo('POST', '/plugins/config').length;
+
+      const refused = await patch(id, { auth_plugin: 'jwt_auth' });
+      assert.equal(refused.statusCode, 409, refused.body);
+      assert.equal(refused.json<ApiErrorBody>().error.code, 'CONFLICT');
+      assert.deepEqual(refusalDetails(refused.body).plugin_names, ['key_auth']);
+      assert.equal(harness.edge.callsTo('POST', '/plugins/config').length, createsBefore);
+      assert.deepEqual(configsNamed(proxyId, 'jwt_auth'), []);
+      assertUntouched(proxyId, operator);
+      assert.deepEqual(stored(String(portalSnapshot.id)), portalSnapshot);
+      assert.equal((await harness.store.apis.findById(id))?.auth_plugin, 'key_auth');
+      assert.deepEqual(await recordOf(id), {});
+    });
+
+    it('never adopts, or deletes on a swap, an auth config with settings of its own', async () => {
+      const { id, proxyId } = await publish();
+      const portal = String(configsNamed(proxyId, 'key_auth')[0]?.id);
+      await forgetRecord(id);
+      // The portal's own `{}` config is gone; what is left is an operator's,
+      // tuned to a header of their own.
+      removeByHand(proxyId, portal);
+      const operator = seedOperatorConfig(proxyId, 'key_auth', 'op-tuned-key-auth', {
+        key_location: 'header:X-Ops-Key',
+      });
+
+      const swapped = await patch(id, { auth_plugin: 'jwt_auth' });
+      assert.equal(swapped.statusCode, 200, swapped.body);
+      assertUntouched(proxyId, operator);
+      const replacement = (await recordOf(id)).auth;
+      assert.ok(replacement);
+      assert.notEqual(replacement, 'op-tuned-key-auth');
+      assert.equal(stored(replacement)?.plugin_name, 'jwt_auth');
+      assert.ok(effectiveIds(proxyId).includes(replacement));
+      // The audit row names the config the portal settled beside.
+      assert.deepEqual(await unownedIn(id), [
+        { plugin_name: 'key_auth', plugin_config_id: 'op-tuned-key-auth' },
+      ]);
+    });
+
+    it('recognises its own ACL gate and leaves an operator’s alone', async () => {
+      const { id, proxyId } = await publish({ requestable: true });
+      const portal = String(configsNamed(proxyId, 'access_control')[0]?.id);
+      await forgetRecord(id);
+      const operator = seedOperatorConfig(proxyId, 'access_control', 'op-legacy-acl', {
+        allowed_groups: ['operators'],
+      });
+
+      const off = await patch(id, { requestable: false });
+      assert.equal(off.statusCode, 200, off.body);
+      assertUntouched(proxyId, operator);
+      assert.equal(stored(portal), undefined, 'the recognised gate is the one removed');
+      assert.equal((await recordOf(id)).access_control, null);
+    });
+
+    it('recognises its own CORS policy and leaves an operator’s alone', async () => {
+      const cors = { allowed_origins: ['https://app.example.com'], allow_credentials: false };
+      const { id, proxyId } = await publish({ cors });
+      const portal = String(configsNamed(proxyId, 'cors')[0]?.id);
+      await forgetRecord(id);
+      const operator = seedOperatorConfig(proxyId, 'cors', 'op-legacy-cors', {
+        allowed_origins: ['https://ops.example.com'],
+        allow_credentials: false,
+        allowed_headers: ['Accept'],
+        allowed_methods: ['GET'],
+      });
+
+      const changed = await patch(id, {
+        cors: { allowed_origins: ['https://new.example.com'], allow_credentials: false },
+      });
+      assert.equal(changed.statusCode, 200, changed.body);
+      assertUntouched(proxyId, operator);
+      assert.deepEqual((stored(portal)?.config as { allowed_origins?: unknown }).allowed_origins, [
+        'https://new.example.com',
+      ]);
+      assert.equal((await recordOf(id)).cors, portal);
+    });
+
+    it('refuses to guess between two CORS policies that both look like its own', async () => {
+      const cors = { allowed_origins: ['https://app.example.com'], allow_credentials: false };
+      const { id, proxyId } = await publish({ cors });
+      await forgetRecord(id);
+      const operator = seedOperatorConfig(proxyId, 'cors', 'op-lookalike-cors', {
+        ...cors,
+        allowed_headers: ['Accept'],
+      });
+      const writesBefore = harness.edge.callsTo('PUT', '/plugins/config').length;
+      const createsBefore = harness.edge.callsTo('POST', '/plugins/config').length;
+
+      const refused = await patch(id, {
+        cors: { allowed_origins: ['https://new.example.com'], allow_credentials: false },
+      });
+      assert.equal(refused.statusCode, 409, refused.body);
+      assert.deepEqual(refusalDetails(refused.body).plugin_names, ['cors']);
+      assert.equal(harness.edge.callsTo('PUT', '/plugins/config').length, writesBefore);
+      assert.equal(harness.edge.callsTo('POST', '/plugins/config').length, createsBefore);
+      assertUntouched(proxyId, operator);
+      assert.deepEqual((await harness.store.apis.findById(id))?.cors?.allowed_origins, [
+        'https://app.example.com',
+      ]);
+    });
+
+    it('refuses a CORS change beside policies that no longer match its settings', async () => {
+      const cors = { allowed_origins: ['https://app.example.com'], allow_credentials: false };
+      const { id, proxyId } = await publish({ cors });
+      const portal = configsNamed(proxyId, 'cors')[0];
+      assert.ok(portal);
+      await forgetRecord(id);
+      // The portal's policy was edited by hand, and an operator added one of
+      // their own: neither carries the origins the portal shows, so a new
+      // policy beside them would leave the gateway enforcing ones it does not.
+      (portal.config as { allowed_origins: string[] }).allowed_origins = [
+        'https://edited.example.com',
+      ];
+      const edited = structuredClone(portal);
+      const operator = seedOperatorConfig(proxyId, 'cors', 'op-other-cors', {
+        allowed_origins: ['https://ops.example.com'],
+        allow_credentials: false,
+      });
+      const createsBefore = harness.edge.callsTo('POST', '/plugins/config').length;
+
+      const refused = await patch(id, {
+        cors: { allowed_origins: ['https://new.example.com'], allow_credentials: false },
+      });
+      assert.equal(refused.statusCode, 409, refused.body);
+      assert.equal(refused.json<ApiErrorBody>().error.code, 'CONFLICT');
+      const details = refusalDetails(refused.body);
+      assert.deepEqual(details.plugin_names, ['cors']);
+      assert.deepEqual([...(details.plugin_config_ids as string[])].sort(), [
+        String(edited.id),
+        'op-other-cors',
+      ]);
+      assert.equal(harness.edge.callsTo('POST', '/plugins/config').length, createsBefore);
+      assert.equal(configsNamed(proxyId, 'cors').length, 2);
+      assert.deepEqual(stored(String(edited.id)), edited);
+      assertUntouched(proxyId, operator);
+
+      // Other changes still go through, and record every other role — but
+      // CORS stays unrecorded while it cannot be attributed.
+      const renamed = await patch(id, { description: 'Renamed beside an edited policy' });
+      assert.equal(renamed.statusCode, 200, renamed.body);
+      const record = await recordOf(id);
+      assert.ok(record.auth);
+      assert.equal('cors' in record, false);
+
+      // Brought back in line, the policy is recognised and the change lands.
+      (stored(String(edited.id))?.config as { allowed_origins: string[] }).allowed_origins = [
+        'https://app.example.com',
+      ];
+      const changed = await patch(id, {
+        cors: { allowed_origins: ['https://new.example.com'], allow_credentials: false },
+      });
+      assert.equal(changed.statusCode, 200, changed.body);
+      assert.equal((await recordOf(id)).cors, String(edited.id));
+      assertUntouched(proxyId, operator);
+    });
+
+    it('refuses to drop an ACL gate that no longer matches its API', async () => {
+      const { id, proxyId } = await publish({ requestable: true });
+      const portal = configsNamed(proxyId, 'access_control')[0];
+      assert.ok(portal);
+      await forgetRecord(id);
+      (portal.config as { allowed_groups: string[] }).allowed_groups = ['edited-by-hand'];
+      const edited = structuredClone(portal);
+
+      const refused = await patch(id, { requestable: false });
+      assert.equal(refused.statusCode, 409, refused.body);
+      const details = refusalDetails(refused.body);
+      assert.deepEqual(details.plugin_names, ['access_control']);
+      assert.deepEqual(details.plugin_config_ids, [String(edited.id)]);
+      assert.deepEqual(stored(String(edited.id)), edited);
+      assert.ok(effectiveIds(proxyId).includes(String(edited.id)));
+      assert.equal((await harness.store.apis.findById(id))?.requestable, true);
+    });
+
+    it('sets its own quota beside a hand-edited limiter and audits it', async () => {
+      const { id, proxyId } = await publish({ rate_limit: { limit: 100, window_seconds: 60 } });
+      const portal = configsNamed(proxyId, 'rate_limiting')[0];
+      assert.ok(portal);
+      await forgetRecord(id);
+      (portal.config as { limits: { max_requests: number }[] }).limits[0]!.max_requests = 7;
+      const edited = structuredClone(portal);
+
+      const changed = await patch(id, { rate_limit: { limit: 500, window_seconds: 60 } });
+      assert.equal(changed.statusCode, 200, changed.body);
+      assert.deepEqual(stored(String(edited.id)), edited, 'the edited limiter is left alone');
+      const owned = (await recordOf(id)).rate_limit;
+      assert.ok(owned);
+      assert.notEqual(owned, String(edited.id));
+      assert.deepEqual((stored(owned)?.config as { limits?: unknown }).limits, [
+        { scope: 'default', window_seconds: 60, max_requests: 500 },
+      ]);
+      assert.deepEqual(await unownedIn(id), [
+        { plugin_name: 'rate_limiting', plugin_config_id: String(edited.id) },
+      ]);
+    });
+
+    it('records a role it owns nothing in, so recognition does not run again', async () => {
+      const { id, proxyId } = await publish();
+      const portal = String(configsNamed(proxyId, 'key_auth')[0]?.id);
+      await forgetRecord(id);
+      removeByHand(proxyId, portal);
+
+      const renamed = await patch(id, { description: 'No auth config left' });
+      assert.equal(renamed.statusCode, 200, renamed.body);
+      assert.deepEqual(await recordOf(id), {
+        auth: null,
+        access_control: null,
+        rate_limit: null,
+        cors: null,
+      });
+
+      // An auth config that turns up later is not the portal's: it was not
+      // there to be recognised, and the record says the portal owns none.
+      const operator = seedOperatorConfig(proxyId, 'key_auth', 'op-later-key-auth', {});
+      const swapped = await patch(id, { auth_plugin: 'jwt_auth' });
+      assert.equal(swapped.statusCode, 200, swapped.body);
+      assertUntouched(proxyId, operator);
+      const replacement = (await recordOf(id)).auth;
+      assert.ok(replacement);
+      assert.equal(stored(replacement)?.plugin_name, 'jwt_auth');
     });
   });
 });

@@ -113,6 +113,9 @@ describe('buildout schema baseline', () => {
           VALUES ('a', 'API', 'api', 'u', 'ferrum', '1.0.0', 'key_auth', 'now', 'now');
         INSERT INTO api_gateway_plugins (api_id, role, ferrum_plugin_config_id, created_at, updated_at)
           VALUES ('a', 'rate_limit', 'config', 'now', 'now');
+        -- A role recorded as owning no config.
+        INSERT INTO api_gateway_plugins (api_id, role, ferrum_plugin_config_id, created_at, updated_at)
+          VALUES ('a', 'cors', NULL, 'now', 'now');
       `);
       assert.throws(
         () =>

@@ -727,14 +727,18 @@ therefore a **new forward migration**:
 3. Make it safe to re-run where the backend cannot roll it back (MySQL DDL,
    MongoDB steps; see the backend notes below), and never make it depend on
    data a portal may not have.
-4. At release, add it to `RELEASED_MIGRATIONS` with its checksums, and commit
-   `server/src/db/released/NNN_description.mongodb.json`, the frozen snapshot
-   of its MongoDB indexes.
+4. In the same change, add it to `RELEASED_MIGRATIONS` with `release: null`
+   and its checksums, and commit
+   `server/src/db/released/NNN_description.mongodb.json`, the snapshot of its
+   MongoDB indexes, so CI checks its artifacts from the start; an edit before
+   it ships updates those checksums in the same change. The release that ships
+   it sets `release` to its tag, which freezes it.
 
 The first forward migration, `002_api_gateway_plugins`, retired the
 buildout-only checks that `001_initial` was the sole migration: the first case
 in `server/src/db/initial-schema.test.ts` and the image assertion in the
-`docker` CI job now name both ids.
+`docker` CI job now name both ids. It is listed in `RELEASED_MIGRATIONS` with
+`release: null` until the release that ships it sets its tag.
 
 **`002_api_gateway_plugins`** adds one table, `api_gateway_plugins`, recording
 the Edge plugin config id of each first-class config the portal creates for an
@@ -744,12 +748,17 @@ an operator's config of the same plugin name. It is a single
 `CREATE TABLE IF NOT EXISTS` on every SQL backend and one unique index on
 MongoDB, and it copies no data. An API published before the upgrade starts with
 no record; its configs are recognised on its first gateway-touching change by
-the values the portal wrote (the ACL group, the quota, the CORS origins) and
-recorded then. If a proxy carries two configs that both match for one role, a
-`PATCH` touching that role answers `409 CONFLICT` naming the plugin until the
-duplicate is removed from the gateway; changes to other fields keep working. A
-config whose portal-owned values an operator edited by hand is left to the
-operator, and the portal creates its own beside it on the next change.
+the values the portal wrote (the empty auth config, the ACL group, the quota,
+the CORS origins) and recorded then, role by role — a role the API does not use
+is recorded as owning nothing (a row with a `NULL` config id). If a proxy
+carries two configs that both match for one role, or an `access_control` or
+`cors` config that no longer matches the API's settings and none that does, a
+`PATCH` touching that role answers `409 CONFLICT` naming the plugin, and the
+role stays unrecorded, until the operator removes the config or brings it back
+in line; changes to other fields keep working. A `rate_limiting` or auth config
+whose portal-owned values an operator edited by hand is left to the operator:
+the portal creates its own beside it on the next change, and the audit row
+names it under `unowned_same_name_configs`.
 
 **CI enforces this.** `server/src/db/released-migrations.test.ts` fails when a
 released migration's file (or MongoDB snapshot) no longer matches its recorded

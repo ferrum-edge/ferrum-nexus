@@ -90,7 +90,7 @@ Backend tests boot the full Fastify app against in-memory SQLite plus a mock Fer
 ## Where to start when…
 
 - **Adding a route**: register it in the appropriate file under `server/src/routes/`, wire any new services into `server/src/index.ts` (COMPOSITION sections), add DTOs to `shared/src/api-contract.ts`, and add the call in `web/src/lib/api.ts`.
-- **Adding a DB column / table**: `001_initial` is frozen, so add a forward migration with the next id — `NNN_description.sql`, `.pg.sql` and `.mysql.sql` under `server/src/db/migrations/` plus a `MONGO_MIGRATIONS` step — and list it in `server/src/db/released-migrations.ts` when it ships; then update `NexusStore`, implement in sqlite + sql-repos + mongodb, extend the smoke suite and the upgrade fixture in `server/src/test/baseline-upgrade.test.ts`.
+- **Adding a DB column / table**: `001_initial` is frozen, so add a forward migration with the next id — `NNN_description.sql`, `.pg.sql` and `.mysql.sql` under `server/src/db/migrations/` plus a `MONGO_MIGRATIONS` step — and list it in `server/src/db/released-migrations.ts` with `release: null` and its checksums (plus its `server/src/db/released/` MongoDB snapshot) in the same change, the release that ships it setting `release`; then update `NexusStore`, implement in sqlite + sql-repos + mongodb, extend the smoke suite and the upgrade fixture in `server/src/test/baseline-upgrade.test.ts`.
 - **Touching the Ferrum Edge integration**: only through `server/src/ferrum-admin/`; extend the mock in `server/src/test/mock-ferrum-edge.ts` to match.
 - **Adding an audit event**: extend the `AuditAction` catalog in [server/src/audit/service.ts](server/src/audit/service.ts) and the table in [docs/security.md](docs/security.md).
 

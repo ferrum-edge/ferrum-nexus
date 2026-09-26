@@ -490,15 +490,33 @@ settings change replaces, repairs or deletes only a recorded config. Setting a
 quota beside an operator's limiter creates the portal's own beside it; clearing
 it removes only the portal's. An API published before the record existed has
 its configs recognised once by the values the portal wrote, never by name
-alone, and a `PATCH` that would touch a role with two such candidates is
-refused with `409 CONFLICT` instead of guessing (`docs/architecture.md` §5.3).
+alone — an auth config counts only while it is exactly the empty config the
+portal writes, so an operator's tuned `key_auth` is never adopted and never
+deleted by an `auth_plugin` swap. A `PATCH` that would touch a role with two
+such candidates, or an `access_control` or `cors` role whose only configs no
+longer match the API's settings, is refused with `409 CONFLICT` instead of
+guessing (`docs/architecture.md` §5.3).
 
 A plugin-config write the gateway applied but never acknowledged is
 compensated like one it refused: the undo — the whole live resource, including
 `enabled` and `trigger` — is registered before the `PUT`, and a new config is
 created under an id minted beforehand. Each failed palette change that reached
 the gateway writes an `api.plugin_rollback` audit row, whose `restored: false`
-is the one to alert on.
+is the one to alert on; a failed API settings change whose compensation could
+not finish writes `api.gateway_repair_required`.
+
+Compensation lives in the request's memory, not on disk. If the Nexus process
+dies after Edge has applied a change and before the undo runs — a crash, an
+`OOM` kill, a hard restart mid-request — nothing records that the change was in
+flight: no audit row is written, the portal row still shows the old setting,
+and the gateway keeps the new one. Recovery is operational.
+`POST /api/admin/gateway/reconcile` finds references that no longer resolve (a
+proxy or consumer that is gone); a plugin config whose values changed is found
+only by comparing the proxy's configs in the Edge Admin API with the API's
+settings in the portal, and is put back by the gateway operator (re-saving an
+unchanged setting repairs a dropped association, not a config's values). After
+an unclean shutdown during provider activity, check the APIs whose settings
+were being changed.
 
 ### First user and the last-super-admin guard
 

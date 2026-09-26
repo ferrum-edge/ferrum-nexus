@@ -38,10 +38,19 @@ All notable changes to Ferrum Nexus are documented here. The format follows
     creates (forward migration `002_api_gateway_plugins`, new store repository
     `apiGatewayPlugins`) and acts on those ids alone; an operator's config is
     left exactly as it is, and the portal creates its own beside it when it
-    owns none. An API published before the upgrade has its configs recognised
-    once, by the values the portal wrote rather than by name, and a change to a
-    setting whose proxy carries two such candidates is refused with
-    `409 CONFLICT` naming the plugin.
+    owns none. Every role is recorded, with a `NULL` config id where the
+    portal owns no config, so the record is complete from the first change.
+    An API published before the upgrade has its configs recognised role by
+    role, by the values the portal wrote rather than by name — an auth config
+    only while it is exactly the empty config the portal writes. A change to a
+    setting whose proxy carries two such candidates, or to `requestable` or
+    `cors` when the proxy's only `access_control` or `cors` configs no longer
+    match the API's settings, is refused with `409 CONFLICT` naming the plugin;
+    a hand-edited limiter or auth config is left to the operator, the portal's
+    own is created beside it, and the `api.update` row names it under
+    `unowned_same_name_configs`. `002_api_gateway_plugins` is listed in the
+    released-migration manifest as pending (`release: null`), so CI checks its
+    artifacts until the release that ships it freezes them.
   - A `PUT /plugins/config/{id}` Edge applied but never acknowledged used to
     leave the change live — a palette security plugin disabled or an
     allow-list replaced, a first-class quota raised — while the request failed
@@ -53,7 +62,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   - A palette `set` or `remove` that reached the gateway and then failed now
     writes an `api.plugin_rollback` audit row recording whether the gateway was
     restored (`restored`), and when it was not, the step errors and the config
-    to inspect.
+    to inspect. `docs/security.md` now states that compensation is held in
+    memory: a process that dies between Edge applying a change and the undo
+    running leaves no record, and recovery is operational.
 - **Application deletion is atomic, race-free and quota-preserving (#363,
   #364, #365).**
   - The rolling access-request budget

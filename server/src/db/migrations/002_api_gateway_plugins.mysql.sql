@@ -2,11 +2,12 @@
 --
 -- Mirrors 002_api_gateway_plugins.sql; see there for what the table records.
 -- A single replayable CREATE with its keys and constraints inline, which is
--- the only statement shape the MySQL migration runner applies.
+-- the only statement shape the MySQL migration runner applies. The config id
+-- is as wide as Edge allows a resource id to be.
 CREATE TABLE IF NOT EXISTS api_gateway_plugins (
   api_id                  VARCHAR(64) NOT NULL,
   role                    VARCHAR(32) NOT NULL,
-  ferrum_plugin_config_id VARCHAR(64) NOT NULL,
+  ferrum_plugin_config_id VARCHAR(254) NULL,
   created_at              VARCHAR(32) NOT NULL,
   updated_at              VARCHAR(32) NOT NULL,
   PRIMARY KEY (api_id, role),

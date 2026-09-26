@@ -886,25 +886,57 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * operator removed it, and the next change creates a fresh one beside
    * whatever else is there.
    *
-   * An API with **no** record predates it (`002_api_gateway_plugins`). Its
-   * configs are recognised once, conservatively: a config counts as the
-   * portal's only when the API currently uses that role *and* the config
-   * carries what the portal wrote for it — its ACL group, its quota, its CORS
-   * origins — so an operator's differently-tuned config is never adopted. Two
-   * such candidates for one role are `ambiguous`: `update` refuses to touch
-   * that role rather than guess, and does not record the rest until it can.
-   * The first successful change records the recognised ids, and the API is
-   * governed by its record from then on.
+   * A role with **no** row predates the record (`002_api_gateway_plugins`).
+   * Its configs are recognised conservatively: a config counts as the portal's
+   * only when the API currently uses that role *and* the config carries what
+   * the portal wrote for it — the empty auth config, its ACL group, its quota,
+   * its CORS origins — so an operator's differently-tuned config is never
+   * adopted. A role the API does not use is settled as owning nothing. Two
+   * candidates for one role are `ambiguous`; for `access_control` and `cors`,
+   * a config of the role's name with no candidate at all is `unrecognised` —
+   * most likely the portal's own, edited by hand, and a second policy beside
+   * it would leave the gateway enforcing one the portal no longer shows.
+   * `update` refuses to touch either rather than guess, and leaves them
+   * unrecorded; every other role is recorded by the first successful change,
+   * and governed by its record from then on.
    */
   interface FirstClassOwnership {
-    /** The recorded ids — or, for an unrecorded API, the recognised ones. */
+    /** What `api_gateway_plugins` holds now: recorded roles only. */
+    stored: ApiGatewayPluginIds;
+    /**
+     * {@link stored} plus every unrecorded role this reading could attribute —
+     * its recognised id, or `null` for none — which is what a successful
+     * change records.
+     */
     ids: ApiGatewayPluginIds;
     /** The owned config on the proxy for each role, when it is still there. */
     live: Partial<Record<ApiGatewayPluginRole, EdgePluginConfig>>;
-    /** `false` for an API published before ownership was recorded. */
-    recorded: boolean;
-    /** Roles an unrecorded API carries more than one candidate config for. */
+    /** Unrecorded roles the proxy carries more than one candidate config for. */
     ambiguous: ApiGatewayPluginRole[];
+    /**
+     * Unrecorded roles in use whose proxy carries configs of the role's plugin
+     * name and no candidate, with those configs' ids. Only `rate_limit` and
+     * `auth` among them are attributed (as `null`) in {@link ids}.
+     */
+    unrecognised: Partial<Record<ApiGatewayPluginRole, string[]>>;
+  }
+
+  /**
+   * Roles whose unrecognised legacy config blocks a change rather than having
+   * the portal's own created beside it: two CORS policies or two ACL gates
+   * would each show the provider one setting while the gateway enforces
+   * another. A second limiter only ever tightens, so `rate_limit` is not here.
+   */
+  const REFUSED_WHEN_UNRECOGNISED: readonly ApiGatewayPluginRole[] = ['access_control', 'cors'];
+
+  /** A complete ownership record that owns nothing yet: every role `null`. */
+  function noFirstClassConfigs(): ApiGatewayPluginIds {
+    return {
+      auth: null,
+      access_control: null,
+      rate_limit: null,
+      cors: null,
+    } satisfies Record<ApiGatewayPluginRole, null>;
   }
 
   /** The plugin name a first-class role runs under on this API. */
@@ -930,7 +962,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
    * Whether an unrecorded API's config carries what the portal wrote for this
    * role. Only the portal-owned keys are compared, so a config whose extra
    * keys an operator tuned is still recognised; one whose portal keys differ
-   * is somebody else's.
+   * is somebody else's. The auth plugin's portal config is the whole config —
+   * `authPluginConfig` writes Edge's defaults as `{}` — so an auth config with
+   * any setting of its own is an operator's, never the portal's to delete.
    */
   function recognisedAsPortals(
     api: ApiRecord,
@@ -938,7 +972,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     plugin: EdgePluginConfig,
   ): boolean {
     const settings = plugin.config ?? {};
-    if (role === 'auth') return true;
+    if (role === 'auth') return isDeepStrictEqual(settings, authPluginConfig(api.auth_plugin));
     if (role === 'access_control') {
       return isDeepStrictEqual(settings.allowed_groups, [aclGroupForApi(api.id)]);
     }
@@ -964,26 +998,31 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
     api: ApiRecord,
     plugins: EdgePluginConfig[],
   ): Promise<FirstClassOwnership> {
+    const stored: ApiGatewayPluginIds = {};
     const ids: ApiGatewayPluginIds = {};
     const live: FirstClassOwnership['live'] = {};
-    const rows = await store.apiGatewayPlugins.listByApi(api.id);
-    if (rows.length > 0) {
-      for (const row of rows) {
-        ids[row.role] = row.ferrum_plugin_config_id;
-        const found = plugins.find((plugin) => plugin.id === row.ferrum_plugin_config_id);
-        if (found && found.plugin_name === firstClassPluginName(api, row.role)) {
-          live[row.role] = found;
-        }
-      }
-      return { ids, live, recorded: true, ambiguous: [] };
-    }
     const ambiguous: ApiGatewayPluginRole[] = [];
+    const unrecognised: FirstClassOwnership['unrecognised'] = {};
+    for (const row of await store.apiGatewayPlugins.listByApi(api.id)) {
+      stored[row.role] = row.ferrum_plugin_config_id;
+    }
     for (const role of API_GATEWAY_PLUGIN_ROLES) {
-      if (!firstClassRoleInUse(api, role)) continue;
       const name = firstClassPluginName(api, role);
-      const candidates = plugins.filter(
-        (plugin) => plugin.plugin_name === name && recognisedAsPortals(api, role, plugin),
-      );
+      const recorded = stored[role];
+      if (recorded !== undefined) {
+        ids[role] = recorded;
+        const found =
+          recorded === null ? undefined : plugins.find((plugin) => plugin.id === recorded);
+        if (found && found.plugin_name === name) live[role] = found;
+        continue;
+      }
+      // Unrecorded: an API published before the record existed.
+      if (!firstClassRoleInUse(api, role)) {
+        ids[role] = null;
+        continue;
+      }
+      const sameName = plugins.filter((plugin) => plugin.plugin_name === name);
+      const candidates = sameName.filter((plugin) => recognisedAsPortals(api, role, plugin));
       if (candidates.length > 1) {
         ambiguous.push(role);
         continue;
@@ -992,9 +1031,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       if (candidate) {
         ids[role] = candidate.id;
         live[role] = candidate;
+        continue;
       }
+      if (sameName.length > 0) {
+        unrecognised[role] = sameName.map((plugin) => plugin.id);
+        if (REFUSED_WHEN_UNRECOGNISED.includes(role)) continue;
+      }
+      ids[role] = null;
     }
-    return { ids, live, recorded: false, ambiguous };
+    return { stored, ids, live, ambiguous, unrecognised };
   }
 
   function associatedIds(proxy: EdgeProxy): string[] {
@@ -1666,8 +1711,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           }
           const proxy = { id: gatewayProxyId };
           // The ids recorded below as the portal's own first-class configs —
-          // the only ones a later settings change may replace or delete.
-          const owned: ApiGatewayPluginIds = {};
+          // the only ones a later settings change may replace or delete. Every
+          // role is recorded, `null` where the API does not use it.
+          const owned = noFirstClassConfigs();
 
           const auth = await attach(
             proxy.id,
@@ -1971,22 +2017,36 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             touched.add('cors');
           }
         }
-        const unattributable = owned.ambiguous.filter((role) => touched.has(role));
-        if (unattributable.length > 0) {
+        const ambiguousTouched = owned.ambiguous.filter((role) => touched.has(role));
+        if (ambiguousTouched.length > 0) {
+          const names = ambiguousTouched.map((role) => firstClassPluginName(api, role));
           throw conflict(
             'This API predates gateway plugin ownership records and its proxy carries more ' +
-              'than one configuration the portal could have created for ' +
-              `${unattributable.map((role) => firstClassPluginName(api, role)).join(', ')}; ` +
+              `than one configuration the portal could have created for ${names.join(', ')}; ` +
               'ask the gateway operator to remove the duplicate, then retry',
-            {
-              api_id: api.id,
-              plugin_names: unattributable.map((role) => firstClassPluginName(api, role)),
-            },
+            { api_id: api.id, plugin_names: names },
+          );
+        }
+        // A policy the portal cannot recognise as its own, where a second one
+        // beside it would make the setting the provider sees diverge from the
+        // one the gateway enforces — see `REFUSED_WHEN_UNRECOGNISED`.
+        const unrecognisedTouched = REFUSED_WHEN_UNRECOGNISED.filter(
+          (role) => touched.has(role) && owned.unrecognised[role] !== undefined,
+        );
+        if (unrecognisedTouched.length > 0) {
+          const names = unrecognisedTouched.map((role) => firstClassPluginName(api, role));
+          const configIds = unrecognisedTouched.flatMap((role) => owned.unrecognised[role] ?? []);
+          throw conflict(
+            'This API predates gateway plugin ownership records and its proxy carries a ' +
+              `${names.join(', ')} configuration that does not match the settings the portal ` +
+              'shows, so the portal cannot tell whether it is its own; ask the gateway operator ' +
+              "to remove it or bring it back in line with the API's settings, then retry",
+            { api_id: api.id, plugin_names: names, plugin_config_ids: configIds },
           );
         }
         // What `api_gateway_plugins` says once this PATCH lands. Starts from
-        // what it says now — or, for an unrecorded API, from what was
-        // recognised — and moves with every first-class config written below.
+        // what it says now plus every unrecorded role this reading could
+        // attribute, and moves with every first-class config written below.
         const nextOwned: ApiGatewayPluginIds = { ...owned.ids };
 
         // ── The auth swap's blast radius, measured before anything moves ──
@@ -2172,7 +2232,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
                 await disassociate(proxyId, [acl.id], actor.id);
                 await edge.pluginConfigs.delete(acl.id, actor.id);
               }
-              delete nextOwned.access_control;
+              nextOwned.access_control = null;
             }
             update.requestable = patch.requestable;
             changed.push('requestable');
@@ -2277,8 +2337,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               undo,
               live ? { enabled: live.enabled, trigger: live.trigger ?? null } : undefined,
             );
-            if (written) nextOwned[role] = written.id;
-            else delete nextOwned[role];
+            nextOwned[role] = written ? written.id : null;
             return true;
           };
 
@@ -2481,13 +2540,25 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // The ownership record moves with the row, in one transaction and
           // still inside the compensated block: a config this PATCH created
           // that the record does not name would be one no later change could
-          // touch. An unrecorded API's recognised ids are recorded here too,
-          // once every role it uses could be attributed.
-          const recordOwnership =
-            proxyId !== null &&
-            (owned.recorded
-              ? !isDeepStrictEqual(nextOwned, owned.ids)
-              : owned.ambiguous.length === 0);
+          // touch. An unrecorded API's attributable roles are recorded here
+          // too — including the ones it owns nothing in, so recognition does
+          // not run again for them — while an ambiguous or unrecognised role
+          // stays unrecorded until the operator resolves it.
+          const recordOwnership = proxyId !== null && !isDeepStrictEqual(nextOwned, owned.stored);
+          if (recordOwnership) {
+            // Same-name configs an unrecorded role is being settled beside,
+            // which the portal treats as an operator's from now on — named in
+            // the audit row so an operator can tell a stale one from their own.
+            const unowned: { plugin_name: string; plugin_config_id: string }[] = [];
+            for (const role of API_GATEWAY_PLUGIN_ROLES) {
+              if (owned.stored[role] !== undefined || nextOwned[role] === undefined) continue;
+              const pluginName = firstClassPluginName(api, role);
+              for (const configId of owned.unrecognised[role] ?? []) {
+                unowned.push({ plugin_name: pluginName, plugin_config_id: configId });
+              }
+            }
+            if (unowned.length > 0) details.unowned_same_name_configs = unowned;
+          }
           if (changed.length === 0) {
             // Reconciliation can repair live gateway drift without changing the
             // Nexus row. That is still a state-changing operation and must retain
@@ -2845,7 +2916,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
 
           // A new proxy means new first-class configs, and these ids replace
           // whatever the API's record named on the proxy that was lost.
-          const owned: ApiGatewayPluginIds = {};
+          const owned = noFirstClassConfigs();
           const auth = await attach(
             gatewayProxyId,
             api.auth_plugin,

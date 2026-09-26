@@ -506,7 +506,8 @@ disassociation, both through `mutateProxy` (§5.2).
 
 Nexus stores the proxy id on the `apis` row and the id of every first-class
 plugin config it created — the auth plugin, `access_control`, `rate_limiting`
-and `cors` — in `api_gateway_plugins`, one row per `(api_id, role)`. Those
+and `cors` — in `api_gateway_plugins`, one row per `(api_id, role)`, with a
+`NULL` config id for a role in which the portal owns no config. Those
 recorded ids, never plugin names, decide which config a settings change may
 replace, repair or delete. Edge lets a proxy carry several configs of one
 plugin name, and an operator's own limiter, CORS policy or gate on a portal
@@ -518,12 +519,24 @@ config; the next change creates a fresh one rather than adopting whatever
 else carries the name.
 
 An API published before `002_api_gateway_plugins` has no rows. Its configs are
-recognised once, conservatively: a config counts as the portal's only when the
-API currently uses that role and the config still carries what the portal
-wrote — its ACL group, its quota, its CORS origins. Two candidates for one role
-are ambiguous, and a `PATCH` that would touch that role is refused with
-`409 CONFLICT` until an operator removes the duplicate; the first successful
-change records the recognised ids, after which the record alone governs.
+recognised role by role, conservatively: a config counts as the portal's only
+when the API currently uses that role and the config still carries what the
+portal wrote — the empty auth config, its ACL group, its quota, its CORS
+origins — so an auth config with settings of its own is never adopted, and
+never deleted by an `auth_plugin` swap. A role the API does not use is settled
+as owning nothing. Two candidates for one role are ambiguous; an
+`access_control` or `cors` config with no candidate beside it is unrecognised —
+most likely the portal's own, edited by hand, and a second policy next to it
+would enforce a setting the portal no longer shows. A `PATCH` that would touch
+either kind of role is refused with `409 CONFLICT` naming the plugin until an
+operator removes the config or brings it back in line with the API's settings;
+an unrecognised limiter or auth config is instead left to the operator, the
+portal's own is created beside it, and the audit row lists it under
+`unowned_same_name_configs`. The first successful change records every role it
+could attribute — `NULL` included, so recognition does not run again for a
+role in which the portal owns nothing — and leaves an ambiguous or
+unrecognised role unrecorded until it resolves; a recorded role is governed by
+its record alone.
 
 ### 5.4 One consumer per identity per namespace
 
