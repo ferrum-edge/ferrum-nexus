@@ -202,7 +202,7 @@ describe('deleting an API', () => {
     expect(detail).toHaveBeenCalledTimes(1);
     // Lists, other APIs and the catalog are refreshed as before.
     expect(client.getQueryState(queryKeys.apis.list({}))?.isInvalidated).toBe(true);
-    expectStale('apis', 'catalog');
+    expectStale('apis', 'catalog', 'grants', 'requests', 'applications', 'credentials');
 
     // Once the page unmounts, the deleted API leaves the cache entirely.
     unmount();
