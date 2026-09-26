@@ -2062,7 +2062,22 @@ would lock grantees out of the API, without `confirm_access_disruption: true`),
 `409 CONFLICT` (a gateway setting — `upstream_url`, `auth_plugin`, `requestable`,
 `rate_limit`, `cors`, `allowed_methods`, `timeouts`, `circuit_breaker` or
 `spec_enforcement` — on an API with no gateway deployment; `details.fields`
-names them), `502 EDGE_ERROR`.
+names them; or a change to `auth_plugin`, `requestable`, `rate_limit` or `cors`
+on an API published before plugin ownership was recorded, whose proxy carries
+two configs the portal could have created for that setting, or — for
+`auth_plugin`, `requestable` and `cors` — only an auth, `access_control` or
+`cors` config that no longer matches the API's settings (for auth, one with any
+setting of its own, which a swap would leave accepting the outgoing
+credentials); `details.plugin_names` names the plugins and, in the second case,
+`details.plugin_config_ids` the configs), `502 EDGE_ERROR`.
+
+**Only the plugin configs the portal created are touched.** Nexus records the
+Edge config id of the auth, `access_control`, `rate_limiting` and `cors` configs
+it creates, and `auth_plugin`, `requestable`, `rate_limit` and `cors` act on
+those alone. A config of the same plugin name that a gateway operator attached
+to the proxy is never rewritten, re-associated or deleted: setting `rate_limit`
+beside an operator's limiter creates the portal's own config next to it (both
+apply), and `null` removes only the portal's.
 
 **An API the gateway no longer serves takes catalog edits only.** While
 `ferrum_proxy_id` is `null` (after a reconciliation repair, or a restore that

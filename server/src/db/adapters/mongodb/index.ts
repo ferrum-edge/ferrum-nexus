@@ -113,6 +113,9 @@ import type {
   AccessRequestRecord,
   AccessRequestRepo,
   ApiFilter,
+  ApiGatewayPluginRecord,
+  ApiGatewayPluginRepo,
+  ApiGatewayPluginRole,
   ApiPluginRecord,
   ApiViewerRecord,
   ApiViewerRepo,
@@ -171,7 +174,11 @@ import type {
   VerificationTokenRecord,
   VerificationTokenRepo,
 } from '../../store.js';
-import { assertLeaseKeyLength, SPEC_HISTORY_PRUNE_BATCH } from '../../store.js';
+import {
+  API_GATEWAY_PLUGIN_ROLES,
+  assertLeaseKeyLength,
+  SPEC_HISTORY_PRUNE_BATCH,
+} from '../../store.js';
 import {
   createMongoContentionGate,
   isMongoTransactionContentionError,
@@ -190,6 +197,7 @@ const COLLECTIONS = {
   apis: 'apis',
   apiSpecs: 'api_specs',
   apiPlugins: 'api_plugins',
+  apiGatewayPlugins: 'api_gateway_plugins',
   apiViewers: 'api_viewers',
   accessRequests: 'access_requests',
   grants: 'grants',
@@ -540,6 +548,16 @@ function mapApiPlugin(row: Row): ApiPluginRecord {
     trigger: (row.trigger ?? null) as ApiPluginTrigger | null,
     // Absent on every document written before 015, which is exactly the `null`
     // the SQL dialects get from the new column.
+    ferrum_plugin_config_id: strOrNull(row.ferrum_plugin_config_id),
+    created_at: str(row.created_at),
+    updated_at: str(row.updated_at),
+  };
+}
+
+function mapApiGatewayPlugin(row: Row): ApiGatewayPluginRecord {
+  return {
+    api_id: str(row.api_id),
+    role: str(row.role) as ApiGatewayPluginRole,
     ferrum_plugin_config_id: strOrNull(row.ferrum_plugin_config_id),
     created_at: str(row.created_at),
     updated_at: str(row.updated_at),
@@ -1207,12 +1225,31 @@ export interface MongoMigrationStep {
   apply: (db: Db) => Promise<void>;
 }
 
+/**
+ * `002_api_gateway_plugins`: the `(api_id, role)` key of the first-class
+ * plugin ownership record, which the SQL dialects declare as a primary key.
+ * The collection itself needs no creation step; the first insert makes it.
+ */
+export const API_GATEWAY_PLUGIN_INDEXES: readonly IndexDefinition[] = [
+  {
+    collection: 'api_gateway_plugins',
+    name: 'ux_api_gateway_plugins_api_role',
+    key: { api_id: 1, role: 1 },
+    unique: true,
+  },
+];
+
 /** The baseline creates every index; document fields are written by repositories. */
 export const MONGO_MIGRATIONS: readonly MongoMigrationStep[] = [
   {
     id: '001_initial',
     indexes: BASELINE_INDEXES,
     apply: (db: Db): Promise<void> => createIndexes(db, BASELINE_INDEXES),
+  },
+  {
+    id: '002_api_gateway_plugins',
+    indexes: API_GATEWAY_PLUGIN_INDEXES,
+    apply: (db: Db): Promise<void> => createIndexes(db, API_GATEWAY_PLUGIN_INDEXES),
   },
 ];
 
@@ -2247,6 +2284,49 @@ class MongoStore implements NexusStore {
     deleteByApi: async (apiId) =>
       (
         await this.col(COLLECTIONS.apiPlugins).deleteMany(
+          { api_id: apiId } as Filter<NexusDoc>,
+          this.opts,
+        )
+      ).deletedCount,
+  };
+
+  /* ── apiGatewayPlugins ────────────────────────────────────────────────── */
+
+  readonly apiGatewayPlugins: ApiGatewayPluginRepo = {
+    listByApi: async (apiId) => {
+      const rows = (
+        await this.col(COLLECTIONS.apiGatewayPlugins)
+          .find({ api_id: apiId } as Filter<NexusDoc>, this.opts)
+          .toArray()
+      ).map((doc) => mapApiGatewayPlugin(doc as Row));
+      return API_GATEWAY_PLUGIN_ROLES.flatMap((role) => rows.filter((row) => row.role === role));
+    },
+
+    replace: async (apiId, ids) => {
+      const at = nowIso();
+      const roles = API_GATEWAY_PLUGIN_ROLES.filter((role) => ids[role] !== undefined);
+      // One transaction, so a reader never sees half of an API's record — the
+      // half that would read as "not the portal's".
+      await this.inTransaction(async (tx) => {
+        await tx
+          .col(COLLECTIONS.apiGatewayPlugins)
+          .deleteMany({ api_id: apiId, role: { $nin: roles } } as Filter<NexusDoc>, tx.opts);
+        for (const role of roles) {
+          await tx.col(COLLECTIONS.apiGatewayPlugins).updateOne(
+            { api_id: apiId, role } as Filter<NexusDoc>,
+            {
+              $set: { ferrum_plugin_config_id: ids[role], updated_at: at },
+              $setOnInsert: { _id: newId(), api_id: apiId, role, created_at: at },
+            } as UpdateFilter<NexusDoc>,
+            { ...tx.opts, upsert: true },
+          );
+        }
+      });
+    },
+
+    deleteByApi: async (apiId) =>
+      (
+        await this.col(COLLECTIONS.apiGatewayPlugins).deleteMany(
           { api_id: apiId } as Filter<NexusDoc>,
           this.opts,
         )

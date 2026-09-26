@@ -59,9 +59,9 @@ function remedy(
 ): string {
   if (entry.release === null) {
     return (
-      `${entry.id} is the buildout baseline awaiting the first supported release. If this ` +
-      `edit is intended, set its ${backend} checksum in server/src/db/released-migrations.ts ` +
-      `to ${actual} in the same change.`
+      `${entry.id} has not shipped in a release yet. If this edit is intended, set its ` +
+      `${backend} checksum in server/src/db/released-migrations.ts to ${actual} in the same ` +
+      'change.'
     );
   }
   return (

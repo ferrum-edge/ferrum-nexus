@@ -62,6 +62,9 @@ import type {
   ApplicationFilter,
   ApplicationRecord,
   ApplicationRepo,
+  ApiGatewayPluginRecord,
+  ApiGatewayPluginRepo,
+  ApiGatewayPluginRole,
   ApiPluginRepo,
   ApiRecord,
   ApiRepo,
@@ -112,7 +115,11 @@ import type {
   VerificationTokenRecord,
   VerificationTokenRepo,
 } from '../store.js';
-import { assertLeaseKeyLength, SPEC_HISTORY_PRUNE_BATCH } from '../store.js';
+import {
+  API_GATEWAY_PLUGIN_ROLES,
+  assertLeaseKeyLength,
+  SPEC_HISTORY_PRUNE_BATCH,
+} from '../store.js';
 import {
   bool,
   encodeBool,
@@ -317,6 +324,16 @@ function mapApiPlugin(row: Row): ApiPluginRecord {
     enabled: bool(row.enabled),
     config: json<Record<string, unknown>>(row.config_json, {}),
     trigger: json<ApiPluginTrigger | null>(row.trigger_json, null),
+    ferrum_plugin_config_id: textOrNull(row.ferrum_plugin_config_id),
+    created_at: text(row.created_at),
+    updated_at: text(row.updated_at),
+  };
+}
+
+function mapApiGatewayPlugin(row: Row): ApiGatewayPluginRecord {
+  return {
+    api_id: text(row.api_id),
+    role: text(row.role) as ApiGatewayPluginRole,
     ferrum_plugin_config_id: textOrNull(row.ferrum_plugin_config_id),
     created_at: text(row.created_at),
     updated_at: text(row.updated_at),
@@ -726,6 +743,7 @@ export interface SqlRepos {
   apis: ApiRepo;
   apiSpecs: ApiSpecRepo;
   apiPlugins: ApiPluginRepo;
+  apiGatewayPlugins: ApiGatewayPluginRepo;
   apiViewers: ApiViewerRepo;
   applications: ApplicationRepo;
   accessRequests: AccessRequestRepo;
@@ -1465,6 +1483,51 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
 
     deleteByApi: async (apiId) =>
       execute(exec, 'DELETE FROM api_plugins WHERE api_id = ?', [apiId]),
+  };
+
+  /* ── apiGatewayPlugins ──────────────────────────────────────────────── */
+
+  // The primary key is the `(api_id, role)` pair; see `API_PLUGIN_UPSERT` for
+  // how the two dialects name a composite conflict target.
+  const API_GATEWAY_PLUGIN_UPSERT = upsertSql(
+    dialect,
+    'api_gateway_plugins',
+    ['api_id', 'role', 'ferrum_plugin_config_id', 'created_at', 'updated_at'],
+    'api_id, role',
+    ['ferrum_plugin_config_id', 'updated_at'],
+  );
+
+  const apiGatewayPlugins: ApiGatewayPluginRepo = {
+    listByApi: async (apiId) => {
+      const rows = (
+        await queryAll(exec, 'SELECT * FROM api_gateway_plugins WHERE api_id = ?', [apiId])
+      ).map(mapApiGatewayPlugin);
+      return API_GATEWAY_PLUGIN_ROLES.flatMap((role) => rows.filter((row) => row.role === role));
+    },
+
+    replace: async (apiId, ids) => {
+      const at = nowIso();
+      const roles = API_GATEWAY_PLUGIN_ROLES.filter((role) => ids[role] !== undefined);
+      // One transaction, so a reader never sees half of an API's record — the
+      // half that would read as "not the portal's".
+      await inTransaction(async (tx) => {
+        await execute(
+          tx,
+          roles.length === 0
+            ? 'DELETE FROM api_gateway_plugins WHERE api_id = ?'
+            : `DELETE FROM api_gateway_plugins WHERE api_id = ? AND role NOT IN (${roles
+                .map(() => '?')
+                .join(', ')})`,
+          [apiId, ...roles],
+        );
+        for (const role of roles) {
+          await execute(tx, API_GATEWAY_PLUGIN_UPSERT, [apiId, role, ids[role] ?? null, at, at]);
+        }
+      });
+    },
+
+    deleteByApi: async (apiId) =>
+      execute(exec, 'DELETE FROM api_gateway_plugins WHERE api_id = ?', [apiId]),
   };
 
   /* ── apiViewers ─────────────────────────────────────────────────────── */
@@ -3121,6 +3184,7 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     apis,
     apiSpecs,
     apiPlugins,
+    apiGatewayPlugins,
     apiViewers,
     applications,
     accessRequests,
@@ -3211,6 +3275,7 @@ class SqlStore implements NexusStore {
   readonly apis: ApiRepo;
   readonly apiSpecs: ApiSpecRepo;
   readonly apiPlugins: ApiPluginRepo;
+  readonly apiGatewayPlugins: ApiGatewayPluginRepo;
   readonly apiViewers: ApiViewerRepo;
   readonly applications: ApplicationRepo;
   readonly accessRequests: AccessRequestRepo;
@@ -3254,6 +3319,7 @@ class SqlStore implements NexusStore {
     this.apis = repos.apis;
     this.apiSpecs = repos.apiSpecs;
     this.apiPlugins = repos.apiPlugins;
+    this.apiGatewayPlugins = repos.apiGatewayPlugins;
     this.apiViewers = repos.apiViewers;
     this.applications = repos.applications;
     this.accessRequests = repos.accessRequests;

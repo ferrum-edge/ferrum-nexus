@@ -727,14 +727,40 @@ therefore a **new forward migration**:
 3. Make it safe to re-run where the backend cannot roll it back (MySQL DDL,
    MongoDB steps; see the backend notes below), and never make it depend on
    data a portal may not have.
-4. At release, add it to `RELEASED_MIGRATIONS` with its checksums, and commit
-   `server/src/db/released/NNN_description.mongodb.json`, the frozen snapshot
-   of its MongoDB indexes.
+4. In the same change, add it to `RELEASED_MIGRATIONS` with `release: null`
+   and its checksums, and commit
+   `server/src/db/released/NNN_description.mongodb.json`, the snapshot of its
+   MongoDB indexes, so CI checks its artifacts from the start; an edit before
+   it ships updates those checksums in the same change. The release that ships
+   it sets `release` to its tag, which freezes it.
 
-The first forward migration also retires the buildout-only checks that
-`001_initial` is the sole migration: the first case in
-`server/src/db/initial-schema.test.ts` and the image assertion in the `docker`
-CI job.
+The first forward migration, `002_api_gateway_plugins`, retired the
+buildout-only checks that `001_initial` was the sole migration: the first case
+in `server/src/db/initial-schema.test.ts` and the image assertion in the
+`docker` CI job now name both ids. It is listed in `RELEASED_MIGRATIONS` with
+`release: null` until the release that ships it sets its tag.
+
+**`002_api_gateway_plugins`** adds one table, `api_gateway_plugins`, recording
+the Edge plugin config id of each first-class config the portal creates for an
+API — its auth plugin, `access_control`, `rate_limiting` and `cors` — so a
+settings change only ever replaces or deletes a config the portal owns, never
+an operator's config of the same plugin name. It is a single
+`CREATE TABLE IF NOT EXISTS` on every SQL backend and one unique index on
+MongoDB, and it copies no data. An API published before the upgrade starts with
+no record; its configs are recognised on its first gateway-touching change by
+the values the portal wrote (the empty auth config, the ACL group, the quota,
+the CORS origins) and recorded then, role by role — a role the API does not use
+is recorded as owning nothing (a row with a `NULL` config id), and the audit
+row of that change names any config of the role's plugin name on the proxy
+under `unowned_same_name_configs`. If a proxy carries two configs that both
+match for one role, or an auth, `access_control` or `cors` config that no
+longer matches the API's settings and none that does, a `PATCH` touching that
+role answers `409 CONFLICT` naming the plugin, and the role stays unrecorded,
+until the operator removes the config or brings it back in line (an auth
+config back to the empty default); changes to other fields keep working. A
+`rate_limiting` config whose portal-owned values an operator edited by hand is
+left to the operator: the portal creates its own beside it on the next change,
+and the audit row names it under `unowned_same_name_configs`.
 
 **CI enforces this.** `server/src/db/released-migrations.test.ts` fails when a
 released migration's file (or MongoDB snapshot) no longer matches its recorded
@@ -1852,16 +1878,22 @@ longer match the catalog:
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `api.gateway_repair_required` | A change the portal made and could not put back. `details.phase` distinguishes them: `conversion` and `rollback` are a `spec_enforcement` rebuild that left the API with no proxy at all; `compensation` is the lesser case where the proxy is still there but a field — the upstream backend, a runtime setting, an auth or access control plugin — may not match the catalog. `details.steps` names which.             |
 | `api.publish_rollback`        | A publish that reached the gateway and then failed. `withdrawn: true` is the ordinary case and needs nothing; `withdrawn: false` means the compensating delete could not be confirmed and `details.stranded_proxy_id` names a proxy that may still be live on its unguessable staging path, with no `apis` row and — when the publish died before its plugins were associated — nothing the gateway runs in front of it. |
+| `api.plugin_rollback`         | A palette plugin change that reached the gateway and then failed. `restored: true` is the ordinary case and needs nothing. `restored: false` means an undo step failed — `details.step_errors` says which — and the config `details.plugin_config_id` names may still carry the attempted change (a security plugin disabled, an allow-list replaced) while the portal shows the old setting.                            |
 
-Both are also logged at `error`. Neither repairs itself: no later request
-revisits them, so alert on both.
+A compensation that failed behind any of them is also logged at `error`. None
+repairs itself: no later request revisits them, so alert on each.
 
 ```sql
 SELECT created_at, action, target_id AS api_id, details
   FROM audit_logs
-  WHERE action IN ('api.gateway_repair_required', 'api.publish_rollback')
+  WHERE action IN ('api.gateway_repair_required', 'api.publish_rollback', 'api.plugin_rollback')
   ORDER BY created_at DESC;
 ```
+
+For an `api.plugin_rollback` with `restored: false`, read the named config
+back with `GET /plugins/config/{id}` and compare it with the API's palette entry;
+put the gateway back to what the portal shows, or ask the provider to re-save
+the plugin — the save is a whole-resource write and idempotent.
 
 For an `api.publish_rollback` with `withdrawn: false`, read the named proxy back
 with `GET /proxies/{id}` on the Admin API. If it is there it is a proxy nothing
