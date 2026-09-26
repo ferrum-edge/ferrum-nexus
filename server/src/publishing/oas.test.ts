@@ -421,6 +421,42 @@ describe('OpenAPI parsing', () => {
     });
   });
 
+  it('charges a referenced parameter for the object it names', () => {
+    // Twenty references to one wide component parameter: nothing inline, no
+    // `components.schemas`, and every reference renders the whole schema.
+    const properties: Record<string, unknown> = {};
+    for (let index = 0; index < 6_000; index += 1) properties[`p${index}`] = {};
+    const text = JSON.stringify({
+      openapi: '3.1.0',
+      info: { title: 'Referenced', version: '1.0.0' },
+      paths: {
+        '/a': {
+          get: {
+            parameters: Array.from({ length: 20 }, () => ({
+              $ref: '#/components/parameters/Wide',
+            })),
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+      components: {
+        parameters: {
+          Wide: { name: 'filter', in: 'query', schema: { type: 'object', properties } },
+        },
+      },
+    });
+    const failure = expectSpecInvalid(() => parseOpenApiSpec(text));
+    assert.deepEqual(failure.details, {
+      field: 'paths',
+      reason: 'too_much_to_render',
+      schema_nodes: 20 * 6_002,
+      parameters: 20,
+      media_types: 0,
+      units: 20 * 6_002 + 20,
+      limit: MAX_SPEC_RENDER_UNITS,
+    });
+  });
+
   it('rejects an operation flood that is well inside MAX_SPEC_BYTES', () => {
     // The shape the size cap alone does not stop: a server-valid document with
     // tens of thousands of minimal operations, which the SPA renders one card

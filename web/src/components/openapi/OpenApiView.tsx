@@ -18,6 +18,7 @@ import {
   parseSpecText,
   type HttpMethod,
   type ParsedSpec,
+  type ResolvedSpecEntry,
   type SpecEntry,
   type SpecNode,
   type SpecOperation,
@@ -58,6 +59,14 @@ const UNRESOLVED_REASONS: Readonly<Record<OpenApiRefFailure, string>> = {
   depth: 'the reference chain is too long',
 };
 
+/** Longest `$ref` shown in full; the document can make one as long as it likes. */
+const MAX_DISPLAYED_REF_LENGTH = 200;
+
+/** `ref`, cut to {@link MAX_DISPLAYED_REF_LENGTH} characters. */
+function displayedRef(ref: string): string {
+  return ref.length > MAX_DISPLAYED_REF_LENGTH ? `${ref.slice(0, MAX_DISPLAYED_REF_LENGTH)}…` : ref;
+}
+
 /**
  * The placeholder for a parameter, request body or response whose `$ref` could
  * not be followed — explicit, so a required input never reads as absent.
@@ -65,10 +74,18 @@ const UNRESOLVED_REASONS: Readonly<Record<OpenApiRefFailure, string>> = {
 function UnresolvedReference({ entry }: { entry: UnresolvedSpecEntry }): ReactElement {
   return (
     <span className="flex flex-wrap items-center gap-2">
-      <Badge tone="danger">unresolved $ref {entry.ref}</Badge>
+      <Badge tone="danger">unresolved $ref {displayedRef(entry.ref)}</Badge>
       <span className="text-xs text-fg-subtle">{UNRESOLVED_REASONS[entry.reason]}</span>
     </span>
   );
+}
+
+/**
+ * A followed entry's description: an OpenAPI 3.1 sibling of its `$ref` when
+ * there is one, the referenced object's own otherwise.
+ */
+function entryDescription(entry: ResolvedSpecEntry): string | null {
+  return entry.overrides.description ?? asString(entry.node.description);
 }
 
 /**
@@ -110,6 +127,7 @@ function renderParameterTable(
       continue;
     }
     const parameter = entry.node;
+    const description = entryDescription(entry);
     rows.push(
       <tr
         key={`${asString(parameter.name) ?? 'param'}-${index}`}
@@ -117,9 +135,7 @@ function renderParameterTable(
       >
         <td className="py-2 pr-3 align-top">
           <code className="font-mono text-xs text-fg">{asString(parameter.name) ?? '—'}</code>
-          {asString(parameter.description) ? (
-            <p className="mt-0.5 text-xs text-fg-muted">{asString(parameter.description)}</p>
-          ) : null}
+          {description ? <p className="mt-0.5 text-xs text-fg-muted">{description}</p> : null}
         </td>
         <td className="py-2 pr-3 align-top font-mono text-xs text-fg-muted">
           {asString(parameter.in) ?? '—'}
@@ -310,7 +326,7 @@ function OperationCard({
 function renderRequestBody(entry: SpecEntry, doc: SpecNode, budget: RenderBudget): ReactElement {
   if (!entry.resolved) return <UnresolvedReference entry={entry} />;
   const body = entry.node;
-  const description = asString(body.description);
+  const description = entryDescription(entry);
   return (
     <>
       {body.required === true ? (
@@ -345,7 +361,7 @@ function renderResponses(
         <div className="mb-1.5 flex flex-wrap items-center gap-2">
           <Badge tone={statusTone(status)}>{status}</Badge>
           {entry.resolved ? (
-            <span className="text-sm text-fg-muted">{asString(entry.node.description) ?? ''}</span>
+            <span className="text-sm text-fg-muted">{entryDescription(entry) ?? ''}</span>
           ) : (
             <UnresolvedReference entry={entry} />
           )}

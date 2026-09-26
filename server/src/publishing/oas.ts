@@ -70,6 +70,7 @@ import {
   MAX_SPEC_RENDER_UNITS,
   MAX_UPSTREAM_URL_LENGTH,
   OPENAPI_OPERATION_METHODS,
+  createOpenApiRefResolver,
   expandServerUrl,
   firstUsableSpecServerUrl,
   parseAbsoluteHttpUrl,
@@ -682,11 +683,24 @@ interface RenderUnits {
  * Counted over the parts the viewer actually walks — reusable schemas, and the
  * parameters, request bodies and responses of every declared operation — rather
  * than over the document as a whole, so the number in the error means something
- * the provider can act on.
+ * the provider can act on. A parameter, request body or response written as a
+ * `$ref` is charged for the object it names, followed the way the viewer
+ * follows it: one memoised resolver for the document, so each distinct
+ * reference is walked once. Path-item parameters are charged once per path
+ * item, and schema `$ref`s are not expanded; the viewer's own page budget
+ * bounds both.
  */
 function assertRenderCost(document: Record<string, unknown>, paths: Record<string, unknown>): void {
   const memo = new WeakMap<object, number>();
   const units: RenderUnits = { schemaNodes: 0, parameters: 0, mediaTypes: 0 };
+  const resolver = createOpenApiRefResolver(document);
+  // The object a component entry names; an entry that cannot be followed
+  // renders as a single placeholder and carries nothing further to count.
+  const followed = (value: unknown): Record<string, unknown> | null => {
+    if (!isRecord(value)) return null;
+    const resolution = resolver.resolve(value);
+    return resolution.ok ? resolution.value : null;
+  };
 
   const components = isRecord(document.components) ? document.components : null;
   const schemas = components && isRecord(components.schemas) ? components.schemas : null;
@@ -698,12 +712,14 @@ function assertRenderCost(document: Record<string, unknown>, paths: Record<strin
     if (!Array.isArray(list)) return;
     units.parameters += list.length;
     for (const entry of list) {
-      if (isRecord(entry)) units.schemaNodes += countNodes(entry.schema, memo);
+      const parameter = followed(entry);
+      if (parameter) units.schemaNodes += countNodes(parameter.schema, memo);
     }
   };
 
-  const addContent = (body: unknown): void => {
-    if (!isRecord(body) || !isRecord(body.content)) return;
+  const addContent = (value: unknown): void => {
+    const body = followed(value);
+    if (!body || !isRecord(body.content)) return;
     const content = body.content;
     units.mediaTypes += Object.keys(content).length;
     for (const media of Object.values(content)) {

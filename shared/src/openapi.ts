@@ -15,16 +15,47 @@
  *   the path-level definition outright.
  */
 
+import { MAX_SPEC_DEPTH } from './constants.js';
+
 /** Longest `$ref` → `$ref` chain followed before giving up. */
 export const MAX_OPENAPI_REF_HOPS = 32;
+
+/**
+ * Most segments a JSON pointer may have. A document nests at most
+ * `MAX_SPEC_DEPTH` levels, so a longer pointer can never name anything; it is
+ * refused before any segment is decoded.
+ */
+export const MAX_OPENAPI_POINTER_SEGMENTS = MAX_SPEC_DEPTH;
 
 /** Why a Reference Object could not be followed. */
 export type OpenApiRefFailure = 'external' | 'missing' | 'cycle' | 'depth';
 
+/**
+ * Reference Object siblings that replace the target's own members (OpenAPI 3.1
+ * and later). Kept apart from the target so a reference never copies it.
+ */
+export interface OpenApiRefOverrides {
+  summary?: string;
+  description?: string;
+}
+
 /** The outcome of following one Reference Object to the object it names. */
 export type OpenApiRefResolution =
-  | { ok: true; value: Record<string, unknown> }
+  | { ok: true; value: Record<string, unknown>; overrides: OpenApiRefOverrides }
   | { ok: false; ref: string; reason: OpenApiRefFailure };
+
+/**
+ * Work counters a caller may pass to a resolver, so a test can assert how much
+ * resolving a document cost without timing it.
+ */
+export interface OpenApiResolveStats {
+  /** JSON pointers walked against the document. */
+  pointerLookups: number;
+  /** Pointer segments decoded across those walks. */
+  pointerSegments: number;
+}
+
+const NO_OVERRIDES: OpenApiRefOverrides = Object.freeze({});
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -36,13 +67,33 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
  *
  * Segments are percent-decoded (a pointer in a URI fragment may be) and then
  * unescaped per RFC 6901 — `~1` before `~0`. Only own members are followed, so a
- * pointer can never walk into `__proto__` or other inherited properties.
+ * pointer can never walk into `__proto__` or other inherited properties. A
+ * pointer with more than {@link MAX_OPENAPI_POINTER_SEGMENTS} segments names
+ * nothing.
  */
 export function resolveOpenApiPointer(document: unknown, ref: string): unknown {
+  return walkPointer(document, ref, undefined);
+}
+
+function walkPointer(
+  document: unknown,
+  ref: string,
+  stats: OpenApiResolveStats | undefined,
+): unknown {
+  if (stats) stats.pointerLookups += 1;
   if (ref === '#') return document;
   if (!ref.startsWith('#/')) return undefined;
+  // Counted before splitting, so an overlong pointer costs one scan and no
+  // allocation per segment.
+  let segments = 1;
+  for (let index = 2; index < ref.length; index += 1) {
+    if (ref.charCodeAt(index) === 0x2f && ++segments > MAX_OPENAPI_POINTER_SEGMENTS) {
+      return undefined;
+    }
+  }
   let current: unknown = document;
   for (const rawSegment of ref.slice(2).split('/')) {
+    if (stats) stats.pointerSegments += 1;
     let decoded: string;
     try {
       decoded = decodeURIComponent(rawSegment);
@@ -85,86 +136,204 @@ export function openApiRefSiblingsApply(specVersion: string | null): boolean {
   return major > 3 || (major === 3 && minor >= 1);
 }
 
-/** How {@link resolveOpenApiObject} follows a chain. */
+/** How a resolver follows chains. */
 export interface OpenApiResolveOptions {
   /** See {@link openApiRefSiblingsApply}. */
   siblingsApply?: boolean;
-  /**
-   * Pointer lookups already made against the same document. A caller resolving
-   * many references passes one map for all of them, so each hop after the first
-   * visit of a pointer is a map lookup instead of a fresh walk.
-   */
-  pointerCache?: Map<string, unknown>;
+  /** Incremented as pointers are walked; see {@link OpenApiResolveStats}. */
+  stats?: OpenApiResolveStats;
 }
 
 /**
- * Follow `value` through any chain of local Reference Objects to the object it
- * finally names. A value that is not a Reference Object resolves to itself.
+ * Follows the Reference Objects of one document. Create one per document and
+ * reuse it for every reference in it.
+ */
+export interface OpenApiRefResolver {
+  /**
+   * Follow `value` through any chain of local Reference Objects to the object
+   * it finally names. A value that is not a Reference Object resolves to
+   * itself. The returned `value` is always an object of the document itself,
+   * never a copy; see {@link OpenApiRefOverrides}.
+   */
+  resolve(value: Record<string, unknown>): OpenApiRefResolution;
+}
+
+/**
+ * What following one `$ref` string leads to. `length` is the number of pointer
+ * lookups the chain takes from that string, so the hop limit can be applied to
+ * a memoised tail wherever a chain starts.
+ */
+type ChainOutcome =
+  | { ok: true; value: Record<string, unknown>; overrides: OpenApiRefOverrides; length: number }
+  | { ok: false; ref: string; reason: Exclude<OpenApiRefFailure, 'depth'>; length: number };
+
+/** `outer` siblings of a Reference Object, falling back to `inner` per field. */
+function mergeOverrides(
+  outer: Record<string, unknown>,
+  inner: OpenApiRefOverrides,
+): OpenApiRefOverrides {
+  const summary = typeof outer.summary === 'string' ? outer.summary : inner.summary;
+  const description = typeof outer.description === 'string' ? outer.description : inner.description;
+  if (summary === inner.summary && description === inner.description) return inner;
+  const merged: OpenApiRefOverrides = {};
+  if (summary !== undefined) merged.summary = summary;
+  if (description !== undefined) merged.description = description;
+  return merged;
+}
+
+/**
+ * A resolver for `document`.
+ *
+ * Every `$ref` string is followed at most once per resolver: the outcome of the
+ * chain it starts — the object it ends at, or why it cannot be followed — is
+ * memoised, and a later chain that reaches it stops there. Resolving a document
+ * therefore costs one pointer walk per distinct reference string, however many
+ * places use each one and however long the chains between them are; each walk
+ * is bounded by {@link MAX_OPENAPI_POINTER_SEGMENTS}.
  *
  * When `siblingsApply` is set (OpenAPI 3.1+), a `summary` or `description`
- * written next to a `$ref` replaces the target's; the outermost one wins.
+ * written next to a `$ref` replaces the target's; the outermost one wins. The
+ * replacements are reported in `overrides`, never merged into a copy of the
+ * target.
+ *
+ * A chain longer than {@link MAX_OPENAPI_REF_HOPS} fails with `depth` and
+ * reports the reference it started from; any other failure reports the
+ * reference at which it was detected.
+ */
+export function createOpenApiRefResolver(
+  document: unknown,
+  { siblingsApply = false, stats }: OpenApiResolveOptions = {},
+): OpenApiRefResolver {
+  const outcomes = new Map<string, ChainOutcome>();
+
+  // Iterative, so a chain as long as the document allows cannot exhaust the
+  // stack. Every string pushed here is new to `outcomes` and is memoised before
+  // returning, which is what keeps the total work linear in distinct refs.
+  const follow = (start: string): ChainOutcome => {
+    const known = outcomes.get(start);
+    if (known) return known;
+    const chain: Array<{ ref: string; target: Record<string, unknown> }> = [];
+    const onChain = new Map<string, number>();
+    let ref = start;
+    let tail: ChainOutcome;
+    for (;;) {
+      const memoised = outcomes.get(ref);
+      if (memoised) {
+        tail = memoised;
+        break;
+      }
+      const cycleStart = onChain.get(ref);
+      if (cycleStart !== undefined) {
+        // Every reference on the loop reports itself as the one that repeats,
+        // exactly as a walk starting there would find it.
+        for (const link of chain.slice(cycleStart)) {
+          outcomes.set(link.ref, { ok: false, ref: link.ref, reason: 'cycle', length: 0 });
+        }
+        chain.length = cycleStart;
+        tail = outcomes.get(ref)!;
+        break;
+      }
+      if (!ref.startsWith('#')) {
+        tail = { ok: false, ref, reason: 'external', length: 0 };
+        outcomes.set(ref, tail);
+        break;
+      }
+      const target = walkPointer(document, ref, stats);
+      if (!isPlainRecord(target)) {
+        tail = { ok: false, ref, reason: 'missing', length: 1 };
+        outcomes.set(ref, tail);
+        break;
+      }
+      const next = openApiRefOf(target);
+      if (next === null) {
+        tail = { ok: true, value: target, overrides: NO_OVERRIDES, length: 1 };
+        outcomes.set(ref, tail);
+        break;
+      }
+      onChain.set(ref, chain.length);
+      chain.push({ ref, target });
+      ref = next;
+    }
+    for (let index = chain.length - 1; index >= 0; index -= 1) {
+      const { ref: link, target } = chain[index]!;
+      if (tail.ok) {
+        tail = {
+          ok: true,
+          value: tail.value,
+          overrides: siblingsApply ? mergeOverrides(target, tail.overrides) : NO_OVERRIDES,
+          length: tail.length + 1,
+        };
+      } else if (tail.reason !== 'cycle') {
+        tail = { ...tail, length: tail.length + 1 };
+      }
+      outcomes.set(link, tail);
+    }
+    return outcomes.get(start)!;
+  };
+
+  return {
+    resolve(value) {
+      const ref = openApiRefOf(value);
+      if (ref === null) return { ok: true, value, overrides: NO_OVERRIDES };
+      const outcome = follow(ref);
+      // `length` counts lookups: a chain may take MAX_OPENAPI_REF_HOPS of them
+      // and must end within them, as an object or as a failure detected there.
+      if (outcome.length > MAX_OPENAPI_REF_HOPS) return { ok: false, ref, reason: 'depth' };
+      if (!outcome.ok) return { ok: false, ref: outcome.ref, reason: outcome.reason };
+      return {
+        ok: true,
+        value: outcome.value,
+        overrides: siblingsApply ? mergeOverrides(value, outcome.overrides) : NO_OVERRIDES,
+      };
+    },
+  };
+}
+
+/**
+ * Follow one value with a resolver of its own. For a single lookup only — a
+ * caller resolving several references of one document shares one
+ * {@link createOpenApiRefResolver} between them.
  */
 export function resolveOpenApiObject(
   document: unknown,
   value: Record<string, unknown>,
-  { siblingsApply = false, pointerCache }: OpenApiResolveOptions = {},
+  options: OpenApiResolveOptions = {},
 ): OpenApiRefResolution {
-  const overrides: Record<string, unknown> = {};
-  const visited = new Set<string>();
-  let current: Record<string, unknown> = value;
-  for (let hops = 0; ; hops += 1) {
-    const ref = openApiRefOf(current);
-    if (ref === null) break;
-    if (siblingsApply) {
-      for (const field of ['summary', 'description'] as const) {
-        if (typeof current[field] === 'string' && !(field in overrides)) {
-          overrides[field] = current[field];
-        }
-      }
-    }
-    if (!ref.startsWith('#')) return { ok: false, ref, reason: 'external' };
-    if (visited.has(ref)) return { ok: false, ref, reason: 'cycle' };
-    if (hops >= MAX_OPENAPI_REF_HOPS) return { ok: false, ref, reason: 'depth' };
-    visited.add(ref);
-    let target: unknown;
-    if (pointerCache?.has(ref)) {
-      target = pointerCache.get(ref);
-    } else {
-      target = resolveOpenApiPointer(document, ref);
-      pointerCache?.set(ref, target);
-    }
-    if (!isPlainRecord(target)) return { ok: false, ref, reason: 'missing' };
-    current = target;
-  }
-  if (Object.keys(overrides).length === 0) return { ok: true, value: current };
-  return { ok: true, value: { ...current, ...overrides } };
+  return createOpenApiRefResolver(document, options).resolve(value);
 }
 
 /**
- * The `(in, name)` identity of a parameter, or `null` when it has none — a
- * reference that cannot be resolved, or an object missing either field. A
+ * The `(in, name)` identity of a resolved parameter, or `null` when it has none
+ * — a reference that cannot be resolved, or an object missing either field. A
  * parameter without an identity is never merged with another one.
  *
  * `in` is compared as written; `name` is compared case-insensitively for
  * headers only, since HTTP header names are.
  */
-export function openApiParameterKey(
-  document: unknown,
-  parameter: unknown,
-  pointerCache?: Map<string, unknown>,
-): string | null {
-  if (!isPlainRecord(parameter)) return null;
-  const resolved = resolveOpenApiObject(document, parameter, { pointerCache });
-  if (!resolved.ok) return null;
-  const { name, in: location } = resolved.value;
+function parameterKeyOf(resolution: OpenApiRefResolution | null): string | null {
+  if (resolution === null || !resolution.ok) return null;
+  const { name, in: location } = resolution.value;
   if (typeof name !== 'string' || typeof location !== 'string') return null;
   return `${location}\u0000${location === 'header' ? name.toLowerCase() : name}`;
+}
+
+/** See {@link parameterKeyOf}; `parameter` is followed through `resolver`. */
+export function openApiParameterKey(
+  resolver: OpenApiRefResolver,
+  parameter: unknown,
+): string | null {
+  return parameterKeyOf(isPlainRecord(parameter) ? resolver.resolve(parameter) : null);
 }
 
 /** One parameter of an operation's effective list, with its identity. */
 export interface KeyedOpenApiParameter {
   /** The entry exactly as written — a Reference Object stays one. */
   parameter: unknown;
+  /**
+   * What the entry resolves to, so a caller that needs the parameter itself
+   * never follows the reference a second time; `null` for a non-object entry.
+   */
+  resolution: OpenApiRefResolution | null;
   /** See {@link openApiParameterKey}; `null` for an entry with no identity. */
   key: string | null;
   /** Declared on the path item rather than the operation. */
@@ -172,20 +341,18 @@ export interface KeyedOpenApiParameter {
 }
 
 /**
- * Attach its identity to each parameter of one `parameters` list. Path-item
- * lists are keyed once and reused for every operation beneath them.
+ * Resolve each parameter of one `parameters` list and attach its identity.
+ * Path-item lists are keyed once and reused for every operation beneath them.
  */
 export function keyOpenApiParameters(
-  document: unknown,
+  resolver: OpenApiRefResolver,
   parameters: readonly unknown[],
   inherited: boolean,
-  pointerCache?: Map<string, unknown>,
 ): KeyedOpenApiParameter[] {
-  return parameters.map((parameter) => ({
-    parameter,
-    key: openApiParameterKey(document, parameter, pointerCache),
-    inherited,
-  }));
+  return parameters.map((parameter) => {
+    const resolution = isPlainRecord(parameter) ? resolver.resolve(parameter) : null;
+    return { parameter, resolution, key: parameterKeyOf(resolution), inherited };
+  });
 }
 
 /**
@@ -196,10 +363,10 @@ export function keyOpenApiParameters(
  * `header` `id`, say) are distinct and both kept. Entries without an identity
  * are never merged away.
  */
-export function mergeOpenApiParameters(
-  pathParameters: readonly KeyedOpenApiParameter[],
-  operationParameters: readonly KeyedOpenApiParameter[],
-): KeyedOpenApiParameter[] {
+export function mergeOpenApiParameters<T extends KeyedOpenApiParameter>(
+  pathParameters: readonly T[],
+  operationParameters: readonly T[],
+): T[] {
   const overridden = new Set<string>();
   for (const entry of operationParameters) {
     if (entry.key !== null) overridden.add(entry.key);

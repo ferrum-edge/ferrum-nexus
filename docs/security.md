@@ -1128,13 +1128,27 @@ number of cards, not the work behind one card.
 
 Two bounds, at the two places the cost appears:
 
-- **At publish.** Nexus counts what the viewer walks — schema nodes, parameter
-  entries and media types across the document — and refuses more than
+- **At publish.** Nexus counts what the viewer walks — the nodes of every
+  `components.schemas` entry, and the parameter entries, media types and inline
+  schema nodes of every declared operation — and refuses more than
   `MAX_SPEC_RENDER_UNITS` (100,000) of them with `400 SPEC_INVALID` and
-  `details.reason = "too_much_to_render"`. One declared operation can carry
-  thousands of parameters and dozens of media types per body, each pulling in a
-  `$ref` whose expansion dwarfs the document; counting paths and operations sees
-  none of that.
+  `details.reason = "too_much_to_render"`. A parameter, request body or response
+  written as a `$ref` is charged for the object it names, each occurrence at
+  full cost. Path-item parameters are counted once per path item rather than
+  once per operation that inherits them, and a schema `$ref` is charged where
+  its target is declared, not expanded at each use; those multiplications are
+  what the render-time budget below absorbs. One declared operation can carry
+  thousands of parameters and dozens of media types per body; counting paths
+  and operations sees none of that.
+- **While following references.** Parameter, request-body and response
+  `$ref`s are followed — by the viewer, the publish-time counter and the
+  revision comparison alike — through one resolver per document that memoises
+  the outcome of every distinct reference string, so a document costs one JSON
+  pointer walk per distinct reference however many places use it and however
+  long its chains are. Chains stop after 32 hops, a pointer longer than
+  `MAX_SPEC_DEPTH` segments names nothing, and an OpenAPI 3.1 `description`
+  sibling is carried beside the referenced object rather than merged into a
+  copy of it.
 - **At render.** The viewer spends a single node allowance across the whole
   page, divided between the operations the reader has expanded, rather than a
   fresh one per schema. A branch that exhausts it renders one "truncated"

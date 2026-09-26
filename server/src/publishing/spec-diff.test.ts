@@ -179,6 +179,50 @@ describe('specification change review', () => {
     ]);
   });
 
+  it('reads an empty parameter list and no list at all as the same thing', () => {
+    const before = document({ '/items': { get: { parameters: [] } } });
+    const after = document({ '/items': { get: {} } });
+    assert.equal(diff(before, after).changed, false);
+    assert.equal(diff(after, before).changed, false);
+    const inherited = document({ '/items': { parameters: [], get: { parameters: [] } } });
+    assert.equal(diff(inherited, after).changed, false);
+  });
+
+  it('follows each distinct reference once, however many parameters share it', () => {
+    // A chain of 30 references buried ~150 levels deep, and tens of thousands
+    // of parameters that all point into it: without memoisation every one of
+    // them re-walks every long pointer of the chain.
+    const chainLength = 30;
+    const segments = Array.from({ length: 150 }, (_, index) => `n${index}`);
+    const base = `#/${segments.join('/')}`;
+    const chain: Record<string, unknown> = {};
+    for (let index = 0; index < chainLength; index += 1) {
+      chain[`L${index}`] = { $ref: `${base}/L${index + 1}` };
+    }
+    chain[`L${chainLength}`] = { name: 'tenant_id', in: 'header' };
+    let buried: Record<string, unknown> = chain;
+    for (const segment of [...segments].reverse()) buried = { [segment]: buried };
+
+    const parameters = Array.from({ length: 20_000 }, (_, index) => ({
+      $ref: `${base}/L${index % chainLength}`,
+    }));
+    const spec = document(
+      { '/items': { parameters, get: { parameters }, post: { parameters } } },
+      undefined,
+      buried,
+    );
+    const resolveStats = { pointerLookups: 0, pointerSegments: 0 };
+    const result = diffSpecDocuments(
+      { document: spec, summary: null },
+      { document: structuredClone(spec), summary: null },
+      { resolveStats },
+    );
+    assert.equal(result.changed, false);
+    // One walk per distinct reference string, per document.
+    assert.equal(resolveStats.pointerLookups, 2 * (chainLength + 1));
+    assert.equal(resolveStats.pointerSegments, 2 * (chainLength + 1) * (segments.length + 1));
+  });
+
   it('reports info and servers changes without inventing operation changes', () => {
     const before = document(
       { '/invoices': { get: {} } },

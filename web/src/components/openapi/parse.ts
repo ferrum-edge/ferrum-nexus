@@ -15,12 +15,16 @@
  */
 
 import {
+  createOpenApiRefResolver,
   keyOpenApiParameters,
   mergeOpenApiParameters,
   openApiRefSiblingsApply,
-  resolveOpenApiObject,
   resolveOpenApiPointer,
+  type KeyedOpenApiParameter,
   type OpenApiRefFailure,
+  type OpenApiRefOverrides,
+  type OpenApiRefResolution,
+  type OpenApiRefResolver,
 } from '@ferrum-nexus/shared';
 import { parse as parseYaml } from 'yaml';
 
@@ -67,7 +71,19 @@ export type HttpMethod = (typeof HTTP_METHODS)[number];
  * followed. An entry that could not be followed stays explicit, so the renderer
  * can say so instead of showing an empty — or, for a parameter, optional — row.
  */
-export type SpecEntry = { resolved: true; node: SpecNode } | UnresolvedSpecEntry;
+export type SpecEntry = ResolvedSpecEntry | UnresolvedSpecEntry;
+
+/**
+ * A followed entry. `node` is the document's own object — shared by every
+ * reference to it, never copied — and `overrides` carries the OpenAPI 3.1
+ * `summary`/`description` siblings written next to the `$ref`, which the
+ * renderer prefers over the node's own.
+ */
+export interface ResolvedSpecEntry {
+  resolved: true;
+  node: SpecNode;
+  overrides: OpenApiRefOverrides;
+}
 
 /** A Reference Object that could not be followed, and why. */
 export interface UnresolvedSpecEntry {
@@ -152,77 +168,72 @@ function readTagDescriptions(doc: SpecNode): Map<string, string> {
   return descriptions;
 }
 
+/** A resolution as the renderer consumes it. */
+function toEntry(resolution: OpenApiRefResolution): SpecEntry {
+  return resolution.ok
+    ? { resolved: true, node: resolution.value, overrides: resolution.overrides }
+    : { resolved: false, ref: resolution.ref, reason: resolution.reason };
+}
+
+/** A keyed parameter together with the entry the renderer shows for it. */
+interface EntryParameter extends KeyedOpenApiParameter {
+  entry: SpecEntry;
+}
+
 /**
- * Follows the Reference Objects of one document. Every lookup shares one pointer
- * cache, so a document that references the same component from thousands of
- * operations walks each pointer once; chains are bounded by the shared hop limit
- * and cycle guard.
+ * The object members of one `parameters` list, each resolved once and keyed by
+ * `(in, name)`; anything that is not an object was never a parameter.
  */
-interface EntryResolver {
-  pointerCache: Map<string, unknown>;
-  resolve(node: SpecNode): SpecEntry;
-}
-
-function createEntryResolver(doc: SpecNode, specVersion: string | null): EntryResolver {
-  const pointerCache = new Map<string, unknown>();
-  const siblingsApply = openApiRefSiblingsApply(specVersion);
-  return {
-    pointerCache,
-    resolve(node) {
-      const result = resolveOpenApiObject(doc, node, { siblingsApply, pointerCache });
-      return result.ok
-        ? { resolved: true, node: result.value }
-        : { resolved: false, ref: result.ref, reason: result.reason };
-    },
-  };
-}
-
-/** The object members of a `parameters` list; anything else was never a parameter. */
-function parameterNodes(value: unknown): SpecNode[] {
+function readParameters(
+  resolver: OpenApiRefResolver,
+  value: unknown,
+  inherited: boolean,
+): EntryParameter[] {
   const nodes: SpecNode[] = [];
-  for (const entry of asArray(value) ?? []) {
-    const record = asRecord(entry);
+  for (const item of asArray(value) ?? []) {
+    const record = asRecord(item);
     if (record) nodes.push(record);
   }
-  return nodes;
+  return keyOpenApiParameters(resolver, nodes, inherited).map((keyed) => ({
+    ...keyed,
+    // Every node is an object, so each one was resolved.
+    entry: toEntry(keyed.resolution!),
+  }));
 }
 
+/**
+ * Every operation of the document. One resolver serves the whole document, so
+ * each distinct `$ref` is followed once however many places use it, and a
+ * path item's parameters are resolved once for all the operations beneath it.
+ */
 function readOperations(doc: SpecNode, specVersion: string | null): SpecOperation[] {
   const paths = asRecord(doc.paths);
   if (!paths) return [];
   const operations: SpecOperation[] = [];
-  const resolver = createEntryResolver(doc, specVersion);
+  const resolver = createOpenApiRefResolver(doc, {
+    siblingsApply: openApiRefSiblingsApply(specVersion),
+  });
+  const resolve = (node: SpecNode): SpecEntry => toEntry(resolver.resolve(node));
 
   for (const [path, pathValue] of Object.entries(paths)) {
     const pathItem = asRecord(pathValue);
     if (!pathItem) continue;
-    const sharedParameters = keyOpenApiParameters(
-      doc,
-      parameterNodes(pathItem.parameters),
-      true,
-      resolver.pointerCache,
-    );
+    const sharedParameters = readParameters(resolver, pathItem.parameters, true);
 
     for (const method of HTTP_METHODS) {
       const operation = asRecord(pathItem[method]);
       if (!operation) continue;
 
-      const ownParameters = keyOpenApiParameters(
-        doc,
-        parameterNodes(operation.parameters),
-        false,
-        resolver.pointerCache,
-      );
+      const ownParameters = readParameters(resolver, operation.parameters, false);
       const merged = mergeOpenApiParameters(sharedParameters, ownParameters);
-      // Every entry is one of the objects `parameterNodes` kept.
-      const parameters = merged.map((entry) => resolver.resolve(entry.parameter as SpecNode));
+      const parameters = merged.map((parameter) => parameter.entry);
 
       const responses: Array<[string, SpecEntry]> = [];
       const responsesNode = asRecord(operation.responses);
       if (responsesNode) {
         for (const [status, value] of Object.entries(responsesNode)) {
           const record = asRecord(value);
-          if (record) responses.push([status, resolver.resolve(record)]);
+          if (record) responses.push([status, resolve(record)]);
         }
       }
       const requestBody = asRecord(operation.requestBody);
@@ -245,7 +256,7 @@ function readOperations(doc: SpecNode, specVersion: string | null): SpecOperatio
         deprecated: operation.deprecated === true,
         tags,
         parameters,
-        requestBody: requestBody ? resolver.resolve(requestBody) : null,
+        requestBody: requestBody ? resolve(requestBody) : null,
         responses,
       });
     }

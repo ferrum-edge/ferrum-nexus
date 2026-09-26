@@ -81,7 +81,8 @@ function onlyOperation(document: unknown): SpecOperation {
 function describeEntry(entry: SpecEntry | null | undefined): unknown {
   if (!entry) return entry;
   if (!entry.resolved) return { unresolved: entry.ref, reason: entry.reason };
-  const { name, in: location, required, description } = entry.node;
+  const { name, in: location, required } = entry.node;
+  const description = entry.overrides.description ?? entry.node.description;
   return { name, in: location, required, description };
 }
 
@@ -169,6 +170,26 @@ describe('parameter inheritance', () => {
       { name: 'tenant_id', in: 'header', required: false, description: undefined },
       { name: 'limit', in: 'query', required: undefined, description: 'shared limit' },
     ]);
+  });
+
+  it('resolves a path-level list once for every operation beneath it', () => {
+    const text = JSON.stringify(
+      jsonSpec(
+        {
+          '/items': {
+            parameters: [{ $ref: '#/components/parameters/Tenant' }],
+            get: { responses: OK },
+            post: { responses: OK },
+          },
+        },
+        { parameters: { Tenant: { name: 'tenant_id', in: 'header', required: true } } },
+      ),
+    );
+    const result = parseSpecText(text);
+    if (!result.ok) throw new Error(result.error);
+    const [get, post] = result.spec.groups[0]?.operations ?? [];
+    expect(get?.parameters).toHaveLength(1);
+    expect(post?.parameters[0]).toBe(get?.parameters[0]);
   });
 
   it('never merges away a parameter whose reference cannot be followed', () => {
@@ -352,5 +373,58 @@ describe('reusable component references', () => {
     expect(describeEntry(current.responses[0]?.[1])).toMatchObject({
       description: 'sibling description',
     });
+  });
+
+  it('renders a 3.1 sibling description without copying the referenced object', () => {
+    const properties: Record<string, unknown> = {};
+    for (let index = 0; index < 5_000; index += 1) properties[`p${index}`] = { type: 'string' };
+    const responses: Record<string, unknown> = {};
+    for (let index = 0; index < 50; index += 1) {
+      responses[String(200 + index)] = {
+        $ref: '#/components/responses/Wide',
+        description: `sibling ${index}`,
+      };
+    }
+    const text = JSON.stringify(
+      jsonSpec(
+        { '/items': { get: { responses } } },
+        {
+          responses: {
+            Wide: {
+              description: 'component description',
+              content: { 'application/json': { schema: { type: 'object', properties } } },
+            },
+          },
+        },
+        '3.1.0',
+      ),
+    );
+    const result = parseSpecText(text);
+    if (!result.ok) throw new Error(result.error);
+    const components = result.spec.doc.components as { responses: Record<string, unknown> };
+    const wide = components.responses.Wide;
+    const operation = result.spec.groups[0]?.operations[0];
+    expect(operation?.responses).toHaveLength(50);
+    for (const [index, [, entry]] of (operation?.responses ?? []).entries()) {
+      if (!entry.resolved) throw new Error('unresolved');
+      // The document's own object, shared by every reference to it.
+      expect(entry.node).toBe(wide);
+      expect(entry.overrides).toEqual({ description: `sibling ${index}` });
+    }
+
+    render(<OpenApiView text={text} />);
+    fireEvent.click(screen.getByRole('button', { expanded: false }));
+    expect(screen.getByText('sibling 0')).toBeInTheDocument();
+    expect(screen.queryByText('component description')).not.toBeInTheDocument();
+  });
+
+  it('shortens a long unresolved reference in the placeholder', () => {
+    const ref = `#/components/parameters/${'x'.repeat(5_000)}`;
+    const spec = jsonSpec({ '/items': { get: { parameters: [{ $ref: ref }], responses: OK } } });
+    render(<OpenApiView text={JSON.stringify(spec)} />);
+    fireEvent.click(screen.getByRole('button', { expanded: false }));
+
+    const badge = screen.getByText(/^unresolved \$ref #\/components\/parameters\/x+…$/);
+    expect(badge.textContent?.length).toBeLessThan(250);
   });
 });
