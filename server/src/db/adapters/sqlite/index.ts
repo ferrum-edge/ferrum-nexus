@@ -88,6 +88,7 @@ import { DEFAULT_SPEC_ENFORCEMENT, isSpecEnforcementLevel } from '@ferrum-nexus/
 
 import type { NexusConfig } from '../../../config/index.js';
 import { newId, nowIso } from '../../../lib/ids.js';
+import { fenceTransactionBody } from '../../../lib/lease-fence.js';
 import {
   loadMigrations,
   runMigrations,
@@ -867,12 +868,15 @@ class SqliteStore implements NexusStore {
       // and falls through to the queue below.
       return fn(this);
     }
+    // Captured here, in the caller's context, before the queue can resume the
+    // body anywhere else: the leases the caller holds fence this transaction.
+    const body = fenceTransactionBody<NexusStore, T>(fn);
     const token = Symbol('sqlite-tx');
     const run = async (): Promise<T> => {
       this.db.exec('BEGIN IMMEDIATE');
       this.activeTx = token;
       try {
-        const result = await this.txContext.run(token, () => fn(this));
+        const result = await this.txContext.run(token, () => body(this));
         this.db.exec('COMMIT');
         return result;
       } catch (error) {
@@ -3136,6 +3140,14 @@ class SqliteStore implements NexusStore {
         'UPDATE edge_leases SET expires_at = ?, updated_at = ? WHERE key = ? AND owner = ?',
         [expiresAt, nowIso(), key, owner],
       ) > 0,
+
+    // A read is enough here: inside a transaction this connection holds the
+    // write lock (`BEGIN IMMEDIATE`), and every other caller is parked on the
+    // queue until it commits, so the row cannot change hands before then.
+    verify: async (key, owner) => {
+      const sql = 'SELECT 1 AS held FROM edge_leases WHERE key = ? AND owner = ?';
+      return queryOne(this.db, sql, [key, owner]) !== undefined;
+    },
 
     deleteExpired: async (now) =>
       execute(this.db, 'DELETE FROM edge_leases WHERE expires_at <= ?', [now]),

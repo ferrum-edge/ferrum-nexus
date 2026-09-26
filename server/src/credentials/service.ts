@@ -658,7 +658,11 @@ export interface TeardownGatewayIdentityResult {
   consumer_id: string | null;
   /** How many `credential_metadata` rows moved to `revoked`. */
   revoked_credentials: number;
-  /** Whether a `gateway_identities` registration was consumed. */
+  /**
+   * Whether a `gateway_identities` registration was consumed. `whileHeld` sees
+   * it before the removal runs, as "there was one to consume"; the returned
+   * result says `false` when the removal was refused and only logged.
+   */
   registration_removed: boolean;
 }
 
@@ -1589,21 +1593,30 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     },
 
     async claimGatewayIdentity(ownerId, username): Promise<GatewayIdentityRecord> {
-      return locks(userLifecycleLockKey(ownerId), async () => {
-        // Inside the key, so the answer cannot change between here and the
-        // write: a disable is either already committed, or waiting for this.
-        await assertOwnerActive(ownerId);
-        return store.gatewayIdentities.claim({
-          user_id: ownerId,
-          namespace,
-          ferrum_username: username,
-          ferrum_consumer_id: null,
-        });
-      });
+      // Inside the key, so the answer cannot change between here and the
+      // write: a disable is either already committed, or waiting for this.
+      // One transaction for the check and the claim, because that is what the
+      // key's fence guards: a claim whose lease was taken over while it stalled
+      // — by a disable that has since enumerated nothing — rolls back instead
+      // of registering an identity no teardown will find.
+      return locks(userLifecycleLockKey(ownerId), () =>
+        store.transaction(async (tx) => {
+          await assertOwnerActive(ownerId, tx);
+          return tx.gatewayIdentities.claim({
+            user_id: ownerId,
+            namespace,
+            ferrum_username: username,
+            ferrum_consumer_id: null,
+          });
+        }),
+      );
     },
 
     async bindGatewayIdentity(identity, consumerId): Promise<void> {
-      await store.gatewayIdentities.bindConsumer(identity.id, consumerId);
+      // A transaction of one statement, so the caller's name-key fence covers
+      // it: a replacement that stalled past the TTL is refused rather than
+      // pointing the registration at its consumer behind a newer holder (#384).
+      await store.transaction((tx) => tx.gatewayIdentities.bindConsumer(identity.id, consumerId));
     },
 
     async abandonGatewayIdentity(
@@ -1636,11 +1649,16 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         replaced.ferrum_consumer_id !== null &&
         replaced.user_id === identity.user_id
       ) {
-        await store.gatewayIdentities
-          .bindConsumer(identity.id, replaced.ferrum_consumer_id)
+        // Fenced by the caller's name key (#384): a replacement that stalled
+        // past the TTL must not point the registration back at its incumbent
+        // behind a newer holder's claim.
+        const incumbent = replaced.ferrum_consumer_id;
+        await store
+          .transaction((tx) => tx.gatewayIdentities.bindConsumer(identity.id, incumbent))
           .catch(() => {
             // Even unbound, the retained registration makes teardown fall back
-            // to the bounded username lookup instead of losing the identity.
+            // to the bounded username lookup instead of losing the identity —
+            // and a refusal leaves the newer holder's registration as it was.
           });
         return false;
       }
@@ -1696,12 +1714,23 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       }
       // Only ever the registration that is still this owner's: the row keeps
       // its id across owners, so the owner is what says whether it is ours.
-      const current = await store.gatewayIdentities
-        .findByUsername(namespace, identity.ferrum_username)
-        .catch(() => null);
-      if (current && current.user_id === identity.user_id) {
-        await store.gatewayIdentities.delete(current.id).catch(() => undefined);
-      }
+      // Owner equality cannot tell this attempt from a newer one by the same
+      // account on another instance, which is what the fence is for: the
+      // check and the delete share one transaction under the caller's name
+      // key, so a compensation that stalled past the TTL — a fence refusal is
+      // often what brought it here — keeps the registration the newer holder
+      // has since claimed rather than untracking its consumer (#384).
+      await store
+        .transaction(async (tx) => {
+          const current = await tx.gatewayIdentities.findByUsername(
+            namespace,
+            identity.ferrum_username,
+          );
+          if (current && current.user_id === identity.user_id) {
+            await tx.gatewayIdentities.delete(current.id);
+          }
+        })
+        .catch(() => undefined);
       return created !== null;
     },
 
@@ -1843,10 +1872,14 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           // than being stripped and left as an empty identity.
           if (live) await edge.consumers.delete(foreignId, subject);
           const count = await revokeRowsFor(foreignId);
-          const cached = await store.consumers.findByFerrumId(foreignId);
           // Only ever a mapping that belongs to *this* account: the tracking row
-          // of somebody else's consumer is not this teardown's to delete.
-          if (cached && cached.user_id === userId) await store.consumers.delete(cached.id);
+          // of somebody else's consumer is not this teardown's to delete. The
+          // check and the delete share one transaction, so the consumer key's
+          // fence covers them (#384).
+          await store.transaction(async (tx) => {
+            const cached = await tx.consumers.findByFerrumId(foreignId);
+            if (cached && cached.user_id === userId) await tx.consumers.delete(cached.id);
+          });
           return count;
         });
         deleted.push(foreignId);
@@ -2445,8 +2478,8 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * teardown behind it deletes what it appended, or the teardown wins and the
    * append then sees `disabled` and is refused.
    */
-  async function assertOwnerActive(userId: Uuid): Promise<void> {
-    const owner = await store.users.findById(userId);
+  async function assertOwnerActive(userId: Uuid, db: NexusStore = store): Promise<void> {
+    const owner = await db.users.findById(userId);
     if (!owner) throw notFound('User', userId);
     if (owner.status !== 'active') {
       throw userDisabled('This account has been disabled; its gateway access cannot be extended');
@@ -2634,41 +2667,62 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // committed, so a registration that cannot be removed is logged rather
       // than failing a request whose effect is already durable — the owner's
       // account teardown enumerates this registration by user.
+      // A transaction of one statement, so the name key's fence covers it: a
+      // stale teardown cannot remove a registration a newer holder has since
+      // claimed (#384). A refusal takes the logged path below like any other
+      // failure once a follow-up has committed.
+      // A removal that is only logged is reported as not having happened: the
+      // registration is still there, and the caller must not say otherwise.
       if (current) {
-        await store.gatewayIdentities.delete(current.id).catch((error: unknown) => {
-          if (
-            !options?.whileHeld ||
-            (result.consumer_id === null && !result.registration_removed)
-          ) {
-            throw error;
-          }
-          deps.log?.(
-            {
-              consumer_username: username,
-              consumer_id: result.consumer_id,
-              error: error instanceof Error ? error.message : String(error),
-            },
-            'a torn-down gateway identity kept its registration; the owner account teardown will remove it',
-          );
-        });
+        const removal = store.transaction((tx) => tx.gatewayIdentities.delete(current.id));
+        const removed = await removal.then(
+          () => true,
+          (error: unknown) => {
+            if (
+              !options?.whileHeld ||
+              (result.consumer_id === null && !result.registration_removed)
+            ) {
+              throw error;
+            }
+            deps.log?.(
+              {
+                consumer_username: username,
+                consumer_id: result.consumer_id,
+                error: error instanceof Error ? error.message : String(error),
+              },
+              'a torn-down gateway identity kept its registration; the owner account teardown will remove it',
+            );
+            return false;
+          },
+        );
+        if (!removed) return { ...result, registration_removed: false };
       }
       return result;
     });
   }
 
-  /** Move every live row of one consumer to `revoked`; returns how many moved. */
+  /**
+   * Move every live row of one consumer to `revoked`; returns how many moved.
+   *
+   * One transaction, so the consumer key its callers hold fences it: a
+   * teardown that stalled past the TTL cannot revoke rows a newer holder has
+   * since issued on that id (#384). Re-runnable — a re-run re-lists what is
+   * still live.
+   */
   async function revokeRowsFor(consumerId: string): Promise<number> {
-    let revoked = 0;
-    const rows = await store.credentials.listByConsumer(
-      consumerId,
-      undefined,
-      LIVE_CREDENTIAL_STATUSES,
-    );
-    for (const row of rows) {
-      await store.credentials.update(row.id, { status: 'revoked' });
-      revoked += 1;
-    }
-    return revoked;
+    return store.transaction(async (tx) => {
+      let revoked = 0;
+      const rows = await tx.credentials.listByConsumer(
+        consumerId,
+        undefined,
+        LIVE_CREDENTIAL_STATUSES,
+      );
+      for (const row of rows) {
+        await tx.credentials.update(row.id, { status: 'revoked' });
+        revoked += 1;
+      }
+      return revoked;
+    });
   }
 
   /** Delete one entry by index, or the whole type when the index is unusable. */
