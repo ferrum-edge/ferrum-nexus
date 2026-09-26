@@ -236,13 +236,15 @@ export function createGodService(deps: GodServiceDeps): GodService {
       // records `access.revoke`, so the reason is never missing from a
       // revocation that happened, nor present for one that did not.
       return access.revoke(actor, grantId, why, ip, async (tx, revoked) => {
-        await audit.forStore(tx).record(
-          { id: actor.id, role: actor.role },
-          AuditAction.GOD_REVOKE_GRANT,
-          { type: 'grant', id: revoked.id },
-          { reason: why, api_id: revoked.api_id, user_id: revoked.user_id },
-          ip,
-        );
+        await audit
+          .forStore(tx)
+          .record(
+            { id: actor.id, role: actor.role },
+            AuditAction.GOD_REVOKE_GRANT,
+            { type: 'grant', id: revoked.id },
+            { reason: why, api_id: revoked.api_id, user_id: revoked.user_id },
+            ip,
+          );
       });
     },
 

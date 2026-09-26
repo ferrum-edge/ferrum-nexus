@@ -530,13 +530,15 @@ export function createApiPluginsService(deps: ApiPluginsServiceDeps): ApiPlugins
               }
             }
             await tx.apiPlugins.delete(target.apiId, pluginName);
-            await audit.forStore(tx).record(
-              { id: actor.id, role: actor.role },
-              AuditAction.API_PLUGIN_REMOVE,
-              { type: 'api', id: target.apiId },
-              { plugin_name: pluginName, label: descriptor.label, ...removed },
-              ip,
-            );
+            await audit
+              .forStore(tx)
+              .record(
+                { id: actor.id, role: actor.role },
+                AuditAction.API_PLUGIN_REMOVE,
+                { type: 'api', id: target.apiId },
+                { plugin_name: pluginName, label: descriptor.label, ...removed },
+                ip,
+              );
           });
         } catch (error) {
           await unwind({

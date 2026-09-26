@@ -718,13 +718,15 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
           name,
           description: input.description ?? null,
         });
-        await audit.forStore(tx).record(
-          { id: actor.id, role: actor.role },
-          AuditAction.ORG_CREATE,
-          { type: 'organization', id: organization.id },
-          { name },
-          ip,
-        );
+        await audit
+          .forStore(tx)
+          .record(
+            { id: actor.id, role: actor.role },
+            AuditAction.ORG_CREATE,
+            { type: 'organization', id: organization.id },
+            { name },
+            ip,
+          );
         return organization;
       });
     },
@@ -753,13 +755,15 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
       return store.transaction(async (tx) => {
         const updated = await tx.organizations.update(id, update);
         if (!updated) throw notFound('Organization', id);
-        await audit.forStore(tx).record(
-          { id: actor.id, role: actor.role },
-          AuditAction.ORG_UPDATE,
-          { type: 'organization', id },
-          { changed_fields: changed },
-          ip,
-        );
+        await audit
+          .forStore(tx)
+          .record(
+            { id: actor.id, role: actor.role },
+            AuditAction.ORG_UPDATE,
+            { type: 'organization', id },
+            { changed_fields: changed },
+            ip,
+          );
         return updated;
       });
     },

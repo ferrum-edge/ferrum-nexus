@@ -2622,13 +2622,15 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
               row = persisted;
             }
             if (recordOwnership) await tx.apiGatewayPlugins.replace(api.id, nextOwned);
-            await audit.forStore(tx).record(
-              { id: actor.id, role: actor.role },
-              update.status === 'retired' ? AuditAction.API_RETIRE : AuditAction.API_UPDATE,
-              { type: 'api', id: api.id },
-              { changed_fields: changed, ...details },
-              ip,
-            );
+            await audit
+              .forStore(tx)
+              .record(
+                { id: actor.id, role: actor.role },
+                update.status === 'retired' ? AuditAction.API_RETIRE : AuditAction.API_UPDATE,
+                { type: 'api', id: api.id },
+                { changed_fields: changed, ...details },
+                ip,
+              );
             return row;
           });
         } catch (error) {

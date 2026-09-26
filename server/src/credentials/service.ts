@@ -1356,13 +1356,15 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           // recorded stops here with nothing changed.
           await store.transaction(async (tx) => {
             await tx.credentials.update(current.id, { status: 'retiring' });
-            await audit.forStore(tx).record(
-              { id: actor.id, role: actor.role },
-              AuditAction.CREDENTIAL_REVOKE_START,
-              { type: 'credential', id: target.id },
-              { credential_type: type, consumer_id: consumerId, last4: target.last4, ...details },
-              ip,
-            );
+            await audit
+              .forStore(tx)
+              .record(
+                { id: actor.id, role: actor.role },
+                AuditAction.CREDENTIAL_REVOKE_START,
+                { type: 'credential', id: target.id },
+                { credential_type: type, consumer_id: consumerId, last4: target.last4, ...details },
+                ip,
+              );
           });
           try {
             await removeAt(consumerId, type, position, actor.id);
@@ -1391,13 +1393,15 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // settles before it records the revocation.
       await store.transaction(async (tx) => {
         await tx.credentials.update(current.id, { status: 'revoked' });
-        await audit.forStore(tx).record(
-          { id: actor.id, role: actor.role },
-          AuditAction.CREDENTIAL_REVOKE,
-          { type: 'credential', id: target.id },
-          { credential_type: type, consumer_id: consumerId, last4: target.last4, ...details },
-          ip,
-        );
+        await audit
+          .forStore(tx)
+          .record(
+            { id: actor.id, role: actor.role },
+            AuditAction.CREDENTIAL_REVOKE,
+            { type: 'credential', id: target.id },
+            { credential_type: type, consumer_id: consumerId, last4: target.last4, ...details },
+            ip,
+          );
       });
       return true;
     });
@@ -2152,13 +2156,15 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             ? {}
             : {
                 recordWithRow: async (tx: NexusStore, replacement: CredentialRecord) => {
-                  await audit.forStore(tx).record(
-                    { id: user.id, role: user.role },
-                    AuditAction.CREDENTIAL_ROTATE,
-                    { type: 'credential', id: replacement.id },
-                    rotation,
-                    ip,
-                  );
+                  await audit
+                    .forStore(tx)
+                    .record(
+                      { id: user.id, role: user.role },
+                      AuditAction.CREDENTIAL_ROTATE,
+                      { type: 'credential', id: replacement.id },
+                      rotation,
+                      ip,
+                    );
                 },
               }),
         }).catch((error: unknown) => {
@@ -2269,13 +2275,15 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             // a failed insert is handled exactly as a failed retirement is.
             previous = await store.transaction(async (tx) => {
               const retired = await tx.credentials.update(current.id, { status: 'revoked' });
-              await audit.forStore(tx).record(
-                { id: user.id, role: user.role },
-                AuditAction.CREDENTIAL_ROTATE,
-                { type: 'credential', id: created.credential.id },
-                rotation,
-                ip,
-              );
+              await audit
+                .forStore(tx)
+                .record(
+                  { id: user.id, role: user.role },
+                  AuditAction.CREDENTIAL_ROTATE,
+                  { type: 'credential', id: created.credential.id },
+                  rotation,
+                  ip,
+                );
               return retired ?? current;
             });
           } catch (error) {

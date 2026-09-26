@@ -550,13 +550,15 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           });
         }
         details.grant_restored = back !== null;
-        await audit.forStore(tx).record(
-          { id: actor.id, role: actor.role },
-          AuditAction.ACCESS_REVOKE_ROLLBACK,
-          { type: 'grant', id: grant.id },
-          details,
-          ip,
-        );
+        await audit
+          .forStore(tx)
+          .record(
+            { id: actor.id, role: actor.role },
+            AuditAction.ACCESS_REVOKE_ROLLBACK,
+            { type: 'grant', id: grant.id },
+            details,
+            ip,
+          );
       });
     } catch (error) {
       // Nothing went back — the grant is still `revoked` while its group may
@@ -932,13 +934,15 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           decided_at: decidedAt,
         });
         if (!moved) return null;
-        await audit.forStore(tx).record(
-          { id: user.id, role: user.role },
-          AuditAction.ACCESS_CANCEL,
-          { type: 'access_request', id: request.id },
-          { api_id: request.api_id },
-          ip,
-        );
+        await audit
+          .forStore(tx)
+          .record(
+            { id: user.id, role: user.role },
+            AuditAction.ACCESS_CANCEL,
+            { type: 'access_request', id: request.id },
+            { api_id: request.api_id },
+            ip,
+          );
         return moved;
       });
       if (!updated) throw await decisionConflict(request.id);
@@ -1148,13 +1152,15 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           decision_note: note ?? null,
         });
         if (!moved) return null;
-        await audit.forStore(tx).record(
-          { id: actor.id, role: actor.role },
-          AuditAction.ACCESS_DENY,
-          { type: 'access_request', id: request.id },
-          { api_id: api.id, api_slug: api.slug, user_id: requester.id, has_note: note !== null },
-          ip,
-        );
+        await audit
+          .forStore(tx)
+          .record(
+            { id: actor.id, role: actor.role },
+            AuditAction.ACCESS_DENY,
+            { type: 'access_request', id: request.id },
+            { api_id: api.id, api_slug: api.slug, user_id: requester.id, has_note: note !== null },
+            ip,
+          );
         return moved;
       });
       if (!updated) throw await decisionConflict(request.id);
