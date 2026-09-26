@@ -678,53 +678,124 @@ interface RenderUnits {
 }
 
 /**
+ * Work counters a caller may pass to {@link assertRenderCost}, so a test can
+ * assert how much counting a document cost without timing it.
+ */
+export interface RenderCostStats {
+  /** `content` maps of request bodies and responses enumerated. */
+  contentWalks: number;
+}
+
+/** What one `content` map costs to render. */
+interface ContentCost {
+  schemaNodes: number;
+  mediaTypes: number;
+}
+
+/**
  * Refuse a document that costs more to render than {@link MAX_SPEC_RENDER_UNITS}.
  *
  * Counted over the parts the viewer actually walks — reusable schemas, and the
  * parameters, request bodies and responses of every declared operation — rather
  * than over the document as a whole, so the number in the error means something
- * the provider can act on. A parameter, request body or response written as a
- * `$ref` is charged for the object it names, followed the way the viewer
- * follows it: one memoised resolver for the document, so each distinct
- * reference is walked once. Path-item parameters are charged once per path
- * item, and schema `$ref`s are not expanded; the viewer's own page budget
- * bounds both.
+ * the provider can act on.
+ *
+ * A parameter, request body or response written as a `$ref` is followed the way
+ * the viewer follows it — one memoised resolver for the document — and each
+ * distinct object so named is charged once, at its first reference; every later
+ * reference to it costs only its own parameter entry, if it is one. Path-item
+ * parameters are charged once per path item, and schema `$ref`s are not
+ * expanded. Those repetitions are what the viewer's own page budget absorbs;
+ * charging them here would refuse documents that merely reuse their components.
+ *
+ * Each `content` map's cost is computed once and cached, as each schema's is,
+ * so neither is enumerated twice however often it is referenced or aliased. The
+ * running total is checked after every charge: counting stops at the first one
+ * past the ceiling, and the error reports the totals reached by then.
  */
-function assertRenderCost(document: Record<string, unknown>, paths: Record<string, unknown>): void {
+export function assertRenderCost(
+  document: Record<string, unknown>,
+  paths: Record<string, unknown>,
+  stats?: RenderCostStats,
+): void {
   const memo = new WeakMap<object, number>();
+  const contentCosts = new WeakMap<object, ContentCost>();
+  const chargedParameters = new WeakSet<object>();
+  const chargedContent = new WeakSet<object>();
   const units: RenderUnits = { schemaNodes: 0, parameters: 0, mediaTypes: 0 };
   const resolver = createOpenApiRefResolver(document);
-  // The object a component entry names; an entry that cannot be followed
-  // renders as a single placeholder and carries nothing further to count.
-  const followed = (value: unknown): Record<string, unknown> | null => {
+
+  const charge = (schemaNodes: number, parameters: number, mediaTypes: number): void => {
+    units.schemaNodes += schemaNodes;
+    units.parameters += parameters;
+    units.mediaTypes += mediaTypes;
+    const total = units.schemaNodes + units.parameters + units.mediaTypes;
+    if (total <= MAX_SPEC_RENDER_UNITS) return;
+    throw specInvalid(
+      `The document declares ${units.schemaNodes} schema nodes, ${units.parameters} parameters ` +
+        `and ${units.mediaTypes} media types, more than the ${MAX_SPEC_RENDER_UNITS} the ` +
+        'documentation viewer can render',
+      {
+        field: 'paths',
+        reason: 'too_much_to_render',
+        schema_nodes: units.schemaNodes,
+        parameters: units.parameters,
+        media_types: units.mediaTypes,
+        units: total,
+        limit: MAX_SPEC_RENDER_UNITS,
+      },
+    );
+  };
+
+  // The object an entry names, or `null` when there is nothing further to
+  // charge: an entry that cannot be followed renders as a single placeholder,
+  // and a `$ref`'d object already charged costs nothing more.
+  const chargeable = (value: unknown, charged: WeakSet<object>): Record<string, unknown> | null => {
     if (!isRecord(value)) return null;
     const resolution = resolver.resolve(value);
-    return resolution.ok ? resolution.value : null;
+    if (!resolution.ok) return null;
+    const target = resolution.value;
+    if (target === value) return target;
+    if (charged.has(target)) return null;
+    charged.add(target);
+    return target;
   };
 
   const components = isRecord(document.components) ? document.components : null;
   const schemas = components && isRecord(components.schemas) ? components.schemas : null;
   if (schemas) {
-    for (const schema of Object.values(schemas)) units.schemaNodes += countNodes(schema, memo);
+    for (const schema of Object.values(schemas)) charge(countNodes(schema, memo), 0, 0);
   }
 
   const addParameters = (list: unknown): void => {
     if (!Array.isArray(list)) return;
-    units.parameters += list.length;
+    charge(0, list.length, 0);
     for (const entry of list) {
-      const parameter = followed(entry);
-      if (parameter) units.schemaNodes += countNodes(parameter.schema, memo);
+      const parameter = chargeable(entry, chargedParameters);
+      if (parameter) charge(countNodes(parameter.schema, memo), 0, 0);
     }
   };
 
-  const addContent = (value: unknown): void => {
-    const body = followed(value);
-    if (!body || !isRecord(body.content)) return;
-    const content = body.content;
-    units.mediaTypes += Object.keys(content).length;
+  // Keyed on the `content` map rather than the object holding it, so a map
+  // shared through a YAML alias is enumerated once too.
+  const contentCost = (content: Record<string, unknown>): ContentCost => {
+    const cached = contentCosts.get(content);
+    if (cached) return cached;
+    if (stats) stats.contentWalks += 1;
+    const cost: ContentCost = { schemaNodes: 0, mediaTypes: 0 };
     for (const media of Object.values(content)) {
-      if (isRecord(media)) units.schemaNodes += countNodes(media.schema, memo);
+      cost.mediaTypes += 1;
+      if (isRecord(media)) cost.schemaNodes += countNodes(media.schema, memo);
     }
+    contentCosts.set(content, cost);
+    return cost;
+  };
+
+  const addContent = (value: unknown): void => {
+    const body = chargeable(value, chargedContent);
+    if (!body || !isRecord(body.content)) return;
+    const cost = contentCost(body.content);
+    charge(cost.schemaNodes, 0, cost.mediaTypes);
   };
 
   for (const item of Object.values(paths)) {
@@ -739,24 +810,6 @@ function assertRenderCost(document: Record<string, unknown>, paths: Record<strin
       for (const response of Object.values(operation.responses)) addContent(response);
     }
   }
-
-  const total = units.schemaNodes + units.parameters + units.mediaTypes;
-  if (total <= MAX_SPEC_RENDER_UNITS) return;
-
-  throw specInvalid(
-    `The document declares ${units.schemaNodes} schema nodes, ${units.parameters} parameters and ` +
-      `${units.mediaTypes} media types, more than the ${MAX_SPEC_RENDER_UNITS} the documentation ` +
-      'viewer can render',
-    {
-      field: 'paths',
-      reason: 'too_much_to_render',
-      schema_nodes: units.schemaNodes,
-      parameters: units.parameters,
-      media_types: units.mediaTypes,
-      units: total,
-      limit: MAX_SPEC_RENDER_UNITS,
-    },
-  );
 }
 
 /**

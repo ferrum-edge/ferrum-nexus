@@ -46,7 +46,8 @@ All notable changes to Ferrum Nexus are documented here. The format follows
     JSON-pointer escapes and percent-encoding are honoured, and only a
     document's own members are followed. External, dangling, circular or
     overlong references render as an explicit unresolved marker instead of an
-    empty or optional row. From OpenAPI 3.1 on, a `description` or `summary`
+    empty or optional row, and any reference the viewer displays is cut to 200
+    characters. From OpenAPI 3.1 on, a `description` or `summary`
     next to a `$ref` overrides the referenced one, as the specification allows.
   - References are followed through one memoised resolver per document, in
     the viewer, the revision comparison and publish-time validation alike: each
@@ -54,9 +55,12 @@ All notable changes to Ferrum Nexus are documented here. The format follows
     pointers longer than the nesting limit are refused, and a 3.1 sibling
     override no longer copies the referenced object. The publish-time render
     ceiling now charges a `$ref`'d parameter, request body or response for the
-    object it names, so a document that stayed under it only by referencing
-    its components may now be refused with `too_much_to_render`. An empty
-    `parameters` list and a missing one no longer read as a change.
+    object it names, each distinct object once however many places reference
+    it, so a document is newly refused with `too_much_to_render` only when the
+    components its operations reference, counted once each, take it past the
+    ceiling. The count enumerates each object once and stops at the first
+    charge past the ceiling. An empty `parameters` list and a missing one no
+    longer read as a change.
 - **Application deletion is atomic, race-free and quota-preserving (#363,
   #364, #365).**
   - The rolling access-request budget

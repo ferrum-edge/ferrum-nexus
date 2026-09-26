@@ -15,6 +15,7 @@ import {
 import {
   asRecord,
   asString,
+  displayedRef,
   parseSpecText,
   type HttpMethod,
   type ParsedSpec,
@@ -58,14 +59,6 @@ const UNRESOLVED_REASONS: Readonly<Record<OpenApiRefFailure, string>> = {
   cycle: 'the reference chain is circular',
   depth: 'the reference chain is too long',
 };
-
-/** Longest `$ref` shown in full; the document can make one as long as it likes. */
-const MAX_DISPLAYED_REF_LENGTH = 200;
-
-/** `ref`, cut to {@link MAX_DISPLAYED_REF_LENGTH} characters. */
-function displayedRef(ref: string): string {
-  return ref.length > MAX_DISPLAYED_REF_LENGTH ? `${ref.slice(0, MAX_DISPLAYED_REF_LENGTH)}…` : ref;
-}
 
 /**
  * The placeholder for a parameter, request body or response whose `$ref` could

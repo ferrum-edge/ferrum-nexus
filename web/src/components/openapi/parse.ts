@@ -371,20 +371,43 @@ export function parseSpecText(text: string): SpecParseResult {
   };
 }
 
+/** Pointers already walked, per document; see {@link resolveRef}. */
+const resolvedRefs = new WeakMap<SpecNode, Map<string, SpecNode | typeof UNRESOLVED_REF>>();
+
 /**
  * Resolve a local `#/a/b/c` reference against `doc`.
  *
  * External references (anything not starting with `#/`) and dangling pointers
  * return {@link UNRESOLVED_REF} so the caller can render a placeholder instead
- * of pretending the schema is empty. Only own members are followed.
+ * of pretending the schema is empty. Only own members are followed. Memoised
+ * per document, so a schema `$ref` used across a page is walked once.
  */
 export function resolveRef(doc: SpecNode, ref: string): SpecNode | typeof UNRESOLVED_REF {
   if (!ref.startsWith('#/')) return UNRESOLVED_REF;
-  return asRecord(resolveOpenApiPointer(doc, ref)) ?? UNRESOLVED_REF;
+  let known = resolvedRefs.get(doc);
+  if (!known) {
+    known = new Map();
+    resolvedRefs.set(doc, known);
+  }
+  const cached = known.get(ref);
+  if (cached !== undefined) return cached;
+  const resolved = asRecord(resolveOpenApiPointer(doc, ref)) ?? UNRESOLVED_REF;
+  known.set(ref, resolved);
+  return resolved;
 }
 
-/** Short display name for a `$ref` (`#/components/schemas/Pet` → `Pet`). */
+/** Longest `$ref` shown in full; the document can make one as long as it likes. */
+export const MAX_DISPLAYED_REF_LENGTH = 200;
+
+/** `ref` for display, cut to {@link MAX_DISPLAYED_REF_LENGTH} characters. */
+export function displayedRef(ref: string): string {
+  return ref.length > MAX_DISPLAYED_REF_LENGTH ? `${ref.slice(0, MAX_DISPLAYED_REF_LENGTH)}…` : ref;
+}
+
+/**
+ * Short display name for a `$ref` (`#/components/schemas/Pet` → `Pet`), cut
+ * like {@link displayedRef}.
+ */
 export function refName(ref: string): string {
-  const parts = ref.split('/');
-  return parts[parts.length - 1] ?? ref;
+  return displayedRef(ref.slice(ref.lastIndexOf('/') + 1));
 }

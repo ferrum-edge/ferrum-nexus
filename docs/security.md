@@ -1136,13 +1136,17 @@ Two bounds, at the two places the cost appears:
   schema nodes of every declared operation — and refuses more than
   `MAX_SPEC_RENDER_UNITS` (100,000) of them with `400 SPEC_INVALID` and
   `details.reason = "too_much_to_render"`. A parameter, request body or response
-  written as a `$ref` is charged for the object it names, each occurrence at
-  full cost. Path-item parameters are counted once per path item rather than
-  once per operation that inherits them, and a schema `$ref` is charged where
-  its target is declared, not expanded at each use; those multiplications are
-  what the render-time budget below absorbs. One declared operation can carry
-  thousands of parameters and dozens of media types per body; counting paths
-  and operations sees none of that.
+  written as a `$ref` is charged for the object it names, and each distinct
+  object once: at its first reference, however many places name it, with every
+  later reference costing only its own parameter entry. Path-item parameters are
+  counted once per path item rather than once per operation that inherits them,
+  and a schema `$ref` is charged where its target is declared, not expanded at
+  each use; those repetitions are what the render-time budget below absorbs.
+  Counting is linear in the document: each `content` map and schema is
+  enumerated once however often it is referenced or aliased, and the count stops
+  at the first charge past the ceiling, reporting the totals reached by then.
+  One declared operation can carry thousands of parameters and dozens of media
+  types per body; counting paths and operations sees none of that.
 - **While following references.** Parameter, request-body and response
   `$ref`s are followed — by the viewer, the publish-time counter and the
   revision comparison alike — through one resolver per document that memoises

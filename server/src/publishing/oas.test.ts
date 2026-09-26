@@ -13,6 +13,7 @@ import {
 
 import { isNexusError } from '../lib/errors.js';
 import {
+  assertRenderCost,
   assertUpstreamAllowed,
   isPublicUpstreamHost,
   parseOpenApiSpec,
@@ -421,40 +422,110 @@ describe('OpenAPI parsing', () => {
     });
   });
 
-  it('charges a referenced parameter for the object it names', () => {
-    // Twenty references to one wide component parameter: nothing inline, no
-    // `components.schemas`, and every reference renders the whole schema.
-    const properties: Record<string, unknown> = {};
-    for (let index = 0; index < 6_000; index += 1) properties[`p${index}`] = {};
-    const text = JSON.stringify({
-      openapi: '3.1.0',
-      info: { title: 'Referenced', version: '1.0.0' },
-      paths: {
-        '/a': {
-          get: {
-            parameters: Array.from({ length: 20 }, () => ({
-              $ref: '#/components/parameters/Wide',
-            })),
-            responses: { '200': { description: 'OK' } },
+  it('charges a referenced parameter for the object it names, once', () => {
+    // Twenty references to one wide component parameter, with nothing inline
+    // and no `components.schemas`: the target's schema is charged at the first
+    // reference and every entry costs one parameter. Charging each reference in
+    // full would put even the accepted document twenty times over the ceiling.
+    const referencing = (propertyCount: number): string => {
+      const properties: Record<string, unknown> = {};
+      for (let index = 0; index < propertyCount; index += 1) properties[`p${index}`] = {};
+      return JSON.stringify({
+        openapi: '3.1.0',
+        info: { title: 'Referenced', version: '1.0.0' },
+        paths: {
+          '/a': {
+            get: {
+              parameters: Array.from({ length: 20 }, () => ({
+                $ref: '#/components/parameters/Wide',
+              })),
+              responses: { '200': { description: 'OK' } },
+            },
           },
         },
-      },
-      components: {
-        parameters: {
-          Wide: { name: 'filter', in: 'query', schema: { type: 'object', properties } },
+        components: {
+          parameters: {
+            Wide: { name: 'filter', in: 'query', schema: { type: 'object', properties } },
+          },
         },
-      },
-    });
-    const failure = expectSpecInvalid(() => parseOpenApiSpec(text));
+      });
+    };
+
+    // The schema object, its `properties` and each property: N + 2 nodes.
+    const atLimit = referencing(MAX_SPEC_RENDER_UNITS - 22);
+    assert.ok(Buffer.byteLength(atLimit, 'utf8') < MAX_SPEC_BYTES);
+    assert.equal(parseOpenApiSpec(atLimit).operationCount, 1);
+
+    const failure = expectSpecInvalid(() =>
+      parseOpenApiSpec(referencing(MAX_SPEC_RENDER_UNITS - 21)),
+    );
     assert.deepEqual(failure.details, {
       field: 'paths',
       reason: 'too_much_to_render',
-      schema_nodes: 20 * 6_002,
+      schema_nodes: MAX_SPEC_RENDER_UNITS - 19,
       parameters: 20,
       media_types: 0,
-      units: 20 * 6_002 + 20,
+      units: MAX_SPEC_RENDER_UNITS + 1,
       limit: MAX_SPEC_RENDER_UNITS,
     });
+  });
+
+  it('enumerates a referenced response once however many responses name it', () => {
+    // One response with a thousand media types, named by five thousand
+    // responses: charged in full at every reference this would be five million
+    // units, and enumerating it at every reference would be five million steps.
+    const content: Record<string, unknown> = {};
+    for (let index = 0; index < 1_000; index += 1) {
+      content[`application/vnd.x${index}+json`] = { schema: { type: 'string' } };
+    }
+    const responses: Record<string, unknown> = {};
+    for (let index = 0; index < 5_000; index += 1) {
+      responses[`x-${index}`] = { $ref: '#/components/responses/Wide' };
+    }
+    const document = {
+      openapi: '3.1.0',
+      info: { title: 'Referenced', version: '1.0.0' },
+      paths: {
+        '/a': { get: { responses } },
+        '/b': { post: { requestBody: { $ref: '#/components/responses/Wide' }, responses } },
+      },
+      components: { responses: { Wide: { description: 'Wide', content } } },
+    };
+
+    const stats = { contentWalks: 0 };
+    assertRenderCost(document, document.paths, stats);
+    assert.equal(stats.contentWalks, 1);
+
+    // A request body is a different role from a response: the same object
+    // named as both is charged once as each, from the one cached count.
+    assert.equal(parseOpenApiSpec(JSON.stringify(document)).operationCount, 2);
+  });
+
+  it('stops counting at the first charge past the ceiling', () => {
+    // Every operation carries its own inline wide body, so the document is far
+    // over the ceiling; the count stops at the operation that crosses it.
+    const content: Record<string, unknown> = {};
+    for (let index = 0; index < 1_000; index += 1) content[`application/vnd.x${index}+json`] = {};
+    const paths: Record<string, unknown> = {};
+    for (let index = 0; index < 1_000; index += 1) {
+      paths[`/p${index}`] = { get: { responses: { '200': { description: 'OK', content } } } };
+    }
+    const document = { openapi: '3.1.0', info: { title: 'Wide', version: '1.0.0' }, paths };
+
+    const stats = { contentWalks: 0 };
+    const failure = expectSpecInvalid(() => assertRenderCost(document, paths, stats));
+    assert.deepEqual(failure.details, {
+      field: 'paths',
+      reason: 'too_much_to_render',
+      schema_nodes: 0,
+      parameters: 0,
+      media_types: 101_000,
+      units: 101_000,
+      limit: MAX_SPEC_RENDER_UNITS,
+    });
+    // One `content` map shared by every body, as a YAML anchor would share it:
+    // each inline occurrence is charged, but the map is enumerated only once.
+    assert.equal(stats.contentWalks, 1);
   });
 
   it('rejects an operation flood that is well inside MAX_SPEC_BYTES', () => {
