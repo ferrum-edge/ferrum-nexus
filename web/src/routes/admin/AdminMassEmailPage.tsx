@@ -1,4 +1,5 @@
 import { useRef, useState, type ReactElement } from 'react';
+import { escapeHtml } from '@ferrum-nexus/shared';
 import { useMassEmail } from '../../hooks/useAdminSettings';
 import { useAuth } from '../../stores/auth';
 import { useToast } from '../../stores/toast';
@@ -73,7 +74,7 @@ function Composer(): ReactElement {
     const request = {
       subject: subject.trim(),
       body_text: bodyText,
-      body_html: bodyHtml.trim() || `<p>${bodyText.replace(/\n/g, '<br />')}</p>`,
+      body_html: bodyHtml.trim() || `<p>${escapeHtml(bodyText).replace(/\n/g, '<br />')}</p>`,
       audience: audienceFrom(audience),
     };
     // Keep the failed submission's ID until its content changes or it succeeds.

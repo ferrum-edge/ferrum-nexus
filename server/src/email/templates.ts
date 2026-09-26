@@ -16,7 +16,9 @@
  *   those variables in `rawHtmlVars`; only those skip escaping.
  */
 
-import type { EmailTemplateKey } from '@ferrum-nexus/shared';
+import { escapeHtml, type EmailTemplateKey } from '@ferrum-nexus/shared';
+
+export { escapeHtml };
 
 /** The three renderable parts of a template, as stored in `email_templates`. */
 export interface EmailTemplateContent {
@@ -49,16 +51,6 @@ export const COMMON_TEMPLATE_VARIABLES = [
   'recipient_email',
   'year',
 ] as const satisfies readonly string[];
-
-/** Escape a value for interpolation into an HTML body. */
-export function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
 
 const PLACEHOLDER = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g;
 
