@@ -93,39 +93,6 @@ describe('messaging', () => {
     assert.equal(threads.json<ListThreadsResponse>().total, 1);
   });
 
-  it('loads previews for a full 200-thread page in one batch', async () => {
-    for (let index = 0; index < 200; index += 1) {
-      await harness.store.threads.create({
-        subject: `Batch preview ${index}`,
-        created_by: founder.user.id,
-        participant_a: founder.user.id,
-        participant_b: null,
-        created_at: new Date(Date.UTC(2035, 0, 1) + index * 1_000).toISOString(),
-      });
-    }
-
-    const original = harness.store.messages.findLatestByThreads;
-    let batches = 0;
-    harness.store.messages.findLatestByThreads = async (threadIds) => {
-      batches += 1;
-      assert.equal(threadIds.length, 200);
-      return original(threadIds);
-    };
-    try {
-      const response = await harness.authed(founder, {
-        method: 'GET',
-        url: '/api/threads?limit=200',
-      });
-      assert.equal(response.statusCode, 200);
-      const page = response.json<ListThreadsResponse>();
-      assert.equal(page.items.length, 200);
-      assert.ok(page.items.every((thread) => thread.last_message_preview === null));
-      assert.equal(batches, 1);
-    } finally {
-      harness.store.messages.findLatestByThreads = original;
-    }
-  });
-
   it('shows the thread with its messages to both participants', async () => {
     const response = await harness.authed(provider, {
       method: 'GET',
@@ -366,5 +333,129 @@ describe('messaging access follows the current role, not the thread’s creator'
       listed.json<ListThreadsResponse>().items.some((entry) => entry.id === thread.id),
       'a thread they actually sit in is still theirs',
     );
+  });
+});
+
+/**
+ * List previews are fetched for the whole page in one batch. This suite runs on
+ * its own harness: the 200 far-future threads it seeds would otherwise fill the
+ * first page of every later listing in a shared one.
+ */
+describe('messaging list previews', () => {
+  let harness: TestApp;
+  let founder: TestSession;
+  let provider: TestSession;
+  let client: TestSession;
+
+  before(async () => {
+    harness = await buildTestApp();
+    founder = await harness.registerUser({ email: 'preview-founder@example.test' });
+    provider = await harness.registerUser({
+      email: 'preview-provider@example.test',
+      role: 'provider',
+    });
+    client = await harness.registerUser({ email: 'preview-client@example.test', role: 'client' });
+  });
+
+  after(async () => {
+    await harness.close();
+  });
+
+  it('previews the newest message of every thread kind and null for empty threads', async () => {
+    const kinds = [
+      { name: 'direct', created_by: client.user.id, participant_b: provider.user.id },
+      { name: 'platform', created_by: client.user.id, participant_b: null },
+      { name: 'admin-routed', created_by: founder.user.id, participant_b: null },
+    ];
+    const expected = new Map<string, string | null>();
+    const directIds: string[] = [];
+    const platformIds: string[] = [];
+    for (const kind of kinds) {
+      for (const withMessages of [true, false]) {
+        const thread = await harness.store.threads.create({
+          subject: `Preview ${kind.name} ${withMessages ? 'with' : 'without'} messages`,
+          created_by: kind.created_by,
+          participant_a: client.user.id,
+          participant_b: kind.participant_b,
+        });
+        (kind.participant_b === null ? platformIds : directIds).push(thread.id);
+        if (!withMessages) {
+          expected.set(thread.id, null);
+          continue;
+        }
+        await harness.store.messages.create({
+          thread_id: thread.id,
+          sender_user_id: kind.created_by,
+          body: `Older ${kind.name} message`,
+          created_at: new Date(Date.now() - 60_000).toISOString(),
+        });
+        await harness.store.messages.create({
+          thread_id: thread.id,
+          sender_user_id: client.user.id,
+          body: `Newest   ${kind.name}\n message`,
+          created_at: new Date(Date.now() - 30_000).toISOString(),
+        });
+        expected.set(thread.id, `Newest ${kind.name} message`);
+      }
+    }
+
+    // Every preview must match what the per-thread lookup reports.
+    for (const [id, text] of expected) {
+      const latest = await harness.store.messages.findLatestByThread(id);
+      assert.equal(latest ? latest.body.replace(/\s+/g, ' ').trim() : null, text);
+    }
+
+    async function previewsFor(session: TestSession): Promise<Map<string, string | null>> {
+      const response = await harness.authed(session, {
+        method: 'GET',
+        url: '/api/threads?limit=200',
+      });
+      assert.equal(response.statusCode, 200);
+      const page = response.json<ListThreadsResponse>();
+      assert.equal(page.total, page.items.length);
+      return new Map(page.items.map((thread) => [thread.id, thread.last_message_preview]));
+    }
+    const subset = (ids: string[]): Map<string, string | null> =>
+      new Map(ids.map((id) => [id, expected.get(id) ?? null]));
+
+    // The client sits in all six threads; an admin sees the platform inbox
+    // (platform and admin-routed threads) but not the direct ones; the provider
+    // sees only its direct threads.
+    assert.deepEqual(await previewsFor(client), expected);
+    assert.deepEqual(await previewsFor(founder), subset(platformIds));
+    assert.deepEqual(await previewsFor(provider), subset(directIds));
+  });
+
+  it('loads previews for a full 200-thread page in one batch', async () => {
+    for (let index = 0; index < 200; index += 1) {
+      await harness.store.threads.create({
+        subject: `Batch preview ${index}`,
+        created_by: founder.user.id,
+        participant_a: founder.user.id,
+        participant_b: null,
+        created_at: new Date(Date.UTC(2035, 0, 1) + index * 1_000).toISOString(),
+      });
+    }
+
+    const original = harness.store.messages.findLatestByThreads;
+    let batches = 0;
+    harness.store.messages.findLatestByThreads = async (threadIds) => {
+      batches += 1;
+      assert.equal(threadIds.length, 200);
+      return original(threadIds);
+    };
+    try {
+      const response = await harness.authed(founder, {
+        method: 'GET',
+        url: '/api/threads?limit=200',
+      });
+      assert.equal(response.statusCode, 200);
+      const page = response.json<ListThreadsResponse>();
+      assert.equal(page.items.length, 200);
+      assert.ok(page.items.every((thread) => thread.last_message_preview === null));
+      assert.equal(batches, 1);
+    } finally {
+      harness.store.messages.findLatestByThreads = original;
+    }
   });
 });

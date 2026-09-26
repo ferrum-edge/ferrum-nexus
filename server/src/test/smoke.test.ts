@@ -2666,6 +2666,24 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         participant_a: client.id,
         participant_b: provider.id,
       });
+      const platformThread = await store.threads.create({
+        subject: `Platform thread ${newId().slice(0, 6)}`,
+        created_by: client.id,
+        participant_a: client.id,
+        participant_b: null,
+      });
+      const emptyPlatformThread = await store.threads.create({
+        subject: `Empty platform thread ${newId().slice(0, 6)}`,
+        created_by: provider.id,
+        participant_a: client.id,
+        participant_b: null,
+      });
+      const platformMessage = await store.messages.create({
+        thread_id: platformThread.id,
+        sender_user_id: client.id,
+        body: 'Platform inbox',
+        created_at: isoInSeconds(-20),
+      });
       const tiedAt = isoInSeconds(-30);
       const tiedFirst = await store.messages.create({
         thread_id: tiedThread.id,
@@ -2689,7 +2707,9 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       const latest = await store.messages.findLatestByThreads([
         emptyThread.id,
         tiedThread.id,
+        emptyPlatformThread.id,
         laterThread.id,
+        platformThread.id,
       ]);
       assert.deepEqual(
         new Map(latest.map((message) => [message.thread_id, message.id])),
@@ -2699,10 +2719,19 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
             tiedFirst.id.localeCompare(tiedSecond.id) > 0 ? tiedFirst.id : tiedSecond.id,
           ],
           [laterThread.id, later.id],
+          [platformThread.id, platformMessage.id],
         ]),
       );
+      assert.equal(latest.length, 3);
+      for (const threadId of [tiedThread.id, laterThread.id, platformThread.id]) {
+        assert.equal(
+          latest.find((message) => message.thread_id === threadId)?.id,
+          (await store.messages.findLatestByThread(threadId))?.id,
+        );
+      }
       assert.deepEqual(await store.messages.findLatestByThreads([]), []);
-      assert.equal(latest.some((message) => message.thread_id === emptyThread.id), false);
+      const emptyIds = [emptyThread.id, emptyPlatformThread.id];
+      assert.equal(latest.some((message) => emptyIds.includes(message.thread_id)), false);
     });
 
     it('messages: countBySenderSince bounds the per-account budget', async () => {
