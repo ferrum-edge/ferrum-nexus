@@ -100,6 +100,34 @@ describe('test consumer lifecycle', () => {
   }
 
   /**
+   * Run `before` inside a deletion of `apiId`, once its test identity is torn
+   * down and before the transaction that drops the rows and writes
+   * `api.delete` — still under the identity's name key. Outside that
+   * transaction on purpose: parked inside it, every other store call would
+   * queue behind the open transaction. Returns the restore.
+   */
+  function beforeRowDelete(apiId: string, before: () => Promise<void>): () => void {
+    const credentials = harness.services.credentials;
+    const teardown = credentials.teardownGatewayIdentity;
+    credentials.teardownGatewayIdentity = (username, subject, options) => {
+      const whileHeld = options?.whileHeld;
+      if (username !== `nexus-test-${apiId}` || !whileHeld) {
+        return teardown.call(credentials, username, subject, options);
+      }
+      return teardown.call(credentials, username, subject, {
+        ...options,
+        whileHeld: async (result) => {
+          await before();
+          await whileHeld(result);
+        },
+      });
+    };
+    return () => {
+      credentials.teardownGatewayIdentity = teardown;
+    };
+  }
+
+  /**
    * The `id` the last `POST /consumers` asked Edge to assign — the id whose
    * create the compensation has to settle when no answer came back. Exact
    * path, so a credential append (`/consumers/:id/credentials/:type`) is not
@@ -459,17 +487,13 @@ describe('test consumer lifecycle', () => {
     const inside = barrier();
     const queued = barrier();
     const resume = barrier();
-    const realListGrants = harness.store.grants.listActiveByApi;
-    const listGrants = realListGrants.bind(harness.store.grants);
     let parked = false;
-    harness.store.grants.listActiveByApi = async (apiId) => {
-      if (apiId === api.id && !parked) {
-        parked = true;
-        inside.release();
-        await resume.promise;
-      }
-      return listGrants(apiId);
-    };
+    const restoreTeardown = beforeRowDelete(api.id, async () => {
+      if (parked) return;
+      parked = true;
+      inside.release();
+      await resume.promise;
+    });
     const serialize = harness.edgeClient.serializePerKey;
     let arrivals = 0;
     harness.edgeClient.serializePerKey = (candidate, work) => {
@@ -491,7 +515,7 @@ describe('test consumer lifecycle', () => {
       inside.release();
       queued.release();
       resume.release();
-      harness.store.grants.listActiveByApi = realListGrants;
+      restoreTeardown();
       harness.edgeClient.serializePerKey = serialize;
     }
 
@@ -662,18 +686,15 @@ describe('test consumer lifecycle', () => {
     assert.ok(consumerId);
 
     // The teardown succeeds; the row-delete transaction that follows it under
-    // the name key fails once. Armed by the grant read that immediately
-    // precedes it, so no earlier transaction can take the failure instead.
-    const realListGrants = harness.store.grants.listActiveByApi;
-    const listGrants = realListGrants.bind(harness.store.grants);
+    // the name key fails once. Armed only once the teardown is done, so no
+    // earlier transaction — `api.delete_start`'s — can take the failure instead.
     const realTransaction = harness.store.transaction;
     const transaction = realTransaction.bind(harness.store);
     let armed = false;
     let failed = false;
-    harness.store.grants.listActiveByApi = async (apiId) => {
-      if (apiId === api.id && !failed) armed = true;
-      return listGrants(apiId);
-    };
+    const restoreTeardown = beforeRowDelete(api.id, async () => {
+      if (!failed) armed = true;
+    });
     harness.store.transaction = async <T>(
       fn: (tx: NexusStore) => Promise<T>,
       options?: TransactionOptions,
@@ -686,7 +707,7 @@ describe('test consumer lifecycle', () => {
       return transaction(fn, options);
     };
     const refused = await deleteApi(api.id).finally(() => {
-      harness.store.grants.listActiveByApi = realListGrants;
+      restoreTeardown();
       harness.store.transaction = realTransaction;
     });
     assert.ok(failed, 'the row delete was the transaction that failed');
@@ -729,17 +750,13 @@ describe('test consumer lifecycle', () => {
     // the winner may answer `200` and write `api.delete`.
     const inside = barrier();
     const resume = barrier();
-    const realListGrants = harness.store.grants.listActiveByApi;
-    const listGrants = realListGrants.bind(harness.store.grants);
     let parked = false;
-    harness.store.grants.listActiveByApi = async (apiId) => {
-      if (apiId === api.id && !parked) {
-        parked = true;
-        inside.release();
-        await resume.promise;
-      }
-      return listGrants(apiId);
-    };
+    const restoreTeardown = beforeRowDelete(api.id, async () => {
+      if (parked) return;
+      parked = true;
+      inside.release();
+      await resume.promise;
+    });
     try {
       const removing = deleteApi(api.id);
       await inside.promise;
@@ -759,7 +776,7 @@ describe('test consumer lifecycle', () => {
     } finally {
       inside.release();
       resume.release();
-      harness.store.grants.listActiveByApi = realListGrants;
+      restoreTeardown();
     }
 
     assert.equal(

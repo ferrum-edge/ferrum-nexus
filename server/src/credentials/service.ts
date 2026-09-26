@@ -622,7 +622,9 @@ export interface TeardownGatewayIdentityOptions {
    * is released — whatever the teardown found, and only when it succeeded.
    * Not run when `requireDisabledOwner` turned the teardown into a no-op.
    *
-   * The API deletion drops its rows here (issue #373). A test-consumer
+   * It receives what the teardown collected, so the caller can record it in
+   * the same transaction as its own work. The API deletion drops its rows and
+   * writes `api.delete` here (issue #373). A test-consumer
    * creation takes the same key and re-reads the API inside it, so the two
    * need the row delete to land while the key is still held: released first,
    * a creation that had loaded the API a moment earlier could take the key in
@@ -642,7 +644,7 @@ export interface TeardownGatewayIdentityOptions {
    * consumer that is now gone: that is what lets a retry report the identity
    * as collected rather than as never having existed.
    */
-  whileHeld?: () => Promise<void>;
+  whileHeld?: (result: TeardownGatewayIdentityResult) => Promise<void>;
 }
 
 /** What one {@link CredentialsService.teardownGatewayIdentity} attempt collected. */
@@ -2608,7 +2610,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // registration is what a retry finds the collected consumer by.
       if (options?.whileHeld) {
         try {
-          await options.whileHeld();
+          await options.whileHeld(result);
         } catch (error) {
           if (result.consumer_id !== null || result.registration_removed) {
             // The consumer is gone and its rows are revoked; nothing will undo

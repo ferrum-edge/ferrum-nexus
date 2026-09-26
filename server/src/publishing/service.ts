@@ -239,7 +239,6 @@ import {
   gatewayIdentityLockKey,
   LIVE_CREDENTIAL_STATUSES,
   type CredentialsService,
-  type TeardownGatewayIdentityResult,
 } from '../credentials/service.js';
 import { assertNamespaceServed, type FerrumAdminClient } from '../ferrum-admin/index.js';
 import {
@@ -397,8 +396,20 @@ export interface PublishingService {
    * the Edge objects are recreated, from what the portal already stores.
    */
   restoreGateway(actor: UserRecord, apiId: Uuid, ip?: string | null): Promise<RestoreResult>;
-  /** Tear the API down: grants revoked, Edge objects deleted, rows removed. */
-  remove(actor: UserRecord, apiId: Uuid, ip?: string | null): Promise<{ revoked_grants: number }>;
+  /**
+   * Tear the API down: grants revoked, Edge objects deleted, rows removed.
+   *
+   * `recordWithDelete` writes further audit rows — god mode's own — in the
+   * transaction that removes the rows and records `api.delete`, so they commit
+   * or roll back with it. It runs in a retryable transaction body, so it must
+   * write only through the store it is handed.
+   */
+  remove(
+    actor: UserRecord,
+    apiId: Uuid,
+    ip?: string | null,
+    recordWithDelete?: (tx: NexusStore) => Promise<void>,
+  ): Promise<{ revoked_grants: number }>;
   /** Create (or replace) the provider's throwaway consumer for their own API. */
   createTestConsumer(
     actor: UserRecord,
@@ -2821,7 +2832,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       };
     },
 
-    async remove(actor, apiId, ip = null): Promise<{ revoked_grants: number }> {
+    async remove(actor, apiId, ip = null, recordWithDelete): Promise<{ revoked_grants: number }> {
       const initial = await loadApi(apiId);
       assertCanAdminister(actor, initial);
 
@@ -2847,11 +2858,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // `LEASE_WAIT_MS` each under a credential burst. Every concurrent write
       // on the API would answer `409` for the duration, for a step that cannot
       // affect what the gateway serves.
-      const apply = async (): Promise<{
-        grants: GrantRecord[];
-        api: ApiRecord;
-        testConsumer: TeardownGatewayIdentityResult;
-      }> => {
+      const apply = async (): Promise<{ grants: GrantRecord[]; api: ApiRecord }> => {
         // Re-read under the lease: whatever held it may have moved the proxy or
         // the enforcement mode, and the teardown has to act on what is there
         // now rather than on the snapshot that waited.
@@ -2862,6 +2869,24 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             'The gateway proxy changed while this delete was waiting; reload and retry',
           );
         }
+
+        // 0. Record the attempt before the gateway is touched. The teardown
+        //    below cannot be rolled back, so a failure to record the delete
+        //    that follows it must still leave a row naming who started it —
+        //    and a failure to record *this* stops the delete before anything
+        //    has changed.
+        await store.transaction(async (tx) => {
+          await audit.forStore(tx).record(
+            { id: actor.id, role: actor.role },
+            AuditAction.API_DELETE_START,
+            { type: 'api', id: api.id },
+            {
+              slug: api.slug,
+              proxy_id: api.ferrum_proxy_id,
+            },
+            ip,
+          );
+        });
 
         // 1. Take the API off the gateway first: once the proxy is gone nobody
         //    can call it, so a later failure cannot leave it
@@ -2905,57 +2930,83 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         //    deletion racing a creation waits for it and then undoes it rather
         //    than interleaving. It is disjoint from the proxy lease held here.
         //
-        // 3. Drop the rows — still under that name key, which is what closes
-        //    the race the other way round (issue #373). A creation re-reads
-        //    the API as the first thing it does inside the key, so it either
-        //    finished before this teardown began, and was collected by it, or
-        //    starts after the row is gone and answers `404` without creating
-        //    anything. Released between the teardown and the delete, the key
-        //    would let a creation that loaded the API a moment earlier find
-        //    the row still standing and build a consumer nothing would ever
-        //    collect.
+        // 3. Drop the rows, and record the delete with them — still under that
+        //    name key, which is what closes the race the other way round
+        //    (issue #373). A creation re-reads the API as the first thing it
+        //    does inside the key, so it either finished before this teardown
+        //    began, and was collected by it, or starts after the row is gone
+        //    and answers `404` without creating anything. Released between the
+        //    teardown and the delete, the key would let a creation that loaded
+        //    the API a moment earlier find the row still standing and build a
+        //    consumer nothing would ever collect.
         //
         //    The store's delete helpers are the cascade, and the grant list is
-        //    read a moment before it because the ACL strip and the
-        //    notifications that follow the lease both need it — a line later
-        //    there is nothing left to read it from.
+        //    read first because the ACL strip and the notifications that follow
+        //    the lease both need it — a line later there is nothing left to
+        //    read it from.
         //
         //    `api_plugins` needs no gateway step of its own: every palette
         //    plugin is proxy-scoped, so deleting the proxy above already
         //    cascaded both the configs and their association rows, and the
         //    sweep that follows it covers anything a gateway left behind. Only
         //    the portal's rows are left to remove here.
+        //
+        //    `api.delete` commits with the rows it describes. Written after
+        //    them, a failed insert left the API gone and unaudited behind a
+        //    `500`; now it leaves the API in the portal for the delete to be
+        //    retried against, and the gateway steps above are idempotent for
+        //    that retry — the proxy and config deletes tolerate a `404`, and
+        //    the test identity's teardown keeps its registration when this
+        //    callback fails, so the retry still records what it collected.
         let grants: GrantRecord[] = [];
-        const testConsumer = await credentials.teardownGatewayIdentity(
-          testConsumerUsername(api.id),
-          actor.id,
-          {
-            whileHeld: async () => {
-              grants = await store.grants.listActiveByApi(api.id);
-              await store.transaction(async (tx) => {
-                await tx.grants.deleteByApi(api.id);
-                await tx.accessRequests.deleteByApi(api.id);
-                await tx.apiPlugins.deleteByApi(api.id);
-                await tx.apiViewers.deleteByApi(api.id);
-                await tx.apiSpecs.deleteByApi(api.id);
-                // Nothing matched: a concurrent deletion got here first — the
-                // lease above does not serialise an API with no proxy, and an
-                // expired one serialises nothing. Only one of them may answer
-                // `200` and write `api.delete`.
-                if (!(await tx.apis.delete(api.id))) throw notFound('API', apiId);
-              });
-            },
+        await credentials.teardownGatewayIdentity(testConsumerUsername(api.id), actor.id, {
+          whileHeld: async (testConsumer) => {
+            grants = await store.transaction(async (tx) => {
+              const active = await tx.grants.listActiveByApi(api.id);
+              await tx.grants.deleteByApi(api.id);
+              await tx.accessRequests.deleteByApi(api.id);
+              await tx.apiPlugins.deleteByApi(api.id);
+              await tx.apiViewers.deleteByApi(api.id);
+              await tx.apiSpecs.deleteByApi(api.id);
+              // Nothing matched: a concurrent deletion got here first — the
+              // lease above does not serialise an API with no proxy, and an
+              // expired one serialises nothing. Only one of them may answer
+              // `200` and write `api.delete`.
+              if (!(await tx.apis.delete(api.id))) throw notFound('API', apiId);
+              await audit.forStore(tx).record(
+                { id: actor.id, role: actor.role },
+                AuditAction.API_DELETE,
+                { type: 'api', id: api.id },
+                {
+                  slug: api.slug,
+                  proxy_id: api.ferrum_proxy_id,
+                  revoked_grants: active.length,
+                  // Only when there was one: an API that never had a test
+                  // consumer must not leave a row that reads as though its
+                  // teardown was skipped rather than unnecessary.
+                  ...(testConsumer.consumer_id !== null || testConsumer.registration_removed
+                    ? {
+                        test_consumer_id: testConsumer.consumer_id,
+                        test_consumer_revoked_credentials: testConsumer.revoked_credentials,
+                      }
+                    : {}),
+                },
+                ip,
+              );
+              await recordWithDelete?.(tx);
+              return active;
+            });
           },
-        );
+        });
 
-        return { grants, api, testConsumer };
+        return { grants, api };
       };
-      // The ACL strip, the audit row and the grantee notifications are all
-      // written outside the lease, so it is held for the teardown and the row
-      // delete and nothing else — and they run only after `apply` returned,
-      // which is what makes `api.delete` mean "the gateway teardown held"
-      // rather than "a delete was attempted".
-      const { grants, api, testConsumer } = initial.ferrum_proxy_id
+      // The ACL strip and the grantee notifications are written outside the
+      // lease, so it is held for the teardown and the row delete and nothing
+      // else — and they run only after `apply` returned, which is what makes
+      // `api.delete` mean "the gateway teardown held" rather than "a delete was
+      // attempted".
+      const { grants, api } = initial.ferrum_proxy_id
         ? await binder.withProxy(initial.ferrum_proxy_id, apply)
         : await apply();
 
@@ -2980,27 +3031,6 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           },
         );
       }
-
-      await audit.record(
-        { id: actor.id, role: actor.role },
-        AuditAction.API_DELETE,
-        { type: 'api', id: api.id },
-        {
-          slug: api.slug,
-          proxy_id: api.ferrum_proxy_id,
-          revoked_grants: grants.length,
-          // Only when there was one: an API that never had a test consumer
-          // must not leave a row that reads as though its teardown was
-          // skipped rather than unnecessary.
-          ...(testConsumer.consumer_id !== null || testConsumer.registration_removed
-            ? {
-                test_consumer_id: testConsumer.consumer_id,
-                test_consumer_revoked_credentials: testConsumer.revoked_credentials,
-              }
-            : {}),
-        },
-        ip,
-      );
 
       for (const grant of grants) {
         await notifications
@@ -3237,21 +3267,46 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             previous,
           );
           if (consumerDeleted && consumerId !== null) {
-            const liveRows = await store.credentials.listByConsumer(
-              consumerId,
-              undefined,
-              LIVE_CREDENTIAL_STATUSES,
-            );
-            for (const row of liveRows) {
-              await credentials.revokeInvalidated(
-                { id: actor.id, role: actor.role },
-                row.id,
+            // Best-effort: the error rethrown below is what the caller has to
+            // see — a retryable `409` above all — and a revocation that fails
+            // here must not replace it with a `500`. The consumer is already
+            // gone, so a row left `active` cannot authenticate anything; it is
+            // logged, and one row's failure does not stop the others.
+            const deletedConsumerId = consumerId;
+            const logUnrevoked = (revokeError: unknown, credentialId?: string): void => {
+              deps.log?.(
                 {
-                  reason: 'test_consumer_creation_abandoned',
                   api_id: api.id,
+                  consumer_id: deletedConsumerId,
+                  ...(credentialId === undefined ? {} : { credential_id: credentialId }),
+                  error: errorMessage(revokeError),
                 },
-                ip,
+                'a credential row of an abandoned test consumer could not be revoked',
               );
+            };
+            try {
+              const liveRows = await store.credentials.listByConsumer(
+                deletedConsumerId,
+                undefined,
+                LIVE_CREDENTIAL_STATUSES,
+              );
+              for (const row of liveRows) {
+                try {
+                  await credentials.revokeInvalidated(
+                    { id: actor.id, role: actor.role },
+                    row.id,
+                    {
+                      reason: 'test_consumer_creation_abandoned',
+                      api_id: api.id,
+                    },
+                    ip,
+                  );
+                } catch (revokeError) {
+                  logUnrevoked(revokeError, row.id);
+                }
+              }
+            } catch (listError) {
+              logUnrevoked(listError);
             }
           }
           throw error;
