@@ -26,6 +26,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Retired APIs in the catalog are labeled as retired and no longer show a new
+  access-request form. Existing identity grants remain visible, and pending
+  requests can still be withdrawn (#376).
 - The catalog's **Call this API** panel now follows the selected identity
   (#374). On an API that needs approval it appears only for an identity that
   holds an active grant, and its example, Consumer and JWT `sub` use that
