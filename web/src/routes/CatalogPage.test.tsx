@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_PAGE_SIZE,
   MAX_JUSTIFICATION_LENGTH,
+  consumerUsernameForApplication,
+  consumerUsernameForUser,
   type AccessRequest,
   type Application,
   type ApplicationSummary,
@@ -69,6 +71,14 @@ afterEach(() => {
   clearClients();
   vi.restoreAllMocks();
 });
+
+/** The example request's text, exactly as shown and copied. */
+function exampleRequest(): string {
+  const code = screen.getByText(
+    (_, element) => element?.tagName === 'CODE' && (element.textContent ?? '').startsWith('curl '),
+  );
+  return code.textContent ?? '';
+}
 
 async function openDetail(tab = 'Overview'): Promise<void> {
   renderPage(<CatalogDetailPage />);
@@ -263,9 +273,9 @@ describe('catalog access', () => {
   });
 
   it.each([
-    ['key_auth', 'X-API-Key: <your key>'],
-    ['basic_auth', 'Authorization: Basic base64(nexus-user-user-1:<your password>)'],
-    ['jwt_auth', 'Authorization: Bearer <token you sign>'],
+    ['key_auth', "-H 'X-API-Key: <your key>'"],
+    ['basic_auth', "--user 'nexus-user-user-1:<your password>'"],
+    ['jwt_auth', "-H 'Authorization: Bearer <token you sign>'"],
   ] as const)('shows the %s recipe only after access is granted', async (authPlugin, recipe) => {
     detail = {
       ...detail,
@@ -276,7 +286,8 @@ describe('catalog access', () => {
     await openDetail('Access');
     await screen.findByText(/Access granted to your account/);
     expect(screen.getByText('Call this API')).toBeInTheDocument();
-    expect(screen.getByText(recipe)).toBeInTheDocument();
+    expect(exampleRequest()).toContain(recipe);
+    expect(exampleRequest()).not.toContain('base64(');
     expect(screen.getByText(GRANT.acl_group)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /Manage your credentials/ })).toHaveAttribute(
       'href',
@@ -471,8 +482,8 @@ describe('per-identity catalog access (issue #314)', () => {
     vi.spyOn(accessRequestsApi, 'create').mockResolvedValue({ access_request: REQUEST });
   });
 
-  async function chooseIdentity(name: string): Promise<void> {
-    fireEvent.click(screen.getByLabelText('Requesting for'));
+  async function chooseIdentity(name: string, label = 'Requesting for'): Promise<void> {
+    fireEvent.click(screen.getByLabelText(label));
     fireEvent.click(await screen.findByRole('option', { name }));
   }
 
@@ -613,5 +624,98 @@ describe('per-identity catalog access (issue #314)', () => {
       await screen.findByText(/Approval adds this API to that application only/),
     ).toBeVisible();
     expect(catalogApi.identityAccess).toHaveBeenLastCalledWith('billing', 'app-7');
+  });
+  describe('call instructions follow the selected identity (issue #374)', () => {
+    /** The consumer the account-level credential endpoint issues on. */
+    const ACCOUNT_CONSUMER = consumerUsernameForUser('user-1');
+
+    /** The JWT `sub` the note tells the caller to sign. */
+    function jwtSubject(): string {
+      return screen.getByText(/claim must be/).querySelectorAll('code')[1]?.textContent ?? '';
+    }
+
+    it('calls as the account when only the account is approved', async () => {
+      detail = {
+        ...detail,
+        api: catalogEntry({ access_state: 'granted', auth_plugin: 'basic_auth' }),
+        my_grant: GRANT,
+      };
+      identities.account = { ...NO_ACCESS, grant: GRANT };
+      identities['app-a'] = { ...NO_ACCESS, application: summary(APP_A) };
+      await openDetail('Access');
+
+      await screen.findByText(/Access granted to your account/);
+      expect(exampleRequest()).toContain(`--user '${ACCOUNT_CONSUMER}:<your password>'`);
+
+      // The account's grant does not reach the application, so there is
+      // nothing to call as it until it is approved.
+      await chooseIdentity('Application A');
+      await screen.findByRole('button', { name: 'Request access' });
+      expect(screen.queryByText('Call this API')).not.toBeInTheDocument();
+    });
+
+    it('calls as the approved application, never the unapproved account', async () => {
+      detail = {
+        ...detail,
+        api: catalogEntry({ access_state: 'granted', auth_plugin: 'basic_auth' }),
+        my_grant: grantFor(APP_A),
+      };
+      identities['app-a'] = { application: summary(APP_A), request: null, grant: grantFor(APP_A) };
+      await openDetail('Access');
+
+      // The account-wide state says "granted", but the account holds nothing.
+      await screen.findByRole('button', { name: 'Request access' });
+      expect(screen.queryByText('Call this API')).not.toBeInTheDocument();
+      expect(screen.getByText('No access')).toBeInTheDocument();
+
+      await chooseIdentity('Application A');
+      await screen.findByText(/Access granted to Application A/);
+      const example = exampleRequest();
+      expect(example).toContain(
+        `--user '${consumerUsernameForApplication('app-a')}:<your password>'`,
+      );
+      expect(example).not.toContain(ACCOUNT_CONSUMER);
+      expect(screen.getByText(/to Application A from the credentials page/)).toBeInTheDocument();
+    });
+
+    it('switches the JWT subject between approved applications', async () => {
+      detail = {
+        ...detail,
+        api: catalogEntry({ access_state: 'granted', auth_plugin: 'jwt_auth' }),
+        my_grant: grantFor(APP_A),
+      };
+      identities['app-a'] = { application: summary(APP_A), request: null, grant: grantFor(APP_A) };
+      identities['app-b'] = { application: summary(APP_B), request: null, grant: grantFor(APP_B) };
+      await openDetail('Access');
+      await screen.findByRole('button', { name: 'Request access' });
+
+      await chooseIdentity('Application A');
+      await screen.findByText(/Access granted to Application A/);
+      expect(jwtSubject()).toBe(consumerUsernameForApplication('app-a'));
+
+      await chooseIdentity('Application B');
+      await screen.findByText(/Access granted to Application B/);
+      expect(jwtSubject()).toBe(consumerUsernameForApplication('app-b'));
+    });
+
+    it('lets an API without approval be called as any identity', async () => {
+      detail = {
+        ...detail,
+        api: catalogEntry({ requestable: false, access_state: 'open', auth_plugin: 'basic_auth' }),
+      };
+      await openDetail('Access');
+
+      expect(await screen.findByText('Call this API')).toBeInTheDocument();
+      expect(exampleRequest()).toContain(`--user '${ACCOUNT_CONSUMER}:<your password>'`);
+
+      await chooseIdentity('Application B', 'Calling as');
+      await waitFor(() =>
+        expect(exampleRequest()).toContain(
+          `--user '${consumerUsernameForApplication('app-b')}:<your password>'`,
+        ),
+      );
+      // Open access has no per-identity grant to look up.
+      expect(catalogApi.identityAccess).not.toHaveBeenCalled();
+    });
   });
 });
