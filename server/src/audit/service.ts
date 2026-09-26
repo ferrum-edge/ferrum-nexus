@@ -59,8 +59,11 @@ export const AuditAction = {
   USER_DISABLE: 'user.disable',
   USER_ENABLE: 'user.enable',
   /**
-   * The teardown worker finished the gateway revocation a disable had left
-   * pending. Written by the system, so the actor is {@link SYSTEM_ACTOR}.
+   * The gateway revocation a disable queued has landed. Written by the teardown
+   * worker as the system ({@link SYSTEM_ACTOR}), or by the administrator's own
+   * request when its immediate attempt succeeded — `details.inline: true`. The
+   * disable itself is recorded before either, in the transaction that queued
+   * the revocation, so this row is the outcome and never the only trace.
    */
   USER_GATEWAY_TEARDOWN_COMPLETE: 'user.gateway_teardown_complete',
   /** An admin re-ran a pending gateway revocation by hand. */
@@ -84,6 +87,13 @@ export const AuditAction = {
    */
   API_SPEC_ROLLBACK: 'api.spec_rollback',
   API_RETIRE: 'api.retire',
+  /**
+   * An API delete is about to take the API's Edge objects down. Committed
+   * before the first gateway call, so a teardown whose completion could not be
+   * recorded still leaves a row naming who started it; {@link API_DELETE}
+   * follows in the transaction that removes the rows.
+   */
+  API_DELETE_START: 'api.delete_start',
   API_DELETE: 'api.delete',
   /** A palette plugin was created or replaced on an API's proxy. */
   API_PLUGIN_SET: 'api.plugin_set',
@@ -144,6 +154,13 @@ export const AuditAction = {
    * cascade removed with it.
    */
   APPLICATION_DELETE: 'application.delete',
+  /**
+   * An application delete is about to take the application's gateway identity
+   * down. The counterpart of {@link API_DELETE_START}: committed before the
+   * gateway is touched, with {@link APPLICATION_DELETE} written in the
+   * transaction that removes the rows.
+   */
+  APPLICATION_DELETE_START: 'application.delete_start',
   API_VIEWER_AUTHORIZE: 'api.viewer_authorize',
   /**
    * A read authorization was withdrawn. `details.revoked_grant` is always
@@ -249,6 +266,13 @@ export const AuditAction = {
   GOD_DELETE_API: 'god.delete_api',
   GOD_DISABLE_USER: 'god.disable_user',
   /**
+   * What a god-mode disable achieved after the disable itself committed — the
+   * grant sweep, the immediate gateway revocation and any step that failed.
+   * The {@link GOD_DISABLE_USER} row is written with the disable, before any of
+   * it, so this row is the outcome rather than the record that it happened.
+   */
+  GOD_DISABLE_USER_COMPLETE: 'god.disable_user_complete',
+  /**
    * Written **before** the first recipient is touched, which is what makes it
    * the broadcast's countable record: `NEXUS_MAX_BROADCASTS_PER_DAY` counts
    * exactly these rows, so an attempt whose fan-out or completion record later
@@ -270,6 +294,42 @@ export type AuditActionName = (typeof AuditAction)[keyof typeof AuditAction];
 
 /** Every action as an array — useful for filter validation and docs generation. */
 export const ALL_AUDIT_ACTIONS = Object.values(AuditAction) as readonly AuditActionName[];
+
+/**
+ * Actions that must be written through `audit.forStore(tx)` inside the
+ * `store.transaction` that performs the change they describe.
+ *
+ * Privileged account transitions and destructive deletions, plus the intent
+ * rows committed before a deletion's gateway work. Recorded after the commit, a
+ * failed audit insert left the change applied and unaudited behind a `500` —
+ * and a repeat of the same request then found nothing left to change and wrote
+ * nothing either. In the transaction, a failed insert rolls the change back
+ * with it.
+ *
+ * `transactional-audit.test.ts` scans the server source and fails when one of
+ * these is recorded any other way, so a new call site cannot quietly slip back
+ * to the post-commit shape. Outcome rows written after a gateway call
+ * ({@link AuditAction.USER_GATEWAY_TEARDOWN_COMPLETE},
+ * {@link AuditAction.GOD_DISABLE_USER_COMPLETE}) are deliberately absent: the
+ * change they report is already recorded by one of these.
+ */
+export const TRANSACTIONAL_AUDIT_ACTIONS: readonly AuditActionName[] = [
+  AuditAction.USER_UPDATE,
+  AuditAction.USER_ROLE_CHANGE,
+  AuditAction.USER_DISABLE,
+  AuditAction.USER_ENABLE,
+  AuditAction.USER_GATEWAY_TEARDOWN_RETRY,
+  AuditAction.GOD_DISABLE_USER,
+  AuditAction.APPLICATION_CREATE,
+  AuditAction.APPLICATION_UPDATE,
+  AuditAction.APPLICATION_DELETE_START,
+  AuditAction.APPLICATION_DELETE,
+  AuditAction.API_VIEWER_AUTHORIZE,
+  AuditAction.API_VIEWER_REVOKE,
+  AuditAction.API_DELETE_START,
+  AuditAction.API_DELETE,
+  AuditAction.GOD_DELETE_API,
+];
 
 /** Who performed the action. `null` for anonymous events (failed logins, registration). */
 export interface AuditActor {

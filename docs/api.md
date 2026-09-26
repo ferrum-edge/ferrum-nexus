@@ -1490,8 +1490,13 @@ useful message; `409 CONFLICT` for any other attempt to disable your own
 account. `revoke_grants: true` revokes the account's grants only after the
 disable has committed, so a refused disable leaves every grant in place.
 
+The disable, the end of its sessions, its queued gateway revocation and its
+`user.disable` and `god.disable_user` audit rows commit in one transaction, so a
+failed audit write leaves the account as it was. What followed is recorded as
+`god.disable_user_complete`.
+
 The sweep never reports a partial result as success. When any grant cannot be
-fully revoked, the disable (already committed) is audited with
+fully revoked, `god.disable_user_complete` records
 `failed_steps: ["revoke_grants"]` and the grants that failed, and the request
 answers with the error — `502 EDGE_ERROR` when a gateway step failed — whose
 `details.failed_grants` lists each one's `grant_id`, `api_id`,
@@ -2132,9 +2137,12 @@ refuses fails the request with `502 EDGE_ERROR`, leaving the API in the catalog
 so the delete can be retried; the identity stays registered, which is what makes
 it findable.
 
-The gateway teardown and the row delete run under the API's per-proxy lease, and
-the `api.delete` audit row is written only once they have. A `spec_enforcement`
-conversion is a delete-and-recreate, so an unserialised teardown could commit in
+The gateway teardown and the row delete run under the API's per-proxy lease. An
+`api.delete_start` audit row is committed before the first gateway call, and the
+`api.delete` row commits in the same transaction as the row delete, once the
+teardown has held; if that transaction fails, the API stays in the catalog for
+the delete to be retried, and the gateway steps are safe to repeat. A
+`spec_enforcement` conversion is a delete-and-recreate, so an unserialised teardown could commit in
 the middle of one and leave the conversion's rebuild serving an API with no
 portal record — reachable, un-removable, and holding the slug against every
 future publish. Returns `409 CONFLICT` if the API's proxy identity changed while
@@ -2308,10 +2316,13 @@ application holds the same key until the request commits, so a request either
 lands first and is removed by the cascade, or finds the application gone
 (`404`).
 
-The local delete — the counts in the response and the row with its cascade — is
-one transaction on every backend, MongoDB included, so a failure part-way
-leaves every row in place. A retry after the consumer was already deleted
-finishes the rows without recreating anything on the gateway.
+The local delete — the counts in the response, the row with its cascade and the
+`application.delete` audit row — is one transaction on every backend, MongoDB
+included, so a failure part-way leaves every row in place. An
+`application.delete_start` audit row is committed before the consumer is
+touched, so a delete that took the consumer down and then failed to record its
+completion still names who started it. A retry after the consumer was already
+deleted finishes the rows without recreating anything on the gateway.
 
 Its credentials stop working immediately. The reversible option is `PATCH` with
 `status: "disabled"`.

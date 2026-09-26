@@ -540,12 +540,10 @@ describe('credential and access ownership (issue #341)', () => {
       assert.equal(revokeRow.acl_group_removed, false);
 
       // … the disable is not reported as a success …
-      for (const action of ['user.disable', 'god.disable_user']) {
-        const details = await auditFor(action, owner.user.id);
-        assert.deepEqual(details.failed_steps, ['revoke_grants'], action);
-        assert.equal(details.failed_grant_revocations, 1, action);
-      }
-      assert.equal((await auditFor('god.disable_user', owner.user.id)).revoked_grants, 0);
+      const outcome = await auditFor('god.disable_user_complete', owner.user.id);
+      assert.deepEqual(outcome.failed_steps, ['revoke_grants']);
+      assert.equal(outcome.failed_grant_revocations, 1);
+      assert.equal(outcome.revoked_grants, 0);
 
       // … the teardown that followed took the group off anyway …
       assert.deepEqual(groupsOf(owner.user.id), []);
@@ -643,7 +641,7 @@ describe('credential and access ownership (issue #341)', () => {
       assert.equal((await harness.store.grants.findById(grant.id))?.status, 'revoked');
       const revokeRow = await auditFor('access.revoke', grant.id);
       assert.equal(revokeRow.acl_group_removed, undefined, 'no failure is recorded');
-      const details = await auditFor('god.disable_user', owner.user.id);
+      const details = await auditFor('god.disable_user_complete', owner.user.id);
       assert.equal(details.revoked_grants, 1);
       assert.equal(details.failed_steps, undefined);
     });
