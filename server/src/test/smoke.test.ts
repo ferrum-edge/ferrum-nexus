@@ -2132,6 +2132,94 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(await store.grants.deleteByApi(api.id), 2);
     });
 
+    it('credentials: updateIfStatus moves a row only from the expected status', async () => {
+      const user = await makeUser();
+      const row = await store.credentials.create({
+        user_id: user.id,
+        ferrum_consumer_id: `consumer-${newId()}`,
+        credential_type: 'keyauth',
+        ferrum_credential_id: 'keyauth:1',
+        fingerprint: `fp-${newId()}`,
+        last4: 'wdrw',
+        status: 'retiring',
+      });
+
+      // A withdrawal and a revocation race over the same `retiring` read. The
+      // predicate is the only arbiter: exactly one of them moves the row.
+      const outcomes = await Promise.all([
+        store.credentials.updateIfStatus(row.id, 'retiring', { status: 'active' }),
+        store.credentials.updateIfStatus(row.id, 'retiring', { status: 'revoked' }),
+      ]);
+      const winners = outcomes.filter((outcome) => outcome !== null);
+      assert.equal(winners.length, 1, 'exactly one transition may move a retiring row');
+      const stored = await store.credentials.findById(row.id);
+      assert.equal(stored?.status, winners[0]?.status, 'the winner is what was stored');
+      assert.equal(stored?.edge_ordinal, row.edge_ordinal);
+
+      // Settle it as revoked; a withdrawal against the status it no longer has
+      // changes nothing — a revoked key never comes back to `active`.
+      await store.credentials.update(row.id, { status: 'revoked' });
+      const revoked = await store.credentials.findById(row.id);
+      assert.equal(
+        await store.credentials.updateIfStatus(row.id, 'retiring', { status: 'active' }),
+        null,
+      );
+      assert.deepEqual(await store.credentials.findById(row.id), revoked);
+
+      // An empty patch is still a predicate test, not an unconditional hit.
+      assert.equal(await store.credentials.updateIfStatus(row.id, 'retiring', {}), null);
+      assert.deepEqual(await store.credentials.updateIfStatus(row.id, 'revoked', {}), revoked);
+
+      // A patch of identical values still matches (MySQL counts matched rows).
+      const rewritten = await store.credentials.updateIfStatus(row.id, 'revoked', {
+        status: 'revoked',
+      });
+      assert.ok(rewritten, 'a patch of identical values still matches the predicate');
+      assert.deepEqual({ ...rewritten, updated_at: '' }, { ...revoked, updated_at: '' });
+
+      assert.equal(
+        await store.credentials.updateIfStatus(newId(), 'retiring', { status: 'active' }),
+        null,
+        'a missing row is a loss, not a throw',
+      );
+      assert.equal(await store.credentials.delete(row.id), true);
+    });
+
+    it('credentials: updateIfStatus in a transaction loses to an outside revocation', async (t) => {
+      if (!target.peer) return t.skip('one connection: an outside write cannot interleave');
+      const user = await makeUser();
+      const row = await store.credentials.create({
+        user_id: user.id,
+        ferrum_consumer_id: `consumer-${newId()}`,
+        credential_type: 'keyauth',
+        ferrum_credential_id: 'keyauth:1',
+        fingerprint: `fp-${newId()}`,
+        last4: 'race',
+        status: 'retiring',
+      });
+
+      const peer = await target.peer();
+      try {
+        let runs = 0;
+        const outcome = await store.transaction(async (tx) => {
+          runs += 1;
+          // Reading first fixes a REPEATABLE READ snapshot that still says
+          // `retiring` before the outside revocation commits.
+          await tx.credentials.findById(row.id);
+          if (runs === 1) {
+            assert.ok(
+              await peer.credentials.updateIfStatus(row.id, 'retiring', { status: 'revoked' }),
+            );
+          }
+          return tx.credentials.updateIfStatus(row.id, 'retiring', { status: 'active' });
+        });
+        assert.equal(outcome, null, 'the withdrawal lost to the committed revocation');
+      } finally {
+        await peer.close();
+      }
+      assert.equal((await store.credentials.findById(row.id))?.status, 'revoked');
+    });
+
     it('updateIfStatus in a transaction loses to a decision committed outside it', async (t) => {
       // Issue #331: a conditional UPDATE that matched nothing was re-checked
       // with an ordinary SELECT, which under MySQL REPEATABLE READ still sees

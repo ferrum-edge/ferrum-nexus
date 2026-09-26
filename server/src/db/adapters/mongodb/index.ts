@@ -2695,6 +2695,28 @@ class MongoStore implements NexusStore {
       return this.credentials.findById(id);
     },
 
+    updateIfStatus: async (id, expected, patch) => {
+      // A single-document `updateOne` is atomic, so the status in the filter is
+      // the compare half of the compare-and-set, as in `grants.updateIfStatus`.
+      const query = { _id: id, status: expected } as Filter<NexusDoc>;
+      const set = setDoc({
+        label: patch.label,
+        status: patch.status,
+        ferrum_credential_id: patch.ferrum_credential_id,
+        rotated_from_id: patch.rotated_from_id,
+      });
+      if (!set) {
+        const still = await this.col(COLLECTIONS.credentials).findOne(query, this.opts);
+        return still ? this.credentials.findById(id) : null;
+      }
+      const result = await this.col(COLLECTIONS.credentials).updateOne(
+        query,
+        { $set: { ...set, updated_at: nowIso() } },
+        this.opts,
+      );
+      return result.matchedCount > 0 ? this.credentials.findById(id) : null;
+    },
+
     list: async (filter, options) =>
       this.paginate(
         COLLECTIONS.credentials,

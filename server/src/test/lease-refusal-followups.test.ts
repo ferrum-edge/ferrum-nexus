@@ -18,6 +18,9 @@
  * 5. Follow-ups (issue #408): a resumed repair that another instance already
  *    completed and recorded is not recorded twice, and a lost acknowledgement
  *    whose audit row cannot be read back takes the documented fallback.
+ * 6. A withdrawn retirement is conditional on the row still being `retiring`,
+ *    and one whose transaction failed for any other reason is retried as one
+ *    transaction that moves the row and records it together (issue #409).
  */
 
 import assert from 'node:assert/strict';
@@ -33,7 +36,7 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { AuditAction } from '../audit/service.js';
-import type { NexusStore, TransactionOptions } from '../db/store.js';
+import type { CredentialRepo, NexusStore, TransactionOptions } from '../db/store.js';
 import { isoInSeconds, newId, nowIso } from '../lib/ids.js';
 import { LEASE_LOST_MESSAGE } from '../lib/lease-fence.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
@@ -133,6 +136,53 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
       store.transaction = realTransaction;
     });
     return () => dropped;
+  }
+
+  /**
+   * Count every conditional withdrawal of `credentialId` a transaction body
+   * attempts. With `failFirst`, the first transaction that would commit a
+   * `credential.revoke_rollback` row for it fails before its commit instead,
+   * with an error that is not a lease refusal.
+   */
+  function watchWithdrawals(credentialId: string, failFirst = false): () => number {
+    const store = harness.store;
+    const realTransaction = store.transaction.bind(store);
+    let attempts = 0;
+    let failed = !failFirst;
+    store.transaction = async <T>(
+      fn: (tx: NexusStore) => Promise<T>,
+      options?: TransactionOptions,
+    ): Promise<T> =>
+      realTransaction(async (tx) => {
+        const credentials: CredentialRepo = {
+          ...tx.credentials,
+          updateIfStatus: (id, expected, patch) => {
+            if (id === credentialId) attempts += 1;
+            return tx.credentials.updateIfStatus(id, expected, patch);
+          },
+        };
+        const spied = new Proxy(tx, {
+          get(target, property): unknown {
+            if (property === 'credentials') return credentials;
+            const value: unknown = Reflect.get(target, property);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        });
+        const result = await fn(spied);
+        const rollbacks = await tx.auditLogs.count({
+          action: AuditAction.CREDENTIAL_REVOKE_ROLLBACK,
+          target_id: credentialId,
+        });
+        if (!failed && rollbacks > 0) {
+          failed = true;
+          throw new Error('the connection dropped before the commit');
+        }
+        return result;
+      }, options);
+    restorePatches.push(() => {
+      store.transaction = realTransaction;
+    });
+    return () => attempts;
   }
 
   /* ── 1 and 4: a consumer repair the lease fence refused ───────────────── */
@@ -480,6 +530,70 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
     assert.equal(entries(), 2, 'the repair took the keys a second time');
   });
 
+  /** A client holding two keys on a consumer the gateway then lost. */
+  async function orphanedClientWithTwoKeys(): Promise<{
+    session: TestSession;
+    credentialIds: [string, string];
+    consumerId: string;
+  }> {
+    const session = await client();
+    const first = await issueKey(session);
+    const second = await issueKey(session);
+    assert.equal(second.credential.ferrum_consumer_id, first.credential.ferrum_consumer_id);
+    harness.edge.consumers.clear();
+    return {
+      session,
+      credentialIds: [first.credential.id, second.credential.id],
+      consumerId: first.credential.ferrum_consumer_id,
+    };
+  }
+
+  it('does not record a repair that two rows for its consumer completed together', async () => {
+    const { session, credentialIds, consumerId } = await orphanedClientWithTwoKeys();
+    const [firstId, secondId] = credentialIds;
+    const entries = releaseOnSecondPass(consumerId);
+
+    // Two repairs of this consumer each revoked one of its stale rows; a row
+    // for a different consumer lists both, and counts for nothing here.
+    const stalled = stallAfterRecreating(consumerId, async () => {
+      await harness.store.credentials.update(firstId, { status: 'revoked' });
+      await harness.store.credentials.update(secondId, { status: 'revoked' });
+      await recordRepair(session.user.id, newId(), [firstId, secondId]);
+      await recordRepair(session.user.id, consumerId, [firstId]);
+      await recordRepair(session.user.id, consumerId, [secondId]);
+    });
+
+    const repaired = await repairAccount(session.user.id);
+    assert.ok(stalled(), 'the repair lost its lease after recreating the consumer');
+    assert.equal(entries(), 2, 'the repair took the keys a second time');
+
+    assert.equal(repaired.error, 'The gateway consumer already exists; nothing to repair');
+    assert.equal(repaired.ferrum_consumer_id, consumerId);
+    assert.equal(repaired.credentials_requiring_reissue, 0);
+    const rows = await repairRows(session.user.id);
+    assert.equal(rows.length, 3, 'only the other instances’ rows record the repair');
+    assert.ok(rows.every((row) => row.details.resumed === undefined));
+  });
+
+  it('records a resumed repair when only another consumer’s row lists a stale row', async () => {
+    const { session, credentialIds, consumerId } = await orphanedClientWithTwoKeys();
+    const [firstId, secondId] = credentialIds;
+    const entries = releaseOnSecondPass(consumerId);
+
+    // One stale row is covered by a repair of this consumer; the other only by
+    // a row for a different consumer, which is no record of this repair.
+    const stalled = stallAfterRecreating(consumerId, async () => {
+      await harness.store.credentials.update(firstId, { status: 'revoked' });
+      await harness.store.credentials.update(secondId, { status: 'revoked' });
+      await recordRepair(session.user.id, consumerId, [firstId]);
+      await recordRepair(session.user.id, newId(), [secondId]);
+    });
+
+    await assertResumedRowRecorded(session.user.id, consumerId, 3);
+    assert.ok(stalled(), 'the repair lost its lease after recreating the consumer');
+    assert.equal(entries(), 2, 'the repair took the keys a second time');
+  });
+
   /* ── 3 and 4: a revocation rollback ───────────────────────────────────── */
 
   /** A client approved for a fresh API, with the grant and the API's proxy. */
@@ -685,6 +799,32 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
     assert.equal(rows[0]?.details.last4, first.credential.last4);
   });
 
+  it('retries a withdrawal that failed before its commit as one atomic move', async () => {
+    const session = await client();
+    const first = await issueKey(session);
+    const credentialId = first.credential.id;
+    harness.edge.queueFailure(503, { error: 'down' }, '/credentials/keyauth/', 'DELETE');
+    const attempts = watchWithdrawals(credentialId, true);
+
+    const failed = await harness.authed(session, {
+      method: 'DELETE',
+      url: `/api/credentials/${credentialId}`,
+    });
+    assert.equal(failed.statusCode, 502, failed.body);
+    assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'active');
+    assert.equal(
+      attempts(),
+      2,
+      'the failed transaction and one retry that moved the row and recorded it together',
+    );
+    assert.equal(await countAudit(AuditAction.CREDENTIAL_REVOKE_START, credentialId), 1);
+    assert.equal(
+      await countAudit(AuditAction.CREDENTIAL_REVOKE_ROLLBACK, credentialId),
+      1,
+      'the rolled-back attempt left no row and the retry wrote exactly one',
+    );
+  });
+
   it('keeps a key another instance revoked when the fence refuses the withdrawal', async () => {
     const session = await client();
     const first = await issueKey(session);
@@ -710,6 +850,7 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
     restorePatches.push(() => {
       consumers.get = get;
     });
+    const attempts = watchWithdrawals(credentialId);
 
     const failed = await harness.authed(session, {
       method: 'DELETE',
@@ -717,6 +858,11 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
     });
     assert.ok(stalled, 'the revocation reached the gateway');
     assert.equal(failed.statusCode, 502, failed.body);
+    assert.equal(
+      attempts(),
+      1,
+      'the refusal ends the withdrawal at once; no retry is attempted under a lost lease',
+    );
     assert.equal(
       await harness.store.leases.release(consumerId, OTHER_INSTANCE),
       true,
