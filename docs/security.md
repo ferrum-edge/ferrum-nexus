@@ -495,7 +495,13 @@ portal writes, so an operator's tuned `key_auth` is never adopted and never
 deleted by an `auth_plugin` swap. A `PATCH` that would touch a role with two
 such candidates, or an `access_control` or `cors` role whose only configs no
 longer match the API's settings, is refused with `409 CONFLICT` instead of
-guessing (`docs/architecture.md` §5.3).
+guessing (`docs/architecture.md` §5.3). So is an `auth_plugin` change on such an
+API whose only config of the outgoing flavour carries settings of its own: the
+swap cannot delete a config it does not own, and left attached it would keep
+accepting the outgoing credentials on the proxy while the portal recorded them
+as invalidated and told every grantee to issue a new one. The refusal comes
+before any gateway write, and the operator removes the config or resets it to
+the empty default before the swap can proceed.
 
 A plugin-config write the gateway applied but never acknowledged is
 compensated like one it refused: the undo — the whole live resource, including

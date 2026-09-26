@@ -460,28 +460,69 @@ describe('first-class plugin ownership', () => {
       assert.deepEqual(await recordOf(id), {});
     });
 
-    it('never adopts, or deletes on a swap, an auth config with settings of its own', async () => {
+    it('refuses an auth swap beside an auth config with settings of its own', async () => {
       const { id, proxyId } = await publish();
       const portal = String(configsNamed(proxyId, 'key_auth')[0]?.id);
       await forgetRecord(id);
       // The portal's own `{}` config is gone; what is left is an operator's,
-      // tuned to a header of their own.
+      // tuned to a header of their own — or the portal's, edited by hand.
       removeByHand(proxyId, portal);
       const operator = seedOperatorConfig(proxyId, 'key_auth', 'op-tuned-key-auth', {
         key_location: 'header:X-Ops-Key',
       });
+      const createsBefore = harness.edge.callsTo('POST', '/plugins/config').length;
+      const deletesBefore = harness.edge.callsTo('DELETE', '/plugins/config').length;
 
+      // Swapped beside it, the proxy would go on accepting key-auth keys while
+      // the portal told every grantee theirs had stopped working here.
+      const refused = await patch(id, { auth_plugin: 'jwt_auth', confirm_access_disruption: true });
+      assert.equal(refused.statusCode, 409, refused.body);
+      assert.equal(refused.json<ApiErrorBody>().error.code, 'CONFLICT');
+      const details = refusalDetails(refused.body);
+      assert.deepEqual(details.plugin_names, ['key_auth']);
+      assert.deepEqual(details.plugin_config_ids, ['op-tuned-key-auth']);
+      assert.equal(harness.edge.callsTo('POST', '/plugins/config').length, createsBefore);
+      assert.equal(harness.edge.callsTo('DELETE', '/plugins/config').length, deletesBefore);
+      assert.deepEqual(configsNamed(proxyId, 'jwt_auth'), []);
+      assertUntouched(proxyId, operator);
+      assert.equal((await harness.store.apis.findById(id))?.auth_plugin, 'key_auth');
+      assert.equal(
+        (await harness.auditRows('api.update')).some((row) => row.target_id === id),
+        false,
+        'nothing is recorded as changed',
+      );
+
+      // Other changes still go through, and leave the auth role unrecorded.
+      const renamed = await patch(id, { description: 'Renamed beside a tuned auth config' });
+      assert.equal(renamed.statusCode, 200, renamed.body);
+      assert.equal('auth' in (await recordOf(id)), false);
+      assertUntouched(proxyId, operator);
+
+      // Reset to the configuration the portal writes, it is recognised as the
+      // portal's own and swapped out like one.
+      (stored('op-tuned-key-auth') as { config: Record<string, unknown> }).config = {};
       const swapped = await patch(id, { auth_plugin: 'jwt_auth' });
       assert.equal(swapped.statusCode, 200, swapped.body);
-      assertUntouched(proxyId, operator);
+      assert.equal(stored('op-tuned-key-auth'), undefined);
       const replacement = (await recordOf(id)).auth;
       assert.ok(replacement);
-      assert.notEqual(replacement, 'op-tuned-key-auth');
       assert.equal(stored(replacement)?.plugin_name, 'jwt_auth');
       assert.ok(effectiveIds(proxyId).includes(replacement));
-      // The audit row names the config the portal settled beside.
+    });
+
+    it('names same-name configs of a role the API does not use when it records it', async () => {
+      const { id, proxyId } = await publish();
+      await forgetRecord(id);
+      seedOperatorConfig(proxyId, 'cors', 'op-unused-cors', {
+        allowed_origins: ['https://ops.example.com'],
+        allow_credentials: false,
+      });
+
+      const renamed = await patch(id, { description: 'Recorded beside an operator policy' });
+      assert.equal(renamed.statusCode, 200, renamed.body);
+      assert.equal((await recordOf(id)).cors, null);
       assert.deepEqual(await unownedIn(id), [
-        { plugin_name: 'key_auth', plugin_config_id: 'op-tuned-key-auth' },
+        { plugin_name: 'cors', plugin_config_id: 'op-unused-cors' },
       ]);
     });
 

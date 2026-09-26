@@ -524,15 +524,18 @@ when the API currently uses that role and the config still carries what the
 portal wrote — the empty auth config, its ACL group, its quota, its CORS
 origins — so an auth config with settings of its own is never adopted, and
 never deleted by an `auth_plugin` swap. A role the API does not use is settled
-as owning nothing. Two candidates for one role are ambiguous; an
+as owning nothing. Two candidates for one role are ambiguous; an auth,
 `access_control` or `cors` config with no candidate beside it is unrecognised —
-most likely the portal's own, edited by hand, and a second policy next to it
-would enforce a setting the portal no longer shows. A `PATCH` that would touch
-either kind of role is refused with `409 CONFLICT` naming the plugin until an
-operator removes the config or brings it back in line with the API's settings;
-an unrecognised limiter or auth config is instead left to the operator, the
-portal's own is created beside it, and the audit row lists it under
-`unowned_same_name_configs`. The first successful change records every role it
+most likely the portal's own, edited by hand. A second policy next to it would
+enforce a setting the portal no longer shows, and an auth swap would leave it
+attached, still accepting the outgoing flavour's credentials while the portal
+tells grantees they no longer work. A `PATCH` that would touch either kind of
+role is refused with `409 CONFLICT` naming the plugin until an operator removes
+the config or brings it back in line with the API's settings (for auth, the
+empty default config); an unrecognised limiter is instead left to the operator,
+the portal's own is created beside it, and the audit row lists it under
+`unowned_same_name_configs`, as it does the same-name configs of a role the API
+does not use. The first successful change records every role it
 could attribute — `NULL` included, so recognition does not run again for a
 role in which the portal owns nothing — and leaves an ambiguous or
 unrecognised role unrecorded until it resolves; a recorded role is governed by

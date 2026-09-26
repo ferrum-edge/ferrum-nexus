@@ -2064,9 +2064,11 @@ would lock grantees out of the API, without `confirm_access_disruption: true`),
 names them; or a change to `auth_plugin`, `requestable`, `rate_limit` or `cors`
 on an API published before plugin ownership was recorded, whose proxy carries
 two configs the portal could have created for that setting, or — for
-`requestable` and `cors` — only an `access_control` or `cors` config that no
-longer matches the API's settings; `details.plugin_names` names the plugins and,
-in the second case, `details.plugin_config_ids` the configs), `502 EDGE_ERROR`.
+`auth_plugin`, `requestable` and `cors` — only an auth, `access_control` or
+`cors` config that no longer matches the API's settings (for auth, one with any
+setting of its own, which a swap would leave accepting the outgoing
+credentials); `details.plugin_names` names the plugins and, in the second case,
+`details.plugin_config_ids` the configs), `502 EDGE_ERROR`.
 
 **Only the plugin configs the portal created are touched.** Nexus records the
 Edge config id of the auth, `access_control`, `rate_limiting` and `cors` configs

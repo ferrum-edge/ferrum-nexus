@@ -57,12 +57,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
     An API published before the upgrade has its configs recognised role by
     role, by the values the portal wrote rather than by name — an auth config
     only while it is exactly the empty config the portal writes. A change to a
-    setting whose proxy carries two such candidates, or to `requestable` or
-    `cors` when the proxy's only `access_control` or `cors` configs no longer
-    match the API's settings, is refused with `409 CONFLICT` naming the plugin;
-    a hand-edited limiter or auth config is left to the operator, the portal's
-    own is created beside it, and the `api.update` row names it under
-    `unowned_same_name_configs`. `002_api_gateway_plugins` is listed in the
+    setting whose proxy carries two such candidates, or to `auth_plugin`,
+    `requestable` or `cors` when the proxy's only auth, `access_control` or
+    `cors` configs no longer match the API's settings, is refused with
+    `409 CONFLICT` naming the plugin — for an auth swap, because the outgoing
+    config left attached would keep accepting the credentials the portal tells
+    grantees to replace. A hand-edited limiter is left to the operator, the
+    portal's own is created beside it, and the `api.update` row names it under
+    `unowned_same_name_configs`, as it does the same-name configs of a role the
+    API does not use. `002_api_gateway_plugins` is listed in the
     released-migration manifest as pending (`release: null`), so CI checks its
     artifacts until the release that ships it freezes them.
   - A `PUT /plugins/config/{id}` Edge applied but never acknowledged used to

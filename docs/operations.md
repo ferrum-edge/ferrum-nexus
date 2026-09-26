@@ -750,15 +750,17 @@ MongoDB, and it copies no data. An API published before the upgrade starts with
 no record; its configs are recognised on its first gateway-touching change by
 the values the portal wrote (the empty auth config, the ACL group, the quota,
 the CORS origins) and recorded then, role by role — a role the API does not use
-is recorded as owning nothing (a row with a `NULL` config id). If a proxy
-carries two configs that both match for one role, or an `access_control` or
-`cors` config that no longer matches the API's settings and none that does, a
-`PATCH` touching that role answers `409 CONFLICT` naming the plugin, and the
-role stays unrecorded, until the operator removes the config or brings it back
-in line; changes to other fields keep working. A `rate_limiting` or auth config
-whose portal-owned values an operator edited by hand is left to the operator:
-the portal creates its own beside it on the next change, and the audit row
-names it under `unowned_same_name_configs`.
+is recorded as owning nothing (a row with a `NULL` config id), and the audit
+row of that change names any config of the role's plugin name on the proxy
+under `unowned_same_name_configs`. If a proxy carries two configs that both
+match for one role, or an auth, `access_control` or `cors` config that no
+longer matches the API's settings and none that does, a `PATCH` touching that
+role answers `409 CONFLICT` naming the plugin, and the role stays unrecorded,
+until the operator removes the config or brings it back in line (an auth
+config back to the empty default); changes to other fields keep working. A
+`rate_limiting` config whose portal-owned values an operator edited by hand is
+left to the operator: the portal creates its own beside it on the next change,
+and the audit row names it under `unowned_same_name_configs`.
 
 **CI enforces this.** `server/src/db/released-migrations.test.ts` fails when a
 released migration's file (or MongoDB snapshot) no longer matches its recorded
