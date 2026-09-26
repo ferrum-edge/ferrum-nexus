@@ -388,7 +388,8 @@ export const MAX_SPEC_OPERATIONS = 3_000;
 
 /**
  * Maximum number of things the documentation viewer has to walk in one uploaded
- * document: schema nodes, parameter entries and media types, added together.
+ * document: schema nodes, parameter entries, media types and response entries,
+ * added together.
  *
  * Paths and operations are not a bound on render cost. One operation can carry
  * thousands of parameters, dozens of media types per body, and schemas whose

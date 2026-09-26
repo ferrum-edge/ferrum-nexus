@@ -39,9 +39,9 @@ function specWithPaths(count: number): string {
 }
 
 /**
- * A document with one operation whose render cost comes from all three counted
- * dimensions: `schemaCount` empty schema properties, six parameters and six
- * response media types. Its total is `schemaCount + 14` render units.
+ * A document with one operation whose render cost comes from all four counted
+ * dimensions: `schemaCount` empty schema properties, six parameters, one
+ * response and its six media types. Its total is `schemaCount + 15` render units.
  */
 function renderCostSpec(schemaCount: number): string {
   const properties: Record<string, unknown> = {};
@@ -402,21 +402,22 @@ describe('OpenAPI parsing', () => {
     // Everything the viewer walks and neither the path nor the operation count
     // sees: one operation, one path, and a components section whose expansion
     // is what a reader actually pays for.
-    const atLimit = renderCostSpec(MAX_SPEC_RENDER_UNITS - 14);
+    const atLimit = renderCostSpec(MAX_SPEC_RENDER_UNITS - 15);
     assert.ok(Buffer.byteLength(atLimit, 'utf8') < MAX_SPEC_BYTES);
     assert.equal(parseOpenApiSpec(atLimit).operationCount, 1);
 
-    const overLimit = renderCostSpec(MAX_SPEC_RENDER_UNITS - 13);
+    const overLimit = renderCostSpec(MAX_SPEC_RENDER_UNITS - 14);
     assert.ok(Buffer.byteLength(overLimit, 'utf8') < MAX_SPEC_BYTES);
     const failure = expectSpecInvalid(() => parseOpenApiSpec(overLimit));
-    assert.match(failure.message, /schema nodes, 6 parameters and 6 media types/);
+    assert.match(failure.message, /schema nodes, 6 parameters, 6 media types and 1 responses/);
     assert.match(failure.message, /more than the 100000 the documentation viewer can render/);
     assert.deepEqual(failure.details, {
       field: 'paths',
       reason: 'too_much_to_render',
-      schema_nodes: MAX_SPEC_RENDER_UNITS - 11,
+      schema_nodes: MAX_SPEC_RENDER_UNITS - 12,
       parameters: 6,
       media_types: 6,
+      responses: 1,
       units: MAX_SPEC_RENDER_UNITS + 1,
       limit: MAX_SPEC_RENDER_UNITS,
     });
@@ -451,20 +452,22 @@ describe('OpenAPI parsing', () => {
       });
     };
 
-    // The schema object, its `properties` and each property: N + 2 nodes.
-    const atLimit = referencing(MAX_SPEC_RENDER_UNITS - 22);
+    // The schema object, its `properties` and each property: N + 2 nodes, plus
+    // twenty parameters and the one response.
+    const atLimit = referencing(MAX_SPEC_RENDER_UNITS - 23);
     assert.ok(Buffer.byteLength(atLimit, 'utf8') < MAX_SPEC_BYTES);
     assert.equal(parseOpenApiSpec(atLimit).operationCount, 1);
 
     const failure = expectSpecInvalid(() =>
-      parseOpenApiSpec(referencing(MAX_SPEC_RENDER_UNITS - 21)),
+      parseOpenApiSpec(referencing(MAX_SPEC_RENDER_UNITS - 22)),
     );
     assert.deepEqual(failure.details, {
       field: 'paths',
       reason: 'too_much_to_render',
-      schema_nodes: MAX_SPEC_RENDER_UNITS - 19,
+      schema_nodes: MAX_SPEC_RENDER_UNITS - 20,
       parameters: 20,
       media_types: 0,
+      responses: 1,
       units: MAX_SPEC_RENDER_UNITS + 1,
       limit: MAX_SPEC_RENDER_UNITS,
     });
@@ -474,6 +477,7 @@ describe('OpenAPI parsing', () => {
     // One response with a thousand media types, named by five thousand
     // responses: charged in full at every reference this would be five million
     // units, and enumerating it at every reference would be five million steps.
+    // Each reference still costs its own response entry: ten thousand in all.
     const content: Record<string, unknown> = {};
     for (let index = 0; index < 1_000; index += 1) {
       content[`application/vnd.x${index}+json`] = { schema: { type: 'string' } };
@@ -496,14 +500,16 @@ describe('OpenAPI parsing', () => {
     assertRenderCost(document, document.paths, stats);
     assert.equal(stats.contentWalks, 1);
 
-    // A request body is a different role from a response: the same object
-    // named as both is charged once as each, from the one cached count.
+    // Request bodies and responses share one charged set: the same object
+    // named as both is charged once, at its first reference, and the request
+    // body that names it again costs nothing more.
     assert.equal(parseOpenApiSpec(JSON.stringify(document)).operationCount, 2);
   });
 
   it('stops counting at the first charge past the ceiling', () => {
     // Every operation carries its own inline wide body, so the document is far
-    // over the ceiling; the count stops at the operation that crosses it.
+    // over the ceiling; the count stops at the operation that crosses it, the
+    // hundredth, whose response entry and thousand media types make 1,001 each.
     const content: Record<string, unknown> = {};
     for (let index = 0; index < 1_000; index += 1) content[`application/vnd.x${index}+json`] = {};
     const paths: Record<string, unknown> = {};
@@ -519,13 +525,52 @@ describe('OpenAPI parsing', () => {
       reason: 'too_much_to_render',
       schema_nodes: 0,
       parameters: 0,
-      media_types: 101_000,
-      units: 101_000,
+      media_types: 100_000,
+      responses: 100,
+      units: 100_100,
       limit: MAX_SPEC_RENDER_UNITS,
     });
     // One `content` map shared by every body, as a YAML anchor would share it:
     // each inline occurrence is charged, but the map is enumerated only once.
     assert.equal(stats.contentWalks, 1);
+  });
+
+  it('charges response entries that declare nothing, so an aliased map cannot repeat free', () => {
+    // One anchored `responses` map of empty entries, aliased by three more
+    // operations: no content, no schema, and nothing but entries to walk. Free
+    // entries would let a 2 MiB document repeat a map this size a hundred times.
+    const entries = Array.from({ length: 30_000 }, (_, index) => `        r${index}: {}`);
+    const operation = (path: string, responses: string): string[] => [
+      `  ${path}:`,
+      '    get:',
+      `      responses: ${responses}`,
+    ];
+    const yaml = [
+      'openapi: 3.1.0',
+      'info:',
+      '  title: Aliased',
+      '  version: 1.0.0',
+      'paths:',
+      ...operation('/a', '&r'),
+      ...entries,
+      ...operation('/b', '*r'),
+      ...operation('/c', '*r'),
+      ...operation('/d', '*r'),
+    ].join('\n');
+    assert.ok(Buffer.byteLength(yaml, 'utf8') < MAX_SPEC_BYTES);
+
+    const failure = expectSpecInvalid(() => parseOpenApiSpec(yaml));
+    // Counting stops at the entry that crosses the ceiling, in the fourth map.
+    assert.deepEqual(failure.details, {
+      field: 'paths',
+      reason: 'too_much_to_render',
+      schema_nodes: 0,
+      parameters: 0,
+      media_types: 0,
+      responses: MAX_SPEC_RENDER_UNITS + 1,
+      units: MAX_SPEC_RENDER_UNITS + 1,
+      limit: MAX_SPEC_RENDER_UNITS,
+    });
   });
 
   it('rejects an operation flood that is well inside MAX_SPEC_BYTES', () => {
