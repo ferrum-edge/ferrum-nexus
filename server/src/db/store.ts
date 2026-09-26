@@ -1129,6 +1129,25 @@ export interface CredentialRepo {
     id: Uuid,
     patch: Omit<UpdateInput<CredentialRecord>, 'edge_ordinal'>,
   ): Promise<CredentialRecord | null>;
+  /**
+   * Atomically move a credential out of one status: apply `patch` **only while
+   * the row still has `expected`**, in one statement
+   * (`… WHERE id = ? AND status = ?`), as {@link GrantRepo.updateIfStatus} does.
+   *
+   * Returns the updated row when this caller won the transition, `null` when it
+   * lost — the row was absent, or somebody else already moved it.
+   *
+   * Withdrawing a retirement (`retiring` back to `active`) goes through here.
+   * Not every revocation of a row holds the consumer lease that fences the
+   * withdrawal, so a blind write could overwrite a revocation that landed
+   * between the withdrawal's read and its write and bring the row back to
+   * `active`.
+   */
+  updateIfStatus(
+    id: Uuid,
+    expected: CredentialStatus,
+    patch: Omit<UpdateInput<CredentialRecord>, 'edge_ordinal'>,
+  ): Promise<CredentialRecord | null>;
   list(filter: CredentialFilter, options?: ListOptions): Promise<Paginated<CredentialRecord>>;
   /**
    * All credentials of a consumer in gateway order: rows without an ordinal

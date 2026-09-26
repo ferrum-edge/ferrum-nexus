@@ -1185,13 +1185,17 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * The `credential.revoke_start` row committed before the delete names who
    * started a retirement; this is its completion when the answer is "nothing
    * was removed", committed with the move back so the trail never reads as a
-   * start with no end. Should the lease fence refuse that transaction, the
-   * row is left `retiring`: another instance may already have settled it, and
-   * a retiring row is the safe reading of an unproved outcome. Should it fail
-   * any other way, the move is retried on its own — only while the row is
-   * still `retiring` — and the audit row follows best-effort, unless the
-   * transaction is found to have committed after all and only its
-   * acknowledgement was lost.
+   * start with no end. The move is conditional on the row still being
+   * `retiring` (`credentials.updateIfStatus`): not every revocation holds the
+   * consumer lease that fences this one, so a row revoked in between must stay
+   * revoked, and one that is no longer `retiring` records nothing. Should the
+   * lease fence refuse that transaction, the row is left `retiring`: another
+   * instance may already have settled it, and a retiring row is the safe
+   * reading of an unproved outcome. Should it fail any other way — and not be
+   * found to have committed after all, its acknowledgement lost — the move
+   * and its audit row are retried together in one transaction under a fresh
+   * row id; should that fail too, the move is retried on its own and the
+   * audit row follows best-effort.
    * Never throws: the caller is carrying the gateway's error.
    */
   async function withdrawRetirement(input: {
@@ -1211,10 +1215,15 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       cause: input.cause instanceof Error ? input.cause.message : String(input.cause),
       ...(credential.user_id === actor.id ? {} : { owner_user_id: credential.user_id }),
     };
-    const rowId = newId();
-    try {
-      await store.transaction(async (tx) => {
-        await tx.credentials.update(credential.id, { status: 'active' });
+    // The move back and its audit row, in one transaction under `id`. Returns
+    // whether the row was still `retiring`: anything else was settled by
+    // someone else, and there is nothing to withdraw or record.
+    const withdraw = (id: Uuid): Promise<boolean> =>
+      store.transaction(async (tx) => {
+        const moved = await tx.credentials.updateIfStatus(credential.id, 'retiring', {
+          status: 'active',
+        });
+        if (!moved) return false;
         await audit
           .forStore(tx)
           .record(
@@ -1223,9 +1232,14 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             target,
             details,
             ip,
-            { id: rowId },
+            { id },
           );
+        return true;
       });
+    const rowId = newId();
+    try {
+      await withdraw(rowId);
+      return;
     } catch (error) {
       // A refusal from the lease fence means another instance may hold the
       // key and may already have finished this revocation: moving the row
@@ -1233,27 +1247,36 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // so the row stays `retiring`, the safe reading of an unproved outcome.
       if (isLeaseLost(error)) return;
       if (await auditRowCommitted(store, target, rowId)) return;
-      // Any other failure is retried as the move alone, and only over a row
-      // that is still `retiring` — anything else was settled by someone else.
-      const moved = await store
-        .transaction(async (tx) => {
-          const fresh = await tx.credentials.findById(credential.id);
-          if (fresh?.status !== 'retiring') return false;
-          await tx.credentials.update(credential.id, { status: 'active' });
-          return true;
-        })
-        .catch(() => false);
-      if (!moved) return;
-      await audit
-        .record(
-          { id: actor.id, role: actor.role },
-          AuditAction.CREDENTIAL_REVOKE_ROLLBACK,
-          target,
-          details,
-          ip,
-        )
-        .catch(() => undefined);
     }
+    // Any other failure is retried whole, under a fresh row id so the first
+    // attempt's cannot be mistaken for it.
+    const retryRowId = newId();
+    try {
+      await withdraw(retryRowId);
+      return;
+    } catch (error) {
+      if (isLeaseLost(error)) return;
+      if (await auditRowCommitted(store, target, retryRowId)) return;
+    }
+    // Failing that, the move alone, and the audit row after it best-effort.
+    const moved = await store
+      .transaction(async (tx) => {
+        const row = await tx.credentials.updateIfStatus(credential.id, 'retiring', {
+          status: 'active',
+        });
+        return row !== null;
+      })
+      .catch(() => false);
+    if (!moved) return;
+    await audit
+      .record(
+        { id: actor.id, role: actor.role },
+        AuditAction.CREDENTIAL_REVOKE_ROLLBACK,
+        target,
+        details,
+        ip,
+      )
+      .catch(() => undefined);
   }
 
   /**

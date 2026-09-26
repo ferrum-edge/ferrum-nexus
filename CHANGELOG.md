@@ -343,6 +343,14 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - Conversation list previews now fetch the newest message for the whole page in
   one adapter query, preserving the `(created_at, id)` ordering and empty-thread
   previews. A 200-thread page used to issue 200 separate message lookups (#394).
+- Withdrawing a credential retirement whose gateway delete provably never
+  applied now moves the row back to `active` only while it is still `retiring`,
+  through a new conditional `CredentialRepo.updateIfStatus` on every store
+  adapter, so a revocation that lands in between is no longer overwritten. A
+  withdrawal whose transaction fails for a reason other than the lease fence is
+  retried as one transaction that writes the move and its
+  `credential.revoke_rollback` row together, falling back to the move alone only
+  if that fails too (#409).
 
 ## [0.1.0] - 2026-09-25
 

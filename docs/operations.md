@@ -2462,8 +2462,10 @@ that reports failure re-reads the array inside the lease it still holds, and one
 that is still exactly as long as it was before the call proves the delete never
 applied — there the portal withdraws the intent itself and puts the row back to
 `active`. What is left is the unprovable remainder: a gateway that could not be
-read back at all, a `basicauth` type no read projection shows, or an array whose
-length changed for some other reason. Recognise it with the `retiring` query
+read back at all, a `basicauth` type no read projection shows, an array whose
+length changed for some other reason, or a withdrawal the lease fence refused or
+that could not be written. The withdrawal moves the row back only while it is
+still `retiring`, so a row revoked in the meantime stays revoked. Recognise it with the `retiring` query
 under [_What a drifted consumer looks like_](#what-a-drifted-consumer-looks-like):
 a row whose pair's mirror and array lengths **agree** is shape 2 and needs the
 retry; a pair that differs by **exactly one** is shape 1 and the next call
@@ -2747,7 +2749,8 @@ healthy and a repair answers that there is nothing to do, while its old
 credential rows stay `active` against entries the gateway does not hold. A
 process crash or restart between the refused pass and its retry leaves the same
 state without the second log line — at most the first names the consumer, with
-a count of its stale rows. The remedy is the same: clear it by reconciling each affected credential type on that consumer
+a count of its stale rows. The remedy is the same: clear it by reconciling each
+affected credential type on that consumer
 ([§12, "Reconciling one"](#reconciling-one)), which empties the type on the
 gateway and revokes its rows; the account holder then issues new credentials.
 
