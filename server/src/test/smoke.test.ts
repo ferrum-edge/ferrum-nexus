@@ -2645,6 +2645,66 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       assert.equal(await store.threads.delete(thread.id), true);
     });
 
+    it('messages: batches latest messages with timestamp and id ordering', async () => {
+      const client = await makeUser();
+      const provider = await makeUser({ role: 'provider' });
+      const tiedThread = await store.threads.create({
+        subject: `Tied messages ${newId().slice(0, 6)}`,
+        created_by: client.id,
+        participant_a: client.id,
+        participant_b: provider.id,
+      });
+      const laterThread = await store.threads.create({
+        subject: `Later message ${newId().slice(0, 6)}`,
+        created_by: client.id,
+        participant_a: client.id,
+        participant_b: provider.id,
+      });
+      const emptyThread = await store.threads.create({
+        subject: `Empty thread ${newId().slice(0, 6)}`,
+        created_by: client.id,
+        participant_a: client.id,
+        participant_b: provider.id,
+      });
+      const tiedAt = isoInSeconds(-30);
+      const tiedFirst = await store.messages.create({
+        thread_id: tiedThread.id,
+        sender_user_id: client.id,
+        body: 'Lower id',
+        created_at: tiedAt,
+      });
+      const tiedSecond = await store.messages.create({
+        thread_id: tiedThread.id,
+        sender_user_id: provider.id,
+        body: 'Higher id',
+        created_at: tiedAt,
+      });
+      const later = await store.messages.create({
+        thread_id: laterThread.id,
+        sender_user_id: provider.id,
+        body: 'Newest timestamp',
+        created_at: isoInSeconds(-10),
+      });
+
+      const latest = await store.messages.findLatestByThreads([
+        emptyThread.id,
+        tiedThread.id,
+        laterThread.id,
+      ]);
+      assert.deepEqual(
+        new Map(latest.map((message) => [message.thread_id, message.id])),
+        new Map([
+          [
+            tiedThread.id,
+            tiedFirst.id.localeCompare(tiedSecond.id) > 0 ? tiedFirst.id : tiedSecond.id,
+          ],
+          [laterThread.id, later.id],
+        ]),
+      );
+      assert.deepEqual(await store.messages.findLatestByThreads([]), []);
+      assert.equal(latest.some((message) => message.thread_id === emptyThread.id), false);
+    });
+
     it('messages: countBySenderSince bounds the per-account budget', async () => {
       const sender = await makeUser();
       const bystander = await makeUser();

@@ -93,6 +93,39 @@ describe('messaging', () => {
     assert.equal(threads.json<ListThreadsResponse>().total, 1);
   });
 
+  it('loads previews for a full 200-thread page in one batch', async () => {
+    for (let index = 0; index < 200; index += 1) {
+      await harness.store.threads.create({
+        subject: `Batch preview ${index}`,
+        created_by: founder.user.id,
+        participant_a: founder.user.id,
+        participant_b: null,
+        created_at: new Date(Date.UTC(2035, 0, 1) + index * 1_000).toISOString(),
+      });
+    }
+
+    const original = harness.store.messages.findLatestByThreads;
+    let batches = 0;
+    harness.store.messages.findLatestByThreads = async (threadIds) => {
+      batches += 1;
+      assert.equal(threadIds.length, 200);
+      return original(threadIds);
+    };
+    try {
+      const response = await harness.authed(founder, {
+        method: 'GET',
+        url: '/api/threads?limit=200',
+      });
+      assert.equal(response.statusCode, 200);
+      const page = response.json<ListThreadsResponse>();
+      assert.equal(page.items.length, 200);
+      assert.ok(page.items.every((thread) => thread.last_message_preview === null));
+      assert.equal(batches, 1);
+    } finally {
+      harness.store.messages.findLatestByThreads = original;
+    }
+  });
+
   it('shows the thread with its messages to both participants', async () => {
     const response = await harness.authed(provider, {
       method: 'GET',

@@ -257,27 +257,30 @@ export function createMessagingService(deps: MessagingServiceDeps): MessagingSer
     );
 
     const gatewayUrl = await settings.getGatewayPublicUrl();
-
-    return Promise.all(
-      threads.map(async (thread) => {
-        const participants: UserSummary[] = [];
-        for (const id of [thread.participant_a, thread.participant_b]) {
-          const record = id ? users.get(id) : undefined;
-          if (record) participants.push(toUserSummary(record));
-        }
-        const api = thread.api_id ? apis.get(thread.api_id) : undefined;
-        const apiSummary: ApiSummary | undefined = api
-          ? presentApiSummary(api, gatewayUrl)
-          : undefined;
-        const latest = await store.messages.findLatestByThread(thread.id);
-        return {
-          ...thread,
-          ...(apiSummary ? { api: apiSummary } : {}),
-          participants,
-          last_message_preview: latest ? preview(latest.body) : null,
-        };
-      }),
+    const latestByThread = new Map(
+      (await store.messages.findLatestByThreads(threads.map((thread) => thread.id))).map(
+        (message) => [message.thread_id, message],
+      ),
     );
+
+    return threads.map((thread) => {
+      const participants: UserSummary[] = [];
+      for (const id of [thread.participant_a, thread.participant_b]) {
+        const record = id ? users.get(id) : undefined;
+        if (record) participants.push(toUserSummary(record));
+      }
+      const api = thread.api_id ? apis.get(thread.api_id) : undefined;
+      const apiSummary: ApiSummary | undefined = api
+        ? presentApiSummary(api, gatewayUrl)
+        : undefined;
+      const latest = latestByThread.get(thread.id);
+      return {
+        ...thread,
+        ...(apiSummary ? { api: apiSummary } : {}),
+        participants,
+        last_message_preview: latest ? preview(latest.body) : null,
+      };
+    });
   }
 
   /** Who should hear about a new message in `thread`, other than the sender. */
