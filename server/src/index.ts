@@ -315,9 +315,10 @@ export async function buildServer(
    * super admin and both demoted. Invariants that span rows rather than
    * belonging to one of them are taken under a key here instead.
    *
-   * The owner defaults to a fresh id per serializer, so each process contends
+   * Every acquisition writes a fresh owner token, so each process contends
    * for the lease independently — which is exactly what makes it testable with
-   * two apps over one store.
+   * two apps over one store — and every transaction opened under a key is
+   * fenced by that token at commit (`lib/lease-fence.ts`).
    */
   const locks = createKeyedSerializer({
     leases: deps.store.leases,

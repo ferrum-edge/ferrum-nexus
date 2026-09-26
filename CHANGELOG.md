@@ -26,6 +26,21 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Cross-instance leases are fenced (#384). Every acquisition of an
+  `edge_leases` lock now writes a fresh owner token, and every database
+  transaction opened while the lock is held verifies that token — and, on
+  PostgreSQL, MySQL and MongoDB, locks the lease row — just before it commits.
+  An instance that stalled past the 60-second lease TTL while another took the
+  key over now fails with `409 CONFLICT` and rolls back instead of committing
+  over the new holder's work; before, an API deletion resumed that way could
+  drop the API's rows after another instance had built a test consumer for it.
+  The lease-guarded checks that were not yet transactional now are: a sign-in's
+  password re-check and its session, a password change's replacement session, a
+  gateway identity's owner check and registration, and a god-mode broadcast's
+  daily count and the audit row it charges. No schema change: the token is
+  stored in the existing `owner` column. Ferrum Edge still cannot reject a stale
+  holder's gateway write, so the single gateway-writing instance guidance is
+  unchanged (`docs/security.md`, "Cross-instance locks are fenced at commit").
 - Retired APIs in the catalog are labeled as retired and no longer show a new
   access-request form. Existing identity grants remain visible, and pending
   requests can still be withdrawn (#376).

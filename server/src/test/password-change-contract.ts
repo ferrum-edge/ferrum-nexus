@@ -251,7 +251,11 @@ export function runPasswordChangeContract(
       t.mock.method(
         harness.services.auth,
         'issueSession',
-        async (updated: UserRecord, context: RequestContext): Promise<IssuedSession> => {
+        async (
+          updated: UserRecord,
+          context: RequestContext,
+          db?: NexusStore,
+        ): Promise<IssuedSession> => {
           assert.equal(committed, true, 'issuance must follow the committed transaction');
           assert.equal(await findToken(token, 'password_reset'), null);
           const now = new Date().toISOString();
@@ -265,7 +269,7 @@ export function runPasswordChangeContract(
             false,
             'another password change cannot acquire the lease before issuance finishes',
           );
-          return issue(updated, context);
+          return issue(updated, context, db);
         },
       );
       const result = await harness.services.users.updateMe(user, {

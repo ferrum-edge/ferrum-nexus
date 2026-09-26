@@ -1753,8 +1753,8 @@ Nexus reduces this risk with two layers:
    is what orders two requests that land on the same instance.
 2. **A lease row in the `edge_leases` table**, taken inside that queue. This
    normally orders _instances_ against each other. One row per resource — a
-   Ferrum consumer id, or `proxy:<id>` — holding the id of the instance that
-   owns it and an expiry.
+   Ferrum consumer id, or `proxy:<id>` — holding a token minted for the one
+   acquisition that owns it, and an expiry.
 
 Every code path that **rewrites** a gateway resource takes the same key for it,
 which is what makes the lock mean anything: approvals and revocations,
@@ -1814,6 +1814,17 @@ an expiry from a sufficiently skewed host clock, it can resume after another
 instance has acquired the lease. Edge cannot reject that stale holder's later
 `PUT`. Renewal makes this overlap unlikely during normal operation, but it does
 not make concurrent gateway writers safe.
+
+The portal's **own database** is fenced. Every acquisition writes a fresh token
+as the lease row's owner, and every transaction opened while the lease is held
+re-checks that token — and locks the lease row — just before it commits. A
+stale holder's transaction fails with `409 CONFLICT` and rolls back, so what it
+would have recorded (a row delete, a budget charge, a status change, a
+replacement session) never commits over the new holder's work. A `409`
+of that kind in the log is a stalled instance being refused, not a bug; the
+request is safe to retry. See
+[`security.md`](security.md#cross-instance-locks-are-fenced-at-commit) for the
+model and its one weaker case, a standalone MongoDB.
 
 ### When a gateway change cannot be taken back
 

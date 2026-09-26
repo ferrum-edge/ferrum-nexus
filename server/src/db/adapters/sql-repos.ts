@@ -50,6 +50,7 @@ import type {
 import { DEFAULT_SPEC_ENFORCEMENT, isSpecEnforcementLevel } from '@ferrum-nexus/shared';
 
 import { newId, nowIso } from '../../lib/ids.js';
+import { fenceTransactionBody } from '../../lib/lease-fence.js';
 import type {
   AccessRequestFilter,
   AccessRequestRecord,
@@ -3096,6 +3097,19 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
         [expiresAt, nowIso(), key, owner],
       )) > 0,
 
+    // An UPDATE rather than a SELECT: the row lock it takes lasts until the
+    // caller's transaction ends, so an `acquire` from another instance blocks
+    // until this holder has committed instead of taking the key between the
+    // check and the commit. The count is honest on both dialects — PostgreSQL
+    // reports matched rows, and `mysql2` connects with CLIENT_FOUND_ROWS, under
+    // which an UPDATE that leaves `updated_at` as it was still counts its row.
+    verify: async (key, owner) =>
+      (await execute(
+        exec,
+        'UPDATE edge_leases SET updated_at = ? WHERE "key" = ? AND owner = ?',
+        [nowIso(), key, owner],
+      )) > 0,
+
     deleteExpired: async (now) =>
       execute(exec, 'DELETE FROM edge_leases WHERE expires_at <= ?', [now]),
   };
@@ -3277,7 +3291,10 @@ class SqlStore implements NexusStore {
 
   transaction<T>(fn: (tx: NexusStore) => Promise<T>, options?: TransactionOptions): Promise<T> {
     if (this.scoped) return fn(this);
-    return this.runInTransaction((exec) => fn(new SqlStore(this.backend, exec)), options);
+    // Captured before the queue, in the caller's context: the leases it holds
+    // fence the transaction, and a retried body re-checks them on every run.
+    const body = fenceTransactionBody<NexusStore, T>(fn);
+    return this.runInTransaction((exec) => body(new SqlStore(this.backend, exec)), options);
   }
 
   private runInTransaction<T>(

@@ -48,7 +48,7 @@ import {
 } from '../auth/service.js';
 import { loadConfig } from '../config/index.js';
 import { createStore } from '../db/index.js';
-import type { EnqueueEmailInput, NexusStore, UserRecord } from '../db/store.js';
+import type { EnqueueEmailInput, LeaseRepo, NexusStore, UserRecord } from '../db/store.js';
 import { createCrypto } from '../lib/crypto.js';
 import { isNexusError } from '../lib/errors.js';
 import { isoInSeconds, newId, nowIso } from '../lib/ids.js';
@@ -3791,6 +3791,93 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         ),
       );
       assert.equal(results.filter(Boolean).length, 1);
+    });
+
+    it('leases: verify names the current holder and nothing else', async () => {
+      const key = `fence-${newId()}`;
+      assert.equal(await store.leases.verify(key, 'token-a'), false, 'no row, no holder');
+
+      assert.equal(await store.leases.acquire(key, 'token-a', isoInSeconds(600), nowIso()), true);
+      assert.equal(await store.leases.verify(key, 'token-a'), true);
+      assert.equal(await store.leases.verify(key, 'token-b'), false);
+
+      // Lapsed but never taken over: nobody can have acted under the key
+      // without replacing the token, so the lapsed holder still holds it.
+      assert.equal(await store.leases.renew(key, 'token-a', '2020-01-01T00:00:00.000Z'), true);
+      assert.equal(await store.leases.verify(key, 'token-a'), true);
+
+      assert.equal(await store.leases.acquire(key, 'token-b', isoInSeconds(600), nowIso()), true);
+      assert.equal(await store.leases.verify(key, 'token-a'), false, 'a replaced token is out');
+      assert.equal(await store.leases.verify(key, 'token-b'), true);
+
+      // Twice in one transaction: the second check re-stamps a row the first
+      // one just stamped, and must still count it (MySQL's FOUND_ROWS, and a
+      // MongoDB update that would otherwise be a no-op).
+      const twice = await store.transaction(async (tx) => {
+        const first = await tx.leases.verify(key, 'token-b');
+        return first && (await tx.leases.verify(key, 'token-b'));
+      });
+      assert.equal(twice, true);
+
+      assert.equal(await store.leases.release(key, 'token-b'), true);
+      assert.equal(await store.leases.verify(key, 'token-b'), false, 'a released lease is gone');
+    });
+
+    it('leases: a transaction whose lease was taken over rolls back (issue #384)', async () => {
+      const key = `fence-${newId()}`;
+      // The holder's table: it remembers each acquisition's token and never
+      // renews, which is the stalled holder the fence exists for.
+      const tokens = new Map<string, string>();
+      const leases: LeaseRepo = {
+        acquire: async (lockKey, owner, expiresAt, now) => {
+          const acquired = await store.leases.acquire(lockKey, owner, expiresAt, now);
+          if (acquired) tokens.set(lockKey, owner);
+          return acquired;
+        },
+        release: (lockKey, owner) => store.leases.release(lockKey, owner),
+        renew: async () => false,
+        verify: (lockKey, owner) => store.leases.verify(lockKey, owner),
+        deleteExpired: (now) => store.leases.deleteExpired(now),
+      };
+      const serialize = createKeyedSerializer({ leases, waitMs: 0 });
+      const writeUser = (email: string): Promise<void> =>
+        store.transaction(async (tx) => {
+          await tx.users.create({
+            email,
+            password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+            display_name: 'Fenced',
+            role: 'client',
+            status: 'active',
+            email_verified: false,
+          });
+        });
+
+      const kept = `fence-kept-${newId()}@example.test`;
+      await serialize(key, () => writeUser(kept));
+      assert.ok(await store.users.findByEmail(kept), 'a current holder commits');
+
+      const stale = `fence-stale-${newId()}@example.test`;
+      await assert.rejects(
+        () =>
+          serialize(key, async () => {
+            const token = tokens.get(key);
+            assert.ok(token);
+            // The stall: the lease lapses and another instance takes the key.
+            assert.equal(await store.leases.renew(key, token, '2020-01-01T00:00:00.000Z'), true);
+            assert.equal(
+              await store.leases.acquire(key, 'other-instance', isoInSeconds(600), nowIso()),
+              true,
+            );
+            await writeUser(stale);
+          }),
+        (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
+      );
+      assert.equal(await store.users.findByEmail(stale), null, 'the stale write rolled back');
+      assert.equal(
+        await store.leases.release(key, 'other-instance'),
+        true,
+        'the new owner still holds the key',
+      );
     });
 
     it('leases: refuses an over-long key instead of truncating it', async () => {

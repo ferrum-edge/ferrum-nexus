@@ -28,6 +28,7 @@ import {
 import { gatewayIdentityLockKey } from '../credentials/service.js';
 import type { NexusStore, TransactionOptions } from '../db/store.js';
 import { derivedConsumerId } from '../ferrum-admin/client.js';
+import { isoInSeconds, nowIso } from '../lib/ids.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
 function errorCode(body: string): string {
@@ -740,6 +741,67 @@ describe('test consumer lifecycle', () => {
       consumerId,
       'the retry still records the test consumer as collected',
     );
+  });
+
+  it('does not drop the rows once its leases changed hands mid-deletion (issue #384)', async () => {
+    const api = await publish();
+    const username = `nexus-test-${api.id}`;
+    const key = gatewayIdentityLockKey(username);
+
+    const created = await createTestConsumer(api.id);
+    assert.equal(created.statusCode, 201, created.body);
+    const consumerId = harness.edge.consumerByUsername(username)?.id;
+    assert.ok(consumerId);
+
+    // The deletion stalls after its teardown, just before the row delete, for
+    // longer than the lease TTL: every lease it holds lapses and is swept, and
+    // another instance takes the identity's name key — and with it the right
+    // to build a consumer for an API whose row it still sees. Resumed, the
+    // deletion must not commit the row delete behind that instance's back.
+    let stalled = false;
+    const restoreTeardown = beforeRowDelete(api.id, async () => {
+      if (stalled) return;
+      stalled = true;
+      await harness.store.leases.deleteExpired('9999-01-01T00:00:00.000Z');
+      assert.equal(
+        await harness.store.leases.acquire(key, 'other-instance', isoInSeconds(600), nowIso()),
+        true,
+      );
+    });
+    const refused = await deleteApi(api.id).finally(restoreTeardown);
+    assert.ok(stalled, 'the deletion reached the row delete');
+    assert.equal(
+      await harness.store.leases.release(key, 'other-instance'),
+      true,
+      "the stale deletion left the new holder's lease alone",
+    );
+
+    assert.equal(refused.statusCode, 409, refused.body);
+    assert.equal(errorCode(refused.body), 'CONFLICT');
+    assert.ok(await harness.store.apis.findById(api.id), 'the stale row delete rolled back');
+    assert.equal(
+      (await harness.auditRows('api.delete')).find((row) => row.target_id === api.id),
+      undefined,
+      'nothing is audited as a completed delete',
+    );
+    assert.equal(
+      (await registrationFor(username))?.ferrum_consumer_id,
+      consumerId,
+      'the registration is kept, still naming the collected consumer',
+    );
+
+    // Holding the keys again, the retry completes and records what the stale
+    // attempt collected.
+    const retried = await deleteApi(api.id);
+    assert.equal(retried.statusCode, 200, retried.body);
+    assert.equal(await harness.store.apis.findById(api.id), null);
+    assert.equal(harness.edge.consumerByUsername(username), undefined);
+    assert.equal(await registrationFor(username), null, 'nothing is left behind');
+    const audited = (await harness.auditRows('api.delete')).filter(
+      (row) => row.target_id === api.id,
+    );
+    assert.equal(audited.length, 1);
+    assert.equal(audited[0]?.details.test_consumer_id, consumerId);
   });
 
   it('answers 404 to a deletion that finds the row already removed', async () => {

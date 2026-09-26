@@ -101,6 +101,7 @@ import {
 import type { NexusConfig } from '../../../config/index.js';
 import { conflict, NexusError } from '../../../lib/errors.js';
 import { newId, nowIso } from '../../../lib/ids.js';
+import { fenceTransactionBody } from '../../../lib/lease-fence.js';
 import {
   runMigrations,
   SCHEMA_MIGRATIONS_TABLE,
@@ -1431,7 +1432,17 @@ class MongoStore implements NexusStore {
   }
 
   transaction<T>(fn: (tx: NexusStore) => Promise<T>, options?: TransactionOptions): Promise<T> {
-    return this.inTransaction(fn, options);
+    // A nested call joins the open transaction, which was fenced when it opened.
+    if (this.session) return fn(this);
+    // Captured here, in the caller's context and before the queue: the leases
+    // the caller holds fence the transaction, re-checked on every re-run. A
+    // standalone deployment has no atomic commit to protect, so there a stale
+    // holder is refused before its body writes anything instead.
+    const body = fenceTransactionBody<NexusStore, T>(
+      fn,
+      this.ctx.supportsTransactions ? 'commit' : 'begin',
+    );
+    return this.inTransaction(body, options);
   }
 
   /**
@@ -3736,6 +3747,21 @@ class MongoStore implements NexusStore {
         await this.col(COLLECTIONS.leases).updateOne(
           { _id: key, owner } as Filter<NexusDoc>,
           { $set: { expires_at: expiresAt, updated_at: nowIso() } },
+          this.opts,
+        )
+      ).matchedCount > 0,
+
+    // A write, not a read: a transaction's snapshot read takes no lock, so only
+    // a modification makes a takeover conflict with — and wait for — this
+    // holder's commit, and makes a takeover that landed after the snapshot
+    // abort the transaction instead of passing unseen. A fresh nonce is always
+    // a modification, where re-setting an unchanged value is a no-op that
+    // locks nothing.
+    verify: async (key, owner) =>
+      (
+        await this.col(COLLECTIONS.leases).updateOne(
+          { _id: key, owner } as Filter<NexusDoc>,
+          { $set: { fence_nonce: newId(), updated_at: nowIso() } },
           this.opts,
         )
       ).matchedCount > 0,

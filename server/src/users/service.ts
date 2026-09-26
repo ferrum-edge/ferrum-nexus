@@ -318,8 +318,13 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
         // Commit before issuing the caller's replacement. Keep the password
         // lease until issuance finishes so a concurrent reset cannot leave a
         // session issued by the earlier password change alive after its reset.
+        // The issuance is its own transaction so the lease's fence covers it
+        // too: a change that stalled past the TTL while a reset took the lease
+        // over issues nothing rather than a session the reset never saw.
         const reissued =
-          update.password_hash !== undefined ? await auth.issueSession(updated, context) : null;
+          update.password_hash !== undefined
+            ? await store.transaction((tx) => auth.issueSession(updated, context, tx))
+            : null;
         return { user: toPublicUser(updated), reissued };
       };
       return update.password_hash !== undefined

@@ -559,6 +559,55 @@ separately with `409 CONFLICT`, but the last-super-admin count is checked
 **first** on both paths: when the two rules collide, `LAST_SUPER_ADMIN` is the
 answer that says how to fix it — promote a second super admin.
 
+### Cross-instance locks are fenced at commit
+
+Every cross-instance lock in the portal — the `users:super-admins` and
+per-account lifecycle keys, the password-change, message-budget,
+access-request-budget and broadcast keys, and the gateway consumer, identity
+and proxy keys — is an `edge_leases` row with a 60-second TTL. A lease that
+expires is what keeps a crashed instance from blocking a key for ever, and it
+is also what a merely **stalled** instance loses: one paused past the TTL (a
+long garbage-collection pause, a hung upstream, renewals that kept failing) can
+resume after another instance has taken the key and acted on it. Without a
+fence its later writes still committed — the row delete that follows an API's
+test-consumer teardown, the check-then-insert behind a daily budget, a status
+change counted against a super-admin set that had since changed (#384).
+
+Each acquisition therefore writes a **fresh random token** as the lease row's
+owner, never a per-process id, so the row names one acquisition and a token
+that has been replaced never holds its key again. The section runs with the
+leases it holds recorded in its async context (`server/src/lib/lease-fence.ts`),
+and every `store.transaction` opened inside it checks, as the last statement of
+its body, that each token still owns its key (`LeaseRepo.verify`). A token that
+lost its key fails the transaction with `409 CONFLICT` and rolls it back, so a
+stale holder's database writes never commit and retrying is safe. The check is
+blind to expiry on purpose: a lease that lapsed without anyone taking it still
+names its holder, and nobody can have acted under the key meanwhile.
+
+On PostgreSQL and MySQL the check is an `UPDATE` of the lease row, and on
+MongoDB a write to its document, so the row stays locked until the transaction
+commits: an instance trying to take the key over waits for the holder's commit
+instead of slipping in between the check and it. SQLite has one connection and
+serialises every transaction, so a read suffices there. A MongoDB deployment
+running standalone under `NEXUS_DB_ALLOW_STANDALONE=true` has no atomic
+commit, so the check runs **before** the body instead — a stale holder is still
+refused before it writes, but the window between the check and the writes is
+not closed.
+
+The fence covers what a transaction commits, which is why every lease-guarded
+invariant is written as one: a sign-in's hash re-check and its session insert,
+a password change's replacement session, a gateway identity's owner check and
+its registration, and a broadcast's per-day count and the audit row it charges
+each share a transaction under their key. It cannot fence **Ferrum Edge**:
+Edge's whole-resource `PUT`s carry no concurrency token, so a stale holder's
+gateway write still lands, and the single-gateway-writer guidance in
+[`operations.md` §8](operations.md#8-scaling) stands. What the fence adds there
+is that database work committed in a transaction under a gateway key — an
+API's row delete after its test-consumer teardown, above all — is refused
+rather than committed over the new holder's. A single-statement mirror write
+made outside a transaction, such as the credential row after an Edge append, is
+ordered by the lease alone.
+
 ### Disabling an account
 
 Both paths — `PATCH /api/users/:id` with `status: "disabled"` and
@@ -616,8 +665,10 @@ Every gateway step for one identity runs inside a critical section keyed on
 _that_ consumer's Ferrum id — an in-process queue plus an `edge_leases` row —
 so a concurrent approval or credential issue on another Nexus instance cannot
 read the pre-teardown state and write it back afterwards. The lease reduces
-cross-instance overlap but cannot fence a holder that resumes after expiry;
-deployments must therefore use only one active gateway-writing Nexus instance.
+cross-instance overlap, and its token fences the portal's own transactions
+([above](#cross-instance-locks-are-fenced-at-commit)), but Edge cannot reject a
+holder that resumes after expiry; deployments must therefore use only one
+active gateway-writing Nexus instance.
 Edge replaces consumers whole, with no version token, so without that lock a
 revoked account could be re-authorised by a write that was merely stale; see
 [`operations.md` §8](operations.md#8-scaling). Identities are torn down one at a

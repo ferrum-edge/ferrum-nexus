@@ -1589,17 +1589,23 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     },
 
     async claimGatewayIdentity(ownerId, username): Promise<GatewayIdentityRecord> {
-      return locks(userLifecycleLockKey(ownerId), async () => {
-        // Inside the key, so the answer cannot change between here and the
-        // write: a disable is either already committed, or waiting for this.
-        await assertOwnerActive(ownerId);
-        return store.gatewayIdentities.claim({
-          user_id: ownerId,
-          namespace,
-          ferrum_username: username,
-          ferrum_consumer_id: null,
-        });
-      });
+      // Inside the key, so the answer cannot change between here and the
+      // write: a disable is either already committed, or waiting for this.
+      // One transaction for the check and the claim, because that is what the
+      // key's fence guards: a claim whose lease was taken over while it stalled
+      // — by a disable that has since enumerated nothing — rolls back instead
+      // of registering an identity no teardown will find.
+      return locks(userLifecycleLockKey(ownerId), () =>
+        store.transaction(async (tx) => {
+          await assertOwnerActive(ownerId, tx);
+          return tx.gatewayIdentities.claim({
+            user_id: ownerId,
+            namespace,
+            ferrum_username: username,
+            ferrum_consumer_id: null,
+          });
+        }),
+      );
     },
 
     async bindGatewayIdentity(identity, consumerId): Promise<void> {
@@ -2445,8 +2451,8 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
    * teardown behind it deletes what it appended, or the teardown wins and the
    * append then sees `disabled` and is refused.
    */
-  async function assertOwnerActive(userId: Uuid): Promise<void> {
-    const owner = await store.users.findById(userId);
+  async function assertOwnerActive(userId: Uuid, db: NexusStore = store): Promise<void> {
+    const owner = await db.users.findById(userId);
     if (!owner) throw notFound('User', userId);
     if (owner.status !== 'active') {
       throw userDisabled('This account has been disabled; its gateway access cannot be extended');

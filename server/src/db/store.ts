@@ -1454,9 +1454,11 @@ export interface VerificationTokenRepo {
  * instance being overwritten by a stale approval on another.
  *
  * `key` is the canonical lock key for one Edge resource — a Ferrum consumer id,
- * or `proxy:<id>` — and `owner` a per-process random id. Expiry rather than an
- * explicit unlock is what makes a crashed holder recoverable: nothing has to
- * notice the crash, the lease simply becomes takeable.
+ * or `proxy:<id>` — and `owner` a random token minted for **one acquisition**,
+ * which is what makes it a fencing token (see {@link LeaseRepo.verify} and
+ * `lib/lease-fence.ts`). Expiry rather than an explicit unlock is what makes a
+ * crashed holder recoverable: nothing has to notice the crash, the lease simply
+ * becomes takeable.
  *
  * Every method is a single atomic statement on every adapter. Callers must not
  * read-then-write around one.
@@ -1480,6 +1482,24 @@ export interface LeaseRepo {
    * `false` when `owner` has already lost the lease.
    */
   renew(key: string, owner: string, expiresAt: IsoTimestamp): Promise<boolean>;
+  /**
+   * Whether `owner` still holds `key` — the fence a lease-guarded transaction
+   * checks before it commits.
+   *
+   * Deliberately blind to `expires_at`: a lease that lapsed but that nobody
+   * took over still names `owner`, and nothing can have acted under the key
+   * meanwhile, because acting under it means acquiring it, which replaces
+   * `owner`. A row taken over, released or swept answers `false`.
+   *
+   * Called through a transaction-scoped store it runs inside that transaction
+   * and, on the pooled adapters, **writes** the row — an `UPDATE` on
+   * PostgreSQL and MySQL, a counter bump on MongoDB — so the row stays locked
+   * until the transaction ends and a takeover waits for the holder's commit
+   * instead of slipping in between the check and it. Call it last in a body,
+   * as `lib/lease-fence.ts` does, so that lock is held for as short a time as
+   * possible.
+   */
+  verify(key: string, owner: string): Promise<boolean>;
   /** Housekeeping sweep of leases nobody can hold any more. */
   deleteExpired(now: IsoTimestamp): Promise<number>;
 }
@@ -1556,6 +1576,13 @@ export interface NexusStore {
    * through `tx` or be idempotent. See "Transaction bodies are re-runnable" at
    * the top of this module, and {@link TransactionOptions.retry} for the
    * escape hatch.
+   *
+   * **A transaction opened inside a lease section is fenced.** Every adapter
+   * captures the leases the calling context holds (`lib/lease-fence.ts`) when
+   * a new — not a joined — transaction is opened, and verifies each token with
+   * {@link LeaseRepo.verify} through `tx` after `fn` resolves and before the
+   * commit. A holder whose lease was taken over while it stalled gets
+   * `CONFLICT` and a rollback instead of a commit (issue #384).
    */
   transaction<T>(fn: (tx: NexusStore) => Promise<T>, options?: TransactionOptions): Promise<T>;
 
