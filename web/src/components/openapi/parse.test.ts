@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { parse as parseYaml } from 'yaml';
+import { MAX_SPEC_BYTES } from '@ferrum-nexus/shared';
 import { parseSpecText } from './parse';
 
 // The YAML parser is spied on rather than timed: the defect this guards is not
@@ -40,6 +41,25 @@ describe('parseSpecText', () => {
     expect(result.spec.title).toBe('Wide API');
     expect(result.spec.schemaNames).toEqual(['Wide']);
     expect(parseYaml).not.toHaveBeenCalled();
+  });
+
+  it('refuses a document over the byte limit without parsing it', () => {
+    vi.mocked(parseYaml).mockClear();
+    const json = vi.spyOn(JSON, 'parse');
+
+    // Under the limit in UTF-16 code units, over it in UTF-8 bytes.
+    const yaml = `openapi: 3.0.3\ninfo:\n  title: ${'é'.repeat(MAX_SPEC_BYTES / 2)}\npaths: {}\n`;
+    const result = parseSpecText(yaml);
+    const jsonResult = parseSpecText(`{"openapi":"${'a'.repeat(MAX_SPEC_BYTES)}"}`);
+
+    expect(result).toEqual({
+      ok: false,
+      error: 'The specification is larger than the 2.00 MB limit.',
+    });
+    expect(jsonResult.ok).toBe(false);
+    expect(parseYaml).not.toHaveBeenCalled();
+    expect(json).not.toHaveBeenCalled();
+    json.mockRestore();
   });
 
   it('still parses YAML, which is what anything not opening with { or [ is', () => {

@@ -1,7 +1,15 @@
-import { useId, useMemo, useRef, type ChangeEvent, type ReactElement } from 'react';
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type ReactElement,
+} from 'react';
 import { MAX_SPEC_BYTES, MAX_SPEC_OPERATIONS } from '@ferrum-nexus/shared';
 import { formatBytes } from '../../lib/format';
-import { parseSpecText } from '../openapi/parse';
+import { parseSpecText, specByteLength } from '../openapi/parse';
 import { FormNotice } from '../auth/AuthShell';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
@@ -27,9 +35,27 @@ export function SpecEditor({
 }: SpecEditorProps): ReactElement {
   const fileInput = useRef<HTMLInputElement | null>(null);
   const hintId = useId();
-  const byteLength = useMemo(() => new TextEncoder().encode(value).length, [value]);
-  const result = useMemo(() => (value.trim() ? parseSpecText(value) : null), [value]);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  // Every selection, manual edit and unmount bumps this, so a file read that
+  // finishes after any of them is dropped instead of overwriting newer work.
+  const readGeneration = useRef(0);
+  const latestValue = useRef(value);
+  useEffect(() => {
+    latestValue.current = value;
+  }, [value]);
+  useEffect(() => {
+    const generation = readGeneration;
+    return () => {
+      generation.current += 1;
+    };
+  }, []);
+  const byteLength = useMemo(() => specByteLength(value), [value]);
   const tooLarge = byteLength > MAX_SPEC_BYTES;
+  // An over-budget document cannot be published, so it is not worth parsing.
+  const result = useMemo(
+    () => (!tooLarge && value.trim() ? parseSpecText(value) : null),
+    [tooLarge, value],
+  );
   // The server enforces this too; saying it here avoids a round trip and tells
   // the provider the number before they hit it.
   const tooManyOperations = result?.ok === true && result.spec.operationCount > MAX_SPEC_OPERATIONS;
@@ -37,8 +63,37 @@ export function SpecEditor({
   const onFile = (event: ChangeEvent<HTMLInputElement>): void => {
     const file = event.target.files?.[0];
     if (!file) return;
-    void file.text().then(onChange);
     event.target.value = '';
+    readGeneration.current += 1;
+    const generation = readGeneration.current;
+    // `File.size` is the byte count, so an oversized file is refused before any
+    // of it is read; the current draft stays as it is.
+    if (file.size > MAX_SPEC_BYTES) {
+      setUploadError(
+        `${file.name} is ${formatBytes(file.size)}, larger than the ${formatBytes(MAX_SPEC_BYTES)} limit. Choose a smaller document.`,
+      );
+      return;
+    }
+    setUploadError(null);
+    const valueAtSelection = latestValue.current;
+    file.text().then(
+      (text) => {
+        // Superseded by a later selection, an edit, or the editor going away.
+        if (generation !== readGeneration.current) return;
+        if (latestValue.current !== valueAtSelection) return;
+        onChange(text);
+      },
+      () => {
+        if (generation !== readGeneration.current) return;
+        setUploadError(`${file.name} could not be read.`);
+      },
+    );
+  };
+
+  const onEdit = (next: string): void => {
+    readGeneration.current += 1;
+    setUploadError(null);
+    onChange(next);
   };
 
   return (
@@ -82,7 +137,7 @@ export function SpecEditor({
         spellCheck={false}
         className="min-h-[28rem] leading-6"
         value={value}
-        onChange={(event) => onChange(event.target.value)}
+        onChange={(event) => onEdit(event.target.value)}
         placeholder={'openapi: 3.0.3\ninfo:\n  title: My API\n  version: 1.0.0\npaths: {}'}
       />
 
@@ -110,6 +165,7 @@ export function SpecEditor({
         ) : null}
       </div>
 
+      {uploadError ? <FormNotice tone="danger">{uploadError}</FormNotice> : null}
       {result && !result.ok ? <FormNotice tone="danger">{result.error}</FormNotice> : null}
       {tooManyOperations ? (
         <FormNotice tone="danger">
@@ -122,12 +178,26 @@ export function SpecEditor({
 }
 
 /**
- * True when `text` parses as an OpenAPI document the portal will accept.
+ * Why the portal would refuse `text` as an OpenAPI document, or null when it
+ * would accept it.
  *
- * Mirrors the server's checks so the provider is stopped before the request,
- * not after it; the server remains the authority.
+ * Mirrors the server's checks — the byte ceiling first, before any parsing —
+ * so the provider is stopped before the request, not after it; the server
+ * remains the authority.
  */
-export function isSpecValid(text: string): boolean {
+export function specProblem(text: string): string | null {
+  if (specByteLength(text, MAX_SPEC_BYTES) > MAX_SPEC_BYTES) {
+    return `The OpenAPI document is larger than the ${formatBytes(MAX_SPEC_BYTES)} limit.`;
+  }
   const result = parseSpecText(text);
-  return result.ok && result.spec.operationCount <= MAX_SPEC_OPERATIONS;
+  if (!result.ok) return 'The OpenAPI document could not be parsed.';
+  if (result.spec.operationCount > MAX_SPEC_OPERATIONS) {
+    return `The OpenAPI document declares more than ${MAX_SPEC_OPERATIONS.toLocaleString()} operations.`;
+  }
+  return null;
+}
+
+/** True when `text` is an OpenAPI document the portal will accept. */
+export function isSpecValid(text: string): boolean {
+  return specProblem(text) === null;
 }
