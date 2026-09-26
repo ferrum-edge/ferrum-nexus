@@ -285,7 +285,11 @@ describe('API deletion and god mode', () => {
         (row) => row.target_id === victim.user.id,
       );
       assert.equal(godRow?.details.reason, 'Account compromised.');
-      assert.equal(godRow?.details.revoked_grants, 1);
+      assert.equal(godRow?.details.revoke_grants, true);
+      const outcome = (await harness.auditRows('god.disable_user_complete')).find(
+        (row) => row.target_id === victim.user.id,
+      );
+      assert.equal(outcome?.details.revoked_grants, 1);
     });
 
     it('leaves the grants alone when the transaction refuses the disable', async (t) => {
@@ -363,12 +367,18 @@ describe('API deletion and god mode', () => {
       const afterwards = await harness.authed(victim, { method: 'GET', url: '/api/catalog' });
       assert.equal(afterwards.statusCode, 401);
       assert.ok(!groupsOf(victim.user.id).includes(aclGroupForApi(apiId)));
+      // The disable itself was recorded with the transition; the step that
+      // failed after it is named in the outcome row.
       for (const action of ['user.disable', 'god.disable_user']) {
         const row = (await harness.auditRows(action)).find(
           (entry) => entry.target_id === victim.user.id,
         );
-        assert.deepEqual(row?.details.failed_steps, ['revoke_grants'], action);
+        assert.ok(row, action);
       }
+      const outcome = (await harness.auditRows('god.disable_user_complete')).find(
+        (entry) => entry.target_id === victim.user.id,
+      );
+      assert.deepEqual(outcome?.details.failed_steps, ['revoke_grants']);
       assert.equal((await harness.store.grants.findById(grantId))?.status, 'active');
 
       // Repeating the disable finishes the revocation.
@@ -411,7 +421,7 @@ describe('API deletion and god mode', () => {
       assert.deepEqual(consumer?.acl_groups, []);
       assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'revoked');
 
-      const godRow = (await harness.auditRows('god.disable_user')).find(
+      const godRow = (await harness.auditRows('god.disable_user_complete')).find(
         (row) => row.target_id === victim.user.id,
       );
       assert.equal(godRow?.details.gateway_teardown, 'ok');

@@ -172,7 +172,12 @@ export function runTeardownFencingContract(
                 'including every timestamp',
               );
               assert.equal((await store.users.findById(user.user.id))?.status, 'disabled');
-              assert.equal((await harness.auditRows('user.gateway_teardown_complete')).length, 0);
+              // The stale attempt recorded no completion; a retry that landed
+              // records its own.
+              assert.equal(
+                (await harness.auditRows('user.gateway_teardown_complete')).length,
+                replacement === 'retry done' ? 1 : 0,
+              );
 
               jobs.markDone = markDone;
               jobs.reschedule = reschedule;

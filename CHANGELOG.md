@@ -105,6 +105,26 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   both the insert and its audit inside it; the viewer notification is still sent
   only after the authorization commits. Covered on every adapter by the new
   application and viewer audit store contract.
+- Account role changes, enables, disables and administrative account edits
+  (ordinary and god-mode), gateway-revocation retries, and application and API
+  deletions now write their audit rows in the same store transaction as the
+  change they describe. Previously the change committed first, so a failed audit
+  insert left it applied with no record behind a `500`, and repeating the
+  request then found nothing left to change and recorded nothing either. A
+  disable's sessions now end, and its gateway revocation is queued, in that
+  transaction too. Deletions, whose gateway work cannot be rolled back, commit a
+  new `application.delete_start` / `api.delete_start` row before the first
+  gateway call and their `application.delete` / `api.delete` row with the local
+  delete (`god.delete_api` joins the latter), so a failed completion leaves the
+  portal rows in place for the retry. What runs after a committed disable is
+  recorded as its outcome: `user.gateway_teardown_complete` (now also written,
+  with `details.inline: true`, when the admin request's own immediate attempt
+  lands) and the new `god.disable_user_complete`, which carries the grant sweep
+  and any `failed_steps` that `user.disable` and `god.disable_user` used to. The
+  transition rows now read `gateway_teardown: "queued"`. The actions are listed
+  in `TRANSACTIONAL_AUDIT_ACTIONS`; a source scan fails the build when one is
+  recorded outside its transaction, and a new store contract fails each audit
+  insert on every adapter and asserts that nothing committed.
 
 ## [0.1.0] - 2026-09-25
 
