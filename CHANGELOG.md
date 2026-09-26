@@ -26,6 +26,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Retired APIs in the catalog are labeled as retired and no longer show a new
+  access-request form. Existing identity grants remain visible, and pending
+  requests can still be withdrawn (#376).
 - **Application deletion is atomic, race-free and quota-preserving (#363,
   #364, #365).**
   - The rolling access-request budget

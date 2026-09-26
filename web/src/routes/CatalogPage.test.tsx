@@ -146,6 +146,17 @@ describe('catalog browsing', () => {
     expect(within(card).queryByText('No access')).not.toBeInTheDocument();
   });
 
+  it('labels a retired API on the catalog card', async () => {
+    vi.mocked(catalogApi.list).mockResolvedValue({
+      items: [catalogEntry({ status: 'retired' })],
+      total: 1,
+    });
+    renderPage(<CatalogPage />);
+    const card = await screen.findByRole('link', { name: /Billing API/ });
+    expect(within(card).getByText('Retired')).toBeInTheDocument();
+    expect(within(card).queryByText('Requestable')).not.toBeInTheDocument();
+  });
+
   it('provides a catalog return link when an entry cannot be loaded', async () => {
     vi.mocked(catalogApi.detail).mockRejectedValue(new Error('Not found'));
     renderPage(<CatalogDetailPage />);
@@ -312,6 +323,75 @@ describe('catalog access', () => {
     expect(await screen.findByText(/Explain your use case/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Request access' })).toBeDisabled();
     expect(screen.queryByText('Call this API')).not.toBeInTheDocument();
+  });
+
+  it('shows the retired state instead of a new-request form for a denied request', async () => {
+    detail = {
+      ...detail,
+      api: catalogEntry({ status: 'retired', access_state: 'denied' }),
+      my_request: { ...REQUEST, status: 'denied', decision_note: 'Explain your use case' },
+      my_grant: { ...GRANT, status: 'revoked' },
+    };
+    identities.account = {
+      ...NO_ACCESS,
+      request: { ...REQUEST, status: 'denied', decision_note: 'Explain your use case' },
+    };
+    await openDetail('Access');
+    expect(
+      await screen.findByText(/retired and is no longer accepting new access requests/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Explain your use case/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Request access' })).not.toBeInTheDocument();
+    expect(screen.getByText('Retired')).toBeInTheDocument();
+  });
+
+  it('keeps withdrawal available for a pending request on a retired API', async () => {
+    detail = { ...detail, api: catalogEntry({ status: 'retired', access_state: 'pending' }) };
+    identities.account = { ...NO_ACCESS, request: REQUEST };
+    vi.spyOn(accessRequestsApi, 'cancel').mockResolvedValue({
+      access_request: { ...REQUEST, status: 'cancelled' },
+    });
+    await openDetail('Access');
+    expect(await screen.findByRole('button', { name: 'Withdraw request' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Request access' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Withdraw request' }));
+    await screen.findByText('Request withdrawn');
+  });
+
+  it('shows an existing application grant on a retired API', async () => {
+    const app = {
+      id: 'app-a',
+      owner_user_id: 'user-1',
+      name: 'Application A',
+      description: null,
+      status: 'active' as const,
+      active_grants: 1,
+      active_credentials: 0,
+      created_at: API.created_at,
+      updated_at: API.created_at,
+    };
+    const appGrant = { ...GRANT, application_id: 'app-a' };
+    detail = {
+      ...detail,
+      api: catalogEntry({ status: 'retired', access_state: 'granted' }),
+      my_grant: appGrant,
+    };
+    identities['app-a'] = {
+      application: {
+        id: app.id,
+        name: app.name,
+        owner_user_id: app.owner_user_id,
+        status: app.status,
+      },
+      request: null,
+      grant: appGrant,
+    };
+    vi.spyOn(applicationsApi, 'list').mockResolvedValue({ items: [app], total: 1 });
+    await openDetail('Access');
+    fireEvent.click(screen.getByLabelText('Access for'));
+    fireEvent.click(await screen.findByRole('option', { name: 'Application A' }));
+    await screen.findByText(/Access granted to Application A/);
+    expect(screen.queryByRole('button', { name: 'Request access' })).not.toBeInTheDocument();
   });
 
   it.each([false, true])('gives the owner a management link (admin: %s)', async (canAdmin) => {

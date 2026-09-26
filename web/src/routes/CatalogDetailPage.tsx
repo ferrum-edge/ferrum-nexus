@@ -79,8 +79,20 @@ function AtAGlance({ detail }: { detail: CatalogDetailResponse }): ReactElement 
       <GlanceTile
         icon="shield"
         label="Access"
-        value={api.requestable ? 'Approval required' : 'Open access'}
-        hint={api.requestable ? 'Ask the provider for a grant' : 'Any portal account may call it'}
+        value={
+          api.status === 'retired'
+            ? 'Retired'
+            : api.requestable
+              ? 'Approval required'
+              : 'Open access'
+        }
+        hint={
+          api.status === 'retired'
+            ? 'This API is no longer accepting new access requests'
+            : api.requestable
+              ? 'Ask the provider for a grant'
+              : 'Any portal account may call it'
+        }
       />
       <GlanceTile
         icon="spec"
@@ -264,6 +276,12 @@ function IdentityAccess({
         </div>
       </div>
     );
+  } else if (api.status === 'retired') {
+    body = (
+      <FormNotice tone="warning">
+        This API is retired and is no longer accepting new access requests.
+      </FormNotice>
+    );
   } else {
     body = (
       <form
@@ -345,7 +363,9 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
   // Only shown once the caller could actually make the call through one of
   // their identities: an approved grant, or an API that needs no approval.
   // `my_grant` is account-wide on purpose here.
-  const canCall = (myGrant !== null && myGrant.status === 'active') || !api.requestable;
+  const canCall =
+    (myGrant !== null && myGrant.status === 'active') ||
+    (api.status !== 'retired' && !api.requestable);
 
   if (api.access_state === 'owner') {
     return (
@@ -376,13 +396,37 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
           icon="grant"
           actions={<StatusPill status={api.access_state} />}
           description={
-            api.requestable
+            api.status === 'retired'
+              ? 'This API is retired and is no longer accepting new access requests.'
+              : api.requestable
               ? 'This API is protected by an access-control policy. Access is approved per identity — your account, or one of your applications — and an approval adds only that identity’s gateway consumer to its ACL group.'
               : 'This API does not require an access request — issue a credential and start calling it.'
           }
         />
         <CardBody>
-          {!api.requestable ? (
+          {api.status === 'retired' ? (
+            <div className="flex flex-col gap-4">
+              <p className="text-sm text-fg-muted">
+                This API is retired. Existing access remains available, but new access requests are
+                closed.
+              </p>
+              <IdentityPicker
+                label="Access for"
+                value={identity}
+                selectedLabel={identityName}
+                onValueChange={(value, name) => {
+                  setIdentity(value);
+                  setIdentityName(name);
+                }}
+              />
+              <IdentityAccess
+                key={identity}
+                api={api}
+                identity={identity}
+                identityName={identityName}
+              />
+            </div>
+          ) : !api.requestable ? (
             <p className="text-sm text-fg-muted">
               No approval needed. Issue a credential from the credentials page to start calling this
               API.
