@@ -35,7 +35,7 @@ import {
 } from '@ferrum-nexus/shared';
 
 import { AuditAction } from '../audit/service.js';
-import type { NexusStore } from '../db/store.js';
+import type { NexusStore, TransactionOptions } from '../db/store.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
 const NAMESPACE = 'nexus';
@@ -322,9 +322,18 @@ describe('restoring a missing gateway deployment', () => {
     await reconcileAndRepair();
 
     // Force the failure after public cutover, then prevent compensation from
-    // withdrawing that proxy. The stranded public path must remain gated.
+    // withdrawing that proxy. The stranded public path must remain gated. The
+    // restore's start row commits first, before the gateway is touched.
     const realTransaction = harness.store.transaction.bind(harness.store);
-    harness.store.transaction = async <T>(_fn: (tx: NexusStore) => Promise<T>): Promise<T> => {
+    let started = false;
+    harness.store.transaction = async <T>(
+      fn: (tx: NexusStore) => Promise<T>,
+      options?: TransactionOptions,
+    ): Promise<T> => {
+      if (!started) {
+        started = true;
+        return realTransaction(fn, options);
+      }
       throw new Error('database unavailable after cutover');
     };
     harness.edge.queueFailure(503, { error: 'gateway unavailable' }, '/proxies/', 'DELETE');
@@ -338,6 +347,15 @@ describe('restoring a missing gateway deployment', () => {
     );
     assert.ok(serving, 'the failed proxy withdrawal leaves the public proxy in place');
     assert.equal(typeof serving.id, 'string');
+
+    // The adoption never committed, but the start row still names who built
+    // the live proxy and the id it went live under.
+    const starts = await harness.auditRows(AuditAction.API_GATEWAY_RESTORE_START);
+    const start = starts.filter((row) => row.target_id === apiId);
+    assert.equal(start.length, 1);
+    assert.equal(start[0]?.details.proxy_id, serving.id);
+    const completions = await harness.auditRows(AuditAction.API_GATEWAY_RESTORE);
+    assert.equal(completions.filter((row) => row.target_id === apiId).length, 0);
     const effective = harness.edge
       .effectivePluginsForProxy(serving.id as string, NAMESPACE)
       .map((plugin) => plugin.plugin_name);

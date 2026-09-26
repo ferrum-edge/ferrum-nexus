@@ -27,6 +27,7 @@ import {
   type PublishApiResponse,
 } from '@ferrum-nexus/shared';
 
+import type { NexusStore, TransactionOptions } from '../db/store.js';
 import {
   SAMPLE_SPEC_YAML,
   buildTestApp,
@@ -337,9 +338,18 @@ describe('a routes spec revision racing a runtime PATCH', () => {
     const { apiId, proxyId } = await publishRoutesApi('https://v1.example.com:8443/v1');
 
     // The store goes down after the gateway has already been moved, which is
-    // the one seam the compensation exists for.
+    // the one seam the compensation exists for. The revision's start row
+    // commits first, in a transaction of its own before the gateway write.
     const real = one.store.transaction.bind(one.store);
-    one.store.transaction = async <T>(): Promise<T> => {
+    let started = false;
+    one.store.transaction = async <T>(
+      fn: (tx: NexusStore) => Promise<T>,
+      options?: TransactionOptions,
+    ): Promise<T> => {
+      if (!started) {
+        started = true;
+        return real(fn, options);
+      }
       one.store.transaction = real;
       throw new Error('database is gone');
     };

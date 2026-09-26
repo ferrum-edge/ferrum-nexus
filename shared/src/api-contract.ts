@@ -529,6 +529,14 @@ export interface UpdateApiRequest {
 /** `PATCH /api/apis/:id` */
 export interface UpdateApiResponse {
   api: Api;
+  /**
+   * Present only after an `auth_plugin` change that left configs of the
+   * outgoing plugin attached to the proxy — an operator's, which the portal
+   * never replaces or deletes. Those configs still accept the outgoing
+   * flavour's credentials on this API, so the change did not invalidate them
+   * here; the Edge plugin config ids say which ones to remove.
+   */
+  outgoing_auth_configs_remaining?: string[];
 }
 
 /**

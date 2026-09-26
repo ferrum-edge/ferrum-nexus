@@ -290,6 +290,14 @@ describe('a gateway write whose acknowledgement is lost', () => {
         'https://billing.example.com:8443/v2',
       );
       assert.deepEqual(await rowsFor(harness, 'api.spec_update', id), []);
+      // The start row committed before the gateway moved, and the outcome row
+      // says whether the compensation put the document back.
+      assert.equal((await rowsFor(harness, 'api.spec_revision_start', id)).length, 1);
+      const outcomes = await rowsFor(harness, 'api.spec_revision_failed', id);
+      assert.equal(outcomes.length, 1);
+      assert.equal(outcomes[0]?.operation, 'update');
+      assert.equal(outcomes[0]?.proxy_id, proxyId);
+      assert.equal(outcomes[0]?.restored, !restoreFails);
       const rows = await rowsFor(harness, 'api.gateway_repair_required', id);
       assert.equal(rows.length, restoreFails ? 1 : 0);
       if (restoreFails) {

@@ -283,6 +283,31 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   a transactional record in a callback that writes nothing else, aliased
   imports of the audit module, and a transaction hook bound, passed or
   destructured under another name.
+- Spec updates, spec rollbacks and gateway restores now write their
+  `api.spec_update`, `api.spec_rollback` and `api.gateway_restore` rows in the
+  transaction that makes the change (#400). A failed insert rolls the revision
+  or the proxy adoption back and the gateway change is compensated, instead of
+  leaving a live deployment unaudited. Because that compensation is
+  best-effort, a revision that rewrites a live proxy first commits a new
+  `api.spec_revision_start` intent row under the proxy lease, and a restore a
+  new `api.gateway_restore_start` row (naming the proxy id it is about to
+  create) under its restore key, before the first gateway write; a failure to
+  record either stops the operation before the gateway is touched. A revision
+  that fails after its start row records a new `api.spec_revision_failed` row
+  saying whether the gateway was put back (`restored`); a restore keeps
+  recording `api.gateway_restore_failed`. All three completion actions are now
+  classified `transactional` and the two start rows `intent`.
+- An `auth_plugin` change that leaves a config of the outgoing plugin attached
+  — an operator's, which the portal never deletes, on a recorded API or beside
+  the portal's recognised config on an unrecorded one — no longer reports the
+  outgoing credentials as invalidated (#397). The `api.update` row records
+  `existing_credentials_invalidated: false` and lists the configs under
+  `outgoing_auth_configs_remaining` (also on `api.auth_plugin_changed` and in
+  the `PATCH /api/apis/:id` response), and grantees are told a gateway
+  configuration outside the portal still accepts their existing credentials
+  instead of being told they stopped working. A non-matching config beside a
+  recognised candidate is now also named under `unowned_same_name_configs` when
+  the role is first recorded.
 
 ## [0.1.0] - 2026-09-25
 

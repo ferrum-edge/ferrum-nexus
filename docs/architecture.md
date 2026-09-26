@@ -543,7 +543,12 @@ the config or brings it back in line with the API's settings (for auth, the
 empty default config); an unrecognised limiter is instead left to the operator,
 the portal's own is created beside it, and the audit row lists it under
 `unowned_same_name_configs`, as it does the same-name configs of a role the API
-does not use. The first successful change records every role it
+does not use and any non-matching config beside a recognised one. An auth swap
+beside such a config (or beside an operator's config on a recorded API) leaves
+it attached, so the `api.update` row lists it under
+`outgoing_auth_configs_remaining` and records
+`existing_credentials_invalidated: false` rather than claiming the outgoing
+credentials stopped working. The first successful change records every role it
 could attribute — `NULL` included, so recognition does not run again for a
 role in which the portal owns nothing — and leaves an ambiguous or
 unrecognised role unrecorded until it resolves; a recorded role is governed by
@@ -734,6 +739,15 @@ the previous document and backend before releasing the lease. A failed restore
 writes `api.gateway_repair_required` with `phase: 'compensation'`,
 `attempted_changes: ['spec']`, and the failed step in `steps`; the catalog keeps
 its previous revision and no `api.spec_update` success event is written.
+The `api.spec_update` / `api.spec_rollback` row itself commits in the revision's
+transaction, so a failed insert is one more failed persistence the undo covers.
+Because that undo is best-effort, a revision that rewrites the proxy first
+commits an `api.spec_revision_start` intent row under the same lease, and a
+failed attempt records `api.spec_revision_failed` with `restored`: a gateway
+change that could be neither recorded nor undone is still named in the trail.
+A gateway restore does the same with `api.gateway_restore_start` before its
+first gateway call and `api.gateway_restore` in the transaction that adopts the
+rebuilt proxy.
 
 ```
 apis row ─── proxy          name `nexus-<slug>`, listen_path `/<namespace>/<slug>`

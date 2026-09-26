@@ -760,7 +760,11 @@ until the operator removes the config or brings it back in line (an auth
 config back to the empty default); changes to other fields keep working. A
 `rate_limiting` config whose portal-owned values an operator edited by hand is
 left to the operator: the portal creates its own beside it on the next change,
-and the audit row names it under `unowned_same_name_configs`.
+and the audit row names it under `unowned_same_name_configs`. So is any config
+that sits beside the one recognised as the portal's; when that is an auth
+config, an `auth_plugin` change leaves it attached — still accepting the
+outgoing credentials — and lists it under `outgoing_auth_configs_remaining`
+instead of reporting those credentials invalidated.
 
 **CI enforces this.** `server/src/db/released-migrations.test.ts` fails when a
 released migration's file (or MongoDB snapshot) no longer matches its recorded
@@ -2783,7 +2787,10 @@ write — the same staged order a publish uses, so the path is never served by a
 half-built proxy. The API keeps its id, slug, owner, specification history,
 configured gateway URL and every access grant, and approved clients keep the
 credentials they were issued: the ACL group is derived from the API id, which
-the restore preserves. A restore that fails leaves the API flagged, records
+the restore preserves. A restore commits an `api.gateway_restore_start` audit
+row before its first gateway call and its `api.gateway_restore` row with the
+adoption of the new proxy. A restore that fails — including one whose completion
+row cannot be written — withdraws what it built, leaves the API flagged, records
 `api.gateway_restore_failed`, and can simply be retried. A gateway that is
 merely unreachable answers `502 EDGE_ERROR` and changes nothing — it is never
 read as a deleted proxy.

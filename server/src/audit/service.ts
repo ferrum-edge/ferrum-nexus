@@ -86,6 +86,25 @@ export const AuditAction = {
    * is never rewritten.
    */
   API_SPEC_ROLLBACK: 'api.spec_rollback',
+  /**
+   * A spec revision — an upload or a rollback — is about to rewrite a live
+   * proxy. Committed under the proxy lease before the gateway write, so a
+   * revision whose gateway change landed and could be neither recorded nor
+   * compensated still leaves a row naming who started it, and a failure to
+   * record *this* stops the revision before the gateway is touched.
+   * {@link API_SPEC_UPDATE} or {@link API_SPEC_ROLLBACK} follows in the
+   * transaction that makes the revision current, or
+   * {@link API_SPEC_REVISION_FAILED} when the attempt failed.
+   */
+  API_SPEC_REVISION_START: 'api.spec_revision_start',
+  /**
+   * A spec revision whose start row committed and which then failed; records
+   * whether its compensation put the gateway back. `restored: false` means an
+   * undo step failed — `step_errors` says why, and the gateway may still serve
+   * the attempted document or backend while the catalog shows the previous
+   * revision.
+   */
+  API_SPEC_REVISION_FAILED: 'api.spec_revision_failed',
   API_RETIRE: 'api.retire',
   /**
    * An API delete is about to take the API's Edge objects down. Committed
@@ -188,6 +207,15 @@ export const AuditAction = {
    */
   API_VIEWER_REVOKE: 'api.viewer_revoke',
   API_GATEWAY_RESTORE: 'api.gateway_restore',
+  /**
+   * A restore is about to build a new proxy and move it onto the public listen
+   * path. Committed under the restore key before the first gateway call, so a
+   * restore whose proxy went live and could be neither recorded nor withdrawn
+   * still leaves a row naming who started it and the proxy id it minted;
+   * {@link API_GATEWAY_RESTORE} follows in the transaction that adopts the
+   * proxy, or {@link API_GATEWAY_RESTORE_FAILED} when the attempt failed.
+   */
+  API_GATEWAY_RESTORE_START: 'api.gateway_restore_start',
   /**
    * A restore that reached the gateway and then failed. Reads like
    * {@link AuditAction.API_PUBLISH_ROLLBACK}: `withdrawn: false` means the
@@ -359,12 +387,6 @@ const COMPENSATION_TRAIL =
   'A compensation trail, written while the failure it describes is already being raised: ' +
   'it is best-effort so that the original error, not an audit failure, reaches the caller.';
 
-/** Why a revision or restore row still follows the commit. */
-const LIVE_DEPLOYMENT_FOLLOW_UP =
-  'Not yet moved into its transaction: the deployment is written under the proxy lease ' +
-  'inside its own compensated block, and the row follows once both sides agree. A failed ' +
-  'insert leaves the change live and unaudited; tracked in #400.';
-
 /**
  * Every audit action, classified. Deny by default: the mapped type makes an
  * unclassified action a compile error, and `transactional-audit.test.ts` scans
@@ -415,8 +437,10 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
       'its record commits alone inside the compensated block, so a failed insert undoes the ' +
       'repair.',
   ),
-  [AuditAction.API_SPEC_UPDATE]: postCommit(LIVE_DEPLOYMENT_FOLLOW_UP),
-  [AuditAction.API_SPEC_ROLLBACK]: postCommit(LIVE_DEPLOYMENT_FOLLOW_UP),
+  [AuditAction.API_SPEC_UPDATE]: TRANSACTIONAL,
+  [AuditAction.API_SPEC_ROLLBACK]: TRANSACTIONAL,
+  [AuditAction.API_SPEC_REVISION_START]: INTENT,
+  [AuditAction.API_SPEC_REVISION_FAILED]: postCommit(COMPENSATION_TRAIL),
   [AuditAction.API_RETIRE]: TRANSACTIONAL,
   [AuditAction.API_DELETE_START]: INTENT,
   [AuditAction.API_DELETE]: TRANSACTIONAL,
@@ -434,7 +458,8 @@ export const AUDIT_COMMIT_CLASSES: { readonly [A in AuditActionName]: AuditCommi
   [AuditAction.APPLICATION_DELETE_START]: INTENT,
   [AuditAction.API_VIEWER_AUTHORIZE]: TRANSACTIONAL,
   [AuditAction.API_VIEWER_REVOKE]: TRANSACTIONAL,
-  [AuditAction.API_GATEWAY_RESTORE]: postCommit(LIVE_DEPLOYMENT_FOLLOW_UP),
+  [AuditAction.API_GATEWAY_RESTORE]: TRANSACTIONAL,
+  [AuditAction.API_GATEWAY_RESTORE_START]: INTENT,
   [AuditAction.API_GATEWAY_RESTORE_FAILED]: postCommit(COMPENSATION_TRAIL),
   [AuditAction.API_PUBLISH_ROLLBACK]: postCommit(COMPENSATION_TRAIL),
   [AuditAction.API_AUTH_PLUGIN_CHANGED]: postCommit(

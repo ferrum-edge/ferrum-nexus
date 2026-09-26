@@ -20,7 +20,7 @@ import {
   type UpdateApiSpecResponse,
 } from '@ferrum-nexus/shared';
 
-import type { AuditLogRecord } from '../db/store.js';
+import type { AuditLogRecord, NexusStore, TransactionOptions } from '../db/store.js';
 import {
   SAMPLE_SPEC_JSON,
   SAMPLE_SPEC_YAML,
@@ -58,11 +58,21 @@ function validationIssues(body: string): { path: string; message: string }[] {
  *
  * Stands in for a database outage at the one seam that matters: by the time
  * publishing persists its rows the Edge objects are already live, so this is
- * what the compensation has to cover.
+ * what the compensation has to cover. `skip` lets that many transactions
+ * through first — a spec revision that rewrites a live proxy commits its
+ * `api.spec_revision_start` row in one of its own before the gateway moves.
  */
-function failNextTransaction(harness: TestApp, message: string): void {
+function failNextTransaction(harness: TestApp, message: string, skip = 0): void {
   const real = harness.store.transaction.bind(harness.store);
-  harness.store.transaction = async <T>(): Promise<T> => {
+  let remaining = skip;
+  harness.store.transaction = async <T>(
+    fn: (tx: NexusStore) => Promise<T>,
+    options?: TransactionOptions,
+  ): Promise<T> => {
+    if (remaining > 0) {
+      remaining -= 1;
+      return real(fn, options);
+    }
     harness.store.transaction = real;
     throw new Error(message);
   };
@@ -2678,7 +2688,7 @@ describe('publishing', () => {
       const api = published.json<PublishApiResponse>().api;
       const proxyId = String(api.ferrum_proxy_id);
 
-      failNextTransaction(harness, 'database is gone');
+      failNextTransaction(harness, 'database is gone', 1);
       const response = await harness.authed(provider, {
         method: 'PUT',
         url: `/api/apis/${api.id}/spec`,
@@ -3988,7 +3998,7 @@ describe('publishing', () => {
       const apiId = published.json<PublishApiResponse>().api.id;
       const proxyId = String(published.json<PublishApiResponse>().api.ferrum_proxy_id);
 
-      failNextTransaction(harness, 'store offline');
+      failNextTransaction(harness, 'store offline', 1);
       const response = await harness.authed(provider, {
         method: 'PUT',
         url: `/api/apis/${apiId}/spec`,
@@ -5205,7 +5215,7 @@ describe('spec upstream following', () => {
         'https://billing.example.com:8443/v2',
       );
 
-      failNextTransaction(harness, 'database is gone');
+      failNextTransaction(harness, 'database is gone', 1);
       const failed = await harness.authed(provider, {
         method: 'PUT',
         url: `/api/apis/${apiId}/spec`,
