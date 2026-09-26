@@ -347,6 +347,37 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
     return () => stalled;
   }
 
+  /** A `gateway.consumer_repair` row as another instance's repair writes one. */
+  async function recordRepair(userId: string, consumerId: string, revoked: string[]): Promise<void> {
+    await harness.store.auditLogs.create({
+      actor_user_id: superAdmin.user.id,
+      actor_role: 'super_admin',
+      action: AuditAction.GATEWAY_CONSUMER_REPAIR,
+      target_type: 'user',
+      target_id: userId,
+      details: { consumer_id: consumerId, revoked_credential_ids: revoked },
+      ip: null,
+    });
+  }
+
+  /** Repair `userId`, and assert that the resumed pass recorded its own row. */
+  async function assertResumedRowRecorded(
+    userId: string,
+    consumerId: string,
+    rows: number,
+  ): Promise<void> {
+    const repaired = await repairAccount(userId);
+    assert.equal(repaired.error, null);
+    assert.equal(repaired.ferrum_consumer_id, consumerId);
+    assert.equal(repaired.credentials_requiring_reissue, 0);
+    const recorded = await repairRows(userId);
+    assert.equal(recorded.length, rows);
+    const resumed = recorded.filter((row) => row.details.resumed === true);
+    assert.equal(resumed.length, 1, 'the resumed repair is recorded');
+    assert.equal(resumed[0]?.details.consumer_id, consumerId);
+    assert.deepEqual(resumed[0]?.details.revoked_credential_ids, []);
+  }
+
   it('does not record a repair twice when another instance completed it first', async () => {
     const { session, credentialId, consumerId } = await orphanedClient();
     const username = consumerUsernameForUser(session.user.id);
@@ -357,15 +388,7 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
     // committed the revocation and its own repair row first.
     const stalled = stallAfterRecreating(consumerId, async () => {
       await harness.store.credentials.update(credentialId, { status: 'revoked' });
-      await harness.store.auditLogs.create({
-        actor_user_id: superAdmin.user.id,
-        actor_role: 'super_admin',
-        action: AuditAction.GATEWAY_CONSUMER_REPAIR,
-        target_type: 'user',
-        target_id: session.user.id,
-        details: { consumer_id: consumerId, revoked_credential_ids: [credentialId] },
-        ip: null,
-      });
+      await recordRepair(session.user.id, consumerId, [credentialId]);
     });
 
     const repaired = await repairAccount(session.user.id);
@@ -403,6 +426,54 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
     assert.equal(rows.length, 1, 'the repair is recorded once');
     assert.equal(rows[0]?.details.resumed, true);
     assert.deepEqual(rows[0]?.details.revoked_credential_ids, []);
+  });
+
+  it('records a resumed repair when a newer repair row does not list its stale row', async () => {
+    const { session, credentialId, consumerId } = await orphanedClient();
+    const entries = releaseOnSecondPass(consumerId);
+
+    // The stale row was revoked some other way, and an unrelated repair of
+    // the same consumer recorded since revoked none of its rows.
+    const stalled = stallAfterRecreating(consumerId, async () => {
+      await harness.store.credentials.update(credentialId, { status: 'revoked' });
+      await recordRepair(session.user.id, consumerId, []);
+    });
+
+    await assertResumedRowRecorded(session.user.id, consumerId, 2);
+    assert.ok(stalled(), 'the repair lost its lease after recreating the consumer');
+    assert.equal(entries(), 2, 'the repair took the keys a second time');
+  });
+
+  it('records a resumed repair when the only other repair row predates it', async () => {
+    const { session, credentialId, consumerId } = await orphanedClient();
+    // A repair of this consumer recorded before this one began.
+    await recordRepair(session.user.id, consumerId, []);
+    const entries = releaseOnSecondPass(consumerId);
+
+    const stalled = stallAfterRecreating(consumerId, async () => {
+      await harness.store.credentials.update(credentialId, { status: 'revoked' });
+    });
+
+    await assertResumedRowRecorded(session.user.id, consumerId, 2);
+    assert.ok(stalled(), 'the repair lost its lease after recreating the consumer');
+    assert.equal(entries(), 2, 'the repair took the keys a second time');
+  });
+
+  it('records a resumed repair that had no stale rows to revoke', async () => {
+    const { session, credentialId, consumerId } = await orphanedClient();
+    // Nothing was live when the consumer was recreated.
+    await harness.store.credentials.update(credentialId, { status: 'revoked' });
+    const entries = releaseOnSecondPass(consumerId);
+
+    // A repair row for the consumer since then covers every stale row
+    // vacuously; that is no evidence the repair was already recorded.
+    const stalled = stallAfterRecreating(consumerId, async () => {
+      await recordRepair(session.user.id, consumerId, []);
+    });
+
+    await assertResumedRowRecorded(session.user.id, consumerId, 2);
+    assert.ok(stalled(), 'the repair lost its lease after recreating the consumer');
+    assert.equal(entries(), 2, 'the repair took the keys a second time');
   });
 
   /* ── 3 and 4: a revocation rollback ───────────────────────────────────── */

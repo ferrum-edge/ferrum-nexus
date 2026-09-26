@@ -543,6 +543,7 @@ export async function buildServer(
     audit,
     notifications,
     log: warn,
+    debug: (obj, message) => app.log.debug(obj, message),
   });
 
   const services: NexusServices = {

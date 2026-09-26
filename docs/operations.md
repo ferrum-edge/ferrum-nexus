@@ -2738,12 +2738,16 @@ takes the keys again and completes itself: finding the consumer it recreated
 still in place, it revokes exactly the credential rows that were live before the
 recreation (a row written since, for an entry another instance appended to the
 new consumer, is left alone) and writes the `gateway.consumer_repair` row with
-`resumed: true`. If another instance's repair of the same account already
-revoked every one of those rows and recorded its own `gateway.consumer_repair`
-row since this repair began, the resumed pass writes no second row and the
-account's entry reports that there is nothing to repair. Only if that second attempt fails too does the account's entry
-in the response carry an error, with the log line _“A consumer repair that lost
-its lease could not be completed”_ naming the consumer and its
+`resumed: true`. If none of those rows is left to revoke, and the account's
+`gateway.consumer_repair` rows for that consumer list every one of them among
+their `revoked_credential_ids` — another instance found the consumer and
+completed the same repair — the resumed pass writes no second row, and the
+account's entry reports the consumer as present, with the error
+`The gateway consumer already exists; nothing to repair`. Short of that,
+including when no rows were live before the recreation, the resumed row is
+written. If the second attempt fails too, the account's entry in the response
+carries that failure as its error, with the log line _“A consumer repair that
+lost its lease could not be completed”_ naming the consumer and its
 `stale_credential_ids`. That is the one state a repeat repair cannot clear: the
 consumer exists under the id the portal stores, so later passes report it
 healthy and a repair answers that there is nothing to do, while its old
