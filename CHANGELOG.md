@@ -26,6 +26,27 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Cross-instance leases are fenced (#384). Every acquisition of an
+  `edge_leases` lock now writes a fresh owner token, and every database
+  transaction opened while the lock is held verifies that token — and, on
+  PostgreSQL, MySQL and MongoDB, locks the lease row — just before it commits.
+  An instance that stalled past the 60-second lease TTL while another took the
+  key over now fails with `409 CONFLICT` and rolls back instead of committing
+  over the new holder's work; before, an API deletion resumed that way could
+  drop the API's rows after another instance had built a test consumer for it.
+  The lease-guarded writes that were not yet transactional now are: a sign-in's
+  password re-check and its session, a password change's replacement session, a
+  gateway identity's owner check, registration, consumer binding and removal
+  (including the compensation of an abandoned test-consumer creation, which no
+  longer removes a registration a newer attempt has claimed), a consumer
+  mapping recorded after provisioning or removed by an account teardown, the
+  credential rows revoked by a consumer teardown, a gateway restore's repair flag, and a god-mode broadcast's
+  daily count and the audit row it charges. A refused sign-in is told to sign
+  in again, and a password change whose new password had already committed is
+  told so and to sign in with it, rather than to retry. No schema change: the
+  token is stored in the existing `owner` column. Ferrum Edge still cannot reject a stale
+  holder's gateway write, so the single gateway-writing instance guidance is
+  unchanged (`docs/security.md`, "Cross-instance locks are fenced at commit").
 - The publish-time render ceiling now charges every response entry, including
   one that declares no `content` or names an already-charged `$ref`, and
   `too_much_to_render` details report the new `responses` count alongside

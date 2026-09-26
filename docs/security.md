@@ -604,6 +604,106 @@ separately with `409 CONFLICT`, but the last-super-admin count is checked
 **first** on both paths: when the two rules collide, `LAST_SUPER_ADMIN` is the
 answer that says how to fix it — promote a second super admin.
 
+### Cross-instance locks are fenced at commit
+
+Every cross-instance lock in the portal — the `users:super-admins` and
+per-account lifecycle keys, the password-change, message-budget,
+access-request-budget and broadcast keys, and the gateway consumer, identity
+and proxy keys — is an `edge_leases` row with a 60-second TTL. A lease that
+expires is what keeps a crashed instance from blocking a key for ever, and it
+is also what a merely **stalled** instance loses: one paused past the TTL (a
+long garbage-collection pause, a hung upstream, renewals that kept failing) can
+resume after another instance has taken the key and acted on it. Without a
+fence its later writes still committed — the row delete that follows an API's
+test-consumer teardown, the check-then-insert behind a daily budget, a status
+change counted against a super-admin set that had since changed (#384).
+
+Each acquisition therefore writes a **fresh random token** as the lease row's
+owner, never a per-process id, so the row names one acquisition and a token
+that has been replaced never holds its key again. The section runs with the
+leases it holds recorded in its async context (`server/src/lib/lease-fence.ts`),
+and every `store.transaction` opened inside it checks, as the last statement of
+its body, that each token still owns its key (`LeaseRepo.verify`). A token that
+lost its key fails the transaction with `409 CONFLICT` and rolls it back, so a
+stale holder's database writes never commit and retrying is safe. The check is
+blind to expiry on purpose: a lease that lapsed without anyone taking it still
+names its holder, and nobody can have acted under the key meanwhile.
+
+On PostgreSQL and MySQL the check is an `UPDATE` of the lease row, and on
+MongoDB a write to its document, so the row stays locked until the transaction
+commits: an instance trying to take the key over waits for the holder's commit
+instead of slipping in between the check and it. SQLite has one connection and
+serialises every transaction, so a read suffices there. A MongoDB deployment
+running standalone under `NEXUS_DB_ALLOW_STANDALONE=true` has no atomic
+commit, so the check runs **before** the body instead — a stale holder is still
+refused before it writes, but the window between the check and the writes is
+not closed.
+
+The fence covers only what a transaction commits, so the lease-guarded writes
+listed here are each written as a fenced transaction under their key:
+
+- a sign-in's hash re-check and its session insert;
+- a password change's replacement session;
+- a gateway identity's owner check and its registration, the consumer id bound
+  to that registration, and its removal once the identity is torn down;
+- the compensation of an abandoned test-consumer creation, which points the
+  registration back at its incumbent or removes it — a stale attempt refused
+  there keeps the registration a newer attempt by the same account has
+  claimed;
+- a consumer mapping recorded after the Edge consumer is provisioned, and the
+  mapping removed when an account teardown deletes a consumer it holds rows on;
+- the credential rows revoked when a consumer is torn down or replaced;
+- a gateway restore's repair flag and its audit row, and the flag it clears
+  when the proxy turns out to be live;
+- an API's row delete after its test-consumer teardown;
+- a broadcast's per-day count and the audit row it charges.
+
+A refusal is a `409 CONFLICT`. A sign-in is told that no session was created
+and to sign in again. A password change whose new password committed before its
+replacement session was refused is told that the password **was** changed and
+to sign in with the new one, because retrying would present the old one.
+Anything else is told to retry.
+
+A write made under a key but outside any transaction is ordered by the lease
+alone and is **not** fenced. These are the ones that remain, and why each is
+acceptable:
+
+- **The credential mirror under a consumer key** — the row created after an
+  Edge append and the rotation's delete of it when the rotation unwinds, the
+  `retiring` and `revoked` transitions of a revocation or rotation (and their
+  restoration to `active` when the gateway proves the entry is still there),
+  and the revocations of `POST /api/admin/credentials/reconcile`. Each records
+  a gateway write made immediately before it, which the fence cannot stop: a
+  refused mirror write would leave rows describing an array Edge no longer
+  has, which is worse than recording what the stale holder did. Drift that
+  does arise is what `settleLostRetirement` and the reconcile endpoint settle,
+  and the single-gateway-writer rule is what keeps it from arising.
+- **An API's rows under its `proxy:<id>` key** — the `PATCH` row save and the
+  first-class ownership record when they are not written together, and a
+  palette plugin's `api_plugins` upsert or delete. The same reasoning: each
+  records the plugin config or proxy the section just wrote to Edge, keyed by
+  the id that write used, so a refusal would only disconnect the portal from
+  a gateway change that stands.
+- **An approval's decision claim and its release** — `access_requests` moved
+  to `approved` before the gateway is touched, and back to `pending` when the
+  approval unwinds. Both are compare-and-set on the request's status, so a
+  stale holder's claim loses to any decision that committed first, and the
+  grant itself is written in a fenced transaction.
+- **Compensation records** — the `repair_required` state and the
+  `api.gateway_repair_required` / `api.gateway_restore_failed` audit rows a
+  failed restore, conversion or `PATCH` leaves behind. They describe what did
+  happen on the gateway, are best-effort by contract, and refusing them would
+  only hide a proxy that needs attention.
+
+A new lease-guarded write belongs in a transaction taken after the key; one
+that cannot be belongs on this list, with its reason.
+
+The fence cannot fence **Ferrum Edge**. Edge's whole-resource `PUT`s carry no
+concurrency token, so a stale holder's gateway write still lands, and the
+single-gateway-writer guidance in [`operations.md` §8](operations.md#8-scaling)
+stands. What the fence adds there is that database work committed under a
+gateway key is refused rather than committed over the new holder's.
+
 ### Disabling an account
 
 Both paths — `PATCH /api/users/:id` with `status: "disabled"` and
@@ -661,8 +761,10 @@ Every gateway step for one identity runs inside a critical section keyed on
 _that_ consumer's Ferrum id — an in-process queue plus an `edge_leases` row —
 so a concurrent approval or credential issue on another Nexus instance cannot
 read the pre-teardown state and write it back afterwards. The lease reduces
-cross-instance overlap but cannot fence a holder that resumes after expiry;
-deployments must therefore use only one active gateway-writing Nexus instance.
+cross-instance overlap, and its token fences the portal's own transactions
+([above](#cross-instance-locks-are-fenced-at-commit)), but Edge cannot reject a
+holder that resumes after expiry; deployments must therefore use only one
+active gateway-writing Nexus instance.
 Edge replaces consumers whole, with no version token, so without that lock a
 revoked account could be re-authorised by a write that was merely stale; see
 [`operations.md` §8](operations.md#8-scaling). Identities are torn down one at a

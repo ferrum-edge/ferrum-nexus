@@ -2889,9 +2889,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             // say so by clearing the condition rather than by rebuilding on
             // top of a proxy that is already serving.
             if (api.gateway_state === 'repair_required') {
-              const cleared =
-                (await store.apis.update(api.id, { gateway_state: 'deployed' })) ?? api;
-              return { api: cleared, spec: current, proxyId: recorded, rebuilt: false };
+              // In a transaction so the restore key's fence covers it (#384).
+              const cleared = await store.transaction((tx) =>
+                tx.apis.update(api.id, { gateway_state: 'deployed' }),
+              );
+              return { api: cleared ?? api, spec: current, proxyId: recorded, rebuilt: false };
             }
             throw conflict('This API already has a gateway proxy; there is nothing to restore', {
               api_id: api.id,
@@ -2901,25 +2903,31 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // A confirmed 404 on a reference the row still holds. Record the
           // condition before building anything, so a restore that fails
           // halfway leaves the API flagged rather than leaving a dead
-          // reference that the next pass would report all over again.
-          await store.apis.update(api.id, {
-            ferrum_proxy_id: null,
-            gateway_state: 'repair_required',
+          // reference that the next pass would report all over again. One
+          // transaction for the flag and its audit row, so the restore key's
+          // fence covers both: a restore that stalled past the TTL while another
+          // took the key over is refused rather than clearing a reference the
+          // other restore has since committed (#384).
+          await store.transaction(async (tx) => {
+            await tx.apis.update(api.id, {
+              ferrum_proxy_id: null,
+              gateway_state: 'repair_required',
+            });
+            await audit.forStore(tx).record(
+              { id: actor.id, role: actor.role },
+              AuditAction.API_GATEWAY_REPAIR_REQUIRED,
+              { type: 'api', id: api.id },
+              {
+                phase: 'orphaned_proxy',
+                namespace,
+                proxy_id: recorded,
+                slug: api.slug,
+                spec_enforcement: api.spec_enforcement,
+                reason: 'confirmed_missing_during_restore',
+              },
+              ip,
+            );
           });
-          await audit.record(
-            { id: actor.id, role: actor.role },
-            AuditAction.API_GATEWAY_REPAIR_REQUIRED,
-            { type: 'api', id: api.id },
-            {
-              phase: 'orphaned_proxy',
-              namespace,
-              proxy_id: recorded,
-              slug: api.slug,
-              spec_enforcement: api.spec_enforcement,
-              reason: 'confirmed_missing_during_restore',
-            },
-            ip,
-          );
         }
 
         const parsed = parseOpenApiSpec(current.raw_spec);
@@ -3564,16 +3572,19 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             // The credentials of the deleted consumer no longer exist on the
             // gateway; leaving their rows `active` would show the provider
             // keys that cannot authenticate anything. The mirror follows the
-            // gateway.
-            const rows = await store.credentials.listByConsumer(
-              existing.id,
-              undefined,
-              LIVE_CREDENTIAL_STATUSES,
-            );
-            for (const row of rows) {
-              await store.credentials.update(row.id, { status: 'revoked' });
-              revokedCredentials += 1;
-            }
+            // gateway, in one transaction so the name key's fence covers it
+            // (#384); the count is taken from the run that committed.
+            revokedCredentials = await store.transaction(async (tx) => {
+              const rows = await tx.credentials.listByConsumer(
+                existing.id,
+                undefined,
+                LIVE_CREDENTIAL_STATUSES,
+              );
+              for (const row of rows) {
+                await tx.credentials.update(row.id, { status: 'revoked' });
+              }
+              return rows.length;
+            });
           }
 
           // A replacement is a *distinct* consumer: it must not reuse the id

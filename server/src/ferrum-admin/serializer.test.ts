@@ -15,7 +15,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 
 import { loadConfig } from '../config/index.js';
 import { createStore } from '../db/index.js';
-import type { NexusStore } from '../db/store.js';
+import type { LeaseRepo, NexusStore } from '../db/store.js';
 import { isNexusError } from '../lib/errors.js';
 import { nowIso } from '../lib/ids.js';
 import {
@@ -46,6 +46,36 @@ function yieldTurn(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+/**
+ * A lease table that remembers the token each acquisition wrote and never
+ * renews: the holder it serves is one whose renewals stopped landing — the
+ * stall issue #384 is about — and the token is what the test needs to expire
+ * that holder's row the way the TTL would.
+ */
+function stallingLeases(inner: LeaseRepo): { repo: LeaseRepo; tokens: Map<string, string> } {
+  const tokens = new Map<string, string>();
+  return {
+    tokens,
+    repo: {
+      acquire: async (key, owner, expiresAt, now) => {
+        const acquired = await inner.acquire(key, owner, expiresAt, now);
+        if (acquired) tokens.set(key, owner);
+        return acquired;
+      },
+      release: (key, owner) => inner.release(key, owner),
+      renew: async () => false,
+      verify: (key, owner) => inner.verify(key, owner),
+      deleteExpired: (now) => inner.deleteExpired(now),
+    },
+  };
+}
+
+/** Long past, so a lease renewed to it has lapsed. */
+const LAPSED = '2020-01-01T00:00:00.000Z';
+
+/** Far off, so a lease taken until then outlives the test. */
+const HELD = '2099-01-01T00:00:00.000Z';
+
 describe('createKeyedSerializer — cross-instance leases', () => {
   let store: NexusStore;
   let keySeed = 0;
@@ -56,9 +86,12 @@ describe('createKeyedSerializer — cross-instance leases', () => {
     return `proxy:test-${keySeed}`;
   }
 
-  /** One "Nexus instance": its own queue, the shared lease table. */
-  function instance(owner: string, overrides: KeyedSerializerOptions = {}): KeyedSerializer {
-    return createKeyedSerializer({ leases: store.leases, owner, ...FAST, ...overrides });
+  /**
+   * One "Nexus instance": its own queue, the shared lease table. The name is
+   * only a label for the reader — every acquisition writes its own token.
+   */
+  function instance(_name: string, overrides: KeyedSerializerOptions = {}): KeyedSerializer {
+    return createKeyedSerializer({ leases: store.leases, ...FAST, ...overrides });
   }
 
   before(async () => {
@@ -236,5 +269,152 @@ describe('createKeyedSerializer — cross-instance leases', () => {
     releaseA.resolve();
     assert.equal(await long, 'finished');
     assert.equal(stolen, false, 'the renewed lease was still live 300ms into a 60ms TTL');
+  });
+  /* ── Fencing (issue #384) ───────────────────────────────────────────── */
+
+  let emailSeed = 0;
+
+  /** A transaction that writes one user row, so a rollback is observable. */
+  async function writeUser(): Promise<string> {
+    emailSeed += 1;
+    const email = `fenced-${emailSeed}@example.test`;
+    await store.transaction(async (tx) => {
+      await tx.users.create({
+        email,
+        password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+        display_name: 'Fenced',
+        role: 'client',
+        status: 'active',
+        email_verified: false,
+      });
+    });
+    return email;
+  }
+
+  /** Assert `error` is the fence's refusal. */
+  function isLeaseLost(error: unknown): boolean {
+    assert.ok(isNexusError(error));
+    assert.equal(error.code, 'CONFLICT');
+    assert.match(error.message, /another portal instance/i);
+    assert.match(error.message, /retry/i);
+    return true;
+  }
+
+  it('writes a fresh owner token for every acquisition', async () => {
+    const key = freshKey();
+    const { repo, tokens } = stallingLeases(store.leases);
+    const a = createKeyedSerializer({ leases: repo, ...FAST });
+
+    const seen: string[] = [];
+    for (let i = 0; i < 2; i += 1) {
+      await a(key, async () => {
+        const token = tokens.get(key);
+        assert.ok(token);
+        seen.push(token);
+      });
+    }
+    assert.notEqual(seen[0], seen[1], 'one process, two acquisitions, two tokens');
+  });
+
+  it('commits a transaction whose section still holds its key', async () => {
+    const key = freshKey();
+    const email = await instance('instance-a')(key, () => writeUser());
+    assert.ok(await store.users.findByEmail(email));
+  });
+
+  it('rolls back a transaction whose lease was taken over while its holder stalled', async () => {
+    const key = freshKey();
+    const { repo, tokens } = stallingLeases(store.leases);
+    const a = createKeyedSerializer({ leases: repo, ...FAST });
+    let email = '';
+
+    await assert.rejects(
+      () =>
+        a(key, async () => {
+          const token = tokens.get(key);
+          assert.ok(token);
+          // The stall: A's lease lapses, and instance B takes the key and acts.
+          assert.equal(await store.leases.renew(key, token, LAPSED), true);
+          assert.equal(await store.leases.acquire(key, 'instance-b', HELD, nowIso()), true);
+          // A resumes and writes as though it still held the key.
+          email = `fenced-stale-${keySeed}@example.test`;
+          await store.transaction(async (tx) => {
+            await tx.users.create({
+              email,
+              password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+              display_name: 'Stale',
+              role: 'client',
+              status: 'active',
+              email_verified: false,
+            });
+          });
+        }),
+      isLeaseLost,
+    );
+
+    assert.equal(await store.users.findByEmail(email), null, 'the stale write never committed');
+    assert.equal(
+      await store.leases.release(key, 'instance-b'),
+      true,
+      "the stale holder's release left the new owner's row alone",
+    );
+  });
+
+  it('commits for a holder whose lease lapsed but was never taken over', async () => {
+    // Nobody can have acted under the key without acquiring it, which would
+    // have replaced the token — so the lapsed holder is still the only one.
+    const key = freshKey();
+    const { repo, tokens } = stallingLeases(store.leases);
+    const a = createKeyedSerializer({ leases: repo, ...FAST });
+
+    const email = await a(key, async () => {
+      const token = tokens.get(key);
+      assert.ok(token);
+      assert.equal(await store.leases.renew(key, token, LAPSED), true);
+      return writeUser();
+    });
+    assert.ok(await store.users.findByEmail(email));
+  });
+
+  it('fences a transaction by every key its nested sections hold', async () => {
+    const outer = freshKey();
+    const inner = freshKey();
+    const { repo, tokens } = stallingLeases(store.leases);
+    const a = createKeyedSerializer({ leases: repo, ...FAST });
+
+    await assert.rejects(
+      () =>
+        a(outer, () =>
+          a(inner, async () => {
+            const token = tokens.get(outer);
+            assert.ok(token);
+            // Only the *outer* key changes hands; the inner one is still held.
+            assert.equal(await store.leases.renew(outer, token, LAPSED), true);
+            assert.equal(await store.leases.acquire(outer, 'instance-b', HELD, nowIso()), true);
+            await writeUser();
+          }),
+        ),
+      isLeaseLost,
+    );
+    assert.equal(await store.leases.release(outer, 'instance-b'), true);
+  });
+
+  it('leaves unfenced the work a section merely started and outlived', async () => {
+    const key = freshKey();
+    const later = deferred();
+    let detached: Promise<string> | undefined;
+
+    await instance('instance-a')(key, async () => {
+      // Started inside the section, run after it: it never held the key, so
+      // the key changing hands afterwards is none of its business.
+      detached = later.promise.then(() => writeUser());
+    });
+    assert.equal(await store.leases.acquire(key, 'instance-b', HELD, nowIso()), true);
+    later.resolve();
+
+    assert.ok(detached);
+    const email = await detached;
+    assert.ok(await store.users.findByEmail(email));
+    assert.equal(await store.leases.release(key, 'instance-b'), true);
   });
 });

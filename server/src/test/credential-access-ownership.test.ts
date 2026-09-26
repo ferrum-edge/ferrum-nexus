@@ -208,21 +208,24 @@ describe('credential and access ownership (issue #341)', () => {
 
     it('waits for an in-flight provisioning, then takes its consumer down', async () => {
       const appId = await createApplication('Provisioning mid-delete');
-      const consumers = harness.store.consumers;
-      const realCreate = consumers.create.bind(consumers);
+      const consumers = harness.edgeClient.consumers;
+      const realEnsure = consumers.ensure.bind(consumers);
       const arrived = latch();
       const proceed = latch();
       // Park the provisioning *inside* its name key: the Edge consumer exists,
       // its mapping does not yet. A delete that read "no mapping" here used to
       // cascade the rows away and leave the consumer — and the key appended
-      // to it next — live and untracked.
-      consumers.create = async (input) => {
-        if (input.application_id === appId) {
-          consumers.create = realCreate;
+      // to it next — live and untracked. Parked once the gateway answered and
+      // before the mapping's transaction opens, which on SQLite would hold the
+      // one connection for as long as it waited.
+      consumers.ensure = async (body, subject) => {
+        const resolved = await realEnsure(body, subject);
+        if (body.custom_id === appId) {
+          consumers.ensure = realEnsure;
           arrived.open();
           await proceed.wait;
         }
-        return realCreate(input);
+        return resolved;
       };
       try {
         const issuing = harness.authed(owner, {
@@ -251,7 +254,7 @@ describe('credential and access ownership (issue #341)', () => {
         // and the issue found the application gone.
         assert.ok([201, 404].includes(issued.statusCode), issued.body);
       } finally {
-        consumers.create = realCreate;
+        consumers.ensure = realEnsure;
         proceed.open();
       }
 
