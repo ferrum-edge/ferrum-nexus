@@ -102,6 +102,29 @@ function authServiceOver(store: NexusStore): AuthService {
   });
 }
 
+/**
+ * A lease table that remembers the token each acquisition wrote and never
+ * renews: the stalled holder the fence exists for (issue #384), and the token
+ * a test needs to lapse that holder's row the way the TTL would.
+ */
+function stallingLeases(inner: LeaseRepo): { repo: LeaseRepo; tokens: Map<string, string> } {
+  const tokens = new Map<string, string>();
+  return {
+    tokens,
+    repo: {
+      acquire: async (key, owner, expiresAt, now) => {
+        const acquired = await inner.acquire(key, owner, expiresAt, now);
+        if (acquired) tokens.set(key, owner);
+        return acquired;
+      },
+      release: (key, owner) => inner.release(key, owner),
+      renew: async () => false,
+      verify: (key, owner) => inner.verify(key, owner),
+      deleteExpired: (now) => inner.deleteExpired(now),
+    },
+  };
+}
+
 /** A registration that asks for `client` and carries the operator's token. */
 function candidate(
   email: string,
@@ -3906,21 +3929,8 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
 
     it('leases: a transaction whose lease was taken over rolls back (issue #384)', async () => {
       const key = `fence-${newId()}`;
-      // The holder's table: it remembers each acquisition's token and never
-      // renews, which is the stalled holder the fence exists for.
-      const tokens = new Map<string, string>();
-      const leases: LeaseRepo = {
-        acquire: async (lockKey, owner, expiresAt, now) => {
-          const acquired = await store.leases.acquire(lockKey, owner, expiresAt, now);
-          if (acquired) tokens.set(lockKey, owner);
-          return acquired;
-        },
-        release: (lockKey, owner) => store.leases.release(lockKey, owner),
-        renew: async () => false,
-        verify: (lockKey, owner) => store.leases.verify(lockKey, owner),
-        deleteExpired: (now) => store.leases.deleteExpired(now),
-      };
-      const serialize = createKeyedSerializer({ leases, waitMs: 0 });
+      const { repo, tokens } = stallingLeases(store.leases);
+      const serialize = createKeyedSerializer({ leases: repo, waitMs: 0 });
       const writeUser = (email: string): Promise<void> =>
         store.transaction(async (tx) => {
           await tx.users.create({
@@ -3959,6 +3969,56 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
         true,
         'the new owner still holds the key',
       );
+    });
+
+    it('leases: a takeover that lands mid-transaction is refused and rolls back', async () => {
+      const key = `fence-${newId()}`;
+      const { repo, tokens } = stallingLeases(store.leases);
+      const serialize = createKeyedSerializer({ leases: repo, waitMs: 0 });
+      const user = (email: string): Parameters<NexusStore['users']['create']>[0] => ({
+        email,
+        password_hash: 'scrypt:16384:8:1:c2FsdA==:aGFzaA==',
+        display_name: 'Fenced',
+        role: 'client',
+        status: 'active',
+        email_verified: false,
+      });
+      const first = `fence-mid-a-${newId()}@example.test`;
+      const second = `fence-mid-b-${newId()}@example.test`;
+      let tookOver = false;
+
+      await assert.rejects(
+        () =>
+          serialize(key, () =>
+            store.transaction(async (tx) => {
+              await tx.users.create(user(first));
+              // The takeover lands after the body has written and before it
+              // commits. On the pooled adapters it commits on a connection of
+              // its own; SQLite has one connection, so there it runs inside
+              // this transaction — the only interleaving that adapter allows.
+              // Once only, since a pooled adapter may re-run the body.
+              if (!tookOver) {
+                tookOver = true;
+                const token = tokens.get(key);
+                assert.ok(token);
+                const lapsed = '2020-01-01T00:00:00.000Z';
+                assert.equal(await store.leases.renew(key, token, lapsed), true);
+                assert.equal(
+                  await store.leases.acquire(key, 'other-instance', isoInSeconds(600), nowIso()),
+                  true,
+                );
+              }
+              await tx.users.create(user(second));
+            }),
+          ),
+        (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
+      );
+      assert.ok(tookOver, 'the takeover landed inside the body');
+      assert.equal(await store.users.findByEmail(first), null, 'the write before it rolled back');
+      assert.equal(await store.users.findByEmail(second), null, 'the write after it rolled back');
+      // Still held on the pooled adapters; on SQLite the takeover rolled back
+      // with the transaction it ran in.
+      await store.leases.release(key, 'other-instance');
     });
 
     it('leases: refuses an over-long key instead of truncating it', async () => {

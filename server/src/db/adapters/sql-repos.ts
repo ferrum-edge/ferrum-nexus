@@ -3167,11 +3167,11 @@ export function createSqlRepos(exec: SqlExecutor, inTransaction: SqlTransactionR
     // reports matched rows, and `mysql2` connects with CLIENT_FOUND_ROWS, under
     // which an UPDATE that leaves `updated_at` as it was still counts its row.
     verify: async (key, owner) =>
-      (await execute(
-        exec,
-        'UPDATE edge_leases SET updated_at = ? WHERE "key" = ? AND owner = ?',
-        [nowIso(), key, owner],
-      )) > 0,
+      (await execute(exec, 'UPDATE edge_leases SET updated_at = ? WHERE "key" = ? AND owner = ?', [
+        nowIso(),
+        key,
+        owner,
+      ])) > 0,
 
     deleteExpired: async (now) =>
       execute(exec, 'DELETE FROM edge_leases WHERE expires_at <= ?', [now]),

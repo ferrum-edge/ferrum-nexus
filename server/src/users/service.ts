@@ -79,7 +79,17 @@ import {
   userLifecycleLockKey,
   type KeyedSerializer,
 } from '../lib/keyed-serializer.js';
+import { rewordLeaseLost } from '../lib/lease-fence.js';
 import type { NotificationsService } from '../notifications/service.js';
+
+/**
+ * `CONFLICT` text for a self-service password change whose replacement session
+ * was refused by the lease fence (issue #384). The change itself committed and
+ * ended every session, so the caller is signed out and must use the new
+ * password — retrying the change would present the one it replaced.
+ */
+export const PASSWORD_CHANGED_SESSION_LOST_MESSAGE =
+  'Your password was changed, but this session could not be renewed — sign in again with your new password';
 
 /** Result of {@link UsersService.updateMe}. */
 export interface UpdateMeResult {
@@ -315,16 +325,22 @@ export function createUsersService(deps: UsersServiceDeps): UsersService {
           return row;
         });
 
+        if (update.password_hash === undefined) {
+          return { user: toPublicUser(updated), reissued: null };
+        }
+
         // Commit before issuing the caller's replacement. Keep the password
         // lease until issuance finishes so a concurrent reset cannot leave a
         // session issued by the earlier password change alive after its reset.
         // The issuance is its own transaction so the lease's fence covers it
         // too: a change that stalled past the TTL while a reset took the lease
-        // over issues nothing rather than a session the reset never saw.
-        const reissued =
-          update.password_hash !== undefined
-            ? await store.transaction((tx) => auth.issueSession(updated, context, tx))
-            : null;
+        // over issues nothing rather than a session the reset never saw. By
+        // then the new password has committed and every session of the account
+        // is gone, so that refusal must not read as "please retry": a retry
+        // would present the replaced password.
+        const reissued = await rewordLeaseLost(PASSWORD_CHANGED_SESSION_LOST_MESSAGE, () =>
+          store.transaction((tx) => auth.issueSession(updated, context, tx)),
+        );
         return { user: toPublicUser(updated), reissued };
       };
       return update.password_hash !== undefined

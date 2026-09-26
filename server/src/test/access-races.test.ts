@@ -504,6 +504,9 @@ describe('access workflow under concurrency', () => {
     // shape of a lost acknowledgement, and it is also how a *concurrent*
     // approval looks to the compensation: by the time it goes to clean up, an
     // active grant owns the group. Stripping it would revoke real access.
+    // The consumer exists first, so the grant is the transaction that loses
+    // its acknowledgement rather than the consumer mapping's insert.
+    await harness.services.credentials.provisioner.ensureConsumer(client.user);
     const store = harness.store;
     const realTransaction = store.transaction.bind(store);
     store.transaction = async <T>(fn: (tx: NexusStore) => Promise<T>): Promise<T> => {

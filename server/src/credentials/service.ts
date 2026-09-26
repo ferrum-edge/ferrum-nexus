@@ -1609,7 +1609,10 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     },
 
     async bindGatewayIdentity(identity, consumerId): Promise<void> {
-      await store.gatewayIdentities.bindConsumer(identity.id, consumerId);
+      // A transaction of one statement, so the caller's name-key fence covers
+      // it: a replacement that stalled past the TTL is refused rather than
+      // pointing the registration at its consumer behind a newer holder (#384).
+      await store.transaction((tx) => tx.gatewayIdentities.bindConsumer(identity.id, consumerId));
     },
 
     async abandonGatewayIdentity(
@@ -2640,8 +2643,13 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       // committed, so a registration that cannot be removed is logged rather
       // than failing a request whose effect is already durable — the owner's
       // account teardown enumerates this registration by user.
+      // A transaction of one statement, so the name key's fence covers it: a
+      // stale teardown cannot remove a registration a newer holder has since
+      // claimed (#384). A refusal takes the logged path below like any other
+      // failure once a follow-up has committed.
       if (current) {
-        await store.gatewayIdentities.delete(current.id).catch((error: unknown) => {
+        const removal = store.transaction((tx) => tx.gatewayIdentities.delete(current.id));
+        await removal.catch((error: unknown) => {
           if (
             !options?.whileHeld ||
             (result.consumer_id === null && !result.registration_removed)
@@ -2662,19 +2670,28 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     });
   }
 
-  /** Move every live row of one consumer to `revoked`; returns how many moved. */
+  /**
+   * Move every live row of one consumer to `revoked`; returns how many moved.
+   *
+   * One transaction, so the consumer key its callers hold fences it: a
+   * teardown that stalled past the TTL cannot revoke rows a newer holder has
+   * since issued on that id (#384). Re-runnable — a re-run re-lists what is
+   * still live.
+   */
   async function revokeRowsFor(consumerId: string): Promise<number> {
-    let revoked = 0;
-    const rows = await store.credentials.listByConsumer(
-      consumerId,
-      undefined,
-      LIVE_CREDENTIAL_STATUSES,
-    );
-    for (const row of rows) {
-      await store.credentials.update(row.id, { status: 'revoked' });
-      revoked += 1;
-    }
-    return revoked;
+    return store.transaction(async (tx) => {
+      let revoked = 0;
+      const rows = await tx.credentials.listByConsumer(
+        consumerId,
+        undefined,
+        LIVE_CREDENTIAL_STATUSES,
+      );
+      for (const row of rows) {
+        await tx.credentials.update(row.id, { status: 'revoked' });
+        revoked += 1;
+      }
+      return revoked;
+    });
   }
 
   /** Delete one entry by index, or the whole type when the index is unusable. */

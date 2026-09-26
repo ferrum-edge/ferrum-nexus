@@ -5,6 +5,8 @@ import { aclGroupForApi, consumerUsernameForUser } from '@ferrum-nexus/shared';
 
 import { canonicalConsumerLockKey } from '../credentials/consumers.js';
 import { CONSUMER_SCAN_LIMIT } from '../ferrum-admin/client.js';
+import { isNexusError } from '../lib/errors.js';
+import { isoInSeconds, nowIso } from '../lib/ids.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp } from './helpers.js';
 
 function barrier() {
@@ -153,6 +155,55 @@ it('adopts the same remote identity after local mapping persistence fails', asyn
       0,
       'a failed mapping insert is recovered by direct id without a scan',
     );
+  } finally {
+    await h.close();
+  }
+});
+
+it('refuses the mapping of a provisioner whose name key changed hands (issue #384)', async () => {
+  const h = await buildTestApp();
+  try {
+    const user = await h.registerUser();
+    const provisioner = h.services.credentials.provisioner;
+    const username = consumerUsernameForUser(user.user.id);
+    const key = canonicalConsumerLockKey(h.config.edge.namespace, username);
+    const lookup = h.edgeClient.consumers.ensure.bind(h.edgeClient.consumers);
+    // The stall: while the gateway call is out, the provisioner's lease lapses
+    // and is swept, and another instance takes the name key.
+    h.edgeClient.consumers.ensure = async (body, subject) => {
+      const resolved = await lookup(body, subject);
+      if (body.username === username) {
+        await h.store.leases.deleteExpired('9999-01-01T00:00:00.000Z');
+        assert.equal(
+          await h.store.leases.acquire(key, 'other-instance', isoInSeconds(600), nowIso()),
+          true,
+        );
+      }
+      return resolved;
+    };
+    await assert.rejects(
+      provisioner.ensureConsumer(user.user),
+      (error: unknown) => isNexusError(error) && error.code === 'CONFLICT',
+    );
+    h.edgeClient.consumers.ensure = lookup;
+    assert.equal(
+      await provisioner.findConsumer(user.user.id),
+      null,
+      'the stale mapping rolled back',
+    );
+    assert.equal(
+      await h.store.leases.release(key, 'other-instance'),
+      true,
+      "the stale provisioner left the new holder's lease alone",
+    );
+
+    // What it left behind is the empty consumer at the derived id, which the
+    // retry adopts rather than duplicating.
+    const remote = h.edge.consumerByUsername(username);
+    assert.ok(remote);
+    const adopted = await provisioner.ensureConsumer(user.user);
+    assert.equal(adopted.ferrum_consumer_id, remote.id);
+    assert.equal(h.edge.callsTo('POST', '/consumers').length, 1);
   } finally {
     await h.close();
   }

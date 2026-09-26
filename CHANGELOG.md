@@ -34,11 +34,15 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   key over now fails with `409 CONFLICT` and rolls back instead of committing
   over the new holder's work; before, an API deletion resumed that way could
   drop the API's rows after another instance had built a test consumer for it.
-  The lease-guarded checks that were not yet transactional now are: a sign-in's
+  The lease-guarded writes that were not yet transactional now are: a sign-in's
   password re-check and its session, a password change's replacement session, a
-  gateway identity's owner check and registration, and a god-mode broadcast's
-  daily count and the audit row it charges. No schema change: the token is
-  stored in the existing `owner` column. Ferrum Edge still cannot reject a stale
+  gateway identity's owner check, registration, consumer binding and removal, a
+  consumer mapping recorded after provisioning, the credential rows revoked by a
+  consumer teardown, a gateway restore's repair flag, and a god-mode broadcast's
+  daily count and the audit row it charges. A refused sign-in is told to sign
+  in again, and a password change whose new password had already committed is
+  told so and to sign in with it, rather than to retry. No schema change: the
+  token is stored in the existing `owner` column. Ferrum Edge still cannot reject a stale
   holder's gateway write, so the single gateway-writing instance guidance is
   unchanged (`docs/security.md`, "Cross-instance locks are fenced at commit").
 - The publish-time render ceiling now charges every response entry, including

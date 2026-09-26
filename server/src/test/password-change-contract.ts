@@ -279,6 +279,62 @@ export function runPasswordChangeContract(
       assert.ok(result.reissued);
     });
 
+    it('reports a committed change whose replacement session was refused', async (t) => {
+      const session = await harness.registerUser();
+      const user = await harness.store.users.findById(session.user.id);
+      assert.ok(user);
+      const key = `users:password:${user.id}`;
+      const issue = harness.services.auth.issueSession.bind(harness.services.auth);
+      let tookOver = false;
+      t.mock.method(
+        harness.services.auth,
+        'issueSession',
+        async (
+          updated: UserRecord,
+          context: RequestContext,
+          db?: NexusStore,
+        ): Promise<IssuedSession> => {
+          // The stall (issue #384): the change's lease lapses and is swept, and
+          // another instance takes the password key before the replacement
+          // commits. Once only, since a pooled adapter may re-run the body.
+          if (!tookOver) {
+            tookOver = true;
+            await harness.store.leases.deleteExpired('9999-01-01T00:00:00.000Z');
+            const now = new Date().toISOString();
+            assert.equal(
+              await harness.store.leases.acquire(key, 'competing-change', isoInSeconds(60), now),
+              true,
+            );
+          }
+          return issue(updated, context, db);
+        },
+      );
+
+      await assert.rejects(
+        harness.services.users.updateMe(user, {
+          current_password: TEST_PASSWORD,
+          new_password: CHANGED_PASSWORD,
+        }),
+        (error: unknown) => {
+          assert.ok(isNexusError(error));
+          assert.equal(error.code, 'CONFLICT');
+          assert.match(error.message, /password was changed/i);
+          assert.match(error.message, /sign in again with your new password/i);
+          return true;
+        },
+      );
+      assert.ok(tookOver);
+      // On SQLite the takeover ran inside the refused transaction and rolled
+      // back with it; on the pooled adapters it is still held.
+      await harness.store.leases.release(key, 'competing-change');
+
+      // The message is the truth: the new password committed, the old sessions
+      // are gone, no replacement was issued, and the new password signs in.
+      await assertPassword(session, CHANGED_PASSWORD);
+      assert.equal(await harness.store.sessions.deleteForUser(user.id), 0);
+      await harness.loginUser(session.user.email, CHANGED_PASSWORD);
+    });
+
     for (const reset of [false, true]) {
       const operationName = reset ? 'reset' : 'change';
       it(`rolls back password, tokens and sessions on failed ${operationName}`, async (t) => {

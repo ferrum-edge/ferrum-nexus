@@ -639,19 +639,36 @@ commit, so the check runs **before** the body instead — a stale holder is stil
 refused before it writes, but the window between the check and the writes is
 not closed.
 
-The fence covers what a transaction commits, which is why every lease-guarded
-invariant is written as one: a sign-in's hash re-check and its session insert,
-a password change's replacement session, a gateway identity's owner check and
-its registration, and a broadcast's per-day count and the audit row it charges
-each share a transaction under their key. It cannot fence **Ferrum Edge**:
-Edge's whole-resource `PUT`s carry no concurrency token, so a stale holder's
-gateway write still lands, and the single-gateway-writer guidance in
-[`operations.md` §8](operations.md#8-scaling) stands. What the fence adds there
-is that database work committed in a transaction under a gateway key — an
-API's row delete after its test-consumer teardown, above all — is refused
-rather than committed over the new holder's. A single-statement mirror write
-made outside a transaction, such as the credential row after an Edge append, is
-ordered by the lease alone.
+The fence covers only what a transaction commits, so the lease-guarded writes
+listed here are each written as a fenced transaction under their key:
+
+- a sign-in's hash re-check and its session insert;
+- a password change's replacement session;
+- a gateway identity's owner check and its registration, the consumer id bound
+  to that registration, and its removal once the identity is torn down;
+- a consumer mapping recorded after the Edge consumer is provisioned;
+- the credential rows revoked when a consumer is torn down or replaced;
+- a gateway restore's repair flag and its audit row, and the flag it clears
+  when the proxy turns out to be live;
+- an API's row delete after its test-consumer teardown;
+- a broadcast's per-day count and the audit row it charges.
+
+A refusal is a `409 CONFLICT`. A sign-in is told that no session was created
+and to sign in again. A password change whose new password committed before its
+replacement session was refused is told that the password **was** changed and
+to sign in with the new one, because retrying would present the old one.
+Anything else is told to retry.
+
+A write made under a key but outside any transaction is ordered by the lease
+alone and is **not** fenced. An example is the credential row recorded after an
+Edge append. A new lease-guarded write belongs in a transaction taken after the
+key.
+
+The fence cannot fence **Ferrum Edge**. Edge's whole-resource `PUT`s carry no
+concurrency token, so a stale holder's gateway write still lands, and the
+single-gateway-writer guidance in [`operations.md` §8](operations.md#8-scaling)
+stands. What the fence adds there is that database work committed under a
+gateway key is refused rather than committed over the new holder's.
 
 ### Disabling an account
 

@@ -34,7 +34,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 import type { LeaseRepo } from '../db/store.js';
-import { conflict } from './errors.js';
+import { conflict, type NexusError } from './errors.js';
 
 /** One lease a critical section holds: its key, and the acquisition's token. */
 export interface LeaseFence {
@@ -52,6 +52,36 @@ export const LEASE_LOST_MESSAGE =
   'This change took too long and another portal instance has taken it over — please retry';
 
 const held = new AsyncLocalStorage<readonly HeldLease[]>();
+
+/** Every `CONFLICT` the fence raised, so {@link isLeaseLost} can tell them apart. */
+const refusals = new WeakSet<object>();
+
+/** A fence refusal carrying `message`. */
+function leaseLost(message: string): NexusError {
+  const error = conflict(message);
+  refusals.add(error);
+  return error;
+}
+
+/** Whether `error` is the fence refusing a transaction whose lease changed hands. */
+export function isLeaseLost(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && refusals.has(error);
+}
+
+/**
+ * Run `fn`, answering a fence refusal with `message` instead of
+ * {@link LEASE_LOST_MESSAGE} — for a caller whose user is owed something more
+ * precise than "this change took too long", such as a sign-in, or a password
+ * change whose new password committed before the refusal.
+ */
+export async function rewordLeaseLost<T>(message: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (isLeaseLost(error)) throw leaseLost(message);
+    throw error;
+  }
+}
 
 /**
  * Run `fn` as the holder of `key` under `token`.
@@ -98,7 +128,7 @@ export async function assertLeaseFences(
   fences: readonly LeaseFence[],
 ): Promise<void> {
   for (const fence of fences) {
-    if (!(await leases.verify(fence.key, fence.token))) throw conflict(LEASE_LOST_MESSAGE);
+    if (!(await leases.verify(fence.key, fence.token))) throw leaseLost(LEASE_LOST_MESSAGE);
   }
 }
 
