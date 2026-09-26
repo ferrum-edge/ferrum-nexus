@@ -348,7 +348,11 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
   }
 
   /** A `gateway.consumer_repair` row as another instance's repair writes one. */
-  async function recordRepair(userId: string, consumerId: string, revoked: string[]): Promise<void> {
+  async function recordRepair(
+    userId: string,
+    consumerId: string,
+    revoked: string[],
+  ): Promise<void> {
     await harness.store.auditLogs.create({
       actor_user_id: superAdmin.user.id,
       actor_role: 'super_admin',
