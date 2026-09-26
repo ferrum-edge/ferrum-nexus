@@ -117,9 +117,11 @@ describe('OpenAPI specification editor', () => {
     expect(text.length).toBeLessThan(MAX_SPEC_BYTES);
     render(<Editor initialValue={text} />);
     expect(screen.getByText('Larger than the 2.00 MB limit')).toBeInTheDocument();
-    // Not parsed, and never labelled valid.
+    // Not parsed, and never labelled valid. The textarea holds the raw document,
+    // so look for the parsed summary line rather than the title alone.
     expect(screen.queryByText('Valid')).not.toBeInTheDocument();
-    expect(screen.queryByText(/Large description/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Large description · 0 operations')).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('refuses a document over the byte limit counted in UTF-8, and accepts one at it', () => {
