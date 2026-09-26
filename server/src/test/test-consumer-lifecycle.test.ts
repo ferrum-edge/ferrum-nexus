@@ -25,11 +25,20 @@ import {
   type PublishApiResponse,
 } from '@ferrum-nexus/shared';
 
+import { gatewayIdentityLockKey } from '../credentials/service.js';
 import { derivedConsumerId } from '../ferrum-admin/client.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
+}
+
+function barrier() {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
 }
 
 describe('test consumer lifecycle', () => {
@@ -382,6 +391,163 @@ describe('test consumer lifecycle', () => {
     assert.equal(removed.statusCode, 200, removed.body);
     assert.equal(harness.edge.consumerByUsername(username), undefined);
     assert.equal(await registrationFor(username), null);
+  });
+
+  /* ── #373: a creation and a deletion never interleave ────────────────── */
+
+  it('refuses a creation that read the API before a deletion completed', async () => {
+    const api = await publish();
+    const username = `nexus-test-${api.id}`;
+    const key = gatewayIdentityLockKey(username);
+
+    // The creation has loaded and authorised the API and is about to ask for
+    // the identity's name key; the whole deletion runs in that gap. Resumed,
+    // the creation holds a snapshot of an API that no longer exists.
+    const entered = barrier();
+    const resume = barrier();
+    const serialize = harness.edgeClient.serializePerKey;
+    let parked = false;
+    harness.edgeClient.serializePerKey = async (candidate, work) => {
+      if (candidate === key && !parked) {
+        parked = true;
+        entered.release();
+        await resume.promise;
+      }
+      return serialize(candidate, work);
+    };
+    try {
+      const creating = createTestConsumer(api.id);
+      await entered.promise;
+      const removed = await deleteApi(api.id);
+      assert.equal(removed.statusCode, 200, removed.body);
+      resume.release();
+
+      const created = await creating;
+      assert.equal(created.statusCode, 404, created.body);
+      assert.equal(errorCode(created.body), 'NOT_FOUND');
+    } finally {
+      harness.edgeClient.serializePerKey = serialize;
+    }
+
+    assert.equal(await harness.store.apis.findById(api.id), null);
+    assert.equal(
+      harness.edge.consumerByUsername(username),
+      undefined,
+      'no consumer outlives the API it names',
+    );
+    assert.equal(await registrationFor(username), null, 'and no registration either');
+    assert.equal(
+      (await harness.auditRows('test_consumer.create')).find((row) => row.target_id === api.id),
+      undefined,
+      'nothing is audited as created',
+    );
+  });
+
+  it('refuses a creation that queued between the teardown and the row delete', async () => {
+    const api = await publish();
+    const username = `nexus-test-${api.id}`;
+    const key = gatewayIdentityLockKey(username);
+
+    // Park the deletion after its identity teardown, just before it drops the
+    // API's rows, and start a creation there. The creation must wait for the
+    // rows to go rather than find them still standing and build a consumer
+    // that nothing would ever collect.
+    const inside = barrier();
+    const queued = barrier();
+    const resume = barrier();
+    const realListGrants = harness.store.grants.listActiveByApi;
+    const listGrants = realListGrants.bind(harness.store.grants);
+    let parked = false;
+    harness.store.grants.listActiveByApi = async (apiId) => {
+      if (apiId === api.id && !parked) {
+        parked = true;
+        inside.release();
+        await resume.promise;
+      }
+      return listGrants(apiId);
+    };
+    const serialize = harness.edgeClient.serializePerKey;
+    let arrivals = 0;
+    harness.edgeClient.serializePerKey = (candidate, work) => {
+      if (candidate === key && ++arrivals === 2) queued.release();
+      return serialize(candidate, work);
+    };
+    try {
+      const removing = deleteApi(api.id);
+      await inside.promise;
+      const creating = createTestConsumer(api.id);
+      await queued.promise;
+      resume.release();
+
+      const [removed, created] = await Promise.all([removing, creating]);
+      assert.equal(removed.statusCode, 200, removed.body);
+      assert.equal(created.statusCode, 404, created.body);
+      assert.equal(errorCode(created.body), 'NOT_FOUND');
+    } finally {
+      harness.store.grants.listActiveByApi = realListGrants;
+      harness.edgeClient.serializePerKey = serialize;
+    }
+
+    assert.equal(await harness.store.apis.findById(api.id), null);
+    assert.equal(harness.edge.consumerByUsername(username), undefined);
+    assert.equal(await registrationFor(username), null);
+  });
+
+  it('collects a creation that was still in flight when the deletion began', async () => {
+    const api = await publish();
+    const username = `nexus-test-${api.id}`;
+    const key = gatewayIdentityLockKey(username);
+
+    // The other order: the creation holds the name key with its consumer
+    // already on the gateway, and the deletion queues for the key behind it.
+    // The creation completes, and the deletion then sweeps what it made.
+    const inside = barrier();
+    const queued = barrier();
+    const resume = barrier();
+    const realCreateRow = harness.store.credentials.create;
+    const createRow = realCreateRow.bind(harness.store.credentials);
+    let parked = false;
+    harness.store.credentials.create = async (input) => {
+      if (!parked) {
+        parked = true;
+        inside.release();
+        await resume.promise;
+      }
+      return createRow(input);
+    };
+    const serialize = harness.edgeClient.serializePerKey;
+    let arrivals = 0;
+    harness.edgeClient.serializePerKey = (candidate, work) => {
+      if (candidate === key && ++arrivals === 2) queued.release();
+      return serialize(candidate, work);
+    };
+    let consumerId: string | undefined;
+    let credentialId = '';
+    try {
+      const creating = createTestConsumer(api.id);
+      await inside.promise;
+      consumerId = harness.edge.consumerByUsername(username)?.id;
+      assert.ok(consumerId, 'the in-flight consumer is already on the gateway');
+      const removing = deleteApi(api.id);
+      await queued.promise;
+      resume.release();
+
+      const [created, removed] = await Promise.all([creating, removing]);
+      assert.equal(created.statusCode, 201, created.body);
+      assert.equal(removed.statusCode, 200, removed.body);
+      credentialId = created.json<CreateTestConsumerResponse>().credential.id;
+    } finally {
+      harness.store.credentials.create = realCreateRow;
+      harness.edgeClient.serializePerKey = serialize;
+    }
+
+    assert.equal(await harness.store.apis.findById(api.id), null);
+    assert.equal(harness.edge.consumerByUsername(username), undefined, 'the consumer was swept');
+    assert.equal(await registrationFor(username), null);
+    assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'revoked');
+    const audited = (await harness.auditRows('api.delete')).find((row) => row.target_id === api.id);
+    assert.ok(audited);
+    assert.equal(audited.details.test_consumer_id, consumerId);
   });
 
   it('serialises a deletion against a test-consumer creation for the same API', async () => {

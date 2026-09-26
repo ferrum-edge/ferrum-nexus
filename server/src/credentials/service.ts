@@ -617,6 +617,20 @@ export interface TeardownGatewayIdentityOptions {
    * no bearing on the API going away.
    */
   requireDisabledOwner?: Uuid;
+  /**
+   * Work to run once the teardown is done, **before** the identity's name key
+   * is released — whatever the teardown found, and only when it succeeded.
+   * Not run when `requireDisabledOwner` turned the teardown into a no-op.
+   *
+   * The API deletion drops its rows here (issue #373). A test-consumer
+   * creation takes the same key and re-reads the API inside it, so the two
+   * need the row delete to land while the key is still held: released first,
+   * a creation that had loaded the API a moment earlier could take the key in
+   * the gap, find the row still there, and build a consumer for an API that
+   * was about to stop existing — one no later teardown would ever look for.
+   * The callback must not take this identity's name key itself.
+   */
+  whileHeld?: () => Promise<void>;
 }
 
 /** What one {@link CredentialsService.teardownGatewayIdentity} attempt collected. */
@@ -2567,6 +2581,9 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       }
       // Consumed: a retry must not come back to an identity that is done.
       if (current) await store.gatewayIdentities.delete(current.id);
+      // Still under the key, so nothing that queued for it can observe the
+      // gap between this teardown and the caller's follow-up (issue #373).
+      await options?.whileHeld?.();
       return {
         consumer_id: live?.id ?? null,
         revoked_credentials: revoked,

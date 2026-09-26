@@ -2121,7 +2121,10 @@ after. Next the API's own gateway identity — the disposable
 `nexus-test-<api_id>` consumer, its credential and the `nexus:api:<id>:approved`
 group it carries — is torn down, because nothing else ever could: it is named
 after an API that is about to stop existing. Then the grants, requests, spec
-revisions and the API row are deleted in one store transaction. Only then is the
+revisions and the API row are deleted in one store transaction — still under
+the identity's name key, which test-consumer creation takes and then re-reads the
+API inside, so a creation either finished before the teardown and was collected
+by it or starts after the rows are gone and answers `404`. Only then is the
 ACL group stripped from every grantee's consumer — the group is inert the moment
 the proxy is gone — and grantees get a notification.
 
@@ -2556,6 +2559,9 @@ to `revoked`. The two are never the same resource, because everything the
 portal records about a credential is keyed on the consumer id.
 
 Deleting the API deletes this consumer with it; see `DELETE /api/apis/:id`.
+The API is re-read once the creation holds the identity's lock, so a creation
+racing a deletion either completes first and is collected by it, or answers
+`404 NOT_FOUND` with nothing created.
 
 ---
 

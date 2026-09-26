@@ -74,6 +74,17 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   both the insert and its audit inside it; the viewer notification is still sent
   only after the authorization commits. Covered on every adapter by the new
   application and viewer audit store contract.
+- A test-consumer creation (`POST /api/apis/:id/test-consumer`) racing the
+  deletion of its API can no longer leave a gateway consumer and
+  `gateway_identities` registration behind for an API that no longer exists
+  (#373). The creation read the API before taking the identity's name lock and
+  never re-read it, and the deletion released that lock between its identity
+  teardown and its row delete, so a creation that had loaded the API a moment
+  earlier answered `201` over an orphan. The creation now re-reads and
+  re-authorises the API inside the lock, and the deletion drops the API's rows
+  before releasing it: a creation either completes first and is swept by the
+  deletion, or answers `404 NOT_FOUND` having created nothing. Deterministic
+  race tests cover both orderings and the gap between teardown and row delete.
 
 ## [0.1.0] - 2026-09-25
 

@@ -2882,30 +2882,45 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         //    `createTestConsumer` holds for the whole of its work, so a
         //    deletion racing a creation waits for it and then undoes it rather
         //    than interleaving. It is disjoint from the proxy lease held here.
-        const testConsumer = await credentials.teardownGatewayIdentity(
-          testConsumerUsername(api.id),
-          actor.id,
-        );
-
-        // 3. Drop the rows. The store's delete helpers are the cascade, and the
-        //    grant list is read a moment before it because the ACL strip and
-        //    the notifications that follow the lease both need it — a line
-        //    later there is nothing left to read it from.
+        //
+        // 3. Drop the rows — still under that name key, which is what closes
+        //    the race the other way round (issue #373). A creation re-reads
+        //    the API as the first thing it does inside the key, so it either
+        //    finished before this teardown began, and was collected by it, or
+        //    starts after the row is gone and answers `404` without creating
+        //    anything. Released between the teardown and the delete, the key
+        //    would let a creation that loaded the API a moment earlier find
+        //    the row still standing and build a consumer nothing would ever
+        //    collect.
+        //
+        //    The store's delete helpers are the cascade, and the grant list is
+        //    read a moment before it because the ACL strip and the
+        //    notifications that follow the lease both need it — a line later
+        //    there is nothing left to read it from.
         //
         //    `api_plugins` needs no gateway step of its own: every palette
         //    plugin is proxy-scoped, so deleting the proxy above already
         //    cascaded both the configs and their association rows, and the
         //    sweep that follows it covers anything a gateway left behind. Only
         //    the portal's rows are left to remove here.
-        const grants = await store.grants.listActiveByApi(api.id);
-        await store.transaction(async (tx) => {
-          await tx.grants.deleteByApi(api.id);
-          await tx.accessRequests.deleteByApi(api.id);
-          await tx.apiPlugins.deleteByApi(api.id);
-          await tx.apiViewers.deleteByApi(api.id);
-          await tx.apiSpecs.deleteByApi(api.id);
-          await tx.apis.delete(api.id);
-        });
+        let grants: GrantRecord[] = [];
+        const testConsumer = await credentials.teardownGatewayIdentity(
+          testConsumerUsername(api.id),
+          actor.id,
+          {
+            whileHeld: async () => {
+              grants = await store.grants.listActiveByApi(api.id);
+              await store.transaction(async (tx) => {
+                await tx.grants.deleteByApi(api.id);
+                await tx.accessRequests.deleteByApi(api.id);
+                await tx.apiPlugins.deleteByApi(api.id);
+                await tx.apiViewers.deleteByApi(api.id);
+                await tx.apiSpecs.deleteByApi(api.id);
+                await tx.apis.delete(api.id);
+              });
+            },
+          },
+        );
 
         return { grants, api, testConsumer };
       };
@@ -3003,6 +3018,18 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
       // would deadlock. Ordering is always name-then-id and never the reverse,
       // which is what keeps the pair free of lock-order inversion.
       const replaced = await edge.serializePerKey(gatewayIdentityLockKey(username), async () => {
+        // The API again, under the key: the read above may have been taken
+        // just before a deletion that has since torn this identity down and
+        // dropped the row — both under this same key (issue #373). Building on
+        // that snapshot would leave a consumer and a registration for an API
+        // that no longer exists, with nothing left to collect them. Read here,
+        // the answer holds until the key is released: a deletion that starts
+        // now waits for this creation and then takes the consumer down with
+        // the API. Re-authorised too, and every field below comes from this
+        // read rather than the stale one.
+        const current = await loadApi(apiId);
+        assertCanAdminister(actor, current);
+
         // Ownership first, durably, before the gateway is touched. This is
         // what the account teardown enumerates, so an identity whose first
         // credential is still being appended when its owner is disabled is
@@ -3110,8 +3137,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             user: actor,
             consumerId: consumer.id,
             consumerUsername: consumer.username,
-            credentialType: CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin],
-            label: label ?? `Test consumer for ${api.slug}`,
+            credentialType: CREDENTIAL_TYPE_FOR_PLUGIN[current.auth_plugin],
+            label: label ?? `Test consumer for ${current.slug}`,
             ip,
           });
 
