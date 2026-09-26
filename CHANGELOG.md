@@ -295,6 +295,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   selection and the draft has not changed since it started, so typing, choosing
   another file, the page replacing the draft or the editor closing all drop an
   earlier pending read. Choosing the same file again still reloads it.
+- Conversation list previews now fetch the newest message for the whole page in
+  one adapter query, preserving the `(created_at, id)` ordering and empty-thread
+  previews. A 200-thread page used to issue 200 separate message lookups (#394).
 
 ## [0.1.0] - 2026-09-25
 
