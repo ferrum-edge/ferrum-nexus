@@ -83,8 +83,20 @@ function AtAGlance({ detail }: { detail: CatalogDetailResponse }): ReactElement 
       <GlanceTile
         icon="shield"
         label="Access"
-        value={api.requestable ? 'Approval required' : 'Open access'}
-        hint={api.requestable ? 'Ask the provider for a grant' : 'Any portal account may call it'}
+        value={
+          api.status === 'retired'
+            ? 'Retired'
+            : api.requestable
+              ? 'Approval required'
+              : 'Open access'
+        }
+        hint={
+          api.status === 'retired'
+            ? 'This API is no longer accepting new access requests'
+            : api.requestable
+              ? 'Ask the provider for a grant'
+              : 'Any portal account may call it'
+        }
       />
       <GlanceTile
         icon="spec"
@@ -268,6 +280,12 @@ function IdentityAccess({
         </div>
       </div>
     );
+  } else if (api.status === 'retired') {
+    body = (
+      <FormNotice tone="warning">
+        This API is retired and is no longer accepting new access requests.
+      </FormNotice>
+    );
   } else {
     body = (
       <form
@@ -360,11 +378,12 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
   const [identityName, setIdentityName] = useState('My account');
   const applicationId = identity === ACCOUNT_IDENTITY ? null : identity;
   // The same query `IdentityAccess` reads, so it is shared rather than fetched
-  // twice. An API that needs no approval has no per-identity grant to read.
+  // twice. An API that needs no approval and is not retired has no per-identity
+  // grant to read.
   const access = useCatalogIdentityAccess(
     api.slug,
     applicationId,
-    api.requestable && api.access_state !== 'owner',
+    (api.requestable || api.status === 'retired') && api.access_state !== 'owner',
   );
 
   // The example calls as the selected identity, because only that identity's
@@ -380,7 +399,12 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
         : 'nexus-user-<your id>';
   const holder =
     applicationId === null ? 'your account' : (access.data?.application?.name ?? identityName);
-  const canCall = !api.requestable || access.data?.grant?.status === 'active';
+  // A retired API takes no new access requests, but an identity that already
+  // holds an active grant may still call it (#376). Everywhere else an API that
+  // needs no approval is callable by any identity, and a requestable one only
+  // by the selected identity once it holds an active grant (#374).
+  const canCall =
+    access.data?.grant?.status === 'active' || (api.status !== 'retired' && !api.requestable);
 
   if (api.access_state === 'owner') {
     return (
@@ -417,13 +441,37 @@ function AccessPanel({ detail }: { detail: CatalogDetailResponse }): ReactElemen
             ) : undefined
           }
           description={
-            api.requestable
-              ? 'This API is protected by an access-control policy. Access is approved per identity — your account, or one of your applications — and an approval adds only that identity’s gateway consumer to its ACL group.'
-              : 'This API does not require an access request — issue a credential and start calling it.'
+            api.status === 'retired'
+              ? 'This API is retired and is no longer accepting new access requests.'
+              : api.requestable
+                ? 'This API is protected by an access-control policy. Access is approved per identity — your account, or one of your applications — and an approval adds only that identity’s gateway consumer to its ACL group.'
+                : 'This API does not require an access request — issue a credential and start calling it.'
           }
         />
         <CardBody>
-          {!api.requestable ? (
+          {api.status === 'retired' ? (
+            <div className="flex flex-col gap-4">
+              <p className="text-sm text-fg-muted">
+                This API is retired. Existing access remains available, but new access requests are
+                closed.
+              </p>
+              <IdentityPicker
+                label="Access for"
+                value={identity}
+                selectedLabel={identityName}
+                onValueChange={(value, name) => {
+                  setIdentity(value);
+                  setIdentityName(name);
+                }}
+              />
+              <IdentityAccess
+                key={identity}
+                api={api}
+                identity={identity}
+                identityName={identityName}
+              />
+            </div>
+          ) : !api.requestable ? (
             <div className="flex flex-col gap-4">
               <p className="text-sm text-fg-muted">
                 No approval needed. Issue a credential from the credentials page to start calling

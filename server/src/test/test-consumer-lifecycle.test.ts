@@ -25,11 +25,21 @@ import {
   type PublishApiResponse,
 } from '@ferrum-nexus/shared';
 
+import { gatewayIdentityLockKey } from '../credentials/service.js';
+import type { NexusStore, TransactionOptions } from '../db/store.js';
 import { derivedConsumerId } from '../ferrum-admin/client.js';
 import { buildTestApp, SAMPLE_SPEC_YAML, type TestApp, type TestSession } from './helpers.js';
 
 function errorCode(body: string): string {
   return (JSON.parse(body) as ApiErrorBody).error.code;
+}
+
+function barrier() {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
 }
 
 describe('test consumer lifecycle', () => {
@@ -87,6 +97,34 @@ describe('test consumer lifecycle', () => {
 
   async function registrationFor(username: string) {
     return harness.store.gatewayIdentities.findByUsername('nexus', username);
+  }
+
+  /**
+   * Run `before` inside a deletion of `apiId`, once its test identity is torn
+   * down and before the transaction that drops the rows and writes
+   * `api.delete` — still under the identity's name key. Outside that
+   * transaction on purpose: parked inside it, every other store call would
+   * queue behind the open transaction. Returns the restore.
+   */
+  function beforeRowDelete(apiId: string, before: () => Promise<void>): () => void {
+    const credentials = harness.services.credentials;
+    const teardown = credentials.teardownGatewayIdentity;
+    credentials.teardownGatewayIdentity = (username, subject, options) => {
+      const whileHeld = options?.whileHeld;
+      if (username !== `nexus-test-${apiId}` || !whileHeld) {
+        return teardown.call(credentials, username, subject, options);
+      }
+      return teardown.call(credentials, username, subject, {
+        ...options,
+        whileHeld: async (result) => {
+          await before();
+          await whileHeld(result);
+        },
+      });
+    };
+    return () => {
+      credentials.teardownGatewayIdentity = teardown;
+    };
   }
 
   /**
@@ -384,6 +422,176 @@ describe('test consumer lifecycle', () => {
     assert.equal(await registrationFor(username), null);
   });
 
+  /* ── #373: a creation and a deletion never interleave ────────────────── */
+
+  it('refuses a creation that read the API before a deletion completed', async () => {
+    const api = await publish();
+    const username = `nexus-test-${api.id}`;
+    const key = gatewayIdentityLockKey(username);
+
+    // The creation has loaded and authorised the API and is about to ask for
+    // the identity's name key; the whole deletion runs in that gap. Resumed,
+    // the creation holds a snapshot of an API that no longer exists.
+    const entered = barrier();
+    const resume = barrier();
+    const serialize = harness.edgeClient.serializePerKey;
+    let parked = false;
+    harness.edgeClient.serializePerKey = async (candidate, work) => {
+      if (candidate === key && !parked) {
+        parked = true;
+        entered.release();
+        await resume.promise;
+      }
+      return serialize(candidate, work);
+    };
+    try {
+      const creating = createTestConsumer(api.id);
+      await entered.promise;
+      const removed = await deleteApi(api.id);
+      assert.equal(removed.statusCode, 200, removed.body);
+      resume.release();
+
+      const created = await creating;
+      assert.equal(created.statusCode, 404, created.body);
+      assert.equal(errorCode(created.body), 'NOT_FOUND');
+    } finally {
+      // Whatever failed above, nothing may stay parked into `harness.close()`.
+      entered.release();
+      resume.release();
+      harness.edgeClient.serializePerKey = serialize;
+    }
+
+    assert.equal(await harness.store.apis.findById(api.id), null);
+    assert.equal(
+      harness.edge.consumerByUsername(username),
+      undefined,
+      'no consumer outlives the API it names',
+    );
+    assert.equal(await registrationFor(username), null, 'and no registration either');
+    assert.equal(
+      (await harness.auditRows('test_consumer.create')).find((row) => row.target_id === api.id),
+      undefined,
+      'nothing is audited as created',
+    );
+  });
+
+  it('refuses a creation that queued between the teardown and the row delete', async () => {
+    const api = await publish();
+    const username = `nexus-test-${api.id}`;
+    const key = gatewayIdentityLockKey(username);
+
+    // Park the deletion after its identity teardown, just before it drops the
+    // API's rows, and start a creation there. The creation must wait for the
+    // rows to go rather than find them still standing and build a consumer
+    // that nothing would ever collect.
+    const inside = barrier();
+    const queued = barrier();
+    const resume = barrier();
+    let parked = false;
+    const restoreTeardown = beforeRowDelete(api.id, async () => {
+      if (parked) return;
+      parked = true;
+      inside.release();
+      await resume.promise;
+    });
+    const serialize = harness.edgeClient.serializePerKey;
+    let arrivals = 0;
+    harness.edgeClient.serializePerKey = (candidate, work) => {
+      if (candidate === key && ++arrivals === 2) queued.release();
+      return serialize(candidate, work);
+    };
+    try {
+      const removing = deleteApi(api.id);
+      await inside.promise;
+      const creating = createTestConsumer(api.id);
+      await queued.promise;
+      resume.release();
+
+      const [removed, created] = await Promise.all([removing, creating]);
+      assert.equal(removed.statusCode, 200, removed.body);
+      assert.equal(created.statusCode, 404, created.body);
+      assert.equal(errorCode(created.body), 'NOT_FOUND');
+    } finally {
+      inside.release();
+      queued.release();
+      resume.release();
+      restoreTeardown();
+      harness.edgeClient.serializePerKey = serialize;
+    }
+
+    assert.equal(await harness.store.apis.findById(api.id), null);
+    assert.equal(harness.edge.consumerByUsername(username), undefined);
+    assert.equal(await registrationFor(username), null);
+    assert.equal(
+      (await harness.auditRows('test_consumer.create')).find((row) => row.target_id === api.id),
+      undefined,
+      'nothing is audited as created',
+    );
+  });
+
+  it('collects a creation that was still in flight when the deletion began', async () => {
+    const api = await publish();
+    const username = `nexus-test-${api.id}`;
+    const key = gatewayIdentityLockKey(username);
+
+    // The other order: the creation holds the name key with its consumer
+    // already on the gateway, and the deletion queues for the key behind it.
+    // The creation completes, and the deletion then sweeps what it made.
+    const inside = barrier();
+    const queued = barrier();
+    const resume = barrier();
+    const realCreateRow = harness.store.credentials.create;
+    const createRow = realCreateRow.bind(harness.store.credentials);
+    // Only the test consumer's own row: an unrelated credential write that
+    // happened to land meanwhile must not trip the barrier.
+    const testConsumerId = derivedConsumerId('nexus', username);
+    let parked = false;
+    harness.store.credentials.create = async (input) => {
+      if (!parked && input.ferrum_consumer_id === testConsumerId) {
+        parked = true;
+        inside.release();
+        await resume.promise;
+      }
+      return createRow(input);
+    };
+    const serialize = harness.edgeClient.serializePerKey;
+    let arrivals = 0;
+    harness.edgeClient.serializePerKey = (candidate, work) => {
+      if (candidate === key && ++arrivals === 2) queued.release();
+      return serialize(candidate, work);
+    };
+    let consumerId: string | undefined;
+    let credentialId = '';
+    try {
+      const creating = createTestConsumer(api.id);
+      await inside.promise;
+      consumerId = harness.edge.consumerByUsername(username)?.id;
+      assert.ok(consumerId, 'the in-flight consumer is already on the gateway');
+      const removing = deleteApi(api.id);
+      await queued.promise;
+      resume.release();
+
+      const [created, removed] = await Promise.all([creating, removing]);
+      assert.equal(created.statusCode, 201, created.body);
+      assert.equal(removed.statusCode, 200, removed.body);
+      credentialId = created.json<CreateTestConsumerResponse>().credential.id;
+    } finally {
+      inside.release();
+      queued.release();
+      resume.release();
+      harness.store.credentials.create = realCreateRow;
+      harness.edgeClient.serializePerKey = serialize;
+    }
+
+    assert.equal(await harness.store.apis.findById(api.id), null);
+    assert.equal(harness.edge.consumerByUsername(username), undefined, 'the consumer was swept');
+    assert.equal(await registrationFor(username), null);
+    assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'revoked');
+    const audited = (await harness.auditRows('api.delete')).find((row) => row.target_id === api.id);
+    assert.ok(audited);
+    assert.equal(audited.details.test_consumer_id, consumerId);
+  });
+
   it('serialises a deletion against a test-consumer creation for the same API', async () => {
     const api = await publish();
     const username = `nexus-test-${api.id}`;
@@ -411,5 +619,170 @@ describe('test consumer lifecycle', () => {
     } else {
       assert.ok(await harness.store.apis.findById(api.id), 'the API is still there to delete');
     }
+  });
+
+  it('revokes a credential of the old flavour when auth_plugin changes mid-creation', async () => {
+    const api = await publish();
+    const username = `nexus-test-${api.id}`;
+    const testConsumerId = derivedConsumerId('nexus', username);
+
+    // The name key pins the API's existence, not its fields: `update()` writes
+    // the row under the proxy lease. Commit an `auth_plugin` swap while the
+    // creation is issuing its `keyauth` credential, exactly where a PATCH
+    // that had computed its impact a moment earlier would have landed.
+    const realCreateRow = harness.store.credentials.create;
+    const createRow = realCreateRow.bind(harness.store.credentials);
+    let swapped = false;
+    harness.store.credentials.create = async (input) => {
+      if (!swapped && input.ferrum_consumer_id === testConsumerId) {
+        swapped = true;
+        await harness.store.apis.update(api.id, { auth_plugin: 'basic_auth' });
+      }
+      return createRow(input);
+    };
+    const refused = await createTestConsumer(api.id).finally(() => {
+      harness.store.credentials.create = realCreateRow;
+    });
+    assert.ok(swapped, 'the swap landed mid-issue');
+    assert.equal(refused.statusCode, 409, refused.body);
+    assert.equal(errorCode(refused.body), 'CONFLICT');
+
+    // The key of the old flavour was never handed out, and nothing of it is
+    // left live on either side.
+    const rows = await harness.store.credentials.listByConsumer(testConsumerId);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.credential_type, 'keyauth');
+    assert.equal(rows[0]?.status, 'revoked', 'the issued credential was revoked');
+    const revokedAudit = (await harness.auditRows('credential.revoke')).find(
+      (row) => row.target_id === rows[0]?.id,
+    );
+    assert.ok(revokedAudit, 'and its revocation is audited');
+    assert.equal(revokedAudit.details.reason, 'auth_plugin_change');
+    assert.equal(harness.edge.consumerByUsername(username), undefined, 'the consumer is gone');
+    assert.equal(await registrationFor(username), null, 'and so is its registration');
+    assert.equal(
+      (await harness.auditRows('test_consumer.create')).find((row) => row.target_id === api.id),
+      undefined,
+      'nothing is audited as created',
+    );
+
+    // A retry issues against the flavour the API has now.
+    const retried = await createTestConsumer(api.id);
+    assert.equal(retried.statusCode, 201, retried.body);
+    assert.equal(
+      retried.json<CreateTestConsumerResponse>().credential.credential_type,
+      'basicauth',
+    );
+  });
+
+  it('records the collected test consumer on a retry after the row delete failed', async () => {
+    const api = await publish();
+    const username = `nexus-test-${api.id}`;
+
+    const created = await createTestConsumer(api.id);
+    assert.equal(created.statusCode, 201, created.body);
+    const credentialId = created.json<CreateTestConsumerResponse>().credential.id;
+    const consumerId = harness.edge.consumerByUsername(username)?.id;
+    assert.ok(consumerId);
+
+    // The teardown succeeds; the row-delete transaction that follows it under
+    // the name key fails once. Armed only once the teardown is done, so no
+    // earlier transaction — `api.delete_start`'s — can take the failure instead.
+    const realTransaction = harness.store.transaction;
+    const transaction = realTransaction.bind(harness.store);
+    let armed = false;
+    let failed = false;
+    const restoreTeardown = beforeRowDelete(api.id, async () => {
+      if (!failed) armed = true;
+    });
+    harness.store.transaction = async <T>(
+      fn: (tx: NexusStore) => Promise<T>,
+      options?: TransactionOptions,
+    ): Promise<T> => {
+      if (armed && !failed) {
+        armed = false;
+        failed = true;
+        throw new Error('database is gone');
+      }
+      return transaction(fn, options);
+    };
+    const refused = await deleteApi(api.id).finally(() => {
+      restoreTeardown();
+      harness.store.transaction = realTransaction;
+    });
+    assert.ok(failed, 'the row delete was the transaction that failed');
+    assert.ok(refused.statusCode >= 500, refused.body);
+    assert.ok(await harness.store.apis.findById(api.id), 'the API survives for the retry');
+    assert.equal(harness.edge.consumerByUsername(username), undefined, 'the teardown held');
+    assert.equal(
+      (await registrationFor(username))?.ferrum_consumer_id,
+      consumerId,
+      'the registration is kept, still naming the collected consumer',
+    );
+    assert.equal(
+      (await harness.auditRows('api.delete')).find((row) => row.target_id === api.id),
+      undefined,
+      'and nothing is audited as a completed delete',
+    );
+
+    const retried = await deleteApi(api.id);
+    assert.equal(retried.statusCode, 200, retried.body);
+    assert.equal(await harness.store.apis.findById(api.id), null);
+    assert.equal(harness.edge.consumerByUsername(username), undefined);
+    assert.equal(await registrationFor(username), null, 'nothing is left behind');
+    assert.equal((await harness.store.credentials.findById(credentialId))?.status, 'revoked');
+    const audited = (await harness.auditRows('api.delete')).filter(
+      (row) => row.target_id === api.id,
+    );
+    assert.equal(audited.length, 1);
+    assert.equal(
+      audited[0]?.details.test_consumer_id,
+      consumerId,
+      'the retry still records the test consumer as collected',
+    );
+  });
+
+  it('answers 404 to a deletion that finds the row already removed', async () => {
+    const api = await publish();
+
+    // Park the deletion just before its row-delete transaction and remove the
+    // row underneath it, as a concurrent deletion that won would have. Only
+    // the winner may answer `200` and write `api.delete`.
+    const inside = barrier();
+    const resume = barrier();
+    let parked = false;
+    const restoreTeardown = beforeRowDelete(api.id, async () => {
+      if (parked) return;
+      parked = true;
+      inside.release();
+      await resume.promise;
+    });
+    try {
+      const removing = deleteApi(api.id);
+      await inside.promise;
+      await harness.store.transaction(async (tx) => {
+        await tx.grants.deleteByApi(api.id);
+        await tx.accessRequests.deleteByApi(api.id);
+        await tx.apiPlugins.deleteByApi(api.id);
+        await tx.apiViewers.deleteByApi(api.id);
+        await tx.apiSpecs.deleteByApi(api.id);
+        assert.equal(await tx.apis.delete(api.id), true);
+      });
+      resume.release();
+
+      const removed = await removing;
+      assert.equal(removed.statusCode, 404, removed.body);
+      assert.equal(errorCode(removed.body), 'NOT_FOUND');
+    } finally {
+      inside.release();
+      resume.release();
+      restoreTeardown();
+    }
+
+    assert.equal(
+      (await harness.auditRows('api.delete')).find((row) => row.target_id === api.id),
+      undefined,
+      'the losing deletion writes no audit row',
+    );
   });
 });

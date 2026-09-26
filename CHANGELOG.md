@@ -26,6 +26,9 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 
 ### Fixed
 
+- Retired APIs in the catalog are labeled as retired and no longer show a new
+  access-request form. Existing identity grants remain visible, and pending
+  requests can still be withdrawn (#376).
 - The catalog's **Call this API** panel now follows the selected identity
   (#374). On an API that needs approval it appears only for an identity that
   holds an active grant, and its example, Consumer and JWT `sub` use that
@@ -76,6 +79,39 @@ All notable changes to Ferrum Nexus are documented here. The format follows
     to inspect. `docs/security.md` now states that compensation is held in
     memory: a process that dies between Edge applying a change and the undo
     running leaves no record, and recovery is operational.
+- **OpenAPI documentation follows parameter inheritance and reusable
+  components (#377, #378).**
+  - An operation parameter now replaces the path-level parameter with the
+    same `name` and `in` instead of rendering beside it, so an override no
+    longer shows two contradictory rows; parameters that share only a name
+    across locations stay distinct. The revision comparison applies the same
+    rule, shared from `@ferrum-nexus/shared`, and compares parameters in a
+    canonical order, so removing an overridden path-level definition, moving
+    one between levels or reordering them no longer reports a `parameters`
+    change. A parameter whose reference cannot be followed is never merged
+    away.
+  - Parameters, request bodies and responses written as local `$ref`s to
+    `components` now render the object they name — a required header shows as
+    required, and a referenced body or response shows its description and
+    schema. Chains are followed up to a fixed hop limit with a cycle guard,
+    JSON-pointer escapes and percent-encoding are honoured, and only a
+    document's own members are followed. External, dangling, circular or
+    overlong references render as an explicit unresolved marker instead of an
+    empty or optional row, and any reference the viewer displays is cut to 200
+    characters. From OpenAPI 3.1 on, a `description` or `summary`
+    next to a `$ref` overrides the referenced one, as the specification allows.
+  - References are followed through one memoised resolver per document, in
+    the viewer, the revision comparison and publish-time validation alike: each
+    distinct `$ref` is walked once however many parameters use it, JSON
+    pointers longer than the nesting limit are refused, and a 3.1 sibling
+    override no longer copies the referenced object. The publish-time render
+    ceiling now charges a `$ref`'d parameter, request body or response for the
+    object it names, each distinct object once however many places reference
+    it, so a document is newly refused with `too_much_to_render` only when the
+    components its operations reference, counted once each, take it past the
+    ceiling. The count enumerates each object once and stops at the first
+    charge past the ceiling. An empty `parameters` list and a missing one no
+    longer read as a change.
 - **Application deletion is atomic, race-free and quota-preserving (#363,
   #364, #365).**
   - The rolling access-request budget
@@ -124,6 +160,25 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   both the insert and its audit inside it; the viewer notification is still sent
   only after the authorization commits. Covered on every adapter by the new
   application and viewer audit store contract.
+- A test-consumer creation (`POST /api/apis/:id/test-consumer`) racing the
+  deletion of its API can no longer leave a gateway consumer and
+  `gateway_identities` registration behind for an API that no longer exists
+  (#373). The creation read the API before taking the identity's name lock and
+  never re-read it, and the deletion released that lock between its identity
+  teardown and its row delete, so a creation that had loaded the API a moment
+  earlier answered `201` over an orphan. The creation now re-reads and
+  re-authorises the API inside the lock, and the deletion drops the API's rows
+  before releasing it: a creation either completes first and is swept by the
+  deletion, or answers `404 NOT_FOUND` having created nothing. Deterministic
+  race tests cover both orderings and the gap between teardown and row delete.
+  A creation whose API had its `auth_plugin` swapped while the credential was
+  being issued now revokes that credential and answers `409 CONFLICT` for the
+  client to retry, instead of returning a key of the old flavour. A deletion
+  whose row delete fails after the teardown logs what the teardown collected
+  and keeps the identity's registration, so the retried `DELETE` still records
+  the collected `test_consumer_id` in its `api.delete` audit row; and two
+  concurrent deletions of one API can no longer both answer `200` and both
+  write `api.delete` — the one that finds the row already gone answers `404`.
 - Account role changes, enables, disables and administrative account edits
   (ordinary and god-mode), gateway-revocation retries, and application and API
   deletions now write their audit rows in the same store transaction as the

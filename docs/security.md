@@ -638,7 +638,18 @@ leaves the API in the catalog for the delete to be retried against, rather than
 answering `200` over a stranded identity). A consumer that is already gone is
 not an error. The teardown takes the identity's own name key, which is the key
 `POST /api/apis/:id/test-consumer` holds for the whole of its work, so a
-deletion racing a creation waits for it and then undoes it.
+deletion racing a creation waits for it and then undoes it. The portal rows are
+dropped before that key is released, and a creation re-reads the API as the
+first thing it does inside the key, so the other order cannot leak either: a
+creation that loaded the API just before a deletion answers `404` without
+creating anything, rather than building a consumer for an API that is already
+gone. The key pins the API's existence, not its `auth_plugin`: a creation
+re-reads the API after issuing its credential and, if an update swapped the
+plugin meanwhile, revokes that credential and answers `409` rather than hand
+back a key of the old flavour. When the row delete fails after the teardown,
+the teardown's result (consumer id and revoked count, no material) is logged
+and the registration is kept until the rows are gone, so the retried deletion's
+`api.delete` row still names the collected consumer.
 
 Every gateway step for one identity runs inside a critical section keyed on
 _that_ consumer's Ferrum id — an in-process queue plus an `edge_leases` row —
@@ -1170,13 +1181,31 @@ number of cards, not the work behind one card.
 
 Two bounds, at the two places the cost appears:
 
-- **At publish.** Nexus counts what the viewer walks — schema nodes, parameter
-  entries and media types across the document — and refuses more than
+- **At publish.** Nexus counts what the viewer walks — the nodes of every
+  `components.schemas` entry, and the parameter entries, media types and inline
+  schema nodes of every declared operation — and refuses more than
   `MAX_SPEC_RENDER_UNITS` (100,000) of them with `400 SPEC_INVALID` and
-  `details.reason = "too_much_to_render"`. One declared operation can carry
-  thousands of parameters and dozens of media types per body, each pulling in a
-  `$ref` whose expansion dwarfs the document; counting paths and operations sees
-  none of that.
+  `details.reason = "too_much_to_render"`. A parameter, request body or response
+  written as a `$ref` is charged for the object it names, and each distinct
+  object once: at its first reference, however many places name it, with every
+  later reference costing only its own parameter entry. Path-item parameters are
+  counted once per path item rather than once per operation that inherits them,
+  and a schema `$ref` is charged where its target is declared, not expanded at
+  each use; those repetitions are what the render-time budget below absorbs.
+  Counting is linear in the document: each `content` map and schema is
+  enumerated once however often it is referenced or aliased, and the count stops
+  at the first charge past the ceiling, reporting the totals reached by then.
+  One declared operation can carry thousands of parameters and dozens of media
+  types per body; counting paths and operations sees none of that.
+- **While following references.** Parameter, request-body and response
+  `$ref`s are followed — by the viewer, the publish-time counter and the
+  revision comparison alike — through one resolver per document that memoises
+  the outcome of every distinct reference string, so a document costs one JSON
+  pointer walk per distinct reference however many places use it and however
+  long its chains are. Chains stop after 32 hops, a pointer longer than
+  `MAX_SPEC_DEPTH` segments names nothing, and an OpenAPI 3.1 `description`
+  sibling is carried beside the referenced object rather than merged into a
+  copy of it.
 - **At render.** The viewer spends a single node allowance across the whole
   page, divided between the operations the reader has expanded, rather than a
   fresh one per schema. A branch that exhausts it renders one "truncated"

@@ -97,6 +97,33 @@ describe('SchemaView', () => {
     );
     expect(screen.getByText('…nested further')).toBeInTheDocument();
   });
+
+  it('shortens long schema references in its badges', () => {
+    const name = 'x'.repeat(5_000);
+    const ref = `#/components/schemas/${name}`;
+    const doc = {
+      components: {
+        schemas: { [name]: { type: 'object', properties: { self: { $ref: ref } } } },
+      },
+    } as SpecNode;
+    render(
+      <SchemaView
+        doc={doc}
+        budget={createRenderBudget()}
+        schema={{
+          type: 'object',
+          properties: { known: { $ref: ref }, missing: { $ref: `${ref}-missing` } },
+        }}
+      />,
+    );
+
+    const badges = [
+      screen.getByText(/^x+…$/),
+      screen.getByText(/^circular → x+…$/),
+      screen.getByText(/^unresolved \$ref #\/components\/schemas\/x+…$/),
+    ];
+    for (const badge of badges) expect(badge.textContent?.length).toBeLessThan(250);
+  });
 });
 
 describe('OpenApiView operation paging', () => {

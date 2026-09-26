@@ -25,19 +25,31 @@
  * The labels are the OpenAPI 3.x Operation Object's own members, compared with
  * `isDeepStrictEqual` after the path item's shared `parameters` have been
  * folded in — a parameter moved from the path item onto the operation, or the
- * other way, is not a change and should not read as one. Anything outside the
- * known member list that differs collapses to a single `other` label rather
- * than leaking vendor extension names into the UI.
+ * other way, is not a change and should not read as one. Folding follows
+ * OpenAPI's inheritance rule (`mergeOpenApiParameters`, shared with the
+ * documentation renderer): an operation parameter replaces a path-item one with
+ * the same `(in, name)`, so removing an overridden, ineffective path-level
+ * definition is not a change either. Parameters are compared as written — a
+ * `$ref` is followed only to learn the parameter's identity, never to compare
+ * its content — and one whose identity cannot be determined is kept as is,
+ * never equated with another. Anything outside the known member list that
+ * differs collapses to a single `other` label rather than leaking vendor
+ * extension names into the UI.
  */
 
 import { isDeepStrictEqual } from 'node:util';
 
-import type {
-  ApiSpecSummary,
-  SpecDiff,
-  SpecInfoChange,
-  SpecOperationChange,
-  SpecOperationRef,
+import {
+  createOpenApiRefResolver,
+  keyOpenApiParameters,
+  mergeOpenApiParameters,
+  type ApiSpecSummary,
+  type KeyedOpenApiParameter,
+  type OpenApiResolveStats,
+  type SpecDiff,
+  type SpecInfoChange,
+  type SpecOperationChange,
+  type SpecOperationRef,
 } from '@ferrum-nexus/shared';
 
 /** HTTP methods an OpenAPI Path Item Object may carry, lowercase as written. */
@@ -83,30 +95,62 @@ function stringOrNull(value: unknown): string | null {
 /**
  * Every operation of a document, keyed `METHOD path`.
  *
- * The path item's own `parameters` are merged onto each operation ahead of its
- * own, which is what makes "the provider moved a shared `{id}` parameter down
- * onto the operation" read as no change at all. A non-object path item, or one
- * with no method key, contributes nothing — the same permissiveness the
- * publishing parser applies.
+ * Each operation's `parameters` become its effective list — the path item's
+ * parameters it does not override plus its own — in a canonical order, which is
+ * what makes "the provider moved a shared `{id}` parameter down onto the
+ * operation" read as no change at all. An empty effective list is dropped, so
+ * `parameters: []` and no `parameters` at all compare equal. A non-object path
+ * item, or one with no method key, contributes nothing — the same
+ * permissiveness the publishing parser applies.
+ *
+ * One resolver serves the whole document, so each distinct `$ref` is followed
+ * once however many parameters use it.
  */
-function operationsOf(document: Record<string, unknown>): Map<string, Operation> {
+function operationsOf(
+  document: Record<string, unknown>,
+  stats: OpenApiResolveStats | undefined,
+): Map<string, Operation> {
   const operations = new Map<string, Operation>();
   const paths = document.paths;
   if (!isRecord(paths)) return operations;
+  const resolver = createOpenApiRefResolver(document, { stats });
   for (const [path, item] of Object.entries(paths)) {
     if (!isRecord(item)) continue;
-    const shared = Array.isArray(item.parameters) ? item.parameters : [];
+    const shared = keyOpenApiParameters(
+      resolver,
+      Array.isArray(item.parameters) ? item.parameters : [],
+      true,
+    );
     for (const key of OPERATION_KEYS) {
       const operation = item[key];
       if (!isRecord(operation)) continue;
-      const own = Array.isArray(operation.parameters) ? operation.parameters : [];
-      operations.set(`${key.toUpperCase()} ${path}`, {
-        ...operation,
-        ...(shared.length > 0 || own.length > 0 ? { parameters: [...shared, ...own] } : {}),
-      });
+      const { parameters: written, ...rest } = operation;
+      const own = keyOpenApiParameters(resolver, Array.isArray(written) ? written : [], false);
+      const effective = canonicalParameters(mergeOpenApiParameters(shared, own));
+      // A `parameters` member that is not a list at all is compared as written.
+      const normalized =
+        effective.length > 0
+          ? { ...rest, parameters: effective }
+          : written === undefined || Array.isArray(written)
+            ? rest
+            : operation;
+      operations.set(`${key.toUpperCase()} ${path}`, normalized);
     }
   }
   return operations;
+}
+
+/**
+ * An effective parameter list in comparison order: parameters with an identity
+ * sorted by it — OpenAPI gives their order no meaning — then those without one,
+ * in declaration order, since nothing says which of them is which.
+ */
+function canonicalParameters(parameters: readonly KeyedOpenApiParameter[]): unknown[] {
+  const keyed = parameters
+    .filter((entry): entry is typeof entry & { key: string } => entry.key !== null)
+    .sort((left, right) => (left.key < right.key ? -1 : left.key > right.key ? 1 : 0));
+  const unkeyed = parameters.filter((entry) => entry.key === null);
+  return [...keyed, ...unkeyed].map((entry) => entry.parameter);
 }
 
 /** Path templates that carry at least one operation, in document order. */
@@ -163,14 +207,16 @@ function infoChanges(
  *
  * `from` is what the API is serving today and `to` is what it would serve —
  * so for a rollback, `from` is the current revision and `to` is the retained
- * one being restored, not the other way round.
+ * one being restored, not the other way round. `resolveStats`, when given,
+ * counts the reference-following work both documents cost.
  */
 export function diffSpecDocuments(
   from: { document: Record<string, unknown>; summary: ApiSpecSummary | null },
   to: { document: Record<string, unknown>; summary: ApiSpecSummary | null },
+  { resolveStats }: { resolveStats?: OpenApiResolveStats } = {},
 ): SpecDiff {
-  const before = operationsOf(from.document);
-  const after = operationsOf(to.document);
+  const before = operationsOf(from.document, resolveStats);
+  const after = operationsOf(to.document, resolveStats);
 
   const added: SpecOperationRef[] = [];
   const removed: SpecOperationRef[] = [];

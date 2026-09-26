@@ -660,8 +660,8 @@ credentials page to do exactly that.
 
 The one exception is the API's own **test consumer**: its key exists to call
 this API and nothing else, so the change really does make it useless and it is
-revoked with the swap. **Create test consumer** again afterwards to get a key
-of the new type.
+revoked with the swap, including one issued while the change is saving. **Create
+test consumer** again afterwards to get a key of the new type.
 
 So coordinate it: tell your consumers first, agree a window, then switch. If you
 only want to know how many accounts would be affected, send the change without
