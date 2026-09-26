@@ -114,7 +114,8 @@ import { canonicalConsumerLockKey } from '../credentials/consumers.js';
 import type { NexusStore, UserRecord } from '../db/store.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import { edgeUnavailable, forbidden, validationFailed } from '../lib/errors.js';
-import { apiRestoreLockKey } from '../lib/keyed-serializer.js';
+import { nowIso } from '../lib/ids.js';
+import { apiRestoreLockKey, LEASE_TTL_MS } from '../lib/keyed-serializer.js';
 import { isLeaseLost } from '../lib/lease-fence.js';
 import type { NotificationsService } from '../notifications/service.js';
 
@@ -170,6 +171,8 @@ export interface GatewayReconciliationServiceDeps {
   audit: AuditService;
   notifications: NotificationsService;
   log?: (obj: Record<string, unknown>, message: string) => void;
+  /** Routine outcomes an operator only needs when tracing one repair. */
+  debug?: (obj: Record<string, unknown>, message: string) => void;
 }
 
 /**
@@ -187,6 +190,8 @@ interface KeptConsumer {
    * wrote for an entry it appended to the recreated consumer since.
    */
   staleCredentialIds: Uuid[];
+  /** When those rows were read, under both keys. */
+  staleReadAt: string;
   /** The fence's refusal. */
   error: unknown;
 }
@@ -217,6 +222,7 @@ export function createGatewayReconciliationService(
 ): GatewayReconciliationService {
   const { config, store, edge, audit, notifications } = deps;
   const log = deps.log ?? ((): void => {});
+  const debug = deps.debug ?? ((): void => {});
   const namespace = config.edge.namespace;
   const sample = config.gatewayReconcileSample;
   const intervalMs = config.gatewayReconcileIntervalMs;
@@ -467,6 +473,47 @@ export function createGatewayReconciliationService(
   }
 
   /**
+   * Whether `userId`'s `gateway.consumer_repair` rows for `consumerId`
+   * already revoked every one of `staleIds` between them.
+   *
+   * Each of those rows was live when `readAt` was taken under both keys, and
+   * a revoked row stays revoked, so a repair row that lists one committed
+   * after that read — whatever the clocks say. The timestamp only bounds the
+   * query, widened by the lease TTL for skew between instances; a row it
+   * leaves out can only make this answer `false`, which records the repair.
+   */
+  async function repairRecorded(
+    db: NexusStore,
+    userId: Uuid,
+    consumerId: string,
+    staleIds: Uuid[],
+    readAt: string,
+  ): Promise<boolean> {
+    const from = new Date(Date.parse(readAt) - LEASE_TTL_MS).toISOString();
+    const left = new Set(staleIds);
+    for (let offset = 0; ; offset += MAX_PAGE_SIZE) {
+      const page = await db.auditLogs.list(
+        {
+          action: AuditAction.GATEWAY_CONSUMER_REPAIR,
+          target_type: 'user',
+          target_id: userId,
+          from,
+        },
+        { limit: MAX_PAGE_SIZE, offset },
+      );
+      for (const entry of page.items) {
+        const revoked = entry.details.revoked_credential_ids;
+        if (entry.details.consumer_id !== consumerId || !Array.isArray(revoked)) continue;
+        for (const id of revoked) {
+          if (typeof id === 'string') left.delete(id);
+        }
+      }
+      if (left.size === 0) return true;
+      if (page.items.length === 0 || offset + page.items.length >= page.total) return false;
+    }
+  }
+
+  /**
    * Recreate one account's gateway consumer and re-link the portal row.
    *
    * Takes the provisioning key `ensureConsumer` uses before the stored
@@ -488,6 +535,12 @@ export function createGatewayReconciliationService(
    * consumer and writing the `gateway.consumer_repair` row with
    * `resumed: true`. A row written since, for an entry another instance
    * appended to the recreated consumer, is not among them and stays live.
+   * When the instance that took the keys found that consumer and completed
+   * the repair itself — its `gateway.consumer_repair` rows for that consumer
+   * list every one of those stale rows among their `revoked_credential_ids` —
+   * the resumed pass reads `present` instead of recording the repair twice.
+   * Anything short of that, including a repair with no stale rows at all, is
+   * recorded.
    * Only a second refusal leaves the rows `active`, and says so in its own
    * log line (`docs/operations.md` §13, "The repair").
    */
@@ -554,7 +607,7 @@ export function createGatewayReconciliationService(
                 // re-read, so one revoked or moved since is left alone — and
                 // the row that records the repair commits with them.
                 const staleIds = kept.staleCredentialIds;
-                const revoked = await store.transaction(async (tx) => {
+                const revoked = await store.transaction(async (tx): Promise<Uuid[] | null> => {
                   const ids: Uuid[] = [];
                   for (const id of staleIds) {
                     const credential = await tx.credentials.findById(id);
@@ -568,6 +621,18 @@ export function createGatewayReconciliationService(
                     await tx.credentials.update(id, { status: 'revoked' });
                     ids.push(id);
                   }
+                  // Nothing left to revoke, and repair rows for this consumer
+                  // that between them revoked every stale row: the instance
+                  // that took the keys found the consumer this repair
+                  // recreated and completed the same repair. That is one
+                  // repair, already recorded, not a second to record again.
+                  if (
+                    ids.length === 0 &&
+                    staleIds.length > 0 &&
+                    (await repairRecorded(tx, orphan.user_id, staleId, staleIds, kept.staleReadAt))
+                  ) {
+                    return null;
+                  }
                   await audit
                     .forStore(tx)
                     .record(
@@ -579,12 +644,14 @@ export function createGatewayReconciliationService(
                     );
                   return ids;
                 });
+                if (revoked === null) return { kind: 'present', consumerId: staleId };
                 return { kind: 'repaired', consumerId: staleId, revoked };
               }
 
               // Read before the consumer exists again: these rows can only
               // name entries of the one that was lost. Under both keys, so no
               // row for this id is written between here and the relink.
+              const staleReadAt = nowIso();
               const stale = await liveCredentialIds(store, staleId);
 
               const { consumer, created } = await edge.consumers.ensure(
@@ -634,6 +701,7 @@ export function createGatewayReconciliationService(
                     kind: 'kept',
                     consumerId: consumer.id,
                     staleCredentialIds: stale,
+                    staleReadAt,
                     error,
                   };
                 }
@@ -690,6 +758,13 @@ export function createGatewayReconciliationService(
           if (retried.kind === 'kept') {
             left = retried;
             throw retried.error;
+          }
+          if (retried.kind === 'present') {
+            debug(
+              { user_id: orphan.user_id, namespace, consumer_id: retried.consumerId },
+              'A consumer repair that lost its lease found the repair already completed by ' +
+                'another instance; it records nothing further',
+            );
           }
           return retried;
         } catch (error) {

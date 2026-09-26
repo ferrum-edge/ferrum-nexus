@@ -343,6 +343,12 @@ All notable changes to Ferrum Nexus are documented here. The format follows
 - Conversation list previews now fetch the newest message for the whole page in
   one adapter query, preserving the `(created_at, id)` ordering and empty-thread
   previews. A 200-thread page used to issue 200 separate message lookups (#394).
+- A consumer repair that resumes after its lease lapsed no longer writes a
+  second `gateway.consumer_repair` row when the account's repair rows for that
+  consumer already list every stale credential row it would have revoked:
+  another instance completed the same repair, and the resumed pass reports the
+  consumer `present` instead. Any other resumed repair, including one with no
+  stale rows, is still recorded (#408).
 - Withdrawing a credential retirement whose gateway delete provably never
   applied now moves the row back to `active` only while it is still `retiring`,
   through a new conditional `CredentialRepo.updateIfStatus` on every store
