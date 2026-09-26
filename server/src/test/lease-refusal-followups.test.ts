@@ -13,8 +13,8 @@
  * 3. A revocation rollback whose transaction committed but lost its
  *    acknowledgement restored the grant again and wrote a second
  *    `access.revoke_rollback` row.
- * 4. The fence-refusal branches themselves: the restore retried alone after
- *    the fence refused it, and the consumer kept during a repair.
+ * 4. The fence-refusal branches themselves: a refused grant restore remains
+ *    revoked, and the consumer is kept during a repair.
  * 5. Follow-ups (issue #408): a resumed repair that another instance already
  *    completed and recorded is not recorded twice, and a lost acknowledgement
  *    whose audit row cannot be read back takes the documented fallback.
@@ -695,7 +695,7 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
     harness.edge.queueFailure(500, { error: 'refused' }, `/consumers/${consumer.id}`, 'PUT');
   }
 
-  it('puts a refused revocation back alone when the fence refuses its rollback', async () => {
+  it('does not restore a grant outside the fence when its rollback is refused', async () => {
     const { session, apiId, proxyId, grantId } = await grantee();
     const key = `proxy:${proxyId}`;
     refuseNextConsumerWrite(session.user.id);
@@ -726,19 +726,17 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
       "the stale rollback left the new holder's lease alone",
     );
 
-    // The group is still on, so the grant must not read as withdrawn.
+    // The stale holder must not restore outside the fence: an administrative
+    // teardown may have skipped the claimed row and removed this group while
+    // the provider's gateway request was stalled.
     assert.deepEqual(groupsOf(session.user.id), [aclGroupForApi(apiId)]);
-    assert.equal((await harness.store.grants.findById(grantId))?.status, 'active');
+    assert.equal((await harness.store.grants.findById(grantId))?.status, 'revoked');
     assert.equal(await countAudit(AuditAction.ACCESS_REVOKE, grantId), 1);
-    assert.equal(await countAudit(AuditAction.ACCESS_REVOKE_ROLLBACK, grantId), 1);
-    const [rollback] = (await harness.auditRows(AuditAction.ACCESS_REVOKE_ROLLBACK)).filter(
-      (row) => row.target_id === grantId,
-    );
-    assert.equal(rollback?.details.grant_restored, true);
-    assert.ok(logged('retrying alone'), 'the retry is logged');
+    assert.equal(await countAudit(AuditAction.ACCESS_REVOKE_ROLLBACK, grantId), 0);
+    assert.ok(logged('Could not return a failed revocation'), 'the refusal is logged');
 
     const retried = await revoke(grantId);
-    assert.equal(retried.statusCode, 200, retried.body);
+    assert.equal(retried.statusCode, 409, retried.body);
     assert.equal((await harness.store.grants.findById(grantId))?.status, 'revoked');
   });
 
