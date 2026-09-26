@@ -283,6 +283,18 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   a transactional record in a callback that writes nothing else, aliased
   imports of the audit module, and a transaction hook bound, passed or
   destructured under another name.
+- The specification editor enforces the 2 MiB document limit before reading or
+  parsing (#403). A selected file larger than the limit is refused from its
+  size without being read, keeping the current draft and saying why; text over
+  the limit, counted in UTF-8 bytes as the server counts it, is no longer
+  parsed; and the publish and revision-review preflight now refuses such a
+  document instead of calling it valid and sending it to a server that will
+  reject it. The server's byte check stays the authority.
+- A specification upload that finishes late no longer overwrites newer work in
+  the editor (#401). A read is applied only while it is still the latest
+  selection and the draft has not changed since it started, so typing, choosing
+  another file, the page replacing the draft or the editor closing all drop an
+  earlier pending read. Choosing the same file again still reloads it.
 - Conversation list previews now fetch the newest message for the whole page in
   one adapter query, preserving the `(created_at, id)` ordering and empty-thread
   previews. A 200-thread page used to issue 200 separate message lookups (#394).

@@ -2731,7 +2731,10 @@ function runSmokeSuite(label: string, makeStore: () => Promise<SmokeTarget>): vo
       }
       assert.deepEqual(await store.messages.findLatestByThreads([]), []);
       const emptyIds = [emptyThread.id, emptyPlatformThread.id];
-      assert.equal(latest.some((message) => emptyIds.includes(message.thread_id)), false);
+      assert.equal(
+        latest.some((message) => emptyIds.includes(message.thread_id)),
+        false,
+      );
     });
 
     it('messages: countBySenderSince bounds the per-account budget', async () => {
