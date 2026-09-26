@@ -1797,9 +1797,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         //
         // Read under the proxy lease, with the API re-read inside it, so what
         // the refusal counts and what the confirmed change acts on are the same
-        // reading. A grant approved after this point brings its own credential
-        // in behind the swap — that account is told to issue a matching one by
-        // the notification below, exactly as an existing grantee is.
+        // reading. Test-consumer credentials are re-listed after the row save
+        // below, closing the overlap with an issuance already in progress.
         const swappedAuthPlugin =
           patch.auth_plugin !== undefined && patch.auth_plugin !== api.auth_plugin && proxyId
             ? patch.auth_plugin
@@ -2299,6 +2298,27 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           throw error;
         }
 
+        // Re-read immediately after the API row save. A creation that issued
+        // the outgoing flavour while this PATCH was in flight may have passed
+        // its own re-check just before the row changed.
+        let apiOwnedAfterSave = impact.apiOwned;
+        if (changed.includes('auth_plugin')) {
+          const identity = await store.gatewayIdentities.findByUsername(
+            namespace,
+            testConsumerUsername(api.id),
+          );
+          if (identity?.ferrum_consumer_id) {
+            const newlyIssued = await store.credentials.listByConsumer(
+              identity.ferrum_consumer_id,
+              CREDENTIAL_TYPE_FOR_PLUGIN[api.auth_plugin],
+              LIVE_CREDENTIAL_STATUSES,
+            );
+            apiOwnedAfterSave = [
+              ...new Map([...apiOwnedAfterSave, ...newlyIssued].map((row) => [row.id, row])).values(),
+            ];
+          }
+        }
+
         await audit.record(
           { id: actor.id, role: actor.role },
           update.status === 'retired' ? AuditAction.API_RETIRE : AuditAction.API_UPDATE,
@@ -2309,10 +2329,11 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
 
         // ── What the swap actually cost, settled after it landed ──────────
         //
-        // **Last**, and only once the swap is durable on both sides. A
+        // Only once the swap and API row are durable on both sides. A
         // revocation deletes the material from the gateway, which no
         // compensation can put back — so it must never run on a PATCH that can
-        // still unwind, and there is nothing above this line left to fail.
+        // still unwind. The test consumer is re-read here to include issuance
+        // that overlapped the row save; its own re-check catches later issuance.
         //
         // Only the API's **own** credentials are revoked: the keys on its
         // `nexus-test-<api_id>` consumer, which exists to call this one proxy
@@ -2334,8 +2355,9 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
         const swapped = changed.includes('auth_plugin');
         const revoked: Uuid[] = [];
         const unrevoked: { credential_id: Uuid; error: string }[] = [];
-        if (swapped && impact.apiOwned.length > 0) {
-          for (const credential of impact.apiOwned) {
+        const apiOwned = apiOwnedAfterSave;
+        if (swapped && apiOwned.length > 0) {
+          for (const credential of apiOwned) {
             try {
               const didRevoke = await credentials.revokeInvalidated(
                 { id: actor.id, role: actor.role },
@@ -2354,7 +2376,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             }
           }
         }
-        if (swapped && (impact.grantees.length > 0 || impact.apiOwned.length > 0)) {
+        if (swapped && (impact.grantees.length > 0 || apiOwned.length > 0)) {
           const summary = {
             previous_auth_plugin: api.auth_plugin,
             auth_plugin: updated.auth_plugin,
@@ -2363,7 +2385,7 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
             // credentials were deliberately left alone.
             affected_grantees: impact.grantees.length,
             affected_grantee_ids: impact.grantees,
-            api_owned_credentials: impact.apiOwned.length,
+            api_owned_credentials: apiOwned.length,
             revoked_api_credentials: revoked.length,
             failed: unrevoked.map((entry) => entry.credential_id),
             failure_errors: unrevoked.map((entry) => entry.error),
@@ -3191,13 +3213,31 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
           // `previous` is passed for the one case that is not a takeover:
           // this account replacing its own consumer, where nothing was created
           // and the registration is put back on the incumbent it still owns.
-          await credentials.abandonGatewayIdentity(
+          const consumerDeleted = await credentials.abandonGatewayIdentity(
             identity,
             consumerId,
             actor.id,
             attemptedConsumerId,
             previous,
           );
+          if (consumerDeleted && consumerId !== null) {
+            const liveRows = await store.credentials.listByConsumer(
+              consumerId,
+              undefined,
+              LIVE_CREDENTIAL_STATUSES,
+            );
+            for (const row of liveRows) {
+              await credentials.revokeInvalidated(
+                { id: actor.id, role: actor.role },
+                row.id,
+                {
+                  reason: 'test_consumer_creation_abandoned',
+                  api_id: api.id,
+                },
+                ip,
+              );
+            }
+          }
           throw error;
         }
       });

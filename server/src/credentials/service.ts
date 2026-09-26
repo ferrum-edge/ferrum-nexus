@@ -581,7 +581,7 @@ export interface CredentialsService {
     subject: string,
     attemptedConsumerId?: string | null,
     replaced?: GatewayIdentityRecord | null,
-  ): Promise<void>;
+  ): Promise<boolean>;
   /**
    * Take one registered gateway identity down: delete its Edge consumer,
    * revoke every credential row that named it, and consume the registration.
@@ -1610,7 +1610,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       subject,
       attemptedConsumerId = null,
       replaced = null,
-    ): Promise<void> {
+    ): Promise<boolean> {
       // A replacement that stopped before asking Edge to create anything, over
       // an incumbent **the same account already owned**: point the row back at
       // the incumbent rather than delete it. The claim cleared the row's
@@ -1640,7 +1640,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             // Even unbound, the retained registration makes teardown fall back
             // to the bounded username lookup instead of losing the identity.
           });
-        return;
+        return false;
       }
       let created = consumerId;
       if (created === null && attemptedConsumerId !== null) {
@@ -1665,7 +1665,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             'an abandoned gateway identity could not be resolved; its registration was kept for teardown',
           );
           await ensureTeardownOwed(identity.user_id).catch(() => undefined);
-          return;
+          return false;
         }
       }
       if (created !== null) {
@@ -1689,7 +1689,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
             'an abandoned gateway identity could not be deleted; its registration was kept for teardown',
           );
           await ensureTeardownOwed(identity.user_id).catch(() => undefined);
-          return;
+          return false;
         }
       }
       // Only ever the registration that is still this owner's: the row keeps
@@ -1700,6 +1700,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       if (current && current.user_id === identity.user_id) {
         await store.gatewayIdentities.delete(current.id).catch(() => undefined);
       }
+      return created !== null;
     },
 
     async restoreGatewayAccess(userId, subject): Promise<void> {
@@ -2609,37 +2610,43 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
         try {
           await options.whileHeld();
         } catch (error) {
-          // The consumer is gone and its rows are revoked; nothing will undo
-          // that. The caller's request fails regardless, so this line is the
-          // only record of what this attempt did take down.
-          deps.log?.(
-            {
-              consumer_username: username,
-              consumer_id: result.consumer_id,
-              revoked_credentials: result.revoked_credentials,
-              error: error instanceof Error ? error.message : String(error),
-            },
-            'a gateway identity was torn down but the work that follows it under its key failed; its registration was kept for the retry',
-          );
+          if (result.consumer_id !== null || result.registration_removed) {
+            // The consumer is gone and its rows are revoked; nothing will undo
+            // that. The caller's request fails regardless, so this line is the
+            // only record of what this attempt did take down.
+            deps.log?.(
+              {
+                consumer_username: username,
+                consumer_id: result.consumer_id,
+                revoked_credentials: result.revoked_credentials,
+                error: error instanceof Error ? error.message : String(error),
+              },
+              'a gateway identity was torn down but the work that follows it under its key failed; its registration was kept for the retry',
+            );
+          }
           throw error;
         }
       }
       // Consumed: a retry must not come back to an identity that is done.
       // After a follow-up, the consumer is gone and the caller's own work has
       // committed, so a registration that cannot be removed is logged rather
-      // than failing a request whose effect is already durable — a leftover
-      // row naming a consumer that no longer exists is what any later
-      // teardown resolves to "nothing there" and removes.
+      // than failing a request whose effect is already durable — the owner's
+      // account teardown enumerates this registration by user.
       if (current) {
         await store.gatewayIdentities.delete(current.id).catch((error: unknown) => {
-          if (!options?.whileHeld) throw error;
+          if (
+            !options?.whileHeld ||
+            (result.consumer_id === null && !result.registration_removed)
+          ) {
+            throw error;
+          }
           deps.log?.(
             {
               consumer_username: username,
               consumer_id: result.consumer_id,
               error: error instanceof Error ? error.message : String(error),
             },
-            'a torn-down gateway identity kept its registration; a later teardown will remove it',
+            'a torn-down gateway identity kept its registration; the owner account teardown will remove it',
           );
         });
       }
