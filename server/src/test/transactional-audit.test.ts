@@ -44,7 +44,8 @@ const HOOK_CALLEES = new Set(['publishing.remove', 'access.revoke']);
  * The names those callbacks go by — the parameter a service invokes one
  * through, or the property an options object passes one under
  * (`recordWithRow`). A hook only records, so every invocation of one is
- * checked to run inside a transaction that writes.
+ * checked to run inside a transaction that writes — and every other mention
+ * of one to keep its name, so it cannot be invoked unseen under an alias.
  */
 const HOOK_NAMES = new Set(['recordWithDelete', 'recordWithRevoke', 'recordWithRow']);
 
@@ -283,18 +284,50 @@ function awaitedDirectly(call: ts.Expression): boolean {
   return ts.isAwaitExpression(parent);
 }
 
-/** A `try` between `node` and `boundary` whose `catch` can return without rethrowing. */
+/**
+ * Whether `block` has a way out other than falling through to a throw: a
+ * `return` anywhere in it, or a `break`/`continue` that leaves it. A function
+ * or class nested in it has exits of its own, which are not the block's.
+ */
+function exitsEarly(block: ts.Block): boolean {
+  let found = false;
+  const visit = (node: ts.Node, loops: number, switches: number): void => {
+    if (found || ts.isFunctionLike(node) || ts.isClassLike(node)) return;
+    if (ts.isReturnStatement(node)) {
+      found = true;
+    } else if (ts.isBreakStatement(node)) {
+      found = node.label !== undefined || loops + switches === 0;
+    } else if (ts.isContinueStatement(node)) {
+      found = node.label !== undefined || loops === 0;
+    } else {
+      const loop = ts.isIterationStatement(node, false) ? 1 : 0;
+      const switched = ts.isSwitchStatement(node) ? 1 : 0;
+      ts.forEachChild(node, (child) => visit(child, loops + loop, switches + switched));
+    }
+  };
+  ts.forEachChild(block, (child) => visit(child, 0, 0));
+  return found;
+}
+
+/**
+ * A `try` between `node` and `boundary` that can complete without rethrowing
+ * a failure of `node`: a `catch` with no rethrow of its own, or one that can
+ * leave early — `if (…) return;` before its `throw` — or a `finally` that can.
+ */
 function swallowedBy(node: ts.Node, boundary: ts.Node): ts.TryStatement | null {
   let child: ts.Node = node;
   let current: ts.Node | undefined = node.parent;
   while (current !== undefined && current !== boundary) {
-    if (
-      ts.isTryStatement(current) &&
-      current.tryBlock === child &&
-      current.catchClause !== undefined &&
-      !current.catchClause.block.statements.some(ts.isThrowStatement)
-    ) {
-      return current;
+    if (ts.isTryStatement(current) && child !== current.finallyBlock) {
+      const { catchClause, finallyBlock } = current;
+      if (
+        current.tryBlock === child &&
+        catchClause !== undefined &&
+        (!catchClause.block.statements.some(ts.isThrowStatement) || exitsEarly(catchClause.block))
+      ) {
+        return current;
+      }
+      if (finallyBlock !== undefined && exitsEarly(finallyBlock)) return current;
     }
     child = current;
     current = current.parent;
@@ -397,7 +430,7 @@ function misuse(
     return 'is not awaited directly — a floating or caught record cannot roll anything back';
   }
   if (swallowedBy(call, scope.fn)) {
-    return 'is recorded inside a try whose catch does not rethrow, so its failure is swallowed';
+    return 'is recorded in a try whose catch does not always rethrow, or whose finally exits';
   }
   if (
     commit.kind === 'transactional' &&
@@ -419,11 +452,75 @@ function hookMisuse(call: ts.CallExpression, source: ts.SourceFile): string | nu
   const scope = scopeOf(argument, source);
   if (scope === null || scope.via === 'hook') return 'is not invoked inside a transaction callback';
   if (!awaitedDirectly(call)) return 'is not awaited directly';
-  if (swallowedBy(call, scope.fn)) return 'is invoked inside a try whose catch does not rethrow';
+  if (swallowedBy(call, scope.fn)) {
+    return 'is invoked in a try whose catch does not always rethrow, or whose finally exits';
+  }
   if (!writesThrough(scope.fn, scope.store)) {
     return `is invoked in a transaction that writes nothing through \`${scope.store}\``;
   }
   return null;
+}
+
+/** Whether `name` is the name `node` declares — a parameter, property, variable or function. */
+function isDeclaredName(node: ts.Node, name: ts.Identifier): boolean {
+  return (
+    (ts.isParameter(node) ||
+      ts.isPropertySignature(node) ||
+      ts.isPropertyDeclaration(node) ||
+      ts.isPropertyAssignment(node) ||
+      ts.isMethodSignature(node) ||
+      ts.isMethodDeclaration(node) ||
+      ts.isFunctionDeclaration(node) ||
+      ts.isVariableDeclaration(node) ||
+      ts.isBindingElement(node)) &&
+    node.name === name
+  );
+}
+
+/**
+ * Why a mention of a hook's name hands the hook on under another name — or
+ * `null` when it does not.
+ *
+ * The invocation check above finds a hook by the name it is called through, so
+ * a hook bound to any other name (`const write = recordWithRow`, a
+ * destructuring rename, an argument) would be invoked unseen. A hook may be
+ * called, tested for presence, or passed on under its own name, and nothing
+ * else.
+ */
+function hookAliasing(id: ts.Identifier): string | null {
+  const parent = id.parent;
+  if (ts.isBindingElement(parent) && parent.propertyName === id) {
+    return ts.isIdentifier(parent.name) && parent.name.text === id.text
+      ? null
+      : 'is destructured under another name';
+  }
+  if (isDeclaredName(parent, id) || ts.isShorthandPropertyAssignment(parent)) return null;
+  // `input.recordWithRow` is the reference; the identifier only names it.
+  let reference: ts.Expression = id;
+  if (ts.isPropertyAccessExpression(parent)) {
+    if (parent.name !== id) return 'has a member read off it, which hides how it is invoked';
+    reference = parent;
+  }
+  let user = reference.parent;
+  while (ts.isParenthesizedExpression(user) || ts.isNonNullExpression(user)) {
+    reference = user;
+    user = user.parent;
+  }
+  const keepsName = (name: ts.Node): boolean => ts.isIdentifier(name) && name.text === id.text;
+  if (ts.isCallExpression(user) && user.expression === reference) return null;
+  if (ts.isVariableDeclaration(user) && user.initializer === reference && keepsName(user.name)) {
+    return null;
+  }
+  if (ts.isPropertyAssignment(user) && user.initializer === reference && keepsName(user.name)) {
+    return null;
+  }
+  // Presence tests.
+  if (ts.isConditionalExpression(user) && user.condition === reference) return null;
+  if (ts.isIfStatement(user) && user.expression === reference) return null;
+  if (ts.isPrefixUnaryExpression(user) && user.operator === ts.SyntaxKind.ExclamationToken) {
+    return null;
+  }
+  return 'is bound, passed or read under another name, where its invocation cannot be checked';
 }
 
 interface Scan {
@@ -488,6 +585,14 @@ function scanSource(label: string, text: string): Scan {
       ACTION_VALUES.has(node.text)
     ) {
       findings.push(`${where(node)} spells out '${node.text}' instead of using AuditAction`);
+    } else if (ts.isIdentifier(node) && HOOK_NAMES.has(node.text)) {
+      const problem = hookAliasing(node);
+      if (problem !== null) findings.push(`${where(node)} ${node.text} ${problem}`);
+    } else if (
+      (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) &&
+      HOOK_NAMES.has(node.text)
+    ) {
+      findings.push(`${where(node)} spells out the hook name '${node.text}'`);
     } else if (ts.isCallExpression(node)) {
       const name = calleeName(node);
       if (name !== null && HOOK_NAMES.has(name)) {
@@ -691,7 +796,7 @@ describe('the transactional audit scan itself', () => {
           }
         });
       }`,
-      'catch does not rethrow',
+      'catch does not always rethrow',
     );
   });
 
@@ -763,6 +868,119 @@ describe('the transactional audit scan itself', () => {
         await recordWithDelete?.(store);
       }`,
       'recordWithDelete() is not invoked inside a transaction callback',
+    );
+  });
+
+  it('flags a catch that can return before it rethrows', () => {
+    assertFlags(
+      `export async function approve(store, audit) {
+        await store.transaction(async (tx) => {
+          await tx.grants.create({});
+          try {
+            await audit.forStore(tx).record(actor, AuditAction.ACCESS_APPROVE, target);
+          } catch (error) {
+            if (isRetryable(error)) return;
+            throw error;
+          }
+        });
+      }`,
+      'catch does not always rethrow',
+    );
+    assertFlags(
+      `export async function approve(store, audit) {
+        await store.transaction(async (tx) => {
+          await tx.grants.create({});
+          for (const attempt of [1, 2]) {
+            try {
+              await audit.forStore(tx).record(actor, AuditAction.ACCESS_APPROVE, target);
+            } catch (error) {
+              if (attempt === 1) continue;
+              throw error;
+            }
+          }
+        });
+      }`,
+      'catch does not always rethrow',
+    );
+    assertFlags(
+      `export async function remove(store, recordWithDelete) {
+        await store.transaction(async (tx) => {
+          await tx.apis.delete('id');
+          try {
+            await recordWithDelete?.(tx);
+          } finally {
+            return;
+          }
+        });
+      }`,
+      'recordWithDelete() is invoked in a try whose catch does not always rethrow',
+    );
+  });
+
+  it('accepts a catch that rethrows on every path', () => {
+    assert.deepEqual(
+      findingsFor(
+        `export async function approve(store, audit) {
+          await store.transaction(async (tx) => {
+            await tx.grants.create({});
+            try {
+              await audit.forStore(tx).record(actor, AuditAction.ACCESS_APPROVE, target);
+            } catch (error) {
+              for (const cleanup of cleanups) {
+                if (!cleanup) continue;
+                await cleanup().catch(() => undefined);
+              }
+              if (isConflict(error)) throw conflict('lost');
+              throw error;
+            }
+          });
+        }`,
+      ),
+      [],
+    );
+  });
+
+  it('flags a hook invoked under an aliased local name', () => {
+    assertFlags(
+      `export async function revoke(store, recordWithRevoke) {
+        const hook = recordWithRevoke;
+        await store.transaction(async (tx) => {
+          await tx.grants.update('id', {});
+          await hook?.(tx);
+        });
+      }`,
+      'recordWithRevoke is bound, passed or read under another name',
+    );
+    assertFlags(
+      `export async function append(store, input) {
+        const { recordWithRow: write } = input;
+        await write(store, {});
+      }`,
+      'recordWithRow is destructured under another name',
+    );
+    assertFlags(
+      `export async function append(store, input) {
+        await runLater(input.recordWithRow);
+      }`,
+      'recordWithRow is bound, passed or read under another name',
+    );
+    assertFlags("const hooks = { write: input['recordWithRow'] };", 'spells out the hook name');
+  });
+
+  it('accepts a hook re-bound, tested and passed on under its own name', () => {
+    assert.deepEqual(
+      findingsFor(
+        `export async function append(store, input) {
+          const recordWithRow = input.recordWithRow;
+          const forwarded = input.recordWithRow ? { recordWithRow: input.recordWithRow } : {};
+          if (!recordWithRow) return forwarded;
+          await store.transaction(async (tx) => {
+            const created = await tx.credentials.create({});
+            await recordWithRow(tx, created);
+          });
+        }`,
+      ),
+      [],
     );
   });
 

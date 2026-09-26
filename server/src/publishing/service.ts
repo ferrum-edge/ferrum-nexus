@@ -3179,8 +3179,8 @@ export function createPublishingService(deps: PublishingServiceDeps): Publishing
 
       // Outside the compensated block: both sides now agree, and tearing a
       // live API back down because an audit write failed would trade a
-      // missing row for an outage (see `AUDIT_COMMIT_CLASSES`, a follow-up to
-      // #389).
+      // missing row for an outage (see `AUDIT_COMMIT_CLASSES`; moving this row
+      // into its transaction is tracked in #400).
       await audit.record(
         { id: actor.id, role: actor.role },
         AuditAction.API_GATEWAY_RESTORE,

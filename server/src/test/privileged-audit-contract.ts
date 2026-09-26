@@ -12,6 +12,7 @@ import {
   type CreateOrganizationResponse,
   type IssueCredentialResponse,
   type PublishApiResponse,
+  type RepairGatewayReferencesResponse,
 } from '@ferrum-nexus/shared';
 
 import { AuditAction } from '../audit/service.js';
@@ -484,6 +485,46 @@ export function runPrivilegedAuditContract(
       assert.equal(await countAudit(AuditAction.ACCESS_REVOKE, grantId), 1);
     });
 
+    it('puts a refused revocation back even when its rollback row fails', async () => {
+      const { client, apiId, grantId } = await grantee();
+      const consumer = harness.edge.consumerByUsername(consumerUsernameForUser(client.user.id));
+      assert.ok(consumer);
+      const revoke = () =>
+        harness.authed(provider, {
+          method: 'POST',
+          url: `/api/grants/${grantId}/revoke`,
+          payload: { reason: 'Audit contract' },
+        });
+      // The claim and its `access.revoke` row commit; the gateway refuses the
+      // group removal; the `access.revoke_rollback` row the restore commits
+      // with fails.
+      harness.edge.queueFailure(500, { error: 'refused' }, `/consumers/${consumer.id}`, 'PUT');
+      faults.failAfter('auditLogs', 'create', 1);
+      const failed = await revoke();
+      assert.equal(failed.statusCode, 502, failed.body);
+      assert.deepEqual(faults.pending(), [], 'the intended failure was reached');
+      // The group is still on the consumer, so the grant must not read as
+      // withdrawn: the restore is retried without the row it failed with.
+      assert.deepEqual(groupsOf(client.user.id), [aclGroupForApi(apiId)]);
+      const grant = await target.store.grants.findById(grantId);
+      assert.equal(grant?.status, 'active');
+      assert.equal(grant?.revoked_at, null);
+      if (grant?.access_request_id) {
+        const request = await target.store.accessRequests.findById(grant.access_request_id);
+        assert.equal(request?.status, 'approved');
+      }
+      assert.equal(await countAudit(AuditAction.ACCESS_REVOKE, grantId), 1);
+      assert.equal(await countAudit(AuditAction.ACCESS_REVOKE_ROLLBACK, grantId), 1);
+      const rollback = await detailsOf(AuditAction.ACCESS_REVOKE_ROLLBACK, grantId);
+      assert.equal(rollback.grant_restored, true);
+
+      const retried = await revoke();
+      assert.equal(retried.statusCode, 200, retried.body);
+      assert.equal((await target.store.grants.findById(grantId))?.status, 'revoked');
+      assert.deepEqual(groupsOf(client.user.id), []);
+      assert.equal(await countAudit(AuditAction.ACCESS_REVOKE, grantId), 2);
+    });
+
     it('commits a god-mode revocation with both of its rows or with neither', async () => {
       const { client, apiId, grantId } = await grantee();
       const revoke = () =>
@@ -604,6 +645,42 @@ export function runPrivilegedAuditContract(
       assert.equal(retried.statusCode, 200, retried.body);
       assert.equal((await target.store.credentials.findById(credentialId))?.status, 'revoked');
       assert.equal(await countAudit(AuditAction.CREDENTIAL_REVOKE, credentialId), 1);
+    });
+
+    it('rotates nothing at the cap when the retirement cannot record its start', async () => {
+      const account = await harness.registerUser();
+      const ids: string[] = [];
+      for (let held = 0; held < harness.config.edge.maxCredentialsPerType; held += 1) {
+        const response = await issueKey(account);
+        assert.equal(response.statusCode, 201, response.body);
+        ids.push(response.json<IssueCredentialResponse>().credential.id);
+      }
+      const [credentialId] = ids;
+      assert.ok(credentialId);
+      const username = consumerUsernameForUser(account.user.id);
+      const rotate = () =>
+        harness.authed(account, {
+          method: 'POST',
+          url: `/api/credentials/${credentialId}/rotate`,
+          payload: {},
+        });
+      // At the cap the old entry goes first, and its move to `retiring`
+      // commits with a start row before the delete; that row fails.
+      faults.failNext('auditLogs', 'create');
+      const failed = await rotate();
+      assert.equal(failed.statusCode, 500, failed.body);
+      assert.deepEqual(faults.pending(), [], 'the intended failure was reached');
+      assert.equal((await target.store.credentials.findById(credentialId))?.status, 'active');
+      assert.equal(keysOf(username), ids.length, 'the key it would have retired still works');
+      assert.equal(await countAudit(AuditAction.CREDENTIAL_REVOKE_START, credentialId), 0);
+
+      const retried = await rotate();
+      assert.equal(retried.statusCode, 200, retried.body);
+      assert.equal((await target.store.credentials.findById(credentialId))?.status, 'revoked');
+      assert.equal(keysOf(username), ids.length);
+      assert.equal(await countAudit(AuditAction.CREDENTIAL_REVOKE_START, credentialId), 1);
+      const start = await detailsOf(AuditAction.CREDENTIAL_REVOKE_START, credentialId);
+      assert.equal(start.operation, 'rotate');
     });
 
     /* ── Plugins ─────────────────────────────────────────────────────────── */
@@ -780,6 +857,48 @@ export function runPrivilegedAuditContract(
       assert.equal(retried.statusCode, 201, retried.body);
       assert.ok(harness.edge.consumerByUsername(username));
       assert.equal(await countAudit(AuditAction.TEST_CONSUMER_CREATE, api.id), 1);
+    });
+
+    it('takes a recreated consumer back down when its repair cannot be recorded', async () => {
+      const session = await accountWithKey();
+      const username = consumerUsernameForUser(session.user.id);
+      // The gateway lost this account's consumer, as a rebuilt Edge would.
+      for (const [key, stored] of [...harness.edge.consumers.entries()]) {
+        if (stored.username === username) harness.edge.consumers.delete(key);
+      }
+      const repair = async () => {
+        const response = await harness.authed(founder, {
+          method: 'POST',
+          url: '/api/admin/gateway/repair',
+          payload: { user_ids: [session.user.id] },
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        const [entry] = response.json<RepairGatewayReferencesResponse>().consumers;
+        assert.ok(entry);
+        return entry;
+      };
+      async function liveKeys(): Promise<number> {
+        const page = await target.store.credentials.list({ user_id: session.user.id });
+        return page.items.filter((row) => row.status === 'active').length;
+      }
+
+      faults.failNext('auditLogs', 'create');
+      const failed = await repair();
+      assert.deepEqual(faults.pending(), [], 'the intended failure was reached');
+      assert.ok(failed.error, 'the repair is reported as failed');
+      // The consumer it recreated under the derived id came back off, so the
+      // repeat still finds an orphan to repair rather than a consumer that is
+      // `present` with nothing to do.
+      assert.equal(harness.edge.consumerByUsername(username), undefined);
+      assert.equal(await liveKeys(), 1, 'the credential mirror rolled back with the row');
+      assert.equal(await countAudit(AuditAction.GATEWAY_CONSUMER_REPAIR, session.user.id), 0);
+
+      const retried = await repair();
+      assert.equal(retried.error, null);
+      assert.equal(retried.credentials_requiring_reissue, 1);
+      assert.ok(harness.edge.consumerByUsername(username), 'the consumer is back');
+      assert.equal(await liveKeys(), 0);
+      assert.equal(await countAudit(AuditAction.GATEWAY_CONSUMER_REPAIR, session.user.id), 1);
     });
 
     it('creates and edits no organization when its audit row fails', async () => {

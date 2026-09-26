@@ -363,7 +363,7 @@ const COMPENSATION_TRAIL =
 const LIVE_DEPLOYMENT_FOLLOW_UP =
   'Not yet moved into its transaction: the deployment is written under the proxy lease ' +
   'inside its own compensated block, and the row follows once both sides agree. A failed ' +
-  'insert leaves the change live and unaudited; tracked as a follow-up to #389.';
+  'insert leaves the change live and unaudited; tracked in #400.';
 
 /**
  * Every audit action, classified. Deny by default: the mapped type makes an

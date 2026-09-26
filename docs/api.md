@@ -3017,9 +3017,12 @@ callers using the old secret start receiving 401 as soon as gateway
 configuration propagates. **When the account is already at the per-type cap
 there is no room to append**, so the old entry is deleted first — and marked
 `revoked` the moment Edge confirms it — leaving a brief window with no working
-credential of that type. If the append then fails, the response says so plainly
-(`502 EDGE_ERROR`, _the previous credential was removed … issue a new
-credential_); everything still live stays revocable.
+credential of that type. That delete cannot be undone, so its move to `retiring`
+commits with a `credential.revoke_start` audit row (`operation: "rotate"`)
+before it is attempted, as a revocation's does; if that row cannot be written
+the rotation stops with nothing changed. If the append then fails, the response
+says so plainly (`502 EDGE_ERROR`, _the previous credential was removed … issue
+a new credential_); everything still live stays revocable.
 
 For a caller-visible cutover, issue a new credential, deploy it, then revoke
 the old one — provided the account is below `FERRUM_MAX_CREDENTIALS_PER_TYPE`.

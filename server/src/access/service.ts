@@ -500,6 +500,33 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
   }
 
   /**
+   * Put a claimed grant — and the request the claim moved with it — back the
+   * way it was before the revocation, each under compare-and-set. Returns
+   * whether the grant went back. Re-runnable: a re-run finds nothing left in
+   * `revoked` to move.
+   */
+  async function restoreRevoked(
+    db: NexusStore,
+    grant: GrantRecord,
+    request: AccessRequestRecord | null,
+  ): Promise<boolean> {
+    const back = await db.grants.updateIfStatus(grant.id, 'revoked', {
+      status: 'active',
+      revoked_by: null,
+      revoked_at: null,
+    });
+    if (back && request) {
+      await db.accessRequests.updateIfStatus(request.id, 'revoked', {
+        status: request.status,
+        decided_by: request.decided_by,
+        decided_at: request.decided_at,
+        decision_note: request.decision_note,
+      });
+    }
+    return back !== null;
+  }
+
+  /**
    * Undo a revocation the gateway would not accept.
    *
    * The mirror of {@link unwindApproval}, and it exists for the mirror reason.
@@ -536,20 +563,7 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     // never left reading as revoked in the trail.
     try {
       await store.transaction(async (tx) => {
-        const back = await tx.grants.updateIfStatus(grant.id, 'revoked', {
-          status: 'active',
-          revoked_by: null,
-          revoked_at: null,
-        });
-        if (back && request) {
-          await tx.accessRequests.updateIfStatus(request.id, 'revoked', {
-            status: request.status,
-            decided_by: request.decided_by,
-            decided_at: request.decided_at,
-            decision_note: request.decision_note,
-          });
-        }
-        details.grant_restored = back !== null;
+        details.grant_restored = await restoreRevoked(tx, grant, request);
         await audit
           .forStore(tx)
           .record(
@@ -561,17 +575,43 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
           );
       });
     } catch (error) {
-      // Nothing went back — the grant is still `revoked` while its group may
-      // be live. Best-effort from here: the caller re-throws the gateway
-      // failure, and this row is the trail of the unrestored grant.
-      details.grant_restored = false;
+      // Nothing went back with it. Whatever failed — the rollback row's
+      // insert, or the lease fence refusing a revocation that stalled past its
+      // TTL — the restore must not go down with it: a grant left `revoked`
+      // while its group is still on the consumer is working access the portal
+      // shows as withdrawn, with nothing to repair it, whereas a missing
+      // rollback row is only a gap in the trail. So the restore is retried on
+      // its own, as bare compare-and-sets outside any transaction and so
+      // outside the fence: the grant goes back only from `revoked`, and never
+      // over an active grant a newer approval committed for the same identity
+      // (the partial unique index refuses that).
       deps.log?.(
         {
           grant_id: grant.id,
           error: error instanceof Error ? error.message : String(error),
         },
-        'Could not return a failed revocation to active',
+        'Could not return a failed revocation to active with its rollback row; retrying alone',
       );
+      try {
+        details.grant_restored = await restoreRevoked(store, grant, request);
+      } catch (retryError) {
+        details.grant_restored = false;
+        deps.log?.(
+          {
+            grant_id: grant.id,
+            error: retryError instanceof Error ? retryError.message : String(retryError),
+          },
+          'Could not return a failed revocation to active',
+        );
+      }
+      // A combined write whose acknowledgement was lost may have committed
+      // after all, in which case the retry finds the grant already back.
+      if (details.grant_restored === false) {
+        const current = await store.grants.findById(grant.id).catch(() => null);
+        details.grant_restored = current?.status === 'active';
+      }
+      // Best-effort from here: the caller re-throws the gateway failure, and
+      // this row is the trail of whichever way the restore went.
       await audit
         .record(
           { id: actor.id, role: actor.role },

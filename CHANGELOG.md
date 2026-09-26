@@ -249,7 +249,16 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   or only best-effort, commits a new intent row first: `api.plugin_remove_start`
   before a palette plugin's config is deleted, and `credential.revoke_start`
   with a credential's move to `retiring`; a failed completion leaves the row
-  for the repeat, which records it. The god-mode sweep's `access.revoke` rows now commit
+  for the repeat, which records it; a rotation at the per-type cap, which deletes
+  the old key before appending its replacement, commits a
+  `credential.revoke_start` row with `operation: "rotate"` the same way, and a
+  rollback of its replacement names the retired key. A revocation the gateway
+  refused still puts the grant back when its `access.revoke_rollback` row cannot
+  be written (or the lease fence refuses the combined write), recording the row
+  best-effort afterwards, and a consumer repair that cannot commit deletes the
+  consumer it recreated, so a repeat repairs it rather than finding it present.
+  The revision and restore rows still recorded after the commit are tracked
+  in #400. The god-mode sweep's `access.revoke` rows now commit
   with each grant's claim, so a gateway refusal is reported in
   `god.disable_user_complete`'s `failed_grants` rather than on the row, and the
   `audit` failure stage is gone. A repeated application, API or plugin removal
@@ -262,8 +271,10 @@ All notable changes to Ferrum Nexus are documented here. The format follows
   `intent` or `post_commit` (with its reason) in `AUDIT_COMMIT_CLASSES`, and the
   source scan is deny-by-default: an unclassified action does not compile, and
   it also fails a record that is not directly awaited, is `.catch`ed or sits in
-  a swallowing `try`, a transactional record in a callback that writes nothing
-  else, and aliased imports of the audit module.
+  a swallowing `try` (including a `catch` that can return before it rethrows),
+  a transactional record in a callback that writes nothing else, aliased
+  imports of the audit module, and a transaction hook bound, passed or
+  destructured under another name.
 
 ## [0.1.0] - 2026-09-25
 

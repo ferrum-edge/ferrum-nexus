@@ -115,6 +115,7 @@ import type { NexusStore, UserRecord } from '../db/store.js';
 import type { FerrumAdminClient } from '../ferrum-admin/index.js';
 import { edgeUnavailable, forbidden, validationFailed } from '../lib/errors.js';
 import { apiRestoreLockKey } from '../lib/keyed-serializer.js';
+import { isLeaseLost } from '../lib/lease-fence.js';
 import type { NotificationsService } from '../notifications/service.js';
 
 /** Credential rows whose gateway entry is supposed to still exist. */
@@ -463,7 +464,7 @@ export function createGatewayReconciliationService(
               return { kind: 'present', consumerId: staleId } as const;
             }
 
-            const { consumer } = await edge.consumers.ensure(
+            const { consumer, created } = await edge.consumers.ensure(
               {
                 username: row.ferrum_username,
                 // The id the username names: the application for an
@@ -481,7 +482,7 @@ export function createGatewayReconciliationService(
             // insert left the relink and the revocations applied and
             // unaudited behind a failed repair, and a repeat found the
             // consumer present and nothing to record.
-            const revoked = await store.transaction(async (tx) => {
+            const relink = store.transaction(async (tx) => {
               if (consumer.id !== staleId) {
                 await tx.consumers.update(row.id, { ferrum_consumer_id: consumer.id });
               }
@@ -515,6 +516,33 @@ export function createGatewayReconciliationService(
                 ip,
               );
               return ids;
+            });
+            const revoked = await relink.catch(async (error: unknown) => {
+              // Nothing of the portal half committed, so the consumer this
+              // attempt recreated must not outlive it. Recreated under the
+              // same derived id, it is exactly what a repeat reads as
+              // `present` — nothing to repair — while the credential rows
+              // stay `active` against an empty consumer and the repair goes
+              // unaudited. Taking it back down leaves the orphan the next pass
+              // reports, and a repeat repairs it whole. Only a consumer this
+              // attempt created, and not when the lease fence refused the
+              // commit: another instance holds the keys by then, and may
+              // already be issuing onto the consumer it found.
+              if (created && !isLeaseLost(error)) {
+                await edge.consumers.delete(consumer.id, actor.id).catch((undoError: unknown) => {
+                  log(
+                    {
+                      user_id: orphan.user_id,
+                      namespace,
+                      consumer_id: consumer.id,
+                      error: errorMessage(undoError),
+                    },
+                    'A failed consumer repair could not delete the consumer it recreated; its ' +
+                      'credential rows still name keys the gateway does not hold',
+                  );
+                });
+              }
+              throw error;
             });
 
             return { kind: 'repaired', consumerId: consumer.id, revoked } as const;

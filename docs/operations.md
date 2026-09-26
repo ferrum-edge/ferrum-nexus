@@ -2717,9 +2717,12 @@ For each orphaned account it:
    already held;
 3. replays the `nexus:api:<api_id>:approved` ACL groups from the portal's own
    `active` grants, so approvals granted before the change work again;
-4. re-links the `consumers` row and moves every live `credential_metadata` row
-   for the old consumer to `revoked`, in one transaction;
-5. writes a `gateway.consumer_repair` audit row and notifies the account holder.
+4. re-links the `consumers` row, moves every live `credential_metadata` row
+   for the old consumer to `revoked` and writes the `gateway.consumer_repair`
+   audit row, in one transaction — if that transaction fails, a consumer step 2
+   created is deleted again, so the next pass still reports the orphan and a
+   repeat repairs it whole rather than finding it `present`;
+5. notifies the account holder.
 
 **Credentials cannot be recovered and are not replaced.** They are show-once by
 design: Nexus stores a SHA-256 fingerprint and the last four characters, never

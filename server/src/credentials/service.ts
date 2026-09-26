@@ -1269,6 +1269,8 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     fingerprint: string;
     last4: string;
     operation: 'issue' | 'rotate';
+    /** See `appendCredential`'s `retiredCredentialId`. */
+    retiredCredentialId: Uuid | null;
     ownerId: Uuid;
     actor: { id: Uuid; role: Role };
     cause: unknown;
@@ -1291,6 +1293,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
       operation: input.operation,
       // The row is written after the append, so there is none to name.
       strandedCredentialId: null,
+      retiredCredentialId: input.retiredCredentialId,
       last4: input.last4,
       appendIndex: input.appendIndex,
       ...(withdrawal.arrayAsAppended ? {} : { suspected: true }),
@@ -1470,6 +1473,12 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
     appendIndex?: number;
     /** Which operation to name in that audit row. */
     operation?: 'issue' | 'rotate';
+    /**
+     * The credential a rotation at the cap already took off the gateway to
+     * make room for this append, named in any rollback row: its secret is
+     * gone whatever becomes of the replacement.
+     */
+    retiredCredentialId?: Uuid | null;
     ip?: string | null;
     /** See {@link IssueForConsumerInput.recordWithRow}. */
     recordWithRow?: (tx: NexusStore, credential: CredentialRecord) => Promise<void>;
@@ -1492,6 +1501,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           fingerprint,
           last4: last4(generated.material),
           operation: input.operation ?? 'issue',
+          retiredCredentialId: input.retiredCredentialId ?? null,
           ownerId: input.ownerId,
           actor: { id: input.actorId, role: input.actorRole },
           cause: error,
@@ -1550,6 +1560,7 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           // The row is what failed to be written, so there is none to name.
           // What names the entry instead is where it went and what it ends in.
           strandedCredentialId: null,
+          retiredCredentialId: input.retiredCredentialId ?? null,
           last4: last4(generated.material),
           appendIndex: input.appendIndex,
           ownerId: input.ownerId,
@@ -2130,8 +2141,28 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           // The intent before the act. `retiring` is durable, still counts as
           // a live slot, and is what {@link settleLostRetirement} resolves if
           // the delete lands and its acknowledgement does not — the case where
-          // no local write follows the delete at all.
-          await store.credentials.update(current.id, { status: 'retiring' });
+          // no local write follows the delete at all. Recorded with it, as a
+          // revocation's is, because the delete cannot be rolled back and the
+          // previous secret is gone for good once it lands: a rotation whose
+          // replacement never arrives still leaves a row naming who took the
+          // old key away, and one whose start could not be recorded stops
+          // here with nothing changed.
+          await store.transaction(async (tx) => {
+            await tx.credentials.update(current.id, { status: 'retiring' });
+            await audit.forStore(tx).record(
+              { id: user.id, role: user.role },
+              AuditAction.CREDENTIAL_REVOKE_START,
+              { type: 'credential', id: current.id },
+              {
+                credential_type: type,
+                consumer_id: consumerId,
+                last4: current.last4,
+                operation: 'rotate',
+                ...(current.user_id === user.id ? {} : { owner_user_id: current.user_id }),
+              },
+              ip,
+            );
+          });
           try {
             await removeAt(consumerId, type, position, user.id);
           } catch (error) {
@@ -2184,10 +2215,12 @@ export function createCredentialsService(deps: CredentialsServiceDeps): Credenti
           ip,
           // At the cap the old entry is already gone, so the replacement's row
           // is the last write of the rotation and its audit row commits with
-          // it. Append-first records it with the retirement below instead.
+          // it, and a rollback row names the credential whose slot it took.
+          // Append-first records it with the retirement below instead.
           ...(appendFirst
             ? {}
             : {
+                retiredCredentialId: current.id,
                 recordWithRow: async (tx: NexusStore, replacement: CredentialRecord) => {
                   await audit
                     .forStore(tx)
