@@ -23,6 +23,10 @@
  *    transaction that moves the row and records it together (issue #409).
  *    The fence alone keeps a refused withdrawal's row `retiring`, and the
  *    retry that commits is the one that moved and recorded it (issue #413).
+ * 7. A revocation rollback that an account disable overtook leaves the grant
+ *    `revoked` rather than handing a later re-enable its group back, both in
+ *    the combined transaction and in the retry after a fence refusal
+ *    (issue #420).
  */
 
 import assert from 'node:assert/strict';
@@ -803,6 +807,125 @@ describe('lease refusals and lost acknowledgements after the audit move (#402)',
     const retried = await revoke(grantId);
     assert.equal(retried.statusCode, 200, retried.body);
     assert.equal((await harness.store.grants.findById(grantId))?.status, 'revoked');
+  });
+
+  /* ── 7: a rollback that an account disable overtook (issue #420) ─────── */
+
+  /**
+   * Run `disable` the first time the revocation reaches the gateway — after its
+   * claim committed, before its ACL removal — then make the gateway refuse
+   * that removal.
+   */
+  function disableBeforeRemoval(userId: string, disable: () => Promise<void>): () => boolean {
+    const provisioner = harness.services.credentials.provisioner;
+    const mutate = provisioner.mutateAclGroups.bind(provisioner);
+    let disabled = false;
+    provisioner.mutateAclGroups = async (...args) => {
+      if (!disabled) {
+        disabled = true;
+        await disable();
+        refuseNextConsumerWrite(userId);
+      }
+      return mutate(...args);
+    };
+    restorePatches.push(() => {
+      provisioner.mutateAclGroups = mutate;
+    });
+    return () => disabled;
+  }
+
+  async function reenable(userId: string): Promise<void> {
+    const enabled = await harness.authed(superAdmin, {
+      method: 'PATCH',
+      url: `/api/users/${userId}`,
+      payload: { status: 'active' },
+    });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+  }
+
+  async function rollbackOf(grantId: string): Promise<Record<string, unknown> | undefined> {
+    const rows = (await harness.auditRows(AuditAction.ACCESS_REVOKE_ROLLBACK)).filter(
+      (row) => row.target_id === grantId,
+    );
+    assert.equal(rows.length, 1);
+    return rows[0]?.details;
+  }
+
+  it('leaves a refused revocation revoked when a disable sweep ran meanwhile', async () => {
+    const { session, apiId, grantId } = await grantee();
+    const group = aclGroupForApi(apiId);
+    // A super admin disables the account and sweeps its grants while the
+    // revocation is on its way to the gateway. The sweep skips the grant,
+    // which the revocation has already claimed, and the teardown strips the
+    // account's groups.
+    const disabled = disableBeforeRemoval(session.user.id, async () => {
+      const response = await harness.authed(superAdmin, {
+        method: 'POST',
+        url: '/api/admin/god/disable-user',
+        payload: { user_id: session.user.id, reason: 'Interleaved', revoke_grants: true },
+      });
+      assert.equal(response.statusCode, 200, response.body);
+    });
+
+    const failed = await revoke(grantId);
+    assert.ok(disabled(), 'the account was disabled while the revocation was in flight');
+    assert.equal(failed.statusCode, 502, failed.body);
+
+    // The rollback does not hand the disabled account its grant back.
+    const grant = await harness.store.grants.findById(grantId);
+    assert.equal(grant?.status, 'revoked');
+    if (grant?.access_request_id) {
+      const request = await harness.store.accessRequests.findById(grant.access_request_id);
+      assert.equal(request?.status, 'revoked');
+    }
+    assert.ok(!(groupsOf(session.user.id) ?? []).includes(group));
+    const rollback = await rollbackOf(grantId);
+    assert.equal(rollback?.grant_restored, false);
+    assert.equal(rollback?.restore_skipped_reason, 'grantee_disabled');
+    assert.ok(logged('its grantee is no longer active'));
+
+    // So a re-enable, which rebuilds the groups from active grants, leaves it off.
+    await reenable(session.user.id);
+    assert.equal((await harness.store.grants.findById(grantId))?.status, 'revoked');
+    assert.ok(!(groupsOf(session.user.id) ?? []).includes(group));
+  });
+
+  it('leaves it revoked when the fence refuses the rollback of a disabled grantee', async () => {
+    const { session, apiId, proxyId, grantId } = await grantee();
+    const key = `proxy:${proxyId}`;
+    const group = aclGroupForApi(apiId);
+    // The account is disabled while the revocation is in flight, and the
+    // revocation then stalls past the TTL, so another instance takes the
+    // proxy key and the rollback is retried alone outside it.
+    const disabled = disableBeforeRemoval(session.user.id, async () => {
+      const response = await harness.authed(superAdmin, {
+        method: 'PATCH',
+        url: `/api/users/${session.user.id}`,
+        payload: { status: 'disabled' },
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      await takeOver(key);
+    });
+
+    const failed = await revoke(grantId);
+    assert.ok(disabled(), 'the account was disabled while the revocation was in flight');
+    assert.equal(failed.statusCode, 502, failed.body);
+    assert.equal(
+      await harness.store.leases.release(key, OTHER_INSTANCE),
+      true,
+      "the stale rollback left the new holder's lease alone",
+    );
+    assert.ok(logged('retrying alone'), 'the fence refused the combined rollback');
+
+    // The retry re-reads the grantee too, and leaves the grant revoked.
+    assert.equal((await harness.store.grants.findById(grantId))?.status, 'revoked');
+    const rollback = await rollbackOf(grantId);
+    assert.equal(rollback?.grant_restored, false);
+    assert.equal(rollback?.restore_skipped_reason, 'grantee_disabled');
+
+    await reenable(session.user.id);
+    assert.equal((await harness.store.grants.findById(grantId))?.status, 'revoked');
+    assert.ok(!(groupsOf(session.user.id) ?? []).includes(group));
   });
 
   /* ── 2: a retirement whose delete provably never applied ──────────────── */

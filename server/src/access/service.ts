@@ -81,6 +81,15 @@
  * group the account's identities hold. A re-enable that cancels that teardown
  * before it has run rebuilds the approval groups from active grants alone, so
  * the group cannot outlive both.
+ *
+ * A targeted revocation's rollback respects the same rule. The sweep skips a
+ * grant a targeted revocation has already claimed, so were that revocation's
+ * gateway step to fail after the account was disabled, a rollback putting the
+ * grant back would hand the next re-enable the access the disable withdrew.
+ * The rollback therefore re-reads the grantee, under the account's lifecycle
+ * key and in the transaction that would restore the grant, and leaves the
+ * grant `revoked` when the account is no longer active — the teardown takes
+ * the group off, and the rollback row says why nothing went back.
  */
 
 import {
@@ -121,8 +130,13 @@ import {
   notFound,
   validationFailed,
 } from '../lib/errors.js';
-import { accessRequestBudgetLockKey, type KeyedSerializer } from '../lib/keyed-serializer.js';
+import {
+  accessRequestBudgetLockKey,
+  userLifecycleLockKey,
+  type KeyedSerializer,
+} from '../lib/keyed-serializer.js';
 import { newId, nowIso } from '../lib/ids.js';
+import { isLeaseLost, outsideHeldLeases } from '../lib/lease-fence.js';
 import type { NotificationsService } from '../notifications/service.js';
 import { presentApiSummary, type GatewayUrlSource } from '../publishing/present.js';
 import {
@@ -259,6 +273,21 @@ export interface BulkRevocationResult {
   failed: BulkRevocationFailure[];
 }
 
+/**
+ * Why a revocation rollback left the grant it claimed `revoked`: the grantee's
+ * account is disabled or gone, or the application holding the grant is.
+ * Recorded as `restore_skipped_reason` on `access.revoke_rollback`.
+ */
+type RevocationRestoreSkip = 'grantee_disabled' | 'grantee_missing' | 'application_missing';
+
+/** What a revocation rollback did with the grant it claimed. */
+interface RevocationRestore {
+  /** Whether the grant went back to `active`. */
+  restored: boolean;
+  /** Set when the grant still carried the claim and was deliberately left `revoked`. */
+  skipped: RevocationRestoreSkip | null;
+}
+
 /** Rolling window for the per-account access-request budget. */
 export const ACCESS_REQUEST_BUDGET_WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -278,12 +307,20 @@ export interface AccessServiceDeps {
   settings: GatewayUrlSource;
   /** Serialises the rolling daily access-request budget per requester. */
   locks: KeyedSerializer;
+  /**
+   * The store-level serializer the users and god-mode services take
+   * {@link userLifecycleLockKey} on. A revocation rollback restores a grant
+   * under its grantee's key, so the restore and an account disable are
+   * ordered on every instance.
+   */
+  lifecycleLocks: KeyedSerializer;
   log?: (obj: Record<string, unknown>, message: string) => void;
 }
 
 /** Build the access service. */
 export function createAccessService(deps: AccessServiceDeps): AccessService {
   const { config, store, edge, audit, notifications, email, provisioner, settings, locks } = deps;
+  const { lifecycleLocks } = deps;
   const namespace = config.edge.namespace;
 
   function userSummary(user: UserRecord): UserSummary {
@@ -500,17 +537,64 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
   }
 
   /**
+   * Why a grant this revocation still holds must stay `revoked`, or `null`
+   * when its grantee is still entitled to it.
+   *
+   * Read through `db`, inside the transaction that would restore the grant, so
+   * the answer and the restore commit together. An application's grant is
+   * held by its owner's account, so it is the owner that has to be active; a
+   * `disabled` application does not stop it, because disabling one revokes
+   * nothing and leaves its groups on its consumer.
+   */
+  async function restoreRefusal(
+    db: NexusStore,
+    grant: GrantRecord,
+  ): Promise<RevocationRestoreSkip | null> {
+    const owner = await db.users.findById(grant.user_id);
+    if (!owner) return 'grantee_missing';
+    if (owner.status !== 'active') return 'grantee_disabled';
+    if (grant.application_id) {
+      const application = await db.applications.findById(grant.application_id);
+      if (!application || application.owner_user_id !== grant.user_id) {
+        return 'application_missing';
+      }
+    }
+    return null;
+  }
+
+  /**
    * Put a claimed grant — and the request the claim moved with it — back the
-   * way it was before the revocation, each under compare-and-set. Returns
-   * whether the grant went back. Re-runnable: a re-run finds nothing left in
-   * `revoked` to move.
+   * way it was before the revocation, each under compare-and-set.
+   *
+   * `claim` is the row as this revocation's claim left it. Only that claim is
+   * undone: a grant that has since been put back, or put back and revoked
+   * again by somebody else, no longer carries its `revoked_at`/`revoked_by`
+   * and is left alone. Nor is a grant whose grantee is no longer active put
+   * back ({@link restoreRefusal}): the account's disable either swept its
+   * grants or will be rebuilt from the active ones on a re-enable, and an
+   * `active` grant restored behind it would hand that re-enable the access
+   * this revocation was withdrawing. The account teardown that follows the
+   * disable takes the group off.
+   *
+   * Re-runnable: a re-run finds nothing left in `revoked` to move.
    */
   async function restoreRevoked(
     db: NexusStore,
-    grant: GrantRecord,
+    claim: GrantRecord,
     request: AccessRequestRecord | null,
-  ): Promise<boolean> {
-    const back = await db.grants.updateIfStatus(grant.id, 'revoked', {
+  ): Promise<RevocationRestore> {
+    const current = await db.grants.findById(claim.id);
+    if (
+      !current ||
+      current.status !== 'revoked' ||
+      current.revoked_at !== claim.revoked_at ||
+      current.revoked_by !== claim.revoked_by
+    ) {
+      return { restored: false, skipped: null };
+    }
+    const skipped = await restoreRefusal(db, current);
+    if (skipped) return { restored: false, skipped };
+    const back = await db.grants.updateIfStatus(claim.id, 'revoked', {
       status: 'active',
       revoked_by: null,
       revoked_at: null,
@@ -523,7 +607,28 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         decision_note: request.decision_note,
       });
     }
-    return back !== null;
+    return { restored: back !== null, skipped: null };
+  }
+
+  /**
+   * Restore `claim` in a transaction of its own, under its grantee's
+   * lifecycle key — the key every account status flip commits under — so no
+   * disable can land between the grantee check and the restore on any
+   * instance. The transaction is fenced by that key and by whatever lease the
+   * caller holds.
+   */
+  function restoreUnderLifecycle<T>(
+    claim: GrantRecord,
+    body: (tx: NexusStore) => Promise<T>,
+  ): Promise<T> {
+    return lifecycleLocks(userLifecycleLockKey(claim.user_id), () => store.transaction(body));
+  }
+
+  /** Copy a restore's outcome onto an `access.revoke_rollback` row's details. */
+  function recordRestore(details: Record<string, unknown>, outcome: RevocationRestore): void {
+    details.grant_restored = outcome.restored;
+    if (outcome.skipped) details.restore_skipped_reason = outcome.skipped;
+    else delete details.restore_skipped_reason;
   }
 
   /**
@@ -539,22 +644,25 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
    * Both halves go back under compare-and-set, so a revocation that lost a
    * later race — somebody re-approved the API in the meantime, and a new
    * active grant now owns the partial unique index — is recorded as unrestored
-   * rather than forced. Every step is best-effort: the caller re-throws the
-   * original gateway failure and an operator needs the trail either way.
+   * rather than forced. A grant whose grantee was disabled in the meantime is
+   * not put back at all (see {@link restoreRevoked}), and the row says why.
+   * Every step is best-effort: the caller re-throws the original gateway
+   * failure and an operator needs the trail either way.
    */
   async function unwindRevocation(input: {
     actor: UserRecord;
-    grant: GrantRecord;
+    /** The grant as this revocation's claim left it. */
+    claim: GrantRecord;
     /** The originating request this revocation moved, or `null` if it moved none. */
     request: AccessRequestRecord | null;
     cause: unknown;
     ip: string | null;
   }): Promise<void> {
-    const { actor, grant, request, cause, ip } = input;
+    const { actor, claim, request, cause, ip } = input;
     const details: Record<string, unknown> = {
-      api_id: grant.api_id,
-      user_id: grant.user_id,
-      acl_group: grant.acl_group,
+      api_id: claim.api_id,
+      user_id: claim.user_id,
+      acl_group: claim.acl_group,
       cause: cause instanceof Error ? cause.message : String(cause),
     };
 
@@ -564,14 +672,14 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     // so that a failure below can tell whether it committed after all.
     const rollbackId = newId();
     try {
-      await store.transaction(async (tx) => {
-        details.grant_restored = await restoreRevoked(tx, grant, request);
+      await restoreUnderLifecycle(claim, async (tx) => {
+        recordRestore(details, await restoreRevoked(tx, claim, request));
         await audit
           .forStore(tx)
           .record(
             { id: actor.id, role: actor.role },
             AuditAction.ACCESS_REVOKE_ROLLBACK,
-            { type: 'grant', id: grant.id },
+            { type: 'grant', id: claim.id },
             details,
             ip,
             { id: rollbackId },
@@ -580,14 +688,14 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
     } catch (error) {
       // Read back by the id minted above; unreadable, it answers `false` and
       // the restore is retried, which is safe because it is a compare-and-set.
-      if (await auditRowCommitted(store, { type: 'grant', id: grant.id }, rollbackId)) {
+      if (await auditRowCommitted(store, { type: 'grant', id: claim.id }, rollbackId)) {
         // The transaction committed and only its acknowledgement was lost:
         // the grant is back and its row says so. Restoring again would act
         // on whatever has happened to the grant since — a new revocation's
         // claim — and a second row would record one rollback twice.
         deps.log?.(
           {
-            grant_id: grant.id,
+            grant_id: claim.id,
             error: error instanceof Error ? error.message : String(error),
           },
           'A failed revocation was returned to active, though its acknowledgement was lost',
@@ -599,43 +707,63 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         // while its group is still on the consumer is working access the portal
         // shows as withdrawn, with nothing to repair it, whereas a missing
         // rollback row is only a gap in the trail. So the restore is retried on
-        // its own, as bare compare-and-sets outside any transaction and so
-        // outside the fence: the grant goes back only from `revoked`, and never
-        // over an active grant a newer approval committed for the same identity
-        // (the partial unique index refuses that).
+        // its own, without the row, in a transaction of its own under the
+        // grantee's lifecycle key: the grant goes back only from this claim,
+        // only while its grantee is active, and never over an active grant a
+        // newer approval committed for the same identity (the partial unique
+        // index refuses that).
         deps.log?.(
           {
-            grant_id: grant.id,
+            grant_id: claim.id,
             error: error instanceof Error ? error.message : String(error),
           },
           'Could not return a failed revocation to active with its rollback row; retrying alone',
         );
-        try {
-          details.grant_restored = await restoreRevoked(store, grant, request);
-        } catch (retryError) {
-          details.grant_restored = false;
-          deps.log?.(
-            {
-              grant_id: grant.id,
-              error: retryError instanceof Error ? retryError.message : String(retryError),
-            },
-            'Could not return a failed revocation to active',
-          );
+        let outcome: RevocationRestore = { restored: false, skipped: null };
+        // Fenced by this revocation's proxy lease while it still holds it. Once
+        // the fence has refused — the lease changed hands while the revocation
+        // stalled — a fenced retry could only be refused again, so it runs
+        // outside that lease, fenced by the lifecycle key alone: the
+        // compare-and-sets above are what keep it off whatever the new holder
+        // did. Any other refusal, a unique-index one included, is not retried
+        // again and leaves the grant unrestored for an operator to investigate.
+        let unfenced = isLeaseLost(error);
+        for (;;) {
+          const retry = (): Promise<RevocationRestore> =>
+            restoreUnderLifecycle(claim, (tx) => restoreRevoked(tx, claim, request));
+          try {
+            outcome = await (unfenced ? outsideHeldLeases(retry) : retry());
+            break;
+          } catch (retryError) {
+            if (!unfenced && isLeaseLost(retryError)) {
+              unfenced = true;
+              continue;
+            }
+            deps.log?.(
+              {
+                grant_id: claim.id,
+                error: retryError instanceof Error ? retryError.message : String(retryError),
+              },
+              'Could not return a failed revocation to active',
+            );
+            break;
+          }
         }
         // Had the lookup above failed, a combined write whose acknowledgement
         // was lost may have committed after all, in which case the retry finds
         // the grant already back.
-        if (details.grant_restored === false) {
-          const current = await store.grants.findById(grant.id).catch(() => null);
-          details.grant_restored = current?.status === 'active';
+        if (!outcome.restored && outcome.skipped === null) {
+          const current = await store.grants.findById(claim.id).catch(() => null);
+          outcome = { restored: current?.status === 'active', skipped: null };
         }
+        recordRestore(details, outcome);
         // Best-effort from here: the caller re-throws the gateway failure, and
         // this row is the trail of whichever way the restore went.
         await audit
           .record(
             { id: actor.id, role: actor.role },
             AuditAction.ACCESS_REVOKE_ROLLBACK,
-            { type: 'grant', id: grant.id },
+            { type: 'grant', id: claim.id },
             details,
             ip,
           )
@@ -643,7 +771,12 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
       }
     }
 
-    deps.log?.(details, 'Rolled back a revocation the gateway would not accept');
+    deps.log?.(
+      details,
+      details.restore_skipped_reason
+        ? 'Left a failed revocation revoked: its grantee is no longer active'
+        : 'Rolled back a revocation the gateway would not accept',
+    );
   }
 
   /**
@@ -1339,7 +1472,13 @@ export function createAccessService(deps: AccessServiceDeps): AccessService {
         try {
           if (grantee) await setGroupMembership(grantee, api.id, false, grant.application_id);
         } catch (error) {
-          await unwindRevocation({ actor, grant, request: movedRequest, cause: error, ip });
+          await unwindRevocation({
+            actor,
+            claim: updated,
+            request: movedRequest,
+            cause: error,
+            ip,
+          });
           throw error;
         }
 

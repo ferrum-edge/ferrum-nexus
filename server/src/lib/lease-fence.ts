@@ -105,6 +105,19 @@ export async function holdingLease<T>(
   }
 }
 
+/**
+ * Run `fn` as though the caller held no lease: a transaction it opens is not
+ * fenced by the caller's leases, though one `fn` takes itself fences its own.
+ *
+ * Only for a compensation that must still land after the caller's lease
+ * changed hands, and whose own compare-and-sets already keep it off whatever
+ * the new holder did — a revocation rollback, whose ACL group is still on the
+ * consumer.
+ */
+export function outsideHeldLeases<T>(fn: () => Promise<T>): Promise<T> {
+  return held.run([], fn);
+}
+
 /** The leases the calling async context holds right now, ordered by key. */
 export function heldLeaseFences(): readonly LeaseFence[] {
   const stack = held.getStore();

@@ -487,6 +487,7 @@ export async function buildServer(
     provisioner,
     settings,
     locks: sendLocks,
+    lifecycleLocks: locks,
     log: warn,
   });
   const god = createGodService({
