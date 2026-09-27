@@ -129,6 +129,21 @@ describe('resolved OpenAPI document size', () => {
     });
     assert.equal(parseOpenApiSpec(json).contentType, 'application/json');
   });
+
+  it('refuses deeply nested JSON whose indentation exceeds the limit during parsing', () => {
+    const scalarCount = 1_000_000;
+    const deepArray =
+      '['.repeat(198) +
+      '[' +
+      '0,'.repeat(scalarCount - 1) +
+      '0' +
+      ']'.repeat(199);
+    const minified =
+      '{"openapi":"3.1.0","info":{"title":"Deep","version":"1"},' +
+      `"paths":{},"x-deep":${deepArray}}`;
+    assert.ok(Buffer.byteLength(minified) < MAX_SPEC_BYTES);
+    expectExpandedTooLarge(() => parseOpenApiSpec(minified));
+  });
 });
 
 describe('YAML read as plain data whatever its directive', () => {

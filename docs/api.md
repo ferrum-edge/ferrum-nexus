@@ -1907,11 +1907,14 @@ plain mapping, sequence or string it is written as. Every mapping key must be a
 scalar (or an alias of one); a mapping or sequence used as a key returns
 `400 SPEC_INVALID` with `details: { reason: "non_scalar_key" }`. A parsed value
 that is not a plain object, array or scalar returns
-`details: { reason: "unsupported_node" }`.
+`details: { reason: "unsupported_node" }`. Under the YAML 1.2 core schema,
+`yes`, `no`, `on` and `off` remain strings, and `0777` is read as decimal 777.
+Stored revisions are re-read with the same rules.
 
-The document's text once YAML aliases are resolved — the UTF-8 bytes of every
-mapping key and scalar, counted at every place each occurs — may not exceed
-**4 MiB** (4,194,304 bytes, twice the upload limit). Neither may the document as
+The document's estimated serialized size once YAML aliases are resolved — the
+UTF-8 bytes of every mapping key and scalar, counted at every place each
+occurs, plus per-item indentation — may not exceed **4 MiB** (4,194,304 bytes,
+twice the upload limit). Neither may the document as
 [the catalog serves it](#get-apicatalogslugspec) — JSON indented by two spaces,
 or YAML as the server writes it — so minified JSON or flow-style YAML that
 formats past the limit is refused too. Either returns `400 SPEC_INVALID` with

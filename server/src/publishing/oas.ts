@@ -16,10 +16,11 @@
  *   merge keys, no `!!omap`/`!!set`/`!!binary`/`!!timestamp` types — and every
  *   mapping key must be a scalar, so the parse yields only plain objects,
  *   arrays and scalars, which is all an OpenAPI document is;
- * - its keys and scalars add up to no more than {@link MAX_SPEC_EXPANDED_BYTES}
- *   once YAML aliases are resolved. `MAX_SPEC_BYTES` bounds the upload, but an
- *   alias repeats its anchor at every use, and everything downstream — the
- *   catalog's re-serialization above all — writes each copy out in full;
+ * - its keys and scalars, plus the indentation needed to serialize each
+ *   occurrence, add up to no more than {@link MAX_SPEC_EXPANDED_BYTES} once
+ *   YAML aliases are resolved. `MAX_SPEC_BYTES` bounds the upload, but an alias
+ *   repeats its anchor at every use and serialization writes each copy out in
+ *   full;
  * - `openapi` is a **3.x** version string — Swagger 2.0 (`swagger: "2.0"`) is
  *   rejected, because the gateway-facing fields Nexus reads (`servers`) do not
  *   exist there;
@@ -647,16 +648,17 @@ function scalarBytes(value: unknown): number {
 /**
  * Bound traversal and later serialization without using the JavaScript call
  * stack: nesting past {@link MAX_SPEC_DEPTH}, a cyclic alias, and resolved text
- * past {@link MAX_SPEC_EXPANDED_BYTES}.
+ * plus serialization indentation past {@link MAX_SPEC_EXPANDED_BYTES}.
  *
  * The text is counted per *occurrence*: a YAML alias hands every place that
  * names it the same object or string, and every one of them is written out
  * again when the document is serialized. A subtree is still walked only once —
  * its height and its size are memoised when it completes, and a later
- * occurrence is charged both from the memo — and the running total is checked
- * after every charge, so the walk stops at the first key or scalar past the
- * limit and never measures more than the limit plus that one string. JSON
- * cannot alias, but is counted the same way.
+ * occurrence is charged from the memo. The memo stores raw text bytes, the
+ * number of charged items, and their relative depths, so indentation is
+ * recalculated for each occurrence without re-walking the subtree. The running
+ * total is checked after every charge. JSON cannot alias, but is counted the
+ * same way.
  */
 function assertSpecShape(value: unknown): void {
   if (value === null || typeof value !== 'object') return;
@@ -667,19 +669,30 @@ function assertSpecShape(value: unknown): void {
     children: unknown[];
     childIndex: number;
     maxChildHeight: number;
-    /** Resolved text of this subtree so far. */
+    /** Resolved key and scalar bytes, excluding indentation. */
     bytes: number;
+    /** Number of keys, scalars, and array elements charged in this subtree. */
+    chargedItems: number;
+    /** Sum of charged-item depths relative to this frame's depth. */
+    relativeDepths: number;
+  }
+
+  interface CompletedSize {
+    bytes: number;
+    chargedItems: number;
+    relativeDepths: number;
   }
 
   const active = new WeakSet<object>();
   const completedHeights = new WeakMap<object, number>();
-  const completedBytes = new WeakMap<object, number>();
+  const completedSizes = new WeakMap<object, CompletedSize>();
   const pending: Frame[] = [];
   let total = 0;
 
   const charge = (frame: Frame, bytes: number): void => {
     frame.bytes += bytes;
-    total += bytes;
+    frame.chargedItems += 1;
+    total += bytes + 2 * (frame.depth - 1) + 4;
     if (total > MAX_SPEC_EXPANDED_BYTES) throw expandedTooLarge();
   };
 
@@ -711,9 +724,11 @@ function assertSpecShape(value: unknown): void {
       childIndex: 0,
       maxChildHeight: 0,
       bytes: 0,
+      chargedItems: 0,
+      relativeDepths: 0,
     };
     pending.push(frame);
-    // Array indices are not written out as text; mapping keys are.
+    // Mapping keys are text; array elements are charged when visited below.
     if (!Array.isArray(entryValue)) {
       for (const key of Object.keys(entryValue)) charge(frame, byteLength(key));
     }
@@ -724,6 +739,7 @@ function assertSpecShape(value: unknown): void {
     const frame = pending[pending.length - 1]!;
     if (frame.childIndex < frame.children.length) {
       const child = frame.children[frame.childIndex++];
+      if (Array.isArray(frame.value)) charge(frame, 0);
       if (child === null || typeof child !== 'object') {
         charge(frame, scalarBytes(child));
         continue;
@@ -742,7 +758,17 @@ function assertSpecShape(value: unknown): void {
           });
         }
         frame.maxChildHeight = Math.max(frame.maxChildHeight, completedHeight);
-        charge(frame, completedBytes.get(child) ?? 0);
+        const size = completedSizes.get(child);
+        if (size) {
+          total +=
+            size.bytes +
+            size.chargedItems * (2 * frame.depth + 4) +
+            2 * size.relativeDepths;
+          if (total > MAX_SPEC_EXPANDED_BYTES) throw expandedTooLarge();
+          frame.bytes += size.bytes;
+          frame.chargedItems += size.chargedItems;
+          frame.relativeDepths += size.relativeDepths + size.chargedItems;
+        }
         continue;
       }
       push(child, frame.depth + 1);
@@ -751,7 +777,12 @@ function assertSpecShape(value: unknown): void {
 
     const height = frame.maxChildHeight + 1;
     completedHeights.set(frame.value, height);
-    completedBytes.set(frame.value, frame.bytes);
+    const size = {
+      bytes: frame.bytes,
+      chargedItems: frame.chargedItems,
+      relativeDepths: frame.relativeDepths,
+    };
+    completedSizes.set(frame.value, size);
     active.delete(frame.value);
     pending.pop();
     const parent = pending[pending.length - 1];
@@ -759,6 +790,8 @@ function assertSpecShape(value: unknown): void {
       parent.maxChildHeight = Math.max(parent.maxChildHeight, height);
       // Already in `total`: only the parent's own subtree size grows.
       parent.bytes += frame.bytes;
+      parent.chargedItems += frame.chargedItems;
+      parent.relativeDepths += frame.relativeDepths + frame.chargedItems;
     }
   }
 }
@@ -1092,14 +1125,12 @@ export function renderCatalogSpec(
  * revision, a rollback or a diff preview — which must also be one the catalog
  * will serve.
  *
- * The parse-time count sees keys and scalars, not the indentation, quoting and
- * line breaks serialization adds, so minified JSON or flow-style YAML inside
- * `MAX_SPEC_BYTES` can still pretty-print past
- * {@link MAX_SPEC_EXPANDED_BYTES}. The catalog refuses to serve such a
- * rendering; refusing the upload here keeps the two in agreement. The document
- * is measured before the catalog rewrites its `servers`, which replaces lists
- * of URLs with one URL and does not materially change the size; the catalog
- * still checks its own output for rows stored before this check existed.
+ * The parse-time walk charges indentation before serialization, and this render
+ * check remains the backstop for quoting and line breaks. The catalog refuses
+ * to serve a rendering over {@link MAX_SPEC_EXPANDED_BYTES}; the catalog check
+ * also refuses (fails closed for) the rare document the server-URL rewrite
+ * pushes over that limit. The catalog still checks its own output for rows
+ * stored before this check existed.
  *
  * @throws NexusError `SPEC_INVALID` with `reason: 'expanded_too_large'` for a
  * rendering past the limit, and everything {@link parseOpenApiSpec} throws
