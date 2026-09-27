@@ -2,6 +2,7 @@
 
 Metadata and public advisories checked on 2026-09-07. The baseline is
 `3d12382f3d8aaa837ae9f1b7e3bfb774b0c6a42f`, after #164's Fastify/Undici update.
+In this report, "static" means `@fastify/static` and "SQLite" means `better-sqlite3`.
 
 ## Version selection and compatibility
 
